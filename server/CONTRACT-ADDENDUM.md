@@ -176,7 +176,7 @@ The secret is never logged and never appears in a ledger line.
 
 | Method | Path | Behaviour |
 |---|---|---|
-| POST | `/broker/run` | `{tenant_id, tool, params, dwg, aps_live, dwg_version?}` → extended §3 envelope. `aps_live:false` → pure-python mock path; `true` → `da.client.run_tool` (live). `dwg_version` pins the §11 store version (live reads reject the pin fail-closed until wired) |
+| POST | `/broker/run` | `{tenant_id, ledger_event_key?, tool, params, dwg, aps_live, dwg_version?, test_source?}` → extended §3 envelope. PostgreSQL posture requires a nonblank `ledger_event_key`; callers reuse it to deduplicate a retry. `aps_live:false` → pure-python mock path; `true` → `da.client.run_tool` (live). `dwg_version` pins the §11 store version (live reads reject the pin fail-closed until wired). Additive `test_source` is accepted only for a design-time non-live test, runs only in the configured sandbox, and contributes only its SHA-256 digest to request identity and ledgers. |
 | POST | `/broker/extract` | `{tenant_id, dwg, upload?}` → `{intake}` envelope; the ONLY extraction path at `APS_LIVE=1` (`GET /api/session` relays through it — the pre-broker in-process extract is gone). `upload:true` resolves tenant-bound staged uploads (§19) |
 | POST | `/broker/tenants/{tid}/disable` / `.../enable` | per-tenant kill-switch, persisted to `broker_tenants.json` (env `BROKER_TENANTS`). Disabled tenant → `TENANT_DISABLED` (retryable:false), APS never touched. Corrupt tenant state can NOT disarm the switch: unparseable records fail CLOSED and a corrupt file refuses broker boot (`BrokerStateError`) |
 | POST | `/broker/reap` | cancel orphaned WorkItems (closed tab / expired lease); only the credential holder may issue the DA cancel |

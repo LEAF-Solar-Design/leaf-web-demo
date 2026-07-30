@@ -12,12 +12,27 @@ export function makeApsTestRun(
   broker: BrokerApsClient,
   tenantId: string,
   dwg = "rooftop_demo",
-): (tool: ToolPackage, params?: Record<string, unknown>) => Promise<ResultEnvelope> {
-  return (tool, params = {}) => {
+): (
+  tool: ToolPackage,
+  params?: Record<string, unknown>,
+  testSource?: string,
+) => Promise<ResultEnvelope> {
+  return (tool, params = {}, testSource) => {
     const capabilities = Array.isArray(tool.capabilities) ? tool.capabilities : [];
     const safeParams = capabilities.includes("drawing.write")
-      ? { ...params, dry_run: true }
+      ? {
+          ...params,
+          ...(params.drawing_id == null ? { drawing_id: dwg } : {}),
+          dry_run: true,
+        }
       : params;
-    return broker.runTool({ tenantId, tool, params: safeParams, dwg, apsLive: false });
+    return broker.runTool({
+      tenantId,
+      tool,
+      params: safeParams,
+      dwg,
+      apsLive: false,
+      ...(testSource === undefined ? {} : { testSource }),
+    });
   };
 }

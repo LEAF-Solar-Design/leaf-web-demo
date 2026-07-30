@@ -1,1 +1,3 @@
 server/tests/fixtures/cat_oracle/* -text -diff
+harness/scripts/start-harness.sh text eol=lf
+server/start-app.sh text eol=lf

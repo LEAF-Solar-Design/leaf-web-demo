@@ -15,6 +15,7 @@ import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
+import { liveDrawingId } from './workbenchId.js'
 import {
   getDrawingIntake,
   getDrawingVersions,
@@ -43,7 +44,11 @@ function bootWantsApp(search, path = window.location.pathname) {
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
-const OPERATOR_DRAWING_ID = 'cat-panels'
+// Keep the shared workspace controller on the same session-scoped drawing as
+// ToolCast. The protected acceptance seeds this value before boot, and both
+// consumers must honor it from the first render instead of briefly exposing
+// the old fixture id.
+const OPERATOR_DRAWING_ID = liveDrawingId()
 const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
 const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
@@ -157,7 +162,7 @@ export default function SiteRoot() {
 
   return (
     <WorkspaceControllerProvider
-      drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
+      drawingId={scene === 'tool' ? OPERATOR_DRAWING_ID : 'rooftop_demo'}
       drawingOptions={drawingOptions}
     >
       <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>

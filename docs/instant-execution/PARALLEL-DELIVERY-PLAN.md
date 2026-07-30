@@ -15,11 +15,40 @@ Redis remains in the control and durability plane. It is not part of the
 instant invocation path. The broker remains outside the instant path and never
 runs user code.
 
-The design matches the intended topology, but the current branch is not ready
+The design matches the intended topology, but the current source is not ready
 for hostile tenant code or a production rollout. The local vertical path is
-substantial. Artifact registry integration, production host lifecycle wiring,
-accounting, AWS infrastructure, certificate operations, and live staging proof
+substantial. The trusted-platform artifact path, payload-free accounting path,
+task-loss recovery, and real local mTLS proof now exist. A hostile user-code
+runtime, certificate operations, product-ledger export, and live staging proof
 remain gates.
+
+## 2026-07-29 reconciliation
+
+The current `main` branches supersede the orphaned compute-pool branches. The
+app branch carried only an executor-ID prefix change that is already on `main`.
+The infrastructure branch carried unrelated AI Manager cost work that is also
+already on `main`.
+
+Current source already implements executor registration, stale-host rejection,
+bounded assignment retries, serialized rebinds, runtime resource bounds,
+bounded idempotency, split host authorization, durable accounting storage, the
+immutable image workflow, and a staging Terraform foundation at desired count
+zero. These items still require the integrated and live gates below.
+
+The staging foundation had diverged from the accepted direct-RPC decision by
+adding an always-on instant proxy. The implementation must remove that proxy.
+The Claude harness must call the assigned executor task IP directly with a
+fixed verified TLS server name. The harness process may hold a scoped executor
+mTLS client identity, but user code must never receive that identity or run in
+the harness process.
+
+Accounting must also stay outside the response path. The executor parent emits
+ordered, payload-free `accepted`, `started`, and terminal usage receipts to its
+structured log stream. An asynchronous ingestor writes those receipts through
+the existing idempotent PostgreSQL accounting boundary and product ledger.
+Invocation does not wait for Redis, PostgreSQL, or the ingestor. A forced task
+death and log-delivery recovery test must prove that this design does not lose
+or double-charge a terminal receipt before it is accepted for production.
 
 ## Target architecture
 
@@ -53,41 +82,48 @@ The following work exists on the compute-pool branch:
 - Direct harness-to-executor HTTP RPC with connection reuse.
 - A separate batch fallback that retains the existing `POST /api/run` job path.
 - Local contract, integration, latency, and capacity checks.
-- Production composition and mTLS hardening are present as uncommitted work and
+- Production-shaped composition and mTLS hardening are on current `main` and
   still need an integration gate.
 
 The following points remain incomplete or unproven:
 
-1. The current load request carries source text. A real immutable code registry
-   fetch, signature check, digest check, cache, and revocation path do not exist.
+1. The app resolves checked-in platform code from an allowlisted registry and
+   validates its immutable digests. At session assignment, the control plane
+   checks those bytes again and signs a tenant, catalog, and digest-bound
+   envelope. The executor verifies and caches that envelope before loading it.
+   A durable object registry, publish-time signing authority, and distributed
+   revocation source are still required before authored user code can use this
+   path.
 2. The restricted CPython child clears its environment and limits built-ins,
    but it uses `exec`. This reduces accidental access by trusted code. It is not
    hostile multi-tenant isolation.
-3. Automatic executor registration exists as a separate module, but service
-   lifecycle integration and failure behavior need a single-owner merge and
-   full regression run.
-4. Runtime and harness mTLS need one end-to-end certificate handshake test after
-   their independently owned changes merge.
-5. Durable invocation usage and billing records are specified but not yet wired
-   through the runtime, control plane, and product ledger.
-6. The AWS task definitions, private service discovery, security groups, secret
-   shells, certificate population workflow, dashboards, and alarms do not yet
-   exist for instant execution.
+3. Automatic executor registration and service lifecycle wiring exist, but the
+   full regression and live failure proofs have not passed on this branch.
+4. A real TypeScript harness-to-Python runtime mTLS test now covers the assigned
+   endpoint, wrong CA, missing client certificate, wrong server name, stable
+   warm child PID, and no invocation-time outbound fetch.
+5. The runtime now emits ordered payload-free accounting events. A VPC Lambda
+   forwards them to the idempotent PostgreSQL boundary, and the reconciler
+   closes stale calls once with zero unproven usage. Product-ledger export and
+   forced ECS task-death proof remain staging gates.
+6. The staging AWS task definitions, private networking, security groups,
+   secret shells, certificate workflow, dashboards, and alarms exist at desired
+   count zero. They need direct-path reconciliation, a refreshed create-only
+   plan, and live proof.
 7. No live staging evidence proves assignment time, code-load time, 20 to 100 ms
    trivial-call latency, host density, recovery, or cost.
-8. Live AWS cost and inventory reads require a renewed non-root SSO session.
-9. The control plane records heartbeats, but slot selection does not yet reject
-   a host whose heartbeat is stale.
-10. Concurrent code-change rebinds can read the same binding epoch before the
-    single-flight section, and concurrent assignments can contend on the first
-    ordered slot instead of spreading and retrying.
-11. Catalog CPU, memory, process, and tool-call limits are not enforced at the
-    operating-system boundary. The in-memory idempotency cache is also unbounded.
-12. Host registration and app control calls currently share one API secret.
-    Host enrollment needs a separate mTLS identity and authorization policy.
-13. A scaled AWS pool still needs a host-specific private addressing decision.
-    Ordinary Cloud Map service DNS load balances tasks and does not guarantee
-    that a harness call reaches the slot named in its lease.
+8. Protected GitHub OIDC is now the approved state-writer path. Local root
+   credentials remain read-only and must never mutate AWS.
+9. Stale-host rejection exists in source and needs integrated and live expiry
+   proof.
+10. Serialized rebinds and bounded spread-and-retry assignment exist in source
+    and need concurrent integration proof.
+11. POSIX resource limits and bounded idempotency exist for trusted code. They
+    still need Linux resource-bomb and multi-slot isolation proof.
+12. Host registration uses a separate lifecycle secret. Identity-to-host mTLS
+    binding and an end-to-end negative authorization test remain open.
+13. Private task IP plus a fixed verified TLS server name is accepted. A
+    two-executor live test must prove that each lease reaches its exact host.
 
 ## Component ownership map
 
@@ -102,7 +138,7 @@ The following points remain incomplete or unproven:
 | Redis | Hold liveness hints, short contention locks, invalidation fan-out, and recovery events only | Control-plane owner in Wave 2 |
 | Persistence | Apply ordered PostgreSQL migrations for hosts, slots, claims, sessions, leases, invocations, outbox, and accounting | Database owner in 1D |
 | Authentication and isolation | Use service mTLS plus Ed25519 leases, keep credentials out of the executor child, deny network by infrastructure policy, and restrict CPython to trusted code | 1B and Wave 5 security |
-| Observability and billing | Correlate session, assignment, lease, invocation, host, and batch job IDs; record bounded usage once; publish SLO and cost dashboards | 1D, 1F, and Wave 5 cost |
+| Observability and billing | Correlate session, assignment, lease, invocation, host, and batch job IDs; emit ordered payload-free receipts from the executor parent; ingest and record bounded usage once outside the response path; publish SLO and cost dashboards | 1D, 1F, and Wave 5 cost |
 
 ## Dependency graph and critical path
 
@@ -191,7 +227,7 @@ Rollback boundary: documentation and contracts only.
 | --- | --- | --- | --- |
 | 1A, executor lifecycle | `executor/runtime/registration.py`, its tests, then a serialized integrator edit to `service.py` | Register host and slots before serving, heartbeat, drain, retry, and clean shutdown | Registration unit tests, supervisor integration test, mismatch fails startup, loss of control plane makes host unavailable |
 | 1B, mTLS path | Harness instant client and tests; runtime TLS tests remain under runtime owner | Verified CA plus client certificate on harness RPC, loopback-only cleartext | Real TLS handshake passes, wrong CA and missing client cert fail, no insecure fallback |
-| 1C, code registry | New registry adapter, artifact policy, cache, revocation tests, and app catalog adapter | Executor receives verified immutable bytes by digest, not arbitrary inline tenant source | Changed bytes, signature, digest, tenant, catalog version, or revoked artifact fail closed |
+| 1C, code registry | New registry adapter, artifact policy, cache, revocation tests, and app catalog adapter | Executor receives a signed assignment-time envelope bound to tenant, catalog, and digests, never arbitrary invocation-time source | Changed bytes, signature, digest, tenant, catalog version, identity replacement, or revoked artifact fail closed |
 | 1D, accounting | New usage event and durable accounting modules plus migrations owned by the database lane | Idempotent invocation and usage ledger outside the response critical path | Duplicate invocation cannot double charge, lost Redis does not lose durable accounting, payloads and secrets are absent |
 | 1E, image supply | `deploy/Dockerfile.instant-execution`, its workflow, and static tests | One immutable non-root image with explicit control, reaper, and executor commands | Test and scan before push, commit tag only, read-only root compatible, workflow never deploys |
 | 1F, staging design | New staging-only Terraform files and tests in the infrastructure repository | ECR, two task definitions, two ECS services, private DNS, least-privilege roles, logs, alarms, and secret shells | `terraform fmt`, validate, static policy tests, and full refreshed plan with no unexplained action |
@@ -230,8 +266,9 @@ Gate W2:
 - Direct invocation continues when Redis is unavailable after assignment.
 - The broker and its credentials are absent from the executor process tree.
 - Direct RPC startup p95 is below 10 ms on the local test network.
-- The branch has no partial mTLS configuration path and no source-by-value path
-  outside an explicit trusted-development fixture.
+- The branch has no partial mTLS configuration path. Production rejects raw
+  inline source. Code bytes may cross only once at assignment in a signed,
+  domain-separated envelope, and never on the invocation path.
 - A regression test proves that tenant-supplied Python cannot enter the instant
   loader while CPython remains the runtime.
 - A dead host stops receiving assignments within one heartbeat expiry window.
@@ -270,7 +307,8 @@ path.
 
 Gate W3:
 
-- Named, non-root AWS identity and `us-east-1` are confirmed.
+- Protected GitHub OIDC assumes the approved Terraform deployment role in
+  account `807034087062` and `us-east-1`. Local root credentials do not mutate.
 - Repository head, remote state, import ledger, rollback commands, and the full
   refreshed plan match the production reconciliation rules.
 - Services exist at zero, image digests are immutable, secrets are populated,

@@ -133,7 +133,11 @@ def internal_gate(req: GateRequest,
         turn_runner.turn_max_s())
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
-                             subject=turn_subject)
+                             subject=turn_subject,
+                             # The APP-owned session the client stored its
+                             # approval policy against — req.session_id is the
+                             # harness's private one (review round 1).
+                             policy_session_id=authority_session_id)
     return with_envelope_fields(result)
 
 

@@ -28,7 +28,7 @@ function options(planFirst: boolean | undefined) {
     maxTurns: 24,
     abortController: new AbortController(),
     server: { fake: true },
-    skillBundle: null,
+
     mcpAttachment: null,
     canUseTool: (async () => ({ behavior: "deny", message: "x" })) as never,
     ...(planFirst === undefined ? {} : { planFirst }),

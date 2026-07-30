@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import ipaddress
 import threading
 import uuid
@@ -13,6 +14,9 @@ from .jws import LeaseSigner
 from .models import Lease, Session
 from .reaper import ControlPlaneReaper, ReconciliationUnavailable
 from .store import ControlStore, NoCapacity, StaleFence, StoreUnavailable
+
+
+CONTRACT = "leaf.instant-execution/v1"
 
 
 class ControlPlaneError(RuntimeError):
@@ -29,7 +33,8 @@ class _SessionAssignmentLock:
 class ControlPlane:
     def __init__(self, store: ControlStore, runtime, signer: LeaseSigner | None = None,
                  coordination=None, clock=None, lease_lifetime: timedelta = timedelta(seconds=60),
-                 executor_cidrs: tuple[str, ...] = (), executor_port: int = 8088):
+                 executor_cidrs: tuple[str, ...] = (), executor_port: int = 8088,
+                 allowed_artifact_digests: frozenset[str] | None = None):
         self.store, self.runtime, self.signer, self.coordination = store, runtime, signer or LeaseSigner(), coordination
         self.clock, self.lease_lifetime = clock or (lambda: datetime.now(timezone.utc)), lease_lifetime
         try:
@@ -39,17 +44,19 @@ class ControlPlane:
         if not 1 <= executor_port <= 65535:
             raise ValueError("executor port is out of range")
         self.executor_port = executor_port
+        self.allowed_artifact_digests = allowed_artifact_digests
         self._assignment_locks = weakref.WeakValueDictionary()
         self._assignment_locks_guard = threading.Lock()
 
     @staticmethod
     def _require(request: dict) -> None:
-        required = {"tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"}
+        required = {"contract", "tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"}
         missing = required - request.keys()
         artifact = request.get("artifact", {})
         drawing_context = request.get("drawing_context", {})
         artifact_required = {"source", "code_digest", "artifact_digest", "runtime", "entrypoint", "limits", "tool_id", "tool_version", "capability_id", "params_schema_digest", "catalog_commit"}
-        if (missing or not isinstance(artifact, dict) or artifact_required - artifact.keys()
+        if (missing or request.get("contract") != CONTRACT
+                or not isinstance(artifact, dict) or artifact_required - artifact.keys()
                 or artifact.get("runtime") != "python-3.12"
                 or not isinstance(drawing_context, dict)
                 or set(("reference", "data")) - drawing_context.keys()):
@@ -87,6 +94,14 @@ class ControlPlane:
 
     def _assign(self, request: dict, binding_epoch: int = 1) -> dict:
         self._require(request)
+        artifact_digest = request["artifact"]["artifact_digest"]
+        if (self.allowed_artifact_digests is not None
+                and artifact_digest not in self.allowed_artifact_digests):
+            raise ControlPlaneError(
+                "ARTIFACT_NOT_ALLOWED",
+                "artifact digest is not approved by the control-plane authority",
+                400,
+            )
         if self.coordination is None:
             raise ControlPlaneError("REDIS_UNAVAILABLE", "Redis coordination is required for new assignments")
         now = self.clock()
@@ -114,6 +129,13 @@ class ControlPlane:
         session_created = False
         try:
             artifact = request["artifact"]
+            try:
+                source_bytes = artifact["source"].encode("utf-8")
+            except (AttributeError, KeyError, UnicodeError) as exc:
+                raise ControlPlaneError("INVALID_ARTIFACT", "artifact source must be UTF-8 text", 400) from exc
+            source_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+            if source_digest != artifact["code_digest"] or source_digest != artifact["artifact_digest"]:
+                raise ControlPlaneError("INVALID_ARTIFACT", "artifact bytes do not match immutable digests", 400)
             capability = {"capability_id": artifact["capability_id"], "tool_id": artifact["tool_id"], "tool_version": artifact["tool_version"]}
             session = Session(str(uuid.uuid4()), request["tenant_id"], request["session_id"], slot.executor_id, slot.slot_id, claim.claim_id,
                               binding_epoch, request["effective_catalog_digest"], artifact["code_digest"], artifact["artifact_digest"], slot.runtime_digest or "", capability)
@@ -133,8 +155,15 @@ class ControlPlane:
                 "execution_class": "instant", "runtime": artifact["runtime"], "limits": artifact["limits"],
                 "code_digest": session.code_digest, "artifact_digest": session.artifact_digest, "entrypoint": artifact["entrypoint"],
                 "params_schema_digest": artifact["params_schema_digest"]}
+            signed_artifact = self.signer.sign_artifact(
+                tenant_id=session.tenant_id,
+                catalog_version=session.catalog_digest,
+                artifact_digest=session.artifact_digest,
+                code_digest=session.code_digest,
+                source=source_bytes,
+            )
             ready = self.runtime.assign(slot.endpoint, {"assignment": assignment, "code_load": code_load, "catalog": catalog,
-                "source": artifact["source"], "drawing_context": request["drawing_context"]["data"]})
+                "artifact": signed_artifact, "drawing_context": request["drawing_context"]["data"]})
             if ready.get("state") != "ready":
                 raise ControlPlaneError("RUNTIME_NOT_READY", "executor did not confirm code readiness")
             self.store.activate(session.session_id, lease)
@@ -243,3 +272,14 @@ class ControlPlane:
             ) from exc
         except ReconciliationUnavailable as exc:
             raise ControlPlaneError("RECONCILIATION_UNAVAILABLE", str(exc)) from exc
+
+    def recover_stale_accounting(self, *, stale_timeout: timedelta) -> list[str]:
+        if stale_timeout <= timedelta(0):
+            raise ValueError("stale_timeout must be positive")
+        try:
+            return self.store.recover_stale_invocations(self.clock() - stale_timeout)
+        except StoreUnavailable as exc:
+            raise ControlPlaneError(
+                "POSTGRES_UNAVAILABLE",
+                "accounting recovery is fail closed while PostgreSQL is unavailable",
+            ) from exc

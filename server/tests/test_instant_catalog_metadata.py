@@ -24,7 +24,7 @@ def _instant_tool():
             "output_bytes": 65_536,
         },
         "artifact_digest": "sha256:" + ("a" * 64),
-        "batch_fallback": False,
+        "batch_fallback": True,
     }
 
 
@@ -35,7 +35,7 @@ def test_capability_projection_exposes_authoritative_execution_metadata():
     assert entry["runtime"] == "cpython-3.13-restricted-v1"
     assert entry["limits"]["wall_ms"] == 100
     assert entry["artifact_digest"] == "sha256:" + ("a" * 64)
-    assert entry["batch_fallback"] is False
+    assert entry["batch_fallback"] is True
 
 
 def test_legacy_tool_defaults_to_batch_without_an_implicit_fallback():
@@ -84,6 +84,6 @@ def test_tracked_instant_tool_source_matches_its_catalog_digest():
 
     assert tool["execution_class"] == "instant"
     assert tool["capabilities"] == ["drawing.read"]
-    assert tool["batch_fallback"] is False
+    assert tool["batch_fallback"] is True
     assert tool["code_digest"] == digest
     assert tool["artifact_digest"] == digest

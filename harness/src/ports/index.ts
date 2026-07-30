@@ -164,7 +164,7 @@ export type AgentGrant =
 
 /** The credential kind of a linked grant (web-lane OAuth vs enterprise BYO API key). */
 export type GrantKind = AgentGrant["kind"];
-export type GrantPlan = "team" | "enterprise";
+export type GrantPlan = "pro" | "max" | "team" | "enterprise";
 
 export interface GrantLease {
   grant: AgentGrant;
@@ -181,7 +181,7 @@ export interface GrantSettlement {
 export interface OAuthGrantProvider {
   /** Resolve the per-tenant Agent SDK grant. Concern 2 only. */
   getGrant(tenantId: string): Promise<AgentGrant>;
-  /** Reserve one eligible Team/Enterprise mount for a live turn. */
+  /** Reserve one eligible owner-attested subscription or API-key mount for a live turn. */
   acquireGrant?(tenantId: string): Promise<GrantLease>;
   /** Feed the turn's token-free usage and terminal state back into routing. */
   settleGrant?(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void>;
@@ -338,10 +338,18 @@ export interface CustomizationCoordination {
 /** Wire shape mirrors POST /broker/run (CONTRACT-ADDENDUM section 8). */
 export interface BrokerRunRequest {
   tenantId: string;
+  /** Durable broker admission key. The HTTP client generates one when omitted. */
+  ledgerEventKey?: string;
   tool: ToolPackage;
   params: Record<string, unknown>;
   dwg: string;
   apsLive: boolean;
+  /**
+   * Exact trusted source produced by validate_tool for a design-time broker test.
+   * The broker accepts it only for apsLive=false and only inside a configured
+   * sandbox. Ordinary registered-tool runs omit it and keep file resolution.
+   */
+  testSource?: string;
 }
 
 export interface BrokerApsClient {
@@ -395,7 +403,11 @@ export interface AuthorToolset {
   /** Validate and atomically write one new exact tool package. */
   submitTool: (proposal: ToolSourceProposal) => ToolSubmissionResult;
   /** Test-runs a candidate tool via the broker (broker only, aps_live=false). */
-  apsTestRun: (tool: ToolPackage, params?: Record<string, unknown>) => Promise<ResultEnvelope>;
+  apsTestRun: (
+    tool: ToolPackage,
+    params?: Record<string, unknown>,
+    testSource?: string,
+  ) => Promise<ResultEnvelope>;
 }
 
 export interface ReadonlyFsTenantRepoTool {
@@ -478,10 +490,11 @@ export type {
 // enforced by test/converseRuntimeSeparation.test.ts).
 // --------------------------------------------------------------------------- //
 
-/** The seven spine tool names. The catalog is data, not model-owned code. */
+/** The spine tool names. The catalog is data, not model-owned code. */
 export const SPINE_TOOL_NAMES = [
   "catalog_search",
   "drawing_state",
+  "ask_user",
   "run_capability",
   "job_status",
   "author_tool",
@@ -499,6 +512,7 @@ export type ConverseEventType =
   | "job_linked"
   | "proposed_run"
   | "confirmation_required"
+  | "question_required"
   | "confirmation_resolved"
   | "turn_usage"
   | "turn_complete"

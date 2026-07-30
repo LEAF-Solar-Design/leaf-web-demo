@@ -17,7 +17,7 @@ Lane: `auth0-identity-signup`. Session date: 2026-07-17. §11 added 2026-07-23.
 | | **Concern 1 — Leaf PLATFORM identity** (this doc) | **Concern 2 — the user's Claude login** (NOT this doc) |
 |---|---|---|
 | Question | *Who is this tenant?* | *Whose Anthropic credit runs the agent?* |
-| Mechanism | **Auth0** RS256 access token → namespaced tenant claim | **Tenant-owner mounted Claude Team/Enterprise credential or API key** |
+| Mechanism | **Auth0** RS256 access token → namespaced tenant claim | **Tenant-owner mounted Claude Pro/Max/Team/Enterprise credential or API key** |
 | Owner | this lane (`auth0-identity-signup`) | sibling **`hosted-oauth-spike`** |
 | Carried in | the JWT tenant claim | the tenant's private server-side Claude grant store |
 
@@ -26,10 +26,10 @@ credential**, and this lane touches nothing of Concern 2. A verified tenant
 identity says *which workspace* a request belongs to; it does not grant, embed,
 or reference any Claude token.
 
-> Staging commercial lane: only the active tenant owner can mount Claude Team or
-> Enterprise workspace credentials or a tenant-owned API key. A tenant can have
+> Staging subscription lane: only the active tenant owner can mount Claude Pro,
+> Max, Team, or Enterprise credentials or a tenant-owned API key. A tenant can have
 > several eligible mounts, but routing stays inside that tenant and follows actual
-> recorded usage. Consumer Free, Pro, and Max credentials are not eligible. This
+> recorded usage. Unattested and Free credentials are not eligible. This
 > reinforces the separation: the platform JWT identifies the workspace, while the
 > private grant store supplies provider credit. A Claude credential never enters a
 > platform identity claim.
@@ -46,7 +46,7 @@ the **access token**:
 ```
 https://leafdesign.ai/tenant_id   (string, required)  e.g. "org_acme_solar"
 https://leafdesign.ai/org_id      (string | null)      e.g. "org_acme_solar"
-https://leafdesign.ai/tier        (string enum)        "self_hosted" | "hosted_starter" | "hosted_pro"
+https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable subset: "restricted" | "self_hosted" | "hosted_starter" | "hosted_pro" | "admin"
 ```
 
 Namespace prefix is configurable via `LEAF_TENANT_CLAIM_NS` (default
@@ -321,7 +321,8 @@ Agreeing copies: `server/auth.py DEFAULT_CLAIM_NS`, the Post-Login Action
 credentials-exchange Action. `LEAF_TENANT_CLAIM_NS` remains an env override
 for test rigs only; production uses the frozen default.
 
-**11.2 Tier vocabulary (frozen, 6 members):**
+**11.2 Tier vocabulary (frozen, 7 members; grown 2026-07-30 per the §11
+promotion ritual — W14 admin self-edit lane):**
 
 | Tier | Class | Meaning |
 |---|---|---|
@@ -331,11 +332,19 @@ for test rigs only; production uses the frozen default.
 | `self_hosted` | claim-mintable | enterprise / BYO-infrastructure seat |
 | `hosted_starter` | claim-mintable | entry hosted seat (default for new/solo users) |
 | `hosted_pro` | claim-mintable | full hosted seat |
+| `admin` | claim-mintable (operator-granted) | staff self-edit identity (W14); the ONLY tier carrying `platform_customize` |
 
 The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_starter`,
-`hosted_pro`} is the only vocabulary a verified identity can carry (JWT tier
-claim, stored org tier). `demo`/`guest` are server-resolved identities and
-must never be minted into a token or stored as an org's billing tier.
+`hosted_pro`, `admin`} is the only vocabulary a verified identity can carry
+(JWT tier claim, stored org tier). `demo`/`guest` are server-resolved
+identities and must never be minted into a token or stored as an org's billing
+tier. `admin` is claim-mintable but **never plan-derived**: the Post-Login
+Action mints it solely from a root-level `app_metadata.leaf_admin === true`
+flag an operator set by hand in the Auth0 dashboard (root level, so
+leaf_website subscription PATCHes replacing `app_metadata.leaf` can neither
+mint nor erase it); no `PLAN_TIER` value maps to it and
+`billing_tiers.derive_tier` never returns it, so no billing state can produce
+an admin identity. Revocation = remove the flag.
 Agreeing copies: `server/entitlements.json` keys, `server/entitlements.py
 _HARDCODED_DEFAULTS` (byte-identical mirror), `server/billing_tiers.py
 TIER_VOCABULARY`/`CLAIM_TIERS`, the Action's `PLAN_TIER` values, and the

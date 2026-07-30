@@ -14,9 +14,9 @@ import { randomUUID } from "node:crypto";
 import { scrubSecrets } from "./envScrub.js";
 import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { redactTokens } from "../../redact.js";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
@@ -265,6 +265,30 @@ export class PgTenantRepoLeaseCoordinator {
   }
 }
 
+const trustedGitDirectories = new Set<string>();
+
+/**
+ * Git accepts safe.directory only from protected configuration. Tenant repos
+ * can be owned by the EFS access-point UID rather than the container UID, so
+ * add only the exact resolved worktree and git-dir paths to this task's
+ * ephemeral global config. Local clone/upload-pack children inherit the same
+ * protected config. No wildcard trust is permitted.
+ */
+function trustSharedRepo(dir: string): void {
+  const root = (existsSync(dir) ? realpathSync(dir) : resolve(dir)).replaceAll("\\", "/");
+  const configScope = process.env.GIT_CONFIG_GLOBAL ?? "<default>";
+  for (const candidate of [root, join(root, ".git")].map((path) => path.replaceAll("\\", "/"))) {
+    const cacheKey = `${configScope}\0${candidate}`;
+    if (trustedGitDirectories.has(cacheKey)) continue;
+    execFileSync("git", ["config", "--global", "--add", "safe.directory", candidate], {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      env: scrubSecrets(process.env),
+    });
+    trustedGitDirectories.add(cacheKey);
+  }
+}
+
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
   const cfg = identity
     ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
@@ -356,13 +380,77 @@ function repoExists(dir: string): boolean {
   return existsSync(join(dir, "registry.json"));
 }
 
+function repoHasMain(dir: string): boolean {
+  if (!existsSync(join(dir, ".git"))) return false;
+  try {
+    return /^[0-9a-f]{40}$/i.test(
+      git(dir, ["rev-parse", "--verify", "refs/heads/main"]).trim(),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function repoHead(dir: string): string | null {
+  if (!existsSync(join(dir, ".git"))) return null;
+  try {
+    const head = git(dir, ["rev-parse", "--verify", "HEAD"]).trim();
+    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+  } catch {
+    return null;
+  }
+}
+
+function bareRepoHasMain(dir: string): boolean {
+  try {
+    return /^[0-9a-f]{40}$/i.test(
+      git(dir, ["rev-parse", "--verify", "refs/heads/main"]).trim(),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bind one existing durable bare repo to its canonical tenant worktree.
+ *
+ * The app's older bootstrap path could leave `HEAD` in the shared bare
+ * directory without configuring `origin`. Treating `HEAD` alone as a complete
+ * clone made the first harness repair fail at `git fetch origin`. Adding the
+ * missing origin preserves every private change ref already present. An
+ * existing different origin is refused rather than silently rewritten.
+ */
+function ensureBareOrigin(dir: string, sourceRef: string): void {
+  const readRemotes = () => git(dir, ["remote"])
+      .split(/\r?\n/)
+      .map((remote) => remote.trim())
+      .filter(Boolean);
+  const remotes = readRemotes();
+  if (!remotes.includes("origin")) {
+    try {
+      git(dir, ["remote", "add", "origin", sourceRef]);
+    } catch {
+      // A concurrent first request may have added the same remote while Git
+      // held config.lock. Re-read below and accept only the canonical value.
+    }
+  }
+  const origin = git(dir, ["remote", "get-url", "origin"]).trim();
+  const canonical = (value: string) => {
+    const absolute = resolve(dir, value);
+    return existsSync(absolute) ? realpathSync(absolute) : absolute;
+  };
+  if (canonical(origin) !== canonical(sourceRef)) {
+    throw new Error("existing bare origin does not match the canonical tenant repository");
+  }
+}
+
 function resetWorkingTree(dir: string): void {
   git(dir, ["reset", "--hard", "HEAD"]);
   git(dir, ["clean", "-fd"]);
 }
 
 export class TenantRepoProviderImpl implements TenantRepoProvider {
-  private readonly bareRepos = new Map<string, TenantBareRepo>();
+  private readonly bareRepos = new Map<string, TenantBareRepo & { sourceRef?: string }>();
   private readonly lease?: PgTenantRepoLeaseCoordinator;
   private readonly leaseContext = new AsyncLocalStorage<RepoLease>();
   private readonly authoringMode: "disabled" | "singleton" | "fleet";
@@ -452,15 +540,27 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   /**
-   * Materialize a brand-new tenant repo from the pristine fixture: copy + ensure the
-   * __pycache__ .gitignore + `git init` + ONE seed commit. Idempotent-safe: callers
-   * only invoke it when `repoExists(dir)` is false.
+   * Materialize a brand-new tenant repo, or finish a prior interrupted provision.
+   * A failed Git command can leave registry.json and an empty .git directory on EFS,
+   * so registry.json alone is not proof that refs/heads/main exists.
    */
   private provision(dir: string): void {
     const fixture = this.opts.autoProvisionFrom!;
     const identity = this.opts.seedIdentity ?? HARNESS_IDENTITY;
     mkdirSync(dir, { recursive: true });
-    cpSync(fixture, dir, { recursive: true });
+    trustSharedRepo(dir);
+    if (repoHasMain(dir)) return;
+
+    const existingHead = repoHead(dir);
+    if (existingHead) {
+      git(dir, ["update-ref", "refs/heads/main", existingHead], identity);
+      git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"], identity);
+      return;
+    }
+
+    if (!repoExists(dir)) {
+      cpSync(fixture, dir, { recursive: true });
+    }
     // ensure the __pycache__ .gitignore exists (keeps the tenant mushy repo pyc-free,
     // matching the broker's sys.dont_write_bytecode discipline).
     const gitignore = join(dir, ".gitignore");
@@ -468,7 +568,11 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (!current.split(/\r?\n/).some((l) => l.trim() === "__pycache__/")) {
       writeFileSync(gitignore, current + (current && !current.endsWith("\n") ? "\n" : "") + GITIGNORE_PYCACHE, "utf8");
     }
-    git(dir, ["init", "-q"], identity);
+    if (!existsSync(join(dir, ".git"))) {
+      git(dir, ["init", "-q", "-b", "main"], identity);
+    } else {
+      git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"], identity);
+    }
     git(dir, ["add", "-A"], identity);
     git(
       dir,
@@ -484,6 +588,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     }
     const ref = await this.opts.locator.repoRef(tenantId);
     if (this.opts.inPlace) {
+      // This also covers a partially provisioned repo left by a prior task.
+      trustSharedRepo(ref);
       // ref IS the local working dir; operate on it directly (no temp clone).
       // Wave 4: auto-provision a brand-new tenant's repo from the fixture on first use.
       if (this.opts.autoProvisionFrom && !repoExists(ref)) {
@@ -511,6 +617,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     }
     const base = this.opts.workBase ?? tmpdir();
     const dir = mkdtempSync(join(base, `mushy-${tenantId}-`));
+    trustSharedRepo(dir);
+    if (existsSync(ref)) trustSharedRepo(ref);
     git(dir, ["clone", "--depth", "1", ref, "."]);
     if (this.lease && lease) lease.repoDirs.add(dir);
     const fence =
@@ -530,16 +638,30 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
    * the source of a staged change or publish.
    */
   async bare(tenantId: string): Promise<TenantBareRepo> {
+    const ref = await this.opts.locator.repoRef(tenantId);
+    if (existsSync(ref)) trustSharedRepo(ref);
+    // Refuse a stale or cross-tenant durable origin before auto-provisioning can
+    // mutate the working repository. A missing origin is safe to bind now; the
+    // fetch happens only after provisioning creates the source main branch.
+    const durableBare = this.opts.bareBase && /^[A-Za-z0-9._-]+$/.test(tenantId)
+      ? join(this.opts.bareBase, `${tenantId}.git`)
+      : undefined;
+    if (durableBare && existsSync(join(durableBare, "HEAD"))) {
+      trustSharedRepo(durableBare);
+      ensureBareOrigin(durableBare, ref);
+    }
+    if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoHasMain(ref)) {
+      this.provision(ref);
+    }
     const existing = this.bareRepos.get(tenantId);
     if (existing) {
-      // Refresh branch heads without ever reusing a mutable checkout. Private
-      // refs remain local so a later publish sees the exact staged receipt.
-      git(existing.dir, ["fetch", "--prune", "origin"]);
+      // Once main exists, the durable bare repository is the lifecycle
+      // authority. A force-fetch from the seed worktree here would rewind a
+      // previously published main on the next stage request.
+      trustSharedRepo(existing.dir);
+      if (existing.sourceRef && existsSync(existing.sourceRef)) trustSharedRepo(existing.sourceRef);
+      if (existing.sourceRef) ensureBareOrigin(existing.dir, existing.sourceRef);
       return existing;
-    }
-    const ref = await this.opts.locator.repoRef(tenantId);
-    if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoExists(ref)) {
-      this.provision(ref);
     }
     if (!/^[A-Za-z0-9._-]+$/.test(tenantId)) {
       throw new Error("tenantId must be a single safe path component");
@@ -548,19 +670,27 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     if (this.opts.bareBase) {
       mkdirSync(this.opts.bareBase, { recursive: true });
       dir = join(this.opts.bareBase, `${tenantId}.git`);
+      trustSharedRepo(dir);
       const alreadyExists = existsSync(join(dir, "HEAD"));
       if (!alreadyExists) {
         git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
       } else {
-        git(dir, ["fetch", "--prune", "origin"]);
+        ensureBareOrigin(dir, ref);
+        // Fetch the source only to bootstrap a missing main. After that,
+        // publishToMain owns the canonical branch and private refs remain local.
+        if (!bareRepoHasMain(dir)) {
+          git(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+        }
+        git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
       }
     } else {
       const base = this.opts.workBase ?? tmpdir();
       mkdirSync(base, { recursive: true });
       dir = mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
+      trustSharedRepo(dir);
       git(dir, ["clone", "--bare", ref, "."]);
     }
-    const repo = { dir };
+    const repo = { dir, sourceRef: ref };
     this.bareRepos.set(tenantId, repo);
     return repo;
   }

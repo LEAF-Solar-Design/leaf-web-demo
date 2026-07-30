@@ -153,6 +153,12 @@ identity is never trusted here (same seam as `deps.get_org_id`). `tier` is
 optional and, when supplied, validated against `models.TIERS` (else 422);
 omitted → the store default (`hosted_starter`).
 
+Dev-only extra: an optional `external_subject` (+ `external_authority`,
+default `auth0`) bootstraps the org WITH its identity binding
+(`store.create_org_with_identity`), mirroring the live-auth shape so the
+billing org-resolve path (contract/BILLING.md §3.1) is exercisable without
+Auth0. With `LEAF_AUTH_LIVE=1` the field is refused (422).
+
 `GET /api/orgs/{org_id}` keeps the **404-not-403** isolation posture of the
 project/job reads: a caller may read only its OWN org (the `X-Org-Id` header
 must equal the path `org_id`); a cross-org or unknown id returns 404, never 403

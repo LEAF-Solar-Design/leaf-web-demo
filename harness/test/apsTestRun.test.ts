@@ -37,6 +37,18 @@ describe("design-time APS test runs", () => {
     });
   });
 
+  it("binds an omitted drawing.write drawing_id to the test drawing", async () => {
+    const broker = new FakeBrokerApsClient();
+    const run = makeApsTestRun(broker, "demo-tenant", "acceptance-drawing");
+
+    await run(tool("drawing.write"));
+
+    expect(broker.calls[0]!.params).toEqual({
+      drawing_id: "acceptance-drawing",
+      dry_run: true,
+    });
+  });
+
   it("leaves drawing.read params unchanged", async () => {
     const broker = new FakeBrokerApsClient();
     const run = makeApsTestRun(broker, "demo-tenant");
@@ -44,5 +56,19 @@ describe("design-time APS test runs", () => {
     await run(tool("drawing.read"), { layer: "Panels" });
 
     expect(broker.calls[0]!.params).toEqual({ layer: "Panels" });
+  });
+
+  it("binds the exact validated source into a design-time broker test", async () => {
+    const broker = new FakeBrokerApsClient();
+    const run = makeApsTestRun(broker, "demo-tenant");
+    const source = "def run(intake, params):\n    return ({}, None)\n";
+
+    await run(tool("drawing.write"), { drawing_id: "cat-workbench" }, source);
+
+    expect(broker.calls[0]).toMatchObject({
+      apsLive: false,
+      testSource: source,
+      params: { drawing_id: "cat-workbench", dry_run: true },
+    });
   });
 });

@@ -1,0 +1,54 @@
+{
+  "_note": "W14 admin self-edit lane: paths whose changes require the out-of-band co-sign (LEAF_CUSTOMIZATION_APPROVAL_SECRET) before the branch may land. Patterns are exact repo-relative paths or 'dir/**' prefixes (same matcher as platform_release_policy). ABSENT file => EVERY path is fundamental (fail closed); present-but-corrupt => the lane refuses service. This manifest, the lane's own module, and the policy files it enforces are themselves fundamental so the co-sign requirement cannot be edited away without a co-sign.",
+  "version": 1,
+  "areas": {
+    "auth": [
+      "server/auth.py",
+      "server/deps.py",
+      "server/auth0-actions/**",
+      "server/entitlements.py",
+      "server/entitlements.json",
+      "server/billing_tiers.py",
+      "server/tenant_id_validator.py",
+      "platform/entitlements.py",
+      "platform/access.py",
+      "contract/AUTH.md"
+    ],
+    "billing": [
+      "platform/billing.py",
+      "contract/BILLING.md",
+      "server/routers/usage.py"
+    ],
+    "agent_spine": [
+      "server/agent_policy.py",
+      "server/agent_policy.json",
+      "server/agent_gate.py",
+      "server/agent_audit.py",
+      "server/agent_ledger.py",
+      "server/agent_pg_store.py",
+      "server/turn_runner.py",
+      "server/customization_service.py",
+      "server/customization_authority.py",
+      "server/customization_flags.py",
+      "server/customization_models.py",
+      "server/customization_store.py",
+      "server/customization_postgres_store.py",
+      "server/customization_reconcile.py",
+      "server/customization_audit.py",
+      "server/platform_release_policy.py",
+      "server/platform_release_policy.json",
+      "server/platform_customize.py",
+      "server/platform_fundamental_paths.json",
+      "server/routers/platform_customize.py",
+      "server/routers/author.py",
+      "server/routers/agent.py",
+      "server/routers/sessions.py",
+      "harness/**",
+      "docs/AGENT-SPINE-DESIGN.md"
+    ],
+    "delivery": [
+      ".github/workflows/**",
+      "deploy/**"
+    ]
+  }
+}

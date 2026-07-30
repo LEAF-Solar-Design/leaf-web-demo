@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
@@ -107,6 +108,8 @@ interface ZodModule {
     unknown(): Z;
     enum(v: string[]): Z;
     record(inner: Z): Z;
+    array(inner: Z): Z;
+    object(shape: Record<string, Z>): Z;
     [k: string]: unknown;
   };
 }
@@ -148,6 +151,8 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Search the platform's registered tool catalog. Args {query, k?}. Returns matching tools; the top match includes its params_schema.",
   drawing_state:
     "Read the current drawing's state. Args {what: 'summary'|'versions'|'checkout'}.",
+  ask_user:
+    "Ask the user one focused question with 2 to 6 choices. After the question is presented, end your turn and wait for the reply.",
   run_capability:
     "Dispatch ONE registered catalog tool as a platform job. Args {tool, params?, dwg?}. Read tools may return their result inline; write tools return a proposal requiring user approval (re-invoke with confirmation_id after approval).",
   job_status: "Check a previously dispatched job. Args {job_id}.",
@@ -234,6 +239,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     const schemas: Record<SpineToolName, Record<string, unknown>> = {
       catalog_search: { query: z.string(), k: z.number().optional() },
       drawing_state: { what: z.enum(["summary", "versions", "checkout"]) },
+      ask_user: {
+        question: z.string(),
+        options: z.array(z.object({ label: z.string(), description: z.string().optional() })),
+      },
       run_capability: {
         tool: z.string(),
         params: z.record(z.unknown()).optional(),
@@ -288,6 +297,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
       })();
     };
+    // A bundle reaches the SDK only after its complete inventory is verified
+    // against a REQUIRED deployment digest pin, and what mounts is a private
+    // normalised snapshot of the verified bytes, never the source directory.
+    const skillBundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
         prompt: withImages(prompt),
@@ -302,6 +315,45 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
           mcpServers: { spine: server },
+          ...(skillBundle ? { plugins: [skillBundle.plugin], skills: skillBundle.skills } : {}),
+          // SETTINGS, not top-level options — the distinction is the whole
+          // fix. Both flags below are Settings fields (sdk.d.ts) delivered
+          // through Options.settings, which the SDK renders as `--settings`.
+          // Passing them at the top level silently does NOTHING: a process
+          // probe shows the CLI receiving `--allowedTools Skill(...)` and no
+          // `--settings` at all. My first attempt did exactly that and "pinned"
+          // it with a test that inspected the mocked options object, so the
+          // test passed while the guard was absent from the real command line.
+          //
+          // WHY BOTH ARE REQUIRED, and why canUseTool is not the containment:
+          // the SDK compiles `skills: [name]` into `--allowedTools Skill(name)`,
+          // and allowlisted tools execute WITHOUT consulting canUseTool. So a
+          // mounted bundle could otherwise reach execution two ways —
+          //   * inline shell commands inside a skill  -> disableSkillShellExecution
+          //   * plugin/skill HOOKS, which spawn commands on their own -> disableAllHooks
+          // Both are outside submitRun and outside the app gate, on the LIVE
+          // path. With them set, a mounted bundle is INSTRUCTIONS ONLY, which
+          // is all a curated bundle is for.
+          settings: {
+            disableSkillShellExecution: true,
+            disableAllHooks: true,
+          },
+          // WHY THE MOUNT ABOVE IS SAFE. Handing the SDK a plugin directory
+          // is how a skill reaches execution outside canUseTool and the app
+          // gate, and successive review rounds each found a fresh route:
+          // inline skill shell commands, plugin and skill hooks, `context:
+          // fork` spawning a subagent, plugin MONITORS in plugin.json, nested
+          // payloads, a YAML-quoted key. Patching each one was losing, because
+          // inspect-and-denylist is the wrong model for this surface.
+          //
+          // What ships instead is allowlist-by-verification: the bundle is
+          // hashed against its manifest under a required deployment pin, and
+          // what the SDK actually loads is a private snapshot we write from
+          // those verified bytes, with frontmatter we author containing only
+          // name and description. Nothing the source declared survives it.
+          //
+          // The two settings above stay regardless: they are cheap, they only
+          // narrow, and they are correct for a spine session either way.
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
             // Bridge to the loop's hook (allow spine tools / deny everything else).

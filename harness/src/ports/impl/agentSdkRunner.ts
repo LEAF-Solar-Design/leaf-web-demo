@@ -33,6 +33,7 @@ import type {
   AgentRunResult,
   AgentRunner,
   AuthorTelemetry,
+  ResultEnvelope,
   ToolExecutionReceipt,
   ToolPackage,
   ToolSubmissionResult,
@@ -118,12 +119,44 @@ export interface RunUsageSummary {
 }
 
 export interface AgentSdkRunnerOptions {
-  /** undefined => the SDK/account default model. */
+  /** undefined => LEAF_SPINE_MODEL, then claude-sonnet-5. */
   model?: string;
   /** Spend cap: abort the author loop past this many SDK turns (contract: <= 40). */
   maxTurns?: number;
   /** Spend cap: abort past this many total tokens (contract: ~500k). */
   maxTotalTokens?: number;
+}
+
+export interface AuthorBrokerTestState {
+  attempted: boolean;
+  ok: boolean;
+  receipt: ToolExecutionReceipt | null;
+  failureReason: string | null;
+  errorCode: string | null;
+}
+
+function emptyBrokerTestState(): AuthorBrokerTestState {
+  return {
+    attempted: false,
+    ok: false,
+    receipt: null,
+    failureReason: null,
+    errorCode: null,
+  };
+}
+
+function brokerTestState(envelope: ResultEnvelope): AuthorBrokerTestState {
+  const accepted = acceptBrokerTestResult(envelope);
+  const rawCode = envelope.error?.error_code;
+  return {
+    attempted: true,
+    ok: accepted.ok,
+    receipt: accepted.receipt,
+    failureReason: accepted.ok ? null : (accepted.reason ?? "broker test was not accepted"),
+    errorCode: typeof rawCode === "string" && /^[A-Z0-9_]{1,100}$/.test(rawCode)
+      ? rawCode
+      : null,
+  };
 }
 
 const AUTHOR_TOOL_NAMES = [
@@ -193,7 +226,7 @@ export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
  * model writes correct field access. It describes the DATA, never the algorithm -
  * the model authors the logic.
  */
-const RUNNER_GUIDE = `
+export const AUTHOR_RUNNER_GUIDE = `
 === How to author (drive these three tools, nothing else) ===
 1. Choose a kebab-case tool NAME and a snake_case ENGINE_OP.
 2. Write the entry-script source in your validate_tool call. Do not write repo files.
@@ -233,7 +266,19 @@ Choose capabilities from the request:
 - A tool that changes panel positions or drawing geometry: ["drawing.write"].
 
 For drawing.write, tool.py stays pure. It does not write files or versions. Return
-the proposed edit in result["mutations"]. To move existing panels, use:
+the proposed edit in result["mutations"].
+
+To add geometry, use result["mutations"]["added"] with one or more intake-shaped
+closed polylines. Each added entity must contain a deterministic unique handle,
+a layer, closed:true, and at least three [x, y, z] points. Represent requested
+prisms and cylinders as their closed 2D drawing footprints. Compute placement
+from the existing intake bounds. For example:
+  {"added": [
+    {"handle": "LEAF-AUTHORED-1", "layer": "LEAF_AUTHORED",
+     "closed": true, "pts": [[0,0,0], [10,0,0], [10,10,0], [0,10,0]]}
+  ]}
+
+To move existing panels, use:
   {"transforms": [
     {"handle": "AB12", "dx": 10.0, "dy": -5.0, "rotation_deg": 0.0}
   ]}
@@ -271,6 +316,13 @@ export interface RateLimitState {
   retry_after_s: number | null;
 }
 
+export function resolveAuthorModel(
+  explicit: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return explicit ?? env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
+}
+
 export class AgentSdkRunner implements AgentRunner {
   /** Per-turn usage from the most recent run() (self-metered). */
   usageLog: TurnUsage[] = [];
@@ -300,8 +352,7 @@ export class AgentSdkRunner implements AgentRunner {
     //    structured submit boundary owned by the harness.
     let candidate: ToolPackage | null = null;
     let candidateSubmission: ReturnType<AgentRunInput["toolset"]["submitTool"]> | null = null;
-    let candidateTested = false;
-    let candidateExecutionReceipt: ToolExecutionReceipt | null = null;
+    let candidateTest = emptyBrokerTestState();
     const fs = input.toolset.fsTenantRepo;
     const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
     const bad = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -357,8 +408,7 @@ export class AgentSdkRunner implements AgentRunner {
           });
           candidate = submitted.tool;
           candidateSubmission = submitted;
-          candidateTested = false;
-          candidateExecutionReceipt = null;
+          candidateTest = emptyBrokerTestState();
           return ok(JSON.stringify({
             status: "VALID",
             tool: submitted.tool,
@@ -381,10 +431,14 @@ export class AgentSdkRunner implements AgentRunner {
           const params = typeof a.params_json === "string" && a.params_json.trim()
             ? JSON.parse(a.params_json)
             : {};
-          const env = await input.toolset.apsTestRun(candidate, params);
+          candidateTest = { ...candidateTest, attempted: true };
+          const env = await input.toolset.apsTestRun(
+            candidate,
+            params,
+            candidateSubmission?.code,
+          );
+          candidateTest = brokerTestState(env);
           const accepted = acceptBrokerTestResult(env);
-          candidateTested = accepted.ok;
-          candidateExecutionReceipt = accepted.receipt;
           const text = JSON.stringify(env, null, 2);
           return accepted.ok
             ? ok(text)
@@ -408,10 +462,10 @@ export class AgentSdkRunner implements AgentRunner {
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
     const allowed = new Set(allowedNames);
     const q = sdk.query({
-      prompt: `${input.systemPrompt}\n${RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
+      prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {
         env: childEnv,
-        model: this.opts.model,
+        model: resolveAuthorModel(this.opts.model),
         maxTurns,
         settingSources: [],
         permissionMode: "default",
@@ -555,9 +609,12 @@ export class AgentSdkRunner implements AgentRunner {
         `author session ended without a validated tool (result subtype=${this.lastRun.result_subtype ?? "n/a"}, turns=${turn}).`,
       );
     }
-    if (!candidateTested) {
-      throw new Error("author session ended without a passing broker test run for the submitted source.");
-    }
+    const candidateExecutionReceipt = await completeRequiredBrokerTest(
+      candidate,
+      input.toolset.apsTestRun,
+      candidateTest,
+      finalSubmission.code,
+    );
     const finalPkg: ToolPackage = candidate;
     const diagnostics = validateToolPackage(finalPkg);
     if (diagnostics.length > 0) {
@@ -578,6 +635,185 @@ export class AgentSdkRunner implements AgentRunner {
       telemetry: telemetryFromSummary(this.lastRun!),
     };
   }
+}
+
+/**
+ * Enforce the broker test as a trusted harness gate even when the model stops
+ * after source validation. The model-facing tool remains useful for iterative
+ * feedback, but correctness no longer depends on the model choosing to call it.
+ */
+export async function completeRequiredBrokerTest(
+  candidate: ToolPackage,
+  apsTestRun: AgentRunInput["toolset"]["apsTestRun"],
+  state: AuthorBrokerTestState = emptyBrokerTestState(),
+  testSource?: string,
+): Promise<ToolExecutionReceipt | null> {
+  const finalState = state.attempted
+    ? state
+    : brokerTestState(await apsTestRun(candidate, sampleBrokerTestParams(candidate.params), testSource));
+  if (!finalState.ok) {
+    throw new Error(
+      `authored tool failed required broker test${finalState.errorCode ? ` (${finalState.errorCode})` : ""}: ${finalState.failureReason ?? "broker test was not accepted"}.`,
+    );
+  }
+  return finalState.receipt;
+}
+
+/** Build one small deterministic input that satisfies ordinary authored JSON schemas.
+ * The fallback runs only when the model omitted its own broker test, so required
+ * fields cannot be left as `{}`. Keep the synthesis bounded and fail closed on
+ * exotic schemas instead of guessing an unbounded payload. */
+export function sampleBrokerTestParams(schema: unknown): Record<string, unknown> {
+  const value = sampleSchemaValue(schema, 0);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("authored tool params schema must describe an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function sampleSchemaValue(schema: unknown, depth: number): unknown {
+  if (depth > 4 || !schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new Error("authored tool params schema is not safely sampleable");
+  }
+  const node = schema as Record<string, unknown>;
+  for (const keyword of ["allOf", "anyOf", "oneOf", "not", "if", "then", "else", "$ref", "pattern", "multipleOf"]) {
+    if (node[keyword] !== undefined) {
+      throw new Error(`authored tool params schema uses unsupported keyword ${keyword}`);
+    }
+  }
+  if (node.const !== undefined && isSampleScalar(node.const)) return node.const;
+  if (Array.isArray(node.enum) && node.enum.length > 0 && isSampleScalar(node.enum[0])) {
+    return node.enum[0];
+  }
+  if (Array.isArray(node.examples) && node.examples.length > 0 && isSampleScalar(node.examples[0])) {
+    return node.examples[0];
+  }
+  if (node.default !== undefined && isSampleScalar(node.default)) return node.default;
+
+  const type = typeof node.type === "string" ? node.type : undefined;
+  if (type === "object" || node.properties !== undefined) {
+    const properties = node.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) return {};
+    if (node.required !== undefined && !Array.isArray(node.required)) {
+      throw new Error("authored tool params schema required must be an array");
+    }
+    const required = (node.required ?? []) as unknown[];
+    if (required.some((name) => typeof name !== "string")) {
+      throw new Error("authored tool params schema required names must be strings");
+    }
+    if (required.length > 32) throw new Error("authored tool params schema requires too many fields");
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    const requiredNames = new Set(required as string[]);
+    for (const name of requiredNames) {
+      if (name === "__proto__" || name === "prototype" || name === "constructor") {
+        throw new Error("authored tool params schema contains an unsafe required field");
+      }
+      if (!Object.prototype.hasOwnProperty.call(properties, name)) {
+        throw new Error(`authored tool params schema omits required field ${name}`);
+      }
+      result[name] = sampleSchemaValue((properties as Record<string, unknown>)[name], depth + 1);
+    }
+    for (const [name, child] of Object.entries(properties)) {
+      if (requiredNames.has(name)) continue;
+      if (name === "__proto__" || name === "prototype" || name === "constructor") continue;
+      if (name === "dry_run") {
+        const childNode = schemaNode(child);
+        if (childNode.type !== "boolean") {
+          throw new Error("authored tool dry_run param must be boolean");
+        }
+        result[name] = true;
+      } else if (schemaNode(child).default !== undefined) {
+        result[name] = sampleSchemaValue(child, depth + 1);
+      }
+    }
+    return result;
+  }
+  if (type === "string") {
+    const min = schemaCount(node.minLength, 0, 64, "minLength");
+    const max = schemaCount(node.maxLength, 64, 64, "maxLength");
+    if (max < min) throw new Error("authored tool params schema has no valid string sample");
+    return "sample".padEnd(min, "x").slice(0, max);
+  }
+  if (type === "integer" || type === "number") {
+    return sampleNumber(node, type === "integer");
+  }
+  if (type === "boolean") return true;
+  if (type === "array") {
+    const count = schemaCount(node.minItems, 0, 3, "minItems");
+    const maxItems = schemaCount(node.maxItems, 3, 3, "maxItems");
+    if (maxItems < count) throw new Error("authored tool params schema has no valid array sample");
+    if (node.uniqueItems === true && count > 1) {
+      throw new Error("authored tool params schema uses unsupported uniqueItems");
+    }
+    if (count === 0) return [];
+    return Array.from({ length: count }, () => sampleSchemaValue(node.items, depth + 1));
+  }
+  if (type === "null") return null;
+  throw new Error("authored tool params schema contains an unsupported required value");
+}
+
+function isSampleScalar(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
+function schemaNode(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("authored tool params schema is not safely sampleable");
+  }
+  return value as Record<string, unknown>;
+}
+
+function schemaCount(value: unknown, fallback: number, cap: number, keyword: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > cap) {
+    throw new Error(`authored tool params schema ${keyword} is outside the safe bound`);
+  }
+  return value;
+}
+
+function sampleNumber(node: Record<string, unknown>, integer: boolean): number {
+  for (const keyword of ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]) {
+    const value = node[keyword];
+    if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+      throw new Error(`authored tool params schema ${keyword} must be finite`);
+    }
+  }
+  const minimum = node.minimum as number | undefined;
+  const maximum = node.maximum as number | undefined;
+  const exclusiveMinimum = node.exclusiveMinimum as number | undefined;
+  const exclusiveMaximum = node.exclusiveMaximum as number | undefined;
+  if (integer) {
+    const lower = Math.max(
+      minimum === undefined ? Number.MIN_SAFE_INTEGER : Math.ceil(minimum),
+      exclusiveMinimum === undefined ? Number.MIN_SAFE_INTEGER : Math.floor(exclusiveMinimum) + 1,
+    );
+    const upper = Math.min(
+      maximum === undefined ? Number.MAX_SAFE_INTEGER : Math.floor(maximum),
+      exclusiveMaximum === undefined ? Number.MAX_SAFE_INTEGER : Math.ceil(exclusiveMaximum) - 1,
+    );
+    const value = Math.max(lower, Math.min(1, upper));
+    if (!Number.isSafeInteger(value) || lower > upper) {
+      throw new Error("authored tool params schema has no safe integer sample");
+    }
+    return value;
+  }
+  const candidates = [
+    1,
+    minimum,
+    exclusiveMinimum === undefined ? undefined : exclusiveMinimum + Math.max(1, Math.abs(exclusiveMinimum) * 0.01),
+    maximum,
+    exclusiveMaximum === undefined ? undefined : exclusiveMaximum - Math.max(1, Math.abs(exclusiveMaximum) * 0.01),
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const value = candidates.find((candidate) =>
+    (minimum === undefined || candidate >= minimum)
+    && (maximum === undefined || candidate <= maximum)
+    && (exclusiveMinimum === undefined || candidate > exclusiveMinimum)
+    && (exclusiveMaximum === undefined || candidate < exclusiveMaximum));
+  if (value === undefined) throw new Error("authored tool params schema has no finite numeric sample");
+  return value;
 }
 
 /**

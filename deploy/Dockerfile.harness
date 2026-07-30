@@ -48,11 +48,13 @@ COPY harness/test/    /app/test/
 # Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
 # dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.
 RUN npx tsc -p tsconfig.build.json \
-  && npm prune --omit=dev
+  && npm prune --omit=dev \
+  && chmod 0555 /app/scripts/start-harness.sh
 
 ENV HARNESS_PORT=8150 \
     LEAF_RUNTIME_ENV=production \
     LEAF_AUTHORED_EXECUTION=0 \
+    LEAF_INSTANT_EXECUTION_ENABLED=0 \
     LEAF_AGENT_MOCK=0 \
     LEAF_HARNESS_AUTHORING_MODE=disabled \
     LEAF_HARNESS_SESSION_STORE=file \
@@ -77,4 +79,4 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
   && chown -R 10002:10002 /data /home/leaf
 USER 10002:10002
 
-CMD ["node", "dist/scripts/serve.js"]
+CMD ["/app/scripts/start-harness.sh"]

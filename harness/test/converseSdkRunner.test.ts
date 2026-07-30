@@ -17,6 +17,10 @@
  *   - no shared mutable telemetry: two interleaved run()s never mix usage.
  */
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -25,6 +29,7 @@ import {
   classifyRateLimit,
 } from "../src/ports/impl/converseSdkRunner.js";
 import type { ConverseSdkRunnerOptions } from "../src/ports/impl/converseSdkRunner.js";
+import { createCuratedSkillSource } from "./helpers/curatedSkillSource.js";
 import type {
   ConverseRunInput,
   ConverseRunnerEvent,
@@ -109,7 +114,7 @@ function makeMockSdk(script: ScriptEntry[] | ScriptEntry[][]) {
   // A zod stand-in: every factory returns a chainable token with .optional().
   const zt = (): AnyRec => ({ optional: zt });
   const zodModule = {
-    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt },
+    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt, array: zt, object: zt },
   };
 
   return {
@@ -340,6 +345,63 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
 // --------------------------------------------------------------------------- //
 
 describe("ConverseSdkRunner — SDK options wiring", () => {
+  it("hardens the session when no verified bundle is configured", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(mock), makeInput());
+    const options = mock.queries[0]!.options;
+    expect("skills" in options).toBe(false);
+    expect("plugins" in options).toBe(false);
+    // The hardening stays regardless: SETTINGS layer, not top-level — the
+    // SDK's arg builder reads options.settings and never a top-level flag, so
+    // the broken form silently does nothing.
+    expect(options.settings).toMatchObject({
+      disableSkillShellExecution: true,
+      disableAllHooks: true,
+    });
+    expect("disableSkillShellExecution" in options).toBe(false);
+    expect("disableAllHooks" in options).toBe(false);
+  });
+
+  // Spawns the REAL builder, which costs seconds under full-suite contention.
+  // vitest's 5s default is a statement about this harness, not the code under
+  // test, and letting it fire would read as a security regression.
+  it("mounts plugins and skills only from a verified builder artifact", { timeout: 60_000 }, async () => {
+    const parent = mkdtempSync(join(tmpdir(), "leaf-converse-bundle-"));
+    const bundle = join(parent, "bundle");
+    try {
+      const repo = resolve(import.meta.dirname, "../..");
+      const skillSource = createCuratedSkillSource(parent, join(repo, "tools", "skills-bundle", "curation.json"));
+      execFileSync(process.execPath, [join(repo, "tools", "skills-bundle", "build.mjs"), "--source", skillSource, "--tier", "tenant-safe", "--out", bundle], { stdio: "pipe", timeout: 60_000 });
+      const digest = (JSON.parse(readFileSync(join(bundle, "manifest.json"), "utf8")) as { bundleDigest: string }).bundleDigest;
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", bundle);
+      vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");
+
+      // Without the deployment pin the runner mounts NOTHING. A bundle that
+      // verifies against its own manifest proves only that it is internally
+      // consistent; whoever wrote the directory could rewrite both.
+      const unpinned = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(unpinned), makeInput());
+      expect(unpinned.queries[0]!.options.plugins).toBeUndefined();
+      expect(unpinned.queries[0]!.options.skills).toBeUndefined();
+
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_DIGEST", digest);
+      const mock = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(mock), makeInput());
+      const options = mock.queries[0]!.options;
+      expect(options.skills).toEqual(["code-standards", "knowledge-synthesis", "orwell-writing"]);
+      // The SDK is pointed at OUR snapshot, never at the source directory: a
+      // verified path that stays writable can be swapped before the SDK reads it.
+      const plugins = options.plugins as Array<{ type: string; path: string; skipMcpDiscovery: boolean }>;
+      expect(plugins).toHaveLength(1);
+      expect(plugins[0]).toMatchObject({ type: "local", skipMcpDiscovery: true });
+      expect(plugins[0]!.path).not.toBe(bundle);
+      expect(readFileSync(join(plugins[0]!.path, "skills", "code-standards", "SKILL.md"), "utf8"))
+        .toMatch(/^---\r?\nname: "code-standards"\r?\ndescription: /);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it("passes resume when resumeSdkSessionId is present, omits it when absent", async () => {
     const withResume = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(withResume), makeInput({ resumeSdkSessionId: "prior-session-42" }));
@@ -520,7 +582,7 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     const seen: Array<{ tool: string; input: AnyRec }> = [];
     const canUseTool: ConverseRunInput["canUseTool"] = async (tool, input) => {
       seen.push({ tool, input });
-      return tool.includes("run_capability")
+      return tool === "Skill" || tool.includes("run_capability")
         ? { behavior: "deny", message: "not now" }
         : { behavior: "allow", updatedInput: input };
     };
@@ -536,9 +598,12 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     expect(allow).toEqual({ behavior: "allow", updatedInput: { what: "summary" } });
     const deny = await hook("mcp__spine__run_capability", { tool: "add-panel" });
     expect(deny).toEqual({ behavior: "deny", message: "not now" });
+    const skill = await hook("Skill", { skill: "drawing-help" });
+    expect(skill).toEqual({ behavior: "deny", message: "not now" });
     expect(seen.map((s) => s.tool)).toEqual([
       "mcp__spine__drawing_state",
       "mcp__spine__run_capability",
+      "Skill",
     ]);
   });
 });

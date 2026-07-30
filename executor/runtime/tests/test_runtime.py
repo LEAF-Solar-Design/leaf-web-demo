@@ -7,6 +7,9 @@ import time
 import unittest
 
 from executor.runtime import child
+from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
+from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
+from executor.runtime.ed25519 import sign
 from executor.runtime.supervisor import WarmExecutorSupervisor
 from executor.runtime.tests.helpers import EXECUTOR_ID, documents, keys, lease
 
@@ -16,7 +19,7 @@ COUNTER_SOURCE = "counter = [0]\ndef run(intake, params):\n    counter[0] += 1\n
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
 
     def tearDown(self) -> None:
         self.supervisor.close()
@@ -40,6 +43,83 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(1, first["result"]["count"])
         self.assertEqual(2, second["result"]["count"])
         self.assertEqual(before, self.supervisor.process_ids())
+
+    def test_accounting_emits_ordered_payload_free_events_once_for_a_replay(self) -> None:
+        class Emitter:
+            def __init__(self) -> None:
+                self.records = []
+            def emit(self, record) -> None:
+                self.records.append(record)
+
+        emitter = Emitter()
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1,
+            trusted_development_fixtures=True, accounting_emitter=emitter,
+        )
+        docs = self.assigned()
+        first = self.invoke(docs)
+        replay = self.invoke(docs)
+        self.assertEqual("succeeded", first["status"])
+        self.assertEqual(first, replay)
+        self.assertEqual([item["state"] for item in emitter.records], ["accepted", "started", "terminal"])
+        encoded = str(emitter.records).lower()
+        self.assertNotIn("params", encoded)
+        self.assertNotIn("drawing_context", encoded)
+        self.assertEqual("succeeded", emitter.records[-1]["outcome"])
+        self.assertEqual(0, emitter.records[-1]["memory_peak_bytes"])
+
+    def test_process_high_water_memory_is_never_billed_as_per_invocation_usage(self) -> None:
+        class Emitter:
+            def __init__(self) -> None:
+                self.records = []
+            def emit(self, record) -> None:
+                self.records.append(record)
+
+        emitter = Emitter()
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1,
+            trusted_development_fixtures=True, accounting_emitter=emitter,
+        )
+        docs = self.assigned(
+            "def run(intake, params):\n"
+            " junk = [0] * params['size']\n"
+            " return {'size': len(junk)}\n"
+        )
+        docs["invocation"]["params"] = {"size": 100_000}
+        self.assertEqual("succeeded", self.invoke(docs)["status"])
+        low = copy.deepcopy(docs["invocation"])
+        low["invocation_id"] = "11111111-1111-4111-8111-111111111111"
+        low["params"] = {"size": 1}
+        self.assertEqual("succeeded", self.supervisor.invoke(low, "Bearer " + lease(low))["status"])
+        terminals = [item for item in emitter.records if item["state"] == "terminal"]
+        self.assertEqual([0, 0], [item["memory_peak_bytes"] for item in terminals])
+
+    def test_normal_mode_resolves_signed_registry_bytes_and_rejects_inline_source(self) -> None:
+        source = "def run(intake, params):\n return {'registry': True}\n"
+        docs = documents(source)
+        assignment = docs["assignment"]
+        reference = ArtifactReference(
+            assignment["tenant_id"], assignment["effective_catalog_digest"],
+            assignment["artifact_digest"], assignment["code_digest"],
+        )
+        unsigned = SignedArtifact(reference, source.encode("utf-8"), "registry-key", b"")
+        artifact = SignedArtifact(
+            reference, source.encode("utf-8"), "registry-key",
+            sign(bytes(range(32)), RegistryImplementation._signed_payload(unsigned)),
+        )
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1,
+            artifact_registry=ImmutableArtifactRegistry((artifact,), {"registry-key": keys()["test-key"]}),
+        )
+        normal_request = {key: docs[key] for key in ("assignment", "code_load", "catalog", "drawing_context")}
+        self.supervisor.assign(normal_request)
+        self.assertEqual("succeeded", self.invoke(docs)["status"])
+        with self.assertRaisesRegex(ValueError, "inline source") as raised:
+            self.supervisor.assign({**normal_request, "source": source})
+        self.assertEqual("UNTRUSTED_SOURCE_REJECTED", raised.exception.code)
 
     def test_replay_and_conflict_do_not_execute_again(self) -> None:
         docs = self.assigned()
@@ -73,7 +153,7 @@ class RuntimeTests(unittest.TestCase):
             other = self.assigned(source) if False else documents(source)
             # Use a fresh warm pool because this test has one fixed slot.
             self.supervisor.close()
-            self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1)
+            self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
             self.supervisor.assign({key: other[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
             failed = self.invoke(other)
             self.assertEqual("TOOL_FAILED", failed["error"]["code"])
@@ -101,7 +181,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("output exceeds", output["error"]["message"])
 
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
         calls_docs = documents("def run(intake, params):\n intake['tool_call']()\n intake['tool_call']()\n return {}\n")
         calls_docs["catalog"]["limits"]["max_tool_calls"] = 1
         self.supervisor.assign({key: calls_docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
@@ -111,7 +191,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_child_failure_replaces_only_the_failed_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
         failing = documents("def run(intake, params):\n raise MemoryError()\n")
         healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
         self.supervisor.assign({key: failing[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
@@ -129,6 +209,7 @@ class RuntimeTests(unittest.TestCase):
         self.supervisor.close()
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, keys(), pool_size=1, idempotency_ttl_seconds=0.02, idempotency_max_entries=2,
+            trusted_development_fixtures=True,
         )
         docs = self.assigned()
         first = self.invoke(docs)
@@ -174,7 +255,7 @@ class RuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "POSIX resource limits are unavailable on Windows")
     def test_linux_memory_limit_replaces_only_the_allocation_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
         allocation = documents("def run(intake, params):\n return {'data': 'x' * (64 * 1024 * 1024)}\n")
         allocation["catalog"]["limits"]["max_memory_mb"] = 32
         healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
@@ -191,7 +272,7 @@ class RuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix" and hasattr(signal, "ITIMER_PROF"), "POSIX CPU timers are unavailable")
     def test_linux_cpu_limit_replaces_only_the_busy_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
         busy = documents("def run(intake, params):\n while True:\n  pass\n")
         busy["catalog"]["limits"]["max_wall_ms"] = 30_000
         busy["catalog"]["limits"]["max_cpu_ms"] = 50

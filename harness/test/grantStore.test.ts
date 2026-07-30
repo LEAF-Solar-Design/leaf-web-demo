@@ -119,11 +119,28 @@ describe("FileTenantGrantStore", () => {
     expect(status.accounts?.find((account) => account.id === first.account_id)?.usage_tokens).toBe(12_000);
   });
 
+  it("routes owner-attested Pro and Max mounts", async () => {
+    const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+    await store.put("acme", FAKE, "oauth", "pro-primary", "pro");
+    await store.put("acme", FAKE2, "oauth", "max-secondary", "max");
+
+    const first = await store.acquire("acme");
+    await store.settle("acme", first.lease_id, {
+      usage: { cost_tokens: 12_000 },
+      stop_reason: "end_turn",
+    });
+    const second = await store.acquire("acme");
+
+    expect(second.account_id).not.toBe(first.account_id);
+    expect(new Set((await store.status("acme")).accounts?.map((account) => account.plan)))
+      .toEqual(new Set(["pro", "max"]));
+  });
+
   it("keeps unattested OAuth mounts out of automatic routing", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
     await store.put("acme", FAKE, "oauth", "legacy subscription");
 
-    await expect(store.acquire("acme")).rejects.toThrow(/Team or Enterprise/i);
+    await expect(store.acquire("acme")).rejects.toThrow(/attested Claude subscription/i);
     expect((await store.status("acme")).accounts?.[0]).toMatchObject({
       plan: null,
       eligible: false,

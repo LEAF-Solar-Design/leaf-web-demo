@@ -6,6 +6,42 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const INTAKE = JSON.parse(readFileSync(join(HERE, '..', '..', 'data', 'rooftop_demo.intake.json'), 'utf8'))
 
+test('live surface honors the exact session-seeded drawing id', async ({ page }) => {
+  const drawingId = 'acceptance-catflow-20260730-1107-a'
+  let releaseSession
+  const sessionReleased = new Promise((resolve) => { releaseSession = resolve })
+  await page.addInitScript((seededDrawingId) => {
+    window.sessionStorage.setItem('leaf.cat.workbench.id.v1', seededDrawingId)
+  }, drawingId)
+
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const found = request.method() === 'GET' && url.pathname === '/api/session'
+    if (found) await sessionReleased
+    await route.fulfill({
+      status: found ? 200 : 404,
+      contentType: 'application/json',
+      body: JSON.stringify(found ? { intake: INTAKE } : {
+        error: { error_code: 'NOT_FOUND', message: 'not found', retryable: false },
+      }),
+      headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
+    })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Connecting backend')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeDisabled()
+  releaseSession()
+  await expect(page.getByTestId('operator-phase')).toContainText('Backend ready')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeEnabled()
+  await expect(page.locator('.tc-bar-proj')).toHaveText(drawingId)
+  await page.reload()
+  await expect(page.getByTestId('operator-phase')).toContainText('Backend ready')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeEnabled()
+  await expect(page.locator('.tc-bar-proj')).toHaveText(drawingId)
+})
+
 test('live surface starts empty and reports the real Claude grant gate', async ({ page }) => {
   let messageBody = null
   let drawingId = null
@@ -52,9 +88,9 @@ test('live surface starts empty and reports the real Claude grant gate', async (
   await expect(page.getByText('Live services')).toBeVisible()
   await expect(page.getByText('Requests are not preloaded or simulated.')).toBeVisible()
   await expect(page.getByText('Deterministic browser proof.')).toHaveCount(0)
-  const workbench = await page.getByText(/^cat-workbench-[0-9a-z-]+$/).textContent()
+  const workbench = await page.locator('.tc-bar-proj').textContent()
   await page.reload()
-  await expect(page.getByText(workbench)).toBeVisible()
+  await expect(page.locator('.tc-bar-proj')).toHaveText(workbench)
   await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
 
   const request = 'Rearrange these panels into a sitting cat.'

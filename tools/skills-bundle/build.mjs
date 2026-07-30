@@ -60,10 +60,32 @@ export async function build(options) {
     const structure = await validateBundleStructure(outputPath);
     const files = {};
     for (const relativePath of structure.files) {
-      files[relativePath] = sha256(await fs.readFile(path.join(outputPath, ...relativePath.split("/"))));
+      // The bytes the validator inspected, so the manifest describes exactly
+      // what was checked rather than whatever a later read happens to return.
+      files[relativePath] = sha256(structure.contents.get(relativePath));
     }
-    const manifest = { version: 1, tier: options.tier, files, bundleDigest: bundleDigest(files) };
-    await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    // `skills` carries what the loader used to re-derive by parsing YAML at
+    // mount time. Recording it here means the read happens once, offline, and
+    // the runtime just reads a field the digest already covers.
+    const manifest = {
+      version: 1,
+      tier: options.tier,
+      files,
+      skills: structure.skills,
+      bundleDigest: bundleDigest(files, structure.skills),
+    };
+    // The FINAL manifest, re-checked against the same cap the loader and the
+    // deploy gate enforce. The placeholder validated above was tiny; this one
+    // carries every hash AND every description, and descriptions alone can be
+    // 250 x 8 KiB. Writing an over-cap manifest here would make this builder
+    // say READY for an artifact verify.mjs and production then refuse — the
+    // build-blesses/gate-refuses drift this pair of implementations exists to
+    // prevent, pointing the other way.
+    const manifestContent = `${JSON.stringify(manifest, null, 2)}\n`;
+    if (Buffer.byteLength(manifestContent) > MAX_MANIFEST_BYTES) {
+      fail(`manifest.json would exceed ${MAX_MANIFEST_BYTES} bytes; curate fewer or shorter descriptions`);
+    }
+    await fs.writeFile(manifestPath, manifestContent);
     console.log(`READY: built ${options.tier} bundle with ${selected.length} skills at ${outputPath}`);
   } catch (error) {
     await fs.rm(outputPath, { recursive: true, force: true });

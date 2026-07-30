@@ -86,6 +86,7 @@ def test_prepare_assigns_and_loads_before_reporting_ready(monkeypatch, tmp_path)
     assignment["artifact_digest"] = code_digest
 
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("LEAF_INSTANT_EXECUTION_ENABLED", "1")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
     monkeypatch.setattr(instant_execution, "_eligible_tool", lambda: tool)
     monkeypatch.setattr(
@@ -225,6 +226,7 @@ def test_assignment_renews_before_half_life(monkeypatch):
         instant_execution._assignments[key] = dict(assignment)
     renewed_expiry = (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("LEAF_INSTANT_EXECUTION_ENABLED", "1")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
     monkeypatch.setattr(
         instant_execution.requests, "post",
@@ -252,6 +254,7 @@ def test_ninety_second_fake_clock_soak_renews_one_session_without_redis(monkeypa
     instant_execution._remember_assignment(key, assignment)
     monkeypatch.setattr(instant_execution, "_now", lambda: clock[0])
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("LEAF_INSTANT_EXECUTION_ENABLED", "1")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
     renewals = []
 
@@ -284,6 +287,7 @@ def test_failed_renewal_never_returns_an_expired_assignment(monkeypatch):
     instant_execution._remember_assignment(key, assignment)
     monkeypatch.setattr(instant_execution, "_now", lambda: clock[0])
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("LEAF_INSTANT_EXECUTION_ENABLED", "1")
     monkeypatch.setenv("LEAF_INSTANT_CONTROL_SECRET", "test-control-secret")
 
     def _fail(_url, **_kwargs):

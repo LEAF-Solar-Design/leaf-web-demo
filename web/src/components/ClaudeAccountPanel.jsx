@@ -38,7 +38,7 @@ export default function ClaudeAccountPanel({
 }) {
   const [token, setToken] = useState('')
   const [kind, setKind] = useState('oauth')
-  const [plan, setPlan] = useState('team')
+  const [plan, setPlan] = useState(null)
   const [label, setLabel] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
@@ -79,7 +79,7 @@ export default function ClaudeAccountPanel({
       setShowAdd(false)
     } else {
       setShowAdd(true)
-      setLabel((current) => current || 'Team workspace')
+      setLabel((current) => current || 'My Claude account')
     }
   }, [linked, accounts.length])
 
@@ -93,7 +93,7 @@ export default function ClaudeAccountPanel({
 
   const submit = async () => {
     const value = token.trim()
-    if (!value || busy || (kind === 'oauth' && !label.trim())) return
+    if (!value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
     await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
     setToken('')
   }
@@ -108,7 +108,7 @@ export default function ClaudeAccountPanel({
         onClick={() => onToggle(!open)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title="Manage tenant-owned Claude Team and Enterprise mounts"
+        title="Manage tenant-owned Claude subscription and API-key mounts"
       >
         <span className="ca-k">Claude accounts</span>
         <span className={`ca-state ${linked ? 'on' : ''}`}>{stateLabel}</span>
@@ -163,21 +163,21 @@ export default function ClaudeAccountPanel({
           {(!linked || showAdd) && (
             <div className="ca-setup">
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
-                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Team or Enterprise subscription</button>
+                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
                 <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => setKind('api_key')} disabled={busy}>Anthropic API key</button>
               </div>
 
               {!isApiKey && (
                 <>
-                  <p className="ca-copy">Mount an authorized <b>Claude Team or Enterprise</b> workspace under Anthropic's Commercial Terms.</p>
+                  <p className="ca-copy">Mount your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
                   <ol className="ca-steps">
                     <li>Run <code>claude setup-token</code> in a terminal.</li>
-                    <li>Approve the request for that Team or Enterprise workspace.</li>
+                    <li>Approve the request for your Claude subscription.</li>
                     <li>Paste the one-time token below.</li>
                   </ol>
                   <div className="ca-choice" role="radiogroup" aria-label="Claude workspace plan">
-                    {['team', 'enterprise'].map((value) => (
-                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => setPlan(value)} disabled={busy}>{value === 'team' ? 'Team' : 'Enterprise'}</button>
+                    {['pro', 'max', 'team', 'enterprise'].map((value) => (
+                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => setPlan(value)} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
                     ))}
                   </div>
                   <label className="ca-field">
@@ -202,7 +202,7 @@ export default function ClaudeAccountPanel({
                   aria-label={isApiKey ? 'Anthropic API key' : 'Claude token'}
                 />
               </label>
-              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && !label.trim())}>
+              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && (!label.trim() || !plan))}>
                 {busy ? 'Linking…' : isApiKey ? 'Link API key' : 'Link Claude account'}
               </button>
               {linked && <button className="chip-neutral" onClick={() => setShowAdd(false)} disabled={busy}>Cancel</button>}

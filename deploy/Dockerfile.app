@@ -13,6 +13,16 @@ ARG LEAF_SOURCE_SHA=unknown
 
 WORKDIR /app
 
+# --- git: REQUIRED, not optional. ---------------------------------------------
+# server/customization_service.py shells out to git against the tenant bare repo
+# (`rev-parse --verify refs/heads/main`, `show`, and `worktree add` for
+# effective_catalog_dir). python:3.12-slim ships no git, so without this every
+# such call raises FileNotFoundError and the app answers a 503 for a repository
+# the harness had already provisioned correctly.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # --- Python deps: server + platform + da (the three the app imports). ---------
 # psycopg[binary] ships its own libpq wheel, so no apt libpq-dev is needed.
 # PyJWT (server/requirements-auth.txt) is an OPERATOR OPT-IN for LEAF_AUTH_LIVE=1
@@ -38,6 +48,8 @@ COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
+COPY server/start-app.sh /app/server/start-app.sh
+RUN chmod 0500 /app/server/start-app.sh
 
 # The stdlib `platform` module is shadowed by /app/platform once /app is on
 # sys.path; app.py loads the platform package under a `leaf_platform` alias and
@@ -50,6 +62,7 @@ ENV APS_LIVE=0 \
     LEAF_JOBS_STORE=legacy \
     LEAF_SESSIONS_STORE=legacy \
     LEAF_AGENT_STORE=legacy \
+    LEAF_INSTANT_EXECUTION_ENABLED=0 \
     LEAF_GUEST_CAP_STORE=memory \
     LEAF_DRAWING_STORE=legacy \
     LEAF_UPLOAD_STORE=legacy \
@@ -65,4 +78,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
 
 # uvicorn binds 0.0.0.0 so the container is reachable on the compose network
 # (python app.py already binds 0.0.0.0, but uvicorn is the documented run form).
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8130"]
+CMD ["/app/server/start-app.sh"]

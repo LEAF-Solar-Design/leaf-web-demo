@@ -586,6 +586,9 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
     assert.ok(source.includes("getByText(/Viewing v1.*read-only preview/)"))
     assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
+    assert.ok(!source.includes("waitUntil: 'networkidle'"))
+    assert.equal(source.match(/waitUntil: 'domcontentloaded'/g)?.length, 2)
+    assert.equal(source.match(/hasText: 'Backend ready'/g)?.length, 2)
   })
 
   it('counts mutating API requests on both allowed browser origins', () => {

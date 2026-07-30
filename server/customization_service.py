@@ -55,6 +55,7 @@ DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
 _LOG = logging.getLogger(__name__)
+_REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class CustomizationServiceError(RuntimeError):
@@ -138,26 +139,67 @@ def _tenant_id(value: Any) -> str:
     return tenant_id
 
 
+def _git_trust(*paths: Path) -> list[str]:
+    """Return command-scope `safe.directory` flags for exactly these paths.
+
+    Tenant repos live on EFS and can be owned by the access-point UID rather than
+    the container UID, so git refuses them with "detected dubious ownership".
+    Running as root does not bypass that check. The harness already handles this
+    (harness/src/ports/impl/tenantRepoProvider.ts trustSharedRepo); this is the
+    Python side of the same problem.
+
+    Command scope is protected configuration, which is what git requires for
+    safe.directory, and unlike the harness's `git config --global` it needs no
+    writable HOME. The app runs as root and the broker as UID 10001, so a
+    HOME-dependent approach would work in one and not the other.
+
+    Exact resolved paths only. A wildcard would trust every repository on the
+    volume, which is not the same statement at all.
+    """
+    flags: list[str] = []
+    for path in paths:
+        try:
+            resolved = str(path.resolve(strict=False))
+        except OSError:
+            resolved = str(path)
+        flags.extend(("-c", f"safe.directory={resolved}"))
+    return flags
+
+
 def _git(bare: Path, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["git", "--git-dir", str(bare), *args], check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+            ["git", *_git_trust(bare), "--git-dir", str(bare), *args],
+            check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        # stderr goes into `detail` (operator-only), never into the response.
+        stderr = str(getattr(exc, "stderr", "") or "").strip()
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"git_failed: {' '.join(args)} in {bare} ({type(exc).__name__})"
+            + (f": {stderr}" if stderr else ""),
+        ) from exc
     return result.stdout.strip()
 
 
 def _git_blob(bare: Path, object_name: str) -> bytes:
     try:
         result = subprocess.run(
-            ["git", "--git-dir", str(bare), "show", object_name],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ["git", *_git_trust(bare), "--git-dir", str(bare), "show", object_name],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        stderr = getattr(exc, "stderr", b"") or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"git_show_failed: {object_name} in {bare} ({type(exc).__name__})"
+            + (f": {stderr.strip()}" if stderr.strip() else ""),
+        ) from exc
     return result.stdout
 
 
@@ -168,30 +210,44 @@ def _bare_repo(tenant_id: str) -> Path:
         or os.environ.get("LEAF_TENANT_BARE_BASE", "").strip()
     )
     if not base:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            "git_dir_unset: neither LEAF_TENANT_GIT_DIR nor LEAF_TENANT_BARE_BASE is set",
+        )
     candidate = Path(base) / f"{tenant_id}.git"
     try:
         resolved_base = Path(base).resolve(strict=True)
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(resolved_base)
     except (OSError, ValueError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"path_unresolvable: {candidate} under {base} ({type(exc).__name__})",
+        ) from exc
     if not (resolved / "HEAD").is_file():
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503, f"head_missing: {resolved}/HEAD",
+        )
     return resolved
 
 
 def _ensure_bare_repo(tenant_id: str) -> Path:
     """Ask the harness to provision a first-time tenant repo, then verify it locally."""
     try:
-        return _bare_repo(tenant_id)
+        bare = _bare_repo(tenant_id)
+        _git(bare, "rev-parse", "--verify", "refs/heads/main")
+        return bare
     except CustomizationServiceError as exc:
         if exc.code != "tenant_repository_unavailable":
             raise
     url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     secret = os.environ.get("LEAF_HARNESS_SECRET", "").strip()
     if not url or not secret:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        # Never log the secret itself, only whether the deployment supplied one.
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"harness_unconfigured: url_set={bool(url)} secret_set={bool(secret)}",
+        )
     try:
         import requests
         response = requests.post(
@@ -202,16 +258,59 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
         response.raise_for_status()
         body = response.json()
     except Exception as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
-    bare = _bare_repo(tenant_id)
-    observed = _git(bare, "rev-parse", "refs/heads/main")
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"harness_provision_failed: {url}/author/repository "
+            f"status={status} {type(exc).__name__}",
+        ) from exc
+    if not isinstance(body, Mapping):
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"provision_response_malformed: {type(body).__name__}",
+        )
+    if body.get("tenant_id") != tenant_id:
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            "provision_response_tenant_mismatch",
+        )
+    expected = body.get("base_commit")
     if (
-        not isinstance(body, Mapping)
-        or body.get("tenant_id") != tenant_id
-        or body.get("base_commit") != observed
+        not isinstance(expected, str)
+        or len(expected) != 40
+        or any(char not in "0123456789abcdef" for char in expected)
     ):
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
-    return bare
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            "provision_response_commit_malformed",
+        )
+
+    # App and harness are separate NFS clients. EFS can retain a negative
+    # directory entry for refs/heads/main after the harness creates it. Retry
+    # only local verification, never the provisioning write, until the bounded
+    # visibility window expires.
+    last_detail = "main_ref_not_observed"
+    for delay in _REPOSITORY_VISIBILITY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            bare = _bare_repo(tenant_id)
+            observed = _git(bare, "rev-parse", "--verify", "refs/heads/main")
+        except CustomizationServiceError as exc:
+            if exc.code != "tenant_repository_unavailable":
+                raise
+            last_detail = exc.detail or exc.code
+            continue
+        if observed == expected:
+            return bare
+        last_detail = (
+            f"provision_base_commit_mismatch: harness={expected} observed={observed}"
+        )
+    raise CustomizationServiceError(
+        "tenant_repository_unavailable", 503,
+        "provision_ref_not_visible: "
+        f"attempts={len(_REPOSITORY_VISIBILITY_DELAYS)} last={last_detail}",
+    )
 
 
 def _binding(tenant: Any) -> TenantBinding:
@@ -226,7 +325,10 @@ def _binding(tenant: Any) -> TenantBinding:
             platform_store = platform_link.platform_store()
             from psycopg import Error as PostgresError
         except (ImportError, OSError, RuntimeError) as exc:
-            raise CustomizationServiceError("tenant_identity_binding_unavailable", 503) from exc
+            raise CustomizationServiceError(
+                "tenant_identity_binding_unavailable", 503,
+                f"platform_store_unavailable: {type(exc).__name__}",
+            ) from exc
         try:
             binding = platform_store.resolve_active_identity_binding("auth0", subject)
             if binding is None:
@@ -242,7 +344,8 @@ def _binding(tenant: Any) -> TenantBinding:
             raise
         except (PostgresError, OSError, RuntimeError, ValueError) as exc:
             raise CustomizationServiceError(
-                "tenant_identity_binding_unavailable", 503
+                "tenant_identity_binding_unavailable", 503,
+                f"binding_resolution_failed: {type(exc).__name__}",
             ) from exc
     if os.environ.get("LEAF_CUSTOMIZATION_ALLOW_STATIC_BINDINGS", "") == "1":
         raw = os.environ.get("LEAF_CUSTOMIZATION_TENANT_BINDINGS", "")
@@ -426,9 +529,17 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_harness_unavailable", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_harness_unavailable", 503,
+                f"harness_stage_failed: {url}/author/stage status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         if not isinstance(body, Mapping):
-            raise CustomizationServiceError("invalid_staged_receipt", 502)
+            raise CustomizationServiceError(
+                "invalid_staged_receipt", 502,
+                f"staged_receipt_not_a_mapping: {type(body).__name__}",
+            )
         return body
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
@@ -802,10 +913,18 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_publish_incomplete", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 503,
+                f"harness_publish_failed: {url}/author/publish status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         commit = body.get("commit") if isinstance(body, Mapping) else None
         if not isinstance(commit, str):
-            raise CustomizationServiceError("customization_publish_incomplete", 502)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 502,
+                f"publish_commit_not_a_string: {type(commit).__name__}",
+            )
         return commit
 
     def record_staged_callback(self, *, tenant_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
@@ -1130,7 +1249,8 @@ def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.Completed
     generic 503: git's actual complaint was thrown away at the point of failure.
     """
     return subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "--git-dir", str(bare),
+        ["git", "-c", "core.autocrlf=false", *_git_trust(bare, target),
+         "--git-dir", str(bare),
          "worktree", "add", "--detach", str(target), commit],
         text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
     )
@@ -1179,7 +1299,7 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
         # A lost race or a crash can leave the path registered but absent, and
         # git then refuses every add on it until the registration is pruned.
         prune = subprocess.run(
-            ["git", "--git-dir", str(bare), "worktree", "prune"],
+            ["git", *_git_trust(bare), "--git-dir", str(bare), "worktree", "prune"],
             text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
         )
         try:
@@ -1221,7 +1341,7 @@ def _verified_worktree(bare: Path, target: Path, commit: str, digest: str) -> No
             _materialize_worktree(bare, target, commit)
         try:
             probe = subprocess.run(
-                ["git", "-C", str(target), "rev-parse", "HEAD"],
+                ["git", *_git_trust(target), "-C", str(target), "rev-parse", "HEAD"],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
             if probe.returncode != 0:

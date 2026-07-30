@@ -373,3 +373,16 @@ Risks:
 - A stale, completed, foreign-tenant, or absent turn must never resolve an author.
 - Confirm-once grants and idempotency keys must remain subject-bound.
 - The change must not split the presented tenant namespace from the platform UUID namespace.
+
+# Staged broker-test source binding
+
+- [x] Carry the trusted validated source through the harness-to-broker test request.
+- [x] Execute that source only on `aps_live=false` inside the configured sandbox and bind its receipt.
+- [x] Prove live APS refusal, staged-source execution, stale published-body exclusion, dry-run safety, and source-hash binding.
+- [ ] Run focused tests, type-check, build, full gates, review, merge, deploy, and repeat protected staging acceptance.
+
+Risks:
+
+- Inline source must never reach live APS or in-process execution.
+- The broker ledger and responses must never record source text.
+- Existing published-tool and built-in execution must remain unchanged when no staged source is supplied.

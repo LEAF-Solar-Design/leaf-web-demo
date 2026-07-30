@@ -18,6 +18,7 @@ from executor.control_plane.service import ControlPlane
 from executor.control_plane.store import InMemoryStore
 from executor.runtime.supervisor import WarmExecutorSupervisor
 from executor.runtime.service import make_server
+from executor.registry import ImmutableArtifactRegistry
 
 
 EXECUTOR_ID = "executor-local-001"
@@ -49,6 +50,9 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         self.signer = LeaseSigner(self.seed, "integration-key")
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, {self.signer.kid: self.signer.public}, pool_size=1,
+            artifact_registry=ImmutableArtifactRegistry(
+                (), {self.signer.artifact_kid: self.signer.artifact_public},
+            ),
         )
         self.server = make_server(("127.0.0.1", 0), self.supervisor, "runtime-control")
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -76,7 +80,8 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         session_id = str(uuid.uuid4())
         drawing = {"drawing_id": "rooftop-demo", "version_id": str(uuid.uuid4()),
                    "content_digest": "sha256:" + "e" * 64, "geometry_ref": "drawing-context:rooftop-ref-001"}
-        request = {"tenant_id": "tenant-demo", "session_id": session_id,
+        request = {"contract": "leaf.instant-execution/v1",
+                   "tenant_id": "tenant-demo", "session_id": session_id,
                    "effective_catalog_digest": "sha256:" + "d" * 64,
                    "drawing_context": {"reference": drawing, "data": {"layers": ["Panels", "Roof"]}},
                    "artifact": {"source": source, "code_digest": digest, "artifact_digest": digest,

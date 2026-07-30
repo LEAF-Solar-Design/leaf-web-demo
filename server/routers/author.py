@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -22,6 +24,7 @@ from pydantic import BaseModel, Field
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
+from customization_models import ChangeSetNotFoundError
 from customization_service import CustomizationServiceError, CustomizationService
 from customization_flags import enabled as customization_enabled
 from deps import fb
@@ -30,6 +33,8 @@ from tenant_id_validator import is_valid_tenant_id
 from tool_validate import static_scan
 
 router = APIRouter()
+
+_LOG = logging.getLogger(__name__)
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 AUTHORED_DIR = SERVER_DIR / "authored"
@@ -216,7 +221,11 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
                                  timeout=_author_timeout_s())
         except Exception as exc:
             harness_failure = exc
-            print(f"[author] harness unreachable, templated fallback: {exc}")
+            # Type only: a harness exception message can carry a credential.
+            _LOG.warning(
+                "author_harness_unreachable: templated fallback, cause=%s",
+                type(exc).__name__,
+            )
         if resp is not None:
             try:
                 jb = resp.json()
@@ -237,7 +246,11 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             except Exception as exc:
                 tool = None
                 harness_failure = exc
-                print(f"[author] harness error, templated fallback: {exc}")
+                # Type only, for the same reason as above.
+                _LOG.warning(
+                    "author_harness_error: templated fallback, cause=%s",
+                    type(exc).__name__,
+                )
     if tool is None:
         if harness_url and os.environ.get(
             "LEAF_AUTHOR_TEMPLATE_FALLBACK", "1"
@@ -362,7 +375,109 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
     return f"{idempotency_key}:{digest[:32]}"
 
 
-def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
+# Refusals a caller can drive at will, or that merely restate a fixed deployment
+# posture (auth off, a rollout rung disabled). They are demoted so an unauthorized
+# caller cannot write one WARNING per request.
+#
+# The list is an allowlist on purpose: everything absent from it warns, including a
+# detail-free 503. Keying the level on whether a detail existed looked tidy and was
+# wrong in the other direction — a missing harness URL, an absent customization
+# secret, an unset DATABASE_URL and an invalid platform release all raise
+# detail-free 503s, and those are exactly what an operator must see. Default to
+# visible; demote only what is provably caller-driven.
+_CALLER_DRIVEN_CODES = frozenset({
+    # Fixed deployment posture. Monitor these as configuration, not once per public
+    # request: auth being off, or a rollout rung being closed, does not vary by call.
+    "customization_auth_required",
+    "customization_stage_disabled",
+    "customization_publish_disabled",
+    "customization_rollback_disabled",
+    # Credentials or identity the caller supplied.
+    "tenant_identity_invalid",
+    "approval_authority_denied",
+    "dispatch_authority_denied",
+    "idempotency_key_required",
+    "tenant_role_denied",
+    "builder_entitlement_missing",
+    # Ordinary request outcomes: a malformed or unsupported request, a lifecycle
+    # state the caller polls for, a target that is not eligible. All expected.
+    "invalid_stage_request",
+    "invalid_publish_request",
+    "invalid_publication_request",
+    "stage_not_available",
+    "publish_not_available",
+    "publication_request_not_available",
+    "publication_denial_not_available",
+    "confirmation_not_available",
+    "independent_approval_pending",
+    "rollback_target_invalid",
+    "staged_receipt_mismatch",
+})
+
+# Two codes cover opposite cases and split on status: the 4xx is the caller's, the
+# 5xx is the deployment's or the trusted harness's.
+_STATUS_SPLIT_CODES = frozenset({
+    "tenant_identity_binding_unavailable",  # 403 caller binding, 503 authority down
+    "invalid_staged_receipt",               # 422 caller receipt, 502 bad harness output
+})
+
+
+def _is_caller_driven(exc: CustomizationServiceError, *, from_authority: bool) -> bool:
+    """Decide whether a refusal carries any per-request operator signal.
+
+    Default is no: an unrecognised code warns, because the costly mistake is a
+    silent deployment fault, not an extra log line. Integrity and trusted-harness
+    failures are deliberately absent from the quiet set even when they answer 4xx.
+    """
+    if from_authority:
+        # AuthorityError reason codes are per-caller authorization outcomes, and the
+        # set is open (several are generated per field), so classify them by origin
+        # rather than by enumerating names that will drift.
+        return True
+    if exc.code in _STATUS_SPLIT_CODES:
+        return exc.status_code < 500
+    return exc.code in _CALLER_DRIVEN_CODES
+
+
+def _customization_error(
+    exc: CustomizationServiceError, *, cause: BaseException | None = None,
+    from_authority: bool = False,
+) -> JSONResponse:
+    """Answer with the opaque reason code, and record why in the log.
+
+    The response deliberately tells a tenant nothing about the deployment, so
+    this is the only place an operator learns the cause. `cause` is for the
+    handlers that would otherwise discard an unexpected exception whole: pass it
+    and the traceback is logged instead of lost.
+    """
+    if isinstance(cause, ChangeSetNotFoundError):
+        # The change-set id comes straight from the request body, and
+        # /api/author/confirmations loads it before checking the caller's
+        # authority, so any tenant member can name arbitrary ids. That is a caller
+        # error, not an operator event: it must not cost one ERROR per request.
+        # The response is unchanged.
+        _LOG.debug("customization_refused: code=%s cause=change_set_not_found", exc.code)
+    elif cause is not None:
+        # Location only: file, line and function, never `exc_info`, never
+        # str(cause), and never the rendered source line. A traceback carries the
+        # exception message and every chained cause, and format_tb additionally
+        # echoes the source text of each frame, so a literal at the raise site
+        # would be reproduced verbatim. Where it broke is the diagnostic; nothing
+        # about the payload is.
+        frames = " | ".join(
+            f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}"
+            for f in traceback.extract_tb(cause.__traceback__)
+        )
+        _LOG.error(
+            "customization_refused: code=%s cause=%s at %s",
+            exc.code, type(cause).__name__, frames or "<no frames>",
+        )
+    elif _is_caller_driven(exc, from_authority=from_authority):
+        # Reachable per request by a caller, and carrying no per-request operator
+        # signal, so these must not cost a WARNING each.
+        _LOG.debug("customization_refused: code=%s", exc.code)
+    else:
+        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail or "-")
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
@@ -423,10 +538,14 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_stage_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/stage")
@@ -440,10 +559,14 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_stage_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/register")
@@ -462,7 +585,9 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
         if isinstance(exc, CustomizationServiceError):
             return _customization_error(exc)
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(CustomizationServiceError("invalid_publish_request", 422))
 
 
@@ -484,14 +609,14 @@ def request_publication(
             return _customization_error(exc)
         if isinstance(exc, AuthorityError):
             return _customization_error(
-                CustomizationServiceError(exc.reason_code, 403)
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(
             CustomizationServiceError("invalid_publication_request", 422)
         )
-    except Exception:
+    except Exception as exc:
         return _customization_error(
-            CustomizationServiceError("customization_publish_failed", 503)
+            CustomizationServiceError("customization_publish_failed", 503), cause=exc
         )
 
 
@@ -510,10 +635,14 @@ def confirmation_lookup(
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_publish_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_publish_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/rollback")
@@ -527,10 +656,14 @@ def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_rollback_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_rollback_failed", 503), cause=exc
+        )
 
 
 @router.post("/internal/customization/confirm")
@@ -561,7 +694,9 @@ def confirm(req: InternalConfirmRequest, x_tenant_id: str | None = Header(defaul
         return CustomizationService.configured().confirm(tenant_id=x_tenant_id, change_set_id=req.change_set_id)
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
 
 
@@ -596,7 +731,7 @@ def deny_publication(
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
-                CustomizationServiceError(exc.reason_code, 403)
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(exc)
 
@@ -624,7 +759,9 @@ def customization_staged(
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
 
 
@@ -646,7 +783,11 @@ def customization_authorize_publish(
         )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
-            return _customization_error(CustomizationServiceError(exc.reason_code, 403))
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_confirmation_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_confirmation_failed", 503), cause=exc
+        )

@@ -9,7 +9,7 @@ carry only ``{linked, linked_at}`` (never the token).
     GET    /api/tenant/claude-grant                 -> §10 {linked:bool, linked_at, kind}
     DELETE /api/tenant/claude-grant                 -> §10 {linked:false, linked_at:null}
 
-Grant KIND (§17): "oauth" for an owner-attested Claude Team or Enterprise workspace,
+Grant KIND (§17): "oauth" for an owner-attested Claude subscription,
 or "api_key" for a tenant-owned Anthropic API key. POST may carry an optional ``kind``
 (else the harness auto-detects from the token prefix); status echoes the linked ``kind``
 (never the token).
@@ -37,14 +37,14 @@ logger = logging.getLogger(__name__)
 
 class GrantLinkRequest(BaseModel):
     token: str
-    # Optional credential kind (§17): "oauth" (Team or Enterprise workspace) or
+    # Optional credential kind (§17): "oauth" (Claude subscription) or
     # "api_key" (tenant-owned API key). When omitted the harness AUTO-DETECTS from the token
     # prefix. Passed through to the harness; the token itself is never persisted app-side.
     kind: Optional[str] = None
     label: Optional[str] = None
     # OAuth mounts may join automatic routing only after the owner explicitly
-    # attests that the credential belongs to a Commercial Terms workspace.
-    plan: Optional[Literal["team", "enterprise"]] = None
+    # attests which supported Claude subscription plan owns the credential.
+    plan: Optional[Literal["pro", "max", "team", "enterprise"]] = None
 
 
 class GrantActivateRequest(BaseModel):
@@ -139,7 +139,7 @@ def _status_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(account.get("linked_at"), str) else None,
                 "active": bool(account.get("active", False)),
                 "plan": account.get("plan")
-                if account.get("plan") in {"team", "enterprise"} else None,
+                if account.get("plan") in {"pro", "max", "team", "enterprise"} else None,
                 "eligible": bool(account.get("eligible", False)),
                 "usage_tokens": account.get("usage_tokens")
                 if isinstance(account.get("usage_tokens"), int)
@@ -224,7 +224,7 @@ def grant_diagnostic(tenant=Depends(_require_grant_owner)):
 
 @router.post("/api/tenant/claude-grant")
 def link_grant(req: GrantLinkRequest, tenant=Depends(_require_grant_owner)):
-    """Mount a Team/Enterprise workspace or API grant for THIS tenant. The token is
+    """Mount a supported Claude subscription or API grant for THIS tenant. The token is
     forwarded to the harness store in this one request and is NEVER persisted, logged,
     or echoed by the app."""
     url = _grant_admin_url(str(tenant))

@@ -16,7 +16,7 @@ _HOST_LIFECYCLE_PATHS = {
 }
 
 _BODY_FIELDS = {
-    "session": {"tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"},
+    "session": {"contract", "tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"},
     "renew": {"binding_epoch"},
     "release": {"reason"},
     "invalidate": {"reason", "binding_epoch"},
@@ -82,7 +82,8 @@ def _authorized(supplied, secret: str | None) -> bool:
 
 
 def application(control_plane, shared_secret: str | None = None, *, app_control_secret: str | None = None,
-                host_lifecycle_secret: str | None = None, accounting=None,
+                host_lifecycle_secret: str | None = None, accounting_secret: str | None = None,
+                accounting=None,
                 allow_unauthenticated: bool = False):
     """Create the API with separate app and executor-host credentials.
 
@@ -94,6 +95,9 @@ def application(control_plane, shared_secret: str | None = None, *, app_control_
     app_control_secret = app_control_secret if app_control_secret is not None else shared_secret
     if host_lifecycle_secret and app_control_secret and hmac.compare_digest(host_lifecycle_secret, app_control_secret):
         raise ValueError("host_lifecycle_secret must differ from app_control_secret")
+    configured = [value for value in (app_control_secret, host_lifecycle_secret, accounting_secret) if value]
+    if len(configured) != len(set(configured)):
+        raise ValueError("app, host lifecycle, and accounting secrets must differ")
     accounting = accounting or AccountingService(control_plane.store)
 
     def app(environ, start_response):
@@ -104,7 +108,11 @@ def application(control_plane, shared_secret: str | None = None, *, app_control_
             else:
                 route, path_id = _route(method, path)
                 supplied = environ.get("HTTP_X_INSTANT_CONTROL_SECRET", "")
-                secret = host_lifecycle_secret if path in _HOST_LIFECYCLE_PATHS else app_control_secret
+                secret = (
+                    host_lifecycle_secret if path in _HOST_LIFECYCLE_PATHS
+                    else accounting_secret if route == "accounting"
+                    else app_control_secret
+                )
                 if not allow_unauthenticated and not _authorized(supplied, secret):
                     result, status = {"code": "UNAUTHORIZED"}, "401 Unauthorized"
                     payload = json.dumps(result).encode()

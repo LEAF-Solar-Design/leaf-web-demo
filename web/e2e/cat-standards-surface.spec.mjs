@@ -213,12 +213,18 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await page.getByRole('button', { name: 'Unlink', exact: true }).click()
   await page.getByRole('button', { name: 'Unlink', exact: true }).click()
   await expect(page.getByRole('button', { name: /Claude accounts not linked/ })).toBeVisible()
+  for (const plan of ['Pro', 'Max', 'Team', 'Enterprise']) {
+    const option = page.getByRole('radio', { name: plan, exact: true })
+    await option.click()
+    await expect(option).toHaveAttribute('aria-checked', 'true')
+  }
+  await page.getByRole('radio', { name: 'Max', exact: true }).click()
   const grantToken = page.getByLabel('Claude token')
   await grantToken.fill('sk-ant-oat01-fixture-only')
   await page.getByRole('button', { name: 'Link Claude account' }).click()
   await expect(page.getByRole('button', { name: /Claude accounts 1 mounted/ })).toBeVisible()
   await expect(grantToken).toHaveCount(0)
-  expect(grantLinkBody).toMatchObject({ kind: 'oauth', plan: 'team' })
+  expect(grantLinkBody).toMatchObject({ kind: 'oauth', plan: 'max' })
   expect(grantLinkBody?.token).toBe('sk-ant-oat01-fixture-only')
   await page.getByRole('button', { name: 'Account details' }).click()
   const accountDetails = page.getByRole('dialog', { name: 'Account details' })
@@ -261,7 +267,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
       'the operator scene remains mounted through the complete flow',
       'version history previews version 1 without moving the version 2 head',
       'trust shows backend health, linked account kind, usage cap, and entitlements',
-      'the Claude grant surface unlinks with confirmation, links a write-only subscription token, and clears the field',
+      'the Claude grant surface offers Pro, Max, Team, and Enterprise plans, links a write-only subscription token, and clears the field',
       'account details use the session tenant, organization, and tier while keeping platform identity separate from the Claude grant',
       'undo restores version 1 and redo restores version 2',
     ],

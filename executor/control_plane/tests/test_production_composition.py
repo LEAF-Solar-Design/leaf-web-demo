@@ -47,11 +47,13 @@ def production_environment(seed_file: Path) -> dict[str, str]:
         "LEAF_INSTANT_CONTROL_DATABASE_URL": "postgresql://control-db.internal/control_plane?sslmode=verify-full",
         "LEAF_INSTANT_CONTROL_REDIS_URL": "rediss://cache.internal:6380/0",
         "LEAF_INSTANT_CONTROL_API_SECRET": "a" * 32,
+        "LEAF_INSTANT_ACCOUNTING_INGEST_SECRET": "i" * 32,
         "LEAF_INSTANT_HOST_LIFECYCLE_SECRET": "h" * 32,
         "LEAF_INSTANT_RUNTIME_CONTROL_SECRET": "b" * 32,
         "LEAF_INSTANT_EXECUTOR_TLS_SERVER_NAME": "executor.instant.internal",
         "LEAF_INSTANT_EXECUTOR_CIDRS": "10.20.0.0/16",
         "LEAF_INSTANT_EXECUTOR_PORT": "8088",
+        "LEAF_INSTANT_ALLOWED_ARTIFACT_DIGESTS": "sha256:" + ("a" * 64),
         "LEAF_INSTANT_RUNTIME_CLIENT_CA_FILE": str(seed_file),
         "LEAF_INSTANT_RUNTIME_CLIENT_CERT_FILE": str(seed_file),
         "LEAF_INSTANT_RUNTIME_CLIENT_KEY_FILE": str(seed_file),
@@ -149,6 +151,7 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertIs(plane.coordination, coordination)
             self.assertIs(plane.runtime, runtime)
             self.assertIs(plane.signer, signer)
+            self.assertEqual(plane.allowed_artifact_digests, frozenset({"sha256:" + ("a" * 64)}))
             postgres_store.assert_called_once_with(connection_factory)
             redis_coordination.assert_called_once_with(redis_client)
             runtime_client.assert_called_once_with(
@@ -188,6 +191,9 @@ class ReaperEntrypointTests(unittest.TestCase):
                 if len(self.calls) == 1:
                     raise RuntimeError("temporary failure")
 
+            def recover_stale_accounting(self, *, stale_timeout):
+                self.calls.append(stale_timeout)
+
         plane = Plane()
         sleeps = []
         self.assertEqual(
@@ -196,12 +202,18 @@ class ReaperEntrypointTests(unittest.TestCase):
             0,
         )
         self.assertEqual(sleeps, [30])
-        self.assertEqual(len(plane.calls), 2)
+        self.assertEqual(len(plane.calls), 3)
         self.assertEqual(plane.calls[0].total_seconds(), 60)
+        self.assertEqual(plane.calls[2].total_seconds(), 120)
 
     def test_reaper_rejects_an_unbounded_interval(self):
         with self.assertRaisesRegex(ValueError, "between 1 and 300"):
             run_reaper(object(), interval_seconds=301, max_cycles=1)
+
+    def test_reaper_rejects_an_unsafe_accounting_recovery_window(self):
+        with self.assertRaisesRegex(ValueError, "between 30 and 3600"):
+            run_reaper(object(), interval_seconds=30,
+                       accounting_stale_timeout_seconds=29, max_cycles=1)
 
 
 class MigrationEntrypointTests(unittest.TestCase):

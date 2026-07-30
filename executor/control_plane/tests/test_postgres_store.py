@@ -210,13 +210,35 @@ class PostgresStoreIntegrationTests(unittest.TestCase):
 
     def test_accounting_terminal_retry_charges_once_with_one_outbox(self):
         invocation_id = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
+        lease_id = str(uuid.uuid4())
+        claim_id = str(uuid.uuid4())
         identity = {
             "invocation_id": invocation_id,
             "tenant_id": "tenant-1",
-            "session_id": str(uuid.uuid4()),
-            "lease_id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "lease_id": lease_id,
             "code_digest": "sha256:" + "a" * 64,
         }
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO instant_sessions
+                     (session_id, tenant_id, code_digest, host_id, slot_id, claim_id,
+                      binding_epoch, state, lease_id, lease_sequence, expires_at)
+                   VALUES (%s, %s, %s, 'executor-accounting', 'slot-1', %s, 1,
+                           'ACTIVE', %s, 1, %s)""",
+                (session_id, identity["tenant_id"], identity["code_digest"], claim_id,
+                 lease_id, NOW + timedelta(minutes=1)),
+            )
+            conn.execute(
+                """INSERT INTO executor_leases
+                     (lease_id, host_id, slot_id, host_epoch, slot_epoch, claim_id,
+                      session_id, binding_epoch, lease_sequence, not_before, expires_at, state)
+                   VALUES (%s, 'executor-accounting', 'slot-1', 1, 1, %s, %s, 1, 1,
+                           %s, %s, 'ACTIVE')""",
+                (lease_id, claim_id, session_id, NOW - timedelta(seconds=1),
+                 NOW + timedelta(minutes=1)),
+            )
         accepted = {**identity, "state": "accepted", "occurred_at": NOW}
         started = {**identity, "state": "started", "occurred_at": NOW + timedelta(milliseconds=1)}
         terminal = {
