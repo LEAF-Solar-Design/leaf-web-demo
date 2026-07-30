@@ -40,8 +40,17 @@ import { SPINE_TOOL_NAMES } from "../src/ports/index.js";
 type AnyRec = Record<string, unknown>;
 
 interface CapturedQuery {
-  prompt: string;
+  prompt: string | AsyncIterable<unknown>;
   options: AnyRec;
+}
+
+/** Drain a structured prompt into the single user message the SDK would read. */
+async function promptMessage(prompt: string | AsyncIterable<unknown>): Promise<AnyRec> {
+  if (typeof prompt === "string") throw new Error("expected a structured prompt, got a string");
+  const seen: unknown[] = [];
+  for await (const item of prompt) seen.push(item);
+  expect(seen).toHaveLength(1);
+  return seen[0] as AnyRec;
 }
 
 interface CapturedTool {
@@ -339,6 +348,47 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     const fresh = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(fresh), makeInput());
     expect("resume" in fresh.queries[0]!.options).toBe(false);
+  });
+
+  it("sends images as content blocks before the text, and text-only stays a plain string", async () => {
+    const USER_MESSAGE = ["=== USER MESSAGE ===", "hello"].join(String.fromCharCode(10));
+    const plain = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(plain), makeInput());
+    // The overwhelmingly common turn must be untouched: same string, same bytes.
+    expect(plain.queries[0]!.prompt).toBe(USER_MESSAGE);
+
+    const withImage = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(withImage), makeInput({
+      images: [{ media_type: "image/png", data: "iVBORw0KGgo=" }],
+    }));
+    const message = await promptMessage(withImage.queries[0]!.prompt);
+    expect(message.type).toBe("user");
+    expect((message.message as AnyRec).content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+      { type: "text", text: USER_MESSAGE },
+    ]);
+  });
+
+  it("rebuilds the image prompt on the restart, instead of replaying a spent generator", async () => {
+    // An async generator yields once. Hoisting it would make the retry send an
+    // EMPTY prompt — the image and the question both silently gone — while every
+    // assertion about the FIRST query still passed.
+    const missing = new Error(
+      "Claude Code returned an error result: No conversation found with session ID: 8b1f10e2-38f2-4293-a035-23a0a2cc5e96",
+    );
+    const mock = makeMockSdk([[missing], [streamDelta("Recovered"), resultSuccess()]]);
+    await collect(runnerWith(mock), makeInput({
+      resumeSdkSessionId: "8b1f10e2-38f2-4293-a035-23a0a2cc5e96",
+      resumeFallbackUserMessage: "bounded prior history plus current turn",
+      images: [{ media_type: "image/png", data: "iVBORw0KGgo=" }],
+    }));
+
+    expect(mock.queries).toHaveLength(2);
+    const retry = await promptMessage(mock.queries[1]!.prompt);
+    expect((retry.message as AnyRec).content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+      { type: "text", text: "bounded prior history plus current turn" },
+    ]);
   });
 
   it("restarts once without resume when the SDK transcript is missing", async () => {

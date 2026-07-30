@@ -91,8 +91,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 import deps
 import emf_metrics
@@ -268,27 +269,67 @@ _MAX_MESSAGE_BODY_BYTES = 1_500_000
 
 
 def _image_magic_matches(media_type: str, decoded: bytes) -> bool:
+    """Check the FULL signature, not a convenient prefix.
+
+    A four-byte PNG test passes anything beginning \\x89PNG, and "GIF8" admits
+    versions that are neither GIF87a nor GIF89a. The point of the check is that
+    the declared media_type and the actual bytes agree before those bytes become
+    a vision content block, so each signature is matched in full.
+    """
     if media_type == "image/png":
-        return decoded.startswith(b"\x89PNG")
+        return decoded.startswith(b"\x89PNG\r\n\x1a\n")
     if media_type == "image/jpeg":
-        return decoded.startswith(b"\xff\xd8\xff")
+        # SOI plus the first marker. JPEG has no longer fixed prefix: the byte
+        # after \\xff\\xd8\\xff is a marker code and legitimately varies. EOI
+        # pins the other end.
+        return decoded.startswith(b"\xff\xd8\xff") and decoded.endswith(b"\xff\xd9")
     if media_type == "image/gif":
-        return decoded.startswith(b"GIF8")
-    return decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP"
+        return decoded.startswith(b"GIF87a") or decoded.startswith(b"GIF89a")
+    # RIFF, a little-endian size, then WEBP — and the declared size must
+    # actually describe the payload rather than being arbitrary filler.
+    if len(decoded) < 12 or not decoded.startswith(b"RIFF") or decoded[8:12] != b"WEBP":
+        return False
+    return int.from_bytes(decoded[4:8], "little") == len(decoded) - 8
 
 
-async def _parse_message_request(request: Request) -> MessageRequest:
-    """Reject an oversized declared body before FastAPI's JSON parsing begins."""
+async def _read_bounded_body(request: Request) -> bytes:
+    """Read the body, refusing once it passes the cap rather than after.
+
+    A Content-Length check alone is not a memory bound: a chunked request
+    declares no length, so ``await request.body()`` would buffer the whole
+    stream first and only then measure it — the caller pays the memory before
+    the refusal. Reading chunk by chunk makes the cap the actual ceiling.
+    """
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > _MAX_MESSAGE_BODY_BYTES:
         raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
-    raw = await request.body()
-    if len(raw) > _MAX_MESSAGE_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_MESSAGE_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _parse_message_request(request: Request) -> MessageRequest:
+    """Reject an oversized body before parsing, keeping FastAPI's 422 shape."""
+    raw = await _read_bounded_body(request)
+    # The 422 body must stay FastAPI's own: clients parse `detail` as a LIST of
+    # error objects, and collapsing it to a bare string is a silent wire change
+    # for every malformed request, not just image ones.
     try:
-        return MessageRequest.parse_obj(json.loads(raw or b"{}"))
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="invalid message body") from exc
+        payload = json.loads(raw or b"{}")
+    except json.JSONDecodeError as exc:
+        raise RequestValidationError(
+            [{"type": "json_invalid", "loc": ("body", exc.pos), "msg": "JSON decode error",
+              "input": {}, "ctx": {"error": exc.msg}}],
+        ) from exc
+    try:
+        return MessageRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
 
 
 def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:

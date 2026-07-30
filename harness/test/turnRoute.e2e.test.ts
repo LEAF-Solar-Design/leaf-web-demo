@@ -230,12 +230,38 @@ describe("POST /turn - bad body", () => {
     expect(typeof body.error?.message).toBe("string");
   });
 
-  it("neither text nor confirm present -> 400", async () => {
+  it("neither text, image, nor confirm present -> 400", async () => {
     const { server: s, baseUrl } = listen(basePorts());
     server = s;
     const { text: _drop, ...rest } = validBody();
     const res = await postTurn(baseUrl, rest);
     expect(res.status).toBe(400);
+  });
+
+  it("accepts image-only turns and rejects spoofed media bytes before the runner", async () => {
+    let seen: ConverseTurnInput | undefined;
+    const capturing: ConverseRunner = {
+      async *runTurn(input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
+        seen = input;
+        yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
+      },
+    };
+    const { server: s, baseUrl } = listen(basePorts(capturing));
+    server = s;
+    const { text: _text, ...imageOnly } = validBody({
+      images: [{ media_type: "image/png", data: "iVBORw0KGgo=" }],
+    });
+    const accepted = await postTurn(baseUrl, imageOnly);
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    expect(seen?.images).toEqual([{ media_type: "image/png", data: "iVBORw0KGgo=" }]);
+
+    const spoofed = await postTurn(baseUrl, validBody({
+      images: [{ media_type: "image/jpeg", data: "iVBORw0KGgo=" }],
+    }));
+    expect(spoofed.status).toBe(400);
+    const body = (await spoofed.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("does not match");
   });
 
   it("invalid JSON body -> 400", async () => {

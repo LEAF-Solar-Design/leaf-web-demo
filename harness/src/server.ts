@@ -201,12 +201,31 @@ const MAX_IMAGES_PER_MESSAGE = 3;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 const MAX_IMAGES_BYTES = 1024 * 1024;
 
+/**
+ * Signatures matched in FULL, and matched the same way the app matches them
+ * (server/routers/sessions.py `_image_magic_matches`). Two independent checks
+ * are the point — the harness does not trust that the app validated — but if
+ * they disagree the app accepts a request the harness then rejects, which the
+ * user experiences as an unexplained failure after a successful upload.
+ */
 function imageMagicMatches(mediaType: string, bytes: Buffer): boolean {
-  if (mediaType === "image/png") return bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  if (mediaType === "image/jpeg") return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
-  if (mediaType === "image/gif") return bytes.subarray(0, 4).toString("ascii") === "GIF8";
+  if (mediaType === "image/png") {
+    return bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mediaType === "image/jpeg") {
+    // SOI plus the first marker; the byte after it varies legitimately, so EOI
+    // pins the other end.
+    return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+      && bytes.subarray(-2).equals(Buffer.from([0xff, 0xd9]));
+  }
+  if (mediaType === "image/gif") {
+    const header = bytes.subarray(0, 6).toString("ascii");
+    return header === "GIF87a" || header === "GIF89a";
+  }
+  if (bytes.length < 12) return false;
   return bytes.subarray(0, 4).toString("ascii") === "RIFF"
-    && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+    && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+    && bytes.readUInt32LE(4) === bytes.length - 8;
 }
 
 function validateImages(value: unknown): { ok: true; images: NonNullable<ConverseTurnInput["images"]> } | { ok: false; message: string } {
