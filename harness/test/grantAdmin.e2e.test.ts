@@ -217,7 +217,7 @@ describe("POST /author resolves the body tenant's grant", () => {
   });
 
   it("after that tenant links a grant -> 200 author body", async () => {
-    await store.put("has-grant", FAKE);
+    await store.put("has-grant", FAKE, "oauth", undefined, "pro");
     const r = await fetch(`${baseUrl}/author`, {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -32,6 +32,7 @@ import type {
   AuthorResponse,
   AgentRunResult,
   AuthorToolset,
+  GrantSettlement,
   HarnessPorts,
   ResultEnvelope,
   StagedCustomizationReceipt,
@@ -61,6 +62,31 @@ export class AuthorLoopError extends Error {
     super(message);
     this.name = "AuthorLoopError";
   }
+}
+
+export function authorGrantSettlement(
+  run: AgentRunResult | undefined,
+  failure: unknown,
+): GrantSettlement {
+  const inputTokens = Math.max(0, Math.trunc(run?.telemetry?.input_tokens ?? 0));
+  const outputTokens = Math.max(0, Math.trunc(run?.telemetry?.output_tokens ?? 0));
+  if (failure === undefined) {
+    return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "end_turn" };
+  }
+
+  const message = failure instanceof Error ? failure.message : String(failure);
+  const rateLimit = message.match(/^Agent SDK rate limited(?: \(retry after ~?(\d+)s\)| \(retry horizon unknown\))?$/);
+  if (rateLimit) {
+    return {
+      usage: { cost_tokens: inputTokens + outputTokens },
+      stop_reason: "llm_rate_limited",
+      ...(rateLimit[1] ? { retry_after_s: Number(rateLimit[1]) } : {}),
+    };
+  }
+  if (message === "Agent SDK auth failure: billing_error") {
+    return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "llm_quota_exhausted" };
+  }
+  return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error" };
 }
 
 export class AuthorLoop {
@@ -208,30 +234,53 @@ export class AuthorLoop {
    * session, get the authored tool package, then re-validate with the oracle.
    */
   private async authorInRepo(tenantId: string, description: string, repoDir: string) {
-    // Concern 2 grant ONLY (never the platform JWT). Injected explicitly.
-    const grant = await this.ports.oauth.getGrant(tenantId);
-    const toolset = this.toolsetFor(repoDir, tenantId);
+    // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
+    // lease router as conversation turns, while retaining legacy single-grant
+    // providers that expose only getGrant().
+    const lease = this.ports.oauth.acquireGrant && this.ports.oauth.settleGrant
+      ? await this.ports.oauth.acquireGrant(tenantId)
+      : null;
+    const grant = lease?.grant ?? await this.ports.oauth.getGrant(tenantId);
+    let run: AgentRunResult | undefined;
+    let failure: unknown;
+    try {
+      const toolset = this.toolsetFor(repoDir, tenantId);
+      run = await this.ports.agentRunner.run({
+        description,
+        systemPrompt: AUTHOR_SYSTEM_PROMPT,
+        repoDir,
+        grant,
+        toolset,
+      });
 
-    const run = await this.ports.agentRunner.run({
-      description,
-      systemPrompt: AUTHOR_SYSTEM_PROMPT,
-      repoDir,
-      grant,
-      toolset,
-    });
+      this.verifySubmittedTool(tenantId, repoDir, run);
 
-    this.verifySubmittedTool(tenantId, repoDir, run);
-
-    // Defense in depth: re-run the CONTRACT section 2 oracle on the result.
-    const vr = validateTool(run.tool);
-    if (!vr.ok) {
-      throw new AuthorLoopError(
-        `authored tool failed CONTRACT section 2 validation`,
-        422,
-        vr.diagnostics,
-      );
+      // Defense in depth: re-run the CONTRACT section 2 oracle on the result.
+      const vr = validateTool(run.tool);
+      if (!vr.ok) {
+        throw new AuthorLoopError(
+          `authored tool failed CONTRACT section 2 validation`,
+          422,
+          vr.diagnostics,
+        );
+      }
+      return run;
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      if (lease && this.ports.oauth.settleGrant) {
+        try {
+          await this.ports.oauth.settleGrant(
+            tenantId,
+            lease.lease_id,
+            authorGrantSettlement(run, failure),
+          );
+        } catch {
+          // Routing telemetry must never replace the author result or root error.
+        }
+      }
     }
-    return run;
   }
 
   private async author(tenantId: string, description: string) {
