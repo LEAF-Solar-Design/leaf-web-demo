@@ -80,7 +80,8 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         session_id = str(uuid.uuid4())
         drawing = {"drawing_id": "rooftop-demo", "version_id": str(uuid.uuid4()),
                    "content_digest": "sha256:" + "e" * 64, "geometry_ref": "drawing-context:rooftop-ref-001"}
-        request = {"tenant_id": "tenant-demo", "session_id": session_id,
+        request = {"contract": "leaf.instant-execution/v1",
+                   "tenant_id": "tenant-demo", "session_id": session_id,
                    "effective_catalog_digest": "sha256:" + "d" * 64,
                    "drawing_context": {"reference": drawing, "data": {"layers": ["Panels", "Roof"]}},
                    "artifact": {"source": source, "code_digest": digest, "artifact_digest": digest,

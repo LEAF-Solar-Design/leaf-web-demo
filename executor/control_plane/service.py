@@ -16,6 +16,9 @@ from .reaper import ControlPlaneReaper, ReconciliationUnavailable
 from .store import ControlStore, NoCapacity, StaleFence, StoreUnavailable
 
 
+CONTRACT = "leaf.instant-execution/v1"
+
+
 class ControlPlaneError(RuntimeError):
     def __init__(self, code: str, message: str, status: int = 503):
         super().__init__(message)
@@ -47,12 +50,13 @@ class ControlPlane:
 
     @staticmethod
     def _require(request: dict) -> None:
-        required = {"tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"}
+        required = {"contract", "tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"}
         missing = required - request.keys()
         artifact = request.get("artifact", {})
         drawing_context = request.get("drawing_context", {})
         artifact_required = {"source", "code_digest", "artifact_digest", "runtime", "entrypoint", "limits", "tool_id", "tool_version", "capability_id", "params_schema_digest", "catalog_commit"}
-        if (missing or not isinstance(artifact, dict) or artifact_required - artifact.keys()
+        if (missing or request.get("contract") != CONTRACT
+                or not isinstance(artifact, dict) or artifact_required - artifact.keys()
                 or artifact.get("runtime") != "python-3.12"
                 or not isinstance(drawing_context, dict)
                 or set(("reference", "data")) - drawing_context.keys()):

@@ -16,7 +16,7 @@ _HOST_LIFECYCLE_PATHS = {
 }
 
 _BODY_FIELDS = {
-    "session": {"tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"},
+    "session": {"contract", "tenant_id", "session_id", "effective_catalog_digest", "artifact", "drawing_context"},
     "renew": {"binding_epoch"},
     "release": {"reason"},
     "invalidate": {"reason", "binding_epoch"},

@@ -55,7 +55,7 @@ class ControlPlaneTests(unittest.TestCase):
         source = f"def run(intake, params):\n return {{'version': '{code}'}}\n"
         source_digest = "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
         reference = {"drawing_id": "drawing-demo", "version_id": str(uuid.uuid4()), "content_digest": digest("f"), "geometry_ref": "drawing-context:rooftop-ref-001"}
-        return {"tenant_id": "tenant-demo", "session_id": session_id or str(uuid.uuid4()), "effective_catalog_digest": digest("d"),
+        return {"contract": "leaf.instant-execution/v1", "tenant_id": "tenant-demo", "session_id": session_id or str(uuid.uuid4()), "effective_catalog_digest": digest("d"),
                 "drawing_context": {"reference": reference, "data": {"layers": ["Panels"]}},
                 "artifact": {"source": source, "code_digest": source_digest, "artifact_digest": source_digest, "runtime": "python-3.12", "entrypoint": "leaf_tools.tool:run", "limits": {"max_wall_ms": 5000, "max_cpu_ms": 3000, "max_memory_mb": 64, "max_output_bytes": 65536, "max_tool_calls": 0}, "tool_id": "instant-list-layers", "tool_version": "1.0.0", "capability_id": "drawing.read", "params_schema_digest": digest("p"), "catalog_commit": "a" * 40}}
 
@@ -272,6 +272,37 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual("UNAUTHORIZED", json.loads(b"".join(response))["code"])
         with self.assertRaisesRegex(ControlPlaneError, "HTTPS"):
             self.plane.register_host("executor-evil-001", "http://169.254.169.254/latest", ["slot-1"])
+
+    def test_control_api_accepts_the_versioned_session_contract(self):
+        app = application(
+            self.plane,
+            app_control_secret="app-control",
+            host_lifecycle_secret="host-lifecycle",
+        )
+
+        status, assignment = self.call_api(
+            app, "/v1/sessions", json.dumps(self.request()).encode(), "app-control",
+        )
+
+        self.assertEqual(status, "201 Created")
+        self.assertEqual(assignment["contract"], "leaf.instant-execution/v1")
+
+    def test_control_api_rejects_the_wrong_session_contract_without_claiming_capacity(self):
+        app = application(
+            self.plane,
+            app_control_secret="app-control",
+            host_lifecycle_secret="host-lifecycle",
+        )
+        request = {**self.request(), "contract": "leaf.instant-execution/v2"}
+
+        status, payload = self.call_api(
+            app, "/v1/sessions", json.dumps(request).encode(), "app-control",
+        )
+
+        self.assertEqual(status, "400 Error")
+        self.assertEqual(payload["code"], "INVALID_ASSIGNMENT")
+        self.assertEqual(self.store.candidate().state, "READY")
+        self.assertEqual([], self.runtime.events)
 
     def test_production_host_registration_is_limited_to_the_pool_cidr_and_port(self):
         plane = ControlPlane(
