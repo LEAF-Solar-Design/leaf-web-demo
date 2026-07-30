@@ -459,3 +459,26 @@ test("REFUSES a description longer than the loader will accept", () => {
   // same text, it would produce a bundle production refuses.
   refuses("over-long", "name: skill-a", `description: ${"x".repeat(9000)}`);
 });
+
+test("the builder refuses a manifest its own gate would refuse", async () => {
+  // The final manifest carries every description, and descriptions alone can
+  // approach 250 x 8 KiB against a 64 KiB manifest cap. Without a final-size
+  // check the builder said READY for an artifact verify.mjs then refused —
+  // build-blesses/gate-refuses, the drift this pair exists to prevent.
+  const work = await fixture();
+  // 12 skills x ~7 KiB of description = ~84 KiB of manifest before hashes.
+  for (let index = 0; index < 12; index += 1) {
+    const name = `skill-${String(index).padStart(3, "0")}`;
+    const directory = path.join(work.source, name);
+    await mkdir(directory);
+    await writeFile(path.join(directory, "SKILL.md"),
+      `---\nname: ${name}\ndescription: ${"long prose ".repeat(640)}trailer\n---\nbody\n`);
+  }
+  await curation(work.curation, entries(12));
+
+  const built = run(BUILD, ["--source", work.source, "--curation", work.curation, "--tier", "tenant-safe", "--out", work.out]);
+  assert.equal(built.status, 1, "an over-cap manifest must fail the BUILD, not the deploy gate");
+  assert.match(built.stderr, /manifest\.json would exceed/);
+  // ...and the failed build cleans up after itself.
+  await assert.rejects(lstat(work.out));
+});
