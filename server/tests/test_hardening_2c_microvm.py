@@ -27,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import tool_loader  # noqa: E402
 import tool_validate  # noqa: E402
+import write_loop  # noqa: E402
 
 
 def test_pinned_e2b_template_has_a_reproducible_nonroot_python_base():
@@ -487,6 +490,34 @@ def test_staged_source_receipt_binds_exact_submitted_bytes(
     assert env["execution_provenance"]["source_sha256"] == hashlib.sha256(
         staged.encode("utf-8")
     ).hexdigest()
+
+
+def test_staged_write_receipt_binds_request_tenant(
+        tenant_repo, fake_helper, monkeypatch, tmp_path):
+    tool = tenant_repo("counter", "def run(intake, params):\n    return ({'old': True}, None)\n")
+    staged = BENIGN_SRC.replace("'n': len(layers)", "'n': len(layers) + 7")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setattr(
+        tool_loader, "_microvm_cmd",
+        lambda: [sys.executable, str(fake_helper("strict_ok"))],
+    )
+
+    env, status = write_loop.run_write_mock(
+        tool,
+        {"drawing_id": "demo", "dry_run": True},
+        "tenant-a",
+        backend=write_loop.default_backend(),
+        t0=time.perf_counter(),
+        run_tool_dynamic_fn=partial(tool_loader.run_tool_dynamic, test_source=staged),
+    )
+
+    assert status == 200
+    assert env["result"]["dry_run"] is True
+    provenance = env["execution_provenance"]
+    assert provenance["tenant_hash"] == hashlib.sha256(b"tenant-a").hexdigest()
+    assert provenance["tenant_hash"] != hashlib.sha256(b"demo-tenant").hexdigest()
+    assert provenance["source_sha256"] == hashlib.sha256(staged.encode("utf-8")).hexdigest()
 
 
 def test_microvm_refuses_input_job_and_result_replay_tampering(

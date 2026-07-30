@@ -889,7 +889,8 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
     env = run_tool_dynamic_fn(tool, cur_intake, dict(params or {}),
-                              aps_live=False, da=None, t0=t0)
+                              aps_live=False, da=None, t0=t0,
+                              tenant_id=tenant_id)
     if not env.get("ok"):
         return env, _status_for(env)
 
