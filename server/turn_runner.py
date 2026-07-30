@@ -202,6 +202,12 @@ PRIOR_EVENTS_WINDOW = 400
 MAX_PRIOR_MESSAGES = 20
 MAX_PRIOR_MESSAGE_BYTES = 64 * 1024
 MAX_PRIOR_CONTEXT_BYTES = 256 * 1024
+# The ceiling the harness enforces on POST /turn (harness/src/server.ts
+# MAX_TURN_BODY_BYTES). The app measures its ENCODED body against this and
+# trims prior context until it fits, so the harness ceiling is an upper bound
+# on what this module sends rather than a number arrived at by arithmetic over
+# decoded text. Change one and change the other.
+MAX_FORWARD_BYTES = 2_000_000
 _TRUNCATION_MARKER = "\n[... earlier text omitted ...]"
 
 
@@ -365,13 +371,36 @@ class TurnRejected(Exception):
 
     def __init__(self, status_code: int, error_code: str, message: str,
                  extra: Optional[Dict[str, Any]] = None,
-                 pre_harness: bool = False) -> None:
+                 pre_harness: bool = False,
+                 approval_unredeemed: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.message = message
         self.extra = extra or {}
         self.pre_harness = pre_harness
+        self._approval_unredeemed = approval_unredeemed
+
+    @property
+    def approval_unredeemed(self) -> bool:
+        """True when the harness PROVABLY did not redeem a confirmation, so the
+        router may hand the approval back.
+
+        Wider than `pre_harness`, which means the request never left this
+        process at all. A request can reach the harness and still be refused
+        before anything touches the confirmation:
+
+          401  either the harness auth gate (before the body is even parsed) or
+               GrantRequiredError, and SpineTurnAdapter.runTurn resolves the
+               grant FIRST, before the session mirror and before ConverseLoop
+          413  readJsonBody, before validation or runner entry
+          429  GrantPoolUnavailableError, raised from that same acquisition
+
+        Each of those consumed an approval the app had already spent, so the
+        proposal was burned with no way to retry. `pre_harness` implies this,
+        never the reverse. It still DEFAULTS TO FALSE, so any leg that has not
+        been reasoned about is treated as "the harness may have acted"."""
+        return self.pre_harness or self._approval_unredeemed
 
 
 # --------------------------------------------------------------------------- #
@@ -431,6 +460,34 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
         if slot["terminal"] and slot["parts"]:
             messages.append({"role": "assistant", "text": "".join(slot["parts"])})
     return _fit_prior_context(messages[-MAX_PRIOR_MESSAGES:])
+
+
+def _encode_turn_body(payload: Dict[str, Any]) -> bytes:
+    """Serialise the forwarded turn, dropping OLDEST prior messages until the
+    encoded bytes fit MAX_FORWARD_BYTES.
+
+    Measured, not calculated. A byte budget over decoded text is not a bound on
+    what goes on the wire: JSON escapes `"` to two bytes and a control character
+    to six, so 262,144 bytes of quotes serialise to 524,288 — and the arithmetic
+    that sized the harness ceiling also assumed a fixed allowance for a
+    confirmation proposal whose `params` have no size limit at all. Both holes
+    close the same way: encode, look at the length, and trim until it fits.
+
+    Encoded with ensure_ascii=False (see the caller) so non-ASCII text costs its
+    UTF-8 length rather than six bytes per character."""
+    def encode(body: Dict[str, Any]) -> bytes:
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    raw = encode(payload)
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return raw
+    # Oldest first: the newest context is the context worth keeping, and this is
+    # the same direction _fit_prior_context already spends its budget.
+    while len(raw) > MAX_FORWARD_BYTES and messages:
+        messages.pop(0)
+        raw = encode(payload)
+    return raw
 
 
 def _clip(text: str) -> str:
@@ -667,8 +724,17 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # blow a ceiling sized against the byte count the app actually accepted.
     # UTF-8 is valid JSON, is what the browser sent, and makes the forwarded
     # size track the inbound size instead of a 6x worst case.
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    body = _encode_turn_body(payload)
     harness_headers["content-type"] = "application/json"
+    if len(body) > MAX_FORWARD_BYTES:
+        # Nothing left to trim: the user's own message does not fit. Answer here
+        # rather than posting a body the harness will refuse — same status and
+        # code the harness would have produced, minus a pointless round trip,
+        # and provably before anything could redeem a confirmation.
+        _release_cas()
+        raise _rejected(413, ErrorCode.BAD_PARAMS,
+                        "the turn payload exceeded the harness body ceiling",
+                        pre_harness=True)
     try:
         resp = requests.post(f"{harness_url}/turn", data=body,
                              headers=harness_headers,
@@ -712,7 +778,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         msg = (body.get("message") or (body.get("error") or {}).get("message")
               or f"tenant {tenant_id!r} has no linked Claude grant")
         resp.close()
-        raise _rejected(401, ErrorCode.GRANT_REQUIRED, msg, extra={"grant_required": True})
+        raise _rejected(401, ErrorCode.GRANT_REQUIRED, msg, extra={"grant_required": True},
+                        approval_unredeemed=True)
 
     if resp.status_code == 429:
         _release_cas()
@@ -722,7 +789,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
             code = ErrorCode.LLM_RATE_LIMITED
         msg = body.get("message") or "harness reported a rate/quota limit"
         resp.close()
-        raise _rejected(429, code, msg)
+        raise _rejected(429, code, msg, approval_unredeemed=True)
 
     if resp.status_code == 413:
         # The payload was too big for the harness, which is a caller-visible
@@ -740,7 +807,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # Without this the router keeps the approval spent, and an oversized
         # confirm turn burns the proposal permanently with nothing to show for
         # it — the caller cannot even retry, because the approval is gone.
-        raise _rejected(413, ErrorCode.BAD_PARAMS, msg, pre_harness=True)
+        raise _rejected(413, ErrorCode.BAD_PARAMS, msg, approval_unredeemed=True)
 
     if resp.status_code >= 400:
         _release_cas()

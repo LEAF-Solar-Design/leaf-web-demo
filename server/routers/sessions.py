@@ -837,11 +837,16 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         # was never established). Those legs report BROKER_UNREACHABLE, which
         # _RETRYABLE_BY_CODE marks retryable, so without this the client is
         # told to retry an approval that has already been spent — the very bug
-        # the TurnBusy path fixes. `pre_harness` defaults False, so ambiguous
-        # legs (read timeout, an actual harness rejection) still never roll
-        # back; see the module docstring's APPROVAL GIVE-BACK note.
+        # the TurnBusy path fixes. The test is `approval_unredeemed`, which is
+        # WIDER than `pre_harness`: a request can reach the harness and still be
+        # refused before anything touches the confirmation (401 before the body
+        # is parsed, 413 in the body reader, 429 during grant acquisition — all
+        # before ConverseLoop). Those three used to burn the proposal with no
+        # way to retry. It still defaults False, so ambiguous legs (read
+        # timeout, a real harness rejection) never roll back; see the module
+        # docstring's APPROVAL GIVE-BACK note.
         approval_lost = False
-        if exc.pre_harness and confirmation_id is not None:
+        if exc.approval_unredeemed and confirmation_id is not None:
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
         return _turn_rejected_response(exc, approval_lost=approval_lost)

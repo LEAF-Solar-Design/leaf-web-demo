@@ -835,12 +835,11 @@ describe("body ceiling - an oversized DECLARED body on an 8 MiB route", { timeou
     });
   });
 
-  it("stops reading a body past the allowance instead of buffering it", async () => {
-    // Beyond cap + allowance the peer is past anything a client legitimately
-    // sends, and HTTP cannot promise it reads an early response while it is
-    // still uploading. What IS promised: the read is bounded and the server
-    // stays healthy. Asserting a delivered envelope here would be asserting
-    // something the protocol does not guarantee.
+  it("reads a very large body without buffering it, and stays healthy", async () => {
+    // 40 MiB against an 8 MiB ceiling. Nothing is accumulated — the bound on
+    // memory is the ceiling itself — and the bound on how long a peer may hold
+    // the socket is the server's requestTimeout, not a byte budget. What is
+    // asserted is that the server survives it and answers the next request.
     const { server: s, baseUrl } = listen(basePorts());
     server = s;
     const addr = s.address() as AddressInfo;

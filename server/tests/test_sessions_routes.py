@@ -976,3 +976,32 @@ def test_zzz_real_sessions_db_still_absent():
         f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
         f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
+
+
+def test_messages_confirm_unredeemed_rejection_gives_the_approval_back(client, monkeypatch):
+    """Round 9 finding: the router only gave an approval back on `pre_harness`,
+    which means "the request never left this process". But a request can REACH
+    the harness and still be refused before anything touches the confirmation —
+    401 before the body is parsed, 413 in the body reader, 429 during grant
+    acquisition, all before ConverseLoop. Those burned the proposal permanently
+    and told the client to retry something already spent."""
+    from envelopes import ErrorCode
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    cid = _seed_approval(sid, tid)
+    session_store.decide_approval(cid, True, by=tid)
+
+    def _unredeemed(*a, **kw):
+        # Reached the harness (so NOT pre_harness) but refused before redemption.
+        raise turn_runner.TurnRejected(
+            429, ErrorCode.LLM_RATE_LIMITED, "slow down", approval_unredeemed=True)
+
+    monkeypatch.setattr(turn_runner, "start_turn", _unredeemed)
+    r = client.post(f"/api/sessions/{sid}/messages",
+                    json={"confirm": {"confirmationId": cid, "approved": True}},
+                    headers=_h(tid))
+    assert r.status_code == 429, r.text
+    assert session_store.get_approval(cid)["consumed"] is False, (
+        "a confirmation refused before the harness could redeem it must be "
+        "retryable — otherwise the proposal is burned with nothing to show"
+    )

@@ -164,26 +164,19 @@ function harnessAuthDenial(
  * `/turn` is sized against what the APP can legitimately forward, which is more
  * than what the app accepts from the browser:
  *
- *     1,500,000  the app's own inbound cap (_MAX_MESSAGE_BODY_BYTES), which
- *                already covers text AND base64 images — they arrive in one body
- *     + 262,144  prior context (turn_runner.MAX_PRIOR_CONTEXT_BYTES)
- *     + 237,856  ids, drawing_id, credential grant, a confirm proposal the
- *                server adds, and JSON framing
- *     ---------
- *       2,000,000
+ * comfortably above the app's own 1,500,000-byte inbound cap, with room for the
+ * prior context, ids, credential grant and framing the app adds afterwards.
  *
- * Two things this depends on, both of which have already been wrong once:
- *
- * 1. Prior context is BYTE-bounded. It used to be count-bounded only, which
- *    left this number sized against nothing.
- * 2. The app forwards UTF-8, not ASCII-escaped JSON. `requests`' default
- *    encoder escapes non-ASCII to \uXXXX, which turns one emoji into 12 bytes
- *    and would let a legal 1.5 MB body arrive here as ~4.5 MB. turn_runner
- *    now encodes with ensure_ascii=False for exactly this reason.
- *
- * If either changes, this number changes with it. Sizing it to the image budget
- * alone (1,500,000) was the original mistake: that equalled the app's inbound
- * cap with nothing left for what the app appends AFTER its own boundary check.
+ * The app MEASURES its encoded body against this same number
+ * (turn_runner.MAX_FORWARD_BYTES) and trims prior context until it fits, so
+ * this is an upper bound on what the app sends rather than a figure arrived at
+ * by arithmetic. That matters because arithmetic over decoded text kept being
+ * wrong in ways that only showed up on real input: prior context was
+ * count-bounded rather than byte-bounded; `requests`' default encoder escapes
+ * non-ASCII to \uXXXX and turned one emoji into 12 bytes; and even after
+ * byte-bounding, JSON escapes `"` to two bytes and a control character to six,
+ * so a budget over decoded text is not a budget over the wire. Change this
+ * number and change MAX_FORWARD_BYTES with it.
  *
  * Every other route gets a generous default, because a customization publish
  * carries a staged receipt and a registered run carries arbitrary tool params:
@@ -272,10 +265,10 @@ function requiredText(body: Record<string, unknown>, field: string): string {
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   const headers: Record<string, string> = { "content-type": "application/json" };
-  // 413 always closes. readJsonBody drains an over-cap body so this response
-  // can be delivered, but that drain is bounded and may have been abandoned
-  // partway, and an unread remainder on a keep-alive socket would be framed as
-  // the next request. Closing is correct whichever way the drain ended.
+  // 413 always closes. The request that caused it was read but never used, and
+  // a refused request is not a good candidate for connection reuse. readJsonBody
+  // reads it through to `end` precisely so that closing here cannot break a peer
+  // that is still writing.
   if (status === 413) headers.connection = "close";
   res.writeHead(status, headers);
   res.end(payload);
