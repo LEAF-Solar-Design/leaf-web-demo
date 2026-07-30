@@ -154,10 +154,35 @@ function harnessAuthDenial(
   return null;
 }
 
+/**
+ * The most any harness request body may be.
+ *
+ * Sized for the image caps: 1 MiB of decoded image expands to at most
+ * 1,398,104 base64 characters, and the rest is bounded JSON framing and prose.
+ * The harness re-validates images because it does not assume the app validated,
+ * and a size check that runs AFTER the body is buffered is not a size check at
+ * all — it just means the memory was already spent.
+ */
+const MAX_BODY_BYTES = 1_500_000;
+
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    let seen = 0;
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      return reject(new AuthorLoopError("request body exceeds the harness cap", 413));
+    }
+    req.on("data", (c: Buffer) => {
+      seen += c.length;
+      if (seen > MAX_BODY_BYTES) {
+        // Stop reading rather than measuring afterwards: a chunked body
+        // declares no length, so buffering first defeats the point.
+        req.destroy();
+        return reject(new AuthorLoopError("request body exceeds the harness cap", 413));
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) return resolve({});

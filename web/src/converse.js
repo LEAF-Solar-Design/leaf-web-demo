@@ -106,7 +106,8 @@ export function resetSession(drawingId) {
 }
 
 // --- Start a turn ---------------------------------------------------------
-// POST /api/sessions/{id}/messages — exactly one of text/confirm (wire §2).
+// POST /api/sessions/{id}/messages — exactly one of a user message (text
+// and/or images) or confirm (wire §2).
 // 202 {turn_id, status:"started"}; everything else throws tagged (409
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).

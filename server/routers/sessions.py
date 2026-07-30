@@ -91,7 +91,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -310,15 +310,10 @@ class MessageBodyLimitMiddleware:
     cumulative body passes the cap, exactly as UploadBodyLimitMiddleware does
     for the upload route.
 
-    And the body must still be parsed by FASTAPI. An earlier attempt read and
-    parsed it by hand inside a dependency, which meant reimplementing FastAPI's
-    error behaviour by hand too — and three reviews found three ways it
-    differed: an absent body became `{}` and answered 409 instead of 422, error
-    locations lost their `body` prefix, and JSON bytes sent as text/plain were
-    accepted where FastAPI refuses them. A dependency cannot fix that, because
-    FastAPI reads the body BEFORE it solves dependencies. Bounding the stream
-    underneath and letting the framework parse keeps one implementation of the
-    wire contract instead of two.
+    And FastAPI must still do the parsing, so there is ONE implementation of the
+    wire contract. A dependency cannot achieve both, because FastAPI reads the
+    body before it solves dependencies; bounding the stream underneath the
+    framework is what lets the framework keep the parsing.
     """
 
     _PATH = re.compile(r"^/api/sessions/[^/]+/messages$")

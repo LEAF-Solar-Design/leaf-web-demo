@@ -967,7 +967,7 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 |---|---|---|
 | POST | `/api/sessions` | `{drawing_id, project_id?}` → `{session_id, status, created_at}`. Idempotent per (tenant, drawing). Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
 | GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
-| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The app assembles the ContextPacket (`server/context_packet.py`, new) and forwards to the harness with the resolved tenant id. |
+| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. Forwards the frozen §2.1 `ConverseTurnInput` to the harness with the resolved tenant id. (The superseded §18-era sentence about assembling a ContextPacket is removed here: the wire-correction note above is the live behaviour, and `server/context_packet.py` has no live caller.) |
 | GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
 | GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
 | DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |
@@ -978,8 +978,17 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 **Inline images (additive, optional, absent-safe; 2026-07-29).**
 `ConverseTurnInput` gains `images?: Array<{media_type, data}>`, and
 `POST /api/sessions/{id}/messages` accepts the same field. The rules are
-normative, and the app, the harness and the client each enforce them
-independently (the harness does not assume the app validated):
+normative. Enforcement is layered, and the layers are NOT equivalent, so
+each one's job is stated rather than implied:
+
+* the **app** is the authority: it decodes every image and enforces count,
+  decoded size, media type and signature agreement;
+* the **harness** re-enforces the same rules on its own input, because it
+  does not assume the app validated, and bounds its own request body while
+  reading rather than after;
+* the **client** checks only the browser-reported type and size, to fail
+  fast in the UI. It does NOT verify signatures, and nothing downstream
+  relies on it having done so.
 
 * A turn is EITHER a user message OR a confirmation. A user message is `text`,
   `images`, or both, so an image with no caption is a valid turn. A `confirm`
@@ -1088,7 +1097,7 @@ One JSON object per SSE `data:` line; the SSE event name equals `type`. Envelope
 
 | type | data payload | Notes |
 |---|---|---|
-| `turn_started` | `{text? \| confirm?, classifier_hint?}` (live; the §18-era design said `{model, classifier_hint?}`) | First event of every turn; app-side (`turn_runner.py:213`). |
+| `turn_started` | `{text? \| confirm?, images?, classifier_hint?}` (live; the §18-era design said `{model, classifier_hint?}`). `images` is a per-image `{media_type, bytes}` DESCRIPTOR, never the base64: see §2.1 "Inline images". | First event of every turn; app-side (`turn_runner.py:213`). |
 | `text_delta` | `{text}` | Streamed assistant prose. |
 | `tool_call` | `{tool, args_summary}` | `args_summary` is a short human string — never full params. |
 | `tool_result` | `{tool, ok, summary}` | |
