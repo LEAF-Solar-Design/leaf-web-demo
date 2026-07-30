@@ -48,6 +48,7 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import ConversePanel from './components/ConversePanel.jsx'
 import { THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
+import { entitlementAllowed } from './controllers/platform/index.js'
 import useJobController from './controllers/useJobController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
@@ -417,7 +418,11 @@ export default function App() {
     return e[key] !== false
   }, [entitlements])
   const canRunWrite = entOf('run_write')
-  const canBuild = entOf('build')
+  // Build routes through the SHARED helper (platformTrustModel) so every
+  // surface — this legacy /app shell and ToolCast's /try — applies the same
+  // entitlement-AND-availability rule: a tier may hold `build` while the R5
+  // authoring stage is off, and Generate must not render enabled then.
+  const canBuild = entitlementAllowed(entitlements, 'build')
   // Agent tier gate: LIVE only (mock has no harness — behavior stays exactly
   // today's), and only when the plan doesn't explicitly exclude `converse`
   // (unknown/undeployed policy resolves permissive, like every other gate).

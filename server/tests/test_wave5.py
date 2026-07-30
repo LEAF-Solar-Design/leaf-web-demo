@@ -351,7 +351,7 @@ def test_entitlements_get_matrix(live_auth):
                         "converse": True, "agent_write_autopilot": True,
                         "deploy": True, "platform_customize": False, "upload": True}),
         ("hosted_starter", {"run_read": True, "run_write": True, "solve": False,
-                            "build": False,
+                            "build": True,
                             "converse": True, "agent_write_autopilot": False,
                             "deploy": False, "platform_customize": False, "upload": True}),
         ("self_hosted", {"run_read": True, "run_write": True, "solve": True,
@@ -366,6 +366,23 @@ def test_entitlements_get_matrix(live_auth):
         assert b["tier"] == tier
         assert b["entitlements"] == expected
         assert b["source"] == "policy"
+
+
+def test_entitlements_availability_tracks_r5_stage(live_auth, monkeypatch):
+    """`availability.author_stage` mirrors the /api/author R5 gate, per tenant.
+
+    A tier may hold `build` (policy) while the deployment's authoring stage is
+    still off — the UI requires BOTH before enabling Generate, so this field
+    must be false when R5 is off and true when it is open to the tenant."""
+    c = _client()
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_R5_MODE", raising=False)
+    b = c.get("/api/entitlements", headers=bearer("hosted_starter")).json()
+    assert b["entitlements"]["build"] is True
+    assert b["availability"]["author_stage"] is False
+
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    b = c.get("/api/entitlements", headers=bearer("hosted_starter")).json()
+    assert b["availability"]["author_stage"] is True
 
 
 def test_author_build_disabled_for_hosted_starter_before_r5(live_auth):
