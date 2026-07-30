@@ -92,9 +92,26 @@ def test_unknown_action_denies():
 
 
 def test_disabled_action_denies():
-    res = _gate("customize_platform")
+    res = _gate("undo_drawing_version", {"dwg": "demo", "to_version": 1})
     assert res["decision"] == "deny"
     assert res["reason"] == "action_disabled"
+
+
+def test_customize_platform_denied_without_platform_customize_capability():
+    """W14 mount: the R7 action is enabled in the catalog, so the entitlement
+    gate is what keeps every non-admin tier out."""
+    caps = dict(FULL_CAPS)
+    caps["platform_customize"] = False  # every shipped tier except `admin`
+    res = _gate("customize_platform", {"title": "x"}, caps=caps)
+    assert res["decision"] == "deny"
+    assert "platform_customize" in res["reason"]
+
+
+def test_customize_platform_always_confirms_for_admin_caps():
+    res = _gate("customize_platform", {"title": "x"})
+    assert res["decision"] == "awaiting_approval"
+    assert res["policy"] == "always-confirm"
+    assert res["confirmation_id"]
 
 
 def test_invalid_args_deny_names_gate():

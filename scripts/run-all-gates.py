@@ -308,7 +308,12 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-policy", "server tests/test_agent_policy.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_gate.py"), 49),
+              _py_pytest("tests/test_agent_gate.py"), 55),
+        # W14 admin self-edit lane (R7): branch-only platform-repo writes,
+        # fundamental-path co-sign, landing handoff. Own process: it builds
+        # real git repos and toggles the R7 rollout env.
+        Suite("server-platform-customize", "server tests/test_platform_customize.py",
+              "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 28),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason
@@ -323,7 +328,7 @@ def build_suites() -> List[Suite]:
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 8),
         Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",
-              SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 8),
+              SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 11),
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
@@ -762,6 +767,13 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 29),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
+        # W14 expand-contract migration gate: the pytest suite validates the
+        # checker AND runs it over the real platform/migrations corpus, so a
+        # contract-phase migration without its expand marker fails this gate
+        # on every PR (test-gate.yml runs this runner).
+        Suite("migration-expand-contract",
+              "scripts test_migration_expand_contract_gate.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_migration_expand_contract_gate.py"), 11),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 317,

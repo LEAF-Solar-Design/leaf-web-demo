@@ -321,7 +321,8 @@ Agreeing copies: `server/auth.py DEFAULT_CLAIM_NS`, the Post-Login Action
 credentials-exchange Action. `LEAF_TENANT_CLAIM_NS` remains an env override
 for test rigs only; production uses the frozen default.
 
-**11.2 Tier vocabulary (frozen, 6 members):**
+**11.2 Tier vocabulary (frozen, 7 members; grown 2026-07-30 per the §11
+promotion ritual — W14 admin self-edit lane):**
 
 | Tier | Class | Meaning |
 |---|---|---|
@@ -331,11 +332,19 @@ for test rigs only; production uses the frozen default.
 | `self_hosted` | claim-mintable | enterprise / BYO-infrastructure seat |
 | `hosted_starter` | claim-mintable | entry hosted seat (default for new/solo users) |
 | `hosted_pro` | claim-mintable | full hosted seat |
+| `admin` | claim-mintable (operator-granted) | staff self-edit identity (W14); the ONLY tier carrying `platform_customize` |
 
 The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_starter`,
-`hosted_pro`} is the only vocabulary a verified identity can carry (JWT tier
-claim, stored org tier). `demo`/`guest` are server-resolved identities and
-must never be minted into a token or stored as an org's billing tier.
+`hosted_pro`, `admin`} is the only vocabulary a verified identity can carry
+(JWT tier claim, stored org tier). `demo`/`guest` are server-resolved
+identities and must never be minted into a token or stored as an org's billing
+tier. `admin` is claim-mintable but **never plan-derived**: the Post-Login
+Action mints it solely from a root-level `app_metadata.leaf_admin === true`
+flag an operator set by hand in the Auth0 dashboard (root level, so
+leaf_website subscription PATCHes replacing `app_metadata.leaf` can neither
+mint nor erase it); no `PLAN_TIER` value maps to it and
+`billing_tiers.derive_tier` never returns it, so no billing state can produce
+an admin identity. Revocation = remove the flag.
 Agreeing copies: `server/entitlements.json` keys, `server/entitlements.py
 _HARDCODED_DEFAULTS` (byte-identical mirror), `server/billing_tiers.py
 TIER_VOCABULARY`/`CLAIM_TIERS`, the Action's `PLAN_TIER` values, and the

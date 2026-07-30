@@ -36,7 +36,8 @@ from envelopes import ErrorCode, error_obj
 # `converse` gates the conversational session surface, `agent_write_autopilot`
 # lets the agent auto-dispatch write tools without a confirm chip, `deploy`
 # gates registering an authored tool (R6, split from `build`), and
-# `platform_customize` gates R7 — false everywhere at launch).
+# `platform_customize` gates R7 — true only on the operator-granted `admin`
+# tier, W14 admin self-edit lane).
 # `upload` (guest-upload lane, §19) gates POST /api/drawings/upload — per-key
 # omission still defaults False, so adding it here forces every policy entry to
 # grant it EXPLICITLY.
@@ -64,6 +65,12 @@ _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "hosted_pro": {"run_read": True, "run_write": True, "solve": True, "build": True,
                    "converse": True, "agent_write_autopilot": True, "deploy": True,
                    "platform_customize": False, "upload": True},
+    # Operator-granted staff tier (W14 admin self-edit lane). The ONLY tier
+    # carrying platform_customize; minted solely from an operator-set
+    # app_metadata.leaf_admin flag, never from a billing plan.
+    "admin": {"run_read": True, "run_write": True, "solve": True, "build": True,
+              "converse": True, "agent_write_autopilot": True, "deploy": True,
+              "platform_customize": True, "upload": True},
     # Ephemeral signed-out guests (§19): upload + nothing else. Their intake
     # reads go through require_tenant (guest session) but run/solve/build/
     # converse are all denied — extraction-only, fail closed.
