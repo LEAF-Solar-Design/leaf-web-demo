@@ -58,7 +58,7 @@ _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "self_hosted": {"run_read": True, "run_write": True, "solve": True, "build": True,
                     "converse": True, "agent_write_autopilot": True, "deploy": True,
                     "platform_customize": False, "upload": True},
-    "hosted_starter": {"run_read": True, "run_write": True, "solve": False, "build": False,
+    "hosted_starter": {"run_read": True, "run_write": True, "solve": False, "build": True,
                        "converse": True, "agent_write_autopilot": False, "deploy": False,
                        "platform_customize": False, "upload": True},
     "hosted_pro": {"run_read": True, "run_write": True, "solve": True, "build": True,

@@ -448,8 +448,8 @@ def test_entitlement_resolves_per_capability_not_from_one_hardcoded_key(monkeypa
     starter_authoring = _by_id(jobs_router.platform_capabilities(
         tenant=jobs_router.deps.TenantContext("tenant", tier="hosted_starter"),
         x_org_id="org-1", x_project_id="project-1", authorization=None))
-    assert starter_authoring["tool.author.company"]["entitled"] is False, (
-        "hosted_starter has build: False, so authoring must read not-entitled")
+    assert starter_authoring["tool.author.company"]["entitled"] is True, (
+        "hosted_starter has build: True (Day-0 stranger flip), so authoring reads entitled")
 
     # An unmapped entitlement name denies for EVERY tier, including full-access
     # demo. Fail-closed by decision, pinned so it cannot drift open unnoticed.

@@ -351,7 +351,7 @@ def test_entitlements_get_matrix(live_auth):
                         "converse": True, "agent_write_autopilot": True,
                         "deploy": True, "platform_customize": False, "upload": True}),
         ("hosted_starter", {"run_read": True, "run_write": True, "solve": False,
-                            "build": False,
+                            "build": True,
                             "converse": True, "agent_write_autopilot": False,
                             "deploy": False, "platform_customize": False, "upload": True}),
         ("self_hosted", {"run_read": True, "run_write": True, "solve": True,

@@ -249,4 +249,4 @@ def test_entitlements_view_shape(monkeypatch):
     view = entitlements.entitlements_view("hosted_starter")
     assert view["tier"] == "hosted_starter" and view["source"] == "policy"
     assert set(view["entitlements"]) == set(CAPABILITIES)
-    assert view["entitlements"]["build"] is False
+    assert view["entitlements"]["build"] is True
