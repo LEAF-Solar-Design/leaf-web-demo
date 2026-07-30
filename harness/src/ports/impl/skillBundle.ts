@@ -1,6 +1,7 @@
 /** Digest-verified curated skill bundle attachment for the converse lanes. */
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 
 export type SkillTier = "tenant-safe" | "operator";
@@ -170,11 +171,91 @@ export function discoverSkills(bundlePath: string): BundledSkill[] {
   return verified.ok ? verified.skills : [];
 }
 
+/**
+ * Materialise a PRIVATE, NORMALISED copy of a verified bundle and return its
+ * path. This is what actually gets mounted, and it closes two findings at once:
+ *
+ * 1. TOCTOU. Verifying a directory and then handing the SDK that same mutable
+ *    directory proves nothing: SKILL.md or plugin.json can be swapped between
+ *    the hash check and the SDK's read, and a deployment digest pin does not
+ *    help. The SDK now loads bytes WE wrote, after verification, into a
+ *    directory the tenant does not control.
+ *
+ * 2. Frontmatter. Inspecting YAML for forbidden keys kept losing — a quoted
+ *    key, a unicode escape, an explicit `? key` mapping all resolve to the same
+ *    top-level key the SDK sees while evading a textual check, and pulling in a
+ *    real YAML parser would add a dependency (and CVE surface) to a module
+ *    whose whole virtue is that it only touches node:fs. So the snapshot is
+ *    REWRITTEN rather than inspected: each SKILL.md is emitted with frontmatter
+ *    containing exactly `name` and `description`, values re-serialised as JSON
+ *    strings, followed by the original body. Whatever the source declared —
+ *    hooks, context: fork, monitors — cannot survive a document we construct.
+ *    Allowlist by construction, which is the only version of this that has not
+ *    been picked apart.
+ */
+function materialiseVerifiedBundle(
+  source: string,
+  verified: { tier: SkillTier; skills: BundledSkill[] },
+): string | null {
+  let root: string | null = null;
+  try {
+    root = mkdtempSync(join(tmpdir(), "leaf-skills-mount-"));
+    mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+    // A manifest we author, carrying only the keys the loader allowlists.
+    writeFileSync(
+      join(root, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "leaf-skills", version: "1.0.0", leafTier: verified.tier }, null, 2),
+      { mode: 0o400 },
+    );
+    for (const skill of verified.skills) {
+      const dir = join(root, "skills", skill.name);
+      mkdirSync(dir, { recursive: true });
+      const body = readFileSync(join(source, "skills", skill.name, "SKILL.md"), "utf8");
+      if (body === null) return null;
+      const rewritten =
+        "---\n" +
+        `name: ${JSON.stringify(skill.name)}\n` +
+        `description: ${JSON.stringify(skill.description)}\n` +
+        "---\n" +
+        stripFrontmatter(body);
+      writeFileSync(join(dir, "SKILL.md"), rewritten, { mode: 0o400 });
+    }
+    return root;
+  } catch {
+    if (root) { try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } }
+    return null;
+  }
+}
+
+/** Everything after the frontmatter block — the prose the skill is FOR. */
+function stripFrontmatter(source: string): string {
+  const match = FRONTMATTER.exec(source ?? "");
+  return match ? source.slice(match[0].length).replace(/^\r?\n/, "") : source;
+}
+
 export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): SkillBundleAttachment | null {
   const path = env.LEAF_SKILLS_BUNDLE_PATH?.trim();
   const tier = env.LEAF_SKILLS_TIER?.trim();
+  const pin = env.LEAF_SKILLS_BUNDLE_DIGEST?.trim();
   if (!path || (tier !== "tenant-safe" && tier !== "operator")) return null;
-  const verified = verifyBundle(path, { expectedDigest: env.LEAF_SKILLS_BUNDLE_DIGEST?.trim() || undefined });
+  // The PIN IS REQUIRED. A self-consistent bundle proves nothing about
+  // provenance: anyone who can write the directory can also regenerate the
+  // manifest and its digest. Only a digest the DEPLOYMENT states out of band
+  // says "this exact artifact was approved". No pin, no mount.
+  if (!pin) {
+    console.error(
+      "[leaf-skills] refusing to mount: LEAF_SKILLS_BUNDLE_DIGEST is required — " +
+      "a self-verifying bundle proves consistency, not provenance",
+    );
+    return null;
+  }
+  const verified = verifyBundle(path, { expectedDigest: pin });
   if (!verified.ok || verified.tier !== tier || verified.skills.length === 0) return null;
-  return { plugin: { type: "local", path, skipMcpDiscovery: true }, skills: verified.skills.map((skill) => skill.name), tier: verified.tier };
+  const mountPath = materialiseVerifiedBundle(path, verified);
+  if (!mountPath) return null;
+  return {
+    plugin: { type: "local", path: mountPath, skipMcpDiscovery: true },
+    skills: verified.skills.map((skill) => skill.name),
+    tier: verified.tier,
+  };
 }

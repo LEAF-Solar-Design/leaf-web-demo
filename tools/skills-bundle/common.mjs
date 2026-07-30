@@ -13,8 +13,34 @@ const RESERVED_NAMES = new Set([
   ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
 ]);
 
+// Both of these mirror harness/src/ports/impl/skillBundle.ts. Two
+// implementations of one rule set drift silently, so skillBundle.test.ts
+// cross-checks that the loader and this verifier accept and reject the same
+// hostile corpus. Change one, change both, and widen that corpus.
+export const PLUGIN_KEYS = new Set(["name", "version", "description", "leafTier"]);
+// Frontmatter keys that make a skill EXECUTABLE or spawn something rather than
+// instruct. A curated skill is prose. The runtime flags do not cover all of
+// these: `context: fork` starts a SUBAGENT and neither
+// disableSkillShellExecution nor disableAllHooks touches it.
+export const EXECUTABLE_FRONTMATTER_KEYS = new Set([
+  "hooks", "allowed-tools", "allowedtools", "context", "agent", "agents",
+  "background", "monitor", "monitors", "command", "commands", "mcp", "mcpservers",
+]);
+
 export function fail(message) {
   throw new Error(message);
+}
+
+/**
+ * The top-level YAML key a line declares, or null for a blank line, a comment,
+ * or an indented (nested) line. Quotes are stripped: `"context": fork` and
+ * `context: fork` name the same key, and a check that reads only bare keys
+ * lets the quoted form straight through.
+ */
+export function plainTopLevelKey(line) {
+  if (/^\s/.test(line) || line.trim() === "" || line.trimStart().startsWith("#")) return null;
+  const match = /^(?:"([^"]+)"|'([^']+)'|([^:\s][^:]*?))\s*:/.exec(line);
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? null)?.trim() ?? null;
 }
 
 export function isValidSkillName(name) {
@@ -66,6 +92,30 @@ export function parseSkillName(markdown, label) {
     return match[1].trim().replace(/^["']|["']$/g, "");
   }
   fail(`${label} lacks a frontmatter name`);
+}
+
+/**
+ * The name a BUNDLED SKILL.md declares, refusing any executable key. This is
+ * the bundle-side parser: the source-side `parseSkillName` stays permissive so
+ * an executable skill sitting in the source tree does not break every build,
+ * it just cannot be bundled.
+ */
+export function parseBundledSkillName(markdown, label) {
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
+  if (!frontmatter) fail(`${label} lacks YAML frontmatter`);
+  let name = null;
+  for (const line of frontmatter[1].split(/\r?\n/)) {
+    const key = plainTopLevelKey(line);
+    if (!key) continue;
+    if (EXECUTABLE_FRONTMATTER_KEYS.has(key.toLowerCase())) {
+      fail(`${label} declares the executable frontmatter key ${JSON.stringify(key)}`);
+    }
+    if (key === "name" && name === null) {
+      name = line.slice(line.indexOf(":") + 1).trim().replace(/^["']|["']$/g, "");
+    }
+  }
+  if (name === null) fail(`${label} lacks a frontmatter name`);
+  return name;
 }
 
 export async function readSkill(sourceRoot, name) {
@@ -177,6 +227,14 @@ export async function validateBundleStructure(bundlePath) {
     fail(".claude-plugin must contain only plugin.json");
   }
   await assertPlainFile(pluginPath, "plugin.json", MAX_MANIFEST_BYTES);
+  // KEY ALLOWLIST. The SDK mounts this file as a plugin manifest, and an
+  // unknown key is not inert: `monitors` declares unsandboxed tasks armed at
+  // session start. Hash inventories cannot catch this on their own, because a
+  // manifest can be regenerated over the edited file.
+  const plugin = await readJsonFile(pluginPath, "plugin.json");
+  if (!plugin || typeof plugin !== "object" || Array.isArray(plugin)) fail("plugin.json must be a JSON object");
+  const disallowed = Object.keys(plugin).filter((key) => !PLUGIN_KEYS.has(key));
+  if (disallowed.length > 0) fail(`plugin.json has disallowed keys: ${disallowed.sort().join(", ")}`);
   await assertPlainFile(path.join(bundlePath, "manifest.json"), "manifest.json");
 
   const names = (await fs.readdir(skillsDir)).sort();
@@ -194,7 +252,7 @@ export async function validateBundleStructure(bundlePath) {
     }
     const skillPath = path.join(skillDir, "SKILL.md");
     await assertPlainFile(skillPath, `bundled SKILL.md for ${name}`, MAX_SKILL_FILE_BYTES);
-    const declaredName = parseSkillName(await fs.readFile(skillPath, "utf8"), `bundled SKILL.md for ${name}`);
+    const declaredName = parseBundledSkillName(await fs.readFile(skillPath, "utf8"), `bundled SKILL.md for ${name}`);
     if (declaredName !== name) fail(`bundled SKILL.md name ${JSON.stringify(declaredName)} does not match directory ${JSON.stringify(name)}`);
     files.push(`skills/${name}/SKILL.md`);
   }

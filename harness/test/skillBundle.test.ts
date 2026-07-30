@@ -57,13 +57,56 @@ afterEach(() => {
 // budget: vitest's 5s default is a statement about THIS harness, not about the
 // code under test, and letting it fire would read as a security regression.
 describe("verifyBundle", { timeout: 60_000 }, () => {
-  it("accepts the real builder artifact and mounts only after verification", () => {
+  it("accepts the real builder artifact and mounts a NORMALISED SNAPSHOT", () => {
     const path = buildBundle();
     const verified = verifyBundle(path);
     expect(verified.ok).toBe(true);
     if (!verified.ok) return;
-    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: path, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv))
-      .toMatchObject({ skills: verified.skills.map((skill) => skill.name), tier: "tenant-safe" });
+    const attachment = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv);
+    expect(attachment).toMatchObject({
+      skills: verified.skills.map((skill) => skill.name), tier: "tenant-safe",
+    });
+    // The SDK must NOT be pointed at the tenant's directory: verifying bytes
+    // and then mounting a path someone else can rewrite proves nothing (a
+    // swap between the hash check and the SDK's read defeats even a pin).
+    expect(attachment!.plugin.path).not.toBe(path);
+    // ...and the snapshot's frontmatter is one WE authored: whatever the
+    // source declared cannot survive a document we construct.
+    const mounted = readFileSync(
+      join(attachment!.plugin.path, "skills", verified.skills[0]!.name, "SKILL.md"), "utf8");
+    expect(mounted.startsWith('---\nname: "')).toBe(true);
+    expect(mounted).not.toMatch(/context|hooks|allowed-tools/i);
+  });
+
+  it("REFUSES to mount without a deployment digest pin", () => {
+    // A self-consistent bundle proves consistency, not provenance: anyone who
+    // can write the directory can regenerate the manifest and its digest.
+    const path = buildBundle();
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: path, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("a post-verification swap cannot reach the SDK", () => {
+    // The TOCTOU the snapshot exists for: mount, then rewrite the SOURCE.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const attachment = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv)!;
+    const name = verified.skills[0]!.name;
+    writeFileSync(join(path, "skills", name, "SKILL.md"),
+      ["---", `name: ${name}`, "context: fork", "---", "pwned"].join("\n"));
+    const mounted = readFileSync(join(attachment.plugin.path, "skills", name, "SKILL.md"), "utf8");
+    expect(mounted).not.toContain("pwned");
+    expect(mounted).not.toContain("fork");
   });
 
   it("refuses a flipped byte in a SKILL.md", () => {
@@ -138,13 +181,52 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
   });
 });
 
-describe("loader and offline verifier cross-check", () => {
-  it("agree on the accepted and rejected corpus", () => {
-    const valid = buildBundle();
-    const changed = buildBundle();
-    writeFileSync(join(changed, "skills", "code-standards", "SKILL.md"), "changed");
-    const extra = buildBundle();
-    writeFileSync(join(extra, "unexpected.txt"), "x");
-    for (const path of [valid, changed, extra]) expect(verifyBundle(path).ok).toBe(offlineAccepts(path));
+// The loader (TypeScript, runtime) and tools/skills-bundle/verify.mjs (the
+// build and deploy gate) implement ONE rule set twice. Drift is silent and
+// dangerous in both directions: a rule only the loader has makes CI bless an
+// artifact production then refuses, and a rule only the verifier has is a
+// runtime hole. So the corpus below is deliberately hostile, not just a valid
+// bundle and a flipped byte — an earlier version of this test agreed on three
+// trivial cases while the two sides disagreed on every interesting one.
+describe("loader and offline verifier cross-check", { timeout: 120_000 }, () => {
+  const corpus: Array<[string, (path: string) => void]> = [
+    ["a genuine bundle", () => { }],
+    ["a changed SKILL.md", (path) => writeFileSync(join(path, "skills", "code-standards", "SKILL.md"), "changed")],
+    ["an extra file at the root", (path) => writeFileSync(join(path, "unexpected.txt"), "x")],
+    ["an extra file beside a skill", (path) => writeFileSync(join(path, "skills", "code-standards", "payload.txt"), "x")],
+    ["a nested payload directory", (path) => {
+      mkdirSync(join(path, "skills", "code-standards", "nested"));
+      writeFileSync(join(path, "skills", "code-standards", "nested", "payload.txt"), "x");
+    }],
+    ["a plugin monitor with a refreshed manifest", (path) => {
+      const pluginPath = join(path, ".claude-plugin", "plugin.json");
+      writeFileSync(pluginPath, JSON.stringify({ ...JSON.parse(readFileSync(pluginPath, "utf8")), monitors: [{ command: "pwn" }] }));
+      refreshManifest(path);
+    }],
+    ["a bare context: fork frontmatter key", (path) => {
+      const file = join(path, "skills", "code-standards", "SKILL.md");
+      writeFileSync(file, readFileSync(file, "utf8").replace("description:", "context: fork\ndescription:"));
+      refreshManifest(path);
+    }],
+    ["a YAML-quoted context key", (path) => {
+      const file = join(path, "skills", "code-standards", "SKILL.md");
+      writeFileSync(file, readFileSync(file, "utf8").replace("description:", '"context": fork\ndescription:'));
+      refreshManifest(path);
+    }],
+    ["a tampered bundle digest", (path) => {
+      const current = manifest(path);
+      writeFileSync(join(path, "manifest.json"), JSON.stringify({ version: 1, tier: "tenant-safe", files: current.files, bundleDigest: "0".repeat(64) }));
+    }],
+    ["a deleted manifest entry", (path) => {
+      const current = manifest(path);
+      delete current.files[Object.keys(current.files)[0]!];
+      writeFileSync(join(path, "manifest.json"), JSON.stringify({ version: 1, tier: "tenant-safe", files: current.files, bundleDigest: bundleDigest(current.files) }));
+    }],
+  ];
+
+  it.each(corpus)("agree on %s", (_case, mutate) => {
+    const path = buildBundle();
+    mutate(path);
+    expect(verifyBundle(path).ok).toBe(offlineAccepts(path));
   });
 });

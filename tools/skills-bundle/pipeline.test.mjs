@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { bundleDigest, sha256 } from "./common.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BUILD = path.join(HERE, "build.mjs");
 const VERIFY = path.join(HERE, "verify.mjs");
@@ -43,6 +45,18 @@ async function curation(file, entries) {
 
 function run(script, args) {
   return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+}
+
+// Re-hash a bundle in place so a tampering case cannot be caught by the hash
+// inventory alone — the rule under test has to do the catching.
+async function refreshManifest(bundlePath) {
+  const manifestPath = path.join(bundlePath, "manifest.json");
+  const current = JSON.parse(await readFile(manifestPath, "utf8"));
+  const files = {};
+  for (const relativePath of Object.keys(current.files)) {
+    files[relativePath] = sha256(await readFile(path.join(bundlePath, ...relativePath.split("/"))));
+  }
+  await writeFile(manifestPath, `${JSON.stringify({ ...current, files, bundleDigest: bundleDigest(files) }, null, 2)}\n`);
 }
 
 async function assertNoLinks(directory) {
@@ -93,6 +107,45 @@ test("verify exits nonzero when a built bundle contains an extra file", async (t
   assert.notEqual(verified.status, 0);
   assert.match(verified.stderr, /NOT-READY: bundle must contain only/);
 });
+
+// A hash inventory alone cannot catch either of the next two: whoever edits
+// the file can regenerate the manifest over it. Both rules are duplicated in
+// harness/src/ports/impl/skillBundle.ts, and skillBundle.test.ts cross-checks
+// that the two sides agree.
+test("verify exits nonzero for an unknown plugin.json key such as monitors", async (t) => {
+  const work = await fixture();
+  t.after(() => rm(work.root, { recursive: true, force: true }));
+  await skill(work.source, "writing-aid");
+  await curation(work.curation, [{ name: "writing-aid", tier: "tenant-safe", reason: "fixture" }]);
+  assert.equal(run(BUILD, ["--source", work.source, "--curation", work.curation, "--tier", "tenant-safe", "--out", work.out]).status, 0);
+  const pluginPath = path.join(work.out, ".claude-plugin", "plugin.json");
+  const plugin = JSON.parse(await readFile(pluginPath, "utf8"));
+  // `monitors` declares unsandboxed tasks armed at session start.
+  await writeFile(pluginPath, JSON.stringify({ ...plugin, monitors: [{ command: "pwn" }] }));
+  await refreshManifest(work.out);
+  const verified = run(VERIFY, [work.out]);
+  assert.notEqual(verified.status, 0);
+  assert.match(verified.stderr, /NOT-READY: plugin\.json has disallowed keys: monitors/);
+});
+
+// `context: fork` spawns a subagent, and neither disableSkillShellExecution
+// nor disableAllHooks disables it. The quoted spelling is the same key to a
+// YAML reader, so a check that reads only bare keys is not a check.
+for (const [label, declaration] of [["bare", "context: fork"], ["quoted", '"context": fork']]) {
+  test(`builder exits nonzero for a ${label} executable frontmatter key`, async (t) => {
+    const work = await fixture();
+    t.after(() => rm(work.root, { recursive: true, force: true }));
+    await mkdir(path.join(work.source, "writing-aid"), { recursive: true });
+    await writeFile(
+      path.join(work.source, "writing-aid", "SKILL.md"),
+      `---\nname: writing-aid\n${declaration}\ndescription: Useful skill.\n---\n\nBody.\n`,
+    );
+    await curation(work.curation, [{ name: "writing-aid", tier: "tenant-safe", reason: "fixture" }]);
+    const built = run(BUILD, ["--source", work.source, "--curation", work.curation, "--tier", "tenant-safe", "--out", work.out]);
+    assert.notEqual(built.status, 0);
+    assert.match(built.stderr, /NOT-READY: bundled SKILL\.md for writing-aid declares the executable frontmatter key "context"/);
+  });
+}
 
 test("verify exits nonzero when manifest tier disagrees with the build tier", async (t) => {
   const work = await fixture();

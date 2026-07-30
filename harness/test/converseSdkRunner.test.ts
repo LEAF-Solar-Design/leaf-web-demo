@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -358,13 +358,31 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     try {
       const repo = resolve(import.meta.dirname, "../..");
       execFileSync(process.execPath, [join(repo, "tools", "skills-bundle", "build.mjs"), "--source", "C:/Users/ehaug/.claude/skills", "--tier", "tenant-safe", "--out", bundle], { stdio: "pipe" });
+      const digest = (JSON.parse(readFileSync(join(bundle, "manifest.json"), "utf8")) as { bundleDigest: string }).bundleDigest;
       vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", bundle);
       vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");
+
+      // Without the deployment pin the runner mounts NOTHING. A bundle that
+      // verifies against its own manifest proves only that it is internally
+      // consistent; whoever wrote the directory could rewrite both.
+      const unpinned = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(unpinned), makeInput());
+      expect(unpinned.queries[0]!.options.plugins).toBeUndefined();
+      expect(unpinned.queries[0]!.options.skills).toBeUndefined();
+
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_DIGEST", digest);
       const mock = makeMockSdk([resultSuccess()]);
       await collect(runnerWith(mock), makeInput());
       const options = mock.queries[0]!.options;
-      expect(options.plugins).toEqual([{ type: "local", path: bundle, skipMcpDiscovery: true }]);
       expect(options.skills).toEqual(["code-standards", "knowledge-synthesis", "orwell-writing"]);
+      // The SDK is pointed at OUR snapshot, never at the source directory: a
+      // verified path that stays writable can be swapped before the SDK reads it.
+      const plugins = options.plugins as Array<{ type: string; path: string; skipMcpDiscovery: boolean }>;
+      expect(plugins).toHaveLength(1);
+      expect(plugins[0]).toMatchObject({ type: "local", skipMcpDiscovery: true });
+      expect(plugins[0]!.path).not.toBe(bundle);
+      expect(readFileSync(join(plugins[0]!.path, "skills", "code-standards", "SKILL.md"), "utf8"))
+        .toMatch(/^---\r?\nname: "code-standards"\r?\ndescription: /);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
