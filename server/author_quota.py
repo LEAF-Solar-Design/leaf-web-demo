@@ -136,19 +136,24 @@ def _cleanup_old_counters(conn) -> None:
 
 
 def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
-    db, _counter_type = _load_platform_counters()
-    counter = _postgres_counter()
-
-    def consume(conn):
-        result = counter.consume_in_transaction(
-            conn, namespace=COUNTER_NAMESPACE, key=key, limit=limit,
-        )
-        if result.accepted:
-            _cleanup_old_counters(conn)
-        return result
-
+    # Package loading and counter construction are INSIDE the wrapper: an import
+    # or initialization failure is a store outage like any other, and must become
+    # the opaque 503 refusal rather than escaping as a raw 500.
     try:
+        db, _counter_type = _load_platform_counters()
+        counter = _postgres_counter()
+
+        def consume(conn):
+            result = counter.consume_in_transaction(
+                conn, namespace=COUNTER_NAMESPACE, key=key, limit=limit,
+            )
+            if result.accepted:
+                _cleanup_old_counters(conn)
+            return result
+
         result = db.run_transaction(consume, isolation="serializable", max_attempts=3)
+    except AuthorQuotaStoreError:
+        raise
     except Exception as exc:  # noqa: BLE001
         # Type only: a database error message can carry a connection string.
         raise AuthorQuotaStoreError(
@@ -165,14 +170,27 @@ def _memory_charge(key: str, limit: int) -> Tuple[bool, int]:
         return True, used + 1
 
 
-def charge(tenant_id: str, day: str, limit: int) -> Tuple[bool, int]:
+def charge(tenant_id: str, day: str, limit: int, *,
+           require_durable: bool = False) -> Tuple[bool, int]:
     """Charge one authoring attempt against ``limit`` for ``tenant_id`` on ``day``.
 
     Returns ``(accepted, value)``. On acceptance ``value`` is the count INCLUDING
     this attempt; on refusal it is the already-recorded count, which the caller
     reports as ``used``. Raises ``AuthorQuotaStoreError`` if the configured store
     is unreachable or misconfigured — never silently unmetered.
+
+    ``require_durable`` refuses the memory counter outright. The caller sets it
+    for any deployment where a per-process counter would not be a real cap: two
+    replicas keep two independent counts, so at limit N a tenant gets N per
+    replica, and a restart returns every tenant to zero. A quota configured
+    against memory in such a deployment reads as enforced while bounding almost
+    nothing, so it fails loudly at the first attempt instead.
     """
+    if require_durable and store_mode() != "postgres":
+        raise AuthorQuotaStoreError(
+            "LEAF_DAILY_AUTHOR_QUOTA is configured but LEAF_AUTHOR_QUOTA_STORE is "
+            "not 'postgres'; a per-process counter is not a cap across replicas "
+            "or restarts")
     key = counter_key(tenant_id, day)
     if store_mode() == "postgres":
         return _postgres_charge(key, limit)

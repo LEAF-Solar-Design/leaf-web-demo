@@ -65,13 +65,20 @@ def clean_counter_state(monkeypatch):
 @pytest.fixture
 def r5_author(monkeypatch):
     """The R5 /api/author route with everything BUT the quota stubbed out, so a
-    call either reaches the (recorded) stage dispatch or is refused by the quota."""
+    call either reaches the (recorded) stage dispatch or is refused by the quota.
+
+    Live auth demands a durable counter, so the memory store is swapped in at the
+    charge seam. Tests that care about the durability rule drive it directly."""
     staged = []
     service = SimpleNamespace(
         stage=lambda **kwargs: staged.append(kwargs) or {"status": "staged"}
     )
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    real_charge = author_quota.charge
+    monkeypatch.setattr(
+        author_quota, "charge",
+        lambda tenant_id, day, limit, **_: real_charge(tenant_id, day, limit))
     monkeypatch.setattr(
         author_router.CustomizationService, "configured",
         classmethod(lambda cls: service),
@@ -175,6 +182,37 @@ def test_charge_counts_per_tenant_per_day():
     assert author_quota.charge("tenant-a", "2026-07-31", 2) == (True, 1)
 
 
+def test_memory_counter_is_refused_when_durability_is_required():
+    """Two replicas keep two independent memory counts and a restart clears both,
+    so a quota configured against memory in a real deployment reads as enforced
+    while bounding almost nothing. It fails loudly instead."""
+    with pytest.raises(author_quota.AuthorQuotaStoreError, match="LEAF_AUTHOR_QUOTA_STORE"):
+        author_quota.charge("tenant-a", "2026-07-30", 5, require_durable=True)
+    # ...and nothing was counted by the refused call.
+    assert author_quota.charge("tenant-a", "2026-07-30", 5) == (True, 1)
+
+
+def test_live_auth_requires_the_durable_counter(monkeypatch):
+    """End to end at the router: LEAF_AUTHOR_QUOTA_STORE left at memory under live
+    auth refuses rather than admitting against a counter that is not a cap."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "5")
+    staged = []
+    service = SimpleNamespace(
+        stage=lambda **kwargs: staged.append(kwargs) or {"status": "staged"})
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router.CustomizationService, "configured",
+                        classmethod(lambda cls: service))
+
+    response = author_router.author(
+        author_router.AuthorRequest(description="make a tool"),
+        tenant="tenant-a", idempotency_key="request-a",
+    )
+    assert response.status_code == 503
+    assert json.loads(response.body)["reason_code"] == "author_quota_unavailable"
+    assert staged == []
+
+
 def test_counter_key_carries_day_and_tenant():
     assert author_quota.counter_key("tenant-a", "2026-07-30") == "2026-07-30:tenant-a"
 
@@ -264,6 +302,35 @@ def test_a_refused_request_never_burns_a_slot(monkeypatch, r5_author):
     assert r5_author.call() == {"status": "staged"}
 
 
+def test_a_build_denied_tenant_never_burns_a_slot(monkeypatch, r5_author):
+    """The Build entitlement refuses deterministically per tier, so charging
+    before it would let a viewer drain its own tenant's budget on requests that
+    reach no harness. The authoritative denial still happens downstream."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    monkeypatch.setattr(author_router.entitlements, "entitlements_for",
+                        lambda _tier: {"build": False})
+    for _ in range(5):
+        assert r5_author.call() == {"status": "staged"}  # stubbed service; real one 403s
+
+    # The budget is intact for a tenant that does hold Build.
+    monkeypatch.setattr(author_router.entitlements, "entitlements_for",
+                        lambda _tier: {"build": True})
+    assert r5_author.call() == {"status": "staged"}
+    assert r5_author.call().status_code == 429
+
+
+def test_an_unreadable_entitlement_policy_still_charges(monkeypatch, r5_author):
+    """On the money side the safe direction is to count."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+
+    def unreadable(_tier):
+        raise author_router.entitlements.EntitlementsError("policy unreadable")
+
+    monkeypatch.setattr(author_router.entitlements, "entitlements_for", unreadable)
+    assert r5_author.call() == {"status": "staged"}
+    assert r5_author.call().status_code == 429
+
+
 def test_store_outage_fails_closed(monkeypatch, r5_author):
     monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "5")
 
@@ -293,17 +360,31 @@ def test_missing_policy_module_fails_closed_only_when_a_quota_is_configured(
 
 
 def test_an_unresolvable_tier_still_produces_the_quota_envelope(monkeypatch, r5_author):
-    """The tier is display-only here, so an entitlements outage must not turn a
-    429 into a 500."""
+    """The tier is display-only in this envelope, so a tier-resolution failure
+    must not turn a 429 into a 500. (Build is granted here because an unresolved
+    tier otherwise fails closed to `restricted`, which holds no build and is
+    therefore never charged.)"""
     monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "0")
 
     def unresolvable(_tenant):
         raise RuntimeError("entitlements unavailable")
 
     monkeypatch.setattr(author_router.entitlements, "resolve_tier", unresolvable)
+    monkeypatch.setattr(author_router.entitlements, "entitlements_for",
+                        lambda _tier: {"build": True})
     response = r5_author.call()
     assert response.status_code == 429
     assert json.loads(response.body)["tier"] == "unknown"
+
+
+def test_an_unresolvable_tier_is_not_charged_when_it_holds_no_build(monkeypatch, r5_author):
+    """`entitlements_for` fails closed to `restricted` for an unknown tier, so
+    such a request is refused downstream and never spends a slot."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    monkeypatch.setattr(author_router.entitlements, "resolve_tier",
+                        lambda _t: (_ for _ in ()).throw(RuntimeError("outage")))
+    for _ in range(3):
+        assert r5_author.call() == {"status": "staged"}  # stubbed service; real one 403s
 
 
 def test_store_outage_response_leaks_no_detail(monkeypatch, r5_author):
@@ -321,25 +402,41 @@ def test_store_outage_response_leaks_no_detail(monkeypatch, r5_author):
 # --------------------------------------------------------------------------- #
 # admission: the legacy path and the sibling stage route
 # --------------------------------------------------------------------------- #
-def test_legacy_author_path_is_metered(monkeypatch):
-    """The legacy path also delegates to the harness when LEAF_AUTHOR_HARNESS_URL
-    is set, so it carries the same cap."""
-    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+@pytest.fixture
+def legacy_author(monkeypatch):
+    """The auth-off legacy path, which also delegates to the harness when
+    LEAF_AUTHOR_HARNESS_URL is set and so carries the same cap."""
     calls = []
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: False)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: False)
     monkeypatch.setattr(author_router, "_legacy_author",
                         lambda *_a: calls.append(True) or {"source": "template"})
 
-    def call():
+    def call(tenant="tenant-a"):
         return author_router.author(
             author_router.AuthorRequest(description="make a tool"),
-            tenant="tenant-a", idempotency_key="request-a",
+            tenant=tenant, idempotency_key="request-a",
         )
 
-    assert call() == {"source": "template"}
-    assert call().status_code == 429
-    assert len(calls) == 1
+    return SimpleNamespace(call=call, calls=calls)
+
+
+def test_legacy_author_path_is_metered(monkeypatch, legacy_author):
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    assert legacy_author.call() == {"source": "template"}
+    assert legacy_author.call().status_code == 429
+    assert len(legacy_author.calls) == 1
+
+
+def test_auth_off_tenants_share_one_anonymous_budget(monkeypatch, legacy_author):
+    """With auth off the tenant id is an unverified request header. Metering it
+    per-id would let a caller mint a new id per request and hand itself a fresh
+    budget forever, so the open lane shares ONE budget."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    assert legacy_author.call(tenant="tenant-a") == {"source": "template"}
+    assert legacy_author.call(tenant="tenant-b").status_code == 429
+    assert legacy_author.call(tenant="whatever-i-invent").status_code == 429
+    assert len(legacy_author.calls) == 1
 
 
 def test_stage_route_shares_the_same_budget(monkeypatch):
@@ -354,6 +451,10 @@ def test_stage_route_shares_the_same_budget(monkeypatch):
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
     monkeypatch.setattr(author_router.CustomizationService, "configured",
                         classmethod(lambda cls: service))
+    real_charge = author_quota.charge
+    monkeypatch.setattr(
+        author_quota, "charge",
+        lambda tenant_id, day, limit, **_: real_charge(tenant_id, day, limit))
 
     request = author_router.StageRequest(
         description="make a tool", mode="build", idempotency_key="request-a")

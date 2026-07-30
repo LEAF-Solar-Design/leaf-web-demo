@@ -76,6 +76,7 @@ REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
         "broker_aps_slots", "broker_admission_resolution_audit",
     },
     "LEAF_GUEST_CAP_STORE": {"guest_upload_counters"},
+    "LEAF_AUTHOR_QUOTA_STORE": {"author_quota_counters"},
     "LEAF_DRAWING_STORE": {"drawing_store_manifests", "drawing_store_versions"},
     "LEAF_UPLOAD_STORE": {
         "drawing_store_manifests", "drawing_store_versions",

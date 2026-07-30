@@ -47,6 +47,12 @@ AUTHORED_DIR = SERVER_DIR / "authored"
 # CONTRACT-ADDENDUM §16.
 GRANT_REQUIRED = "GRANT_REQUIRED"
 
+# The single authoring-quota principal used when auth is off. An unauthenticated
+# deployment has no verified tenant to meter — the id arrives in a request header
+# the caller controls — so the open lane shares one budget rather than handing a
+# fresh one to every id someone invents.
+ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
+
 # Bound the tool-description so an unbounded body can't exhaust the author /
 # templater / harness pipeline (security-audit F15). An over-cap body is rejected at
 # the validation layer before any harness/template work runs.
@@ -538,14 +544,30 @@ def _author_quota_denied(tenant: Any) -> JSONResponse | None:
     limit = usage.daily_author_quota()
     if limit is None:
         return None  # no quota configured -> prior behavior, no store touched
-    tenant_id = str(tenant)
     try:
         tier = entitlements.resolve_tier(tenant)
     except Exception:  # noqa: BLE001 - the tier is display-only in this envelope
         tier = "unknown"
+    # Do not spend a slot on a request the Build entitlement is about to refuse.
+    # This is NOT a second gate — the authoritative one still runs downstream and
+    # is what actually denies — it only keeps a deterministic 403 from consuming
+    # the tenant's budget. An unreadable policy charges anyway: on the money side
+    # the safe direction is to count.
+    try:
+        if not entitlements.entitlements_for(tier).get("build", False):
+            return None
+    except entitlements.EntitlementsError:
+        pass
+    live = deps.auth_live()
+    # With auth off the tenant id is an unverified request header, not a
+    # principal: a caller can mint a new one per request and hand itself a fresh
+    # budget forever. Such a deployment has no authenticated identity to meter,
+    # so the whole open lane shares ONE anonymous budget. Under live auth the
+    # verified tenant is the principal, as everywhere else.
+    tenant_id = str(tenant) if live else ANONYMOUS_QUOTA_PRINCIPAL
     try:
         accepted, used = author_quota.charge(
-            tenant_id, usage.author_quota_day(), limit)
+            tenant_id, usage.author_quota_day(), limit, require_durable=live)
     except author_quota.AuthorQuotaStoreError as exc:
         # Type only: a store error message can carry a connection string. The
         # code is absent from _CALLER_DRIVEN_CODES on purpose, so this warns.
