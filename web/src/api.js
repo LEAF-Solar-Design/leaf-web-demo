@@ -869,6 +869,17 @@ export async function authorTool(mock, description) {
     // a calm "upgrade to build" gate, not a red failure.
     err.entitlementRequired = res.status === 403 && !!(body && body.entitlement_required)
     if (err.entitlementRequired) { err.required = body.required || 'build'; err.tier = body.tier || null }
+    // Daily authoring-quota rejection (HTTP 429 {quota_kind:"daily_author", tier,
+    // limit, used}). A plan boundary that lifts at 00:00 UTC, not a failure — the
+    // AuthorPanel renders it as a calm gate, like the build-entitlement one.
+    // Distinct from the run-lane 402 spend cap and the daily RUN quota, which
+    // never reach this route.
+    err.quotaExceeded = res.status === 429 && !!(body && body.quota_kind === 'daily_author')
+    if (err.quotaExceeded) {
+      err.tier = body.tier || null
+      err.limit = Number.isFinite(Number(body.limit)) ? Number(body.limit) : null
+      err.used = Number.isFinite(Number(body.used)) ? Number(body.used) : null
+    }
     throw err
   }
   return body

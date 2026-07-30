@@ -883,6 +883,29 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
   `tenant_id`/`org_id` like every other echoed body). This is a READ of policy — the actual
   gate lives in the run/author chains and cannot be bypassed via this endpoint.
 
+> **§17 daily authoring quota (2026-07-30):** `POST /api/author` and
+> `POST /api/author/stage` additionally enforce a per-tenant DAILY cap on
+> authoring ATTEMPTS, configured by `LEAF_DAILY_AUTHOR_QUOTA` (absent/empty ⇒
+> no cap, prior behavior). It stands beside the entitlement gate, not in place
+> of it: entitlement asks whether the plan includes Build at all, this asks how
+> often. It exists because authoring spend is invisible to the two caps that
+> already exist — R5 authoring runs the Agent SDK harness and enables the
+> operator-funded sandbox BEFORE any broker lease, and its broker test is
+> `aps_live=false` / `usd_est=null`, so neither the broker's USD spend cap nor
+> the daily RUN quota (§ preflight order) ever observes it, while the harness's
+> per-session ceilings bound one session and never a SERIES of them.
+> A quota unit is one attempt admitted at the router; a refused attempt is not
+> counted, and a retry under an existing idempotency key IS counted, because a
+> change set still in STAGING re-invokes the harness. Rejection is **HTTP 429**
+> carrying the daily-run-quota envelope shape verbatim (`error_code:
+> "quota_exceeded"`, `retryable: true`, top-level and nested `tier`/`limit`/
+> `used`), discriminated by `quota_kind: "daily_author"` rather than
+> `"daily_runs"`. The counter is `leaf_platform.counters.SharedCounterStore`
+> bound to `author_quota_counters` (migration 0023) under
+> `LEAF_AUTHOR_QUOTA_STORE=postgres`, or per-process memory otherwise; a
+> configured quota whose counter cannot be reached refuses with a 503 rather
+> than admitting unmetered.
+
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
 > **§17 platform-lane extension (2026-07-22):** the platform jobs lane
