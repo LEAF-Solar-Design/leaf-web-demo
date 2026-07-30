@@ -952,7 +952,7 @@ Two ground rules frame everything below:
 > assembles the ContextPacket and forwards it" sentence is the superseded
 > §18-era proxy design. The live wire forwards the frozen §2.1
 > `ConverseTurnInput` — `{tenant_id, session_id, turn_id, drawing_id, messages,
-> text|confirm}` — with NO ContextPacket field; `server/context_packet.py` has
+> text|confirm, images?}` — with NO ContextPacket field; `server/context_packet.py` has
 > no live caller. Pinned by `server/tests/test_sessions_router.py`
 > (no-packet body assertion); FROZEN by chip 5 (2026-07-23) —
 > `tests/test_contract_freeze.py` pins the port field set and the parked
@@ -967,13 +967,41 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 |---|---|---|
 | POST | `/api/sessions` | `{drawing_id, project_id?}` → `{session_id, status, created_at}`. Idempotent per (tenant, drawing). Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
 | GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
-| POST | `/api/sessions/{id}/messages` | `{text?, confirm?, classifier_hint?}` (exactly one of text/confirm) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The app assembles the ContextPacket (`server/context_packet.py`, new) and forwards to the harness with the resolved tenant id. |
+| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The app assembles the ContextPacket (`server/context_packet.py`, new) and forwards to the harness with the resolved tenant id. |
 | GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
 | GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
 | DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |
 | POST | `/api/agent/approvals/{confirmation_id}` | `{approved: bool}` → `{resolved:true, approved}`. Records the decision in the app's pending store. Does **not** start the resume turn — the client posts the confirm message separately. |
 | GET | `/api/agent/audit?limit=` | Tenant's own audit records, projected through the `audit_extra` allowlist. |
 | GET | `/api/agent/killswitch` | `{active: bool}`, read-only. |
+
+**Inline images (additive, optional, absent-safe; 2026-07-29).**
+`ConverseTurnInput` gains `images?: Array<{media_type, data}>`, and
+`POST /api/sessions/{id}/messages` accepts the same field. The rules are
+normative, and the app, the harness and the client each enforce them
+independently (the harness does not assume the app validated):
+
+* A turn is EITHER a user message OR a confirmation. A user message is `text`,
+  `images`, or both, so an image with no caption is a valid turn. A `confirm`
+  turn MUST NOT carry images (400 `BAD_PARAMS`).
+* At most **3** images per message; each at most **1 MiB DECODED**; at most
+  **1 MiB decoded in total**. `data` is base64 with no data-URI prefix.
+* `media_type` is one of `image/png`, `image/jpeg`, `image/webp`, `image/gif`,
+  and MUST agree with the decoded bytes' signature. A mismatch is refused.
+* Caps are refuse-not-truncate, and they run BEFORE the entitlement gate and
+  before any approval is consumed, so an invalid image never burns an approval.
+* Images are **turn-local**. The durable `turn_started` event stores only
+  `{media_type, bytes}` per image, never the base64, so transcripts and SSE
+  replay do not carry megabytes. Prior-turn context is text-only, so a resumed
+  or replayed turn never re-sends image bytes.
+* Oversized requests are refused before the body is parsed, by an ASGI
+  middleware (`MessageBodyLimitMiddleware`), including chunked bodies that
+  declare no Content-Length.
+
+Pinned by `tests/test_contract_freeze.py` (the frozen field set includes
+`images`), `tests/test_image_turns.py` (limits, signatures, the one-of rule,
+the durable descriptor) and `harness/test/converseSdkRunner.test.ts` (the SDK
+content blocks).
 | GET | `/api/usage` | Existing endpoint (`server/routers/usage.py:70–78`): every existing field stays byte-identical; the response gains one **additive** `agent` key per §6.7 (`today`/`total`/`cap` token aggregates, `estimate_basis` with `"self_metered"` as the only Phase-1 value, `updated_at`). |
 | POST | `/internal/agent/gate` | Back-edge only (§18.5). `{tenant_id, session_id, turn_id, action, args}` → `{decision:"allow"\|"deny"\|"awaiting_approval", reason?, confirmation_id?, policy, rung}`. Runs the full gate chain (kill switch → catalog → args schema → entitlement → revalidate → rate limit → policy) and creates the pending-approval record when `awaiting_approval`. |
 | GET | `/api/ops/agent/tenants` | Ops read (per-tenant session/spend view). |
