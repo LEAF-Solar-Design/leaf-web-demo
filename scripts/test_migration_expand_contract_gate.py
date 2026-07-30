@@ -70,6 +70,10 @@ def test_block_comments_are_token_separators_not_glue(tmp_path):
             "DROP/**/TRIGGER trg ON t;",
             "ALTER TYPE e RENAME/**/VALUE 'a' TO 'b';",
             "DROP/* sneaky */TABLE users;",
+            # PostgreSQL block comments NEST — the whole outer comment is one
+            # separator (round 4 finding).
+            "DROP/* outer /* inner */ NOT */TRIGGER trg ON t;",
+            "ALTER TABLE t ALTER/* o /* i */ garbage */c TYPE bigint;",
     ]):
         root = _dir(tmp_path / f"glue{i}", {"0023_x.sql": sql + "\n"})
         violations = gate.check_migrations(root)

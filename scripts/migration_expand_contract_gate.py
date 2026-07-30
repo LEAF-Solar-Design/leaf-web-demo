@@ -93,8 +93,20 @@ def strip_sql_noise(text: str) -> str:
             j = text.find("\n", i)
             i = n if j == -1 else j  # keep the newline
         elif ch == "/" and text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            i = n if j == -1 else j + 2
+            # PostgreSQL block comments NEST (sql-syntax-lexical): closing at
+            # the first */ would leave the outer comment's tail — e.g.
+            # `DROP/* a /* b */ NOT */TRIGGER` — as bogus tokens that break
+            # the DROP...TRIGGER adjacency and evade the detectors. Track
+            # depth so the WHOLE outer comment strips to one separator.
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            i = j
             # A block comment is a TOKEN SEPARATOR in SQL: `DROP/**/TRIGGER`
             # is valid DDL. Removing it without a replacement would glue the
             # tokens into DROPTRIGGER and evade every \b...\s+ pattern.
