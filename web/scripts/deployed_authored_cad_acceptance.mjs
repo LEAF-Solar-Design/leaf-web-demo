@@ -596,10 +596,13 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         mutatingApiRequests.push(`${request.method()} ${url.pathname}`)
       }
     })
-    await page.goto('/try', { waitUntil: 'networkidle', timeout: 120_000 })
-    await page.getByTestId('operator-phase').waitFor({ state: 'visible' })
-    const phase = await page.getByTestId('operator-phase').innerText()
-    if (!phase.includes('Backend ready')) {
+    await page.goto('/try', { waitUntil: 'domcontentloaded', timeout: 120_000 })
+    const operatorPhase = page.getByTestId('operator-phase')
+    try {
+      await operatorPhase
+        .filter({ hasText: 'Backend ready' })
+        .waitFor({ state: 'visible', timeout: 120_000 })
+    } catch {
       throw new AcceptanceError('browser_preflight', `tenant ${tenant.label} is not backend-ready`)
     }
     const command = page.getByRole('textbox', { name: 'Command bar' })
@@ -619,7 +622,17 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         'the browser did not use the exact acceptance drawing id',
       )
     }
-    await page.reload({ waitUntil: 'networkidle', timeout: 120_000 })
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 120_000 })
+    try {
+      await operatorPhase
+        .filter({ hasText: 'Backend ready' })
+        .waitFor({ state: 'visible', timeout: 120_000 })
+    } catch {
+      throw new AcceptanceError(
+        'browser_preflight',
+        `tenant ${tenant.label} is not backend-ready after reload`,
+      )
+    }
     if (await page.locator('.tc-bar-proj').innerText() !== workbenchText) {
       throw new AcceptanceError('browser_preflight', 'the workbench id changed across reload')
     }
