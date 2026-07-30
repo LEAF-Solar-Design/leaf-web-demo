@@ -100,7 +100,7 @@ export function parseSkillName(markdown, label) {
  * int, `1_000` is one thousand, `1:30` is sexagesimal.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?([Tt \t].*)?)$/i;
 
 /**
  * Byte-for-byte the loader's `readInlineScalar`
@@ -156,6 +156,20 @@ export function readInlineScalar(raw) {
 export function readScalar(lines, index, raw) {
   const header = raw.replace(/^[ \t]+|[ \t]+$/g, "");
   if (!/^[>|]/.test(header)) {
+    // A plain or flow scalar can CONTINUE on more-indented lines: YAML folds
+    //     description: first
+    //       second
+    // into "first second", and `description: [` can open a sequence that closes
+    // pages later. Reading only the first line returns "first" or "[" and calls
+    // it exact. Both the continuation lines are consumed (so parsing resumes
+    // where YAML would) and the value is refused (so nothing is guessed at).
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const line = lines[cursor];
+      if (line.trim() === "" || !/^[ \t]/.test(line)) break;
+      cursor += 1;
+    }
+    if (cursor > index + 1) return { value: null, next: cursor };
     return { value: readInlineScalar(header), next: index + 1 };
   }
   const reproducible = /^[>|]-?$/.test(header);

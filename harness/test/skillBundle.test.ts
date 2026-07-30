@@ -508,11 +508,26 @@ describe("frontmatter block scalars", () => {
                          ".5", "+.inf", "0b1010", "1_000", "1:30", "12:34:56", "Null", "TRUE"]) {
       expect(fm("name: skill-a", `description: ${value}`), value).toBeNull();
     }
-    // ...but a date is a STRING under the schema these readers use, and prose
-    // that merely contains a colon or a dash is obviously fine.
-    expect(fm("name: skill-a", "description: 2026-07-29")?.description).toBe("2026-07-29");
+    // A bare date is a TIMESTAMP to js-yaml's default schema, not the text.
+    expect(fm("name: skill-a", "description: 2026-07-29")).toBeNull();
+    expect(fm("name: skill-a", "description: 2026-07-29T10:30:00Z")).toBeNull();
+    // ...but prose that merely contains a colon or a comma is obviously fine.
     expect(fm("name: skill-a", "description: Use when: drafting, editing")?.description)
       .toBe("Use when: drafting, editing");
+  });
+
+  it("REFUSES a plain scalar that continues on the next line", () => {
+    // YAML folds a more-indented continuation into the value, so
+    //   description: first
+    //     second
+    // is "first second". Reading only the first line returns "first" and calls
+    // it exact. A flow sequence opened with `[` and closed later is the same
+    // problem wearing a different hat.
+    expect(fm("name: skill-a", "description: first", "  second")).toBeNull();
+    expect(fm("name: skill-a", "description: [", "  a, b]")).toBeNull();
+    // ...and the continuation is CONSUMED, so a key below it is still inspected.
+    expect(fm("name: skill-a", "description: real prose", "some-key: first", "  continued",
+              "context: fork")).toBeNull();
   });
 
   it("uses YAML whitespace, not JavaScript whitespace, to find a comment", () => {

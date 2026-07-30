@@ -93,7 +93,7 @@ function plainTopLevelKey(line: string): string | null {
  * cheap and loud; under-refusing is a silent rewrite.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?([Tt \t].*)?)$/i;
 
 /**
  * Decode a one-line YAML scalar, or return null meaning "present, but we will
@@ -151,6 +151,20 @@ function readInlineScalar(raw: string): string | null {
 function readScalar(lines: string[], index: number, raw: string): { value: string | null; next: number } {
   const header = raw.replace(/^[ \t]+|[ \t]+$/g, "");
   if (!/^[>|]/.test(header)) {
+    // A plain or flow scalar can CONTINUE on more-indented lines: YAML folds
+    //     description: first
+    //       second
+    // into "first second", and `description: [` can open a sequence that closes
+    // pages later. Reading only the first line returns "first" or "[" and calls
+    // it exact. Both the continuation lines are consumed (so parsing resumes
+    // where YAML would) and the value is refused (so nothing is guessed at).
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const line = lines[cursor]!;
+      if (line.trim() === "" || !/^[ \t]/.test(line)) break;
+      cursor += 1;
+    }
+    if (cursor > index + 1) return { value: null, next: cursor };
     return { value: readInlineScalar(header), next: index + 1 };
   }
   // ONLY the four plain headers, and then only a block whose text we can
@@ -431,13 +445,14 @@ function stripFrontmatter(source: string): string {
 /**
  * One snapshot per configuration, not one per turn.
  *
- * Both runners call this on EVERY turn. Without the memo each turn re-walked
+ * ConverseSdkRunner calls this on EVERY turn. Without the memo each turn re-walked
  * and re-hashed the whole bundle and left another temp copy behind: an
  * unbounded disk and inode leak on a long-lived server, paid for with a full
  * bundle hash on the hot path. The result is a pure function of
  * (path, tier, pin) — the pin names one exact artifact — so it is computed
- * once. Refusals are memoised too, which also keeps the refusal from
- * reprinting on every turn.
+ * once. Refusals are NOT memoised: an operator who repairs a bundle in place
+ * must not have to restart the process before it is picked up. The refusal
+ * log is deduplicated instead, so re-checking every turn stays quiet.
  */
 const MAX_CACHED_MOUNTS = 4;
 const mounts = new Map<string, SkillBundleAttachment>();
@@ -459,7 +474,7 @@ const warned = new Set<string>();
  * written.
  */
 const CONTROL_CHARACTERS =
-  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 const MAX_WARNINGS = 32;
 
