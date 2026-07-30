@@ -76,6 +76,29 @@ Flag-gated skeleton, **dark by default**. Server half: `platform/billing.py` +
 | Idempotency | The write sets an absolute tier; replaying an event is a no-op (`applied:false` in the response). No event-id dedup table yet (§6). |
 | Response | `{org_id, previous_tier, tier, applied, stripe_subscription_id, stripe_event_id}` — the Stripe ids are **audit echoes for the caller's log line only**, deliberately not persisted (§6). |
 
+### 3.1 Org discovery: `POST /api/billing/org-resolve`
+
+The tier-sync path param is a **platform org UUID**, but leaf_website's org
+ids are Prisma CUIDs. This endpoint is the durable bridge (the §6 follow-up,
+built 2026-07-30): it resolves a verified external identity — the org OWNER's
+Auth0 `sub`, which the Stripe webhook already has in hand — to the platform
+org UUID through the `identity_bindings` row that org bootstrap created.
+
+| Property | Contract |
+|---|---|
+| Gates | Identical to tier-sync: `LEAF_BILLING_SYNC_LIVE` + secret, else **503**; wrong/missing `X-Billing-Sync-Secret` → **403** (constant-time). |
+| Body | `{external_authority: "auth0", external_subject: "<sub>"}` — POSTed in the body, never the URL, so the subject stays out of access logs. |
+| Semantics | Read-only lookup of `identity_bindings` → `{org_id}`, resolvable only for an **active, `role='owner'` binding to an active org**. Everything else → **404**: unknown identity (an account predating platform bootstrap), a non-owner binding (member/reviewer identities must not enumerate), and a non-active org (offboarding marks the org before revoking bindings; a UUID cached in that window would be durably persisted while tier-sync forever answers 409). |
+| Caller cadence | REQUIRED CONSUMER BEHAVIOR (implemented by leaf_website PR #172, verified by its `scripts/billing/tier-sync-e2e.ts`): call ONCE per org — the first subscription event with no stored linkage — persist the UUID in the caller's own DB (`Organization.platformOrgId`), never ask again; keep `LEAF_BILLING_SYNC_ORG_MAP` as an explicit operator override with top precedence. |
+
+Dev posture: `POST /api/orgs` accepts an optional `external_subject` when auth
+is off, bootstrapping org + binding in one call so leaf_website's e2e harness
+can prove bootstrap → resolve → tier-sync without Auth0. With `LEAF_AUTH_LIVE=1`
+that field is refused (**422, after successful authentication** — an
+unauthenticated call is already 401 at the gate, so the refusal is what a
+verified-but-miswired caller sees): a client-supplied identity is never
+trusted.
+
 ## 4. Lapse and grace
 
 * Hard lapse: `subscription_status` ∈ `{canceled, unpaid, incomplete_expired}`
@@ -115,8 +138,17 @@ Nothing below is chippable; each step is an operator action:
   idempotency dedup) is a follow-up schema decision.
 * **Metering** — usage-based billing (`/api/usage` `agent` aggregates) is out
   of scope for the tier rail entirely.
-* **Org discovery for the webhook** — leaf_website must map a Stripe customer
-  to a platform `org_id`; today that linkage lives in `app_metadata.leaf`
-  (`org_id` at signup). If an account predates org bootstrap, the webhook has
-  no org to sync — acceptable: the login leg still corrects the claim, and the
-  stored leg catches up on the next event after bootstrap.
+* **Org discovery for the webhook** — BUILT (2026-07-30), see §3.1: this repo
+  serves `POST /api/billing/org-resolve`; the companion consumer half
+  (leaf_website PR #172) persists the result as `Organization.platformOrgId`,
+  keyed on the org owner's Auth0 `sub`. The location this section originally named —
+  `app_metadata.leaf.org_id` — was REJECTED: Auth0's PATCH merges only
+  root-level `app_metadata` keys, and leaf_website's webhook replaces the
+  whole `leaf` object on every subscription event, so a UUID stored there is
+  erased by the very webhook that needs it; and writing it would require the
+  platform to hold Auth0 Management API write credentials it deliberately does
+  not have. (`app_metadata.leaf.organization_id` remains the WEBSITE org CUID,
+  unrelated to the platform UUID.) If an account predates org bootstrap,
+  resolve answers 404 and the webhook skips — acceptable: the login leg still
+  corrects the claim, and the stored leg catches up on the next event after
+  bootstrap.

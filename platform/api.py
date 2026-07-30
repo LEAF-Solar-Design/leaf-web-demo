@@ -41,6 +41,12 @@ def upload_import_mutations_enabled() -> bool:
 class CreateOrgBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     tier: Optional[str] = None
+    # DEV SEAM (contract/BILLING.md §6): with auth OFF, a caller may bootstrap
+    # the org WITH its identity binding so cross-repo harnesses can exercise the
+    # billing org-resolve path. With LEAF_AUTH_LIVE=1 a client-supplied identity
+    # is never trusted — the route 422s if these are present.
+    external_subject: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    external_authority: str = Field(default="auth0", min_length=1, max_length=100)
 
 
 class CreateProjectBody(BaseModel):
@@ -132,6 +138,13 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
     if body.tier is not None and body.tier not in TIERS:
         raise HTTPException(status_code=422, detail=f"tier must be one of {list(TIERS)}")
     if _auth is not None:
+        # Live auth: identity comes from the VERIFIED token only. A body-supplied
+        # subject is refused loudly rather than silently ignored, so a miswired
+        # caller learns immediately that client identity hints carry no weight.
+        if body.external_subject is not None:
+            raise HTTPException(status_code=422,
+                                detail="external_subject is a dev-posture seam; "
+                                       "live auth binds the verified token subject")
         subject = _auth.get("sub")
         if not subject:
             raise HTTPException(status_code=403, detail="verified token has no external subject")
@@ -141,6 +154,16 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         try:
             org = store.create_org_with_identity(
                 body.name, "auth0", str(subject),
+                tier=body.tier or "hosted_starter",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+    elif body.external_subject is not None:
+        # DEV SEAM: bootstrap org + binding in one call, mirroring the live-auth
+        # shape, so the billing org-resolve path is exercisable without Auth0.
+        try:
+            org = store.create_org_with_identity(
+                body.name, body.external_authority, body.external_subject,
                 tier=body.tier or "hosted_starter",
             )
         except ValueError as exc:
@@ -570,17 +593,17 @@ class BillingTierSyncBody(BaseModel):
     stripe_event_id: Optional[str] = None
 
 
-@router.post("/orgs/{org_id}/billing/tier-sync")
-def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
-                      x_billing_sync_secret: str | None = Header(default=None)):
-    """Update the org's STORED tier from subscription facts (idempotent).
+class BillingOrgResolveBody(BaseModel):
+    """A verified external identity as leaf_website's Stripe webhook knows it
+    (the org OWNER's Auth0 ``sub``). POSTed in the body, never in the URL, so
+    the subject stays out of access logs."""
+    external_authority: str = Field(default="auth0", min_length=1, max_length=100)
+    external_subject: str = Field(min_length=1, max_length=500)
 
-    Operator-gated and fail-closed at every step: flag off -> 503, secret
-    unconfigured -> 503, wrong secret -> 403 (constant-time compare, F16),
-    unknown org -> 404, non-active org -> 409 (billing must never resurrect
-    an offboarding/deleted org). The derived tier is validated against the
-    frozen claim-mintable subset before the write.
-    """
+
+def _require_billing_sync_caller(x_billing_sync_secret: str | None) -> None:
+    """The billing feed's shared fail-closed gate: flag off -> 503, secret
+    unconfigured -> 503, missing/wrong secret -> 403 (constant-time, F16)."""
     if not billing.sync_enabled():
         raise HTTPException(status_code=503,
                             detail="billing tier sync is not enabled (LEAF_BILLING_SYNC_LIVE)")
@@ -592,6 +615,53 @@ def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
         x_billing_sync_secret.encode("utf-8"), secret.encode("utf-8")
     ):
         raise HTTPException(status_code=403, detail="billing sync secret required")
+
+
+@router.post("/billing/org-resolve")
+def billing_org_resolve(body: BillingOrgResolveBody,
+                        x_billing_sync_secret: str | None = Header(default=None)):
+    """Resolve a verified external identity to its platform org UUID
+    (contract/BILLING.md §6 durable linkage).
+
+    leaf_website's Stripe webhook calls this ONCE per org — on the first
+    subscription event with no stored linkage — and persists the returned
+    UUID in its own DB (Organization.platformOrgId). Same trusted-internal-
+    caller model and fail-closed gates as tier-sync; read-only (resolves a
+    binding the platform already owns, writes nothing).
+
+    404 in every unresolvable case — unknown identity (an account predating
+    platform bootstrap), a non-OWNER binding (the contract keys the linkage
+    on the org owner; member/reviewer identities must not enumerate), and a
+    non-active org (offboarding marks the org BEFORE revoking its bindings,
+    and a caller caching a UUID in that window would durably persist a
+    linkage tier-sync forever answers 409 for).
+    """
+    _require_billing_sync_caller(x_billing_sync_secret)
+    binding = store.resolve_active_identity_binding(
+        body.external_authority, body.external_subject)
+    if binding is None:
+        raise HTTPException(status_code=404, detail="no platform org for this identity")
+    role = store.active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role != "owner":
+        raise HTTPException(status_code=404, detail="no platform org for this identity")
+    org = store.get_org(binding.platform_tenant_id)
+    if org is None or org.status != "active":
+        raise HTTPException(status_code=404, detail="no platform org for this identity")
+    return {"org_id": str(org.org_id)}
+
+
+@router.post("/orgs/{org_id}/billing/tier-sync")
+def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
+                      x_billing_sync_secret: str | None = Header(default=None)):
+    """Update the org's STORED tier from subscription facts (idempotent).
+
+    Operator-gated and fail-closed at every step: flag off -> 503, secret
+    unconfigured -> 503, wrong secret -> 403 (constant-time compare, F16),
+    unknown org -> 404, non-active org -> 409 (billing must never resurrect
+    an offboarding/deleted org). The derived tier is validated against the
+    frozen claim-mintable subset before the write.
+    """
+    _require_billing_sync_caller(x_billing_sync_secret)
 
     org = store.get_org(org_id)
     if org is None:

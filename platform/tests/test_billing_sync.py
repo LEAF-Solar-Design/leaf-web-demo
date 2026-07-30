@@ -136,3 +136,132 @@ def test_set_org_tier_refuses_non_active_rows(make_org):
                     {"o": org.org_id})
     assert store.set_org_tier(org.org_id, "hosted_pro") is None
     assert store.get_org(org.org_id).tier == "hosted_starter"
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/billing/org-resolve — durable linkage (contract/BILLING.md §6)
+# --------------------------------------------------------------------------- #
+def _resolve(client, subject, secret=SECRET, header=True, authority="auth0"):
+    headers = {"X-Billing-Sync-Secret": secret} if header else {}
+    return client.post("/api/billing/org-resolve",
+                       json={"external_authority": authority, "external_subject": subject},
+                       headers=headers)
+
+
+def _unique_subject():
+    return f"auth0|resolve-test-{uuid.uuid4().hex}"
+
+
+def test_resolve_flag_off_is_503(client, monkeypatch):
+    monkeypatch.delenv(TIER_SYNC_FLAG_ENV, raising=False)
+    monkeypatch.setenv(TIER_SYNC_SECRET_ENV, SECRET)
+    assert _resolve(client, _unique_subject()).status_code == 503
+
+
+def test_resolve_no_secret_is_503(client, monkeypatch):
+    monkeypatch.setenv(TIER_SYNC_FLAG_ENV, "1")
+    monkeypatch.delenv(TIER_SYNC_SECRET_ENV, raising=False)
+    assert _resolve(client, _unique_subject()).status_code == 503
+
+
+def test_resolve_missing_header_is_403(client, live_sync):
+    assert _resolve(client, _unique_subject(), header=False).status_code == 403
+
+
+def test_resolve_wrong_secret_is_403(client, live_sync):
+    assert _resolve(client, _unique_subject(), secret="not-the-secret").status_code == 403
+
+
+def test_resolve_unknown_identity_is_404(client, live_sync):
+    r = _resolve(client, _unique_subject())
+    assert r.status_code == 404
+
+
+def test_resolve_returns_bound_org(client, live_sync):
+    subject = _unique_subject()
+    org = store.create_org_with_identity("Resolve Test Org", "auth0", subject)
+    r = _resolve(client, subject)
+    assert r.status_code == 200
+    assert r.json() == {"org_id": str(org.org_id)}
+
+
+def test_resolve_authority_mismatch_is_404(client, live_sync):
+    subject = _unique_subject()
+    store.create_org_with_identity("Authority Test Org", "auth0", subject)
+    assert _resolve(client, subject, authority="google").status_code == 404
+
+
+def test_resolve_non_active_org_is_404(client, live_sync):
+    """Offboarding marks the org before revoking bindings; resolving in that
+    window must NOT hand out a UUID the caller would durably cache while
+    tier-sync forever answers 409 for it."""
+    subject = _unique_subject()
+    org = store.create_org_with_identity("Offboarding Org", "auth0", subject)
+    assert _resolve(client, subject).status_code == 200  # sanity: resolvable while active
+    with cursor() as cur:
+        cur.execute("UPDATE orgs SET status = 'offboarding' WHERE org_id = %(o)s",
+                    {"o": org.org_id})
+    assert _resolve(client, subject).status_code == 404
+
+
+def test_resolve_non_owner_binding_is_404(client, make_org, live_sync):
+    """The contract keys the linkage on the org OWNER's identity; an editor/
+    reviewer/read_only binding must not resolve (enumeration surface)."""
+    org = make_org(name="Role Test Org")
+    subject = _unique_subject()
+    store.create_identity_binding(org.org_id, "auth0", subject, role="editor")
+    assert _resolve(client, subject).status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# dev bootstrap seam: POST /api/orgs with external_subject binds the identity,
+# making the full webhook path (bootstrap -> resolve -> tier-sync) provable
+# without Auth0 — the shape leaf_website's e2e harness drives.
+# --------------------------------------------------------------------------- #
+def test_dev_seam_bootstrap_resolves_and_syncs(client, live_sync):
+    subject = _unique_subject()
+    created = client.post("/api/orgs", json={"name": "Dev Seam Org",
+                                             "external_subject": subject})
+    assert created.status_code == 200
+    org_id = created.json()["org"]["org_id"]
+
+    resolved = _resolve(client, subject)
+    assert resolved.status_code == 200
+    assert resolved.json()["org_id"] == org_id
+
+    synced = _sync(client, org_id, {"plan": "pro", "subscription_active": True,
+                                    "subscription_status": "active"})
+    assert synced.status_code == 200
+    assert synced.json()["tier"] == "hosted_pro"
+    assert store.get_org(uuid.UUID(org_id)).tier == "hosted_pro"
+
+
+def test_dev_seam_duplicate_subject_is_409(client, live_sync):
+    subject = _unique_subject()
+    first = client.post("/api/orgs", json={"name": "Dup A", "external_subject": subject})
+    assert first.status_code == 200
+    again = client.post("/api/orgs", json={"name": "Dup B", "external_subject": subject})
+    assert again.status_code == 409
+
+
+def test_dev_seam_refused_422_under_live_auth_with_valid_token(client, live_sync, monkeypatch):
+    """The 422 refusal fires AFTER successful authentication (unauthenticated
+    calls are already 401 at the gate) and leaves no write behind — neither
+    the verified subject nor the body-supplied one gains a binding."""
+    t1b = pytest.importorskip("test_wave_hardening_1b")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_AUTH0_ISSUER", t1b.ISS)
+    monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", t1b.AUD)
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", t1b.NS)
+    monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(t1b._JWKS_FILE))
+    verified_subject = _unique_subject()
+    body_subject = _unique_subject()
+    r = client.post(
+        "/api/orgs",
+        json={"name": "Live Seam Refusal", "external_subject": body_subject},
+        headers={"Authorization": "Bearer " + t1b._mint(
+            "unused", with_org=False, subject=verified_subject)},
+    )
+    assert r.status_code == 422, r.text
+    assert store.resolve_active_identity_binding("auth0", verified_subject) is None
+    assert store.resolve_active_identity_binding("auth0", body_subject) is None
