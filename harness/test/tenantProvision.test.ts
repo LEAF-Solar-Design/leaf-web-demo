@@ -117,6 +117,79 @@ describe("TenantRepoProviderImpl auto-provision", () => {
     expect(git(dir, ["log", "--oneline"]).split("\n").filter(Boolean)).toHaveLength(1);
   });
 
+  it("repairs an app-created empty bare repo without origin and preserves private refs", async () => {
+    const dir = join(base, "missing-origin");
+    const bareBase = join(base, "tenant-git");
+    const bareDir = join(bareBase, "missing-origin.git");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(bareBase, { recursive: true });
+    writeFileSync(join(dir, "registry.json"), JSON.stringify({ tools: [] }), "utf8");
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(dir, [
+      "-c", "user.name=Leaf Harness",
+      "-c", "user.email=harness@leaf.local",
+      "add", "registry.json",
+    ]);
+    git(dir, [
+      "-c", "user.name=Leaf Harness",
+      "-c", "user.email=harness@leaf.local",
+      "commit", "-q", "-m", "seed",
+    ]);
+
+    git(bareBase, ["init", "-q", "--bare", bareDir]);
+    git(bareDir, ["fetch", dir, "main:refs/leaf/changes/preserved"]);
+    const privateRef = git(bareDir, ["rev-parse", "refs/leaf/changes/preserved"]).trim();
+    expect(git(bareDir, ["remote"]).trim()).toBe("");
+
+    const bare = await providerWithBareBase(base, bareBase).bare("missing-origin");
+
+    expect(git(bare.dir, ["remote", "get-url", "origin"]).trim()).toBe(dir);
+    expect(git(bare.dir, ["show-ref", "--verify", "refs/heads/main"]).trim())
+      .toContain("refs/heads/main");
+    expect(git(bare.dir, ["symbolic-ref", "HEAD"]).trim()).toBe("refs/heads/main");
+    expect(git(bare.dir, ["rev-parse", "refs/leaf/changes/preserved"]).trim()).toBe(privateRef);
+  });
+
+  it("refuses to rewrite an existing bare origin for another repository", async () => {
+    const bareBase = join(base, "tenant-git");
+    const bareDir = join(bareBase, "wrong-origin.git");
+    const wrongOrigin = join(base, "not-the-tenant-repo");
+    mkdirSync(bareBase, { recursive: true });
+    git(bareBase, ["init", "-q", "--bare", bareDir]);
+    git(bareDir, ["remote", "add", "origin", wrongOrigin]);
+
+    await expect(providerWithBareBase(base, bareBase).bare("wrong-origin"))
+      .rejects.toThrow("existing bare origin does not match the canonical tenant repository");
+    expect(git(bareDir, ["remote", "get-url", "origin"]).trim()).toBe(wrongOrigin);
+    expect(() => git(bareDir, ["show-ref", "--verify", "refs/heads/main"])).toThrow();
+    expect(existsSync(join(base, "wrong-origin"))).toBe(false);
+  });
+
+  it("does not rewind canonical bare main from the seed worktree on reuse", async () => {
+    const bareBase = join(base, "tenant-git");
+    const p = providerWithBareBase(base, bareBase);
+    const bare = await p.bare("published-main");
+    const sourceDir = join(base, "published-main");
+    const originalMain = git(bare.dir, ["rev-parse", "refs/heads/main"]).trim();
+
+    writeFileSync(join(sourceDir, "published.txt"), "published\n", "utf8");
+    git(sourceDir, ["add", "published.txt"]);
+    git(sourceDir, [
+      "-c", "user.name=Leaf Harness",
+      "-c", "user.email=harness@leaf.local",
+      "commit", "-q", "-m", "published",
+    ]);
+    const published = git(sourceDir, ["rev-parse", "HEAD"]).trim();
+    git(bare.dir, ["fetch", sourceDir, "main:refs/leaf/changes/published"]);
+    git(bare.dir, ["update-ref", "refs/heads/main", published, originalMain]);
+    git(sourceDir, ["reset", "--hard", originalMain]);
+
+    const reopened = await p.bare("published-main");
+
+    expect(git(reopened.dir, ["rev-parse", "refs/heads/main"]).trim()).toBe(published);
+    expect(git(sourceDir, ["rev-parse", "refs/heads/main"]).trim()).toBe(originalMain);
+  });
+
   it("opens a bare clone from an existing foreign-owned tenant repo", async () => {
     const dir = join(base, "partial");
     mkdirSync(dir, { recursive: true });

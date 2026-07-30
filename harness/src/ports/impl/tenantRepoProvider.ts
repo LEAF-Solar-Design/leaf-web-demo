@@ -401,6 +401,49 @@ function repoHead(dir: string): string | null {
   }
 }
 
+function bareRepoHasMain(dir: string): boolean {
+  try {
+    return /^[0-9a-f]{40}$/i.test(
+      git(dir, ["rev-parse", "--verify", "refs/heads/main"]).trim(),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bind one existing durable bare repo to its canonical tenant worktree.
+ *
+ * The app's older bootstrap path could leave `HEAD` in the shared bare
+ * directory without configuring `origin`. Treating `HEAD` alone as a complete
+ * clone made the first harness repair fail at `git fetch origin`. Adding the
+ * missing origin preserves every private change ref already present. An
+ * existing different origin is refused rather than silently rewritten.
+ */
+function ensureBareOrigin(dir: string, sourceRef: string): void {
+  const readRemotes = () => git(dir, ["remote"])
+      .split(/\r?\n/)
+      .map((remote) => remote.trim())
+      .filter(Boolean);
+  const remotes = readRemotes();
+  if (!remotes.includes("origin")) {
+    try {
+      git(dir, ["remote", "add", "origin", sourceRef]);
+    } catch {
+      // A concurrent first request may have added the same remote while Git
+      // held config.lock. Re-read below and accept only the canonical value.
+    }
+  }
+  const origin = git(dir, ["remote", "get-url", "origin"]).trim();
+  const canonical = (value: string) => {
+    const absolute = resolve(dir, value);
+    return existsSync(absolute) ? realpathSync(absolute) : absolute;
+  };
+  if (canonical(origin) !== canonical(sourceRef)) {
+    throw new Error("existing bare origin does not match the canonical tenant repository");
+  }
+}
+
 function resetWorkingTree(dir: string): void {
   git(dir, ["reset", "--hard", "HEAD"]);
   git(dir, ["clean", "-fd"]);
@@ -597,16 +640,27 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   async bare(tenantId: string): Promise<TenantBareRepo> {
     const ref = await this.opts.locator.repoRef(tenantId);
     if (existsSync(ref)) trustSharedRepo(ref);
+    // Refuse a stale or cross-tenant durable origin before auto-provisioning can
+    // mutate the working repository. A missing origin is safe to bind now; the
+    // fetch happens only after provisioning creates the source main branch.
+    const durableBare = this.opts.bareBase && /^[A-Za-z0-9._-]+$/.test(tenantId)
+      ? join(this.opts.bareBase, `${tenantId}.git`)
+      : undefined;
+    if (durableBare && existsSync(join(durableBare, "HEAD"))) {
+      trustSharedRepo(durableBare);
+      ensureBareOrigin(durableBare, ref);
+    }
     if (this.opts.inPlace && this.opts.autoProvisionFrom && !repoHasMain(ref)) {
       this.provision(ref);
     }
     const existing = this.bareRepos.get(tenantId);
     if (existing) {
-      // Refresh branch heads without ever reusing a mutable checkout. Private
-      // refs remain local so a later publish sees the exact staged receipt.
+      // Once main exists, the durable bare repository is the lifecycle
+      // authority. A force-fetch from the seed worktree here would rewind a
+      // previously published main on the next stage request.
       trustSharedRepo(existing.dir);
       if (existing.sourceRef && existsSync(existing.sourceRef)) trustSharedRepo(existing.sourceRef);
-      git(existing.dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+      if (existing.sourceRef) ensureBareOrigin(existing.dir, existing.sourceRef);
       return existing;
     }
     if (!/^[A-Za-z0-9._-]+$/.test(tenantId)) {
@@ -621,7 +675,13 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       if (!alreadyExists) {
         git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
       } else {
-        git(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+        ensureBareOrigin(dir, ref);
+        // Fetch the source only to bootstrap a missing main. After that,
+        // publishToMain owns the canonical branch and private refs remain local.
+        if (!bareRepoHasMain(dir)) {
+          git(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+        }
+        git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
       }
     } else {
       const base = this.opts.workBase ?? tmpdir();
