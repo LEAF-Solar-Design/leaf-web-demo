@@ -25,8 +25,13 @@ from routers import author as author_router
 
 
 def _status_token(detail: str) -> str | None:
-    """Return the exact value recorded for `status=`, so `status=5030` cannot pass."""
-    found = re.search(r"status=(\S+)", detail)
+    """Return the exact value recorded for the `status` key.
+
+    Anchored on a word boundary at both ends: an unanchored search accepted
+    `status=5030` for 503, and a leading-boundary-only one accepted `xstatus=503`,
+    so renaming the field while keeping the suffix would have survived.
+    """
+    found = re.search(r"(?:^|\s)status=(\S+)", detail)
     return found.group(1) if found else None
 
 
@@ -431,6 +436,101 @@ def test_a_detail_free_503_does_not_warn():
     assert all(r.levelno < _logging.WARNING for r in records)
 
 
+
+
+def _levels_for(exc, **kwargs):
+    """Return the levels logged for one refusal, isolated from caplog's root setup."""
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture()
+    author_router._LOG.addHandler(handler)
+    previous = author_router._LOG.level
+    author_router._LOG.setLevel(logging.DEBUG)
+    try:
+        author_router._customization_error(exc, **kwargs)
+    finally:
+        author_router._LOG.removeHandler(handler)
+        author_router._LOG.setLevel(previous)
+    assert records, "every refusal must be recorded at some level"
+    return [r.levelno for r in records]
+
+
+@pytest.mark.parametrize("code", [
+    "invalid_stage_request", "independent_approval_pending", "tenant_role_denied",
+    "publication_request_not_available", "customization_rollback_disabled",
+    "stage_not_available", "builder_entitlement_missing",
+])
+def test_ordinary_request_outcomes_stay_quiet(code):
+    """A caller polling, or sending an unsupported mode, is not an operator event."""
+    levels = _levels_for(CustomizationServiceError(code, 422))
+    assert max(levels) < logging.WARNING, f"{code} should be quiet"
+
+
+def test_an_integrity_failure_answering_4xx_still_warns():
+    """Guards the classification against collapsing into `all 4xx are quiet`.
+
+    A denied symlink or a changed frozen path is a trusted-input integrity failure.
+    It answers 4xx but an operator must see it.
+    """
+    for code in ("staged_symlink_denied", "frozen_path_changed",
+                 "catalog_digest_mismatch", "publish_not_authorized"):
+        levels = _levels_for(CustomizationServiceError(code, 409))
+        assert max(levels) >= logging.WARNING, f"{code} must stay visible"
+
+
+def test_the_dual_use_codes_split_on_status():
+    """One code, two meanings: the caller's 4xx is quiet, the deployment's 5xx warns."""
+    assert max(_levels_for(
+        CustomizationServiceError("tenant_identity_binding_unavailable", 403)
+    )) < logging.WARNING
+    assert max(_levels_for(
+        CustomizationServiceError("tenant_identity_binding_unavailable", 503,
+                                  "binding_resolution_failed: Error")
+    )) >= logging.WARNING
+    assert max(_levels_for(
+        CustomizationServiceError("invalid_staged_receipt", 422)
+    )) < logging.WARNING
+    assert max(_levels_for(
+        CustomizationServiceError("invalid_staged_receipt", 502)
+    )) >= logging.WARNING
+
+
+def test_an_unmarked_authority_code_would_warn():
+    """The classification's baseline: an unknown code is NOT quiet by default."""
+    levels = _levels_for(CustomizationServiceError("stage_role_denied", 403))
+    assert max(levels) >= logging.WARNING
+
+
+def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch):
+    """AuthorityError reason codes are generated per field, so the set is open.
+
+    Classifying them by name would drift, so the ROUTES mark the conversion. Testing
+    the funnel directly would not notice `from_authority=True` being dropped at the
+    eight call sites, so this drives a real request.
+    """
+    from customization_authority import AuthorityError
+
+    def _raise():
+        raise AuthorityError("stage_role_denied")
+
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    client = _tenant_route_client(monkeypatch, _raise)
+    response = client.post(
+        "/api/author/stage",
+        json={"description": "count panels", "mode": "build", "idempotency_key": "k"},
+    )
+    assert response.status_code == 403
+    assert response.json()["reason_code"] == "stage_role_denied"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        "an authority denial is a per-caller outcome, not an operator event"
+    )
+    assert [r for r in caplog.records if r.levelno == logging.DEBUG]
+
+
 def test_platform_store_failure_names_itself(monkeypatch):
     """`tenant_identity_binding_unavailable` had two detail-free 503 branches."""
     import platform_link
@@ -485,6 +585,8 @@ def test_harness_stage_failure_records_the_real_status(monkeypatch):
     assert "harness_stage_failed" in caught.value.detail
     assert _status_token(caught.value.detail) == "502"
     assert "HTTPError" in caught.value.detail
+    # `from exc` must survive: the chain is what a traceback-free log relies on.
+    assert isinstance(caught.value.__cause__, requests.HTTPError)
 
 
 def test_harness_publish_failure_records_the_real_status(monkeypatch):
@@ -504,6 +606,7 @@ def test_harness_publish_failure_records_the_real_status(monkeypatch):
     assert caught.value.code == "customization_publish_incomplete"
     assert "harness_publish_failed" in caught.value.detail
     assert _status_token(caught.value.detail) == "504"
+    assert isinstance(caught.value.__cause__, requests.HTTPError)
 
 
 def test_an_operator_misconfiguration_still_warns(caplog):
@@ -547,6 +650,44 @@ def test_the_legacy_author_path_does_not_emit_exception_text(caplog, capsys, mon
         [r.getMessage() for r in caplog.records] + [captured.out, captured.err]
     )
     # Non-vacuous: the fallback must have said something, or this proves nothing.
-    assert "author_harness_unreachable" in emitted or "author_harness_error" in emitted
+    assert "author_harness_unreachable" in emitted
+    assert "hunter2-should-never-be-logged" not in emitted
+    assert SENTINEL not in emitted
+
+
+def test_the_legacy_response_catch_also_hides_exception_text(caplog, capsys, monkeypatch):
+    """The SECOND fallback, which the transport stub never reached.
+
+    `requests.post` must SUCCEED and the failure happen while processing the
+    response, or `author.py`'s response-processing catch stays uncovered and
+    restoring its raw print goes unnoticed.
+    """
+    import requests
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            # Must be ValueError: production guards only that, so anything else
+            # escapes the function before the response catch is reached.
+            raise ValueError("not json")
+
+        def raise_for_status(self):
+            raise RuntimeError(SENTINEL)
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Response())
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    try:
+        author_router._legacy_author(
+            author_router.AuthorRequest(description="count panels", mode="build"), TENANT
+        )
+    except Exception:
+        pass
+    captured = capsys.readouterr()
+    emitted = "\n".join(
+        [r.getMessage() for r in caplog.records] + [captured.out, captured.err]
+    )
+    assert "author_harness_error" in emitted, "the response catch must be reached"
     assert "hunter2-should-never-be-logged" not in emitted
     assert SENTINEL not in emitted
