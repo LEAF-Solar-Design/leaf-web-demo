@@ -88,6 +88,114 @@ def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
     assert env["error"]["retryable"] is True
 
 
+def test_staged_source_is_hashed_not_recorded_in_request_fingerprint():
+    source_a = "def run(intake, params):\n    return ({'value': 'secret-a'}, None)\n"
+    base = dict(
+        tenant_id="tenant-a",
+        tool={"name": "candidate", "entry": "tools/candidate/tool.py"},
+        params={},
+        aps_live=False,
+    )
+    first = broker._broker_request_fingerprint(
+        broker.BrokerRunRequest(**base, test_source=source_a))
+    second = broker._broker_request_fingerprint(
+        broker.BrokerRunRequest(**base, test_source=source_a.replace("secret-a", "secret-b")))
+
+    assert first != second
+    assert "secret-a" not in first
+
+
+def test_ordinary_request_fingerprint_remains_backward_compatible():
+    req = broker.BrokerRunRequest(
+        tenant_id="tenant-a",
+        tool={"name": "ordinary", "params_schema": {"type": "object"}},
+        params={"x": 1},
+        dwg="rooftop_demo",
+        aps_live=False,
+    )
+    old_canonical = json.dumps({
+        "tenant_id": req.tenant_id,
+        "tool": req.tool,
+        "params": req.params,
+        "dwg": req.dwg,
+        "aps_live": False,
+        "dwg_version": None,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    expected = broker.hashlib.sha256(old_canonical.encode("utf-8")).hexdigest()
+
+    assert broker._broker_request_fingerprint(req) == expected
+
+
+def test_broker_refuses_staged_source_on_live_aps_before_runner(monkeypatch):
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    monkeypatch.setattr(
+        broker, "run_tool_dynamic",
+        lambda *args, **kwargs: pytest.fail("live staged source reached the runner"),
+    )
+    tool = {
+        "name": "candidate",
+        "entry": "tools/candidate/tool.py",
+        "params_schema": {"type": "object"},
+    }
+    env, status = broker._execute(
+        broker.BrokerRunRequest(
+            tenant_id="tenant-a", tool=tool, params={}, aps_live=True,
+            test_source="def run(intake, params):\n    return ({}, None)\n",
+        ),
+        tool,
+        "candidate",
+        0.0,
+        {},
+    )
+
+    assert status == 400
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    tool = {
+        "name": "candidate-writer",
+        "version": "1.0.0",
+        "entry": "tools/candidate-writer/tool.py",
+        "capabilities": ["drawing.write"],
+        "params_schema": {"type": "object"},
+    }
+    source = (
+        "def run(intake, params):\n"
+        "    target = intake['polylines'][0]\n"
+        "    return ({'mutations': {'transforms': [{\n"
+        "        'handle': target['handle'], 'dx': 4, 'dy': 2, 'rotation_deg': 0\n"
+        "    }]}}, None)\n"
+    )
+
+    env, status = broker._execute(
+        broker.BrokerRunRequest(
+            tenant_id="tenant-a", tool=tool,
+            params={"drawing_id": "staged-safety", "dry_run": False},
+            aps_live=False, test_source=source,
+        ),
+        tool,
+        "candidate_writer",
+        0.0,
+        {},
+    )
+
+    assert status == 200
+    assert env["result"]["dry_run"] is True
+    assert "new_version" not in env["result"]
+    backend = broker.write_loop.default_backend(aps_live=False)
+    version, _ = broker.write_loop.read_intake(
+        backend, "tenant-a", "staged-safety", "head")
+    assert version == 1
+
+
 def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_path):
     from contextlib import contextmanager
 

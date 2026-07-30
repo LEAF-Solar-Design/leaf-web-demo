@@ -107,7 +107,11 @@ function makeFactory(cfg: { network: SandboxNetworkInfo; stdout: string; exitCod
 
 function makeToolset() {
   const files = new Map<string, string>();
-  const apsTestCalls: { tool: ToolPackage; params?: Record<string, unknown> }[] = [];
+  const apsTestCalls: {
+    tool: ToolPackage;
+    params?: Record<string, unknown>;
+    testSource?: string;
+  }[] = [];
   const fsTenantRepo: FsTenantRepoTool = {
     root: "/mem",
     readFile: (p) => {
@@ -165,8 +169,8 @@ function makeToolset() {
         },
       };
     },
-    apsTestRun: async (tool, params): Promise<ResultEnvelope> => {
-      apsTestCalls.push({ tool, params });
+    apsTestRun: async (tool, params, testSource): Promise<ResultEnvelope> => {
+      apsTestCalls.push({ tool, params, testSource });
       return {
         ok: true,
         tool: tool.name,
@@ -243,6 +247,7 @@ describe("E2bAgentRunner — egress-locked author session (hermetic, fake sandbo
 
     // Test-run went through the (fake) broker exactly once; sandbox was torn down.
     expect(apsTestCalls).toHaveLength(1);
+    expect(apsTestCalls[0]?.testSource).toBe(res.code);
     expect(captured.sandbox?.killed).toBe(true);
 
     // The receipt records a PASSING egress lock.
