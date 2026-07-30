@@ -56,17 +56,16 @@ GRANDFATHERED = frozenset(range(1, 23))
 # CONTRACT-phase statement detectors, applied to comment-and-string-stripped
 # SQL. Each is (label, compiled regex).
 CONTRACT_PATTERNS = [
-    ("DROP TABLE", re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE)),
-    ("DROP COLUMN", re.compile(r"\bDROP\s+COLUMN\b", re.IGNORECASE)),
-    ("DROP INDEX", re.compile(r"\bDROP\s+INDEX\b", re.IGNORECASE)),
-    ("DROP VIEW", re.compile(
-        r"\bDROP\s+(?:MATERIALIZED\s+)?VIEW\b", re.IGNORECASE)),
-    ("DROP SCHEMA", re.compile(r"\bDROP\s+SCHEMA\b", re.IGNORECASE)),
-    ("DROP SEQUENCE", re.compile(r"\bDROP\s+SEQUENCE\b", re.IGNORECASE)),
-    ("DROP TYPE", re.compile(r"\bDROP\s+TYPE\b", re.IGNORECASE)),
-    ("DROP FUNCTION", re.compile(r"\bDROP\s+FUNCTION\b", re.IGNORECASE)),
-    ("DROP CONSTRAINT", re.compile(r"\bDROP\s+CONSTRAINT\b", re.IGNORECASE)),
-    ("RENAME", re.compile(r"\bRENAME\s+(?:TO|COLUMN)\b", re.IGNORECASE)),
+    # CATCH-ALL DROP, not an object-type list. Round-2 review showed a list
+    # (TABLE, COLUMN, VIEW, ...) is a whack-a-mole: DROP TRIGGER, DROP
+    # POLICY, DROP PROCEDURE and future object kinds slipped through. Every
+    # `DROP <thing>` is contract-phase EXCEPT the two loosening ALTER COLUMN
+    # forms (`DROP NOT NULL`, `DROP DEFAULT`), which are expand-safe.
+    ("DROP", re.compile(
+        r"\bDROP\s+(?!NOT\b|DEFAULT\b)\w", re.IGNORECASE)),
+    # Any RENAME (TO / COLUMN / VALUE / CONSTRAINT / ...) breaks a reader of
+    # the old name — same catch-all reasoning.
+    ("RENAME", re.compile(r"\bRENAME\b", re.IGNORECASE)),
     # PostgreSQL allows omitting the COLUMN keyword: `ALTER TABLE t ALTER c
     # TYPE ...`. Match both spellings.
     ("ALTER COLUMN TYPE", re.compile(

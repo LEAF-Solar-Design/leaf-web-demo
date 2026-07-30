@@ -35,7 +35,7 @@ def test_contract_without_marker_fails(tmp_path):
     root = _dir(tmp_path, {"0023_cleanup.sql": "ALTER TABLE orgs DROP COLUMN legacy;\n"})
     violations = gate.check_migrations(root)
     assert len(violations) == 1
-    assert "DROP COLUMN" in violations[0]
+    assert "DROP" in violations[0]
     assert "expand-contract" in violations[0]
 
 
@@ -91,6 +91,10 @@ def test_every_contract_pattern_is_detected(tmp_path):
         "DROP SEQUENCE seq;",
         "DROP TYPE old_enum;",
         "DROP FUNCTION fn(int);",
+        "DROP TRIGGER trg ON t;",
+        "DROP POLICY pol ON t;",
+        "DROP PROCEDURE proc(int);",
+        "ALTER TYPE status_enum RENAME VALUE 'old' TO 'new';",
         "REVOKE SELECT ON t FROM app_role;",
     ]
     for i, sql in enumerate(statements):

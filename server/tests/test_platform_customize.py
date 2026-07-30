@@ -281,6 +281,69 @@ def test_land_requires_exact_commit_ack(lane_env):
     assert exc.value.code == "land_ack_mismatch"
 
 
+def test_landed_replay_still_requires_the_exact_ack(lane_env):
+    """Round 2, finding 3: the idempotent replay of an already-landed record
+    must not hand out a landed receipt to a wrong-sha ack."""
+    view = _propose()
+    lane.land(change_id=view["change_id"], tenant_id=TENANT,
+              ack_commit_sha=view["commit_sha"])
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha="0" * 40)
+    assert exc.value.code == "land_ack_mismatch"
+
+
+def test_marker_claim_is_atomic_and_never_partial(lane_env):
+    """Round 2, finding 5: a claimed marker is complete bytes or nothing —
+    the payload is fsynced to a private temp file and published via link."""
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 7\n"}])
+    cid = view["change_id"]
+    lane.cosign(change_id=cid, approver_subject="auth0|reviewer",
+                commit_sha=view["commit_sha"], approve=True)
+    marker = lane._read_marker(cid, "cosign")
+    assert marker and marker["verdict"] == "approved"
+    # no temp residue in the state dir
+    residue = [p.name for p in lane.state_dir().iterdir() if ".tmp-" in p.name]
+    assert residue == []
+
+
+def test_crashed_land_heals_instead_of_wedging(lane_env):
+    """Round 2, finding 5: a land marker with a stale 'approved' record (crash
+    between marker claim and record write) must reconcile to landed on the
+    next touch, not answer 'approved' forever."""
+    view = _propose()
+    cid = view["change_id"]
+    # simulate the crash: marker exists, record projection never updated
+    assert lane._claim_marker(cid, "landed", {
+        "commit_sha": view["commit_sha"], "at": "2026-07-30T00:00:00Z"})
+    healed = lane.land(change_id=cid, tenant_id=TENANT,
+                       ack_commit_sha=view["commit_sha"])
+    assert healed["state"] == "landed"
+    assert healed["push"]["healed"] is True
+    # and a plain status read reports landed too
+    assert lane.status_view(change_id=cid, tenant_id=TENANT)["state"] == "landed"
+
+
+def test_crashed_cosign_heals_on_next_touch(lane_env):
+    """A verdict marker with a stale awaiting record reconciles on read."""
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 8\n"}])
+    cid = view["change_id"]
+    assert lane._claim_marker(cid, "cosign", {
+        "approver_subject": "auth0|reviewer",
+        "approver_attestation": "approval-secret-holder",
+        "commit_sha": view["commit_sha"], "verdict": "approved",
+        "at": "2026-07-30T00:00:00Z"})
+    # record still says awaiting_cosign; a second cosign settles as not-pending
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.cosign(change_id=cid, approver_subject="auth0|reviewer2",
+                    commit_sha=view["commit_sha"], approve=False)
+    assert exc.value.code == "cosign_not_pending"
+    # and the healed record lands
+    landed = lane.land(change_id=cid, tenant_id=TENANT,
+                       ack_commit_sha=view["commit_sha"])
+    assert landed["state"] == "landed"
+
+
 def test_land_pushes_only_the_lane_ref_sha_pinned(lane_env, tmp_path, monkeypatch):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True,

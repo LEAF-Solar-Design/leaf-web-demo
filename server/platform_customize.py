@@ -510,21 +510,37 @@ def _marker_path(change_id: str, kind: str) -> Path:
 
 
 def _claim_marker(change_id: str, kind: str, payload: dict[str, Any]) -> bool:
-    """Atomically claim a one-shot transition (O_EXCL). False = already taken.
+    """Atomically claim a one-shot transition. False = already taken.
 
     The marker, not the record, is the transition authority: two racing
-    writers both read the same record state, but only ONE can create the
-    marker file, so approve-vs-deny and double-land races collapse to a
-    single winner regardless of record rewrite ordering.
+    writers both read the same record state, but only ONE can claim the
+    marker, so approve-vs-deny and double-land races collapse to a single
+    winner regardless of record rewrite ordering.
+
+    CRASH-SAFE: the payload is written and fsynced to a PRIVATE temp file
+    first, then published under the final name via ``os.link`` — an atomic
+    claim that either exposes the complete payload or nothing. A bare O_EXCL
+    open of the final path would expose an empty marker between open and
+    write, and a crash there would wedge the transition forever.
     """
+    final = _marker_path(change_id, kind)
+    tmp = final.with_suffix(f".tmp-{uuid4().hex[:8]}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     try:
-        fd = os.open(str(_marker_path(change_id, kind)),
-                     os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(json.dumps(payload, sort_keys=True).encode("utf-8"))
-    return True
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(json.dumps(payload, sort_keys=True).encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(str(tmp), str(final))
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
 
 
 def _read_marker(change_id: str, kind: str) -> Optional[dict[str, Any]]:
@@ -557,6 +573,7 @@ def cosign(*, change_id: str, approver_subject: str, commit_sha: str,
     secret-holder who lies.
     """
     record = load_record(change_id)
+    record = _reconcile(change_id, record)
     if record.get("state") != AWAITING_COSIGN:
         raise PlatformCustomizeError("cosign_not_pending", 409)
     if not isinstance(commit_sha, str) or commit_sha != record.get("commit_sha"):
@@ -574,11 +591,52 @@ def cosign(*, change_id: str, approver_subject: str, commit_sha: str,
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if not _claim_marker(change_id, "cosign", verdict):
+        # Lost the race (or a prior crash already claimed it): reconcile the
+        # record from the durable marker so nothing stays wedged, then report
+        # the transition as already settled.
+        _reconcile(change_id, load_record(change_id))
         raise PlatformCustomizeError("cosign_not_pending", 409)
     record["cosign"] = verdict
     record["state"] = APPROVED if approve else DENIED
     _write_record(record)
     return public_view(record)
+
+
+def _reconcile(change_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive the record's state from the durable markers (self-healing).
+
+    Markers are the transition authority; the record file is a projection a
+    crash can leave stale (verdict claimed but record still awaiting, or land
+    marker claimed but record still approved). Every read path funnels through
+    here so a wedged projection heals on the next touch instead of refusing
+    forever. Marker bindings are checked against the record's commit before
+    they are believed.
+    """
+    commit_sha = record.get("commit_sha")
+    changed = False
+    cosign_marker = _read_marker(change_id, "cosign")
+    if (cosign_marker and cosign_marker.get("commit_sha") == commit_sha
+            and record.get("state") == AWAITING_COSIGN):
+        record["cosign"] = cosign_marker
+        record["state"] = (APPROVED if cosign_marker.get("verdict") == "approved"
+                           else DENIED)
+        changed = True
+    landed_marker = _read_marker(change_id, "landed")
+    if (landed_marker and landed_marker.get("commit_sha") == commit_sha
+            and record.get("state") != LANDED):
+        # push-then-mark ordering: an existing land marker PROVES delivery
+        # completed (or push was disabled), so completing the projection is
+        # honest, not optimistic.
+        record.setdefault("push", None)
+        if record["push"] is None:
+            record["push"] = {"pushed": push_enabled(),
+                              "remote": push_remote() if push_enabled() else None,
+                              "at": landed_marker.get("at"), "healed": True}
+        record["state"] = LANDED
+        changed = True
+    if changed:
+        _write_record(record)
+    return record
 
 
 def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:
@@ -597,15 +655,19 @@ def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, An
     record = load_record(change_id)
     if record.get("tenant_id") != str(tenant_id):
         raise PlatformCustomizeError("change_not_found", 404)
+    record = _reconcile(change_id, record)
+    # The ack binds EVERY land invocation to the exact bytes — including the
+    # idempotent replay of an already-landed record. Checked before any state
+    # answer so a wrong sha never earns a landed receipt.
+    commit_sha = str(record.get("commit_sha", ""))
+    if not isinstance(ack_commit_sha, str) or ack_commit_sha != commit_sha:
+        raise PlatformCustomizeError("land_ack_mismatch", 409)
     if record.get("state") == LANDED:
         return public_view(record)
     if record.get("state") != APPROVED:
         code = ("cosign_required" if record.get("state") == AWAITING_COSIGN
                 else "change_not_landable")
         raise PlatformCustomizeError(code, 409)
-    commit_sha = str(record.get("commit_sha", ""))
-    if not isinstance(ack_commit_sha, str) or ack_commit_sha != commit_sha:
-        raise PlatformCustomizeError("land_ack_mismatch", 409)
     # Fundamental changes must ALSO show the durable approved verdict marker —
     # the record alone could have been rewritten by a stale writer.
     if record.get("fundamental_paths"):
@@ -636,13 +698,23 @@ def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, An
     if not _claim_marker(change_id, "landed", {
             "commit_sha": commit_sha,
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}):
-        return public_view(load_record(change_id))
+        # Another lander won (or a prior crash left the marker): reconcile so
+        # the projection reflects the marker instead of wedging on "approved".
+        return public_view(_reconcile(change_id, load_record(change_id)))
 
     record["push"] = {"pushed": pushed, "remote": push_remote() if pushed else None,
                       "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     record["state"] = LANDED
     _write_record(record)
     return public_view(record)
+
+
+def status_view(*, change_id: str, tenant_id: str) -> dict[str, Any]:
+    """Tenant-scoped read that self-heals a stale projection from markers."""
+    record = load_record(change_id)
+    if record.get("tenant_id") != str(tenant_id):
+        raise PlatformCustomizeError("change_not_found", 404)
+    return public_view(_reconcile(change_id, record))
 
 
 def public_view(record: Mapping[str, Any]) -> dict[str, Any]:

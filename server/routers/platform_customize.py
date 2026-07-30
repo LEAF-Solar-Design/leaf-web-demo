@@ -148,11 +148,10 @@ def status(change_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any
         return admitted
     tenant_id, _tier = admitted
     try:
-        record = lane.load_record(change_id)
-        if record.get("tenant_id") != tenant_id:
-            # Same shape as absent: existence must not leak across tenants.
-            return _error(lane.PlatformCustomizeError("change_not_found", 404))
-        return lane.public_view(record)
+        # Tenant-scoped inside the service (foreign ids read as absent, so
+        # existence never leaks across tenants), and self-healing: a stale
+        # projection reconciles from the durable markers on read.
+        return lane.status_view(change_id=change_id, tenant_id=tenant_id)
     except lane.PlatformCustomizeError as exc:
         return _error(exc)
 
