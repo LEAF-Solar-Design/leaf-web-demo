@@ -55,6 +55,7 @@ DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
 _LOG = logging.getLogger(__name__)
+_REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class CustomizationServiceError(RuntimeError):
@@ -235,8 +236,6 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
             f"harness_provision_failed: {url}/author/repository "
             f"status={status} {type(exc).__name__}",
         ) from exc
-    bare = _bare_repo(tenant_id)
-    observed = _git(bare, "rev-parse", "--verify", "refs/heads/main")
     if not isinstance(body, Mapping):
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
@@ -247,13 +246,43 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
             "tenant_repository_unavailable", 503,
             "provision_response_tenant_mismatch",
         )
-    if body.get("base_commit") != observed:
+    expected = body.get("base_commit")
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 40
+        or any(char not in "0123456789abcdef" for char in expected)
+    ):
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"provision_base_commit_mismatch: harness={body.get('base_commit')} "
-            f"observed={observed}",
+            "provision_response_commit_malformed",
         )
-    return bare
+
+    # App and harness are separate NFS clients. EFS can retain a negative
+    # directory entry for refs/heads/main after the harness creates it. Retry
+    # only local verification, never the provisioning write, until the bounded
+    # visibility window expires.
+    last_detail = "main_ref_not_observed"
+    for delay in _REPOSITORY_VISIBILITY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            bare = _bare_repo(tenant_id)
+            observed = _git(bare, "rev-parse", "--verify", "refs/heads/main")
+        except CustomizationServiceError as exc:
+            if exc.code != "tenant_repository_unavailable":
+                raise
+            last_detail = exc.detail or exc.code
+            continue
+        if observed == expected:
+            return bare
+        last_detail = (
+            f"provision_base_commit_mismatch: harness={expected} observed={observed}"
+        )
+    raise CustomizationServiceError(
+        "tenant_repository_unavailable", 503,
+        "provision_ref_not_visible: "
+        f"attempts={len(_REPOSITORY_VISIBILITY_DELAYS)} last={last_detail}",
+    )
 
 
 def _binding(tenant: Any) -> TenantBinding:
