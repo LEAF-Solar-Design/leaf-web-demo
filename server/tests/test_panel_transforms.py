@@ -254,3 +254,30 @@ def test_dry_run_returns_proposal_without_creating_a_version(tmp_path, monkeypat
     assert "new_version" not in envelope["result"]
     version, _ = read_intake(backend, "cat-litmus", "demo", "head")
     assert version == 1
+
+
+def test_write_runner_propagates_tenant_identity_to_execution_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    backend = default_backend()
+    captured = {}
+
+    def transform_tool(_tool, _source, _params, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "result": {"mutations": {}},
+        }
+
+    envelope, status = run_write_mock(
+        {"name": "tenant-bound-write", "version": "1.0.0"},
+        {"drawing_id": "demo", "dry_run": True},
+        "acceptance-tenant-a",
+        backend=backend,
+        t0=time.perf_counter(),
+        run_tool_dynamic_fn=transform_tool,
+    )
+
+    assert status == 200
+    assert envelope["ok"] is True
+    assert captured["tenant_id"] == "acceptance-tenant-a"
+    assert captured["tenant_id"] != "demo-tenant"
