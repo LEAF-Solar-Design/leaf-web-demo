@@ -130,6 +130,70 @@ def test_ensure_bare_repo_repairs_existing_repo_without_main(tmp_path, monkeypat
     ]
 
 
+def test_ensure_bare_repo_waits_for_shared_ref_visibility(tmp_path, monkeypatch):
+    bare = tmp_path / "tenant-a.git"
+    git_attempts = 0
+    sleeps = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tenant_id": "tenant-a", "base_commit": BASE}
+
+    def git(*_args):
+        nonlocal git_attempts
+        git_attempts += 1
+        if git_attempts < 4:
+            raise CustomizationServiceError(
+                "tenant_repository_unavailable", 503, "main_ref_not_observed"
+            )
+        return BASE
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "secret")
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda _tenant_id: bare)
+    monkeypatch.setattr(customization_service, "_git", git)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(customization_service.time, "sleep", sleeps.append)
+
+    assert customization_service._ensure_bare_repo("tenant-a") == bare
+    assert git_attempts == 4
+    assert sleeps == [1.0, 2.0]
+
+
+def test_ensure_bare_repo_bounds_shared_ref_visibility_wait(tmp_path, monkeypatch):
+    bare = tmp_path / "tenant-a.git"
+    sleeps = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tenant_id": "tenant-a", "base_commit": BASE}
+
+    def missing_main(*_args):
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503, "main_ref_not_observed"
+        )
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "secret")
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda _tenant_id: bare)
+    monkeypatch.setattr(customization_service, "_git", missing_main)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(customization_service.time, "sleep", sleeps.append)
+
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service._ensure_bare_repo("tenant-a")
+
+    assert "provision_ref_not_visible" in caught.value.detail
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 15.0, 30.0]
+    assert sum(sleeps) == 60.0
+
+
 def test_ensure_bare_repo_rejects_unverified_harness_receipt(tmp_path, monkeypatch):
     bare = tmp_path / "tenant-a.git"
     attempts = 0
