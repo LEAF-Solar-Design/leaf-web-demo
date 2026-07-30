@@ -1005,3 +1005,33 @@ def test_messages_confirm_unredeemed_rejection_gives_the_approval_back(client, m
         "a confirmation refused before the harness could redeem it must be "
         "retryable — otherwise the proposal is burned with nothing to show"
     )
+
+
+def test_direct_rejection_terminates_the_transcript_turn(client, monkeypatch):
+    """Round 10 MAJOR 1, confirmed by an adversarial consult: `turn_started` is
+    appended before the harness POST, and on a synchronous rejection the DIRECT
+    path answered its HTTP caller but never terminated the transcript turn —
+    for every rejection leg alike (401, 413, 429, 502). The queued kicker has
+    closed its own failed starts since it existed; the router now applies the
+    same closure, so a reloaded client sees a terminated turn instead of one
+    stuck in-flight forever."""
+    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+
+    r = client.post(f"/api/sessions/{sid}/messages",
+                    json={"text": "hello"}, headers=_h(tid))
+    assert r.status_code == 502, r.text
+
+    events = session_store.recent_events(sid, 50)
+    started = {e["turn_id"] for e in events if e.get("type") == "turn_started"}
+    terminal = {e["turn_id"] for e in events
+                if e.get("type") in ("turn_complete", "error")}
+    assert started, "the failed start must still record the user's message"
+    dangling = started - terminal
+    assert not dangling, f"turns left in-flight forever: {dangling}"
+    # ...and the terminal carries the rejection, so the transcript says WHY.
+    err = next(e for e in events if e.get("type") == "error")
+    assert err["data"]["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert err["data"]["stop_reason"] == "error"

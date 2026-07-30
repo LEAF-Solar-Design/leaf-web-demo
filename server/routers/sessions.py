@@ -856,6 +856,24 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if exc.approval_unredeemed and confirmation_id is not None:
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
+        # Close the transcript the failed start opened. `turn_started` was
+        # appended before the rejection, and nothing downstream will ever
+        # terminate that turn — the relay only runs for accepted turns. The
+        # queued kicker has closed its own failed starts this way since it
+        # existed (turn_runner._kick_queued's TurnRejected leg); the DIRECT
+        # path answered its HTTP caller and just left the transcript dangling,
+        # for every synchronous rejection alike (401, 413, 429, 502). Same
+        # closure, same event shape, so a reloaded client sees a terminated
+        # turn instead of one stuck in-flight forever.
+        if exc.turn_id is not None:
+            try:
+                session_store.append_event(
+                    session_id, exc.turn_id, "error",
+                    {"error": {"error_code": exc.error_code,
+                               "message": exc.message},
+                     "stop_reason": "error"})
+            except Exception:  # noqa: BLE001
+                pass
         return _turn_rejected_response(exc, approval_lost=approval_lost)
 
     return JSONResponse(
