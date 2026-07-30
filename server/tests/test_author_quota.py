@@ -331,10 +331,14 @@ def test_enforce_fails_closed_when_the_policy_module_is_missing(monkeypatch, all
     ("", "s3cret", True),                      # no URL at all
     ("   ", "s3cret", True),                   # whitespace-only URL
     ("harness.internal:8150", "s3cret", True), # no http(s) scheme -> requests refuses client-side
+    ("http://harness.internal:bad", "s3cret", True),   # invalid port -> InvalidURL at prepare
+    ("http://[::1", "s3cret", True),           # malformed IPv6 literal -> urlsplit raises
     ("http://harness.internal:8150", "", True),    # blank secret -> the caller gate 401s every retry
     ("http://harness.internal:8150", "  \r\n", True),
+    ("http://harness.internal:8150", "secret\r\nX-Injected: yes", True),  # header-invalid secret
     ("http://harness.internal:8150", "s3cret", False),
     ("https://harness.internal:8150/", "s3cret", False),
+    ("  http://harness.internal:8150  ", "s3cret", False),  # padding: one shared normalization
 ])
 def test_harness_misconfiguration_is_deterministic_and_refused(
     monkeypatch, url, secret, misconfigured

@@ -141,22 +141,46 @@ def _tenant_id(value: Any) -> str:
     return tenant_id
 
 
+def _harness_config() -> tuple[str, str]:
+    """The (url, secret) pair exactly as the stage dispatch will use them —
+    one normalization, shared by the pre-charge guard and ``_harness_stage``,
+    so the two can never diverge on what "configured" means."""
+    return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
+            os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
 def _harness_misconfigured() -> bool:
     """True when no usable authoring harness is configured here.
 
     Deterministic, so ``stage()`` refuses BEFORE charging the daily authoring
-    quota: a URL that is not an http(s) origin never leaves the box (requests
-    rejects it client-side), and a blank ``LEAF_HARNESS_SECRET`` is 401ed by
-    the harness's caller gate on every retry — the same definition of
-    "configured" the repo-preparation fallback uses. A secret the harness
-    REJECTS is different: that dispatch really reached the harness, and the
-    attempt is charged like any other refused-in-flight attempt.
+    quota. Total by construction rather than shape-by-shape: it PREPARES the
+    same request ``_harness_stage`` will send, so everything the HTTP client
+    refuses without any network I/O — a URL that is not an http(s) origin, an
+    invalid port, a malformed IPv6 literal, a secret that is not a valid
+    header value — refuses here first, as does a blank secret (the harness's
+    caller gate 401s every dispatch; same definition of "configured" as the
+    repo-preparation fallback). The boundary: this guard owns the app's own
+    harness configuration as validated client-side at prepare time. Anything
+    past prepare (proxy/DNS/TLS/connect, a secret the harness REJECTS) is
+    transport or harness state whose outcome is ambiguous or external, and
+    such an attempt is charged like any other refused-in-flight attempt — a
+    timed-out dispatch may well have reached the harness and spent.
     """
-    url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/")
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    url, secret = _harness_config()
+    if not secret:
         return True
-    return not os.environ.get("LEAF_HARNESS_SECRET", "").strip()
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return True
+        import requests
+        requests.models.PreparedRequest().prepare(
+            method="POST", url=f"{url}/author/stage",
+            headers={"X-Harness-Secret": secret},
+        )
+    except Exception:  # noqa: BLE001 - anything the client refuses locally
+        return True
+    return False
 
 
 def _git_trust(*paths: Path) -> list[str]:
@@ -549,14 +573,14 @@ class CustomizationService:
         return self._receipt(change, tool=body.get("tool"), preview=body.get("preview"))
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
-        url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
+        url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
         try:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=120,
-                headers={"X-Harness-Secret": os.environ.get("LEAF_HARNESS_SECRET", "").strip()},
+                headers={"X-Harness-Secret": secret},
                 json={"tenant_id": tenant_id, "description": description, "changeSetId": change.change_set_id,
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
