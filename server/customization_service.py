@@ -142,10 +142,16 @@ def _git(bare: Path, *args: str) -> str:
     try:
         result = subprocess.run(
             ["git", "--git-dir", str(bare), *args], check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        # stderr goes into `detail` (operator-only), never into the response.
+        stderr = str(getattr(exc, "stderr", "") or "").strip()
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"git_failed: {' '.join(args)} in {bare} ({type(exc).__name__})"
+            + (f": {stderr}" if stderr else ""),
+        ) from exc
     return result.stdout.strip()
 
 
@@ -153,11 +159,18 @@ def _git_blob(bare: Path, object_name: str) -> bytes:
     try:
         result = subprocess.run(
             ["git", "--git-dir", str(bare), "show", object_name],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        stderr = getattr(exc, "stderr", b"") or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"git_show_failed: {object_name} in {bare} ({type(exc).__name__})"
+            + (f": {stderr.strip()}" if stderr.strip() else ""),
+        ) from exc
     return result.stdout
 
 
@@ -168,16 +181,24 @@ def _bare_repo(tenant_id: str) -> Path:
         or os.environ.get("LEAF_TENANT_BARE_BASE", "").strip()
     )
     if not base:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            "git_dir_unset: neither LEAF_TENANT_GIT_DIR nor LEAF_TENANT_BARE_BASE is set",
+        )
     candidate = Path(base) / f"{tenant_id}.git"
     try:
         resolved_base = Path(base).resolve(strict=True)
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(resolved_base)
     except (OSError, ValueError) as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"path_unresolvable: {candidate} under {base} ({type(exc).__name__})",
+        ) from exc
     if not (resolved / "HEAD").is_file():
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503, f"head_missing: {resolved}/HEAD",
+        )
     return resolved
 
 
@@ -193,7 +214,11 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
     url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     secret = os.environ.get("LEAF_HARNESS_SECRET", "").strip()
     if not url or not secret:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+        # Never log the secret itself, only whether the deployment supplied one.
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"harness_unconfigured: url_set={bool(url)} secret_set={bool(secret)}",
+        )
     try:
         import requests
         response = requests.post(
@@ -204,15 +229,30 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
         response.raise_for_status()
         body = response.json()
     except Exception as exc:
-        raise CustomizationServiceError("tenant_repository_unavailable", 503) from exc
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"harness_provision_failed: {url}/author/repository "
+            f"status={status} {type(exc).__name__}",
+        ) from exc
     bare = _bare_repo(tenant_id)
     observed = _git(bare, "rev-parse", "--verify", "refs/heads/main")
-    if (
-        not isinstance(body, Mapping)
-        or body.get("tenant_id") != tenant_id
-        or body.get("base_commit") != observed
-    ):
-        raise CustomizationServiceError("tenant_repository_unavailable", 503)
+    if not isinstance(body, Mapping):
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"provision_response_malformed: {type(body).__name__}",
+        )
+    if body.get("tenant_id") != tenant_id:
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            "provision_response_tenant_mismatch",
+        )
+    if body.get("base_commit") != observed:
+        raise CustomizationServiceError(
+            "tenant_repository_unavailable", 503,
+            f"provision_base_commit_mismatch: harness={body.get('base_commit')} "
+            f"observed={observed}",
+        )
     return bare
 
 
@@ -428,9 +468,17 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_harness_unavailable", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_harness_unavailable", 503,
+                f"harness_stage_failed: {url}/author/stage status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         if not isinstance(body, Mapping):
-            raise CustomizationServiceError("invalid_staged_receipt", 502)
+            raise CustomizationServiceError(
+                "invalid_staged_receipt", 502,
+                f"staged_receipt_not_a_mapping: {type(body).__name__}",
+            )
         return body
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
@@ -804,10 +852,18 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_publish_incomplete", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 503,
+                f"harness_publish_failed: {url}/author/publish status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         commit = body.get("commit") if isinstance(body, Mapping) else None
         if not isinstance(commit, str):
-            raise CustomizationServiceError("customization_publish_incomplete", 502)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 502,
+                f"publish_commit_not_a_string: {type(commit).__name__}",
+            )
         return commit
 
     def record_staged_callback(self, *, tenant_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
