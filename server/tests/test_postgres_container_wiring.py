@@ -189,55 +189,60 @@ def test_authored_tool_bodies_never_enter_the_build_context():
         assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
 
 
-def _installs_git(path: str) -> bool:
-    """Whether the SHIPPED stage of a Dockerfile really installs git.
+# Each image's git install, pinned to the EXACT command it ships.
+#
+# Four review rounds of parsing the shell here produced four more false positives
+# (`--simulate`, `-d`, `--only-upgrade`, a trailing `autoremove git`, `|| true`, a
+# trailing `# git` comment, a quoted argument, install-then-purge) and four false
+# negatives (`apt-get -y install git`, an install inside `if`/`for`, an environment
+# prefix, `/usr/bin/apt-get`). A regex approximation of shell semantics cannot be
+# made sound, and each round only moved the hole.
+#
+# So this pins the exact form instead. Nothing but these commands passes, which
+# makes a false positive impossible rather than merely unlikely. Changing HOW an
+# image installs git now requires editing this pin, and that is the point: it is a
+# change a reviewer should see.
+_PINNED_GIT_INSTALL = {
+    "deploy/Dockerfile.app":
+        "apt-get install -y --no-install-recommends git",
+    "deploy/Dockerfile.broker":
+        "apt-get install -y --no-install-recommends libstdc++6 git",
+    "deploy/Dockerfile.harness":
+        "apt-get install -y --no-install-recommends git ca-certificates",
+}
 
-    Every guard here replaced a false positive found in review. Each of these left
-    git absent while an earlier version of this helper said yes:
-      - `# apt-get install -y git`               (a whole-line comment)
-      - `RUN apt-get install -y curl # git`      (a TRAILING comment)
-      - `RUN printf 'apt-get install -y git' >f` (a quoted argument)
-      - `RUN true || apt-get install git`        (only runs if `true` fails)
-      - `apt-get install --download-only git`    (downloads, installs nothing)
-      - install git, then `apt-get purge git`    (net effect: absent)
-      - an install in an earlier, discarded stage
-    And one false NEGATIVE: a valid install continued onto the next line with `\\`.
 
-    Anything this parser cannot read (heredocs, exec-form RUN) simply fails, which
-    is the safe direction: it reports "not installed" and someone looks.
-    """
+def _shipped_stage(path: str) -> list[str]:
+    """The final build stage's instructions, continuations joined, comments gone."""
     joined = re.sub(r"\\\s*\n\s*", " ", _read(path))
     lines = [ln for ln in joined.splitlines() if not re.match(r"\s*#", ln)]
     starts = [i for i, ln in enumerate(lines) if re.match(r"\s*FROM\s", ln)]
-    shipped = lines[starts[-1]:] if starts else lines
+    return lines[starts[-1]:] if starts else lines
 
-    installed = False
-    for line in shipped:
-        run = re.match(r"\s*RUN\s+(.*)", line)
-        if not run:
+
+def _installs_git(path: str) -> bool:
+    """Whether the shipped stage runs this image's pinned git install, unconditionally.
+
+    Three checks, no shell interpretation: the exact pinned command appears in the
+    shipped stage; it is not guarded by `||` so a failed install cannot pass; and
+    nothing later removes git again.
+    """
+    pinned = _PINNED_GIT_INSTALL[path]
+    for line in _shipped_stage(path):
+        if not re.match(r"\s*RUN\s", line) or pinned not in line:
             continue
-        body = run.group(1)
-        # `RUN --mount=... cmd` / `RUN --network=none cmd`: drop the flags.
-        body = re.sub(r"^(--[\w-]+(=\S+)?\s+)+", "", body)
-        # A trailing unquoted comment is not part of any command.
-        body = re.sub(r"(?<!['\"])#.*$", "", body)
-        for chain in body.split(";"):
-            # `A || B` runs B only when A fails, so B is not a guarantee.
-            reliable = chain.split("||")[0]
-            for command in reliable.split("&&"):
-                command = command.strip()
-                verb = re.match(r"^(apt-get|apt)\s+(install|purge|remove)\b", command)
-                if not verb:
-                    continue
-                if not re.search(r"(?<![\w./-])git(?![\w./-])", command):
-                    continue
-                if verb.group(2) == "install":
-                    if "--download-only" in command:
-                        continue  # fetched, never unpacked
-                    installed = True
-                else:
-                    installed = False  # purged again: net effect is absent
-    return installed
+        before, _, _ = line.partition(pinned)
+        if "||" in before:
+            continue  # runs only if something else failed
+        if re.search(r"\|\|\s*true", line):
+            continue  # failure swallowed: the build succeeds without git
+        if re.search(
+            r"(apt-get|apt)\s+(purge|remove|autoremove)[^\n]*(?<![\w./-])git(?![\w./-])",
+            line,
+        ):
+            continue  # installed and then taken away in the same command
+        return True
+    return False
 
 
 def _subprocess_launches(module_path: str) -> tuple[list[ast.Call], list[ast.Call]]:
@@ -306,8 +311,9 @@ def test_every_git_launch_declares_the_repository_safe():
         "Keep git launches literal, or extend the checker."
     )
     for call in calls:
+        elements = call.args[0].elts
         trusted = [
-            el for el in call.args[0].elts
+            el for el in elements
             if isinstance(el, ast.Starred)
             and isinstance(el.value, ast.Call)
             and isinstance(el.value.func, ast.Name)
@@ -317,12 +323,29 @@ def test_every_git_launch_declares_the_repository_safe():
             f"customization_service.py:{call.lineno}: this git launch does not pass "
             "_git_trust(...), so an EFS-owned repo will be refused as dubious"
         )
-        # `_git_trust()` with no arguments emits no flags and trusts nothing, and
-        # satisfied an earlier version of this assertion.
-        assert all(node.value.args for node in trusted), (
-            f"customization_service.py:{call.lineno}: _git_trust() was called with no "
-            "paths, so it produces no safe.directory flags at all"
-        )
+        # Which paths, not merely that some argument exists. `_git_trust()` with no
+        # arguments emits no flags, and `_git_trust(Path.cwd())` emits a flag for the
+        # wrong directory: both passed an earlier version of this assertion, and the
+        # second recreates the exact 503 it is here to prevent.
+        operands: set[str] = set()
+        for element in elements:
+            if element in trusted:
+                continue  # the trust flags themselves are not operands
+            operands.update(
+                node.id for node in ast.walk(element) if isinstance(node, ast.Name)
+            )
+        for starred in trusted:
+            args = starred.value.args
+            assert args, (
+                f"customization_service.py:{call.lineno}: _git_trust() was called with "
+                "no paths, so it produces no safe.directory flags at all"
+            )
+            names = {n.id for a in args for n in ast.walk(a) if isinstance(n, ast.Name)}
+            assert names & operands, (
+                f"customization_service.py:{call.lineno}: _git_trust{tuple(sorted(names))} "
+                f"trusts nothing this command touches {tuple(sorted(operands))}. "
+                "Trusting the wrong path leaves the real repository refused."
+            )
 
 
 def test_every_image_whose_process_requires_git_installs_git():
