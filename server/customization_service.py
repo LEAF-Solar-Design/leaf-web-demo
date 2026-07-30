@@ -139,10 +139,38 @@ def _tenant_id(value: Any) -> str:
     return tenant_id
 
 
+def _git_trust(*paths: Path) -> list[str]:
+    """Return command-scope `safe.directory` flags for exactly these paths.
+
+    Tenant repos live on EFS and can be owned by the access-point UID rather than
+    the container UID, so git refuses them with "detected dubious ownership".
+    Running as root does not bypass that check. The harness already handles this
+    (harness/src/ports/impl/tenantRepoProvider.ts trustSharedRepo); this is the
+    Python side of the same problem.
+
+    Command scope is protected configuration, which is what git requires for
+    safe.directory, and unlike the harness's `git config --global` it needs no
+    writable HOME. The app runs as root and the broker as UID 10001, so a
+    HOME-dependent approach would work in one and not the other.
+
+    Exact resolved paths only. A wildcard would trust every repository on the
+    volume, which is not the same statement at all.
+    """
+    flags: list[str] = []
+    for path in paths:
+        try:
+            resolved = str(path.resolve(strict=False))
+        except OSError:
+            resolved = str(path)
+        flags.extend(("-c", f"safe.directory={resolved}"))
+    return flags
+
+
 def _git(bare: Path, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["git", "--git-dir", str(bare), *args], check=True, text=True,
+            ["git", *_git_trust(bare), "--git-dir", str(bare), *args],
+            check=True, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -159,7 +187,7 @@ def _git(bare: Path, *args: str) -> str:
 def _git_blob(bare: Path, object_name: str) -> bytes:
     try:
         result = subprocess.run(
-            ["git", "--git-dir", str(bare), "show", object_name],
+            ["git", *_git_trust(bare), "--git-dir", str(bare), "show", object_name],
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=15,
         )
@@ -1221,7 +1249,8 @@ def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.Completed
     generic 503: git's actual complaint was thrown away at the point of failure.
     """
     return subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "--git-dir", str(bare),
+        ["git", "-c", "core.autocrlf=false", *_git_trust(bare, target),
+         "--git-dir", str(bare),
          "worktree", "add", "--detach", str(target), commit],
         text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
     )
@@ -1270,7 +1299,7 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
         # A lost race or a crash can leave the path registered but absent, and
         # git then refuses every add on it until the registration is pruned.
         prune = subprocess.run(
-            ["git", "--git-dir", str(bare), "worktree", "prune"],
+            ["git", *_git_trust(bare), "--git-dir", str(bare), "worktree", "prune"],
             text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
         )
         try:
@@ -1312,7 +1341,7 @@ def _verified_worktree(bare: Path, target: Path, commit: str, digest: str) -> No
             _materialize_worktree(bare, target, commit)
         try:
             probe = subprocess.run(
-                ["git", "-C", str(target), "rev-parse", "HEAD"],
+                ["git", *_git_trust(target), "-C", str(target), "rev-parse", "HEAD"],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
             if probe.returncode != 0:

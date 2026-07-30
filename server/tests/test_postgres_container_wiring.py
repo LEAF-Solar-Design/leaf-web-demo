@@ -5,6 +5,7 @@ legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
 from pathlib import Path
+import ast
 import json
 import re
 
@@ -186,6 +187,195 @@ def test_authored_tool_bodies_never_enter_the_build_context():
     # The rule only matters because the images copy the tree that holds it.
     for path in ("deploy/Dockerfile.app", "deploy/Dockerfile.broker"):
         assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
+
+
+# Each image's git install, pinned to the EXACT command it ships.
+#
+# Four review rounds of parsing the shell here produced four more false positives
+# (`--simulate`, `-d`, `--only-upgrade`, a trailing `autoremove git`, `|| true`, a
+# trailing `# git` comment, a quoted argument, install-then-purge) and four false
+# negatives (`apt-get -y install git`, an install inside `if`/`for`, an environment
+# prefix, `/usr/bin/apt-get`). A regex approximation of shell semantics cannot be
+# made sound, and each round only moved the hole.
+#
+# So this pins the exact form instead. Nothing but these commands passes, which
+# makes a false positive impossible rather than merely unlikely. Changing HOW an
+# image installs git now requires editing this pin, and that is the point: it is a
+# change a reviewer should see.
+_PINNED_GIT_INSTALL = {
+    "deploy/Dockerfile.app":
+        "apt-get install -y --no-install-recommends git",
+    "deploy/Dockerfile.broker":
+        "apt-get install -y --no-install-recommends libstdc++6 git",
+    "deploy/Dockerfile.harness":
+        "apt-get install -y --no-install-recommends git ca-certificates",
+}
+
+
+def _shipped_stage(path: str) -> list[str]:
+    """The final build stage's instructions, continuations joined, comments gone."""
+    joined = re.sub(r"\\\s*\n\s*", " ", _read(path))
+    lines = [ln for ln in joined.splitlines() if not re.match(r"\s*#", ln)]
+    starts = [i for i, ln in enumerate(lines) if re.match(r"\s*FROM\s", ln)]
+    return lines[starts[-1]:] if starts else lines
+
+
+def _installs_git(path: str) -> bool:
+    """Whether the shipped stage runs this image's pinned git install, unconditionally.
+
+    Three checks, no shell interpretation: the exact pinned command appears in the
+    shipped stage; it is not guarded by `||` so a failed install cannot pass; and
+    nothing later removes git again.
+    """
+    pinned = _PINNED_GIT_INSTALL[path]
+    for line in _shipped_stage(path):
+        if not re.match(r"\s*RUN\s", line) or pinned not in line:
+            continue
+        before, _, _ = line.partition(pinned)
+        if "||" in before:
+            continue  # runs only if something else failed
+        if re.search(r"\|\|\s*true", line):
+            continue  # failure swallowed: the build succeeds without git
+        if re.search(
+            r"(apt-get|apt)\s+(purge|remove|autoremove)[^\n]*(?<![\w./-])git(?![\w./-])",
+            line,
+        ):
+            continue  # installed and then taken away in the same command
+        return True
+    return False
+
+
+def _subprocess_launches(module_path: str) -> tuple[list[ast.Call], list[ast.Call]]:
+    """Split a module's subprocess launches into (literal git, unreadable).
+
+    Narrowed to subprocess on purpose: an unrelated `record_requirement(["git"])`
+    satisfied an earlier any-call version. The second list is what closes the hole
+    a bare count could not: a launch whose command is built in a variable is
+    invisible to this checker, so it is reported rather than skipped. A sixth
+    untrusted variable-based git launch therefore fails instead of hiding behind
+    five recognised ones.
+    """
+    tree = ast.parse(_read(module_path))
+    literal_git: list[ast.Call] = []
+    unreadable: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        launcher = (
+            isinstance(func, ast.Attribute)
+            and func.attr in {"run", "Popen", "check_output", "call"}
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess"
+        )
+        if not launcher or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.List) or not first.elts:
+            unreadable.append(node)
+            continue
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and head.value == "git":
+            literal_git.append(node)
+    return literal_git, unreadable
+
+
+def test_the_image_build_never_selects_a_stage_other_than_the_last():
+    """`_installs_git` inspects the final stage, which only ships if nothing
+    overrides it. A `target:` input would silently point the build elsewhere."""
+    workflow = _read(".github/workflows/build-platform-images.yml")
+    build_step = workflow[workflow.index("Build and push"):]
+    assert not re.search(r"^\s+target:", build_step, flags=re.MULTILINE), (
+        "the build now selects an explicit stage; _installs_git must follow it"
+    )
+
+
+def test_every_git_launch_declares_the_repository_safe():
+    """Installing git is necessary and not sufficient.
+
+    Tenant repos sit on EFS and can be owned by the access-point UID rather than
+    the container UID, so git refuses them with "detected dubious ownership", and
+    running as root does not bypass that check. The harness has always handled this
+    (tenantRepoProvider.ts trustSharedRepo); the Python service did not, so the app
+    and broker would still have answered 503 with git installed.
+    """
+    calls, unreadable = _subprocess_launches("server/customization_service.py")
+    assert calls, (
+        "premise: the service launches git through subprocess with a literal command "
+        "list. If that changed, this contract needs rewriting, not skipping."
+    )
+    assert not unreadable, (
+        "customization_service.py:"
+        + ", ".join(str(node.lineno) for node in unreadable)
+        + ": a subprocess command built in a variable is invisible to this check. "
+        "Keep git launches literal, or extend the checker."
+    )
+    for call in calls:
+        elements = call.args[0].elts
+        trusted = [
+            el for el in elements
+            if isinstance(el, ast.Starred)
+            and isinstance(el.value, ast.Call)
+            and isinstance(el.value.func, ast.Name)
+            and el.value.func.id == "_git_trust"
+        ]
+        assert trusted, (
+            f"customization_service.py:{call.lineno}: this git launch does not pass "
+            "_git_trust(...), so an EFS-owned repo will be refused as dubious"
+        )
+        # Which paths, not merely that some argument exists. `_git_trust()` with no
+        # arguments emits no flags, and `_git_trust(Path.cwd())` emits a flag for the
+        # wrong directory: both passed an earlier version of this assertion, and the
+        # second recreates the exact 503 it is here to prevent.
+        operands: set[str] = set()
+        for element in elements:
+            if element in trusted:
+                continue  # the trust flags themselves are not operands
+            operands.update(
+                node.id for node in ast.walk(element) if isinstance(node, ast.Name)
+            )
+        for starred in trusted:
+            args = starred.value.args
+            assert args, (
+                f"customization_service.py:{call.lineno}: _git_trust() was called with "
+                "no paths, so it produces no safe.directory flags at all"
+            )
+            names = {n.id for a in args for n in ast.walk(a) if isinstance(n, ast.Name)}
+            assert names & operands, (
+                f"customization_service.py:{call.lineno}: _git_trust{tuple(sorted(names))} "
+                f"trusts nothing this command touches {tuple(sorted(operands))}. "
+                "Trusting the wrong path leaves the real repository refused."
+            )
+
+
+def test_every_image_whose_process_requires_git_installs_git():
+    """A missing binary is invisible to a test suite that only reads Python.
+
+    `customization_service` launches git (`rev-parse --verify refs/heads/main`,
+    `show`, `worktree add`) and `python:3.12-slim` ships none, so every call raised
+    FileNotFoundError. The app answered 503 `tenant_repository_unavailable` for a
+    repository the harness had already provisioned correctly, and the BROKER could
+    not execute a published tenant tool either, because
+    `tool_loader.resolve_local_file` reaches `effective_catalog_dir` which calls
+    `_git_blob` on every resolution.
+
+    Scoped to REQUIRED git, deliberately: `solver_adapters/autofill.py` probes for
+    git and treats OSError as "unknown revision", so canonical-worker legitimately
+    ships without it.
+    """
+    assert _subprocess_launches("server/customization_service.py")[0], (
+        "premise: customization_service launches git. If that changed, this test's "
+        "reason to exist changed with it."
+    )
+
+    for path in (
+        "deploy/Dockerfile.app",        # stages and publishes authored tools
+        "deploy/Dockerfile.broker",     # EXECUTES them, via the effective catalog
+        "deploy/Dockerfile.harness",    # owns the tenant repos
+    ):
+        assert _installs_git(path), (
+            f"{path}: the shipped stage must install git, which its process requires"
+        )
 
 
 def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():

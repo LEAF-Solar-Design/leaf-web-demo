@@ -13,6 +13,16 @@ ARG LEAF_SOURCE_SHA=unknown
 
 WORKDIR /app
 
+# --- git: REQUIRED, not optional. ---------------------------------------------
+# server/customization_service.py shells out to git against the tenant bare repo
+# (`rev-parse --verify refs/heads/main`, `show`, and `worktree add` for
+# effective_catalog_dir). python:3.12-slim ships no git, so without this every
+# such call raises FileNotFoundError and the app answers a 503 for a repository
+# the harness had already provisioned correctly.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # --- Python deps: server + platform + da (the three the app imports). ---------
 # psycopg[binary] ships its own libpq wheel, so no apt libpq-dev is needed.
 # PyJWT (server/requirements-auth.txt) is an OPERATOR OPT-IN for LEAF_AUTH_LIVE=1
