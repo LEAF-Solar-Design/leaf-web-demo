@@ -43,6 +43,7 @@ COUNTER_TABLE = "author_quota_counters"
 COUNTER_NAMESPACE = "author_daily"
 
 _PG_COUNTER: Any = None
+_USAGE_POLICY: Any = None
 
 _MEMORY_LOCK = threading.Lock()
 # {counter_key: value} — reset implicitly, since a new UTC day is a new key.
@@ -51,6 +52,27 @@ _MEMORY_STATE: dict[str, int] = {}
 
 class AuthorQuotaStoreError(RuntimeError):
     """The configured counter store could not be reached or is misconfigured."""
+
+
+class AuthorQuotaExceeded(Exception):
+    """The tenant has spent its authoring attempts for the UTC day.
+
+    Carries the facts the 429 envelope reports. Raised from the charge point,
+    which sits immediately before the harness call, so a request refused for any
+    other reason never reaches it.
+    """
+
+    def __init__(self, tier: str, limit: int, used: int) -> None:
+        super().__init__(f"daily authoring limit reached ({used}/{limit})")
+        self.tier, self.limit, self.used = tier, limit, used
+
+
+# Deployment postures where a per-process counter is honest: a developer's
+# machine and the test suite. Anything else is a real deployment with replicas
+# and restarts, where memory would read as enforced while bounding almost
+# nothing. LEAF_RUNTIME_ENV carries the posture (compose defaults it to
+# "development"; staging and production set their own).
+_LOCAL_POSTURES = frozenset({"", "development", "test", "local"})
 
 
 def store_mode() -> str:
@@ -195,6 +217,71 @@ def charge(tenant_id: str, day: str, limit: int, *,
     if store_mode() == "postgres":
         return _postgres_charge(key, limit)
     return _memory_charge(key, limit)
+
+
+def durability_required() -> bool:
+    """True when a per-process counter would not be a real cap here.
+
+    Keyed on DEPLOYED POSTURE, not on whether auth happens to be live: an
+    auth-off staging deployment still runs replicas and still restarts, so it
+    needs the durable counter just as much. Live auth also implies a deployment
+    for the local flows that never set a posture.
+    """
+    posture = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
+    if posture not in _LOCAL_POSTURES:
+        return True
+    try:
+        import deps  # lazy: server module, imported here to avoid a load cycle
+        return bool(deps.auth_live())
+    except Exception:  # noqa: BLE001 - cannot tell => assume deployed
+        return True
+
+
+def usage_policy():
+    """da/usage.py, which owns the quota POLICY (is it on, what is the limit,
+    what does the over-quota envelope look like). Loaded by path under its own
+    name — it is not a ``server`` package module — and memoized, because this
+    sits on an admission path and the loader re-executes the module every call.
+    A failed load is retried rather than cached as a permanent absence."""
+    global _USAGE_POLICY
+    if _USAGE_POLICY is None:
+        import deps  # lazy: server module, imported here to avoid a load cycle
+        _USAGE_POLICY = deps._load_module_from(deps.DA_DIR / "usage.py", "leaf_usage")
+    return _USAGE_POLICY
+
+
+def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> None:
+    """Charge one authoring attempt, or refuse. Returns ``None`` to PROCEED.
+
+    Call this at the LAST point before authoring spends money, so a request
+    refused for any other reason (entitlement, role, an already-staged replay)
+    never consumes a slot. Raises ``AuthorQuotaExceeded`` when the tenant is out
+    of attempts for the UTC day, or ``AuthorQuotaStoreError`` when a configured
+    quota cannot be evaluated — never silently unmetered.
+    """
+    usage = usage_policy()
+    if usage is None:
+        # The policy module did not load. Intent is still readable without it:
+        # an unset variable means there was never a cap to enforce, a set one
+        # means this deployment asked for a cap that cannot be evaluated.
+        if os.environ.get("LEAF_DAILY_AUTHOR_QUOTA", "").strip():
+            raise AuthorQuotaStoreError("author quota policy unavailable")
+        return
+    limit = usage.daily_author_quota()
+    if limit is None:
+        return  # no quota configured -> prior behavior, no store touched
+    accepted, used = charge(
+        tenant_id, usage.author_quota_day(now_ts), limit,
+        require_durable=durability_required(),
+    )
+    if not accepted:
+        raise AuthorQuotaExceeded(tier, limit, used)
+
+
+def reset_usage_policy() -> None:
+    """Drop the memoized policy module (tests only)."""
+    global _USAGE_POLICY
+    _USAGE_POLICY = None
 
 
 def reset_memory_state() -> None:

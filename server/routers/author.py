@@ -495,89 +495,60 @@ def _customization_error(
     }))
 
 
-_USAGE_POLICY: Any = None
+def _quota_exceeded_response(tenant_id: str,
+                             exc: author_quota.AuthorQuotaExceeded) -> JSONResponse:
+    """The 429 the daily authoring cap answers with, in the same wire shape the
+    daily RUN quota already uses (only ``quota_kind`` differs)."""
+    usage = author_quota.usage_policy()
+    body = usage.daily_author_envelope(tenant_id, exc.tier, exc.limit, exc.used)
+    body["degraded_mode"] = False  # the wire schema requires a boolean
+    return JSONResponse(status_code=429, content=body)
 
 
-def _usage_policy():
-    """da/usage.py, loaded by path under its own name (it is not a ``server``
-    package module) — the same seam routers/usage.py and routers/ops.py use.
+def _quota_store_error(exc: author_quota.AuthorQuotaStoreError) -> JSONResponse:
+    """A configured quota that cannot be evaluated REFUSES (503). Failing open
+    would silently restore the unbounded state this gate exists to end. Type only
+    in the log: a store error message can carry a connection string, and the code
+    is absent from _CALLER_DRIVEN_CODES on purpose, so this warns."""
+    return _customization_error(CustomizationServiceError(
+        "author_quota_unavailable", 503, f"cause={type(exc).__name__}"))
 
-    Memoized like ``broker._get_usage``, and for the same reason: this sits on an
-    admission path, and ``deps._load_module_from`` re-executes the module on every
-    call. A failed load is retried rather than cached as a permanent absence.
+
+def _legacy_quota_denied(tenant: Any) -> JSONResponse | None:
+    """Charge one attempt for the LEGACY (auth-off) authoring path.
+
+    The R5 lane charges inside ``CustomizationService.stage``, immediately before
+    the harness call, so nothing it refuses first can spend a slot. The legacy
+    path has no such chokepoint — it calls the harness directly from
+    ``_legacy_author`` — so it is metered here, after its own gates.
+
+    With auth off the tenant id is an unverified request header, not a principal:
+    a caller can mint a new one per request and hand itself a fresh budget
+    forever. Such a deployment has no authenticated identity to meter, so the
+    whole open lane shares ONE anonymous budget.
     """
-    global _USAGE_POLICY
-    if _USAGE_POLICY is None:
-        _USAGE_POLICY = deps._load_module_from(deps.DA_DIR / "usage.py", "leaf_usage")
-    return _USAGE_POLICY
-
-
-def _author_quota_denied(tenant: Any) -> JSONResponse | None:
-    """Charge one authoring attempt against the tenant's daily cap.
-
-    Returns ``None`` to ADMIT (including when no quota is configured, which is
-    the default and leaves authoring exactly as it was), or a 429 response to
-    REFUSE. This is the bound on SERIAL authoring sessions: the per-session
-    ceilings inside the harness cap one session's turns and tokens, while the
-    money that authoring spends — Anthropic tokens and the operator-funded
-    sandbox — is spent harness-side BEFORE any broker lease, so the broker's USD
-    cap and daily RUN quota never observe it.
-
-    The counter is charged HERE, before dispatch, and is never refunded: an
-    attempt that fails inside the harness still spent that money.
-
-    A configured quota whose counter store is unreachable REFUSES the attempt
-    (503). Failing open would silently return the deployment to the unbounded
-    state this gate exists to end.
-    """
-    usage = _usage_policy()
-    if usage is None:
-        # The policy module did not load. Whether that matters depends on the
-        # operator's intent, which is readable without the module: an unset
-        # variable means there was never a cap to enforce, while a set one means
-        # this deployment asked for a cap that cannot be evaluated. Admitting the
-        # second case would be exactly the unbounded state this gate exists to end.
-        if os.environ.get("LEAF_DAILY_AUTHOR_QUOTA", "").strip():
-            return _customization_error(CustomizationServiceError(
-                "author_quota_unavailable", 503, "cause=usage_policy_not_loaded"))
-        return None
-    limit = usage.daily_author_quota()
-    if limit is None:
-        return None  # no quota configured -> prior behavior, no store touched
+    tenant_id = ANONYMOUS_QUOTA_PRINCIPAL if not deps.auth_live() else str(tenant)
     try:
         tier = entitlements.resolve_tier(tenant)
     except Exception:  # noqa: BLE001 - the tier is display-only in this envelope
         tier = "unknown"
-    # Do not spend a slot on a request the Build entitlement is about to refuse.
-    # This is NOT a second gate — the authoritative one still runs downstream and
-    # is what actually denies — it only keeps a deterministic 403 from consuming
-    # the tenant's budget. An unreadable policy charges anyway: on the money side
-    # the safe direction is to count.
+    # Do not spend a slot on a request the Build entitlement is about to refuse
+    # inside _legacy_author. This is NOT a second gate — that one still runs and
+    # is what denies — it only keeps a deterministic 403 from consuming the
+    # budget. An unreadable policy charges anyway: on the money side the safe
+    # direction is to count.
     try:
         if not entitlements.entitlements_for(tier).get("build", False):
             return None
     except entitlements.EntitlementsError:
         pass
-    live = deps.auth_live()
-    # With auth off the tenant id is an unverified request header, not a
-    # principal: a caller can mint a new one per request and hand itself a fresh
-    # budget forever. Such a deployment has no authenticated identity to meter,
-    # so the whole open lane shares ONE anonymous budget. Under live auth the
-    # verified tenant is the principal, as everywhere else.
-    tenant_id = str(tenant) if live else ANONYMOUS_QUOTA_PRINCIPAL
     try:
-        accepted, used = author_quota.charge(
-            tenant_id, usage.author_quota_day(), limit, require_durable=live)
+        author_quota.enforce(tenant_id, tier)
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(tenant_id, exc)
     except author_quota.AuthorQuotaStoreError as exc:
-        # Type only: a store error message can carry a connection string. The
-        # code is absent from _CALLER_DRIVEN_CODES on purpose, so this warns.
-        return _customization_error(CustomizationServiceError(
-            "author_quota_unavailable", 503, f"cause={type(exc).__name__}"))
-    if accepted:
-        return None
-    body = usage.daily_author_envelope(tenant_id, tier, limit, used)
-    body["degraded_mode"] = False  # the wire schema requires a boolean
-    return JSONResponse(status_code=429, content=body)
+        return _quota_store_error(exc)
+    return None
 
 
 def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
@@ -612,7 +583,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
         # The legacy path also delegates to the authoring harness when
         # LEAF_AUTHOR_HARNESS_URL is set, so it is metered by the same cap.
-        over_quota = _author_quota_denied(tenant)
+        over_quota = _legacy_quota_denied(tenant)
         if over_quota is not None:
             return over_quota
         return _legacy_author(req, tenant)
@@ -628,19 +599,17 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         return _customization_error(
             CustomizationServiceError("idempotency_key_required", 422)
         )
-    # Charged last, so a request the router was going to refuse anyway never
-    # burns a slot — but before dispatch, which is where the harness spend starts.
-    # A RETRY under an existing key counts again on purpose: a change set still
-    # in STAGING re-invokes the harness, so counting change-set rows instead of
-    # attempts would let one reused key loop the harness unbounded.
-    over_quota = _author_quota_denied(tenant)
-    if over_quota is not None:
-        return over_quota
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
         )
+    # The daily authoring cap is charged inside stage(), immediately before the
+    # harness call, so everything it refuses first costs nothing.
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(str(tenant), exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
@@ -658,15 +627,16 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
-    # Same cap as /api/author: this route reaches the same harness, so leaving it
-    # unmetered would make the gate bypassable by calling the sibling route.
-    over_quota = _author_quota_denied(tenant)
-    if over_quota is not None:
-        return over_quota
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
         )
+    # Same cap as /api/author: both routes reach the harness through stage(),
+    # which is where the charge lives, so neither can bypass it via the other.
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(str(tenant), exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(

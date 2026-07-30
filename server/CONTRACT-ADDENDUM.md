@@ -894,13 +894,17 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > `aps_live=false` / `usd_est=null`, so neither the broker's USD spend cap nor
 > the daily RUN quota (§ preflight order) ever observes it, while the harness's
 > per-session ceilings bound one session and never a SERIES of them.
-> A quota unit is one attempt admitted at the router; a refused attempt is not
-> counted (including one the Build entitlement will deterministically deny), and
-> a retry under an existing idempotency key IS counted, because a change set
-> still in STAGING re-invokes the harness. With auth OFF the tenant id is an
-> unverified request header rather than a principal, so the open lane shares one
-> anonymous budget instead of handing a fresh one to every invented id.
-> Rejection is **HTTP 429**
+> A quota unit is one attempt that reaches the harness. On the R5 lane the
+> charge lives inside `CustomizationService.stage`, immediately before the
+> harness call, so anything the service deterministically refuses first — an
+> invalid request, a missing tenant binding, a tier without Build, a role
+> `authorize_stage` denies, an already-STAGED idempotency replay answered from
+> its durable receipt — never spends a slot; a retry under a key still in
+> STAGING re-invokes the harness and IS counted. The legacy auth-off path calls
+> the harness directly from the router, so it is metered there, after its own
+> gates. With auth OFF the tenant id is an unverified request header rather
+> than a principal, so the open lane shares one anonymous budget instead of
+> handing a fresh one to every invented id. Rejection is **HTTP 429**
 > carrying the daily-run-quota envelope shape verbatim (`error_code:
 > "quota_exceeded"`, `retryable: true`, top-level and nested `tier`/`limit`/
 > `used`), discriminated by `quota_kind: "daily_author"` rather than
@@ -908,9 +912,12 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > bound to `author_quota_counters` (migration 0023) under
 > `LEAF_AUTHOR_QUOTA_STORE=postgres`, or per-process memory otherwise; a
 > configured quota whose counter cannot be reached refuses with a 503 rather
-> than admitting unmetered. Under live auth the durable store is REQUIRED: a
-> quota configured against the memory counter refuses, because two replicas
-> keep two independent counts and a restart returns every tenant to zero.
+> than admitting unmetered. The durable store is REQUIRED wherever a
+> per-process counter would not be a real cap, keyed on deployment posture:
+> any `LEAF_RUNTIME_ENV` outside development/test/local demands postgres
+> regardless of auth (two replicas keep two independent counts and a restart
+> returns every tenant to zero), and a local posture still demands it once
+> auth is live.
 
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
