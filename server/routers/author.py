@@ -609,7 +609,7 @@ def request_publication(
             return _customization_error(exc)
         if isinstance(exc, AuthorityError):
             return _customization_error(
-                CustomizationServiceError(exc.reason_code, 403)
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(
             CustomizationServiceError("invalid_publication_request", 422)
@@ -731,7 +731,7 @@ def deny_publication(
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
-                CustomizationServiceError(exc.reason_code, 403)
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(exc)
 

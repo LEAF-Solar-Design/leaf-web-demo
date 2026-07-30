@@ -505,12 +505,66 @@ def test_an_unmarked_authority_code_would_warn():
     assert max(levels) >= logging.WARNING
 
 
-def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch):
-    """AuthorityError reason codes are generated per field, so the set is open.
+def test_every_authority_conversion_site_is_marked():
+    """The invariant a single-route test cannot enforce.
 
-    Classifying them by name would drift, so the ROUTES mark the conversion. Testing
-    the funnel directly would not notice `from_authority=True` being dropped at the
-    eight call sites, so this drives a real request.
+    There were TEN of these branches, not the eight a string search found: two were
+    formatted differently and went unmarked, so a `confirmation_tampered` denial on
+    /api/author/publication-requests warned once per request. This walks the module's
+    AST so a new conversion site cannot be added unmarked.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(author_router))
+    conversions = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "_customization_error"):
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        # Only the AuthorityError conversions, identified by their reason_code arg.
+        built_from_reason_code = (
+            isinstance(first, ast.Call)
+            and any(
+                isinstance(a, ast.Attribute) and a.attr == "reason_code"
+                for a in first.args
+            )
+        )
+        if not built_from_reason_code:
+            continue
+        marked = any(
+            kw.arg == "from_authority"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in node.keywords
+        )
+        conversions.append((node.lineno, marked))
+
+    assert len(conversions) >= 10, (
+        f"expected at least ten authority conversions, found {len(conversions)}"
+    )
+    unmarked = [line for line, marked in conversions if not marked]
+    assert not unmarked, (
+        f"authority conversions missing from_authority=True at lines {unmarked}"
+    )
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/author/stage",
+     {"description": "count panels", "mode": "build", "idempotency_key": "k"}),
+    ("/api/author/publication-requests", {"change_set_id": CHANGE_SET}),
+    ("/api/author/rollback", {"change_set_id": CHANGE_SET, "idempotency_key": "k"}),
+])
+def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch, path, body):
+    """The behavioural half: the marking must actually reach the level decision.
+
+    More than one route, because a single-route test let two unmarked branches
+    through. The AST test above covers the sites this cannot reach.
     """
     from customization_authority import AuthorityError
 
@@ -519,11 +573,8 @@ def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch):
 
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
     client = _tenant_route_client(monkeypatch, _raise)
-    response = client.post(
-        "/api/author/stage",
-        json={"description": "count panels", "mode": "build", "idempotency_key": "k"},
-    )
-    assert response.status_code == 403
+    response = client.post(path, json=body)
+    assert response.status_code == 403, response.text
     assert response.json()["reason_code"] == "stage_role_denied"
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
         "an authority denial is a per-caller outcome, not an operator event"
