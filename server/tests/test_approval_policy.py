@@ -55,6 +55,12 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     SCRIPTS: List[List[Dict[str, Any]]] = []   # consumed one per POST
     BODIES: List[Dict[str, Any]] = []
+    # When set, EVERY POST is answered with this non-stream status instead of
+    # a scripted 200 stream — the same knob test_turn_runner's stub has. My
+    # first policy-give-back test set this on a stub that ignored it, so the
+    # confirm turn silently SUCCEEDED and the test proved nothing.
+    IMMEDIATE_STATUS: Optional[int] = None
+    IMMEDIATE_BODY: Dict[str, Any] = {}
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("content-length", 0) or 0)
@@ -64,6 +70,15 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
             cls.BODIES.append(json.loads(body or b"{}"))
         except Exception:
             cls.BODIES.append({})
+        if cls.IMMEDIATE_STATUS is not None:
+            payload = json.dumps(cls.IMMEDIATE_BODY).encode("utf-8")
+            self.send_response(cls.IMMEDIATE_STATUS)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            return
         script = cls.SCRIPTS.pop(0) if cls.SCRIPTS else [
             {"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
         self.send_response(200)
@@ -85,6 +100,8 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
 def turn_stub():
     _TurnStub.SCRIPTS = []
     _TurnStub.BODIES = []
+    _TurnStub.IMMEDIATE_STATUS = None
+    _TurnStub.IMMEDIATE_BODY = {}
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TurnStub)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -792,3 +809,41 @@ def test_an_orphan_cancel_retries_the_park(monkeypatch, turn_stub):
     assert _wait_until(
         lambda: session_store.get_approval("cid-orphret")["consumed"] is True), (
         "the orphan cancel's release never retried the parked decision")
+
+
+def test_policy_auto_confirm_gives_the_approval_back_on_an_unredeemed_rejection(monkeypatch, turn_stub):
+    """Round 11: the policy path's TurnRejected catch checked only pre_harness,
+    while 400/401/413/429/431 set approval_unredeemed WITHOUT pre_harness. So a
+    policy auto-confirm refused before the harness could redeem anything (a
+    missing grant, an oversized forward) permanently consumed the approval the
+    policy had just spent — the third consume site, after the router and the
+    kicker, to need the wider test."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 401
+    stub.IMMEDIATE_BODY = {"grant_required": True, "error": {"message": "no grant"}}
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-unredeemed", session_id=sid, tenant_id="tenant-p",
+        turn_id="t-ur", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-unredeemed": {"capability": "drawing.read"}}, None, "demo")
+
+    approval = session_store.get_approval("cid-unredeemed")
+    assert approval["decided"] is True, "the policy's decision itself stands"
+    assert approval["consumed"] is False, (
+        "an auto-confirm the harness provably never redeemed must return its "
+        "consume — otherwise the approval is burned with nothing to show"
+    )
+    # ...and a harness REJECTION is not parked for a retry loop (only a lost
+    # CAS parks; retrying a refusing harness would loop against it).
+    with turn_runner._pending_policy_lock:
+        assert sid not in turn_runner._pending_policy

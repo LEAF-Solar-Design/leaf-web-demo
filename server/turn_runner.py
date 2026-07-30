@@ -4,7 +4,9 @@ addendum) — Turn-engine API v1 (FROZEN):
 
     class TurnBusy(Exception)
     class TurnRejected(Exception): status_code, error_code, message, extra,
-                                   pre_harness (additive, defaults False)
+                                   pre_harness, approval_unredeemed
+                                   (both additive, both default False;
+                                   pre_harness implies approval_unredeemed)
     start_turn(tenant_id, session_id, *, text, confirm, images, classifier_hint) -> turn_id
 
 This module is the ONLY place that POSTs to the harness's `POST /turn`
@@ -1481,11 +1483,35 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                   f"session {session_id!r}; approval {cid!r} parked for the "
                   f"next terminal", file=sys.stderr, flush=True)
         except TurnRejected as exc:
-            if exc.pre_harness:
-                try:
-                    session_store.unconsume_approval(cid, session_id, tenant_id)
-                except Exception:  # noqa: BLE001
-                    pass
+            # `approval_unredeemed`, NOT `pre_harness` (round 11): the router
+            # was widened to refund 400/401/413/429/431 but this third consume
+            # site kept the narrower test, so a policy auto-confirm hitting a
+            # missing grant (401) or an oversized forward (413) burned the
+            # approval permanently. Same give-back discipline as the TurnBusy
+            # leg above: bounded retries, and a persistent failure is visible,
+            # never silent.
+            if exc.approval_unredeemed:
+                released = False
+                for _ in range(3):
+                    try:
+                        released = bool(session_store.unconsume_approval(
+                            cid, session_id, tenant_id))
+                    except Exception:  # noqa: BLE001
+                        released = False
+                    if released:
+                        break
+                if not released:
+                    try:
+                        emf_metrics.emit_approval_give_back_failed(
+                            "policy_auto_confirm", confirmation_id=cid,
+                            session_id=session_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print(f"[leaf-agent] policy auto-confirm give-back FAILED "
+                          f"for {cid!r} on session {session_id!r} after an "
+                          f"unredeemed rejection — the row stays consumed "
+                          f"until its TTL expires",
+                          file=sys.stderr, flush=True)
             if exc.turn_id is not None:
                 # No HTTP caller to answer: close the transcript the failed
                 # start opened, the queue kicker's rule.

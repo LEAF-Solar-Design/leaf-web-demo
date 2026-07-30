@@ -988,11 +988,12 @@ def test_second_turn_carries_prior_turn_as_messages(monkeypatch, turn_stub):
 
 
 # =========================================================================== #
-# pre_harness classification (routers/sessions.py's APPROVAL GIVE-BACK). The
-# router un-spends a consumed approval IFF TurnRejected.pre_harness is set, so
-# a leg wrongly marked pre_harness can un-spend an approval the harness is
-# already acting on. Getting this boundary right IS the safety property.
-# (sol-critic round 2, blocker 1.)
+# Rejection classification (routers/sessions.py's APPROVAL GIVE-BACK). The
+# router un-spends a consumed approval IFF TurnRejected.approval_unredeemed is
+# set (pre_harness implies it; 400/401/413/429/431 set it directly), so a leg
+# wrongly marked can un-spend an approval the harness is already acting on.
+# Getting this boundary right IS the safety property.
+# (sol-critic round 2, blocker 1; widened round 9-11.)
 # =========================================================================== #
 def _reject_from_post_error(monkeypatch, exc, url="http://127.0.0.1:9/"):
     """Drive start_turn to its POST and make requests.post raise `exc`."""

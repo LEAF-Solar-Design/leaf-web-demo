@@ -873,7 +873,12 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                                "message": exc.message},
                      "stop_reason": "error"})
             except Exception:  # noqa: BLE001
-                pass
+                # The caller still gets its rejection response either way, but
+                # a silent append failure recreates exactly the dangling
+                # transcript this closure exists to prevent — say so.
+                print(f"[leaf-agent] transcript closure FAILED for turn "
+                      f"{exc.turn_id!r} on session {session_id!r}; the turn "
+                      f"dangles until repair", file=sys.stderr, flush=True)
         return _turn_rejected_response(exc, approval_lost=approval_lost)
 
     return JSONResponse(
