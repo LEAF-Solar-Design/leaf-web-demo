@@ -338,6 +338,8 @@ export interface CustomizationCoordination {
 /** Wire shape mirrors POST /broker/run (CONTRACT-ADDENDUM section 8). */
 export interface BrokerRunRequest {
   tenantId: string;
+  /** Durable broker admission key. The HTTP client generates one when omitted. */
+  ledgerEventKey?: string;
   tool: ToolPackage;
   params: Record<string, unknown>;
   dwg: string;

@@ -126,11 +126,13 @@ answer 501/404, everything else unchanged); they are part of the frozen surface:
 | `converseRunner: ConverseRunner` | one converse turn as an async event stream backing `POST /turn` | `fakeTurnRunner.ts` | `impl/agentSdkTurnRunner.ts` (lazy-loaded) | §18 sessions wire |
 
 `BrokerApsClient` maps to **POST `{BROKER_URL}/broker/run`** with the snake_case
-body `{ tenant_id, tool, params, dwg, aps_live, test_source? }` and returns the
+body `{ tenant_id, ledger_event_key, tool, params, dwg, aps_live, test_source? }` and returns the
 extended §3/§10 envelope (`ADDENDUM §8`). The additive `test_source` field carries
 the exact validated candidate only for a design-time `aps_live:false` test. The
 broker refuses it for live APS, executes it only in the configured sandbox, and
-stores only its SHA-256 digest in request identity. `BROKER_URL` defaults to
+stores only its SHA-256 digest in request identity. The client generates a unique
+`ledger_event_key` for each call unless its caller supplies one for a retry.
+`BROKER_URL` defaults to
 `http://127.0.0.1:8140`; a
 per-tenant kill-switch denial surfaces as `TENANT_DISABLED`, a down broker as
 `BROKER_UNREACHABLE`.

@@ -5,13 +5,15 @@
  * BROKER_URL); it COMPILES + is exercised structurally now.
  *
  *   POST {BROKER_URL}/broker/run
- *     body: { tenant_id, tool, params, dwg, aps_live, test_source? }
+ *     body: { tenant_id, ledger_event_key, tool, params, dwg, aps_live, test_source? }
  *     (snake_case wire shape; test_source is design-time and non-live only)
  *     -> extended CONTRACT section 3 envelope (adds degraded_mode; section 10)
  *
  * Per-tenant kill-switch denials surface as a TENANT_DISABLED envelope; a broker
  * that is down surfaces as BROKER_UNREACHABLE. Both are returned AS envelopes.
  */
+
+import { randomUUID } from "node:crypto";
 
 import type { BrokerApsClient, BrokerRunRequest, ResultEnvelope } from "../index.js";
 
@@ -37,6 +39,7 @@ export class BrokerApsClientHttp implements BrokerApsClient {
     const brokerSecret = (process.env.LEAF_BROKER_SECRET ?? "").trim();
     const body = {
       tenant_id: req.tenantId,
+      ledger_event_key: req.ledgerEventKey ?? `harness:${randomUUID()}`,
       tool: req.tool,
       params: req.params,
       dwg: req.dwg,
