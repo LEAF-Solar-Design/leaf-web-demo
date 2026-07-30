@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Literal
@@ -30,6 +31,8 @@ from tenant_id_validator import is_valid_tenant_id
 from tool_validate import static_scan
 
 router = APIRouter()
+
+_LOG = logging.getLogger(__name__)
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 AUTHORED_DIR = SERVER_DIR / "authored"
@@ -362,7 +365,25 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
     return f"{idempotency_key}:{digest[:32]}"
 
 
-def _customization_error(exc: CustomizationServiceError) -> JSONResponse:
+def _customization_error(
+    exc: CustomizationServiceError, *, cause: BaseException | None = None
+) -> JSONResponse:
+    """Answer with the opaque reason code, and record why in the log.
+
+    The response deliberately tells a tenant nothing about the deployment, so
+    this is the only place an operator learns the cause. `cause` is for the
+    handlers that would otherwise discard an unexpected exception whole: pass it
+    and the traceback is logged instead of lost.
+    """
+    if cause is not None:
+        _LOG.error(
+            "customization_refused: code=%s cause=%s",
+            exc.code, type(cause).__name__, exc_info=cause,
+        )
+    else:
+        _LOG.warning(
+            "customization_refused: code=%s detail=%s", exc.code, exc.detail or "-"
+        )
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
@@ -425,8 +446,10 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_stage_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/stage")
@@ -442,8 +465,10 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_stage_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/register")
@@ -489,9 +514,9 @@ def request_publication(
         return _customization_error(
             CustomizationServiceError("invalid_publication_request", 422)
         )
-    except Exception:
+    except Exception as exc:
         return _customization_error(
-            CustomizationServiceError("customization_publish_failed", 503)
+            CustomizationServiceError("customization_publish_failed", 503), cause=exc
         )
 
 
@@ -512,8 +537,10 @@ def confirmation_lookup(
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_publish_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_publish_failed", 503), cause=exc
+        )
 
 
 @router.post("/api/author/rollback")
@@ -529,8 +556,10 @@ def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_rollback_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_rollback_failed", 503), cause=exc
+        )
 
 
 @router.post("/internal/customization/confirm")
@@ -648,5 +677,7 @@ def customization_authorize_publish(
         if isinstance(exc, AuthorityError):
             return _customization_error(CustomizationServiceError(exc.reason_code, 403))
         return _customization_error(exc)
-    except Exception:
-        return _customization_error(CustomizationServiceError("customization_confirmation_failed", 503))
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_confirmation_failed", 503), cause=exc
+        )
