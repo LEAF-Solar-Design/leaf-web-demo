@@ -82,26 +82,44 @@ function plainTopLevelKey(line: string): string | null {
  * loudly. Folded (`>`) joins its lines with spaces, literal (`|`) keeps the
  * newlines, and a blank line is a paragraph break in both.
  */
-function readScalar(lines: string[], index: number, raw: string): { value: string; next: number } {
-  const block = /^([>|])[+-]?\d*\s*$/.exec(raw.trim());
-  if (!block) {
-    return { value: raw.trim().replace(/^['"]|['"]$/g, ""), next: index + 1 };
+function readScalar(lines: string[], index: number, raw: string): { value: string; next: number } | null {
+  const header = raw.trim();
+  if (!/^[>|]/.test(header)) {
+    return { value: header.replace(/^['"]|['"]$/g, ""), next: index + 1 };
   }
-  const folded = block[1] === ">";
-  const parts: string[] = [];
+  // ONLY the four forms we can reproduce exactly. `>` and `>-` differ solely in
+  // a trailing newline, which cannot change what a description says, so both
+  // normalise to the same trimmed prose. Everything else is REFUSED rather than
+  // approximated: `|+` exists precisely to keep trailing blank lines, and an
+  // explicit indentation indicator (`>2`, `|-4`) means the leading spaces are
+  // content. Guessing at either silently rewrites the text, and this module's
+  // whole posture is that a shape we cannot reproduce is a bundle we do not
+  // mount.
+  if (!/^[>|]-?$/.test(header)) return null;
+  const folded = header.startsWith(">");
+  const content: string[] = [];
   let cursor = index + 1;
   for (; cursor < lines.length; cursor += 1) {
     const line = lines[cursor]!;
     // A line that is neither blank nor indented ends the block — that is where
     // YAML resumes reading keys, so the caller must resume there too or an
     // executable key hiding after a block scalar would never be inspected.
-    if (line.trim() !== "" && !/^\s/.test(line)) break;
-    parts.push(line.trim());
+    if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
+    content.push(line);
+  }
+  const indentOf = (line: string): number => line.length - line.trimStart().length;
+  const body = content.filter((line) => line.trim() !== "");
+  if (body.length) {
+    // A line indented FURTHER than the block's own indentation is structure
+    // YAML keeps and folding would destroy. Refuse instead of flattening it.
+    const base = indentOf(body[0]!);
+    if (body.some((line) => indentOf(line) !== base)) return null;
   }
   let value = "";
-  for (const part of parts) {
-    if (part === "") value += "\n";
-    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + part;
+  for (const line of content) {
+    const text = line.trim();
+    if (text === "") value += "\n";
+    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + text;
   }
   return { value: value.trim(), next: cursor };
 }
@@ -118,6 +136,7 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
     if (EXECUTABLE_KEYS.has(key.toLowerCase())) return null;
     const line = lines[index]!;
     const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
+    if (!scalar) return null;
     index = scalar.next - 1;
     if (key === "name" && name === null) name = scalar.value;
     if (key === "description" && description === null) description = scalar.value;
@@ -328,16 +347,25 @@ function stripFrontmatter(source: string): string {
  * once. Refusals are memoised too, which also keeps the refusal from
  * reprinting on every turn.
  */
-let memo: { key: string; attachment: SkillBundleAttachment | null } | null = null;
+const mounts = new Map<string, SkillBundleAttachment>();
+/** Bundle paths already reported as unpinned, so the refusal is logged once. */
+const warned = new Set<string>();
 
 export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): SkillBundleAttachment | null {
   const path = env.LEAF_SKILLS_BUNDLE_PATH?.trim();
   const tier = env.LEAF_SKILLS_TIER?.trim();
   const pin = env.LEAF_SKILLS_BUNDLE_DIGEST?.trim();
   const key = JSON.stringify([path ?? "", tier ?? "", pin ?? ""]);
-  if (memo?.key === key) return memo.attachment;
+  const cached = mounts.get(key);
+  if (cached) return cached;
   const attachment = mountFor(path, tier, pin);
-  memo = { key, attachment };
+  // Only a SUCCESS is remembered. A cached refusal would mean an operator who
+  // repairs the bundle in place has to restart the process before it is ever
+  // picked up, and the refusal path is cheap in the case that actually repeats
+  // (no bundle configured returns before touching the disk). Keyed by
+  // configuration rather than held in one slot, so alternating configurations
+  // reuse their snapshots instead of making new ones.
+  if (attachment) mounts.set(key, attachment);
   return attachment;
 }
 
@@ -352,10 +380,16 @@ function mountFor(
   // manifest and its digest. Only a digest the DEPLOYMENT states out of band
   // says "this exact artifact was approved". No pin, no mount.
   if (!pin) {
-    console.error(
+    // Once per configuration, not once per turn: this is now re-evaluated on
+    // every turn so that a fix is picked up, and a log line on every turn would
+    // bury the one that matters.
+    if (!warned.has(path)) {
+      warned.add(path);
+      console.error(
       "[leaf-skills] refusing to mount: LEAF_SKILLS_BUNDLE_DIGEST is required — " +
-      "a self-verifying bundle proves consistency, not provenance",
-    );
+        "a self-verifying bundle proves consistency, not provenance",
+      );
+    }
     return null;
   }
   const verified = verifyBundle(path, { expectedDigest: pin });

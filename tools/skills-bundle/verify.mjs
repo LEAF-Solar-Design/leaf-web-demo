@@ -1,4 +1,3 @@
-import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleDigest, fail, MAX_SKILLS, readJsonFile, sha256, validateBundleStructure } from "./common.mjs";
@@ -10,7 +9,9 @@ export async function verify(bundlePath) {
     fail(`bundle exceeds ${MAX_SKILLS} skills`);
   }
   const manifest = await readJsonFile(path.join(root, "manifest.json"), "manifest.json");
-  const plugin = await readJsonFile(structure.pluginPath, "plugin.json");
+  // The buffer validateBundleStructure inspected, not a fresh read of the same
+  // path: re-reading is what lets a racing writer show us two different files.
+  const plugin = JSON.parse(structure.contents.get(".claude-plugin/plugin.json").toString("utf8"));
   if (!manifest || manifest.version !== 1 || (manifest.tier !== "tenant-safe" && manifest.tier !== "operator")) {
     fail("manifest.json has an invalid version or tier");
   }
@@ -27,8 +28,9 @@ export async function verify(bundlePath) {
   for (const relativePath of structure.files) {
     const expected = manifest.files[relativePath];
     if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) fail(`invalid SHA-256 for ${relativePath}`);
-    const actual = sha256(await fs.readFile(path.join(root, ...relativePath.split("/"))));
-    if (actual !== expected) fail(`hash mismatch for ${relativePath}`);
+    const inspected = structure.contents.get(relativePath);
+    if (!inspected) fail(`no inspected bytes for ${relativePath}`);
+    if (sha256(inspected) !== expected) fail(`hash mismatch for ${relativePath}`);
   }
   if (typeof manifest.bundleDigest !== "string" || !/^[a-f0-9]{64}$/.test(manifest.bundleDigest) || manifest.bundleDigest !== bundleDigest(manifest.files)) {
     fail("bundle digest mismatch");

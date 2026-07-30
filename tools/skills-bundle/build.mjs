@@ -60,7 +60,9 @@ export async function build(options) {
     const structure = await validateBundleStructure(outputPath);
     const files = {};
     for (const relativePath of structure.files) {
-      files[relativePath] = sha256(await fs.readFile(path.join(outputPath, ...relativePath.split("/"))));
+      // The bytes the validator inspected, so the manifest describes exactly
+      // what was checked rather than whatever a later read happens to return.
+      files[relativePath] = sha256(structure.contents.get(relativePath));
     }
     const manifest = { version: 1, tier: options.tier, files, bundleDigest: bundleDigest(files) };
     await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);

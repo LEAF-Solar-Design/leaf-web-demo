@@ -100,19 +100,58 @@ export function parseSkillName(markdown, label) {
  * an executable skill sitting in the source tree does not break every build,
  * it just cannot be bundled.
  */
+/**
+ * Byte-for-byte the loader's `readScalar` (harness/src/ports/impl/skillBundle.ts).
+ * It has to be: with `name: >-` on the next line the loader folds to the real
+ * name while a line-only reader returns ">-", and the two sides then disagree
+ * about the same file. Returns null for any block form we cannot reproduce
+ * exactly, which both sides treat as a refusal.
+ */
+export function readScalar(lines, index, raw) {
+  const header = raw.trim();
+  if (!/^[>|]/.test(header)) {
+    return { value: header.replace(/^["']|["']$/g, ""), next: index + 1 };
+  }
+  if (!/^[>|]-?$/.test(header)) return null;
+  const folded = header.startsWith(">");
+  const content = [];
+  let cursor = index + 1;
+  for (; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
+    content.push(line);
+  }
+  const indentOf = (line) => line.length - line.trimStart().length;
+  const body = content.filter((line) => line.trim() !== "");
+  if (body.length) {
+    const base = indentOf(body[0]);
+    if (body.some((line) => indentOf(line) !== base)) return null;
+  }
+  let value = "";
+  for (const line of content) {
+    const text = line.trim();
+    if (text === "") value += "\n";
+    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + text;
+  }
+  return { value: value.trim(), next: cursor };
+}
+
 export function parseBundledSkillName(markdown, label) {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!frontmatter) fail(`${label} lacks YAML frontmatter`);
+  const lines = frontmatter[1].split(/\r?\n/);
   let name = null;
-  for (const line of frontmatter[1].split(/\r?\n/)) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const key = plainTopLevelKey(line);
     if (!key) continue;
     if (EXECUTABLE_FRONTMATTER_KEYS.has(key.toLowerCase())) {
       fail(`${label} declares the executable frontmatter key ${JSON.stringify(key)}`);
     }
-    if (key === "name" && name === null) {
-      name = line.slice(line.indexOf(":") + 1).trim().replace(/^["']|["']$/g, "");
-    }
+    const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
+    if (!scalar) fail(`${label} uses a block scalar this pipeline cannot reproduce exactly`);
+    index = scalar.next - 1;
+    if (key === "name" && name === null) name = scalar.value;
   }
   if (name === null) fail(`${label} lacks a frontmatter name`);
   return name;
@@ -231,7 +270,20 @@ export async function validateBundleStructure(bundlePath) {
   // unknown key is not inert: `monitors` declares unsandboxed tasks armed at
   // session start. Hash inventories cannot catch this on their own, because a
   // manifest can be regenerated over the edited file.
-  const plugin = await readJsonFile(pluginPath, "plugin.json");
+  // ONE read, kept. Parsing here and hashing a SECOND read in verify.mjs is the
+  // same window the loader had: a racing bundle can show safe bytes to the
+  // policy check and different, manifest-matching bytes to the hash, and the
+  // deployment gate then blesses an artifact production refuses. The buffers
+  // inspected below are the ones returned for hashing.
+  const contents = new Map();
+  const pluginBuffer = await fs.readFile(pluginPath);
+  contents.set(".claude-plugin/plugin.json", pluginBuffer);
+  let plugin;
+  try {
+    plugin = JSON.parse(pluginBuffer.toString("utf8"));
+  } catch (error) {
+    fail(`invalid plugin.json JSON: ${error.message}`);
+  }
   if (!plugin || typeof plugin !== "object" || Array.isArray(plugin)) fail("plugin.json must be a JSON object");
   const disallowed = Object.keys(plugin).filter((key) => !PLUGIN_KEYS.has(key));
   if (disallowed.length > 0) fail(`plugin.json has disallowed keys: ${disallowed.sort().join(", ")}`);
@@ -262,9 +314,11 @@ export async function validateBundleStructure(bundlePath) {
     }
     const skillPath = path.join(skillDir, "SKILL.md");
     await assertPlainFile(skillPath, `bundled SKILL.md for ${name}`, MAX_SKILL_FILE_BYTES);
-    const declaredName = parseBundledSkillName(await fs.readFile(skillPath, "utf8"), `bundled SKILL.md for ${name}`);
+    const skillBuffer = await fs.readFile(skillPath);
+    contents.set(`skills/${name}/SKILL.md`, skillBuffer);
+    const declaredName = parseBundledSkillName(skillBuffer.toString("utf8"), `bundled SKILL.md for ${name}`);
     if (declaredName !== name) fail(`bundled SKILL.md name ${JSON.stringify(declaredName)} does not match directory ${JSON.stringify(name)}`);
     files.push(`skills/${name}/SKILL.md`);
   }
-  return { files: files.sort(), names: names.sort(), pluginPath };
+  return { files: files.sort(), names: names.sort(), pluginPath, contents };
 }

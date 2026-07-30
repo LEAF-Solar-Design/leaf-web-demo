@@ -699,9 +699,8 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         server,
         mcpAttachment,
         planFirst: planFirst === true,
-        // Skills reach the model through the SDK's own `skills` option, which
-        // enables the Skill tool itself — so this list stays the APS tool only
-        // and the money-gated canUseTool envelope below is unchanged.
+        // This list stays the APS tool only; the money-gated canUseTool
+        // envelope below is unchanged.
         canUseTool,
       }),
     });

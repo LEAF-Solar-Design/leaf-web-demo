@@ -44,7 +44,9 @@ async function curation(file, entries) {
 }
 
 function run(script, args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  // Bounded: node:test cannot interrupt a synchronous child, so a hung
+  // builder would hang the whole run instead of failing it.
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 60_000 });
 }
 
 // Re-hash a bundle in place so a tampering case cannot be caught by the hash

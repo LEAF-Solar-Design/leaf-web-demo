@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { materialiseVerifiedBundle, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
+import { materialiseVerifiedBundle, parseSkillFrontmatter, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
 
 const made: string[] = [];
 const repo = resolve(import.meta.dirname, "../..");
@@ -165,6 +165,28 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     expect(second!.plugin.path).toBe(first!.plugin.path);
   });
 
+  it("RETRIES a refusal, so repairing a bundle in place does not need a restart", () => {
+    // Caching a refusal is the tempting half of the memo and the wrong half: an
+    // operator who fixes the bundle under the same path, tier and pin would
+    // otherwise see nothing change until the process restarts.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const env = {
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv;
+    const file = join(path, "skills", "code-standards", "SKILL.md");
+    const good = readFileSync(file);
+
+    writeFileSync(file, "broken");
+    expect(skillBundleAttachment(env)).toBeNull();
+
+    writeFileSync(file, good);
+    expect(skillBundleAttachment(env)).not.toBeNull();
+  });
+
   it("refuses a flipped byte in a SKILL.md", () => {
     const path = buildBundle();
     const file = join(path, "skills", "code-standards", "SKILL.md");
@@ -298,5 +320,49 @@ describe("loader and offline verifier cross-check", { timeout: 120_000 }, () => 
     const path = buildBundle();
     mutate(path);
     expect(verifyBundle(path).ok).toBe(offlineAccepts(path));
+  });
+});
+
+// CRLF throughout: the real curated skills are CRLF, and a reader that only
+// works on LF would pass every hand-written LF fixture and fail in production.
+describe("frontmatter block scalars", () => {
+  const CRLF = String.fromCharCode(13, 10);
+  const fm = (...body: string[]) =>
+    parseSkillFrontmatter(["---", ...body, "---", "prose"].join(CRLF) + CRLF);
+
+  it("folds a >- description into one line", () => {
+    expect(fm("name: skill-a", "description: >-", "  first line", "  second line")?.description)
+      .toBe("first line second line");
+  });
+
+  it("keeps the line breaks of a |- description", () => {
+    expect(fm("name: skill-a", "description: |-", "  first line", "  second line")?.description)
+      .toBe("first line" + String.fromCharCode(10) + "second line");
+  });
+
+  it("REFUSES a block form it cannot reproduce exactly", () => {
+    // Each of these means something specific that folding would quietly
+    // rewrite: an explicit indentation indicator makes leading spaces content,
+    // and `+` keeps trailing blank lines on purpose.
+    for (const header of [">2-", ">-2", "|+", "|-4", ">+", "|2"]) {
+      expect(fm("name: skill-a", `description: ${header}`, "  text")).toBeNull();
+    }
+  });
+
+  it("REFUSES a folded block whose lines are not evenly indented", () => {
+    // YAML preserves the deeper indentation as structure; folding it away
+    // changes the text, so the bundle is refused instead.
+    expect(fm("name: skill-a", "description: >-", "  even", "    deeper")).toBeNull();
+  });
+
+  it("RESUMES after a block scalar, so a later executable key is still caught", () => {
+    // The guard that makes this work is the break on a dedented line. Without
+    // it the parser swallows `context: fork` as block content and mounts a
+    // skill that forks a subagent.
+    expect(fm("name: skill-a", "description: >-", "  text", "context: fork")).toBeNull();
+    expect(fm("name: skill-a", "description: >-", "  text", "hooks: [x]")).toBeNull();
+    // ...and a harmless key after a block is still read normally.
+    expect(fm("name: skill-a", "description: >-", "  text", "compatibility: claude-code")?.name)
+      .toBe("skill-a");
   });
 });
