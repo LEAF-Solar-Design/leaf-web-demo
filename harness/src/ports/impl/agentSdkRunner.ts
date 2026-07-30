@@ -425,7 +425,11 @@ export class AgentSdkRunner implements AgentRunner {
             ? JSON.parse(a.params_json)
             : {};
           candidateTest = { ...candidateTest, attempted: true };
-          const env = await input.toolset.apsTestRun(candidate, params);
+          const env = await input.toolset.apsTestRun(
+            candidate,
+            params,
+            candidateSubmission?.code,
+          );
           candidateTest = brokerTestState(env);
           const accepted = acceptBrokerTestResult(env);
           const text = JSON.stringify(env, null, 2);
@@ -602,6 +606,7 @@ export class AgentSdkRunner implements AgentRunner {
       candidate,
       input.toolset.apsTestRun,
       candidateTest,
+      finalSubmission.code,
     );
     const finalPkg: ToolPackage = candidate;
     const diagnostics = validateToolPackage(finalPkg);
@@ -634,10 +639,11 @@ export async function completeRequiredBrokerTest(
   candidate: ToolPackage,
   apsTestRun: AgentRunInput["toolset"]["apsTestRun"],
   state: AuthorBrokerTestState = emptyBrokerTestState(),
+  testSource?: string,
 ): Promise<ToolExecutionReceipt | null> {
   const finalState = state.attempted
     ? state
-    : brokerTestState(await apsTestRun(candidate, {}));
+    : brokerTestState(await apsTestRun(candidate, {}, testSource));
   if (!finalState.ok) {
     throw new Error(
       `authored tool failed required broker test${finalState.errorCode ? ` (${finalState.errorCode})` : ""}: ${finalState.failureReason ?? "broker test was not accepted"}.`,

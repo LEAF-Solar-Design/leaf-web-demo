@@ -220,6 +220,49 @@ def test_sandbox_round_trips_valid_section3_envelope(tenant_repo, monkeypatch):
     assert env["result"] == in_proc["result"]
 
 
+def test_staged_source_wins_over_stale_published_file(tenant_repo, monkeypatch):
+    """A design-time test must execute the submitted bytes, not the published body."""
+    tool = tenant_repo(
+        "candidate",
+        "def run(intake, params):\n    return ({'source': 'published-stale'}, None)\n",
+    )
+    staged = (
+        "def run(intake, params):\n"
+        "    return ({'source': 'staged-exact', 'count': len(intake['layers'])}, None)\n"
+    )
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+
+    env = tool_loader.run_tool_dynamic(
+        tool, {"layers": ["A", "B"]}, {}, aps_live=False, da=None,
+        tenant_id="tenant-a", test_source=staged,
+    )
+
+    assert env["ok"] is True
+    assert env["result"] == {"source": "staged-exact", "count": 2}
+
+
+def test_staged_source_requires_sandbox_and_never_runs_live(tenant_repo, monkeypatch):
+    tool = tenant_repo("candidate", BENIGN_SRC)
+    staged = "def run(intake, params):\n    return ({'ran': True}, None)\n"
+
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    unboxed = tool_loader.run_tool_dynamic(
+        tool, {}, {}, aps_live=False, da=None, tenant_id="tenant-a",
+        test_source=staged,
+    )
+    assert unboxed["ok"] is False
+    assert unboxed["error"]["error_code"] == "TENANT_DISABLED"
+
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+    live = tool_loader.run_tool_dynamic(
+        tool, {}, {}, aps_live=True, da=None, tenant_id="tenant-a",
+        test_source=staged,
+    )
+    assert live["ok"] is False
+    assert live["error"]["error_code"] == "BAD_PARAMS"
+
+
 def test_sandbox_bypasses_in_process_exec_module(tenant_repo, monkeypatch):
     """Acceptance (3): on the sandbox path NO tenant-code exec_module runs in this PID."""
     tool = tenant_repo("counter", BENIGN_SRC)
@@ -335,6 +378,8 @@ def test_sandbox_write_path_uses_same_sandboxed_runner():
     wl_src = (SERVER_DIR / "write_loop.py").read_text(encoding="utf-8")
     assert "run_tool_dynamic_fn(" in wl_src  # write branch calls the injected runner
     broker_src = (SERVER_DIR / "broker.py").read_text(encoding="utf-8")
-    assert "run_tool_dynamic_fn=run_tool_dynamic" in broker_src  # broker injects the real one
+    assert "run_dynamic = functools.partial(" in broker_src
+    assert "run_tool_dynamic, test_source=req.test_source" in broker_src
+    assert "run_tool_dynamic_fn=run_dynamic" in broker_src
     # and the real runner honors the sandbox flag
     assert callable(write_loop.run_write_mock)

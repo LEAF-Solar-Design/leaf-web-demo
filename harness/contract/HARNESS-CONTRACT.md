@@ -126,8 +126,12 @@ answer 501/404, everything else unchanged); they are part of the frozen surface:
 | `converseRunner: ConverseRunner` | one converse turn as an async event stream backing `POST /turn` | `fakeTurnRunner.ts` | `impl/agentSdkTurnRunner.ts` (lazy-loaded) | §18 sessions wire |
 
 `BrokerApsClient` maps to **POST `{BROKER_URL}/broker/run`** with the snake_case
-body `{ tenant_id, tool, params, dwg, aps_live }` and returns the extended §3/§10
-envelope (`ADDENDUM §8`). `BROKER_URL` defaults to `http://127.0.0.1:8140`; a
+body `{ tenant_id, tool, params, dwg, aps_live, test_source? }` and returns the
+extended §3/§10 envelope (`ADDENDUM §8`). The additive `test_source` field carries
+the exact validated candidate only for a design-time `aps_live:false` test. The
+broker refuses it for live APS, executes it only in the configured sandbox, and
+stores only its SHA-256 digest in request identity. `BROKER_URL` defaults to
+`http://127.0.0.1:8140`; a
 per-tenant kill-switch denial surfaces as `TENANT_DISABLED`, a down broker as
 `BROKER_UNREACHABLE`.
 
@@ -159,7 +163,8 @@ SPEC §10, with no shell and no arbitrary network access):
    exact paths, byte counts, and SHA-256 digests. A retry can replace only the
    same uncommitted package when it presents the exact prior receipt.
 3. `aps_test_run` delegates the current validated candidate to
-   `BrokerApsClient` with `aps_live:false`. When
+   `BrokerApsClient` with `aps_live:false`, including the exact candidate source
+   as `test_source`. When
    `LEAF_TOOL_SANDBOX_PROVIDER=e2b`, success requires a
    `leaf.tool-execution.v1` receipt bound to the submitted source digest and
    tenant hash.

@@ -594,8 +594,21 @@ def _run_in_sandbox(local: Path, intake: Dict[str, Any],
         source = local.read_text(encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return ("infra_error", f"could not read tool source {local.name}: {type(exc).__name__}: {exc}")
+    return _run_source_in_sandbox(source, local.name, intake, params)
+
+
+def _run_source_in_sandbox(source: str, filename: str, intake: Dict[str, Any],
+                           params: Dict[str, Any]) -> Tuple[str, Any]:
+    """Execute already-validated source in the locked-down subprocess sandbox.
+
+    This is the design-time staged-source seam. It never loads the source in the
+    credential-holding broker process and applies the same fixed source bound as
+    the E2B tier.
+    """
+    if len(source.encode("utf-8")) > _SANDBOX_LIMITS["source_bytes"]:
+        return ("infra_error", "tool source exceeds fixed sandbox limit")
     job = json.dumps({"source": source, "intake": intake, "params": params,
-                      "filename": local.name}).encode("utf-8")
+                      "filename": filename}).encode("utf-8")
     timeout = _sandbox_timeout_s()
     try:
         with tempfile.TemporaryDirectory(prefix="leaf-sbx-") as jail:
@@ -638,13 +651,21 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
     intake never touches an argv), runs `_SANDBOX_RUNNER` (audit-hook jail included) via
     stdin redirect, verifies the broker-only egress receipt (REFUSING to relay on failure),
     and relays the runner's JSON verbatim. Same return contract as `_run_in_sandbox`."""
-    cmd = _microvm_cmd()
-    if cmd is None:
-        return ("infra_error", "node executable not found; e2b-microvm tier unavailable")
     try:
         source = local.read_text(encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return ("infra_error", f"could not read tool source {local.name}: {type(exc).__name__}: {exc}")
+    return _run_source_in_sandbox_e2b(
+        source, local.name, intake, params, tenant_id=tenant_id)
+
+
+def _run_source_in_sandbox_e2b(source: str, filename: str,
+                               intake: Dict[str, Any], params: Dict[str, Any],
+                               tenant_id: Optional[str] = None) -> Tuple[str, Any]:
+    """Execute already-validated source in the broker-owned E2B micro-VM."""
+    cmd = _microvm_cmd()
+    if cmd is None:
+        return ("infra_error", "node executable not found; e2b-microvm tier unavailable")
     source_bytes = len(source.encode("utf-8"))
     intake_bytes = len(json.dumps(intake, separators=(",", ":")).encode("utf-8"))
     params_bytes = len(json.dumps(params, separators=(",", ":")).encode("utf-8"))
@@ -658,7 +679,7 @@ def _run_in_sandbox_e2b(local: Path, intake: Dict[str, Any],
     broker_host = (os.environ.get("LEAF_SANDBOX_BROKER_HOST", "").strip()
                    or "httpbingo.org")
     sandbox_job = {"source": source, "intake": intake, "params": params,
-                   "filename": local.name, "require_limits": True,
+                   "filename": filename, "require_limits": True,
                    "require_network_namespace": True}
     blob = json.dumps({
         "schema": "leaf.e2b.tool-exec-job.v1",
@@ -1043,6 +1064,17 @@ def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     return resolve_local_file(tool, tenant_id) is None
 
 
+def _test_source_filename(tool: Dict[str, Any]) -> Optional[str]:
+    """Return the safe package filename for a staged design-time source."""
+    entry = (tool or {}).get("entry")
+    if not isinstance(entry, str) or _is_unsafe_ref(entry):
+        return None
+    filename = Path(entry).name
+    if not filename or Path(filename).suffix.lower() != ".py":
+        return None
+    return filename
+
+
 def _coerce(ret: Any) -> Union[Tuple[dict, Any], dict]:
     """Normalize a tool's return into (result, overlay) — or a full envelope."""
     if isinstance(ret, tuple) and len(ret) == 2:
@@ -1075,11 +1107,17 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
                      aps_live: bool, da: Any = None, *,
                      dwg_path: Optional[str] = None,
                      t0: Optional[float] = None,
-                     tenant_id: Optional[str] = None) -> Dict[str, Any]:
+                     tenant_id: Optional[str] = None,
+                     test_source: Optional[str] = None) -> Dict[str, Any]:
     """Execute the tool the registry entry references. Returns an extended §3 envelope.
 
     ``tenant_id`` scopes entry resolution to the requesting tenant's repo (wave 4). A
-    None tenant_id keeps the legacy demo-tenant behaviour (honours $LEAF_TENANT_REPO)."""
+    None tenant_id keeps the legacy demo-tenant behaviour (honours $LEAF_TENANT_REPO).
+
+    ``test_source`` is the exact trusted validate_tool output for a design-time
+    staged test. It is accepted only for non-live execution inside a configured
+    sandbox and never enters the broker's in-process module loader.
+    """
     t0 = t0 if t0 is not None else time.perf_counter()
     name = (tool or {}).get("name")
     version = (tool or {}).get("version", "1.0.0")
@@ -1094,7 +1132,27 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         return err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
                             retryable=False, tool=name, version=version, timing_ms=_ms())
 
-    local = resolve_local_file(tool, tenant_id)
+    test_filename = None
+    if test_source is not None:
+        if aps_live:
+            return err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "staged test source is forbidden for APS_LIVE=1",
+                retryable=False, tool=name, version=version, timing_ms=_ms())
+        test_filename = _test_source_filename(tool)
+        if test_filename is None:
+            return err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "staged test source requires a safe repo-relative Python entry",
+                retryable=False, tool=name, version=version, timing_ms=_ms())
+        if len(test_source.encode("utf-8")) > _SANDBOX_LIMITS["source_bytes"]:
+            return err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "staged test source exceeds fixed sandbox limit",
+                retryable=False, tool=name, version=version, timing_ms=_ms())
+        local = None
+    else:
+        local = resolve_local_file(tool, tenant_id)
 
     # 2) APS path (kind:appbundle OR kind:script with only .lsp/engine_script)
     if aps_live and da is not None and hasattr(da, "run_tool") and local is None:
@@ -1112,7 +1170,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
 
     # 3) LOCAL "the FILE is the tool" path (APS_LIVE=0, or degraded live fallback)
     degraded = bool(aps_live)  # requested live but running locally => degraded
-    if local is None:
+    if local is None and test_source is None:
         return err_envelope(
             ErrorCode.BAD_PARAMS,
             f"no local implementation resolvable for tool {name!r} "
@@ -1129,12 +1187,28 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             ErrorCode.INTERNAL,
             "unsupported LEAF_TOOL_SANDBOX_PROVIDER; execution refused",
             retryable=False, tool=name, version=version, timing_ms=_ms())
+    if test_source is not None and tier == "off":
+        return err_envelope(
+            ErrorCode.TENANT_DISABLED,
+            "staged test source requires configured sandbox execution",
+            retryable=False, tool=name, version=version, timing_ms=_ms())
     execution_provenance = None
     if tier != "off":
-        if tier == "microvm":
+        if test_source is not None:
+            assert test_filename is not None
+            if tier == "microvm":
+                kind, payload = _run_source_in_sandbox_e2b(
+                    test_source, test_filename, intake, params,
+                    tenant_id=tenant_id)
+            else:
+                kind, payload = _run_source_in_sandbox(
+                    test_source, test_filename, intake, params)
+        elif tier == "microvm":
+            assert local is not None
             kind, payload = _run_in_sandbox_e2b(
                 local, intake, params, tenant_id=tenant_id)
         else:
+            assert local is not None
             kind, payload = _run_in_sandbox(local, intake, params)
         if kind == "tool_error":
             return err_envelope(ErrorCode.INTERNAL,
@@ -1150,6 +1224,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         else:
             ret = payload
     else:
+        assert local is not None
         try:
             mod = _load_module(local)
         except Exception as exc:  # noqa: BLE001

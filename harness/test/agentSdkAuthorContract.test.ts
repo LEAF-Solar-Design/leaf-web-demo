@@ -47,9 +47,12 @@ describe("Agent SDK author contract", () => {
 
   it("runs a trusted default broker test when the model stops after validation", async () => {
     const run = vi.fn(async () => envelope(true));
-    await expect(completeRequiredBrokerTest(TOOL, run)).resolves.toBeNull();
+    const source = "def run(intake, params):\n    return ({}, None)\n";
+    await expect(
+      completeRequiredBrokerTest(TOOL, run, undefined, source),
+    ).resolves.toBeNull();
     expect(run).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledWith(TOOL, {});
+    expect(run).toHaveBeenCalledWith(TOOL, {}, source);
   });
 
   it("fails closed with only a bounded broker error code", async () => {

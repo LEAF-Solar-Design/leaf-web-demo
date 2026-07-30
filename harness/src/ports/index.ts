@@ -342,6 +342,12 @@ export interface BrokerRunRequest {
   params: Record<string, unknown>;
   dwg: string;
   apsLive: boolean;
+  /**
+   * Exact trusted source produced by validate_tool for a design-time broker test.
+   * The broker accepts it only for apsLive=false and only inside a configured
+   * sandbox. Ordinary registered-tool runs omit it and keep file resolution.
+   */
+  testSource?: string;
 }
 
 export interface BrokerApsClient {
@@ -395,7 +401,11 @@ export interface AuthorToolset {
   /** Validate and atomically write one new exact tool package. */
   submitTool: (proposal: ToolSourceProposal) => ToolSubmissionResult;
   /** Test-runs a candidate tool via the broker (broker only, aps_live=false). */
-  apsTestRun: (tool: ToolPackage, params?: Record<string, unknown>) => Promise<ResultEnvelope>;
+  apsTestRun: (
+    tool: ToolPackage,
+    params?: Record<string, unknown>,
+    testSource?: string,
+  ) => Promise<ResultEnvelope>;
 }
 
 export interface ReadonlyFsTenantRepoTool {

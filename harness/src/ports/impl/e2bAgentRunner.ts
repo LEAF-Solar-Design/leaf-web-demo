@@ -626,7 +626,7 @@ export class E2bAgentRunner implements AgentRunner {
     });
 
     // Test-run once through the broker (broker only, aps_live=false) to confirm the numbers.
-    await input.toolset.apsTestRun(submitted.tool, {});
+    await input.toolset.apsTestRun(submitted.tool, {}, submitted.code);
 
     const preview =
       `Tool "${name}" ${author.preview_verb} (engine_op=${author.engine_op}); ` +
