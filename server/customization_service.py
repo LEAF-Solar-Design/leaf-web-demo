@@ -468,9 +468,17 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_harness_unavailable", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_harness_unavailable", 503,
+                f"harness_stage_failed: {url}/author/stage status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         if not isinstance(body, Mapping):
-            raise CustomizationServiceError("invalid_staged_receipt", 502)
+            raise CustomizationServiceError(
+                "invalid_staged_receipt", 502,
+                f"staged_receipt_not_a_mapping: {type(body).__name__}",
+            )
         return body
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
@@ -844,10 +852,18 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise CustomizationServiceError("customization_publish_incomplete", 503) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 503,
+                f"harness_publish_failed: {url}/author/publish status={status} "
+                f"{type(exc).__name__}",
+            ) from exc
         commit = body.get("commit") if isinstance(body, Mapping) else None
         if not isinstance(commit, str):
-            raise CustomizationServiceError("customization_publish_incomplete", 502)
+            raise CustomizationServiceError(
+                "customization_publish_incomplete", 502,
+                f"publish_commit_not_a_string: {type(commit).__name__}",
+            )
         return commit
 
     def record_staged_callback(self, *, tenant_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:

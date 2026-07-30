@@ -72,7 +72,12 @@ def test_secret_value_is_never_placed_in_the_detail(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_HARNESS_SECRET", "s3cret-harness-token")
     with pytest.raises(CustomizationServiceError) as caught:
         _ensure_bare_repo("55555555-5555-4555-8555-555555555555")
-    assert "s3cret-harness-token" not in caught.value.detail
+    detail = caught.value.detail
+    # Assert the detail SAYS something first, so this cannot pass vacuously on an
+    # empty string the way it would if the branch simply stopped setting detail.
+    assert "harness_unconfigured" in detail
+    assert "url_set=False" in detail
+    assert "s3cret-harness-token" not in detail
 
 
 def test_failed_provision_call_records_status_and_exception_type(tmp_path, monkeypatch):
@@ -94,6 +99,8 @@ def test_failed_provision_call_records_status_and_exception_type(tmp_path, monke
     assert "harness_provision_failed" in detail
     assert "_Boom" in detail
     assert "/author/repository" in detail
+    # The name of this test promises the status, so hold it to that.
+    assert "status=" in detail
 
 
 def test_git_failure_carries_stderr(tmp_path):
@@ -132,14 +139,126 @@ def test_detail_never_reaches_the_response_body():
     assert "head_missing" not in response.body.decode("utf-8")
 
 
-def test_unexpected_exception_is_logged_with_a_traceback(caplog):
-    """The six handlers that used to discard the exception entirely."""
-    caplog.set_level(logging.ERROR, logger=author_router._LOG.name)
-    author_router._customization_error(
-        CustomizationServiceError("customization_stage_failed", 503),
-        cause=ZeroDivisionError("division by zero"),
+SENTINEL = "dbname=leaf password=hunter2-should-never-be-logged"
+
+
+TENANT = "77777777-7777-4777-8777-777777777777"
+
+
+def _authorize_publish(monkeypatch, raiser):
+    """Drive the real /internal/customization/authorize-publish route.
+
+    Chosen deliberately: of the six handlers that now pass `cause=`, this is the
+    one that authenticates from headers rather than a JWT dependency, so a real
+    request can reach its `except Exception` without minting a token.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "dispatch-secret")
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: raiser()), raising=True,
     )
-    records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert records, "an unexpected cause must be logged at ERROR"
-    assert records[0].exc_info is not None, "the traceback must be preserved"
-    assert "ZeroDivisionError" in records[0].getMessage()
+    route_app = FastAPI()
+    route_app.include_router(author_router.router)
+    client = TestClient(route_app, raise_server_exceptions=False)
+    return client.post(
+        "/internal/customization/authorize-publish",
+        json={"receipt": {"change_set_id": TENANT}, "expected_main_sha": "a" * 40},
+        headers={"X-Tenant-Id": TENANT, "X-Dispatch-Secret": "dispatch-secret"},
+    )
+
+
+def test_a_real_route_logs_the_frames_of_an_unexpected_failure(caplog, monkeypatch):
+    """Blocker: calling the funnel directly cannot prove the routes pass cause=.
+
+    Reverting any route's `cause=exc` back to a bare `except Exception:` makes this
+    fail, because the ERROR record disappears.
+    """
+    def _raise():
+        raise RuntimeError(SENTINEL)
+
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    response = _authorize_publish(monkeypatch, _raise)
+    assert response.status_code == 503
+    assert response.json()["reason_code"] == "customization_confirmation_failed"
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "an unexpected route failure must log at ERROR"
+    message = errors[0].getMessage()
+    assert "RuntimeError" in message, "the exception type identifies the fault"
+    assert "author.py" in message, "the frames must say where it broke"
+
+
+def test_the_exception_message_is_never_logged(caplog, monkeypatch):
+    """An exception message can carry a DSN or a token. Log where, not what."""
+    def _raise():
+        raise RuntimeError(SENTINEL)
+
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    _authorize_publish(monkeypatch, _raise)
+    rendered = "\n".join(
+        r.getMessage() + (str(r.exc_info) if r.exc_info else "") for r in caplog.records
+    )
+    assert "hunter2-should-never-be-logged" not in rendered
+    assert SENTINEL not in rendered
+    # exc_info would render the message via the traceback formatter, so refuse it.
+    assert all(r.exc_info is None for r in caplog.records)
+
+
+def test_an_unauthenticated_internal_refusal_does_not_warn(caplog, monkeypatch):
+    """Blocker: these routes sit on a public ALB and authenticate in the handler.
+
+    A caller with no secret must not be able to write a WARNING per request.
+    """
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_APPROVAL_SECRET", "approval-secret")
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    route_app = FastAPI()
+    route_app.include_router(author_router.router)
+    client = TestClient(route_app, raise_server_exceptions=False)
+    response = client.post(
+        "/internal/customization/deny",
+        json={"change_set_id": "99999999-9999-4999-8999-999999999999"},
+        headers={"X-Tenant-Id": "99999999-9999-4999-8999-999999999999",
+                 "X-Approval-Secret": "wrong-secret"},
+    )
+    assert response.status_code == 403
+    assert response.json()["reason_code"] == "approval_authority_denied"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        "an unauthenticated refusal must not reach WARNING"
+    )
+    assert [r for r in caplog.records if r.levelno == logging.DEBUG], (
+        "it should still be visible at DEBUG"
+    )
+
+
+def test_a_detail_carrying_refusal_still_warns(caplog):
+    """The demotion above must not silence the failures worth seeing."""
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    author_router._customization_error(
+        CustomizationServiceError(
+            "tenant_repository_unavailable", 503, "head_missing: /data/tenant-git/x.git/HEAD"
+        )
+    )
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "a 503 carrying a detail must warn"
+    assert "head_missing" in warnings[0].getMessage()
+
+
+def test_harness_stage_and_publish_failures_carry_their_cause():
+    """The two sites that still answered with an empty detail."""
+    import inspect
+    stage_src = inspect.getsource(customization_service.CustomizationService._harness_stage)
+    publish_src = inspect.getsource(customization_service.CustomizationService._harness_publish)
+    assert "harness_stage_failed" in stage_src
+    assert "harness_publish_failed" in publish_src
+    for src in (stage_src, publish_src):
+        # Every raise on these paths names a cause rather than defaulting to "".
+        assert "status={status}" in src

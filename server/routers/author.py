@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -376,14 +377,25 @@ def _customization_error(
     and the traceback is logged instead of lost.
     """
     if cause is not None:
+        # Frames only, never `exc_info` and never str(cause). A traceback renders
+        # the exception message and every chained cause, and a psycopg or client
+        # error can carry a DSN, a token or a row value. Where it broke is the
+        # diagnostic; the payload is not.
+        frames = "".join(traceback.format_tb(cause.__traceback__)).strip()
         _LOG.error(
-            "customization_refused: code=%s cause=%s",
-            exc.code, type(cause).__name__, exc_info=cause,
+            "customization_refused: code=%s cause=%s at %s",
+            exc.code, type(cause).__name__,
+            " | ".join(frames.split("\n")) if frames else "<no frames>",
         )
-    else:
+    elif exc.detail or exc.status_code >= 500:
         _LOG.warning(
             "customization_refused: code=%s detail=%s", exc.code, exc.detail or "-"
         )
+    else:
+        # A 4xx with nothing to add is a caller error, and the /internal/* routes
+        # authenticate inside the handler on a public ALB. Warning here would let
+        # an unauthenticated caller drive log growth one line per request.
+        _LOG.debug("customization_refused: code=%s", exc.code)
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
