@@ -13,7 +13,19 @@ export type SkillBundleAttachment = {
 };
 
 export type BundledSkill = { name: string; description: string };
-export type VerifiedSkillBundle = { ok: true; tier: SkillTier; skills: BundledSkill[]; digest: string };
+export type VerifiedSkillBundle = {
+  ok: true;
+  tier: SkillTier;
+  skills: BundledSkill[];
+  digest: string;
+  /**
+   * The EXACT bytes that were hashed, keyed by skill name. The mount is written
+   * from these and never re-reads the source. Reading the file again to copy it
+   * would reopen the window verification just closed: hash, then copy, and a
+   * concurrent writer slips between the two.
+   */
+  sources: Map<string, string>;
+};
 export type RejectedSkillBundle = { ok: false; reason: string };
 export type VerifyBundleResult = VerifiedSkillBundle | RejectedSkillBundle;
 
@@ -58,20 +70,59 @@ function plainTopLevelKey(line: string): string | null {
   return (match?.[1] ?? match?.[2] ?? match?.[3] ?? null)?.trim() ?? null;
 }
 
+/**
+ * Read one frontmatter value starting at `index`, returning it and the line to
+ * resume from.
+ *
+ * Block scalars are the reason this is not a one-liner. Real curated skills
+ * write `description: >-` and continue on indented lines, so reading only the
+ * text after the colon yields the literal string ">-" and throws the actual
+ * description away. That value is what the model reads to decide whether a
+ * skill is relevant, so losing it disables the skill quietly rather than
+ * loudly. Folded (`>`) joins its lines with spaces, literal (`|`) keeps the
+ * newlines, and a blank line is a paragraph break in both.
+ */
+function readScalar(lines: string[], index: number, raw: string): { value: string; next: number } {
+  const block = /^([>|])[+-]?\d*\s*$/.exec(raw.trim());
+  if (!block) {
+    return { value: raw.trim().replace(/^['"]|['"]$/g, ""), next: index + 1 };
+  }
+  const folded = block[1] === ">";
+  const parts: string[] = [];
+  let cursor = index + 1;
+  for (; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor]!;
+    // A line that is neither blank nor indented ends the block — that is where
+    // YAML resumes reading keys, so the caller must resume there too or an
+    // executable key hiding after a block scalar would never be inspected.
+    if (line.trim() !== "" && !/^\s/.test(line)) break;
+    parts.push(line.trim());
+  }
+  let value = "";
+  for (const part of parts) {
+    if (part === "") value += "\n";
+    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + part;
+  }
+  return { value: value.trim(), next: cursor };
+}
+
 export function parseSkillFrontmatter(source: string): BundledSkill | null {
   const match = FRONTMATTER.exec(source);
   if (!match) return null;
+  const lines = match[1].split(/\r?\n/);
   let name: string | null = null;
-  let description = "";
-  for (const line of match[1].split(/\r?\n/)) {
-    const key = plainTopLevelKey(line);
+  let description: string | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const key = plainTopLevelKey(lines[index]!);
     if (!key) continue;
     if (EXECUTABLE_KEYS.has(key.toLowerCase())) return null;
-    const value = line.slice(line.indexOf(":") + 1).trim().replace(/^['"]|['"]$/g, "");
-    if (key === "name" && name === null) name = value;
-    if (key === "description" && description === "") description = value;
+    const line = lines[index]!;
+    const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
+    index = scalar.next - 1;
+    if (key === "name" && name === null) name = scalar.value;
+    if (key === "description" && description === null) description = scalar.value;
   }
-  return isValidSkillName(name) ? { name, description } : null;
+  return isValidSkillName(name) ? { name, description: description ?? "" } : null;
 }
 
 /**
@@ -139,28 +190,42 @@ export function verifyBundle(bundlePath: string, options: { expectedDigest?: str
     const inventory = [...files.keys()].filter((path) => path !== "manifest.json").sort();
     const declared = Object.keys(expectedFiles).sort();
     if (declared.length !== inventory.length || declared.some((path, index) => path !== inventory[index])) return reject("manifest file list does not exactly match disk");
+    // ONE read per file, kept. Everything downstream — the plugin manifest, the
+    // frontmatter parse, and the bytes that get mounted — uses the buffer that
+    // was hashed here. Re-reading any of them would mean the thing we checked
+    // and the thing we use are two different reads of a file someone else can
+    // write between them.
+    const contents = new Map<string, Buffer>();
     for (const path of inventory) {
       const maxBytes = path === ".claude-plugin/plugin.json" ? MANIFEST_BYTES : SKILL_BYTES;
       if (lstatSync(files.get(path)!).size > maxBytes) return reject(`file exceeds size limit: ${path}`);
-      if (sha256(readFileSync(files.get(path)!)) !== expectedFiles[path]) return reject(`hash mismatch: ${path}`);
+      const buffer = readFileSync(files.get(path)!);
+      if (buffer.length > maxBytes) return reject(`file exceeds size limit: ${path}`);
+      if (sha256(buffer) !== expectedFiles[path]) return reject(`hash mismatch: ${path}`);
+      contents.set(path, buffer);
     }
     if (typeof manifest.bundleDigest !== "string" || !SHA256.test(manifest.bundleDigest) || manifest.bundleDigest !== digest(expectedFiles as Record<string, string>)) return reject("bundle digest mismatch");
     if (options.expectedDigest !== undefined && options.expectedDigest !== manifest.bundleDigest) return reject("bundle digest does not match deployment pin");
 
-    const pluginBuffer = readFileSync(join(pluginDir, "plugin.json"));
+    const pluginBuffer = contents.get(".claude-plugin/plugin.json");
+    if (!pluginBuffer) return reject("plugin.json is missing from the verified inventory");
     let plugin: Record<string, unknown>;
     try { plugin = JSON.parse(pluginBuffer.toString("utf8")) as Record<string, unknown>; } catch { return reject("plugin.json is invalid JSON"); }
     if (!plugin || Array.isArray(plugin) || Object.keys(plugin).some((key) => !PLUGIN_KEYS.has(key))) return reject("plugin.json has disallowed keys");
     if (typeof plugin.name !== "string" || typeof plugin.version !== "string" || (plugin.description !== undefined && typeof plugin.description !== "string") || plugin.leafTier !== manifest.tier) return reject("plugin.json is invalid or tier-mismatched");
 
     const skills: BundledSkill[] = [];
+    const sources = new Map<string, string>();
     for (const name of skillNames) {
-      const source = readFileSync(join(skillsDir, name, "SKILL.md"));
-      const parsed = parseSkillFrontmatter(source.toString("utf8"));
+      const buffer = contents.get(`skills/${name}/SKILL.md`);
+      if (!buffer) return reject(`skill is missing from the verified inventory: ${name}`);
+      const text = buffer.toString("utf8");
+      const parsed = parseSkillFrontmatter(text);
       if (!parsed || parsed.name !== name) return reject(`invalid skill frontmatter: ${name}`);
       skills.push(parsed);
+      sources.set(name, text);
     }
-    return { ok: true, tier: manifest.tier, skills, digest: manifest.bundleDigest };
+    return { ok: true, tier: manifest.tier, skills, digest: manifest.bundleDigest, sources };
   } catch {
     return reject("bundle cannot be safely read");
   }
@@ -193,10 +258,7 @@ export function discoverSkills(bundlePath: string): BundledSkill[] {
  *    Allowlist by construction, which is the only version of this that has not
  *    been picked apart.
  */
-function materialiseVerifiedBundle(
-  source: string,
-  verified: { tier: SkillTier; skills: BundledSkill[] },
-): string | null {
+export function materialiseVerifiedBundle(verified: VerifiedSkillBundle): string | null {
   let root: string | null = null;
   try {
     root = mkdtempSync(join(tmpdir(), "leaf-skills-mount-"));
@@ -210,8 +272,9 @@ function materialiseVerifiedBundle(
     for (const skill of verified.skills) {
       const dir = join(root, "skills", skill.name);
       mkdirSync(dir, { recursive: true });
-      const body = readFileSync(join(source, "skills", skill.name, "SKILL.md"), "utf8");
-      if (body === null) return null;
+      // The verified buffer, NOT a fresh read of the source file.
+      const body = verified.sources.get(skill.name);
+      if (body === undefined) throw new Error(`no verified bytes for ${skill.name}`);
       const rewritten =
         "---\n" +
         `name: ${JSON.stringify(skill.name)}\n` +
@@ -220,11 +283,32 @@ function materialiseVerifiedBundle(
         stripFrontmatter(body);
       writeFileSync(join(dir, "SKILL.md"), rewritten, { mode: 0o400 });
     }
+    // THREAT MODEL, stated plainly: mode 0400 and a 0700 mkdtemp root keep other
+    // OS users out, and that is the whole claim. They do not stop the harness's
+    // OWN account from rewriting the snapshot — but an adversary already running
+    // as the harness does not need a skill to do anything. What this closes is
+    // the tenant-writable bundle directory, which is the untrusted input.
+    mounted.add(root);
+    armMountCleanup();
     return root;
   } catch {
     if (root) { try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } }
     return null;
   }
+}
+
+/** Snapshots this process created, removed together when it exits. */
+const mounted = new Set<string>();
+let cleanupArmed = false;
+
+function armMountCleanup(): void {
+  if (cleanupArmed) return;
+  cleanupArmed = true;
+  process.on("exit", () => {
+    for (const dir of mounted) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
 }
 
 /** Everything after the frontmatter block — the prose the skill is FOR. */
@@ -233,10 +317,35 @@ function stripFrontmatter(source: string): string {
   return match ? source.slice(match[0].length).replace(/^\r?\n/, "") : source;
 }
 
+/**
+ * One snapshot per configuration, not one per turn.
+ *
+ * Both runners call this on EVERY turn. Without the memo each turn re-walked
+ * and re-hashed the whole bundle and left another temp copy behind: an
+ * unbounded disk and inode leak on a long-lived server, paid for with a full
+ * bundle hash on the hot path. The result is a pure function of
+ * (path, tier, pin) — the pin names one exact artifact — so it is computed
+ * once. Refusals are memoised too, which also keeps the refusal from
+ * reprinting on every turn.
+ */
+let memo: { key: string; attachment: SkillBundleAttachment | null } | null = null;
+
 export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): SkillBundleAttachment | null {
   const path = env.LEAF_SKILLS_BUNDLE_PATH?.trim();
   const tier = env.LEAF_SKILLS_TIER?.trim();
   const pin = env.LEAF_SKILLS_BUNDLE_DIGEST?.trim();
+  const key = JSON.stringify([path ?? "", tier ?? "", pin ?? ""]);
+  if (memo?.key === key) return memo.attachment;
+  const attachment = mountFor(path, tier, pin);
+  memo = { key, attachment };
+  return attachment;
+}
+
+function mountFor(
+  path: string | undefined,
+  tier: string | undefined,
+  pin: string | undefined,
+): SkillBundleAttachment | null {
   if (!path || (tier !== "tenant-safe" && tier !== "operator")) return null;
   // The PIN IS REQUIRED. A self-consistent bundle proves nothing about
   // provenance: anyone who can write the directory can also regenerate the
@@ -251,7 +360,7 @@ export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): Ski
   }
   const verified = verifyBundle(path, { expectedDigest: pin });
   if (!verified.ok || verified.tier !== tier || verified.skills.length === 0) return null;
-  const mountPath = materialiseVerifiedBundle(path, verified);
+  const mountPath = materialiseVerifiedBundle(verified);
   if (!mountPath) return null;
   return {
     plugin: { type: "local", path: mountPath, skipMcpDiscovery: true },

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
+import { materialiseVerifiedBundle, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
 
 const made: string[] = [];
 const repo = resolve(import.meta.dirname, "../..");
@@ -25,7 +25,9 @@ function buildBundle(): string {
   const parent = mkdtempSync(join(tmpdir(), "leaf-verified-bundle-"));
   made.push(parent);
   const output = join(parent, "bundle");
-  execFileSync(process.execPath, [builder, "--source", skillSource, "--tier", "tenant-safe", "--out", output], { stdio: "pipe" });
+  // Bounded: vitest's per-test timeout cannot interrupt a SYNCHRONOUS child,
+  // so a hung builder would hang the run forever rather than fail it.
+  execFileSync(process.execPath, [builder, "--source", skillSource, "--tier", "tenant-safe", "--out", output], { stdio: "pipe", timeout: 60_000 });
   return output;
 }
 
@@ -43,7 +45,7 @@ function refreshManifest(path: string): void {
 }
 
 function offlineAccepts(path: string): boolean {
-  return spawnSync(process.execPath, [offlineVerifier, path], { stdio: "pipe" }).status === 0;
+  return spawnSync(process.execPath, [offlineVerifier, path], { stdio: "pipe", timeout: 60_000 }).status === 0;
 }
 
 afterEach(() => {
@@ -107,6 +109,60 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     const mounted = readFileSync(join(attachment.plugin.path, "skills", name, "SKILL.md"), "utf8");
     expect(mounted).not.toContain("pwned");
     expect(mounted).not.toContain("fork");
+  });
+
+  it("materialises the VERIFIED bytes, not a fresh read of the source", () => {
+    // The window a hash check cannot close on its own: verify, then copy. If
+    // the copy re-opens the file, a writer between the two reads gets its bytes
+    // mounted with the verified bundle's blessing. The mount must therefore be
+    // written from the buffer that was hashed.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const name = verified.skills[0]!.name;
+    writeFileSync(join(path, "skills", name, "SKILL.md"),
+      ["---", `name: ${name}`, "context: fork", "---", "pwned"].join("\n"));
+    const mount = materialiseVerifiedBundle(verified);
+    expect(mount).not.toBeNull();
+    const body = readFileSync(join(mount!, "skills", name, "SKILL.md"), "utf8");
+    expect(body).not.toContain("pwned");
+    expect(body).not.toContain("fork");
+  });
+
+  it("carries a FOLDED description through to the mount", () => {
+    // Real curated skills write `description: >-` over several indented lines.
+    // Reading only the text after the colon yields the literal ">-", and the
+    // description is what the model reads to decide a skill is relevant — so
+    // losing it disables the skill silently instead of loudly.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const standards = verified.skills.find((skill) => skill.name === "code-standards");
+    expect(standards).toBeDefined();
+    expect(standards!.description).not.toBe(">-");
+    expect(standards!.description.length).toBeGreaterThan(40);
+    expect(standards!.description).toContain("disciplined engineering workflow");
+    const mount = materialiseVerifiedBundle(verified)!;
+    expect(readFileSync(join(mount, "skills", "code-standards", "SKILL.md"), "utf8"))
+      .toContain("disciplined engineering workflow");
+  });
+
+  it("mounts ONCE per configuration instead of once per turn", () => {
+    // Both runners call this every turn. Re-verifying and re-copying each time
+    // is a full bundle hash on the hot path plus an unbounded pile of temp
+    // directories on a long-lived server.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const env = {
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv;
+    const first = skillBundleAttachment(env);
+    const second = skillBundleAttachment(env);
+    expect(first).not.toBeNull();
+    expect(second!.plugin.path).toBe(first!.plugin.path);
   });
 
   it("refuses a flipped byte in a SKILL.md", () => {
@@ -212,6 +268,20 @@ describe("loader and offline verifier cross-check", { timeout: 120_000 }, () => 
       const file = join(path, "skills", "code-standards", "SKILL.md");
       writeFileSync(file, readFileSync(file, "utf8").replace("description:", '"context": fork\ndescription:'));
       refreshManifest(path);
+    }],
+    ["a plugin description of the wrong type", (path) => {
+      const pluginPath = join(path, ".claude-plugin", "plugin.json");
+      writeFileSync(pluginPath, JSON.stringify({ ...JSON.parse(readFileSync(pluginPath, "utf8")), description: {} }));
+      refreshManifest(path);
+    }],
+    // Padded but otherwise VALID: the hashes, the file list and the digest all
+    // still check out, so size is the only thing left that can reject it.
+    ["an oversized manifest.json", (path) => {
+      const current = manifest(path);
+      writeFileSync(join(path, "manifest.json"), JSON.stringify({
+        version: 1, tier: "tenant-safe", files: current.files,
+        bundleDigest: current.bundleDigest, pad: "x".repeat(70_000),
+      }));
     }],
     ["a tampered bundle digest", (path) => {
       const current = manifest(path);

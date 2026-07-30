@@ -80,7 +80,6 @@ import type {
   TenantRepoProvider,
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
-import { skillBundleAttachment } from "./skillBundle.js";
 import {
   describeConfig,
   FileMcpBridgeStore,
@@ -487,7 +486,6 @@ export interface BuildTurnOptionsInput {
   maxTurns: number;
   abortController: AbortController;
   server: unknown;
-  skillBundle: ReturnType<typeof skillBundleAttachment>;
   mcpAttachment: McpAttachment | null;
   canUseTool: CanUseTool;
   planFirst?: boolean;
@@ -496,7 +494,6 @@ export interface BuildTurnOptionsInput {
 /** Assemble SDK options in one testable place. Tenant bridge servers are optional;
  * the local converse server remains authoritative if a key collides. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
-  const { skillBundle } = input;
   const tenantMcp = buildTenantMcpOptions(input.mcpAttachment);
   return {
     env: input.childEnv,
@@ -516,9 +513,6 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     // CONSTANTS, not this array — the APS tool confirms rather than being
     // denied. plan_first only ever narrows.
     allowedTools: input.planFirst ? [] : [APS_TEST_RUN_MCP_NAME],
-    ...(skillBundle
-      ? { plugins: [skillBundle.plugin], skills: skillBundle.skills }
-      : {}),
     canUseTool: input.canUseTool,
   };
 }
@@ -686,13 +680,13 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       return { behavior: "deny", message: `"${bare}" requires operator approval before it can run.`, interrupt: true };
     };
 
-    // Curated skill bundle for this tier, when one is mounted. `settingSources`
-    // stays [] — it CANNOT name a curated directory (its type is
-    // 'user' | 'project' | 'local', and 'user' is ~/.claude), so keeping it
-    // empty is exactly what excludes the operator's own skills. `plugins`
-    // supplies the bundle; `skills` is always an explicit allowlist because
-    // 'all' would also pull in the CLI's bundled developer skills.
-    const skillBundle = skillBundleAttachment();
+    // NO SKILL MOUNT HERE. This runner is not reachable from serve.ts (the live
+    // converse path is SpineTurnAdapter -> ConverseLoop -> ConverseSdkRunner),
+    // and it mounted the same bundle WITHOUT disableSkillShellExecution or
+    // disableAllHooks — so a skill body's inline shell command would have run.
+    // One guarded mount is the whole design; a second unguarded one is how the
+    // guard gets lost. If this runner is ever revived, mount through the same
+    // path ConverseSdkRunner uses, settings included.
     const mcpAttachment = await resolveEnvMcpAttachment(process.env.LEAF_MCP_BRIDGE_DIR, input.tenant_id);
 
     const q = sdk.query({
@@ -703,7 +697,6 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         maxTurns,
         abortController: abort,
         server,
-        skillBundle,
         mcpAttachment,
         planFirst: planFirst === true,
         // Skills reach the model through the SDK's own `skills` option, which

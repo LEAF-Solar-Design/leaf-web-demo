@@ -235,7 +235,17 @@ export async function validateBundleStructure(bundlePath) {
   if (!plugin || typeof plugin !== "object" || Array.isArray(plugin)) fail("plugin.json must be a JSON object");
   const disallowed = Object.keys(plugin).filter((key) => !PLUGIN_KEYS.has(key));
   if (disallowed.length > 0) fail(`plugin.json has disallowed keys: ${disallowed.sort().join(", ")}`);
-  await assertPlainFile(path.join(bundlePath, "manifest.json"), "manifest.json");
+  // TYPES, not just key names. An allowed key holding the wrong type is still a
+  // disagreement with the loader, which requires strings — and a bundle the
+  // build gate blesses but the runtime refuses is the drift this pair exists to
+  // prevent, just pointing the other way.
+  if (typeof plugin.name !== "string" || typeof plugin.version !== "string") {
+    fail("plugin.json name and version must be strings");
+  }
+  if (plugin.description !== undefined && typeof plugin.description !== "string") {
+    fail("plugin.json description must be a string when present");
+  }
+  await assertPlainFile(path.join(bundlePath, "manifest.json"), "manifest.json", MAX_MANIFEST_BYTES);
 
   const names = (await fs.readdir(skillsDir)).sort();
   const seen = new Set();
