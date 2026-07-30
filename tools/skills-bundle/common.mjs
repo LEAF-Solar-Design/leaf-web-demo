@@ -100,7 +100,7 @@ export function parseSkillName(markdown, label) {
  * int, `1_000` is one thousand, `1:30` is sexagesimal.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?([Tt \t].*)?)$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?(([Tt]|[ \t]+)\d\d?:\d\d:\d\d(\.\d+)?([ \t]*([Zz]|[-+]\d\d?(:?\d\d)?))?)?)$/i;
 
 /**
  * Byte-for-byte the loader's `readInlineScalar`
@@ -163,13 +163,26 @@ export function readScalar(lines, index, raw) {
     // pages later. Reading only the first line returns "first" or "[" and calls
     // it exact. Both the continuation lines are consumed (so parsing resumes
     // where YAML would) and the value is refused (so nothing is guessed at).
+    // A blank line does NOT end a plain scalar, and an indented comment is not
+    // content. So scan past both, and treat this as a continuation only if some
+    // indented, non-comment line actually follows. Stopping at the first blank
+    // returned "first" for
+    //     description: first
+    //
+    //       second
+    // which YAML folds to "first second".
     let cursor = index + 1;
+    let lastContent = index;
     while (cursor < lines.length) {
       const line = lines[cursor];
-      if (line.trim() === "" || !/^[ \t]/.test(line)) break;
+      if (line.trim() === "") { cursor += 1; continue; }
+      if (!/^[ \t]/.test(line)) break;
+      if (!line.trimStart().startsWith("#")) lastContent = cursor;
       cursor += 1;
     }
-    if (cursor > index + 1) return { value: null, next: cursor };
+    // Resume AFTER the continuation, or at the next line when there was none;
+    // blank and comment lines the outer loop skips on its own.
+    if (lastContent > index) return { value: null, next: lastContent + 1 };
     return { value: readInlineScalar(header), next: index + 1 };
   }
   const reproducible = /^[>|]-?$/.test(header);

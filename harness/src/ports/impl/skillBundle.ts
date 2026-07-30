@@ -93,7 +93,7 @@ function plainTopLevelKey(line: string): string | null {
  * cheap and loud; under-refusing is a silent rewrite.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?([Tt \t].*)?)$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?(([Tt]|[ \t]+)\d\d?:\d\d:\d\d(\.\d+)?([ \t]*([Zz]|[-+]\d\d?(:?\d\d)?))?)?)$/i;
 
 /**
  * Decode a one-line YAML scalar, or return null meaning "present, but we will
@@ -158,13 +158,26 @@ function readScalar(lines: string[], index: number, raw: string): { value: strin
     // pages later. Reading only the first line returns "first" or "[" and calls
     // it exact. Both the continuation lines are consumed (so parsing resumes
     // where YAML would) and the value is refused (so nothing is guessed at).
+    // A blank line does NOT end a plain scalar, and an indented comment is not
+    // content. So scan past both, and treat this as a continuation only if some
+    // indented, non-comment line actually follows. Stopping at the first blank
+    // returned "first" for
+    //     description: first
+    //
+    //       second
+    // which YAML folds to "first second".
     let cursor = index + 1;
+    let lastContent = index;
     while (cursor < lines.length) {
       const line = lines[cursor]!;
-      if (line.trim() === "" || !/^[ \t]/.test(line)) break;
+      if (line.trim() === "") { cursor += 1; continue; }
+      if (!/^[ \t]/.test(line)) break;
+      if (!line.trimStart().startsWith("#")) lastContent = cursor;
       cursor += 1;
     }
-    if (cursor > index + 1) return { value: null, next: cursor };
+    // Resume AFTER the continuation, or at the next line when there was none;
+    // blank and comment lines the outer loop skips on its own.
+    if (lastContent > index) return { value: null, next: lastContent + 1 };
     return { value: readInlineScalar(header), next: index + 1 };
   }
   // ONLY the four plain headers, and then only a block whose text we can
@@ -533,10 +546,9 @@ export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): Ski
   // (no bundle configured returns before touching the disk).
   if (attachment) {
     // BOUNDED. Production reads one process-wide configuration, so this holds a
-    // single entry — but the function is exported and takes an env object, so an
-    // explicit caller (or a long test run) could otherwise grow it, and every
-    // key holds a snapshot directory until exit. Evicting oldest-first removes
-    // the directory with it.
+    // single entry, but the function is exported and takes an env object, so an
+    // explicit caller (or a long test run) could otherwise grow it without
+    // limit. Eviction is oldest-first.
     if (mounts.size >= MAX_CACHED_MOUNTS) {
       const oldest = mounts.keys().next().value as string | undefined;
       if (oldest !== undefined) mounts.delete(oldest);

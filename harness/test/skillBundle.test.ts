@@ -169,8 +169,8 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
   });
 
   it("mounts ONCE per configuration instead of once per turn", () => {
-    // Both runners call this every turn. Re-verifying and re-copying each time
-    // is a full bundle hash on the hot path plus an unbounded pile of temp
+    // ConverseSdkRunner calls this every turn. Re-verifying and re-copying each
+    // time is a full bundle hash on the hot path plus an unbounded pile of temp
     // directories on a long-lived server.
     const path = buildBundle();
     const verified = verifyBundle(path);
@@ -511,6 +511,13 @@ describe("frontmatter block scalars", () => {
     // A bare date is a TIMESTAMP to js-yaml's default schema, not the text.
     expect(fm("name: skill-a", "description: 2026-07-29")).toBeNull();
     expect(fm("name: skill-a", "description: 2026-07-29T10:30:00Z")).toBeNull();
+    expect(fm("name: skill-a", "description: 2026-07-29 10:30:00")).toBeNull();
+    // ...but date-LED PROSE is a string, and refusing it would refuse the whole
+    // bundle over an ordinary description.
+    for (const prose of ["2026-07-29 release notes helper", "2026-07-29 to 2026-08-01",
+                         "2026-07-29TICKET helper"]) {
+      expect(fm("name: skill-a", `description: ${prose}`)?.description, prose).toBe(prose);
+    }
     // ...but prose that merely contains a colon or a comma is obviously fine.
     expect(fm("name: skill-a", "description: Use when: drafting, editing")?.description)
       .toBe("Use when: drafting, editing");
@@ -524,6 +531,15 @@ describe("frontmatter block scalars", () => {
     // it exact. A flow sequence opened with `[` and closed later is the same
     // problem wearing a different hat.
     expect(fm("name: skill-a", "description: first", "  second")).toBeNull();
+    // A BLANK LINE does not end a plain scalar, so this folds to "first second"
+    // too. Stopping at the blank returned "first" and called it exact.
+    expect(fm("name: skill-a", "description: first", "", "  second")).toBeNull();
+    expect(fm("name: skill-a", "description: [", "", "  a, b]")).toBeNull();
+    // ...but an indented COMMENT is not content, and neither is a trailing blank.
+    expect(fm("name: skill-a", "description: real prose", "  # just a comment")?.description)
+      .toBe("real prose");
+    expect(fm("name: skill-a", "description: real prose", "", "other: x")?.description)
+      .toBe("real prose");
     expect(fm("name: skill-a", "description: [", "  a, b]")).toBeNull();
     // ...and the continuation is CONSUMED, so a key below it is still inspected.
     expect(fm("name: skill-a", "description: real prose", "some-key: first", "  continued",
