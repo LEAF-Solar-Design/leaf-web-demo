@@ -149,6 +149,8 @@ function defaultsOf(schema) {
 }
 
 function phaseLabel(phase) {
+  if (phase === 'loading') return PROOF_MODE ? 'Loading drawing' : 'Connecting backend'
+  if (phase === 'ready') return PROOF_MODE ? 'Drawing ready' : 'Backend ready'
   if (phase === 'starting') return 'Starting request'
   if (phase === 'proposal') return PROOF_MODE ? 'Waiting for approval' : 'Assistant response'
   if (phase === 'running') return 'Rearranging panels'
@@ -156,7 +158,7 @@ function phaseLabel(phase) {
   if (phase === 'tool-complete') return 'Tool run complete'
   if (phase === 'undone') return 'Original restored'
   if (phase === 'failed') return 'Request failed'
-  return PROOF_MODE ? 'Drawing ready' : 'Backend ready'
+  return 'Workspace state unavailable'
 }
 
 function selectedEntity(intake, handle) {
