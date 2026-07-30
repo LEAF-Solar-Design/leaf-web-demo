@@ -26,7 +26,7 @@ function turnOptions(mcpAttachment: Record<string, unknown> | null) {
     maxTurns: 24,
     abortController: new AbortController(),
     server: LOCAL_SERVER,
-    skillBundle: null,
+
     mcpAttachment: mcpAttachment as never,
     canUseTool,
   });
