@@ -37,6 +37,18 @@ describe("design-time APS test runs", () => {
     });
   });
 
+  it("binds an omitted drawing.write drawing_id to the test drawing", async () => {
+    const broker = new FakeBrokerApsClient();
+    const run = makeApsTestRun(broker, "demo-tenant", "acceptance-drawing");
+
+    await run(tool("drawing.write"));
+
+    expect(broker.calls[0]!.params).toEqual({
+      drawing_id: "acceptance-drawing",
+      dry_run: true,
+    });
+  });
+
   it("leaves drawing.read params unchanged", async () => {
     const broker = new FakeBrokerApsClient();
     const run = makeApsTestRun(broker, "demo-tenant");
