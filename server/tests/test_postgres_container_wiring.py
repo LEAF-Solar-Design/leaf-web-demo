@@ -189,36 +189,103 @@ def test_authored_tool_bodies_never_enter_the_build_context():
         assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
 
 
-def _final_stage_runs(path: str) -> str:
-    """Return the final build stage's instructions, comments stripped.
+def _installs_git(path: str) -> bool:
+    """Whether the SHIPPED stage of a Dockerfile really installs git.
 
-    Both matter. A commented-out `# apt-get install -y git` and an install in an
-    earlier discarded stage each satisfied a naive whole-file regex while the
-    shipped image still had no git.
+    Every loosening here was a real false positive found in review:
+      - a commented-out `# apt-get install -y git` matched a whole-file regex;
+      - an install in an earlier, discarded stage matched;
+      - `RUN printf 'apt-get install -y git' > /note` matched, installing nothing;
+      - a valid install continued onto the next line with `\\` did NOT match.
+    So: join continuations first, drop comments, keep only RUN instructions, split
+    each into shell commands, and require a command that STARTS with apt-get
+    install and carries git as its own token. A printf command starts with printf.
     """
-    lines = _read(path).splitlines()
-    starts = [i for i, line in enumerate(lines) if re.match(r"\s*FROM\s", line)]
-    final = lines[starts[-1]:] if starts else lines
-    return "\n".join(
-        line for line in final if not re.match(r"\s*#", line)
-    )
+    joined = re.sub(r"\\\s*\n\s*", " ", _read(path))
+    lines = [ln for ln in joined.splitlines() if not re.match(r"\s*#", ln)]
+    starts = [i for i, ln in enumerate(lines) if re.match(r"\s*FROM\s", ln)]
+    shipped = lines[starts[-1]:] if starts else lines
+    for line in shipped:
+        run = re.match(r"\s*RUN\s+(.*)", line)
+        if not run:
+            continue
+        for command in re.split(r"&&|;|\|\|", run.group(1)):
+            command = command.strip()
+            if not re.match(r"^(apt-get|apt)\s+install\b", command):
+                continue
+            if re.search(r"(?<![\w./-])git(?![\w./-])", command):
+                return True
+    return False
 
 
-def _shells_out_to_git(module_path: str) -> bool:
-    """True when the module launches the literal `git` executable.
+def _git_subprocess_calls(module_path: str) -> list[ast.Call]:
+    """Every subprocess launch whose command list literally starts with "git".
 
-    Parsed, not grepped: the premise must not be satisfiable by a comment.
+    Narrowed to subprocess on purpose: an unrelated `record_requirement(["git"])`
+    satisfied the earlier any-call version. A command built in a variable is not
+    matched, so if the module is refactored that way the premise assertion below
+    fails loudly rather than passing on stale reasoning.
     """
     tree = ast.parse(_read(module_path))
+    found: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        for arg in node.args:
-            if isinstance(arg, ast.List) and arg.elts:
-                first = arg.elts[0]
-                if isinstance(first, ast.Constant) and first.value == "git":
-                    return True
-    return False
+        func = node.func
+        launcher = (
+            isinstance(func, ast.Attribute)
+            and func.attr in {"run", "Popen", "check_output", "call"}
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess"
+        )
+        if not launcher or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.List) or not first.elts:
+            continue
+        head = first.elts[0]
+        if isinstance(head, ast.Constant) and head.value == "git":
+            found.append(node)
+    return found
+
+
+def test_the_image_build_never_selects_a_stage_other_than_the_last():
+    """`_installs_git` inspects the final stage, which only ships if nothing
+    overrides it. A `target:` input would silently point the build elsewhere."""
+    workflow = _read(".github/workflows/build-platform-images.yml")
+    build_step = workflow[workflow.index("Build and push"):]
+    assert not re.search(r"^\s+target:", build_step, flags=re.MULTILINE), (
+        "the build now selects an explicit stage; _installs_git must follow it"
+    )
+
+
+def test_every_git_launch_declares_the_repository_safe():
+    """Installing git is necessary and not sufficient.
+
+    Tenant repos sit on EFS and can be owned by the access-point UID rather than
+    the container UID, so git refuses them with "detected dubious ownership", and
+    running as root does not bypass that check. The harness has always handled this
+    (tenantRepoProvider.ts trustSharedRepo); the Python service did not, so the app
+    and broker would still have answered 503 with git installed.
+    """
+    calls = _git_subprocess_calls("server/customization_service.py")
+    assert len(calls) >= 5, (
+        f"expected the service's git launches, found {len(calls)}; if it stopped "
+        "shelling out to git, this contract no longer applies"
+    )
+    for call in calls:
+        elements = call.args[0].elts
+        trusted = any(
+            isinstance(el, ast.Starred)
+            and isinstance(el.value, ast.Call)
+            and isinstance(el.value.func, ast.Name)
+            and el.value.func.id == "_git_trust"
+            for el in elements
+        )
+        assert trusted, (
+            f"customization_service.py:{call.lineno}: this git launch does not pass "
+            "_git_trust(...), so an EFS-owned repo will be refused as dubious"
+        )
 
 
 def test_every_image_whose_process_requires_git_installs_git():
@@ -236,7 +303,7 @@ def test_every_image_whose_process_requires_git_installs_git():
     git and treats OSError as "unknown revision", so canonical-worker legitimately
     ships without it.
     """
-    assert _shells_out_to_git("server/customization_service.py"), (
+    assert _git_subprocess_calls("server/customization_service.py"), (
         "premise: customization_service launches git. If that changed, this test's "
         "reason to exist changed with it."
     )
@@ -246,8 +313,7 @@ def test_every_image_whose_process_requires_git_installs_git():
         "deploy/Dockerfile.broker",     # EXECUTES them, via the effective catalog
         "deploy/Dockerfile.harness",    # owns the tenant repos
     ):
-        instructions = _final_stage_runs(path)
-        assert re.search(r"apt-get install[^\n]*\bgit\b", instructions), (
+        assert _installs_git(path), (
             f"{path}: the shipped stage must install git, which its process requires"
         )
 
