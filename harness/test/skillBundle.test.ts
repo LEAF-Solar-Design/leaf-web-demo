@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -187,6 +187,52 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     expect(skillBundleAttachment(env)).not.toBeNull();
   });
 
+  it("SAYS WHY it refused, because no-skills looks like no-skills-configured", () => {
+    // A refusal removes every skill. Without a reason in the log, a tampered
+    // byte is indistinguishable from a deployment that never configured a
+    // bundle, and nobody goes looking.
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const said: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { said.push(args.join(" ")); };
+    try {
+      skillBundleAttachment({
+        LEAF_SKILLS_BUNDLE_PATH: path,
+        LEAF_SKILLS_TIER: "tenant-safe",
+        LEAF_SKILLS_BUNDLE_DIGEST: "0".repeat(64),
+      } as NodeJS.ProcessEnv);
+    } finally {
+      console.error = original;
+    }
+    expect(said.join(" ")).toContain("deployment pin");
+    expect(said.join(" ")).toContain(path);
+  });
+
+  it("bounds the mount cache, removing the snapshot it evicts", () => {
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    if (!verified.ok) throw new Error("fixture did not verify");
+    const first = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv)!;
+    // Distinct keys, each a real mount, enough to push the first one out.
+    for (let extra = 0; extra < 6; extra += 1) {
+      const other = buildBundle();
+      const otherVerified = verifyBundle(other);
+      if (!otherVerified.ok) throw new Error("fixture did not verify");
+      skillBundleAttachment({
+        LEAF_SKILLS_BUNDLE_PATH: other,
+        LEAF_SKILLS_TIER: "tenant-safe",
+        LEAF_SKILLS_BUNDLE_DIGEST: otherVerified.digest,
+      } as NodeJS.ProcessEnv);
+    }
+    expect(existsSync(first.plugin.path)).toBe(false);
+  });
+
   it("refuses a flipped byte in a SKILL.md", () => {
     const path = buildBundle();
     const file = join(path, "skills", "code-standards", "SKILL.md");
@@ -338,6 +384,30 @@ describe("frontmatter block scalars", () => {
   it("keeps the line breaks of a |- description", () => {
     expect(fm("name: skill-a", "description: |-", "  first line", "  second line")?.description)
       .toBe("first line" + String.fromCharCode(10) + "second line");
+  });
+
+  it("reproduces chomping exactly: strip drops the trailing newline, clip keeps one", () => {
+    const LF = String.fromCharCode(10);
+    expect(fm("name: skill-a", "description: >-", "  text")?.description).toBe("text");
+    expect(fm("name: skill-a", "description: >", "  text")?.description).toBe("text" + LF);
+    expect(fm("name: skill-a", "description: |", "  a", "  b")?.description).toBe("a" + LF + "b" + LF);
+  });
+
+  it("REFUSES text it would have to alter to read", () => {
+    // Each of these is content YAML keeps and a trim() would quietly destroy.
+    const TAB = String.fromCharCode(9);
+    expect(fm("name: skill-a", "description: >-", `${TAB}text`)).toBeNull();       // tab indent
+    expect(fm("name: skill-a", "description: >-", "  text   ")).toBeNull();        // trailing spaces
+    expect(fm("name: skill-a", "description: >-", "  one", "", "  two")).toBeNull(); // interior blank
+    expect(fm("name: skill-a", "description: >-", "  one", "    ", "  two")).toBeNull();
+  });
+
+  it("allows the ordinary blank line between a block and the next key", () => {
+    // Trailing blanks are chomped by YAML, so refusing them would reject
+    // perfectly normal formatting and break the real corpus.
+    const parsed = fm("name: skill-a", "description: >-", "  text", "", "compatibility: claude-code");
+    expect(parsed?.description).toBe("text");
+    expect(parsed?.name).toBe("skill-a");
   });
 
   it("REFUSES a block form it cannot reproduce exactly", () => {

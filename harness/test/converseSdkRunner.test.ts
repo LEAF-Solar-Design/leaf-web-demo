@@ -352,7 +352,10 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     expect("disableAllHooks" in options).toBe(false);
   });
 
-  it("mounts plugins and skills only from a verified builder artifact", async () => {
+  // Spawns the REAL builder, which costs seconds under full-suite contention.
+  // vitest's 5s default is a statement about this harness, not the code under
+  // test, and letting it fire would read as a security regression.
+  it("mounts plugins and skills only from a verified builder artifact", { timeout: 60_000 }, async () => {
     const parent = mkdtempSync(join(tmpdir(), "leaf-converse-bundle-"));
     const bundle = join(parent, "bundle");
     try {

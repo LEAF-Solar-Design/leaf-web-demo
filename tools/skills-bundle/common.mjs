@@ -114,6 +114,7 @@ export function readScalar(lines, index, raw) {
   }
   if (!/^[>|]-?$/.test(header)) return null;
   const folded = header.startsWith(">");
+  const chomped = header.endsWith("-");
   const content = [];
   let cursor = index + 1;
   for (; cursor < lines.length; cursor += 1) {
@@ -121,19 +122,18 @@ export function readScalar(lines, index, raw) {
     if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
     content.push(line);
   }
-  const indentOf = (line) => line.length - line.trimStart().length;
-  const body = content.filter((line) => line.trim() !== "");
-  if (body.length) {
-    const base = indentOf(body[0]);
-    if (body.some((line) => indentOf(line) !== base)) return null;
-  }
-  let value = "";
+  while (content.length && content[content.length - 1].trim() === "") content.pop();
+  if (!content.length) return { value: "", next: cursor };
+  const base = content[0].length - content[0].trimStart().length;
+  const parts = [];
   for (const line of content) {
-    const text = line.trim();
-    if (text === "") value += "\n";
-    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + text;
+    if (line.trim() === "") return null;
+    if (/\t/.test(line.slice(0, base + 1))) return null;
+    if (line.length - line.trimStart().length !== base) return null;
+    if (/\s$/.test(line)) return null;
+    parts.push(line.slice(base));
   }
-  return { value: value.trim(), next: cursor };
+  return { value: parts.join(folded ? " " : "\n") + (chomped ? "" : "\n"), next: cursor };
 }
 
 export function parseBundledSkillName(markdown, label) {

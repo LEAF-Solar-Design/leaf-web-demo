@@ -274,8 +274,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     }, this.turnTimeoutS * 1000);
 
     const model = input.model ?? this.model;
-    // A bundle reaches the SDK only after its complete inventory is verified.
-    // A deployment digest pin is optional here, but recommended in production.
+    // A bundle reaches the SDK only after its complete inventory is verified
+    // against a REQUIRED deployment digest pin, and what mounts is a private
+    // normalised snapshot of the verified bytes, never the source directory.
     const skillBundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
@@ -314,27 +315,22 @@ export class ConverseSdkRunner implements SpineConverseRunner {
             disableSkillShellExecution: true,
             disableAllHooks: true,
           },
-          // SKILLS ARE DELIBERATELY NOT MOUNTED HERE YET. Mounting a bundle
-          // means handing the SDK a whole PLUGIN DIRECTORY, and four review
-          // rounds each found a fresh way for that to reach execution outside
-          // canUseTool and the app gate: inline skill shell commands, plugin
-          // and skill hooks, `context: fork` spawning subagents, plugin
-          // MONITORS declared in plugin.json, and nested payloads. Each patch
-          // closed one hole and the next round found another, which is the
-          // signal that inspect-and-denylist is the wrong model for this
-          // surface.
+          // WHY THE MOUNT ABOVE IS SAFE. Handing the SDK a plugin directory
+          // is how a skill reaches execution outside canUseTool and the app
+          // gate, and successive review rounds each found a fresh route:
+          // inline skill shell commands, plugin and skill hooks, `context:
+          // fork` spawning a subagent, plugin MONITORS in plugin.json, nested
+          // payloads, a YAML-quoted key. Patching each one was losing, because
+          // inspect-and-denylist is the wrong model for this surface.
           //
-          // The right model is allowlist-by-verification, and the pipeline
-          // already produces what it needs: tools/skills-bundle emits
-          // manifest.json with a sha256 per file and an overall digest. The
-          // loader should refuse to mount unless it re-verifies that manifest
-          // — every file hashed, the tree exactly as declared, and plugin.json
-          // carrying only permitted keys. That is a real change, not a patch,
-          // so it ships as its own chip rather than riding this one.
+          // What ships instead is allowlist-by-verification: the bundle is
+          // hashed against its manifest under a required deployment pin, and
+          // what the SDK actually loads is a private snapshot we write from
+          // those verified bytes, with frontmatter we author containing only
+          // name and description. Nothing the source declared survives it.
           //
-          // The two settings below stay regardless: they are cheap, they only
-          // narrow, and they are correct for a spine session whatever else
-          // lands later.
+          // The two settings above stay regardless: they are cheap, they only
+          // narrow, and they are correct for a spine session either way.
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
             // Bridge to the loop's hook (allow spine tools / deny everything else).

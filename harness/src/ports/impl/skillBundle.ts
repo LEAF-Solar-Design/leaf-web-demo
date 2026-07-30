@@ -87,16 +87,18 @@ function readScalar(lines: string[], index: number, raw: string): { value: strin
   if (!/^[>|]/.test(header)) {
     return { value: header.replace(/^['"]|['"]$/g, ""), next: index + 1 };
   }
-  // ONLY the four forms we can reproduce exactly. `>` and `>-` differ solely in
-  // a trailing newline, which cannot change what a description says, so both
-  // normalise to the same trimmed prose. Everything else is REFUSED rather than
-  // approximated: `|+` exists precisely to keep trailing blank lines, and an
-  // explicit indentation indicator (`>2`, `|-4`) means the leading spaces are
-  // content. Guessing at either silently rewrites the text, and this module's
-  // whole posture is that a shape we cannot reproduce is a bundle we do not
-  // mount.
+  // ONLY the four plain headers, and then only a block whose text we can
+  // reproduce CHARACTER FOR CHARACTER. Everything else refuses. An explicit
+  // indentation indicator (`>2`, `|-4`) makes leading spaces content; `+` keeps
+  // trailing blank lines on purpose; a more-indented line inside a folded block
+  // is preserved verbatim by YAML rather than folded; and a tab is not YAML
+  // indentation at all. Each of those needs a real YAML engine to honour, and
+  // approximating any of them silently rewrites the description the model reads
+  // to decide a skill applies. Refusing is the honest option and it is loud:
+  // the bundle does not build.
   if (!/^[>|]-?$/.test(header)) return null;
   const folded = header.startsWith(">");
+  const chomped = header.endsWith("-");
   const content: string[] = [];
   let cursor = index + 1;
   for (; cursor < lines.length; cursor += 1) {
@@ -107,21 +109,23 @@ function readScalar(lines: string[], index: number, raw: string): { value: strin
     if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
     content.push(line);
   }
-  const indentOf = (line: string): number => line.length - line.trimStart().length;
-  const body = content.filter((line) => line.trim() !== "");
-  if (body.length) {
-    // A line indented FURTHER than the block's own indentation is structure
-    // YAML keeps and folding would destroy. Refuse instead of flattening it.
-    const base = indentOf(body[0]!);
-    if (body.some((line) => indentOf(line) !== base)) return null;
-  }
-  let value = "";
+  // Blank lines AFTER the text are chomped by YAML (`-` drops them, clip keeps
+  // exactly one newline), so they carry no content and a blank line before the
+  // next key is ordinary formatting. Blank lines BETWEEN text lines are content.
+  while (content.length && content[content.length - 1]!.trim() === "") content.pop();
+  if (!content.length) return { value: "", next: cursor };
+  const base = content[0]!.length - content[0]!.trimStart().length;
+  const parts: string[] = [];
   for (const line of content) {
-    const text = line.trim();
-    if (text === "") value += "\n";
-    else value += (value === "" || value.endsWith("\n") ? "" : folded ? " " : "\n") + text;
+    if (line.trim() === "") return null;                       // interior blank
+    if (/\t/.test(line.slice(0, base + 1))) return null;       // tab indentation
+    if (line.length - line.trimStart().length !== base) return null;  // uneven
+    if (/\s$/.test(line)) return null;                         // trailing space
+    parts.push(line.slice(base));
   }
-  return { value: value.trim(), next: cursor };
+  // Clip (`>` / `|`) keeps exactly one trailing newline; strip (`-`) keeps none.
+  // Emitting it makes the reproduction exact rather than nearly exact.
+  return { value: parts.join(folded ? " " : "\n") + (chomped ? "" : "\n"), next: cursor };
 }
 
 export function parseSkillFrontmatter(source: string): BundledSkill | null {
@@ -347,9 +351,24 @@ function stripFrontmatter(source: string): string {
  * once. Refusals are memoised too, which also keeps the refusal from
  * reprinting on every turn.
  */
+const MAX_CACHED_MOUNTS = 4;
 const mounts = new Map<string, SkillBundleAttachment>();
-/** Bundle paths already reported as unpinned, so the refusal is logged once. */
+/**
+ * Refusals already reported, keyed by path AND reason. Logged once per distinct
+ * reason rather than once per turn: the check re-runs every turn so a repair is
+ * picked up, and a line per turn would bury the one that matters — but a NEW
+ * reason is new information and gets its own line.
+ */
 const warned = new Set<string>();
+
+function refuse(path: string, reason: string): null {
+  const key = `${path} ${reason}`;
+  if (!warned.has(key)) {
+    warned.add(key);
+    console.error(`[leaf-skills] refusing to mount ${path}: ${reason}`);
+  }
+  return null;
+}
 
 export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): SkillBundleAttachment | null {
   const path = env.LEAF_SKILLS_BUNDLE_PATH?.trim();
@@ -362,10 +381,24 @@ export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): Ski
   // Only a SUCCESS is remembered. A cached refusal would mean an operator who
   // repairs the bundle in place has to restart the process before it is ever
   // picked up, and the refusal path is cheap in the case that actually repeats
-  // (no bundle configured returns before touching the disk). Keyed by
-  // configuration rather than held in one slot, so alternating configurations
-  // reuse their snapshots instead of making new ones.
-  if (attachment) mounts.set(key, attachment);
+  // (no bundle configured returns before touching the disk).
+  if (attachment) {
+    // BOUNDED. Production reads one process-wide configuration, so this holds a
+    // single entry — but the function is exported and takes an env object, so an
+    // explicit caller (or a long test run) could otherwise grow it, and every
+    // key holds a snapshot directory until exit. Evicting oldest-first removes
+    // the directory with it.
+    if (mounts.size >= MAX_CACHED_MOUNTS) {
+      const oldest = mounts.keys().next().value as string | undefined;
+      const evicted = oldest === undefined ? undefined : mounts.get(oldest);
+      if (oldest !== undefined) mounts.delete(oldest);
+      if (evicted) {
+        mounted.delete(evicted.plugin.path);
+        try { rmSync(evicted.plugin.path, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    }
+    mounts.set(key, attachment);
+  }
   return attachment;
 }
 
@@ -383,19 +416,23 @@ function mountFor(
     // Once per configuration, not once per turn: this is now re-evaluated on
     // every turn so that a fix is picked up, and a log line on every turn would
     // bury the one that matters.
-    if (!warned.has(path)) {
-      warned.add(path);
-      console.error(
-      "[leaf-skills] refusing to mount: LEAF_SKILLS_BUNDLE_DIGEST is required — " +
-        "a self-verifying bundle proves consistency, not provenance",
-      );
-    }
-    return null;
+    return refuse(path,
+      "LEAF_SKILLS_BUNDLE_DIGEST is required — a self-verifying bundle proves " +
+      "consistency, not provenance");
   }
   const verified = verifyBundle(path, { expectedDigest: pin });
-  if (!verified.ok || verified.tier !== tier || verified.skills.length === 0) return null;
+  // SAY WHY. A refusal removes every skill, and no-skills looks exactly like a
+  // deployment that never configured any — so a tampered byte, or a description
+  // in a YAML form we will not reproduce, would disable the feature with
+  // nothing in the log to find. verifyBundle already returns a reason; the only
+  // failure worth having is the one an operator can read.
+  if (!verified.ok) return refuse(path, verified.reason);
+  if (verified.tier !== tier) {
+    return refuse(path, `bundle tier ${verified.tier} does not match LEAF_SKILLS_TIER ${tier}`);
+  }
+  if (verified.skills.length === 0) return refuse(path, "bundle contains no skills");
   const mountPath = materialiseVerifiedBundle(verified);
-  if (!mountPath) return null;
+  if (!mountPath) return refuse(path, "the verified snapshot could not be written");
   return {
     plugin: { type: "local", path: mountPath, skipMcpDiscovery: true },
     skills: verified.skills.map((skill) => skill.name),
