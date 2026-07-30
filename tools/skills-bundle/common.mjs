@@ -95,10 +95,12 @@ export function parseSkillName(markdown, label) {
 }
 
 /**
- * YAML scalars that are NOT strings. Byte-for-byte the loader's list.
+ * Byte-for-byte the loader's list. Follows js-yaml's resolvers, because the
+ * near-misses are the problem: `.5` and `+.inf` are floats, `0b1010` is an
+ * int, `1_000` is one thousand, `1:30` is sexagesimal.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?\d+(\.\d*)?([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|-?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\})$/i;
 
 /**
  * Byte-for-byte the loader's `readInlineScalar`

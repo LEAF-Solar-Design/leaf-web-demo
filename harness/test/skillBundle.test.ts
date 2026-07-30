@@ -501,9 +501,18 @@ describe("frontmatter block scalars", () => {
     expect(fm("name: skill-a", `description: ${Q}a${Q}b${Q}`)).toBeNull();
     // ...and these are not strings at all to YAML. Emitting them as the text
     // between the colon and the newline would say something the source did not.
-    for (const value of ["false", "null", "~", "3.14", "0x1f", "[a, b]", "{a: b}", "yes"]) {
-      expect(fm("name: skill-a", `description: ${value}`)).toBeNull();
+    // The near-misses are the point: each of these is a number or a keyword to a
+    // YAML reader, so emitting it as the text after the colon would say
+    // something the source did not.
+    for (const value of ["false", "null", "~", "3.14", "0x1f", "[a, b]", "{a: b}", "yes",
+                         ".5", "+.inf", "0b1010", "1_000", "1:30", "12:34:56", "Null", "TRUE"]) {
+      expect(fm("name: skill-a", `description: ${value}`), value).toBeNull();
     }
+    // ...but a date is a STRING under the schema these readers use, and prose
+    // that merely contains a colon or a dash is obviously fine.
+    expect(fm("name: skill-a", "description: 2026-07-29")?.description).toBe("2026-07-29");
+    expect(fm("name: skill-a", "description: Use when: drafting, editing")?.description)
+      .toBe("Use when: drafting, editing");
   });
 
   it("uses YAML whitespace, not JavaScript whitespace, to find a comment", () => {

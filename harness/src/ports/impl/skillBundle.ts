@@ -83,13 +83,17 @@ function plainTopLevelKey(line: string): string | null {
  * newlines, and a blank line is a paragraph break in both.
  */
 /**
- * YAML scalars that are NOT strings. A plain `false`, `null`, `3.14` or `[a, b]`
- * is a boolean, a null, a number or a sequence, so reproducing it as the text
- * between the colon and the newline would put something in the mounted document
- * that the source did not say.
+ * Plain scalars a YAML reader resolves to something that is NOT a string.
+ *
+ * The set follows js-yaml's own resolvers rather than intuition, because the
+ * near-misses are the whole problem: `.5` and `+.inf` are floats, `0b1010` is
+ * an int, `1_000` is one thousand, and `1:30` is sexagesimal. Emitting any of
+ * them as the text between the colon and the newline would put something in
+ * the mounted document that the source did not say. Over-refusing here is
+ * cheap and loud; under-refusing is a silent rewrite.
  */
 const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?\d+(\.\d*)?([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|-?\.inf|\.nan|\[.*\]|\{.*\})$/i;
+  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\})$/i;
 
 /**
  * Decode a one-line YAML scalar, or return null meaning "present, but we will
