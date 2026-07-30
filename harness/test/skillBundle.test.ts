@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
-import { materialiseVerifiedBundle, parseSkillFrontmatter, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
+import { materialiseVerifiedBundle, parseSkillFrontmatter, sanitiseLogText, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
 
 const made: string[] = [];
+const templates: string[] = [];
 const repo = resolve(import.meta.dirname, "../..");
 const builder = join(repo, "tools", "skills-bundle", "build.mjs");
 const offlineVerifier = join(repo, "tools", "skills-bundle", "verify.mjs");
@@ -21,13 +22,29 @@ function bundleDigest(files: Record<string, string>): string {
   return sha256(Object.keys(files).sort().map((path) => `${path}:${files[path]}`).join("\n"));
 }
 
+// The builder is a CHILD PROCESS and this file wants a fresh bundle per case.
+// Spawning one each time made this file the heaviest CPU consumer in the suite
+// and pushed an unrelated 5s test over its budget. So the real artifact is
+// built ONCE and copied per case: every case still gets its own mutable tree,
+// byte-identical to the pipeline's output, for the cost of a file copy.
+let template: string | null = null;
+
 function buildBundle(): string {
+  if (template === null) {
+    const home = mkdtempSync(join(tmpdir(), "leaf-bundle-template-"));
+    templates.push(home);
+    const built = join(home, "bundle");
+    // Bounded: vitest's per-test timeout cannot interrupt a SYNCHRONOUS child,
+    // so a hung builder would hang the run forever rather than fail it.
+    execFileSync(process.execPath,
+      [builder, "--source", skillSource, "--tier", "tenant-safe", "--out", built],
+      { stdio: "pipe", timeout: 60_000 });
+    template = built;
+  }
   const parent = mkdtempSync(join(tmpdir(), "leaf-verified-bundle-"));
   made.push(parent);
   const output = join(parent, "bundle");
-  // Bounded: vitest's per-test timeout cannot interrupt a SYNCHRONOUS child,
-  // so a hung builder would hang the run forever rather than fail it.
-  execFileSync(process.execPath, [builder, "--source", skillSource, "--tier", "tenant-safe", "--out", output], { stdio: "pipe", timeout: 60_000 });
+  cpSync(template, output, { recursive: true });
   return output;
 }
 
@@ -50,6 +67,10 @@ function offlineAccepts(path: string): boolean {
 
 afterEach(() => {
   for (const path of made.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+afterAll(() => {
+  for (const path of templates.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
 // Each case below spawns the REAL builder (tools/skills-bundle/build.mjs) so
@@ -210,7 +231,25 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     expect(said.join(" ")).toContain(path);
   });
 
-  it("bounds the mount cache, removing the snapshot it evicts", () => {
+  it("ESCAPES control characters before putting a tenant filename in a log", () => {
+    // Refusal reasons quote filenames from a tenant-writable directory. Written
+    // raw, a crafted name can move the cursor or forge a line in a log that
+    // people and parsers both read. Tested on the escaping itself rather than
+    // through a real file, because Windows refuses to create such a name at all
+    // and the test would pass by never running.
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const dirty = `skills/${ESC}[2J${BEL}wiped/SKILL.md: hash mismatch`;
+    const clean = sanitiseLogText(dirty);
+    expect(clean).not.toContain(ESC);
+    expect(clean).not.toContain(BEL);
+    expect(clean).toContain("\\x1b");
+    expect(clean).toContain("hash mismatch");
+    // ...and it cannot be grown without bound by a name that changes every turn.
+    expect(sanitiseLogText("x".repeat(5000)).length).toBeLessThanOrEqual(300);
+  });
+
+  it("bounds the mount cache, and does NOT delete the snapshot it evicts", () => {
     const path = buildBundle();
     const verified = verifyBundle(path);
     if (!verified.ok) throw new Error("fixture did not verify");
@@ -230,7 +269,17 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
         LEAF_SKILLS_BUNDLE_DIGEST: otherVerified.digest,
       } as NodeJS.ProcessEnv);
     }
-    expect(existsSync(first.plugin.path)).toBe(false);
+    // The ENTRY is gone — asking again re-verifies and mounts a fresh snapshot.
+    const again = skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: path,
+      LEAF_SKILLS_TIER: "tenant-safe",
+      LEAF_SKILLS_BUNDLE_DIGEST: verified.digest,
+    } as NodeJS.ProcessEnv)!;
+    expect(again.plugin.path).not.toBe(first.plugin.path);
+    // ...but the evicted DIRECTORY survives, because an in-flight sdk.query may
+    // still be reading it. Removing it under a live turn would trade a bounded
+    // map for a broken session; exit cleanup owns it instead.
+    expect(existsSync(first.plugin.path)).toBe(true);
   });
 
   it("refuses a flipped byte in a SKILL.md", () => {
@@ -296,7 +345,7 @@ describe("verifyBundle", { timeout: 60_000 }, () => {
     expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("enforces the optional deployment digest pin", () => {
+  it("enforces the required deployment digest pin", () => {
     const path = buildBundle();
     const expected = manifest(path).bundleDigest;
     expect(verifyBundle(path, { expectedDigest: "0".repeat(64) }).ok).toBe(false);
@@ -408,6 +457,36 @@ describe("frontmatter block scalars", () => {
     const parsed = fm("name: skill-a", "description: >-", "  text", "", "compatibility: claude-code");
     expect(parsed?.description).toBe("text");
     expect(parsed?.name).toBe("skill-a");
+  });
+
+  it("DECODES an inline scalar rather than stripping its quotes", () => {
+    const LF = String.fromCharCode(10);
+    const BS = String.fromCharCode(92);
+    // A double-quoted \n is a newline to YAML and a backslash-n to a naive
+    // strip; a doubled quote is one apostrophe; ` #` starts a comment.
+    expect(fm("name: skill-a", `description: "one${BS}ntwo"`)?.description).toBe("one" + LF + "two");
+    expect(fm("name: skill-a", "description: 'it''s useful'")?.description).toBe("it's useful");
+    expect(fm("name: skill-a", "description: useful # note")?.description).toBe("useful");
+    expect(fm("name: skill-a", `description: "tab${BS}there"`)?.description)
+      .toBe("tab" + String.fromCharCode(9) + "here");
+  });
+
+  it("REFUSES an inline scalar it cannot decode", () => {
+    const BS = String.fromCharCode(92);
+    expect(fm("name: skill-a", `description: "unterminated`)).toBeNull();
+    expect(fm("name: skill-a", "description: 'unterminated")).toBeNull();
+    expect(fm("name: skill-a", `description: "bad ${BS}q escape"`)).toBeNull();
+    expect(fm("name: skill-a", `description: "short ${BS}u12 unicode"`)).toBeNull();
+    expect(fm("name: skill-a", "description: *anchor-reference")).toBeNull();
+  });
+
+  it("REFUSES a skill with no usable description", () => {
+    // The description is the only text the model reads when deciding a skill
+    // applies, so an empty one mounts a skill that is never chosen — silently
+    // useless, which is the exact failure this module exists to prevent.
+    expect(fm("name: skill-a", "description: >-")).toBeNull();
+    expect(fm("name: skill-a", "description:")).toBeNull();
+    expect(fm("name: skill-a")).toBeNull();
   });
 
   it("REFUSES a block form it cannot reproduce exactly", () => {

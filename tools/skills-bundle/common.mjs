@@ -107,10 +107,53 @@ export function parseSkillName(markdown, label) {
  * about the same file. Returns null for any block form we cannot reproduce
  * exactly, which both sides treat as a refusal.
  */
+/**
+ * Byte-for-byte the loader's `readInlineScalar`. Stripping the outer quotes is
+ * not decoding: a double-quoted `\n` is a newline, `'it''s'` is one apostrophe,
+ * and in a plain scalar ` #` begins a comment. A difference here is a bundle
+ * the build gate calls READY and production refuses.
+ */
+export function readInlineScalar(raw) {
+  if (raw.startsWith('"')) {
+    if (raw.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(raw)) return null;
+    let out = "";
+    for (let i = 1; i < raw.length - 1; i += 1) {
+      const ch = raw[i];
+      if (ch !== "\\") { out += ch; continue; }
+      const esc = raw[++i];
+      if (esc === "u") {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 4;
+        continue;
+      }
+      const simple = {
+        n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "/": "/",
+        b: "\b", f: "\f", 0: "\0", " ": " ",
+      };
+      const mapped = esc === undefined ? undefined : simple[esc];
+      if (mapped === undefined) return null;
+      out += mapped;
+    }
+    return out;
+  }
+  if (raw.startsWith("'")) {
+    if (raw.length < 2 || !raw.endsWith("'")) return null;
+    const inner = raw.slice(1, -1);
+    if (inner.replace(/''/g, "").includes("'")) return null;
+    return inner.replace(/''/g, "'");
+  }
+  const comment = raw.search(/(^|\s)#/);
+  const text = (comment === -1 ? raw : raw.slice(0, comment)).trim();
+  return /^[&*!%@`]/.test(text) ? null : text;
+}
+
 export function readScalar(lines, index, raw) {
   const header = raw.trim();
   if (!/^[>|]/.test(header)) {
-    return { value: header.replace(/^["']|["']$/g, ""), next: index + 1 };
+    const value = readInlineScalar(header);
+    return value === null ? null : { value, next: index + 1 };
   }
   if (!/^[>|]-?$/.test(header)) return null;
   const folded = header.startsWith(">");
@@ -136,11 +179,17 @@ export function readScalar(lines, index, raw) {
   return { value: parts.join(folded ? " " : "\n") + (chomped ? "" : "\n"), next: cursor };
 }
 
+/**
+ * Named for the value it returns, but it applies every rule the RUNTIME
+ * applies. Anything the loader refuses and this accepts is an artifact the
+ * build gate calls READY and production then silently drops.
+ */
 export function parseBundledSkillName(markdown, label) {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!frontmatter) fail(`${label} lacks YAML frontmatter`);
   const lines = frontmatter[1].split(/\r?\n/);
   let name = null;
+  let description = null;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const key = plainTopLevelKey(line);
@@ -149,11 +198,15 @@ export function parseBundledSkillName(markdown, label) {
       fail(`${label} declares the executable frontmatter key ${JSON.stringify(key)}`);
     }
     const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
-    if (!scalar) fail(`${label} uses a block scalar this pipeline cannot reproduce exactly`);
+    if (!scalar) fail(`${label} uses a YAML scalar this pipeline cannot reproduce exactly`);
     index = scalar.next - 1;
     if (key === "name" && name === null) name = scalar.value;
+    if (key === "description" && description === null) description = scalar.value;
   }
   if (name === null) fail(`${label} lacks a frontmatter name`);
+  // The runtime refuses a skill with no usable description, because that text
+  // is the only thing the model reads when deciding the skill applies.
+  if (!description) fail(`${label} lacks a usable frontmatter description`);
   return name;
 }
 

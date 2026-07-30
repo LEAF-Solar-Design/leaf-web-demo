@@ -82,10 +82,61 @@ function plainTopLevelKey(line: string): string | null {
  * loudly. Folded (`>`) joins its lines with spaces, literal (`|`) keeps the
  * newlines, and a blank line is a paragraph break in both.
  */
+/**
+ * Decode a one-line YAML scalar, or refuse.
+ *
+ * Stripping the outer quotes is not decoding. `"a\nb"` is a newline to YAML and
+ * a backslash-n to a naive strip; `'it''s'` is one apostrophe, not two; and in a
+ * plain scalar ` #` begins a comment that is not part of the value. Each of
+ * those silently changes the text we then re-emit as the mounted description.
+ * The three forms below are decoded properly and anything else refuses.
+ */
+function readInlineScalar(raw: string): string | null {
+  if (raw.startsWith('"')) {
+    if (raw.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(raw)) return null;
+    let out = "";
+    for (let i = 1; i < raw.length - 1; i += 1) {
+      const ch = raw[i]!;
+      if (ch !== "\\") { out += ch; continue; }
+      const esc = raw[++i];
+      if (esc === "u") {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 4;
+        continue;
+      }
+      const simple: Record<string, string> = {
+        n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "/": "/",
+        b: "\b", f: "\f", "0": "\0", " ": " ",
+      };
+      const mapped = esc === undefined ? undefined : simple[esc];
+      // An escape we do not decode is one we would reproduce wrongly.
+      if (mapped === undefined) return null;
+      out += mapped;
+    }
+    return out;
+  }
+  if (raw.startsWith("'")) {
+    if (raw.length < 2 || !raw.endsWith("'")) return null;
+    const inner = raw.slice(1, -1);
+    // In a single-quoted scalar the ONLY escape is a doubled quote, so any
+    // lone quote left after collapsing pairs means the value is not what it looks like.
+    if (inner.replace(/''/g, "").includes("'")) return null;
+    return inner.replace(/''/g, "'");
+  }
+  // Plain scalar: ` #` starts a comment, which is not part of the value.
+  const comment = raw.search(/(^|\s)#/);
+  const text = (comment === -1 ? raw : raw.slice(0, comment)).trim();
+  // A plain scalar cannot open with an indicator that means something else.
+  return /^[&*!%@`]/.test(text) ? null : text;
+}
+
 function readScalar(lines: string[], index: number, raw: string): { value: string; next: number } | null {
   const header = raw.trim();
   if (!/^[>|]/.test(header)) {
-    return { value: header.replace(/^['"]|['"]$/g, ""), next: index + 1 };
+    const value = readInlineScalar(header);
+    return value === null ? null : { value, next: index + 1 };
   }
   // ONLY the four plain headers, and then only a block whose text we can
   // reproduce CHARACTER FOR CHARACTER. Everything else refuses. An explicit
@@ -145,7 +196,13 @@ export function parseSkillFrontmatter(source: string): BundledSkill | null {
     if (key === "name" && name === null) name = scalar.value;
     if (key === "description" && description === null) description = scalar.value;
   }
-  return isValidSkillName(name) ? { name, description: description ?? "" } : null;
+  // A description is REQUIRED, not decorative: it is the only text the model
+  // reads when deciding whether a skill applies, so a skill without one is
+  // mounted and never chosen. Silently useless is the failure mode this whole
+  // module is built to avoid, and every curated skill already has one — an
+  // empty description means the artifact is malformed, not minimal.
+  if (!isValidSkillName(name) || !description) return null;
+  return { name, description };
 }
 
 /**
@@ -361,11 +418,45 @@ const mounts = new Map<string, SkillBundleAttachment>();
  */
 const warned = new Set<string>();
 
+/** The most distinct refusals to report before going quiet. */
+/** C0 and C1 control characters: cursor moves and escape sequences a log
+ *  reader would interpret rather than display. */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+const MAX_WARNINGS = 32;
+
+/**
+ * A refusal reason quotes FILENAMES FROM A TENANT-WRITABLE DIRECTORY. Written
+ * raw to a terminal or a log pipeline, a crafted name can move the cursor,
+ * inject a fake line, or emit escape sequences the reader interprets — a log is
+ * a place attacker-controlled text is read by people and by parsers. Control
+ * characters are escaped and the reason is truncated. The count is capped too:
+ * a hostile name that changes every turn would otherwise grow both the log and
+ * this set without limit.
+ */
+/**
+ * Make a refusal reason safe to write to a log.
+ *
+ * Reasons quote FILENAMES FROM A TENANT-WRITABLE DIRECTORY. Written raw to a
+ * terminal or a log pipeline, a crafted name can move the cursor, forge a
+ * line, or emit escape sequences the reader interprets — logs are read by
+ * people and by parsers, and both can be lied to. Exported so the escaping
+ * is tested directly: routing a control character through a real filename
+ * only works on filesystems that accept one.
+ */
+export function sanitiseLogText(reason: string): string {
+  return reason
+    .replace(CONTROL_CHARACTERS, (ch) =>
+      "\\x" + ch.charCodeAt(0).toString(16).padStart(2, "0"))
+    .slice(0, 300);
+}
+
 function refuse(path: string, reason: string): null {
-  const key = `${path} ${reason}`;
-  if (!warned.has(key)) {
+  const safe = sanitiseLogText(reason);
+  const key = path + "\u0000" + safe;
+  if (!warned.has(key) && warned.size < MAX_WARNINGS) {
     warned.add(key);
-    console.error(`[leaf-skills] refusing to mount ${path}: ${reason}`);
+    console.error(`[leaf-skills] refusing to mount: ${safe}`);
   }
   return null;
 }
@@ -390,12 +481,12 @@ export function skillBundleAttachment(env: NodeJS.ProcessEnv = process.env): Ski
     // the directory with it.
     if (mounts.size >= MAX_CACHED_MOUNTS) {
       const oldest = mounts.keys().next().value as string | undefined;
-      const evicted = oldest === undefined ? undefined : mounts.get(oldest);
       if (oldest !== undefined) mounts.delete(oldest);
-      if (evicted) {
-        mounted.delete(evicted.plugin.path);
-        try { rmSync(evicted.plugin.path, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
+      // The entry goes; the DIRECTORY STAYS until process exit. An earlier
+      // sdk.query may still be reading that path, and removing it underneath a
+      // live turn trades a bounded map for a broken session. Production holds
+      // one configuration and never evicts, so this only ever costs a stale
+      // directory that exit cleanup already owns.
     }
     mounts.set(key, attachment);
   }
@@ -417,8 +508,8 @@ function mountFor(
     // every turn so that a fix is picked up, and a log line on every turn would
     // bury the one that matters.
     return refuse(path,
-      "LEAF_SKILLS_BUNDLE_DIGEST is required — a self-verifying bundle proves " +
-      "consistency, not provenance");
+      `${path}: LEAF_SKILLS_BUNDLE_DIGEST is required — a self-verifying ` +
+      "bundle proves consistency, not provenance");
   }
   const verified = verifyBundle(path, { expectedDigest: pin });
   // SAY WHY. A refusal removes every skill, and no-skills looks exactly like a
@@ -426,13 +517,13 @@ function mountFor(
   // in a YAML form we will not reproduce, would disable the feature with
   // nothing in the log to find. verifyBundle already returns a reason; the only
   // failure worth having is the one an operator can read.
-  if (!verified.ok) return refuse(path, verified.reason);
+  if (!verified.ok) return refuse(path, `${path}: ${verified.reason}`);
   if (verified.tier !== tier) {
-    return refuse(path, `bundle tier ${verified.tier} does not match LEAF_SKILLS_TIER ${tier}`);
+    return refuse(path, `${path}: bundle tier ${verified.tier} does not match LEAF_SKILLS_TIER ${tier}`);
   }
-  if (verified.skills.length === 0) return refuse(path, "bundle contains no skills");
+  if (verified.skills.length === 0) return refuse(path, `${path}: bundle contains no skills`);
   const mountPath = materialiseVerifiedBundle(verified);
-  if (!mountPath) return refuse(path, "the verified snapshot could not be written");
+  if (!mountPath) return refuse(path, `${path}: the verified snapshot could not be written`);
   return {
     plugin: { type: "local", path: mountPath, skipMcpDiscovery: true },
     skills: verified.skills.map((skill) => skill.name),
