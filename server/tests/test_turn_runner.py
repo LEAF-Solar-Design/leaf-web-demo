@@ -1617,3 +1617,72 @@ def test_an_ambiguous_rejection_still_keeps_the_approval_spent():
     # ...and pre_harness implies it, never the reverse.
     assert turn_runner.TurnRejected(502, ErrorCode.BROKER_UNREACHABLE, "x",
                                     pre_harness=True).approval_unredeemed is True
+
+
+def test_an_oversized_instant_assignment_header_never_reaches_the_wire(monkeypatch, turn_stub):
+    """Round 10 finding: the assignment header was base64-encoded with no size
+    check, while assignment validation keeps extra fields and bounds nothing.
+    Past node's header limit the PARSER answers 431 before the handler runs, so
+    the app never even sees a status it classifies — and a confirm turn stayed
+    consumed. Bounding it here keeps it off the wire."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    sess = _new_session("tenant-big-header")
+    huge = {"executor_id": "e", "session": "s", "padding": "p" * 40_000}
+    monkeypatch.setattr(turn_runner.instant_execution, "assignment_for_session",
+                        lambda *_a: huge)
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-big-header", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 413
+    assert exc.approval_unredeemed is True
+    assert stub.LAST_RAW is None, "an unsendable request must not be posted"
+    assert session_store.get_session(sess["session_id"])["active_turn_id"] is None
+
+
+@pytest.mark.parametrize("status", [400, 431])
+def test_pre_runner_request_rejections_give_the_approval_back(monkeypatch, turn_stub, status):
+    """400 is the harness's own request validation and 431 is node's parser
+    refusing oversized headers before the handler runs. Both precede runner
+    entry, so a confirm refused this way must stay retryable."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = status
+    stub.IMMEDIATE_BODY = {"error": {"message": "rejected"}}
+
+    sess = _new_session(f"tenant-prerunner-{status}")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn(f"tenant-prerunner-{status}", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 400
+    assert exc.error_code == ErrorCode.BAD_PARAMS
+    assert exc.approval_unredeemed is True
+
+
+def test_a_harness_500_stays_ambiguous(monkeypatch, turn_stub):
+    """The line this must not cross. A 500 can be raised AFTER ConverseLoop
+    resolved a confirmation and began acting on it, so the approval stays
+    spent."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 500
+    stub.IMMEDIATE_BODY = {"error": {"message": "boom"}}
+
+    sess = _new_session("tenant-500")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-500", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 502
+    assert exc.error_code == ErrorCode.BROKER_UNREACHABLE
+    assert exc.approval_unredeemed is False, (
+        "a 500 may follow a redeemed confirmation; un-spending it is the "
+        "double execution consume-once prevents"
+    )

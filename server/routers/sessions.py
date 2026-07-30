@@ -61,15 +61,22 @@ start_turn does after the session guard — no ``turn_started`` event was
 appended, no request reached the harness, so nothing anywhere redeemed the
 approval and giving it back cannot produce a second redemption.
 
-``TurnRejected`` qualifies ONLY when it carries ``pre_harness`` (turn_runner
-sets it where no POST was attempted, or the connection was never established).
-Those legs answer ``BROKER_UNREACHABLE``, which ``_RETRYABLE_BY_CODE`` marks
-retryable — so skipping the give-back there would invite a retry against an
-approval already spent, which is the same defect this note exists to fix.
-``pre_harness`` DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll
-back: on a read timeout, or a rejection the harness itself returned, the
-harness may already be executing the tool call, and un-spending that approval
-is precisely the double-execution consume-once exists to prevent.
+``TurnRejected`` qualifies when it carries ``approval_unredeemed``. That covers
+``pre_harness`` (no POST was attempted, or the connection was never
+established) AND the refusals that reach the harness but are answered before
+the runner is ever entered: 400/431 request validation, 401 auth gate or
+missing grant, 413 body reader, 429 grant-pool exhaustion. In every one of
+those the grant is resolved before the session mirror and before ConverseLoop
+(``harness/src/agent/spineTurnAdapter.ts``), so nothing can have redeemed the
+confirmation. Those legs are marked retryable, so skipping the give-back would
+invite a retry against an approval already spent — the defect this note exists
+to fix.
+
+It DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll back: on a
+read timeout, or a 500 the harness returned after ConverseLoop had already
+resolved a confirmation and begun acting on it, the harness may already be
+executing the tool call, and un-spending that approval is precisely the
+double-execution consume-once exists to prevent.
 
 Single redemption is preserved in both directions: a confirm whose turn really
 started still replays into ``already_consumed`` (see

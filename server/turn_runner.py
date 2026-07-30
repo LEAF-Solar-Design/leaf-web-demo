@@ -208,6 +208,10 @@ MAX_PRIOR_CONTEXT_BYTES = 256 * 1024
 # on what this module sends rather than a number arrived at by arithmetic over
 # decoded text. Change one and change the other.
 MAX_FORWARD_BYTES = 2_000_000
+# The harness refuses this header above 16,384 characters, and node's own total
+# header limit is the same order, so anything larger is refused before the
+# handler runs. Kept strictly under both so the app never posts one.
+MAX_INSTANT_ASSIGNMENT_HEADER = 8 * 1024
 _TRUNCATION_MARKER = "\n[... earlier text omitted ...]"
 
 
@@ -715,7 +719,20 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # Keep the frozen turn body exact. This authenticated sidecar header is
         # consumed before the runner starts and never enters the transcript.
         encoded = json.dumps(instant_assignment, separators=(",", ":")).encode("utf-8")
-        harness_headers["x-leaf-instant-assignment"] = base64.urlsafe_b64encode(encoded).decode("ascii")
+        header = base64.urlsafe_b64encode(encoded).decode("ascii")
+        # BOUNDED HERE, not only at the harness. Assignment validation keeps
+        # extra fields and has no serialised-size limit, so this header could
+        # outgrow both the harness's own 16,384 check and node's total header
+        # limit — and a request refused by node's PARSER never reaches the
+        # handler, so it comes back as 431 rather than anything this module
+        # classifies. Refusing locally keeps that off the wire entirely, which
+        # also means a confirm turn cannot be spent on it.
+        if len(header) > MAX_INSTANT_ASSIGNMENT_HEADER:
+            _release_cas()
+            raise _rejected(413, ErrorCode.BAD_PARAMS,
+                            "instant assignment header is too large",
+                            pre_harness=True)
+        harness_headers["x-leaf-instant-assignment"] = header
 
     # Encoded HERE rather than via `json=`, because requests' default encoder
     # sets ensure_ascii=True and escapes every non-ASCII character to \uXXXX.
@@ -802,14 +819,32 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         msg = (rejected.get("message") or (rejected.get("error") or {}).get("message")
                or "the turn payload exceeded the harness body ceiling")
         resp.close()
-        # pre_harness: a 413 is the harness refusing the BODY before it parses
-        # one, so ConverseLoop never ran and no confirmation was redeemed.
-        # Without this the router keeps the approval spent, and an oversized
-        # confirm turn burns the proposal permanently with nothing to show for
-        # it — the caller cannot even retry, because the approval is gone.
+        # NOT pre_harness — this request did reach the harness. It was refused
+        # in the body reader, before validation or runner entry, so ConverseLoop
+        # never ran and no confirmation was redeemed. Without that the router
+        # keeps the approval spent and an oversized confirm turn burns the
+        # proposal permanently, with no way to retry.
         raise _rejected(413, ErrorCode.BAD_PARAMS, msg, approval_unredeemed=True)
 
+    if resp.status_code in (400, 431):
+        # Refused before the runner was entered, so no confirmation was
+        # redeemed: 400 is the harness's own body/header validation and 431 is
+        # node's PARSER rejecting oversized headers before the handler runs at
+        # all. The app bounds the one header it sends, so neither should be
+        # reachable — but "should not be reachable" is not a reason to leave a
+        # confirm turn burnable if it is.
+        _release_cas()
+        body = _safe_json(resp) or {}
+        msg = body.get("message") or (body.get("error") or {}).get("message") \
+            or f"harness rejected the request (HTTP {resp.status_code})"
+        resp.close()
+        raise _rejected(400, ErrorCode.BAD_PARAMS, msg, approval_unredeemed=True)
+
     if resp.status_code >= 400:
+        # Everything left is AMBIGUOUS and must stay that way. A 500 can be
+        # raised after ConverseLoop has already resolved a confirmation and
+        # started acting on it, so un-spending the approval here is exactly the
+        # double execution consume-once exists to prevent.
         _release_cas()
         body = _safe_json(resp) or {}
         msg = body.get("message") or f"harness returned HTTP {resp.status_code}"
