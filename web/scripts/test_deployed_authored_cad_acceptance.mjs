@@ -185,8 +185,7 @@ describe('deployed authored CAD acceptance checks', () => {
     }
     const authorTab = {
       waitFor: async (options) => calls.push(['tab.waitFor', options]),
-      isEnabled: async () => true,
-      click: async () => calls.push(['tab.click']),
+      click: async (options) => calls.push(['tab.click', options]),
     }
     const page = {
       getByRole: (role, options) => {
@@ -206,24 +205,28 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.deepEqual(calls, [
       ['getByRole', 'tab', { name: 'Author', exact: true }],
       ['tab.waitFor', { state: 'visible', timeout: 30_000 }],
-      ['tab.click'],
+      ['tab.click', { timeout: 30_000 }],
       ['getByLabel', 'What should the tool do?'],
       ['field.waitFor', { state: 'visible', timeout: 30_000 }],
     ])
   })
 
-  it('reports a disabled or missing /try author surface by acceptance stage', async () => {
+  it('waits for the /try author surface to become actionable and reports timeout by stage', async () => {
     const disabledPage = {
       getByRole: () => ({
         waitFor: async () => {},
-        isEnabled: async () => false,
+        click: async () => {
+          const error = new Error('disabled')
+          error.name = 'TimeoutError'
+          throw error
+        },
       }),
     }
     await assert.rejects(
       () => openTryAuthorSurface(disabledPage),
       (error) => error instanceof AcceptanceError
         && error.check === 'author_surface'
-        && /disabled/.test(error.message),
+        && /TimeoutError/.test(error.message),
     )
 
     const missingPage = {

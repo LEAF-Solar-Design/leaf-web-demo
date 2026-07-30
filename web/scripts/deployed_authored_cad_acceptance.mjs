@@ -551,13 +551,7 @@ export async function openTryAuthorSurface(page) {
   try {
     const authorTab = page.getByRole('tab', { name: 'Author', exact: true })
     await authorTab.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
-    if (!await authorTab.isEnabled()) {
-      throw new AcceptanceError(
-        'author_surface',
-        'the /try Author tab is disabled after backend readiness',
-      )
-    }
-    await authorTab.click()
+    await authorTab.click({ timeout: DEFAULT_TIMEOUT_MS })
     const authorRequest = page.getByLabel('What should the tool do?')
     await authorRequest.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
     return authorRequest

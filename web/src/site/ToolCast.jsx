@@ -149,6 +149,7 @@ function defaultsOf(schema) {
 }
 
 function phaseLabel(phase) {
+  if (phase === 'loading') return 'Connecting backend'
   if (phase === 'starting') return 'Starting request'
   if (phase === 'proposal') return PROOF_MODE ? 'Waiting for approval' : 'Assistant response'
   if (phase === 'running') return 'Rearranging panels'

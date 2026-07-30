@@ -1,6 +1,39 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
+test('backend readiness waits for the authenticated session before enabling Author', async ({ page }) => {
+  const state = makeCatProofState()
+  let releaseSession
+  const sessionGate = new Promise((resolve) => { releaseSession = resolve })
+  await page.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-token'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (url.pathname === '/api/session') await sessionGate
+    const result = catProofResponse({
+      method: request.method(),
+      path: url.pathname,
+      body: request.postDataJSON?.(),
+    }, state)
+    await route.fulfill({
+      status: result.status,
+      contentType: 'application/json',
+      body: JSON.stringify(result.body || {}),
+    })
+  })
+
+  await page.goto('/try')
+  const authorTab = page.getByRole('tab', { name: 'Author', exact: true })
+  await expect(page.getByTestId('operator-phase')).toContainText('Connecting backend')
+  await expect(authorTab).toBeDisabled()
+
+  releaseSession()
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready')
+  await expect(authorTab).toBeEnabled()
+  await authorTab.click()
+  await expect(page.getByLabel('What should the tool do?')).toBeVisible()
+})
+
 test('session 401 renders one calm gate and disables execution', async ({ page }) => {
   const state = makeCatProofState()
   const calls = []
