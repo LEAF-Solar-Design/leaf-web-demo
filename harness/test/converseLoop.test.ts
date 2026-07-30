@@ -20,6 +20,7 @@ import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
 import type {
   ConverseEvent,
+  ConverseRunInput,
   GateCheckContext,
   GateCheckResult,
   SessionRecord,
@@ -271,6 +272,108 @@ describe("ConverseLoop — seq + replay", () => {
 });
 
 describe("ConverseLoop — read auto-dispatch", () => {
+  it("denies the SDK Skill tool through the live loop permission bridge", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    let verdict: Awaited<ReturnType<ConverseRunInput["canUseTool"]>> | undefined;
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        verdict = await input.canUseTool("Skill", { skill: "drawing-help" });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "skill-sdk-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, session, "Use the drawing skill");
+
+    expect(verdict).toMatchObject({ behavior: "deny" });
+    expect(gate.checks).toHaveLength(0);
+    expect(appRun.submitCalls).toHaveLength(0);
+  });
+
+  it("ask_user emits one bounded question, uses a read-only gate action, and never dispatches", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const results: Array<{ content: string; isError?: boolean }> = [];
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        const ask = async (args: Record<string, unknown>) => {
+          const permission = await input.canUseTool("mcp__spine__ask_user", args);
+          if (permission.behavior === "deny") throw new Error(permission.message);
+          const result = await input.tools.execute("ask_user", permission.updatedInput);
+          results.push(result);
+        };
+        await ask({
+          question: "Which drawing should I inspect?",
+          options: [
+            { label: "Current drawing", description: "Use the open drawing" },
+            { label: "Choose another", description: "Select a different drawing" },
+          ],
+        });
+        await ask({
+          question: "A second question",
+          options: [{ label: "One" }, { label: "Two" }],
+        });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "ask-sdk-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, session, "I need a choice");
+
+    const questions = ofType(await store.eventsAfter(session.session_id, 0), "question_required");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]!.data).toMatchObject({
+      question: "Which drawing should I inspect?",
+      options: [
+        { label: "Current drawing", description: "Use the open drawing" },
+        { label: "Choose another", description: "Select a different drawing" },
+      ],
+    });
+    expect(questions[0]!.data.question_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(results[0]!.isError).toBeUndefined();
+    expect(results[1]).toMatchObject({ isError: true, content: expect.stringContaining("only one question") });
+    expect(gate.checks.map((check) => ({ action: check.action, args: check.args }))).toEqual([
+      { action: "read_platform_state", args: { what: "capabilities" } },
+      { action: "read_platform_state", args: { what: "capabilities" } },
+    ]);
+    expect(appRun.submitCalls).toHaveLength(0);
+  });
+
+  it("ask_user rejects invalid bounds without emitting a question", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const results: Array<{ content: string; isError?: boolean }> = [];
+    const invalidCalls = [
+      { question: "Too few", options: [{ label: "Only" }] },
+      { question: "x".repeat(501), options: [{ label: "One" }, { label: "Two" }] },
+      { question: "Untrimmed", options: [{ label: " One" }, { label: "Two" }] },
+      { question: "Long description", options: [{ label: "One", description: "x".repeat(301) }, { label: "Two" }] },
+      // Review round 1: well-typed is not enough. An empty question renders a
+      // card asking nothing; an empty label renders a blank disabled button in
+      // the live web card. The pre-port implementation rejected both.
+      { question: "   ", options: [{ label: "One" }, { label: "Two" }] },
+      { question: "Blank label", options: [{ label: "" }, { label: "Two" }] },
+    ];
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        for (const args of invalidCalls) results.push(await input.tools.execute("ask_user", args));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "ask-invalid-sdk-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, session, "I need a choice");
+
+    expect(results).toHaveLength(invalidCalls.length);
+    for (const result of results) expect(result.isError).toBe(true);
+    expect(ofType(await store.eventsAfter(session.session_id, 0), "question_required")).toHaveLength(0);
+    expect(appRun.submitCalls).toHaveLength(0);
+  });
+
   it("run_capability on a READ tool dispatches inline via the wait path", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

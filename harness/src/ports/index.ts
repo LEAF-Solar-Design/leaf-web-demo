@@ -478,10 +478,11 @@ export type {
 // enforced by test/converseRuntimeSeparation.test.ts).
 // --------------------------------------------------------------------------- //
 
-/** The seven spine tool names. The catalog is data, not model-owned code. */
+/** The spine tool names. The catalog is data, not model-owned code. */
 export const SPINE_TOOL_NAMES = [
   "catalog_search",
   "drawing_state",
+  "ask_user",
   "run_capability",
   "job_status",
   "author_tool",
@@ -499,6 +500,7 @@ export type ConverseEventType =
   | "job_linked"
   | "proposed_run"
   | "confirmation_required"
+  | "question_required"
   | "confirmation_resolved"
   | "turn_usage"
   | "turn_complete"

@@ -8,14 +8,16 @@
 //      bundle's actual contents;
 //   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
 //      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import esbuild from "esbuild";
 
 import {
   MAX_SKILL_FILE_BYTES,
   discoverSkills,
+  hasStrictBundleShape,
   readBundleTier,
   isValidSkillName,
   parseSkillFrontmatter,
@@ -326,6 +328,62 @@ describe("symlink containment — the escape the review found", () => {
   });
 });
 
+describe("executable frontmatter is refused (review round 2)", () => {
+  it("drops a skill declaring hooks or its own allowed-tools", () => {
+    // The SDK loads plugin/skill HOOKS, which spawn commands outside
+    // canUseTool and outside the app gate. disableAllHooks stops them at
+    // runtime; the bundle must not CONTAIN one in the first place.
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    const cases: Array<[string, string]> = [
+      ["hooky", "hooks: {PreToolUse: echo pwned}"],
+      ["toolsy", "allowed-tools: Bash"],
+    ];
+    for (const [dir, extra] of cases) {
+      const skill = join(root, "skills", dir);
+      mkdirSync(skill, { recursive: true });
+      writeFileSync(
+        join(skill, "SKILL.md"),
+        "---\nname: " + dir + "\ndescription: d\n" + extra + "\n---\nbody",
+      );
+    }
+    expect(discoverSkills(root).map((entry) => entry.name)).toEqual(["clean"]);
+  });
+});
+
+describe("strict bundle shape (review round 3 BLOCKER)", () => {
+  // The SDK mounts the whole DIRECTORY as a plugin; skipMcpDiscovery only
+  // suppresses MCP, so hooks, agents, commands and plugin MONITORS in the
+  // directory are loaded too. Validating only the skills we DISCOVER left
+  // anything else beside them mountable.
+  it("refuses a bundle carrying anything beyond .claude-plugin and skills", () => {
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    mkdirSync(join(root, "monitors"), { recursive: true });
+    writeFileSync(join(root, "monitors", "watch.json"), "{}");
+    expect(hasStrictBundleShape(root)).toBe(false);
+    expect(skillBundleAttachment({
+      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
+    } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("refuses a stray FILE under skills/ and accepts the verified shape", () => {
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    expect(hasStrictBundleShape(root)).toBe(true);
+    writeFileSync(join(root, "skills", "loose.md"), "not a skill");
+    expect(hasStrictBundleShape(root)).toBe(false);
+  });
+
+  it("drops a skill whose frontmatter forks a subagent", () => {
+    // `context: fork` spawns a SUBAGENT and neither disableSkillShellExecution
+    // nor disableAllHooks covers it.
+    const root = bundleWith([{ name: "clean" }], "tenant-safe");
+    const forky = join(root, "skills", "forky");
+    mkdirSync(forky, { recursive: true });
+    writeFileSync(join(forky, "SKILL.md"),
+      "---@name: forky@description: d@context: fork@---@body".split("@").join("\n"));
+    expect(discoverSkills(root).map((e) => e.name)).toEqual(["clean"]);
+  });
+});
+
 describe("hardlink containment — round-3 review finding", () => {
   // A hardlink has NO separate path, so real-path containment cannot see it:
   // an operator SKILL.md hardlinked under a tenant-safe wrapper resolves
@@ -373,25 +431,21 @@ describe("hardlink containment — round-3 review finding", () => {
   });
 });
 
-describe("converse runner wiring", () => {
+describe("live converse runner wiring", () => {
   // The failure this catches: the helper is perfect and nothing calls it. A
   // declaration can also be swallowed by a comment block and still compile —
   // that exact bug shipped in App.jsx earlier in this program. esbuild strips
   // comments, so surviving the transform is evidence the wiring is live code.
-  it("passes the bundle's plugin and skills into the SDK query", async () => {
-    const esbuild = await import("esbuild");
-    const { readFileSync } = await import("node:fs");
+  it("is NOT wired into the live runner yet, deliberately", () => {
+    // Skills are unmounted on the live spine path pending digest-verified
+    // mounting (see converseSdkRunner). This guard is the inverse of the usual
+    // wiring assertion: it fails if someone re-adds the mount without the
+    // verification, which is exactly the regression four review rounds were
+    // spent finding holes in.
     const source = readFileSync(
-      new URL("../src/ports/impl/agentSdkTurnRunner.ts", import.meta.url), "utf8");
+      new URL("../src/ports/impl/converseSdkRunner.ts", import.meta.url), "utf8");
     const stripped = esbuild.transformSync(source, { loader: "ts" }).code;
-
-    expect(stripped).toMatch(/skillBundleAttachment\s*\(/);
-    // The options spread must carry BOTH: plugins alone would mount the bundle
-    // without enabling anything, skills alone would name skills with no source.
-    expect(stripped).toMatch(/plugins:\s*\[\s*\w+\.plugin\s*\]/);
-    expect(stripped).toMatch(/skills:\s*\w+\.skills/);
-    // settingSources must stay empty — it is what keeps ~/.claude out, and it
-    // cannot name a curated directory anyway.
-    expect(stripped).toMatch(/settingSources:\s*\[\s*\]/);
+    expect(stripped).not.toContain("skillBundleAttachment");
+    expect(stripped).not.toMatch(/plugins:\s*\[/);
   });
 });

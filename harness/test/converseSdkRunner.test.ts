@@ -100,7 +100,7 @@ function makeMockSdk(script: ScriptEntry[] | ScriptEntry[][]) {
   // A zod stand-in: every factory returns a chainable token with .optional().
   const zt = (): AnyRec => ({ optional: zt });
   const zodModule = {
-    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt },
+    z: { string: zt, number: zt, unknown: zt, boolean: zt, enum: zt, record: zt, array: zt, object: zt },
   };
 
   return {
@@ -331,6 +331,27 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
 // --------------------------------------------------------------------------- //
 
 describe("ConverseSdkRunner — SDK options wiring", () => {
+  it("hardens the session and does NOT mount a skill bundle yet", async () => {
+    // Skills are deliberately unmounted on the live path (see the comment in
+    // converseSdkRunner): handing the SDK a plugin DIRECTORY kept reaching
+    // execution outside canUseTool and the gate, and the correct fix is
+    // digest-verified mounting, shipping as its own chip.
+    const mock = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(mock), makeInput());
+    const options = mock.queries[0]!.options;
+    expect("skills" in options).toBe(false);
+    expect("plugins" in options).toBe(false);
+    // The hardening stays regardless: SETTINGS layer, not top-level — the
+    // SDK's arg builder reads options.settings and never a top-level flag, so
+    // the broken form silently does nothing.
+    expect(options.settings).toMatchObject({
+      disableSkillShellExecution: true,
+      disableAllHooks: true,
+    });
+    expect("disableSkillShellExecution" in options).toBe(false);
+    expect("disableAllHooks" in options).toBe(false);
+  });
+
   it("passes resume when resumeSdkSessionId is present, omits it when absent", async () => {
     const withResume = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(withResume), makeInput({ resumeSdkSessionId: "prior-session-42" }));
@@ -470,7 +491,7 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     const seen: Array<{ tool: string; input: AnyRec }> = [];
     const canUseTool: ConverseRunInput["canUseTool"] = async (tool, input) => {
       seen.push({ tool, input });
-      return tool.includes("run_capability")
+      return tool === "Skill" || tool.includes("run_capability")
         ? { behavior: "deny", message: "not now" }
         : { behavior: "allow", updatedInput: input };
     };
@@ -486,9 +507,12 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     expect(allow).toEqual({ behavior: "allow", updatedInput: { what: "summary" } });
     const deny = await hook("mcp__spine__run_capability", { tool: "add-panel" });
     expect(deny).toEqual({ behavior: "deny", message: "not now" });
+    const skill = await hook("Skill", { skill: "drawing-help" });
+    expect(skill).toEqual({ behavior: "deny", message: "not now" });
     expect(seen.map((s) => s.tool)).toEqual([
       "mcp__spine__drawing_state",
       "mcp__spine__run_capability",
+      "Skill",
     ]);
   });
 });
