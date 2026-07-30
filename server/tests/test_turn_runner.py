@@ -1306,3 +1306,110 @@ def test_concurrent_orphan_cancels_append_exactly_one_terminal_event(monkeypatch
     assert sum(1 for e in events if e["type"] == "turn_complete") == 1, \
         [e["type"] for e in events]
     assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# A harness 413 is the caller's payload problem, not an outage.
+# --------------------------------------------------------------------------- #
+def test_immediate_413_maps_to_bad_params_not_broker_unreachable(monkeypatch, turn_stub):
+    """Round 7 finding: the harness's own body ceiling answered 413, and the
+    >= 400 catch-all reported it as `502 BROKER_UNREACHABLE` — sending the
+    caller to look for an outage instead of shrinking the payload."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 413
+    stub.IMMEDIATE_BODY = {"error": {"message": "request body exceeds the harness cap"}}
+
+    sess = _new_session("tenant-413")
+    session_id = sess["session_id"]
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-413", session_id, text="hi")
+    exc = ei.value
+    assert exc.status_code == 413
+    assert exc.error_code == ErrorCode.BAD_PARAMS
+    assert exc.error_code != ErrorCode.BROKER_UNREACHABLE
+    assert "harness cap" in exc.message
+    # the turn lock is released like every other immediate rejection
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Prior context is bounded in BYTES, not only in message count.
+# --------------------------------------------------------------------------- #
+def _ctx_bytes(messages):
+    return sum(len(m["text"].encode("utf-8")) for m in messages)
+
+
+def test_prior_context_is_byte_bounded_not_just_count_bounded():
+    """MAX_PRIOR_MESSAGES caps the COUNT; without a byte budget, 20 messages of
+    unbounded text is unbounded context, and the harness /turn ceiling has
+    nothing to be sized against."""
+    huge = [{"role": "user", "text": "x" * 200_000} for _ in range(20)]
+    fitted = turn_runner._fit_prior_context(huge)
+
+    assert _ctx_bytes(fitted) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(fitted) < len(huge)  # whole messages were dropped to fit
+    # 20 x 200KB would be 4 MB on the wire before this bound existed
+    assert _ctx_bytes(huge) > 10 * turn_runner.MAX_PRIOR_CONTEXT_BYTES
+
+
+def test_prior_context_keeps_the_newest_messages_verbatim():
+    """The budget is spent from the newest end, and what survives is not clipped
+    — a mid-sentence cut through every message would be worse than dropping the
+    oldest ones outright."""
+    messages = [{"role": "user", "text": f"msg-{i}: " + "y" * 50_000} for i in range(20)]
+    fitted = turn_runner._fit_prior_context(messages)
+
+    assert fitted[-1] == messages[-1]              # newest survives byte-for-byte
+    assert fitted[0]["text"].startswith("msg-")    # no partial leading message
+    assert all(m in messages for m in fitted)      # every kept message is verbatim
+
+
+def test_a_single_oversized_message_is_clipped_with_a_marker():
+    """One message alone can exceed the per-message cap; that one is truncated
+    (tail kept) rather than dropped, so the newest turn never vanishes."""
+    one = [{"role": "user", "text": "lead " + "z" * 300_000 + " THE ACTUAL ASK"}]
+    fitted = turn_runner._fit_prior_context(one)
+
+    assert len(fitted) == 1
+    text = fitted[0]["text"]
+    assert len(text.encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+    assert text.startswith(turn_runner._TRUNCATION_MARKER)
+    assert text.endswith("THE ACTUAL ASK")   # the tail is what was kept
+
+
+def test_clipping_never_emits_a_broken_codepoint():
+    """The byte cut can land mid-character; the result must still be text."""
+    clipped = turn_runner._clip("\u4e2d" * 100_000)
+    assert len(clipped.encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+    clipped.encode("utf-8").decode("utf-8")   # raises if a partial codepoint survived
+
+
+def test_ordinary_history_is_untouched():
+    """The bound must not perturb the normal case at all."""
+    normal = [{"role": "user", "text": "count entities per layer"},
+              {"role": "assistant", "text": "There are 412 entities across 9 layers."}]
+    assert turn_runner._fit_prior_context(normal) == normal
+
+
+def test_prior_messages_applies_the_byte_bound_on_the_real_path():
+    """The bound has to be wired into `_prior_messages`, not merely available:
+    testing `_fit_prior_context` alone passed happily with the call site
+    removed."""
+    sess = _new_session("tenant-prior-bytes")
+    session_id = sess["session_id"]
+    for i in range(12):
+        tid = f"prior-turn-{i}"
+        session_store.append_event(session_id, tid, "turn_started", {"text": "u" * 120_000})
+        session_store.append_event(session_id, tid, "text_delta", {"text": "a" * 120_000})
+        session_store.append_event(session_id, tid, "turn_complete", {"stop_reason": "end_turn"})
+
+    messages = turn_runner._prior_messages(session_id, exclude_turn_id="not-a-real-turn")
+
+    assert messages, "the fold itself must still work"
+    assert _ctx_bytes(messages) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(messages) <= turn_runner.MAX_PRIOR_MESSAGES
+    # 24 x 120KB of raw history folded down to the budget
+    assert _ctx_bytes(messages) < 24 * 120_000

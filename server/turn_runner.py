@@ -5,15 +5,16 @@ addendum) — Turn-engine API v1 (FROZEN):
     class TurnBusy(Exception)
     class TurnRejected(Exception): status_code, error_code, message, extra,
                                    pre_harness (additive, defaults False)
-    start_turn(tenant_id, session_id, *, text, confirm, classifier_hint) -> turn_id
+    start_turn(tenant_id, session_id, *, text, confirm, images, classifier_hint) -> turn_id
 
 This module is the ONLY place that POSTs to the harness's `POST /turn`
 (harness/src/ports/converse.ts, ConverseRunner / ConverseTurnInput). It owns
 the whole turn lifecycle: session guard, the `active_turn_id` compare-and-swap
 (session_store.try_begin_turn), durably recording the user's message as the
 `turn_started` event (the durable transcript source for `{text}` /
-`{confirm}` turns), relaying every NDJSON line the harness streams back into
-`session_events` verbatim, materializing an `approvals` row the moment a
+`{text+images}` / `{confirm}` turns), relaying every NDJSON line the harness
+streams back into `session_events` verbatim, materializing an `approvals` row
+the moment a
 `confirmation_required` event arrives, and guaranteeing the turn's
 `active_turn_id` lock is ALWAYS released — on an immediate harness rejection,
 on a clean `turn_complete`/`error`, on an unexpected stream failure, or (the
@@ -23,8 +24,9 @@ Semantics (frozen order):
 
     session exists (+ tenant match) guard
       -> try_begin_turn CAS                              (raise TurnBusy on loss)
-      -> append_event(..., 'turn_started', {text|confirm, classifier_hint})
+      -> append_event(..., 'turn_started', {text?, images?|confirm, classifier_hint})
       -> build bounded prior-context `messages[]` from the event log
+         (count-bounded AND byte-bounded — see MAX_PRIOR_CONTEXT_BYTES)
       -> POST {LEAF_CONVERSE_HARNESS_URL|LEAF_AUTHOR_HARNESS_URL}/turn,
          stream=True, timeout=(5, TURN_MAX_S)   (converse var preferred)
            immediate 401              -> TurnRejected(401, GRANT_REQUIRED, extra={grant_required:True})
@@ -180,9 +182,22 @@ def _harness_url() -> str:
 # bounded prior-context window (§2.1.2 "messages ... bounded, built by the
 # turn engine") — kept simple: fold the last PRIOR_EVENTS_WINDOW raw events
 # into per-turn {user, assistant} pairs, then keep only the most recent
-# MAX_PRIOR_MESSAGES of those.
+# MAX_PRIOR_MESSAGES of those, within a BYTE budget.
+#
+# The count alone is not a bound. Each message's text is whatever was said, and
+# an inbound message may be up to _MAX_MESSAGE_BODY_BYTES (1.5 MB), so 20 of
+# them is ~30 MB of "bounded" context. That left the harness's own /turn ceiling
+# with nothing to be sized against: a legitimate 1 MiB image plus ordinary
+# history could exceed it, and the resulting 413 surfaced as BROKER_UNREACHABLE.
+#
+# Whole messages are dropped oldest-first to fit, rather than every message
+# being clipped, so what survives is verbatim. Only a single message that alone
+# exceeds the per-message cap is truncated, with a visible marker.
 PRIOR_EVENTS_WINDOW = 400
 MAX_PRIOR_MESSAGES = 20
+MAX_PRIOR_MESSAGE_BYTES = 64 * 1024
+MAX_PRIOR_CONTEXT_BYTES = 256 * 1024
+_TRUNCATION_MARKER = "\n[... earlier text omitted ...]"
 
 
 # --------------------------------------------------------------------------- #
@@ -410,7 +425,36 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
             messages.append({"role": "user", "text": slot["user"]})
         if slot["terminal"] and slot["parts"]:
             messages.append({"role": "assistant", "text": "".join(slot["parts"])})
-    return messages[-MAX_PRIOR_MESSAGES:]
+    return _fit_prior_context(messages[-MAX_PRIOR_MESSAGES:])
+
+
+def _clip(text: str) -> str:
+    """Keep the TAIL of an over-long message: the end of a turn carries the
+    conclusion, and for a user message it is where the actual ask usually is."""
+    raw = text.encode("utf-8")
+    if len(raw) <= MAX_PRIOR_MESSAGE_BYTES:
+        return text
+    marker = _TRUNCATION_MARKER.encode("utf-8")
+    keep = raw[-(MAX_PRIOR_MESSAGE_BYTES - len(marker)):]
+    # The cut can land mid-codepoint; drop the partial leading character.
+    return marker.decode("utf-8") + keep.decode("utf-8", "ignore")
+
+
+def _fit_prior_context(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Clip each message to MAX_PRIOR_MESSAGE_BYTES, then drop whole messages
+    from the OLDEST end until the total fits MAX_PRIOR_CONTEXT_BYTES. Newest
+    context is the context worth keeping, so the budget is spent from the end."""
+    kept: List[Dict[str, str]] = []
+    total = 0
+    for msg in reversed(messages):
+        text = _clip(msg["text"])
+        size = len(text.encode("utf-8"))
+        if kept and total + size > MAX_PRIOR_CONTEXT_BYTES:
+            break
+        kept.append({"role": msg["role"], "text": text})
+        total += size
+    kept.reverse()
+    return kept
 
 
 def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
@@ -661,6 +705,19 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         msg = body.get("message") or "harness reported a rate/quota limit"
         resp.close()
         raise _rejected(429, code, msg)
+
+    if resp.status_code == 413:
+        # The payload was too big for the harness, which is a caller-visible
+        # BAD_PARAMS at 413 — the same answer the app's own body-cap middleware
+        # gives on this route. Folding it into the >= 400 branch below reported
+        # "broker unreachable" for a broker that answered perfectly well, and
+        # sent the caller looking for an outage instead of a smaller payload.
+        _release_cas()
+        body = _safe_json(resp) or {}
+        msg = (body.get("message") or (body.get("error") or {}).get("message")
+               or "the turn payload exceeded the harness body ceiling")
+        resp.close()
+        raise _rejected(413, ErrorCode.BAD_PARAMS, msg)
 
     if resp.status_code >= 400:
         _release_cas()

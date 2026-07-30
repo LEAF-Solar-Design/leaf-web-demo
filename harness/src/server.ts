@@ -159,15 +159,33 @@ function harnessAuthDenial(
  * size check at all: the memory is already spent, and a chunked request
  * declares no length to check up front. So the ceiling is enforced per chunk.
  *
- * Two values because the routes are not alike. `/turn` is sized for the image
- * caps (1 MiB of decoded image expands to at most 1,398,104 base64 characters,
- * plus bounded JSON framing and prose). Every other route gets a generous
- * default, because a customization publish carries a staged receipt and a
- * registered run carries arbitrary tool params: bounding those to the IMAGE
- * budget would refuse legitimate payloads that have nothing to do with images.
+ * Two values because the routes are not alike.
+ *
+ * `/turn` is sized against what the APP can legitimately forward, which is more
+ * than what the app accepts from the browser:
+ *
+ *     1,500,000  the app's own inbound cap (_MAX_MESSAGE_BODY_BYTES), which
+ *                already covers text AND base64 images — they arrive in one body
+ *     + 262,144  prior context (turn_runner.MAX_PRIOR_CONTEXT_BYTES)
+ *     +  ~2,000  ids, credential grant, and JSON framing the app adds
+ *     ---------
+ *       1,764,144 worst case, so 2,000,000 with real headroom.
+ *
+ * Sizing this to the image budget alone (1,500,000) was wrong: it equalled the
+ * app's inbound cap with nothing left for the history the app appends AFTER the
+ * boundary check, so a legal 1 MiB image plus ordinary history hit the ceiling.
+ * This number is only meaningful because prior context is byte-bounded; if that
+ * bound moves, this one moves with it.
+ *
+ * Every other route gets a generous default, because a customization publish
+ * carries a staged receipt and a registered run carries arbitrary tool params:
+ * bounding those to the IMAGE budget would refuse legitimate payloads that have
+ * nothing to do with images.
  */
-const MAX_TURN_BODY_BYTES = 1_500_000;
+const MAX_TURN_BODY_BYTES = 2_000_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** How much of an over-cap body to read and throw away so the 413 can be delivered. */
+const MAX_DRAIN_BYTES = 4 * 1024 * 1024;
 
 function readJsonBody(
   req: IncomingMessage,
@@ -176,21 +194,50 @@ function readJsonBody(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let seen = 0;
+    let refused = false;
+    let discarded = 0;
+    const tooLarge = (): AuthorLoopError =>
+      new AuthorLoopError("request body exceeds the harness cap", 413);
+
+    // Over the cap, STOP BUFFERING but keep consuming, and answer when the
+    // request ends. Memory is the thing being defended and discarding costs
+    // none of it, whereas the two shortcuts both break the answer: destroying
+    // the socket races the 413 (the client reads a connection reset), and
+    // simply ignoring the rest leaves node to close on a still-writing client,
+    // which resets it just the same. That reset is not cosmetic — the app maps
+    // a dropped connection to BROKER_UNREACHABLE, so the caller is told the
+    // harness is down when it actually answered "your payload is too big".
+    //
+    // The drain is bounded: a client that keeps pushing megabytes past the cap
+    // has already been told no, and forfeits the tidy envelope.
+    const refuse = (): void => {
+      refused = true;
+      chunks.length = 0;
+    };
+
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      return reject(new AuthorLoopError("request body exceeds the harness cap", 413));
-    }
+    if (Number.isFinite(declared) && declared > maxBytes) refuse();
+
     req.on("data", (c: Buffer) => {
+      if (refused) {
+        discarded += c.length;
+        if (discarded > MAX_DRAIN_BYTES) {
+          req.destroy();
+          reject(tooLarge());
+        }
+        return;
+      }
       seen += c.length;
       if (seen > maxBytes) {
-        // Stop reading rather than measuring afterwards: a chunked body
-        // declares no length, so buffering first defeats the point.
-        req.destroy();
-        return reject(new AuthorLoopError("request body exceeds the harness cap", 413));
+        // Measured as it arrives, not afterwards: a chunked body declares no
+        // length, so buffering first and checking later defeats the point.
+        refuse();
+        return;
       }
       chunks.push(c);
     });
     req.on("end", () => {
+      if (refused) return reject(tooLarge());
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) return resolve({});
       try {
@@ -213,7 +260,13 @@ function requiredText(body: Record<string, unknown>, field: string): string {
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json" });
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  // 413 always closes. readJsonBody drains an over-cap body so this response
+  // can be delivered, but that drain is bounded and may have been abandoned
+  // partway, and an unread remainder on a keep-alive socket would be framed as
+  // the next request. Closing is correct whichever way the drain ended.
+  if (status === 413) headers.connection = "close";
+  res.writeHead(status, headers);
   res.end(payload);
 }
 
@@ -287,9 +340,10 @@ function validateImages(value: unknown): { ok: true; images: NonNullable<Convers
 }
 
 /**
- * Minimal validation of ConverseTurnInput: the four required id fields, and at
- * least one of `text` / `images` / `confirm` to drive the turn. Deliberately does not
- * validate deeper into `confirm.proposal` — that is the runner's job. `messages`
+ * Minimal validation of ConverseTurnInput: the four required id fields, and
+ * exactly one of (`text` and/or `images`) | `confirm` to drive the turn.
+ * Deliberately does not validate deeper into `confirm.proposal` — that is the
+ * runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
  * missing array here should not be a reason to reject the whole request).
  */
@@ -312,11 +366,17 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
     if (!validated.ok) return validated;
     images = validated.images;
   }
+  // A turn is a user message (text and/or images) OR a confirmation, never both
+  // and never neither — the same rule ConverseLoop enforces. Both halves have to
+  // be checked HERE, at the boundary, because the adapter acquires a grant and
+  // writes the confirmation mirror before the loop ever sees the body: leaving
+  // `text + confirm` to the loop turned a boundary 400 into a post-side-effect
+  // 500. Refusing images-with-confirm but not text-with-confirm was the gap.
   if (!hasText && !hasConfirm && !images?.length) {
     return { ok: false, message: "one of text, images, or confirm is required" };
   }
-  if (hasConfirm && images?.length) {
-    return { ok: false, message: "confirm turns cannot include images" };
+  if (hasConfirm && (hasText || images?.length)) {
+    return { ok: false, message: "a turn carries either text/images or confirm, not both" };
   }
 
   const messages = Array.isArray(body.messages)

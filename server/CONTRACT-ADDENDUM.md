@@ -1077,8 +1077,10 @@ no-existence-oracle rule.
 > `HarnessTurnEvent` union (`harness/src/ports/converse.ts`). The three
 > app-side types, precisely: `turn_started` is appended by the turn engine
 > when a turn starts (`server/turn_runner.py:213`, live payload
-> `{text? | confirm?, classifier_hint?}` — the table row's `model` value was
-> the §18-era design; the live wire carries the user input);
+> `{text?, images? | confirm?, classifier_hint?}` — the table row's `model`
+> value was the §18-era design; the live wire carries the user input. `images`
+> is the turn-local descriptor list (`{media_type, bytes}` per image), never
+> the base64 payload: §2.1 "Inline images" holds the storage rule);
 > `confirmation_resolved` is appended by the approvals route
 > (`server/routers/agent.py:217–220`); `session_state` is RESERVED vocabulary
 > with NO live emitter today — frozen so spine unification can surface

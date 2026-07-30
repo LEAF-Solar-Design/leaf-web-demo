@@ -594,3 +594,177 @@ describe("POST /turn - client disconnect ABORTS a hung first pull via the runner
     expect(abortedPromptly).toBe(true);
   });
 });
+
+// --------------------------------------------------------------------------- //
+// Request body ceilings, and the one-of rule at the boundary.
+// --------------------------------------------------------------------------- //
+
+/**
+ * Send a CHUNKED request (no content-length, so the ceiling can only be
+ * enforced as bytes arrive) and return whatever the server actually wrote back.
+ * Raw sockets rather than fetch: the claim under test is about the bytes on the
+ * wire — that the client reads a 413 envelope instead of a connection reset.
+ */
+function rawChunkedPost(
+  port: number,
+  path: string,
+  totalBytes: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    const chunk = "x".repeat(64 * 1024);
+    const chunkFrame = `${chunk.length.toString(16)}\r\n${chunk}\r\n`;
+    let response = "";
+    let sent = 0;
+
+    socket.on("data", (d: Buffer) => { response += d.toString("utf8"); });
+    socket.on("close", () => resolve(response));
+    // Writing into a socket the server has deliberately closed fails; that is
+    // the POINT of connection:close, not a test failure. Only a connect-time
+    // error is real, and that arrives before anything was written.
+    socket.on("error", () => { if (!response) reject(new Error("socket error before any response")); });
+
+    socket.once("connect", () => {
+      socket.write(
+        `POST ${path} HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Content-Type: application/json\r\n` +
+        `Transfer-Encoding: chunked\r\n\r\n`,
+      );
+      const pump = (): void => {
+        while (sent < totalBytes && !socket.destroyed) {
+          sent += chunk.length;
+          if (!socket.write(chunkFrame)) { socket.once("drain", pump); return; }
+        }
+        if (!socket.destroyed) socket.write("0\r\n\r\n");
+      };
+      pump();
+    });
+  });
+}
+
+/**
+ * `send()` writes the payload without a content-length, so node frames the
+ * response with `transfer-encoding: chunked`. Undo that framing to get at the
+ * JSON. Tolerates an unframed body in case the response ever carries a length.
+ */
+function decodeBody(body: string): string {
+  if (body.trimStart().startsWith("{")) return body;
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const nl = body.indexOf("\r\n", i);
+    if (nl < 0) break;
+    const size = Number.parseInt(body.slice(i, nl), 16);
+    if (!Number.isFinite(size) || size === 0) break;
+    out += body.slice(nl + 2, nl + 2 + size);
+    i = nl + 2 + size + 2;
+  }
+  return out;
+}
+
+describe("POST /turn - request body ceiling", () => {
+  it("answers an over-limit CHUNKED body with the 413 envelope, not a connection reset", async () => {
+    let runnerCalled = false;
+    const runner: ConverseRunner = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(): AsyncGenerator<HarnessTurnEvent> { runnerCalled = true; },
+    };
+    const { server: s } = listen(basePorts(runner));
+    server = s;
+    const addr = s.address() as AddressInfo;
+
+    // 2.1 MB against the 2,000,000-byte /turn ceiling, with no content-length
+    // to check up front, so refusal can only happen mid-body.
+    const response = await rawChunkedPost(addr.port, "/turn", 2_100_000);
+
+    // The regression this pins: req.destroy() used to tear the socket down
+    // before the handler could write, so the client got a reset and an EMPTY
+    // response here.
+    expect(response).not.toBe("");
+    expect(response.split("\r\n")[0]).toContain("413");
+    expect(response.toLowerCase()).toContain("connection: close");
+    const body = response.slice(response.indexOf("\r\n\r\n") + 4);
+    expect(JSON.parse(decodeBody(body))).toMatchObject({
+      error: { message: "request body exceeds the harness cap" },
+    });
+    expect(runnerCalled).toBe(false);
+  });
+
+  it("answers an over-limit DECLARED body with the same 413 envelope", async () => {
+    const { server: s, baseUrl } = listen(basePorts());
+    server = s;
+
+    const res = await fetch(`${baseUrl}/turn`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": "3000000" },
+      body: "x".repeat(3_000_000),
+    });
+    expect(res.status).toBe(413);
+    expect(res.headers.get("connection")).toBe("close");
+    await expect(res.json()).resolves.toMatchObject({
+      error: { message: "request body exceeds the harness cap" },
+    });
+  });
+
+  it("accepts a /turn body that a 1 MiB image plus prior context would produce", async () => {
+    const seen: ConverseTurnInput[] = [];
+    const runner: ConverseRunner = {
+      async *runTurn(input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
+        seen.push(input);
+        yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
+      },
+    };
+    const { server: s, baseUrl } = listen(basePorts(runner));
+    server = s;
+
+    // The worst case the APP can legitimately forward: a message at the app's
+    // own 1.5 MB inbound cap, plus the byte-bounded prior context it appends
+    // AFTERWARDS. Sizing /turn to 1,500,000 refused exactly this.
+    const res = await postTurn(baseUrl, validBody({
+      text: "x".repeat(1_500_000 - 2_000),
+      messages: [{ role: "user", text: "y".repeat(256 * 1024) }],
+    }));
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(seen).toHaveLength(1);
+  });
+});
+
+describe("POST /turn - a turn is a user message or a confirmation, not both", () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["text + confirm", { text: "hi", confirm: { confirmationId: "c1", approved: true } }],
+    ["images + confirm", {
+      text: undefined,
+      images: [{ media_type: "image/png", data: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16),
+      ]).toString("base64") }],
+      confirm: { confirmationId: "c1", approved: true },
+    }],
+  ];
+
+  for (const [label, overrides] of cases) {
+    it(`refuses ${label} at the boundary, before the runner is ever reached`, async () => {
+      let runnerCalled = false;
+      const runner: ConverseRunner = {
+        // eslint-disable-next-line require-yield
+        async *runTurn(): AsyncGenerator<HarnessTurnEvent> { runnerCalled = true; },
+      };
+      const { server: s, baseUrl } = listen(basePorts(runner));
+      server = s;
+
+      const body = validBody(overrides);
+      if (overrides.text === undefined) delete body.text;
+      const res = await postTurn(baseUrl, body);
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        error: { message: "a turn carries either text/images or confirm, not both" },
+      });
+      // The whole point: rejected BEFORE streamTurn, so nothing downstream
+      // acquired a grant or wrote a confirmation mirror. Leaving text+confirm
+      // to ConverseLoop made this a post-side-effect 500 instead of a 400.
+      expect(runnerCalled).toBe(false);
+    });
+  }
+});

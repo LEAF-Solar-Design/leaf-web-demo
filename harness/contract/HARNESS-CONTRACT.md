@@ -75,7 +75,22 @@ timing-safe compare; FAIL-CLOSED when enabled with no secret configured).
   capabilities, provenance) and also carries the hot-script **SPEC §7.1**
   `tool.json` fields (`entry`, `timeout_ms`, `idempotent`, `review`).
 - Errors are JSON `{ error: { message, diagnostics? } }` with a sane HTTP status
-  (400 bad request, 404 unknown tool, 422 tool failed validation, 500 internal).
+  (400 bad request, 404 unknown tool, 413 body too large, 422 tool failed
+  validation, 500 internal).
+- **Request body ceilings** (added 2026-07-29). Every route bounds its request
+  body before parsing and answers `413 { error: { message } }` with
+  `connection: close` when the body exceeds it. A chunked body declares no
+  length, so the ceiling is enforced per chunk as the body arrives, and the
+  refused remainder is never drained — hence the close.
+
+  | Route | Ceiling | Why |
+  |---|---|---|
+  | `POST /turn` | 2,000,000 bytes | the app's own 1.5 MB message cap (text plus base64 images) plus the 256 KiB byte-bounded prior context the app appends, plus framing |
+  | every other route | 8 MiB | `/run-registered` takes arbitrary tool `params` and a customization publish carries a staged receipt; neither has anything to do with the image budget |
+
+  These are backstops against unbounded buffering, not semantic limits: the
+  image caps (3 per message, 1 MiB each, 1 MiB total) are enforced by field
+  validation, and the app enforces them again at its own boundary.
 
 ### `/converse/*` — conversational spine surface (PARKED — not served)
 

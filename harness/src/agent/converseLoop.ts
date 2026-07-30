@@ -58,7 +58,7 @@ export class SessionNotFoundError extends Error {
   }
 }
 
-/** 400 — message body must carry exactly one of text | confirm. */
+/** 400 — a body carries either a user message (text and/or images) or confirm. */
 export class BadMessageError extends Error {
   constructor(message: string) {
     super(message);
