@@ -336,6 +336,8 @@ def test_enforce_fails_closed_when_the_policy_module_is_missing(monkeypatch, all
     ("http://harness.internal:8150", "", True),    # blank secret -> the caller gate 401s every retry
     ("http://harness.internal:8150", "  \r\n", True),
     ("http://harness.internal:8150", "secret\r\nX-Injected: yes", True),  # header-invalid secret
+    ("http://harness.internal:8150", "s3cret-☃", True),  # non-Latin-1: http.client can never send it
+    ("http://harness.internal:8150", "sécret", False),   # Latin-1 non-ASCII IS sendable
     ("http://harness.internal:8150", "s3cret", False),
     ("https://harness.internal:8150/", "s3cret", False),
     ("  http://harness.internal:8150  ", "s3cret", False),  # padding: one shared normalization

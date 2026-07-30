@@ -173,6 +173,10 @@ def _harness_misconfigured() -> bool:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             return True
+        # http.client's own pre-I/O gate: header values are sent Latin-1, so a
+        # secret outside that repertoire can never be dispatched by this client
+        # and is configuration error, not harness state.
+        secret.encode("latin-1")
         import requests
         requests.models.PreparedRequest().prepare(
             method="POST", url=f"{url}/author/stage",
