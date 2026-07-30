@@ -188,6 +188,29 @@ def test_authored_tool_bodies_never_enter_the_build_context():
         assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
 
 
+def test_every_image_that_shells_out_to_git_installs_git():
+    """The app shells out to git, and its base image does not ship it.
+
+    `server/customization_service.py` runs `git rev-parse --verify
+    refs/heads/main`, `git show` and `git worktree add` against the tenant bare
+    repo. `python:3.12-slim` carries no git, so without an explicit install every
+    one of those raises FileNotFoundError and the app answers 503
+    `tenant_repository_unavailable` for a repository the harness had already
+    provisioned correctly. That is exactly what staging did, and no test could see
+    it: the failure is a missing binary, not missing code.
+    """
+    service_source = _read("server/customization_service.py")
+    assert '"git", "--git-dir"' in service_source or '["git",' in service_source, (
+        "this test's premise is that the app shells out to git; it no longer does"
+    )
+
+    for path in ("deploy/Dockerfile.app", "deploy/Dockerfile.harness"):
+        dockerfile = _read(path)
+        assert re.search(
+            r"apt-get install[^\n]*\bgit\b", dockerfile
+        ), f"{path} must install git; the process shells out to it"
+
+
 def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():
     app = _read("deploy/Dockerfile.app")
     harness = _read("deploy/Dockerfile.harness")
