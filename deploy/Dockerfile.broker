@@ -53,7 +53,13 @@ COPY data/    /app/data/
 #     tier and needs none of this). libstdc++6 satisfies the copied node binary's
 #     dynamic linking on this debian-slim base — node:20-slim is debian-slim and
 #     ships it, python:3.12-slim does not by default.
-RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
+# git is REQUIRED here too, not only in the app: executing a PUBLISHED tenant tool
+# runs broker.py -> tool_loader.resolve_local_file -> tenant_paths ->
+# customization_service.effective_catalog_dir, which calls _git_blob on every
+# resolution even when the shared worktree already exists. Without git the broker
+# raises FileNotFoundError and an authored tool that stages and publishes fine is
+# still unusable. python:3.12-slim ships no git.
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 git \
       && rm -rf /var/lib/apt/lists/*
 COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=e2bdeps /helper/node_modules /app/harness/node_modules

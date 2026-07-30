@@ -5,6 +5,7 @@ legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
 from pathlib import Path
+import ast
 import json
 import re
 
@@ -188,27 +189,67 @@ def test_authored_tool_bodies_never_enter_the_build_context():
         assert re.search(r"^COPY server/\s+/app/server/", _read(path), flags=re.MULTILINE), path
 
 
-def test_every_image_that_shells_out_to_git_installs_git():
-    """The app shells out to git, and its base image does not ship it.
+def _final_stage_runs(path: str) -> str:
+    """Return the final build stage's instructions, comments stripped.
 
-    `server/customization_service.py` runs `git rev-parse --verify
-    refs/heads/main`, `git show` and `git worktree add` against the tenant bare
-    repo. `python:3.12-slim` carries no git, so without an explicit install every
-    one of those raises FileNotFoundError and the app answers 503
-    `tenant_repository_unavailable` for a repository the harness had already
-    provisioned correctly. That is exactly what staging did, and no test could see
-    it: the failure is a missing binary, not missing code.
+    Both matter. A commented-out `# apt-get install -y git` and an install in an
+    earlier discarded stage each satisfied a naive whole-file regex while the
+    shipped image still had no git.
     """
-    service_source = _read("server/customization_service.py")
-    assert '"git", "--git-dir"' in service_source or '["git",' in service_source, (
-        "this test's premise is that the app shells out to git; it no longer does"
+    lines = _read(path).splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r"\s*FROM\s", line)]
+    final = lines[starts[-1]:] if starts else lines
+    return "\n".join(
+        line for line in final if not re.match(r"\s*#", line)
     )
 
-    for path in ("deploy/Dockerfile.app", "deploy/Dockerfile.harness"):
-        dockerfile = _read(path)
-        assert re.search(
-            r"apt-get install[^\n]*\bgit\b", dockerfile
-        ), f"{path} must install git; the process shells out to it"
+
+def _shells_out_to_git(module_path: str) -> bool:
+    """True when the module launches the literal `git` executable.
+
+    Parsed, not grepped: the premise must not be satisfiable by a comment.
+    """
+    tree = ast.parse(_read(module_path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.List) and arg.elts:
+                first = arg.elts[0]
+                if isinstance(first, ast.Constant) and first.value == "git":
+                    return True
+    return False
+
+
+def test_every_image_whose_process_requires_git_installs_git():
+    """A missing binary is invisible to a test suite that only reads Python.
+
+    `customization_service` launches git (`rev-parse --verify refs/heads/main`,
+    `show`, `worktree add`) and `python:3.12-slim` ships none, so every call raised
+    FileNotFoundError. The app answered 503 `tenant_repository_unavailable` for a
+    repository the harness had already provisioned correctly, and the BROKER could
+    not execute a published tenant tool either, because
+    `tool_loader.resolve_local_file` reaches `effective_catalog_dir` which calls
+    `_git_blob` on every resolution.
+
+    Scoped to REQUIRED git, deliberately: `solver_adapters/autofill.py` probes for
+    git and treats OSError as "unknown revision", so canonical-worker legitimately
+    ships without it.
+    """
+    assert _shells_out_to_git("server/customization_service.py"), (
+        "premise: customization_service launches git. If that changed, this test's "
+        "reason to exist changed with it."
+    )
+
+    for path in (
+        "deploy/Dockerfile.app",        # stages and publishes authored tools
+        "deploy/Dockerfile.broker",     # EXECUTES them, via the effective catalog
+        "deploy/Dockerfile.harness",    # owns the tenant repos
+    ):
+        instructions = _final_stage_runs(path)
+        assert re.search(r"apt-get install[^\n]*\bgit\b", instructions), (
+            f"{path}: the shipped stage must install git, which its process requires"
+        )
 
 
 def test_app_and_harness_images_are_ready_but_keep_legacy_defaults():
