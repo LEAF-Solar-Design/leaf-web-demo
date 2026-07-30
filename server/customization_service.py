@@ -476,14 +476,20 @@ class CustomizationService:
             return self._receipt(change)
         if change.state is not ChangeState.STAGING:
             raise CustomizationServiceError("stage_not_available")
+        # An unconfigured harness answers every attempt with the same 503, so
+        # that deterministic refusal must also come before the charge
+        # (_harness_stage re-checks and raises the identical error).
+        if not os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/"):
+            raise CustomizationServiceError("customization_harness_unavailable", 503)
         # The daily authoring cap is charged HERE, at the last point before
         # authoring spends money, and never refunded. Everything deterministic
         # has already refused above — a disabled rollout, an invalid mode or
         # blank description, a missing binding, a tier without Build, a role
-        # `authorize_stage` denies, and an already-STAGED replay that returns its
-        # durable receipt without calling the harness — so none of those spends a
-        # slot. A retry that DOES reach here re-invokes the harness and so counts
-        # again, which is why the unit is an attempt and not a change-set row.
+        # `authorize_stage` denies, an already-STAGED replay that returns its
+        # durable receipt without calling the harness, and a harness this
+        # deployment never configured — so none of those spends a slot. A retry
+        # that DOES reach here re-invokes the harness and so counts again,
+        # which is why the unit is an attempt and not a change-set row.
         author_quota.enforce(tenant_id, tier)
         body = self._harness_stage(tenant_id, description, change)
         raw_receipt = body.get("receipt")

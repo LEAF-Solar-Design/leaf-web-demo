@@ -71,8 +71,11 @@ class AuthorQuotaExceeded(Exception):
 # machine and the test suite. Anything else is a real deployment with replicas
 # and restarts, where memory would read as enforced while bounding almost
 # nothing. LEAF_RUNTIME_ENV carries the posture (compose defaults it to
-# "development"; staging and production set their own).
-_LOCAL_POSTURES = frozenset({"", "development", "test", "local"})
+# "development"; staging and production set their own). UNSET IS NOT LOCAL:
+# the app image bakes no posture and nothing enforces required-config on a
+# direct container run, so memory is allowed only when a human explicitly
+# declared a local posture.
+_LOCAL_POSTURES = frozenset({"development", "test", "local"})
 
 
 def store_mode() -> str:
@@ -224,8 +227,10 @@ def durability_required() -> bool:
 
     Keyed on DEPLOYED POSTURE, not on whether auth happens to be live: an
     auth-off staging deployment still runs replicas and still restarts, so it
-    needs the durable counter just as much. Live auth also implies a deployment
-    for the local flows that never set a posture.
+    needs the durable counter just as much. An unset posture counts as
+    deployed, because the app image bakes none and a direct container run
+    enforces no required-config; memory needs an EXPLICIT local posture, and
+    even then live auth still demands the durable store.
     """
     posture = os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower()
     if posture not in _LOCAL_POSTURES:

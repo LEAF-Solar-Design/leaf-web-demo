@@ -247,15 +247,27 @@ def test_deployed_postures_require_the_durable_counter(monkeypatch, posture):
     assert author_quota.durability_required() is True
 
 
-@pytest.mark.parametrize("posture", ["", "development", "test", "local", "  DEVELOPMENT  "])
+@pytest.mark.parametrize("posture", ["development", "test", "local", "  DEVELOPMENT  "])
 def test_local_postures_accept_the_memory_counter(monkeypatch, posture):
     monkeypatch.setenv("LEAF_RUNTIME_ENV", posture)
     monkeypatch.setattr(deps, "auth_live", lambda: False)
     assert author_quota.durability_required() is False
 
 
-def test_live_auth_requires_durability_even_without_a_declared_posture(monkeypatch):
+def test_an_undeclared_posture_requires_the_durable_counter(monkeypatch):
+    """Unset is NOT local: the app image bakes no posture and a direct container
+    run enforces no required-config, so a deployment that opts into the quota
+    with no declared posture would otherwise meter per process. Memory needs an
+    EXPLICIT local posture — auth state does not soften this."""
     monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    assert author_quota.durability_required() is True
+
+
+def test_a_local_posture_still_requires_durability_under_live_auth(monkeypatch):
+    """A deployment claiming `development` while running live auth is a
+    misdeclaration, and money-side the safe reading is `deployed`."""
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "development")
     monkeypatch.setattr(deps, "auth_live", lambda: True)
     assert author_quota.durability_required() is True
 
@@ -333,6 +345,10 @@ def test_service_charges_immediately_before_the_harness_call():
         "self._authority().authorize_stage(",                             # role/binding
         "return self._receipt(change)",                                   # STAGED replay
         'raise CustomizationServiceError("stage_not_available")',         # bad state
+        # An unconfigured harness 503s every attempt deterministically, so its
+        # guard must also refuse before the charge (source.index finds the
+        # hoisted guard in stage(), which precedes _harness_stage's own).
+        'raise CustomizationServiceError("customization_harness_unavailable", 503)',
     ):
         assert source.index(earlier) < charge, earlier
 

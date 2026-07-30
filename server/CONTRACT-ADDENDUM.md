@@ -914,10 +914,10 @@ lives in the tracked, operator-tunable `server/entitlements.json` (override:
 > configured quota whose counter cannot be reached refuses with a 503 rather
 > than admitting unmetered. The durable store is REQUIRED wherever a
 > per-process counter would not be a real cap, keyed on deployment posture:
-> any `LEAF_RUNTIME_ENV` outside development/test/local demands postgres
-> regardless of auth (two replicas keep two independent counts and a restart
-> returns every tenant to zero), and a local posture still demands it once
-> auth is live.
+> any `LEAF_RUNTIME_ENV` outside development/test/local — including UNSET,
+> since the app image bakes no posture — demands postgres regardless of auth
+> (two replicas keep two independent counts and a restart returns every tenant
+> to zero), and an explicit local posture still demands it once auth is live.
 
 > **§10 enum update (2026-07-18):** `GRANT_REQUIRED` (HTTP 401) and `ENTITLEMENT_REQUIRED` (HTTP 403) promoted into the frozen ErrorCode enum + `envelope_schema.json`. The grant-required (§16) and entitlement-denied (§17) responses now carry these dedicated `error.error_code`s instead of `BAD_PARAMS`; the additive top-level markers (`grant_required`/`reason`, `entitlement_required`/`required`/`tier`) are unchanged, so existing consumers keep working.
 
