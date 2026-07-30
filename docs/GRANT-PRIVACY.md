@@ -1,6 +1,6 @@
 # How Leaf handles Claude credentials
 
-Status: Staging commercial lane review, 2026-07-27.
+Status: Staging subscription lane review, 2026-07-30.
 
 Audience: enterprise security reviewers. The controls below are implemented in
 `server/routers/tenant.py`, `harness/src/ports/impl/oauthGrantProvider.ts`,
@@ -8,17 +8,19 @@ Audience: enterprise security reviewers. The controls below are implemented in
 
 ## Terms boundary
 
-This lane accepts Claude Team or Enterprise setup tokens under Anthropic's
-Commercial Terms and Claude for Work terms. It also accepts customer-owned
-Anthropic API keys. It does not accept consumer Free, Pro, or Max credentials
-for automatic routing.
+This lane accepts owner-attested Claude Pro, Max, Team, or Enterprise setup
+tokens. It also accepts customer-owned Anthropic API keys. Free credentials
+remain unsupported for automatic routing.
 
-The tenant owner must attest the Team or Enterprise plan when mounting an OAuth
-credential. This is a product control, not proof of the customer's contract.
+The tenant owner must attest the Pro, Max, Team, or Enterprise plan when mounting
+an OAuth credential. This is a product control, not proof of the customer's contract.
 Leaf must keep the current terms and its own Anthropic agreement under review.
 
-Primary terms reviewed on 2026-07-27:
+Primary provider guidance and terms reviewed on 2026-07-30:
 
+- https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
+- https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan
+- https://www.anthropic.com/legal/consumer-terms
 - https://www.anthropic.com/legal/commercial-terms
 - https://www.anthropic.com/legal/service-specific-terms
 - https://code.claude.com/docs/en/legal-and-compliance
@@ -27,7 +29,7 @@ Primary terms reviewed on 2026-07-27:
 
 Leaf stores one private atomic v3 JSON record per tenant. It contains:
 
-- one or more Team or Enterprise OAuth setup tokens, or customer API keys;
+- one or more Pro, Max, Team, or Enterprise OAuth setup tokens, or customer API keys;
 - an opaque account id, owner-supplied label, credential kind, plan attestation,
   and link time;
 - token-free routing state: settled token usage, selection count, last use,

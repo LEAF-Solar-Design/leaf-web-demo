@@ -434,7 +434,8 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
             const kind = rawKind === "oauth" || rawKind === "api_key" ? rawKind : undefined;
             const label = typeof gbody.label === "string" ? gbody.label : undefined;
             const rawPlan = typeof gbody.plan === "string" ? gbody.plan.trim().toLowerCase() : "";
-            const plan = rawPlan === "team" || rawPlan === "enterprise" ? rawPlan : undefined;
+            const plan = rawPlan === "pro" || rawPlan === "max" ||
+              rawPlan === "team" || rawPlan === "enterprise" ? rawPlan : undefined;
             const st = await ports.grantAdmin.put(tenantId, token, kind, label, plan);
             return send(res, 200, st); // {linked, linked_at, kind} — token never echoed
           }

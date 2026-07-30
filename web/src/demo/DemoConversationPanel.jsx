@@ -44,7 +44,7 @@ export default function DemoConversationPanel({ turns = [], onSuggestion, canSig
             </div>
             {canSignIn && (
               <button type="button" className="chip-act" onClick={onSignIn}>
-                Sign in to use mounted Team or Enterprise Claude accounts
+                Sign in to use your mounted Claude subscription
               </button>
             )}
           </div>

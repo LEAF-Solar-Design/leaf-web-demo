@@ -164,7 +164,7 @@ export type AgentGrant =
 
 /** The credential kind of a linked grant (web-lane OAuth vs enterprise BYO API key). */
 export type GrantKind = AgentGrant["kind"];
-export type GrantPlan = "team" | "enterprise";
+export type GrantPlan = "pro" | "max" | "team" | "enterprise";
 
 export interface GrantLease {
   grant: AgentGrant;
@@ -181,7 +181,7 @@ export interface GrantSettlement {
 export interface OAuthGrantProvider {
   /** Resolve the per-tenant Agent SDK grant. Concern 2 only. */
   getGrant(tenantId: string): Promise<AgentGrant>;
-  /** Reserve one eligible Team/Enterprise mount for a live turn. */
+  /** Reserve one eligible owner-attested subscription or API-key mount for a live turn. */
   acquireGrant?(tenantId: string): Promise<GrantLease>;
   /** Feed the turn's token-free usage and terminal state back into routing. */
   settleGrant?(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void>;

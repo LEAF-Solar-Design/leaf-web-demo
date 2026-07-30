@@ -12,7 +12,7 @@ export default function WorkspaceBootstrapGate({ busy, error, onCreate }) {
   return (
     <section className="session-gate" aria-labelledby="workspace-bootstrap-title">
       <h3 id="workspace-bootstrap-title">Create your Leaf workspace</h3>
-      <p>You are signed in. Create your tenant workspace to become its owner, then mount Team or Enterprise Claude accounts.</p>
+      <p>You are signed in. Create your tenant workspace to become its owner, then mount your Claude subscription.</p>
       <form className="proj-create" onSubmit={submit}>
         <label>
           Workspace name
