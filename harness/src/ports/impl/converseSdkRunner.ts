@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
@@ -273,8 +274,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     }, this.turnTimeoutS * 1000);
 
     const model = input.model ?? this.model;
-    // Curated skills are opt-in and fail closed when their bundle/tier is invalid.
-    // `settingSources` remains empty, so this never discovers ~/.claude.
+    // A bundle reaches the SDK only after its complete inventory is verified.
+    // A deployment digest pin is optional here, but recommended in production.
+    const skillBundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
         prompt,
@@ -289,6 +291,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
           mcpServers: { spine: server },
+          ...(skillBundle ? { plugins: [skillBundle.plugin], skills: skillBundle.skills } : {}),
           // SETTINGS, not top-level options — the distinction is the whole
           // fix. Both flags below are Settings fields (sdk.d.ts) delivered
           // through Options.settings, which the SDK renders as `--settings`.

@@ -1,451 +1,150 @@
-// Curated skill bundle: off unless mounted, explicit allowlist, disk-derived.
-//
-// These pin the three findings the Wave-0 spike settled, each of which is a
-// property a future edit could silently undo:
-//   1. `skills` is never 'all' (that would enable the CLI's bundled developer
-//      skills — run/review/security-review — in a tenant session);
-//   2. the allowlist comes from what is ON DISK, so it cannot drift from the
-//      bundle's actual contents;
-//   3. an empty/absent bundle attaches NOTHING, rather than enabling the Skill
-//      tool with nothing behind it.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import esbuild from "esbuild";
 
-import {
-  MAX_SKILL_FILE_BYTES,
-  discoverSkills,
-  hasStrictBundleShape,
-  readBundleTier,
-  isValidSkillName,
-  parseSkillFrontmatter,
-  skillBundleAttachment,
-} from "../src/ports/impl/skillBundle.js";
+import { skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
 
 const made: string[] = [];
+const repo = resolve(import.meta.dirname, "../..");
+const builder = join(repo, "tools", "skills-bundle", "build.mjs");
+const offlineVerifier = join(repo, "tools", "skills-bundle", "verify.mjs");
+const skillSource = "C:/Users/ehaug/.claude/skills";
 
-function bundleWith(
-  skills: Array<{ name: string; description?: string; body?: string }>,
-  tier: string | null = "tenant-safe",
-): string {
-  const root = mkdtempSync(join(tmpdir(), "leaf-skills-"));
-  made.push(root);
-  mkdirSync(join(root, ".claude-plugin"), { recursive: true });
-  writeFileSync(join(root, ".claude-plugin", "plugin.json"),
-    JSON.stringify({ name: "leaf-test", version: "0.0.1", ...(tier ? { leafTier: tier } : {}) }));
-  for (const s of skills) {
-    const dir = join(root, "skills", s.name);
-    mkdirSync(dir, { recursive: true });
-    const fm = `---\nname: ${s.name}\ndescription: ${s.description ?? "d"}\n---\n\n${s.body ?? "body"}\n`;
-    writeFileSync(join(dir, "SKILL.md"), fm);
+function sha256(value: Buffer | string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function bundleDigest(files: Record<string, string>): string {
+  return sha256(Object.keys(files).sort().map((path) => `${path}:${files[path]}`).join("\n"));
+}
+
+function buildBundle(): string {
+  const parent = mkdtempSync(join(tmpdir(), "leaf-verified-bundle-"));
+  made.push(parent);
+  const output = join(parent, "bundle");
+  execFileSync(process.execPath, [builder, "--source", skillSource, "--tier", "tenant-safe", "--out", output], { stdio: "pipe" });
+  return output;
+}
+
+function manifest(path: string): { files: Record<string, string>; bundleDigest: string } {
+  return JSON.parse(readFileSync(join(path, "manifest.json"), "utf8")) as { files: Record<string, string>; bundleDigest: string };
+}
+
+function refreshManifest(path: string): void {
+  const current = manifest(path);
+  const files: Record<string, string> = {};
+  for (const relativePath of Object.keys(current.files)) {
+    files[relativePath] = sha256(readFileSync(join(path, ...relativePath.split("/"))));
   }
-  return root;
+  writeFileSync(join(path, "manifest.json"), `${JSON.stringify({ version: 1, tier: "tenant-safe", files, bundleDigest: bundleDigest(files) }, null, 2)}\n`);
+}
+
+function offlineAccepts(path: string): boolean {
+  return spawnSync(process.execPath, [offlineVerifier, path], { stdio: "pipe" }).status === 0;
 }
 
 afterEach(() => {
-  for (const dir of made.splice(0)) {
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
+  for (const path of made.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-describe("parseSkillFrontmatter", () => {
-  it("reads name and description", () => {
-    expect(parseSkillFrontmatter("---\nname: a\ndescription: b\n---\nbody"))
-      .toEqual({ name: "a", description: "b" });
+// Each case below spawns the REAL builder (tools/skills-bundle/build.mjs) so
+// "the verified shape" means the artifact the pipeline actually produces — the
+// previous attempt used a hand-made fixture and hid a bug that way. A child
+// process costs seconds under full-suite contention, so these get a realistic
+// budget: vitest's 5s default is a statement about THIS harness, not about the
+// code under test, and letting it fire would read as a security regression.
+describe("verifyBundle", { timeout: 60_000 }, () => {
+  it("accepts the real builder artifact and mounts only after verification", () => {
+    const path = buildBundle();
+    const verified = verifyBundle(path);
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) return;
+    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: path, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv))
+      .toMatchObject({ skills: verified.skills.map((skill) => skill.name), tier: "tenant-safe" });
   });
 
-  it("strips surrounding quotes", () => {
-    expect(parseSkillFrontmatter(`---\nname: "a"\ndescription: 'b'\n---\n`))
-      .toEqual({ name: "a", description: "b" });
+  it("refuses a flipped byte in a SKILL.md", () => {
+    const path = buildBundle();
+    const file = join(path, "skills", "code-standards", "SKILL.md");
+    writeFileSync(file, `${readFileSync(file, "utf8")}x`);
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("is null without frontmatter or without a name", () => {
-    expect(parseSkillFrontmatter("no frontmatter")).toBeNull();
-    expect(parseSkillFrontmatter("---\ndescription: b\n---\n")).toBeNull();
-    expect(parseSkillFrontmatter("")).toBeNull();
-  });
-});
-
-describe("discoverSkills", () => {
-  it("finds every skill in the bundle, sorted", () => {
-    const root = bundleWith([{ name: "zed" }, { name: "alpha" }]);
-    expect(discoverSkills(root).map((s) => s.name)).toEqual(["alpha", "zed"]);
+  it.each([
+    ["root", (path: string) => writeFileSync(join(path, "payload.txt"), "x")],
+    ["plugin", (path: string) => writeFileSync(join(path, ".claude-plugin", "payload.txt"), "x")],
+    ["skill", (path: string) => writeFileSync(join(path, "skills", "code-standards", "payload.txt"), "x")],
+    ["nested", (path: string) => { mkdirSync(join(path, "skills", "code-standards", "nested")); writeFileSync(join(path, "skills", "code-standards", "nested", "payload.txt"), "x"); }],
+  ])("refuses an extra file at %s", (_where, mutate) => {
+    const path = buildBundle();
+    mutate(path);
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("skips directories without a SKILL.md and unparseable ones", () => {
-    const root = bundleWith([{ name: "good" }]);
-    mkdirSync(join(root, "skills", "empty-dir"), { recursive: true });
-    const broken = join(root, "skills", "broken");
-    mkdirSync(broken, { recursive: true });
-    writeFileSync(join(broken, "SKILL.md"), "no frontmatter here");
-    expect(discoverSkills(root).map((s) => s.name)).toEqual(["good"]);
+  it("refuses a deleted manifest entry", () => {
+    const path = buildBundle();
+    const current = manifest(path);
+    delete current.files[Object.keys(current.files)[0]!];
+    current.bundleDigest = bundleDigest(current.files);
+    writeFileSync(join(path, "manifest.json"), JSON.stringify({ version: 1, tier: "tenant-safe", files: current.files, bundleDigest: current.bundleDigest }));
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("is empty for a missing bundle rather than throwing", () => {
-    expect(discoverSkills(join(tmpdir(), "definitely-not-here-leaf"))).toEqual([]);
-  });
-});
-
-describe("skillBundleAttachment", () => {
-  it("is OFF when unconfigured — the session runs exactly as today", () => {
-    expect(skillBundleAttachment({} as NodeJS.ProcessEnv)).toBeNull();
-    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: "  " } as NodeJS.ProcessEnv)).toBeNull();
-    // A path without a tier is also unconfigured — both halves are required.
-    const some = bundleWith([{ name: "probe" }]);
-    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: some } as NodeJS.ProcessEnv)).toBeNull();
+  it("refuses a tampered bundle digest", () => {
+    const path = buildBundle();
+    const current = manifest(path);
+    current.bundleDigest = "0".repeat(64);
+    writeFileSync(join(path, "manifest.json"), JSON.stringify({ version: 1, tier: "tenant-safe", files: current.files, bundleDigest: current.bundleDigest }));
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("is OFF when the configured path does not exist", () => {
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: join(tmpdir(), "leaf-absent-bundle"),
-      LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
+  it("refuses a plugin monitor even when its hash inventory is otherwise valid", () => {
+    const path = buildBundle();
+    const pluginPath = join(path, ".claude-plugin", "plugin.json");
+    writeFileSync(pluginPath, JSON.stringify({ ...JSON.parse(readFileSync(pluginPath, "utf8")), monitors: [{ command: "pwn" }] }));
+    refreshManifest(path);
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("is OFF for an empty bundle — never enable the Skill tool with nothing behind it", () => {
-    const root = bundleWith([]);
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
+  it("refuses a YAML-quoted context: fork key even when its hash inventory is valid", () => {
+    const path = buildBundle();
+    const file = join(path, "skills", "code-standards", "SKILL.md");
+    writeFileSync(file, readFileSync(file, "utf8").replace("description:", '"context": fork\ndescription:'));
+    refreshManifest(path);
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("emits a local plugin with MCP discovery skipped (the harness owns MCP)", () => {
-    const root = bundleWith([{ name: "probe" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
-    expect(att?.plugin).toEqual({ type: "local", path: root, skipMcpDiscovery: true });
+  it("refuses a symlink anywhere when the filesystem permits one", () => {
+    const path = buildBundle();
+    try { symlinkSync(join(path, "skills", "code-standards", "SKILL.md"), join(path, "skills", "code-standards", "link.md")); } catch { return; }
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("ALWAYS emits an explicit allowlist, never 'all'", () => {
-    // 'all' would also enable the CLI's bundled developer skills (run, review,
-    // security-review) inside a tenant session. This is the guard.
-    const root = bundleWith([{ name: "one" }, { name: "two" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
-    expect(Array.isArray(att?.skills)).toBe(true);
-    expect(att?.skills).not.toBe("all");
-    expect(att?.skills).toEqual(["one", "two"]);
+  it("refuses a hardlink anywhere when the filesystem permits one", () => {
+    const path = buildBundle();
+    try { linkSync(join(path, "skills", "code-standards", "SKILL.md"), join(path, "skills", "code-standards", "link.md")); } catch { return; }
+    expect(verifyBundle(path).ok).toBe(false);
   });
 
-  it("derives the allowlist from disk, so it cannot drift from the bundle", () => {
-    const root = bundleWith([{ name: "only-this-one" }]);
-    const att = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
-    expect(att?.skills).toEqual(["only-this-one"]);
-  });
-
-  it("mounts ONE bundle path — the tenant/operator split is a disk boundary", () => {
-    // `skills` is a context filter, not a sandbox: unlisted skills stay on disk
-    // and are readable. So two tiers must be two DIRECTORIES, and the
-    // attachment must carry exactly the one it was pointed at.
-    const tenant = bundleWith([{ name: "tenant-safe-skill" }]);
-    const operator = bundleWith([{ name: "tenant-safe-skill" }, { name: "operator-only-skill" }], "operator");
-    const tenantAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: tenant, LEAF_SKILLS_TIER: "tenant-safe" } as NodeJS.ProcessEnv);
-    const operatorAtt = skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: operator, LEAF_SKILLS_TIER: "operator" } as NodeJS.ProcessEnv);
-    expect(tenantAtt?.skills).toEqual(["tenant-safe-skill"]);
-    expect(tenantAtt?.plugin.path).toBe(tenant);
-    expect(operatorAtt?.skills).toContain("operator-only-skill");
-    expect(operatorAtt?.plugin.path).toBe(operator);
+  it("enforces the optional deployment digest pin", () => {
+    const path = buildBundle();
+    const expected = manifest(path).bundleDigest;
+    expect(verifyBundle(path, { expectedDigest: "0".repeat(64) }).ok).toBe(false);
+    expect(verifyBundle(path, { expectedDigest: expected }).ok).toBe(true);
+    expect(skillBundleAttachment({ LEAF_SKILLS_BUNDLE_PATH: path, LEAF_SKILLS_TIER: "tenant-safe", LEAF_SKILLS_BUNDLE_DIGEST: "0".repeat(64) } as NodeJS.ProcessEnv)).toBeNull();
   });
 });
 
-describe("hostile input (review findings)", () => {
-  // The reviewer got BOTH of these accepted by the first version. The SDK
-  // expands `skills` names into comma-delimited tool patterns, so `safe),Bash`
-  // is not cosmetic — it can widen the allowlist the money-gate relies on.
-  const HOSTILE = [
-    "../../operator",
-    "safe),Bash",
-    "a b",
-    "name;rm -rf /",
-    "with/slash",
-    "with\backslash",
-    "",
-    ".",
-    "..",
-    "-leading-dash",
-    "x".repeat(200),
-  ];
-
-  it("refuses hostile skill names outright", () => {
-    for (const name of HOSTILE) {
-      expect(isValidSkillName(name), `accepted ${JSON.stringify(name)}`).toBe(false);
-    }
-    expect(isValidSkillName("orwell-writing")).toBe(true);
-    expect(isValidSkillName("leaf_fixture.probe-2")).toBe(true);
-  });
-
-  it("never lets a hostile name reach the allowlist", () => {
-    const root = bundleWith([{ name: "good" }]);
-    // Hand-plant a directory whose frontmatter name is hostile.
-    const evil = join(root, "skills", "evil");
-    mkdirSync(evil, { recursive: true });
-    writeFileSync(join(evil, "SKILL.md"), "---\nname: safe),Bash\ndescription: x\n---\n");
-    const att = skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv);
-    expect(att?.skills).toEqual(["good"]);
-    for (const name of att?.skills ?? []) expect(isValidSkillName(name)).toBe(true);
-  });
-
-  it("ignores a directory whose name is hostile, without reading it", () => {
-    const root = bundleWith([{ name: "good" }]);
-    const traversal = join(root, "skills", "..");
-    // `..` resolves to the bundle root; discoverSkills must skip it by NAME.
-    expect(existsSync(traversal)).toBe(true);
-    const found = discoverSkills(root).map((s) => s.name);
-    expect(found).toEqual(["good"]);
-  });
-
-  it("takes the FIRST name, so a duplicate key cannot override the validated one", () => {
-    expect(parseSkillFrontmatter("---\nname: good\nname: safe),Bash\ndescription: d\n---\n"))
-      .toEqual({ name: "good", description: "d" });
-  });
-
-  it("requires the frontmatter name to match its directory", () => {
-    const root = bundleWith([]);
-    const dir = join(root, "skills", "claims-one-thing");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "SKILL.md"), "---\nname: something-else\ndescription: d\n---\n");
-    expect(discoverSkills(root)).toEqual([]);
-  });
-
-  it("bounds the discovery read rather than slurping a huge file", () => {
-    // The cap protects THIS pass, not the SDK (which reads the file itself on
-    // invocation). Frontmatter lives at the top, so a long body is still a
-    // legitimate skill — the property that matters is that discovery never
-    // reads more than the cap.
-    const root = bundleWith([{ name: "good" }]);
-    const big = join(root, "skills", "huge");
-    mkdirSync(big, { recursive: true });
-    writeFileSync(join(big, "SKILL.md"),
-      "---\nname: huge\ndescription: d\n---\n" + "x".repeat(MAX_SKILL_FILE_BYTES + 1024));
-    expect(discoverSkills(root).map((s) => s.name)).toEqual(["good", "huge"]);
-  });
-
-  it("skips a file whose frontmatter lies BEYOND the cap", () => {
-    // Truncation loses the closing `---`, so the frontmatter cannot parse and
-    // the skill is dropped instead of being half-read.
-    const root = bundleWith([{ name: "good" }]);
-    const pushed = join(root, "skills", "pushed");
-    mkdirSync(pushed, { recursive: true });
-    writeFileSync(join(pushed, "SKILL.md"),
-      "---\nname: pushed\ndescription: " + "y".repeat(MAX_SKILL_FILE_BYTES + 64) + "\n---\n");
-    expect(discoverSkills(root).map((s) => s.name)).toEqual(["good"]);
-  });
-});
-
-describe("tier binding — the fail-closed boundary", () => {
-  it("refuses to mount an operator bundle in a tenant-tier process", () => {
-    const operator = bundleWith([{ name: "operator-only-skill" }], "operator");
-    const att = skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: operator, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv);
-    expect(att).toBeNull();
-  });
-
-  it("refuses a bundle that declares no tier at all", () => {
-    const untagged = bundleWith([{ name: "probe" }], null);
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: untagged, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
-  });
-
-  it("refuses an unknown process tier", () => {
-    const root = bundleWith([{ name: "probe" }]);
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "superuser",
-    } as NodeJS.ProcessEnv)).toBeNull();
-  });
-
-  it("mounts when the tiers agree, echoing the tier", () => {
-    const root = bundleWith([{ name: "probe" }], "operator");
-    const att = skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "operator",
-    } as NodeJS.ProcessEnv);
-    expect(att?.tier).toBe("operator");
-    expect(att?.skills).toEqual(["probe"]);
-  });
-
-  it("refuses a bundle path that is a FILE, not a directory", () => {
-    const root = bundleWith([{ name: "probe" }]);
-    const file = join(root, ".claude-plugin", "plugin.json");
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: file, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
-  });
-});
-
-describe("symlink containment — the escape the review found", () => {
-  // A tenant-safe wrapper bundle whose skills/<x> is a SYMLINK to an operator
-  // skill outside the bundle. statSync and readFileSync both follow links, so
-  // without a real-path containment check the external skill lands in the
-  // allowlist and the wrapper still mounts as "tenant-safe".
-  function trySymlink(target: string, path: string, type: "dir" | "file"): boolean {
-    try { symlinkSync(target, path, type); return true; } catch { return false; }
-  }
-
-  it("does not follow a symlinked skill directory out of the bundle", () => {
-    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
-    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
-    const linked = join(wrapper, "skills", "operator-only-skill");
-    if (!trySymlink(join(outside, "skills", "operator-only-skill"), linked, "dir")) {
-      return; // unprivileged Windows cannot create symlinks; nothing to assert
-    }
-    const names = discoverSkills(wrapper).map((s) => s.name);
-    expect(names).toEqual(["innocent"]);
-    const att = skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv);
-    expect(att?.skills ?? []).not.toContain("operator-only-skill");
-  });
-
-  it("does not follow a symlinked SKILL.md out of the bundle", () => {
-    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
-    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
-    const dir = join(wrapper, "skills", "operator-only-skill");
-    mkdirSync(dir, { recursive: true });
-    if (!trySymlink(join(outside, "skills", "operator-only-skill", "SKILL.md"),
-                    join(dir, "SKILL.md"), "file")) {
-      return;
-    }
-    expect(discoverSkills(wrapper).map((s) => s.name)).toEqual(["innocent"]);
-  });
-
-  it("refuses a bundle whose MANIFEST is a symlink to another tier's manifest", () => {
-    // Otherwise a wrapper could borrow a tenant-safe manifest while serving
-    // operator skills.
-    const tenant = bundleWith([{ name: "innocent" }], "tenant-safe");
-    const wrapper = bundleWith([{ name: "operator-only-skill" }], null);
-    const manifestPath = join(wrapper, ".claude-plugin", "plugin.json");
-    rmSync(manifestPath, { force: true });
-    if (!trySymlink(join(tenant, ".claude-plugin", "plugin.json"), manifestPath, "file")) {
-      return;
-    }
-    expect(readBundleTier(wrapper)).toBeNull();
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
-  });
-});
-
-describe("executable frontmatter is refused (review round 2)", () => {
-  it("drops a skill declaring hooks or its own allowed-tools", () => {
-    // The SDK loads plugin/skill HOOKS, which spawn commands outside
-    // canUseTool and outside the app gate. disableAllHooks stops them at
-    // runtime; the bundle must not CONTAIN one in the first place.
-    const root = bundleWith([{ name: "clean" }], "tenant-safe");
-    const cases: Array<[string, string]> = [
-      ["hooky", "hooks: {PreToolUse: echo pwned}"],
-      ["toolsy", "allowed-tools: Bash"],
-    ];
-    for (const [dir, extra] of cases) {
-      const skill = join(root, "skills", dir);
-      mkdirSync(skill, { recursive: true });
-      writeFileSync(
-        join(skill, "SKILL.md"),
-        "---\nname: " + dir + "\ndescription: d\n" + extra + "\n---\nbody",
-      );
-    }
-    expect(discoverSkills(root).map((entry) => entry.name)).toEqual(["clean"]);
-  });
-});
-
-describe("strict bundle shape (review round 3 BLOCKER)", () => {
-  // The SDK mounts the whole DIRECTORY as a plugin; skipMcpDiscovery only
-  // suppresses MCP, so hooks, agents, commands and plugin MONITORS in the
-  // directory are loaded too. Validating only the skills we DISCOVER left
-  // anything else beside them mountable.
-  it("refuses a bundle carrying anything beyond .claude-plugin and skills", () => {
-    const root = bundleWith([{ name: "clean" }], "tenant-safe");
-    mkdirSync(join(root, "monitors"), { recursive: true });
-    writeFileSync(join(root, "monitors", "watch.json"), "{}");
-    expect(hasStrictBundleShape(root)).toBe(false);
-    expect(skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: root, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv)).toBeNull();
-  });
-
-  it("refuses a stray FILE under skills/ and accepts the verified shape", () => {
-    const root = bundleWith([{ name: "clean" }], "tenant-safe");
-    expect(hasStrictBundleShape(root)).toBe(true);
-    writeFileSync(join(root, "skills", "loose.md"), "not a skill");
-    expect(hasStrictBundleShape(root)).toBe(false);
-  });
-
-  it("drops a skill whose frontmatter forks a subagent", () => {
-    // `context: fork` spawns a SUBAGENT and neither disableSkillShellExecution
-    // nor disableAllHooks covers it.
-    const root = bundleWith([{ name: "clean" }], "tenant-safe");
-    const forky = join(root, "skills", "forky");
-    mkdirSync(forky, { recursive: true });
-    writeFileSync(join(forky, "SKILL.md"),
-      "---@name: forky@description: d@context: fork@---@body".split("@").join("\n"));
-    expect(discoverSkills(root).map((e) => e.name)).toEqual(["clean"]);
-  });
-});
-
-describe("hardlink containment — round-3 review finding", () => {
-  // A hardlink has NO separate path, so real-path containment cannot see it:
-  // an operator SKILL.md hardlinked under a tenant-safe wrapper resolves
-  // *inside* the wrapper. Detection is by link count instead.
-  //
-  // Honest scope: anyone who can write into the bundle could simply copy the
-  // text in, so this is not the last line of defence — the bundle being a
-  // read-only build artifact is. What it does catch is the realistic case: a
-  // build pipeline that links instead of copying, exposing another tier's inode.
-  it("refuses a SKILL.md that is hardlinked from outside the bundle", () => {
-    const outside = bundleWith([{ name: "operator-only-skill" }], "operator");
-    const wrapper = bundleWith([{ name: "innocent" }], "tenant-safe");
-    const dir = join(wrapper, "skills", "operator-only-skill");
-    mkdirSync(dir, { recursive: true });
-    try {
-      linkSync(join(outside, "skills", "operator-only-skill", "SKILL.md"),
-               join(dir, "SKILL.md"));
-    } catch {
-      return; // hardlinks unavailable on this filesystem
-    }
-    expect(discoverSkills(wrapper).map((x) => x.name)).toEqual(["innocent"]);
-    const att = skillBundleAttachment({
-      LEAF_SKILLS_BUNDLE_PATH: wrapper, LEAF_SKILLS_TIER: "tenant-safe",
-    } as NodeJS.ProcessEnv);
-    expect(att?.skills ?? []).not.toContain("operator-only-skill");
-  });
-
-  it("refuses a bundle whose MANIFEST is hardlinked from another tier", () => {
-    const tenant = bundleWith([{ name: "innocent" }], "tenant-safe");
-    const wrapper = bundleWith([{ name: "operator-only-skill" }], null);
-    const manifestPath = join(wrapper, ".claude-plugin", "plugin.json");
-    rmSync(manifestPath, { force: true });
-    try {
-      linkSync(join(tenant, ".claude-plugin", "plugin.json"), manifestPath);
-    } catch {
-      return;
-    }
-    expect(readBundleTier(wrapper)).toBeNull();
-  });
-
-  it("accepts an ordinary, exclusively-linked SKILL.md", () => {
-    // The control: link-count detection must not reject normal bundles.
-    const root = bundleWith([{ name: "ordinary" }], "tenant-safe");
-    expect(discoverSkills(root).map((x) => x.name)).toEqual(["ordinary"]);
-  });
-});
-
-describe("live converse runner wiring", () => {
-  // The failure this catches: the helper is perfect and nothing calls it. A
-  // declaration can also be swallowed by a comment block and still compile —
-  // that exact bug shipped in App.jsx earlier in this program. esbuild strips
-  // comments, so surviving the transform is evidence the wiring is live code.
-  it("is NOT wired into the live runner yet, deliberately", () => {
-    // Skills are unmounted on the live spine path pending digest-verified
-    // mounting (see converseSdkRunner). This guard is the inverse of the usual
-    // wiring assertion: it fails if someone re-adds the mount without the
-    // verification, which is exactly the regression four review rounds were
-    // spent finding holes in.
-    const source = readFileSync(
-      new URL("../src/ports/impl/converseSdkRunner.ts", import.meta.url), "utf8");
-    const stripped = esbuild.transformSync(source, { loader: "ts" }).code;
-    expect(stripped).not.toContain("skillBundleAttachment");
-    expect(stripped).not.toMatch(/plugins:\s*\[/);
+describe("loader and offline verifier cross-check", () => {
+  it("agree on the accepted and rejected corpus", () => {
+    const valid = buildBundle();
+    const changed = buildBundle();
+    writeFileSync(join(changed, "skills", "code-standards", "SKILL.md"), "changed");
+    const extra = buildBundle();
+    writeFileSync(join(extra, "unexpected.txt"), "x");
+    for (const path of [valid, changed, extra]) expect(verifyBundle(path).ok).toBe(offlineAccepts(path));
   });
 });

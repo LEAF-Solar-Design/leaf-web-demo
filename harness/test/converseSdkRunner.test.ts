@@ -17,6 +17,10 @@
  *   - no shared mutable telemetry: two interleaved run()s never mix usage.
  */
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -331,11 +335,7 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
 // --------------------------------------------------------------------------- //
 
 describe("ConverseSdkRunner — SDK options wiring", () => {
-  it("hardens the session and does NOT mount a skill bundle yet", async () => {
-    // Skills are deliberately unmounted on the live path (see the comment in
-    // converseSdkRunner): handing the SDK a plugin DIRECTORY kept reaching
-    // execution outside canUseTool and the gate, and the correct fix is
-    // digest-verified mounting, shipping as its own chip.
+  it("hardens the session when no verified bundle is configured", async () => {
     const mock = makeMockSdk([resultSuccess()]);
     await collect(runnerWith(mock), makeInput());
     const options = mock.queries[0]!.options;
@@ -350,6 +350,24 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     });
     expect("disableSkillShellExecution" in options).toBe(false);
     expect("disableAllHooks" in options).toBe(false);
+  });
+
+  it("mounts plugins and skills only from a verified builder artifact", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "leaf-converse-bundle-"));
+    const bundle = join(parent, "bundle");
+    try {
+      const repo = resolve(import.meta.dirname, "../..");
+      execFileSync(process.execPath, [join(repo, "tools", "skills-bundle", "build.mjs"), "--source", "C:/Users/ehaug/.claude/skills", "--tier", "tenant-safe", "--out", bundle], { stdio: "pipe" });
+      vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", bundle);
+      vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");
+      const mock = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(mock), makeInput());
+      const options = mock.queries[0]!.options;
+      expect(options.plugins).toEqual([{ type: "local", path: bundle, skipMcpDiscovery: true }]);
+      expect(options.skills).toEqual(["code-standards", "knowledge-synthesis", "orwell-writing"]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 
   it("passes resume when resumeSdkSessionId is present, omits it when absent", async () => {
