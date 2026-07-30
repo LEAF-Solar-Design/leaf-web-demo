@@ -4,6 +4,8 @@ import { AUTHOR_SYSTEM_PROMPT } from "../src/agent/systemPrompt.js";
 import {
   AUTHOR_RUNNER_GUIDE,
   completeRequiredBrokerTest,
+  resolveAuthorModel,
+  sampleBrokerTestParams,
 } from "../src/ports/impl/agentSdkRunner.js";
 import type { AuthorBrokerTestState } from "../src/ports/impl/agentSdkRunner.js";
 import type { ResultEnvelope, ToolPackage } from "../src/ports/index.js";
@@ -38,6 +40,16 @@ function envelope(ok: boolean, errorCode?: string): ResultEnvelope {
 }
 
 describe("Agent SDK author contract", () => {
+  it("uses the explicit, environment, then proven default model", () => {
+    expect(resolveAuthorModel("claude-opus-4-1", { LEAF_SPINE_MODEL: "claude-haiku-4-5" })).toBe(
+      "claude-opus-4-1",
+    );
+    expect(resolveAuthorModel(undefined, { LEAF_SPINE_MODEL: "claude-haiku-4-5" })).toBe(
+      "claude-haiku-4-5",
+    );
+    expect(resolveAuthorModel(undefined, {})).toBe("claude-sonnet-5");
+  });
+
   it("requires model-visible validation and a passing broker test", () => {
     expect(AUTHOR_SYSTEM_PROMPT).toContain("MUST validate the candidate");
     expect(AUTHOR_SYSTEM_PROMPT).toContain("receive ok:true before finishing");
@@ -53,6 +65,85 @@ describe("Agent SDK author contract", () => {
     ).resolves.toBeNull();
     expect(run).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledWith(TOOL, {}, source);
+  });
+
+  it("derives a bounded valid fallback input from required params", async () => {
+    const parameterized = {
+      ...TOOL,
+      params: {
+        type: "object",
+        required: ["width", "label", "options"],
+        properties: {
+          width: { type: "number", minimum: 2 },
+          label: { type: "string", minLength: 3 },
+          options: {
+            type: "object",
+            required: ["centered"],
+            properties: { centered: { type: "boolean" } },
+          },
+        },
+      },
+    } as ToolPackage;
+    expect(sampleBrokerTestParams(parameterized.params)).toEqual({
+      width: 2,
+      label: "sample",
+      options: { centered: true },
+    });
+    const run = vi.fn(async () => envelope(true));
+    await completeRequiredBrokerTest(parameterized, run);
+    expect(run).toHaveBeenCalledWith(
+      parameterized,
+      { width: 2, label: "sample", options: { centered: true } },
+      undefined,
+    );
+  });
+
+  it("fails closed on unsafe required fallback fields", () => {
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: ["__proto__"],
+      properties: { "__proto__": { type: "string" } },
+    })).toThrow("unsafe required field");
+  });
+
+  it("samples the safe drawing-write controls and optional defaults", () => {
+    expect(sampleBrokerTestParams({
+      type: "object",
+      required: ["width"],
+      properties: {
+        width: { type: "integer", minimum: 1.5, maximum: 10 },
+        drawing_id: { type: "string", default: "acceptance-drawing" },
+        dry_run: { type: "boolean", default: false },
+      },
+    })).toEqual({ width: 2, drawing_id: "acceptance-drawing", dry_run: true });
+  });
+
+  it("fails closed instead of clamping or ignoring unsupported constraints", () => {
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: ["name"],
+      properties: { name: { type: "string", minLength: 65 } },
+    })).toThrow("minLength is outside the safe bound");
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: ["points"],
+      properties: { points: { type: "array", minItems: 4, items: { type: "number" } } },
+    })).toThrow("minItems is outside the safe bound");
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: ["name"],
+      properties: { name: { type: "string", pattern: "^[A-Z]+$" } },
+    })).toThrow("unsupported keyword pattern");
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: ["step"],
+      properties: { step: { type: "number", multipleOf: 0.5 } },
+    })).toThrow("unsupported keyword multipleOf");
+    expect(() => sampleBrokerTestParams({
+      type: "object",
+      required: [42],
+      properties: {},
+    })).toThrow("required names must be strings");
   });
 
   it("fails closed with only a bounded broker error code", async () => {
