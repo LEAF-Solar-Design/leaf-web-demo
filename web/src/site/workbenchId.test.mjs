@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import {
   CANONICAL_DRAWING_ID,
   WORKBENCH_ID_KEY,
   freshDrawingId,
   liveDrawingId,
+  operatorDrawingId,
 } from './workbenchId.js'
 
 function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
   const store = new Map(Object.entries(initial ?? {}))
   return {
     crypto: { randomUUID: () => '00000000-1111-2222-3333-444444444444' },
+    location: { search: '' },
     sessionStorage: {
       getItem(key) {
         if (throwOnGet) throw new Error('storage disabled')
@@ -28,6 +31,29 @@ function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
 }
 
 describe('live workbench drawing id', () => {
+  it('uses the seeded id for the operator controller and surface', () => {
+    const seeded = 'acceptance-authored-accept-20260101-r1-a'
+    const scope = scopeWith({ [WORKBENCH_ID_KEY]: seeded })
+    assert.equal(operatorDrawingId(false, scope), seeded)
+  })
+
+  it('keeps explicit proof builds and proof links on the fixture drawing', () => {
+    const scope = scopeWith({ [WORKBENCH_ID_KEY]: 'acceptance-authored-accept-20260101-r1-a' })
+    assert.equal(operatorDrawingId(true, scope), 'cat-panels')
+    scope.location.search = '?proof=1'
+    assert.equal(operatorDrawingId(false, scope), 'cat-panels')
+  })
+
+  it('seeds both SiteRoot controller inputs from the shared operator id', () => {
+    // SiteRoot owns the drawing controller before ToolCast mounts. Pin both
+    // inputs because a hard-coded cat-panels value here bypasses a valid
+    // acceptance seed whenever the tenant session is already active.
+    const siteRoot = readFileSync(new URL('./SiteRoot.jsx', import.meta.url), 'utf8')
+    assert.match(siteRoot, /const OPERATOR_DRAWING_ID = operatorDrawingId\(/)
+    assert.match(siteRoot, /drawing_id: OPERATOR_DRAWING_ID/)
+    assert.match(siteRoot, /drawingId=\{scene === 'tool' \? OPERATOR_DRAWING_ID : 'rooftop_demo'\}/)
+  })
+
   it('uses a seeded acceptance id exactly as given', () => {
     // The exact shape the protected staging acceptance driver seeds.
     const seeded = 'acceptance-authored-accept-20260101-r1-a'

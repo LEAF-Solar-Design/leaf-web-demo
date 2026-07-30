@@ -48,7 +48,7 @@ import useCheckoutController from '../controllers/checkout/useCheckoutController
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
-import { liveDrawingId } from './workbenchId.js'
+import { operatorDrawingId } from './workbenchId.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
   confirmRunIntent,
@@ -78,7 +78,7 @@ const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') =
 // CAD surface. Only an anonymous demo remains fully local.
 const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const LIVE_TOUR_REQUESTED = new URLSearchParams(window.location.search).get('demo') === 'tour'
-const DRAWING_ID = PROOF_MODE ? 'cat-panels' : liveDrawingId()
+const DRAWING_ID = operatorDrawingId(import.meta.env.VITE_CAT_PROOF === '1')
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
 const UNIFIED_TOUR_STEPS = [

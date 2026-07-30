@@ -13,6 +13,7 @@
 // fresh id, which made the protected staging acceptance preflight unpassable.
 export const WORKBENCH_ID_KEY = 'leaf.cat.workbench.id.v1'
 export const CANONICAL_DRAWING_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/
+export const PROOF_DRAWING_ID = 'cat-panels'
 
 export function freshDrawingId(scope = globalThis) {
   const randomId = scope.crypto?.randomUUID?.()
@@ -30,4 +31,9 @@ export function liveDrawingId(scope = globalThis) {
   } catch {
     return freshDrawingId(scope)
   }
+}
+
+export function operatorDrawingId(buildProof = false, scope = globalThis) {
+  const queryProof = new URLSearchParams(scope.location?.search || '').get('proof') === '1'
+  return buildProof || queryProof ? PROOF_DRAWING_ID : liveDrawingId(scope)
 }

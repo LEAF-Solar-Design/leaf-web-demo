@@ -13,6 +13,7 @@ import { sceneForPath } from './routeScene.js'
 import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
+import { operatorDrawingId } from './workbenchId.js'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import {
@@ -43,7 +44,12 @@ function bootWantsApp(search, path = window.location.pathname) {
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
-const OPERATOR_DRAWING_ID = 'cat-panels'
+// Keep the controller's first drawing in sync with ToolCast. A signed-in
+// session can already be active when /try mounts, so ToolCast may correctly
+// reuse the controller without running its session bootstrap again. The
+// controller must therefore start on the seeded acceptance drawing, not the
+// historical proof fixture.
+const OPERATOR_DRAWING_ID = operatorDrawingId(import.meta.env.VITE_CAT_PROOF === '1')
 const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
 const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
 const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
@@ -157,7 +163,7 @@ export default function SiteRoot() {
 
   return (
     <WorkspaceControllerProvider
-      drawingId={scene === 'tool' ? 'cat-panels' : 'rooftop_demo'}
+      drawingId={scene === 'tool' ? OPERATOR_DRAWING_ID : 'rooftop_demo'}
       drawingOptions={drawingOptions}
     >
       <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
