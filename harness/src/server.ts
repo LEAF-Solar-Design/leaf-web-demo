@@ -155,27 +155,34 @@ function harnessAuthDenial(
 }
 
 /**
- * The most any harness request body may be.
+ * Body ceilings. A size check that runs AFTER the body is buffered is not a
+ * size check at all: the memory is already spent, and a chunked request
+ * declares no length to check up front. So the ceiling is enforced per chunk.
  *
- * Sized for the image caps: 1 MiB of decoded image expands to at most
- * 1,398,104 base64 characters, and the rest is bounded JSON framing and prose.
- * The harness re-validates images because it does not assume the app validated,
- * and a size check that runs AFTER the body is buffered is not a size check at
- * all — it just means the memory was already spent.
+ * Two values because the routes are not alike. `/turn` is sized for the image
+ * caps (1 MiB of decoded image expands to at most 1,398,104 base64 characters,
+ * plus bounded JSON framing and prose). Every other route gets a generous
+ * default, because a customization publish carries a staged receipt and a
+ * registered run carries arbitrary tool params: bounding those to the IMAGE
+ * budget would refuse legitimate payloads that have nothing to do with images.
  */
-const MAX_BODY_BYTES = 1_500_000;
+const MAX_TURN_BODY_BYTES = 1_500_000;
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let seen = 0;
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (Number.isFinite(declared) && declared > maxBytes) {
       return reject(new AuthorLoopError("request body exceeds the harness cap", 413));
     }
     req.on("data", (c: Buffer) => {
       seen += c.length;
-      if (seen > MAX_BODY_BYTES) {
+      if (seen > maxBytes) {
         // Stop reading rather than measuring afterwards: a chunked body
         // declares no length, so buffering first defeats the point.
         req.destroy();
@@ -645,7 +652,7 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       }
 
       if (method === "POST" && path === "/turn") {
-        const body = await readJsonBody(req);
+        const body = await readJsonBody(req, MAX_TURN_BODY_BYTES);
         const validated = validateConverseTurnInput(body);
         if (!validated.ok) {
           return send(res, 400, { error: { message: validated.message } });
