@@ -90,7 +90,11 @@ def test_reconciliation_source_writes_are_schema_init_only() -> None:
     assert "DELETE FROM" not in source
     assert "TRUNCATE " not in source
     assert "DROP TABLE" not in source
-    assert "nonempty and differs" in source
+    assert "Target-only rows are retained" in source
+    assert '"source_incorporated": True' in source
+    assert '"exact_equal": exact_equal' in source
+    assert "conflicting row" in source
+    assert "duplicate primary key" in source
     assert "pg_advisory_xact_lock" in source
     assert "SQLiteCustomizationStore" in source
     assert ".initialize()" in source
