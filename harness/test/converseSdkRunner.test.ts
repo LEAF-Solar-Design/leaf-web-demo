@@ -29,6 +29,7 @@ import {
   classifyRateLimit,
 } from "../src/ports/impl/converseSdkRunner.js";
 import type { ConverseSdkRunnerOptions } from "../src/ports/impl/converseSdkRunner.js";
+import { createCuratedSkillSource } from "./helpers/curatedSkillSource.js";
 import type {
   ConverseRunInput,
   ConverseRunnerEvent,
@@ -360,7 +361,8 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     const bundle = join(parent, "bundle");
     try {
       const repo = resolve(import.meta.dirname, "../..");
-      execFileSync(process.execPath, [join(repo, "tools", "skills-bundle", "build.mjs"), "--source", "C:/Users/ehaug/.claude/skills", "--tier", "tenant-safe", "--out", bundle], { stdio: "pipe", timeout: 60_000 });
+      const skillSource = createCuratedSkillSource(parent, join(repo, "tools", "skills-bundle", "curation.json"));
+      execFileSync(process.execPath, [join(repo, "tools", "skills-bundle", "build.mjs"), "--source", skillSource, "--tier", "tenant-safe", "--out", bundle], { stdio: "pipe", timeout: 60_000 });
       const digest = (JSON.parse(readFileSync(join(bundle, "manifest.json"), "utf8")) as { bundleDigest: string }).bundleDigest;
       vi.stubEnv("LEAF_SKILLS_BUNDLE_PATH", bundle);
       vi.stubEnv("LEAF_SKILLS_TIER", "tenant-safe");

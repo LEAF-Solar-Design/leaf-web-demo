@@ -7,13 +7,14 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import { materialiseVerifiedBundle, sanitiseLogText, skillBundleAttachment, verifyBundle } from "../src/ports/impl/skillBundle.js";
 import type { VerifiedSkillBundle } from "../src/ports/impl/skillBundle.js";
+import { createCuratedSkillSource } from "./helpers/curatedSkillSource.js";
 
 const made: string[] = [];
 const templates: string[] = [];
 const repo = resolve(import.meta.dirname, "../..");
 const builder = join(repo, "tools", "skills-bundle", "build.mjs");
 const offlineVerifier = join(repo, "tools", "skills-bundle", "verify.mjs");
-const skillSource = "C:/Users/ehaug/.claude/skills";
+const curation = join(repo, "tools", "skills-bundle", "curation.json");
 
 function sha256(value: Buffer | string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -45,6 +46,7 @@ function buildBundle(): string {
     const home = mkdtempSync(join(tmpdir(), "leaf-bundle-template-"));
     templates.push(home);
     const built = join(home, "bundle");
+    const skillSource = createCuratedSkillSource(home, curation);
     // Bounded: vitest's per-test timeout cannot interrupt a SYNCHRONOUS child,
     // so a hung builder would hang the run forever rather than fail it.
     execFileSync(process.execPath,
