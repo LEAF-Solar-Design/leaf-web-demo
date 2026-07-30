@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from types import SimpleNamespace
 
 import pytest
 
 import customization_service
 from customization_service import CustomizationServiceError, _bare_repo, _ensure_bare_repo
 from routers import author as author_router
+
+
+def _status_token(detail: str) -> str | None:
+    """Return the exact value recorded for `status=`, so `status=5030` cannot pass."""
+    found = re.search(r"status=(\S+)", detail)
+    return found.group(1) if found else None
 
 
 @pytest.fixture(autouse=True)
@@ -103,9 +111,9 @@ def test_failed_provision_call_records_status_and_exception_type(tmp_path, monke
     assert "harness_provision_failed" in detail
     assert "HTTPError" in detail
     assert "/author/repository" in detail
-    # The REAL status the harness answered, not merely the presence of "status=".
-    # An implementation that hardcoded status=None or a wrong value fails here.
-    assert "status=503" in detail
+    # Parse the token and compare it exactly. Substring matching would accept
+    # status=5030, so it proved nothing about the recorded value.
+    assert _status_token(detail) == "503"
 
 
 def test_a_transport_failure_with_no_response_records_no_status(monkeypatch, tmp_path):
@@ -125,7 +133,7 @@ def test_a_transport_failure_with_no_response_records_no_status(monkeypatch, tmp
     monkeypatch.setattr(requests, "post", _explode)
     with pytest.raises(CustomizationServiceError) as caught:
         _ensure_bare_repo("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    assert "status=None" in caught.value.detail
+    assert _status_token(caught.value.detail) == "None"
     assert "_Boom" in caught.value.detail
 
 
@@ -445,13 +453,100 @@ def test_platform_store_failure_names_itself(monkeypatch):
     assert "RuntimeError" in caught.value.detail
 
 
-def test_harness_stage_and_publish_failures_carry_their_cause():
-    """The two sites that still answered with an empty detail."""
-    import inspect
-    stage_src = inspect.getsource(customization_service.CustomizationService._harness_stage)
-    publish_src = inspect.getsource(customization_service.CustomizationService._harness_publish)
-    assert "harness_stage_failed" in stage_src
-    assert "harness_publish_failed" in publish_src
-    for src in (stage_src, publish_src):
-        # Every raise on these paths names a cause rather than defaulting to "".
-        assert "status={status}" in src
+def _change_set():
+    return SimpleNamespace(
+        change_set_id=CHANGE_SET, tenant_id=TENANT, base_commit="a" * 40,
+        desired_platform_release="r1", workspace_contract_digest="d" * 64,
+        idempotency_key="k", staged_commit="b" * 40, catalog_digest="c" * 64,
+    )
+
+
+def test_harness_stage_failure_records_the_real_status(monkeypatch):
+    """Previously asserted by reading the source, which `from exc` removal survived.
+
+    This calls the production method. `_harness_stage` never touches `self`, so it
+    runs unbound with no service instance to build.
+    """
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    import requests
+
+    class _Response:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise requests.HTTPError("bad gateway", response=self)
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Response())
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service.CustomizationService._harness_stage(
+            None, TENANT, "count panels", _change_set()
+        )
+    assert caught.value.code == "customization_harness_unavailable"
+    assert "harness_stage_failed" in caught.value.detail
+    assert _status_token(caught.value.detail) == "502"
+    assert "HTTPError" in caught.value.detail
+
+
+def test_harness_publish_failure_records_the_real_status(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    import requests
+
+    class _Response:
+        status_code = 504
+
+        def raise_for_status(self):
+            raise requests.HTTPError("gateway timeout", response=self)
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Response())
+    service = SimpleNamespace(_raw_receipt=lambda change: {"change_set_id": CHANGE_SET})
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service.CustomizationService._harness_publish(service, _change_set())
+    assert caught.value.code == "customization_publish_incomplete"
+    assert "harness_publish_failed" in caught.value.detail
+    assert _status_token(caught.value.detail) == "504"
+
+
+def test_an_operator_misconfiguration_still_warns(caplog):
+    """The reverse risk: keying the level on `detail` hid real deployment faults.
+
+    A missing harness URL raises a detail-free 503. Under the old rule that went to
+    DEBUG and vanished at INFO in production.
+    """
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    author_router._customization_error(
+        CustomizationServiceError("customization_harness_unavailable", 503)
+    )
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a deployment fault must be visible at WARNING"
+    assert "customization_harness_unavailable" in warnings[0].getMessage()
+
+
+def test_the_legacy_author_path_does_not_emit_exception_text(caplog, capsys, monkeypatch):
+    """`/api/author` falls back to the templater and used to `print(str(exc))`.
+
+    stdout is captured as well as the logger: the original defect was a bare
+    `print`, which caplog cannot see, so a caplog-only assertion would pass
+    vacuously the moment the print came back.
+    """
+    import requests
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setattr(
+        requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError(SENTINEL)),
+    )
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    try:
+        author_router._legacy_author(
+            author_router.AuthorRequest(description="count panels", mode="build"), TENANT
+        )
+    except Exception:
+        pass  # the templater may be unconfigured here; what it emitted is the point
+    captured = capsys.readouterr()
+    emitted = "\n".join(
+        [r.getMessage() for r in caplog.records] + [captured.out, captured.err]
+    )
+    # Non-vacuous: the fallback must have said something, or this proves nothing.
+    assert "author_harness_unreachable" in emitted or "author_harness_error" in emitted
+    assert "hunter2-should-never-be-logged" not in emitted
+    assert SENTINEL not in emitted

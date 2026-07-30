@@ -650,7 +650,7 @@ def build_suites() -> List[Suite]:
         # never the tenant's response body.
         Suite("server-customization-refusal-observability",
               "server customization refusal observability", "pytest",
-              SERVER, _py_pytest("tests/test_customization_refusal_observability.py"), 24),
+              SERVER, _py_pytest("tests/test_customization_refusal_observability.py"), 27),
         # The two OS-file-lock probes are skipif(fcntl is None): they EXECUTE on
         # the Linux CI runner and skip only on a Windows operator box. Named here
         # so a Windows run stays green without the fail-closed skip rule having to

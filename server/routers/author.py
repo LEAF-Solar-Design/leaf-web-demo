@@ -221,7 +221,11 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
                                  timeout=_author_timeout_s())
         except Exception as exc:
             harness_failure = exc
-            print(f"[author] harness unreachable, templated fallback: {exc}")
+            # Type only: a harness exception message can carry a credential.
+            _LOG.warning(
+                "author_harness_unreachable: templated fallback, cause=%s",
+                type(exc).__name__,
+            )
         if resp is not None:
             try:
                 jb = resp.json()
@@ -242,7 +246,11 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             except Exception as exc:
                 tool = None
                 harness_failure = exc
-                print(f"[author] harness error, templated fallback: {exc}")
+                # Type only, for the same reason as above.
+                _LOG.warning(
+                    "author_harness_error: templated fallback, cause=%s",
+                    type(exc).__name__,
+                )
     if tool is None:
         if harness_url and os.environ.get(
             "LEAF_AUTHOR_TEMPLATE_FALLBACK", "1"
@@ -367,6 +375,27 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
     return f"{idempotency_key}:{digest[:32]}"
 
 
+# Refusals a caller can drive at will, or that merely restate a fixed deployment
+# posture (auth off, a rollout rung disabled). They are demoted so an unauthorized
+# caller cannot write one WARNING per request.
+#
+# The list is an allowlist on purpose: everything absent from it warns, including a
+# detail-free 503. Keying the level on whether a detail existed looked tidy and was
+# wrong in the other direction — a missing harness URL, an absent customization
+# secret, an unset DATABASE_URL and an invalid platform release all raise
+# detail-free 503s, and those are exactly what an operator must see. Default to
+# visible; demote only what is provably caller-driven.
+_CALLER_DRIVEN_CODES = frozenset({
+    "customization_auth_required",
+    "customization_stage_disabled",
+    "customization_publish_disabled",
+    "tenant_identity_invalid",
+    "approval_authority_denied",
+    "dispatch_authority_denied",
+    "idempotency_key_required",
+})
+
+
 def _customization_error(
     exc: CustomizationServiceError, *, cause: BaseException | None = None
 ) -> JSONResponse:
@@ -399,16 +428,12 @@ def _customization_error(
             "customization_refused: code=%s cause=%s at %s",
             exc.code, type(cause).__name__, frames or "<no frames>",
         )
-    elif exc.detail:
-        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail)
-    else:
-        # Nothing to add means nothing to say. Several of these routes are
-        # reachable by an unauthorized caller (the /internal/* pair authenticates
-        # inside the handler, and with auth off the /api/* lifecycle routes refuse
-        # at the gate), so a level keyed on status rather than on content lets a
-        # caller drive one log line per request. Count these with metrics or the
-        # access log, not a line each.
+    elif exc.code in _CALLER_DRIVEN_CODES:
+        # Reachable per request by a caller, and carrying no per-request operator
+        # signal, so these must not cost a WARNING each.
         _LOG.debug("customization_refused: code=%s", exc.code)
+    else:
+        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail or "-")
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
