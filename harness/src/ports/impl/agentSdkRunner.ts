@@ -33,6 +33,7 @@ import type {
   AgentRunResult,
   AgentRunner,
   AuthorTelemetry,
+  ResultEnvelope,
   ToolExecutionReceipt,
   ToolPackage,
   ToolSubmissionResult,
@@ -126,6 +127,38 @@ export interface AgentSdkRunnerOptions {
   maxTotalTokens?: number;
 }
 
+export interface AuthorBrokerTestState {
+  attempted: boolean;
+  ok: boolean;
+  receipt: ToolExecutionReceipt | null;
+  failureReason: string | null;
+  errorCode: string | null;
+}
+
+function emptyBrokerTestState(): AuthorBrokerTestState {
+  return {
+    attempted: false,
+    ok: false,
+    receipt: null,
+    failureReason: null,
+    errorCode: null,
+  };
+}
+
+function brokerTestState(envelope: ResultEnvelope): AuthorBrokerTestState {
+  const accepted = acceptBrokerTestResult(envelope);
+  const rawCode = envelope.error?.error_code;
+  return {
+    attempted: true,
+    ok: accepted.ok,
+    receipt: accepted.receipt,
+    failureReason: accepted.ok ? null : (accepted.reason ?? "broker test was not accepted"),
+    errorCode: typeof rawCode === "string" && /^[A-Z0-9_]{1,100}$/.test(rawCode)
+      ? rawCode
+      : null,
+  };
+}
+
 const AUTHOR_TOOL_NAMES = [
   "mcp__author__fs_tenant_repo",
   "mcp__author__validate_tool",
@@ -193,7 +226,7 @@ export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
  * model writes correct field access. It describes the DATA, never the algorithm -
  * the model authors the logic.
  */
-const RUNNER_GUIDE = `
+export const AUTHOR_RUNNER_GUIDE = `
 === How to author (drive these three tools, nothing else) ===
 1. Choose a kebab-case tool NAME and a snake_case ENGINE_OP.
 2. Write the entry-script source in your validate_tool call. Do not write repo files.
@@ -233,7 +266,19 @@ Choose capabilities from the request:
 - A tool that changes panel positions or drawing geometry: ["drawing.write"].
 
 For drawing.write, tool.py stays pure. It does not write files or versions. Return
-the proposed edit in result["mutations"]. To move existing panels, use:
+the proposed edit in result["mutations"].
+
+To add geometry, use result["mutations"]["added"] with one or more intake-shaped
+closed polylines. Each added entity must contain a deterministic unique handle,
+a layer, closed:true, and at least three [x, y, z] points. Represent requested
+prisms and cylinders as their closed 2D drawing footprints. Compute placement
+from the existing intake bounds. For example:
+  {"added": [
+    {"handle": "LEAF-AUTHORED-1", "layer": "LEAF_AUTHORED",
+     "closed": true, "pts": [[0,0,0], [10,0,0], [10,10,0], [0,10,0]]}
+  ]}
+
+To move existing panels, use:
   {"transforms": [
     {"handle": "AB12", "dx": 10.0, "dy": -5.0, "rotation_deg": 0.0}
   ]}
@@ -300,8 +345,7 @@ export class AgentSdkRunner implements AgentRunner {
     //    structured submit boundary owned by the harness.
     let candidate: ToolPackage | null = null;
     let candidateSubmission: ReturnType<AgentRunInput["toolset"]["submitTool"]> | null = null;
-    let candidateTested = false;
-    let candidateExecutionReceipt: ToolExecutionReceipt | null = null;
+    let candidateTest = emptyBrokerTestState();
     const fs = input.toolset.fsTenantRepo;
     const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
     const bad = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -357,8 +401,7 @@ export class AgentSdkRunner implements AgentRunner {
           });
           candidate = submitted.tool;
           candidateSubmission = submitted;
-          candidateTested = false;
-          candidateExecutionReceipt = null;
+          candidateTest = emptyBrokerTestState();
           return ok(JSON.stringify({
             status: "VALID",
             tool: submitted.tool,
@@ -381,10 +424,10 @@ export class AgentSdkRunner implements AgentRunner {
           const params = typeof a.params_json === "string" && a.params_json.trim()
             ? JSON.parse(a.params_json)
             : {};
+          candidateTest = { ...candidateTest, attempted: true };
           const env = await input.toolset.apsTestRun(candidate, params);
+          candidateTest = brokerTestState(env);
           const accepted = acceptBrokerTestResult(env);
-          candidateTested = accepted.ok;
-          candidateExecutionReceipt = accepted.receipt;
           const text = JSON.stringify(env, null, 2);
           return accepted.ok
             ? ok(text)
@@ -408,7 +451,7 @@ export class AgentSdkRunner implements AgentRunner {
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
     const allowed = new Set(allowedNames);
     const q = sdk.query({
-      prompt: `${input.systemPrompt}\n${RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
+      prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {
         env: childEnv,
         model: this.opts.model,
@@ -555,9 +598,11 @@ export class AgentSdkRunner implements AgentRunner {
         `author session ended without a validated tool (result subtype=${this.lastRun.result_subtype ?? "n/a"}, turns=${turn}).`,
       );
     }
-    if (!candidateTested) {
-      throw new Error("author session ended without a passing broker test run for the submitted source.");
-    }
+    const candidateExecutionReceipt = await completeRequiredBrokerTest(
+      candidate,
+      input.toolset.apsTestRun,
+      candidateTest,
+    );
     const finalPkg: ToolPackage = candidate;
     const diagnostics = validateToolPackage(finalPkg);
     if (diagnostics.length > 0) {
@@ -578,6 +623,27 @@ export class AgentSdkRunner implements AgentRunner {
       telemetry: telemetryFromSummary(this.lastRun!),
     };
   }
+}
+
+/**
+ * Enforce the broker test as a trusted harness gate even when the model stops
+ * after source validation. The model-facing tool remains useful for iterative
+ * feedback, but correctness no longer depends on the model choosing to call it.
+ */
+export async function completeRequiredBrokerTest(
+  candidate: ToolPackage,
+  apsTestRun: AgentRunInput["toolset"]["apsTestRun"],
+  state: AuthorBrokerTestState = emptyBrokerTestState(),
+): Promise<ToolExecutionReceipt | null> {
+  const finalState = state.attempted
+    ? state
+    : brokerTestState(await apsTestRun(candidate, {}));
+  if (!finalState.ok) {
+    throw new Error(
+      `authored tool failed required broker test${finalState.errorCode ? ` (${finalState.errorCode})` : ""}: ${finalState.failureReason ?? "broker test was not accepted"}.`,
+    );
+  }
+  return finalState.receipt;
 }
 
 /**
