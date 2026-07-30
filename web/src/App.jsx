@@ -417,7 +417,16 @@ export default function App() {
     return e[key] !== false
   }, [entitlements])
   const canRunWrite = entOf('run_write')
-  const canBuild = entOf('build')
+  // Build needs BOTH the tier entitlement AND rollout availability (the R5
+  // authoring stage can be off/internal-only in a deployment even when the
+  // tier holds `build`). Absent availability (old server / mock) resolves
+  // permissive, mirroring entOf, so behavior without the field is unchanged.
+  const authorStageAvailable = (() => {
+    const a = entitlements && entitlements.availability
+    if (!a || typeof a.author_stage === 'undefined' || a.author_stage === null) return true
+    return a.author_stage !== false
+  })()
+  const canBuild = entOf('build') && authorStageAvailable
   // Agent tier gate: LIVE only (mock has no harness — behavior stays exactly
   // today's), and only when the plan doesn't explicitly exclude `converse`
   // (unknown/undeployed policy resolves permissive, like every other gate).

@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 import customization_service
 import deps
 import entitlements
+from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 
 router = APIRouter()
@@ -60,4 +61,11 @@ def get_entitlements(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
         view = entitlements.entitlements_view(tier)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("run_read", tier)
+    # Rollout AVAILABILITY, distinct from entitlement POLICY: a tier may hold
+    # `build` while the R5 authoring stage is still off (or internal-only) in
+    # this deployment. The UI must require BOTH before showing an enabled
+    # Generate affordance — same per-tenant predicate the /api/author gate uses.
+    view["availability"] = {
+        "author_stage": bool(customization_enabled(5, str(tenant).strip())),
+    }
     return deps.tenant_echo(with_envelope_fields(view), tenant)
