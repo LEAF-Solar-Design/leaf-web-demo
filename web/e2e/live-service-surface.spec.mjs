@@ -8,6 +8,8 @@ const INTAKE = JSON.parse(readFileSync(join(HERE, '..', '..', 'data', 'rooftop_d
 
 test('live surface honors the exact session-seeded drawing id', async ({ page }) => {
   const drawingId = 'acceptance-catflow-20260730-1107-a'
+  let releaseSession
+  const sessionReleased = new Promise((resolve) => { releaseSession = resolve })
   await page.addInitScript((seededDrawingId) => {
     window.sessionStorage.setItem('leaf.cat.workbench.id.v1', seededDrawingId)
   }, drawingId)
@@ -16,6 +18,7 @@ test('live surface honors the exact session-seeded drawing id', async ({ page })
     const request = route.request()
     const url = new URL(request.url())
     const found = request.method() === 'GET' && url.pathname === '/api/session'
+    if (found) await sessionReleased
     await route.fulfill({
       status: found ? 200 : 404,
       contentType: 'application/json',
@@ -27,10 +30,15 @@ test('live surface honors the exact session-seeded drawing id', async ({ page })
   })
 
   await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Connecting backend')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeDisabled()
+  releaseSession()
   await expect(page.getByTestId('operator-phase')).toContainText('Backend ready')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeEnabled()
   await expect(page.locator('.tc-bar-proj')).toHaveText(drawingId)
   await page.reload()
   await expect(page.getByTestId('operator-phase')).toContainText('Backend ready')
+  await expect(page.getByRole('tab', { name: 'Author', exact: true })).toBeEnabled()
   await expect(page.locator('.tc-bar-proj')).toHaveText(drawingId)
 })
 
