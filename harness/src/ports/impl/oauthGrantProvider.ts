@@ -1,7 +1,7 @@
 /**
  * REAL OAuthGrantProvider - resolves ONE tenant's Agent SDK grant (Concern 2).
  *
- *   - Commercial workspace lane: tenant-owner mounted Team or Enterprise Claude
+ *   - Subscription lane: tenant-owner mounted Pro, Max, Team, or Enterprise Claude
  *     credentials, routed only inside that tenant.
  *   - API lane: a tenant-owned Anthropic API key.
  *
@@ -84,7 +84,7 @@ export class GrantRequiredError extends Error {
     super(
       message ??
         `tenant ${tenantId} has no eligible Claude grant. The tenant owner must mount ` +
-          `a Claude Team or Enterprise workspace credential, or a tenant-owned Anthropic API key.`,
+          `an attested Claude subscription credential, or a tenant-owned Anthropic API key.`,
     );
     this.name = "GrantRequiredError";
   }
@@ -217,6 +217,7 @@ type PersistedGrantRecord = PersistedGrantRecordV1 | PersistedGrantRecordV2 | Pe
 
 const LEASE_TTL_MS = 5 * 60 * 1000;
 const LEASE_RESERVATION_TOKENS = 100_000;
+const ELIGIBLE_OAUTH_PLANS: ReadonlySet<GrantPlan> = new Set(["pro", "max", "team", "enterprise"]);
 const DEFAULT_QUOTA_COOLDOWN_S = 15 * 60;
 
 function cleanLabel(label: string | undefined, kind: GrantKind): string {
@@ -361,7 +362,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
           (account.kind === "oauth" || account.kind === "api_key") &&
           typeof account.token === "string" && !!account.token.trim() &&
           typeof account.linked_at === "string" && !Number.isNaN(Date.parse(account.linked_at)) &&
-          (account.plan === null || account.plan === "team" || account.plan === "enterprise") &&
+          (account.plan === null || ELIGIBLE_OAUTH_PLANS.has(account.plan as GrantPlan)) &&
           Number.isSafeInteger(account.usage_tokens) && (account.usage_tokens as number) >= 0 &&
           Number.isSafeInteger(account.selection_count) && (account.selection_count as number) >= 0 &&
           (account.last_used_at === null ||
@@ -524,13 +525,14 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       account.leases = leases;
     }
     const attested = record.accounts.filter(
-      (account) => account.kind === "api_key" || account.plan === "team" || account.plan === "enterprise",
+      (account) => account.kind === "api_key" ||
+        (account.plan !== null && ELIGIBLE_OAUTH_PLANS.has(account.plan)),
     );
     if (!attested.length) {
       if (changed) this.writeRecord(tenantId, record);
       throw new GrantRequiredError(
         tenantId,
-        `tenant ${tenantId} must mount a Claude Team or Enterprise account before live conversation`,
+        `tenant ${tenantId} must mount an attested Claude subscription or API key before live conversation`,
       );
     }
     const eligible = attested.filter(

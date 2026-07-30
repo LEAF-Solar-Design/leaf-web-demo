@@ -17,7 +17,7 @@ Lane: `auth0-identity-signup`. Session date: 2026-07-17. §11 added 2026-07-23.
 | | **Concern 1 — Leaf PLATFORM identity** (this doc) | **Concern 2 — the user's Claude login** (NOT this doc) |
 |---|---|---|
 | Question | *Who is this tenant?* | *Whose Anthropic credit runs the agent?* |
-| Mechanism | **Auth0** RS256 access token → namespaced tenant claim | **Tenant-owner mounted Claude Team/Enterprise credential or API key** |
+| Mechanism | **Auth0** RS256 access token → namespaced tenant claim | **Tenant-owner mounted Claude Pro/Max/Team/Enterprise credential or API key** |
 | Owner | this lane (`auth0-identity-signup`) | sibling **`hosted-oauth-spike`** |
 | Carried in | the JWT tenant claim | the tenant's private server-side Claude grant store |
 
@@ -26,10 +26,10 @@ credential**, and this lane touches nothing of Concern 2. A verified tenant
 identity says *which workspace* a request belongs to; it does not grant, embed,
 or reference any Claude token.
 
-> Staging commercial lane: only the active tenant owner can mount Claude Team or
-> Enterprise workspace credentials or a tenant-owned API key. A tenant can have
+> Staging subscription lane: only the active tenant owner can mount Claude Pro,
+> Max, Team, or Enterprise credentials or a tenant-owned API key. A tenant can have
 > several eligible mounts, but routing stays inside that tenant and follows actual
-> recorded usage. Consumer Free, Pro, and Max credentials are not eligible. This
+> recorded usage. Unattested and Free credentials are not eligible. This
 > reinforces the separation: the platform JWT identifies the workspace, while the
 > private grant store supplies provider credit. A Claude credential never enters a
 > platform identity claim.

@@ -244,20 +244,53 @@ def test_grant_explicit_api_key_kind_forwarded(monkeypatch, harness_stub):
     assert stub.LAST_PUT_TOKEN == FAKE_API and stub.LAST_PUT_KIND == "api_key"
 
 
-def test_grant_commercial_plan_attestation_forwarded_without_echo(monkeypatch, harness_stub):
+@pytest.mark.parametrize("plan", ["pro", "max", "team", "enterprise"])
+def test_grant_subscription_plan_attestation_forwarded_without_echo(
+        monkeypatch, harness_stub, plan):
     url, stub = harness_stub
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
     c = _client()
 
     r = c.post(
         "/api/tenant/claude-grant",
-        json={"token": FAKE_OAUTH, "kind": "oauth", "plan": "team"},
+        json={"token": FAKE_OAUTH, "kind": "oauth", "plan": plan},
         headers=_h("commercial"),
     )
 
     assert r.status_code == 200, r.text
-    assert stub.LAST_PUT_PLAN == "team"
+    assert stub.LAST_PUT_PLAN == plan
     assert FAKE_OAUTH not in r.text and "token" not in r.json()
+
+
+def test_grant_rejects_unrecognized_subscription_plan_before_forwarding(
+        monkeypatch, harness_stub):
+    url, stub = harness_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    c = _client()
+
+    r = c.post(
+        "/api/tenant/claude-grant",
+        json={"token": FAKE_OAUTH, "kind": "oauth", "plan": "free"},
+        headers=_h("unsupported"),
+    )
+
+    assert r.status_code == 422
+    assert stub.LAST_PUT_TOKEN is None
+    assert FAKE_OAUTH not in r.text
+
+
+def test_grant_status_preserves_only_supported_subscription_plans():
+    from routers.tenant import _status_body
+
+    accounts = [
+        {"id": f"acct-{plan}", "label": plan, "kind": "oauth", "plan": plan}
+        for plan in ["pro", "max", "team", "enterprise", "free"]
+    ]
+    body = _status_body({"linked": True, "accounts": accounts})
+
+    assert [account["plan"] for account in body["accounts"]] == [
+        "pro", "max", "team", "enterprise", None,
+    ]
 
 
 def test_grant_autodetect_api_key_when_kind_omitted(monkeypatch, harness_stub):
