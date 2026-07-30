@@ -297,7 +297,10 @@ def _binding(tenant: Any) -> TenantBinding:
             platform_store = platform_link.platform_store()
             from psycopg import Error as PostgresError
         except (ImportError, OSError, RuntimeError) as exc:
-            raise CustomizationServiceError("tenant_identity_binding_unavailable", 503) from exc
+            raise CustomizationServiceError(
+                "tenant_identity_binding_unavailable", 503,
+                f"platform_store_unavailable: {type(exc).__name__}",
+            ) from exc
         try:
             binding = platform_store.resolve_active_identity_binding("auth0", subject)
             if binding is None:
@@ -313,7 +316,8 @@ def _binding(tenant: Any) -> TenantBinding:
             raise
         except (PostgresError, OSError, RuntimeError, ValueError) as exc:
             raise CustomizationServiceError(
-                "tenant_identity_binding_unavailable", 503
+                "tenant_identity_binding_unavailable", 503,
+                f"binding_resolution_failed: {type(exc).__name__}",
             ) from exc
     if os.environ.get("LEAF_CUSTOMIZATION_ALLOW_STATIC_BINDINGS", "") == "1":
         raw = os.environ.get("LEAF_CUSTOMIZATION_TENANT_BINDINGS", "")
