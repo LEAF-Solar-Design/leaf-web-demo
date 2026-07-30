@@ -187,9 +187,37 @@ def authority_backfill_gate(tmp_path_factory):
         assert authority_reconcile.reconcile(
             sqlite_path=sqlite_path, mode="parity"
         )["parity"]
+        postgres_store = PostgresCustomizationStore()
+        postgres_store.initialize()
+        create(
+            postgres_store,
+            "pg-retained-target-tenant",
+            "pg-retained-target-create",
+        )
+        superset_receipt = authority_reconcile.reconcile(
+            sqlite_path=sqlite_path, mode="parity"
+        )
+        repeated_superset_receipt = authority_reconcile.reconcile(
+            sqlite_path=sqlite_path, mode="backfill"
+        )
+        assert superset_receipt["source_incorporated"]
+        assert not superset_receipt["exact_equal"]
+        assert superset_receipt["target_only_counts"][
+            "customization_change_sets"
+        ] == 1
+        assert superset_receipt["target_only_counts"][
+            "customization_audit_events"
+        ] == 1
+        assert repeated_superset_receipt["final_target_digest"] == (
+            superset_receipt["final_target_digest"]
+        )
+        assert repeated_superset_receipt["target_counts"] == (
+            superset_receipt["target_counts"]
+        )
         yield {
             "partial_receipt": partial_receipt,
             "rollback_snapshot": before_failure,
+            "superset_receipt": superset_receipt,
         }
     finally:
         database.reset_pool()
@@ -205,6 +233,8 @@ def store(authority_backfill_gate):
 def test_postgres_incremental_backfill_and_rollback_gate(authority_backfill_gate):
     assert authority_backfill_gate["partial_receipt"]["parity"]
     assert authority_backfill_gate["rollback_snapshot"]
+    assert authority_backfill_gate["superset_receipt"]["source_incorporated"]
+    assert not authority_backfill_gate["superset_receipt"]["exact_equal"]
 
 
 def create(store, tenant: str, key: str):

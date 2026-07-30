@@ -62,8 +62,11 @@ reads correctly instead of failing as incomplete). It therefore requires
 write access to the SQLite file for schema and migration only; it never
 inserts, rewrites, or deletes source rows outside those guarded migrations.
 The subsequent snapshot itself opens the file read-only. It refuses a
-non-empty mismatched PostgreSQL target and reports only table counts plus an
-aggregate digest:
+shared-primary-key conflict. It inserts SQLite-only rows, preserves
+PostgreSQL-only rows retained from an earlier partial cutover, and has no
+update or delete path. Its v2 receipt reports both aggregate digests, source
+and target counts, target-only counts, `source_incorporated`, and
+`exact_equal`. A strict PostgreSQL superset is incorporated but not equal:
 
 ```shell
 python scripts/reconcile_customization_authority.py --mode backfill \
@@ -72,9 +75,10 @@ python scripts/reconcile_customization_authority.py --mode parity \
   --sqlite /data/state/customization.db
 ```
 
-Run both commands from the exact release image before selecting PostgreSQL.
-Save their output as staging evidence. The commands do not make a live selector
-change.
+Run both commands from the exact release image while SQLite writes are dark,
+before selecting PostgreSQL. The historical `parity` mode name now proves
+source incorporation and reports exact equality separately. Save both receipts
+as staging evidence. The commands do not make a live selector change.
 
 ## Current authority summary
 
@@ -91,7 +95,7 @@ change.
 | Harness sessions and repository leases | `LEAF_HARNESS_SESSION_STORE` | `file` | implemented in `0017`; no historical backfill command |
 | Harness grants | `LEAF_GRANT_STORE` | `file` | `vault` is an unimplemented fail-closed seam; tokens are not in PostgreSQL |
 | Tenant repository mutation | `LEAF_HARNESS_AUTHORING_MODE` | `disabled` | `singleton` exists; `fleet` is blocked until the vault exists |
-| Customization R5 and R6 | `LEAF_CUSTOMIZATION_STORE` plus the R5 and R6 rollout modes | `sqlite`, with both rollout modes `off` | implemented in `0020`; reviewed backfill and parity commands exist, but have not run against staging |
+| Customization R5 and R6 | `LEAF_CUSTOMIZATION_STORE` plus the R5 and R6 rollout modes | `sqlite`, with both rollout modes `off` | implemented in `0020`; reviewed source-incorporation and equality evidence commands exist |
 
 `LEAF_PLATFORM_POSTGRES_REQUIRED=1` is a startup gate, not an authority
 selector. It requires live auth, a direct `DATABASE_URL`, current migrations,
@@ -139,8 +143,8 @@ default. It is not evidence of a staging or production cutover.
    output from the migration, API, broker, harness, and worker images that use
    PostgreSQL.
 3. Resolve every `unknown` and `not_implemented` item in the authority
-   inventory. Add reviewed backfill and live-data parity commands before a
-   selector changes.
+   inventory. Add reviewed backfill and live-data source-incorporation commands
+   before a selector changes.
 4. Rehearse each authority alone. Prove retries, task replacement, lease
    expiry, stale-owner fencing, and duplicate-charge prevention.
 5. For app sessions, progress through dual-write and shadow modes while the
@@ -149,8 +153,10 @@ default. It is not evidence of a staging or production cutover.
 6. Prove rollback for each authority. A selector rollback without a reverse
    backfill can lose writes made after cutover, so it is not a complete
    rollback.
-7. Change one staging selector at a time, then save live parity evidence and a
-   rollback receipt.
+7. Change one staging selector at a time, then save live source-incorporation
+   evidence and a rollback receipt. Do not roll back PostgreSQL to SQLite after
+   PostgreSQL accepts writes until a separately fenced reverse backfill proves
+   coverage and exact equality.
 8. Use a production canary only after staging is complete and an operator has
    approved production work.
 9. Keep the one-task deployment and 300-second drain until every mutable

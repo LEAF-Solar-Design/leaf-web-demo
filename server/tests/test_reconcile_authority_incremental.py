@@ -70,7 +70,7 @@ class _Database:
             raise
 
 
-def _run(monkeypatch, source, target, *, database=None):
+def _run(monkeypatch, source, target, *, database=None, mode="backfill"):
     database = database or _Database(target)
     monkeypatch.setattr(RECONCILE, "_ensure_source_schema", lambda _: None)
     monkeypatch.setattr(RECONCILE, "_sqlite_snapshot", lambda _: copy.deepcopy(source))
@@ -81,7 +81,7 @@ def _run(monkeypatch, source, target, *, database=None):
         lambda connection: copy.deepcopy(connection.snapshot),
     )
     return RECONCILE.reconcile(
-        sqlite_path=Path("unused-by-fakes.db"), mode="backfill"
+        sqlite_path=Path("unused-by-fakes.db"), mode=mode
     ), database
 
 
@@ -142,15 +142,42 @@ def test_nullable_and_json_text_content_must_match_exactly(monkeypatch):
         _run(monkeypatch, source, target)
 
 
-def test_target_only_row_is_rejected(monkeypatch):
+def test_target_only_row_is_preserved_as_prior_cutover_state(monkeypatch):
     source = _empty()
     target = _empty()
     table = "customization_change_sets"
     target[table] = [_row(table, "target-only-secret")]
 
-    with pytest.raises(RuntimeError, match="target-only row") as caught:
-        _run(monkeypatch, source, target)
-    assert "target-only-secret" not in str(caught.value)
+    receipt, database = _run(monkeypatch, source, target)
+
+    assert receipt["parity"] is False
+    assert receipt["exact_equal"] is False
+    assert receipt["source_incorporated"] is True
+    assert receipt["target_only_counts"][table] == 1
+    assert database.connection.snapshot == target
+    assert not [s for s in database.connection.statements if s.startswith("INSERT")]
+
+
+def test_parity_accepts_a_compatible_target_superset(monkeypatch):
+    source = _empty()
+    target = _empty()
+    table = "customization_change_sets"
+    target[table] = [_row(table, "retained")]
+
+    receipt, _ = _run(monkeypatch, source, target, mode="parity")
+
+    assert receipt["parity"] is False
+    assert receipt["exact_equal"] is False
+    assert receipt["source_incorporated"] is True
+
+
+def test_parity_rejects_source_rows_missing_from_target(monkeypatch):
+    source = _empty()
+    table = "customization_change_sets"
+    source[table] = [_row(table, "not-copied")]
+
+    with pytest.raises(RuntimeError, match="parity failed"):
+        _run(monkeypatch, source, _empty(), mode="parity")
 
 
 @pytest.mark.parametrize("side", ["source", "target"])
@@ -215,6 +242,6 @@ def test_post_insert_reread_must_reach_full_digest_parity(monkeypatch):
     database = _Database(_empty())
     database.connection.after_insert = lambda row: row.update(state="corrupted")
 
-    with pytest.raises(RuntimeError, match="parity failed"):
+    with pytest.raises(RuntimeError, match="conflicting row"):
         _run(monkeypatch, source, _empty(), database=database)
     assert database.connection.snapshot == _empty()

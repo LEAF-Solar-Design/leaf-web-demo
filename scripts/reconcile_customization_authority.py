@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Backfill or compare the SQLite and PostgreSQL customization authorities.
+"""Incorporate SQLite customization rows into the PostgreSQL authority.
 
-The command prints counts and one aggregate digest only. It never prints tenant
-rows, signatures, confirmation payloads, or the database URL.
+PostgreSQL-only rows from an earlier partial cutover remain durable. Shared
+primary keys must match exactly, and SQLite-only rows are inserted without any
+update or delete path. The command prints counts and aggregate digests only. It
+never prints tenant rows, signatures, confirmation payloads, or the database
+URL.
 """
 from __future__ import annotations
 
@@ -270,10 +273,13 @@ def _missing_source_rows(
     source: Mapping[str, Sequence[Mapping[str, Any]]],
     target: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, list[Mapping[str, Any]]]:
-    """Return source rows absent from an exact target subset.
+    """Return source rows absent from a compatible target.
 
     Errors intentionally identify only the table and mismatch class. Authority
     row values may contain tenant data, signatures, or confirmation payloads.
+    Target-only rows are retained because PostgreSQL can contain durable writes
+    from an earlier partial cutover. A shared primary key must still match every
+    declared column exactly.
     """
     source_index = _indexed_snapshot(source, side="SQLite")
     target_index = _indexed_snapshot(target, side="PostgreSQL")
@@ -282,9 +288,7 @@ def _missing_source_rows(
         for key, target_row in target_index[table].items():
             source_row = source_index[table].get(key)
             if source_row is None:
-                raise RuntimeError(
-                    f"PostgreSQL customization authority has a target-only row in {table}"
-                )
+                continue
             if target_row != source_row:
                 raise RuntimeError(
                     f"customization authority has a conflicting row in {table}"
@@ -298,6 +302,18 @@ def _missing_source_rows(
     return missing
 
 
+def _target_only_counts(
+    source: Mapping[str, Sequence[Mapping[str, Any]]],
+    target: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, int]:
+    source_index = _indexed_snapshot(source, side="SQLite")
+    target_index = _indexed_snapshot(target, side="PostgreSQL")
+    return {
+        table: len(target_index[table].keys() - source_index[table].keys())
+        for table in TABLE_COLUMNS
+    }
+
+
 def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
     _ensure_source_schema(sqlite_path)
     source = _sqlite_snapshot(sqlite_path)
@@ -308,20 +324,30 @@ def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
         connection.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_FENCE,))
         target = _postgres_snapshot(connection)
         target_digest = authority_digest(target)
+        missing = _missing_source_rows(source, target)
         if mode == "backfill":
-            missing = _missing_source_rows(source, target)
             if any(missing.values()):
                 _insert_snapshot(connection, missing)
                 target = _postgres_snapshot(connection)
                 target_digest = authority_digest(target)
-        if target_digest != source_digest:
+                missing = _missing_source_rows(source, target)
+        if any(missing.values()):
             raise RuntimeError("customization authority parity failed")
+        exact_equal = target_digest == source_digest
+        target_counts = authority_counts(target)
         return {
-            "schema": "leaf.customization-authority-reconciliation.v1",
+            "schema": "leaf.customization-authority-reconciliation.v2",
             "mode": mode,
-            "digest": source_digest,
-            "counts": authority_counts(source),
-            "parity": True,
+            "digest": target_digest,
+            "counts": target_counts,
+            "exact_equal": exact_equal,
+            "final_target_digest": target_digest,
+            "parity": exact_equal,
+            "source_incorporated": True,
+            "source_counts": authority_counts(source),
+            "source_digest": source_digest,
+            "target_counts": target_counts,
+            "target_only_counts": _target_only_counts(source, target),
         }
 
 
