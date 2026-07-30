@@ -139,9 +139,6 @@ def _tenant_id(value: Any) -> str:
     return tenant_id
 
 
-_TRUSTED_GIT_PATHS: set[str] = set()
-
-
 def _git_trust(*paths: Path) -> list[str]:
     """Return command-scope `safe.directory` flags for exactly these paths.
 
@@ -166,7 +163,6 @@ def _git_trust(*paths: Path) -> list[str]:
         except OSError:
             resolved = str(path)
         flags.extend(("-c", f"safe.directory={resolved}"))
-        _TRUSTED_GIT_PATHS.add(resolved)
     return flags
 
 

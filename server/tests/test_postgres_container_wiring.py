@@ -192,42 +192,67 @@ def test_authored_tool_bodies_never_enter_the_build_context():
 def _installs_git(path: str) -> bool:
     """Whether the SHIPPED stage of a Dockerfile really installs git.
 
-    Every loosening here was a real false positive found in review:
-      - a commented-out `# apt-get install -y git` matched a whole-file regex;
-      - an install in an earlier, discarded stage matched;
-      - `RUN printf 'apt-get install -y git' > /note` matched, installing nothing;
-      - a valid install continued onto the next line with `\\` did NOT match.
-    So: join continuations first, drop comments, keep only RUN instructions, split
-    each into shell commands, and require a command that STARTS with apt-get
-    install and carries git as its own token. A printf command starts with printf.
+    Every guard here replaced a false positive found in review. Each of these left
+    git absent while an earlier version of this helper said yes:
+      - `# apt-get install -y git`               (a whole-line comment)
+      - `RUN apt-get install -y curl # git`      (a TRAILING comment)
+      - `RUN printf 'apt-get install -y git' >f` (a quoted argument)
+      - `RUN true || apt-get install git`        (only runs if `true` fails)
+      - `apt-get install --download-only git`    (downloads, installs nothing)
+      - install git, then `apt-get purge git`    (net effect: absent)
+      - an install in an earlier, discarded stage
+    And one false NEGATIVE: a valid install continued onto the next line with `\\`.
+
+    Anything this parser cannot read (heredocs, exec-form RUN) simply fails, which
+    is the safe direction: it reports "not installed" and someone looks.
     """
     joined = re.sub(r"\\\s*\n\s*", " ", _read(path))
     lines = [ln for ln in joined.splitlines() if not re.match(r"\s*#", ln)]
     starts = [i for i, ln in enumerate(lines) if re.match(r"\s*FROM\s", ln)]
     shipped = lines[starts[-1]:] if starts else lines
+
+    installed = False
     for line in shipped:
         run = re.match(r"\s*RUN\s+(.*)", line)
         if not run:
             continue
-        for command in re.split(r"&&|;|\|\|", run.group(1)):
-            command = command.strip()
-            if not re.match(r"^(apt-get|apt)\s+install\b", command):
-                continue
-            if re.search(r"(?<![\w./-])git(?![\w./-])", command):
-                return True
-    return False
+        body = run.group(1)
+        # `RUN --mount=... cmd` / `RUN --network=none cmd`: drop the flags.
+        body = re.sub(r"^(--[\w-]+(=\S+)?\s+)+", "", body)
+        # A trailing unquoted comment is not part of any command.
+        body = re.sub(r"(?<!['\"])#.*$", "", body)
+        for chain in body.split(";"):
+            # `A || B` runs B only when A fails, so B is not a guarantee.
+            reliable = chain.split("||")[0]
+            for command in reliable.split("&&"):
+                command = command.strip()
+                verb = re.match(r"^(apt-get|apt)\s+(install|purge|remove)\b", command)
+                if not verb:
+                    continue
+                if not re.search(r"(?<![\w./-])git(?![\w./-])", command):
+                    continue
+                if verb.group(2) == "install":
+                    if "--download-only" in command:
+                        continue  # fetched, never unpacked
+                    installed = True
+                else:
+                    installed = False  # purged again: net effect is absent
+    return installed
 
 
-def _git_subprocess_calls(module_path: str) -> list[ast.Call]:
-    """Every subprocess launch whose command list literally starts with "git".
+def _subprocess_launches(module_path: str) -> tuple[list[ast.Call], list[ast.Call]]:
+    """Split a module's subprocess launches into (literal git, unreadable).
 
     Narrowed to subprocess on purpose: an unrelated `record_requirement(["git"])`
-    satisfied the earlier any-call version. A command built in a variable is not
-    matched, so if the module is refactored that way the premise assertion below
-    fails loudly rather than passing on stale reasoning.
+    satisfied an earlier any-call version. The second list is what closes the hole
+    a bare count could not: a launch whose command is built in a variable is
+    invisible to this checker, so it is reported rather than skipped. A sixth
+    untrusted variable-based git launch therefore fails instead of hiding behind
+    five recognised ones.
     """
     tree = ast.parse(_read(module_path))
-    found: list[ast.Call] = []
+    literal_git: list[ast.Call] = []
+    unreadable: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -242,11 +267,12 @@ def _git_subprocess_calls(module_path: str) -> list[ast.Call]:
             continue
         first = node.args[0]
         if not isinstance(first, ast.List) or not first.elts:
+            unreadable.append(node)
             continue
         head = first.elts[0]
         if isinstance(head, ast.Constant) and head.value == "git":
-            found.append(node)
-    return found
+            literal_git.append(node)
+    return literal_git, unreadable
 
 
 def test_the_image_build_never_selects_a_stage_other_than_the_last():
@@ -268,23 +294,34 @@ def test_every_git_launch_declares_the_repository_safe():
     (tenantRepoProvider.ts trustSharedRepo); the Python service did not, so the app
     and broker would still have answered 503 with git installed.
     """
-    calls = _git_subprocess_calls("server/customization_service.py")
-    assert len(calls) >= 5, (
-        f"expected the service's git launches, found {len(calls)}; if it stopped "
-        "shelling out to git, this contract no longer applies"
+    calls, unreadable = _subprocess_launches("server/customization_service.py")
+    assert calls, (
+        "premise: the service launches git through subprocess with a literal command "
+        "list. If that changed, this contract needs rewriting, not skipping."
+    )
+    assert not unreadable, (
+        "customization_service.py:"
+        + ", ".join(str(node.lineno) for node in unreadable)
+        + ": a subprocess command built in a variable is invisible to this check. "
+        "Keep git launches literal, or extend the checker."
     )
     for call in calls:
-        elements = call.args[0].elts
-        trusted = any(
-            isinstance(el, ast.Starred)
+        trusted = [
+            el for el in call.args[0].elts
+            if isinstance(el, ast.Starred)
             and isinstance(el.value, ast.Call)
             and isinstance(el.value.func, ast.Name)
             and el.value.func.id == "_git_trust"
-            for el in elements
-        )
+        ]
         assert trusted, (
             f"customization_service.py:{call.lineno}: this git launch does not pass "
             "_git_trust(...), so an EFS-owned repo will be refused as dubious"
+        )
+        # `_git_trust()` with no arguments emits no flags and trusts nothing, and
+        # satisfied an earlier version of this assertion.
+        assert all(node.value.args for node in trusted), (
+            f"customization_service.py:{call.lineno}: _git_trust() was called with no "
+            "paths, so it produces no safe.directory flags at all"
         )
 
 
@@ -303,7 +340,7 @@ def test_every_image_whose_process_requires_git_installs_git():
     git and treats OSError as "unknown revision", so canonical-worker legitimately
     ships without it.
     """
-    assert _git_subprocess_calls("server/customization_service.py"), (
+    assert _subprocess_launches("server/customization_service.py")[0], (
         "premise: customization_service launches git. If that changed, this test's "
         "reason to exist changed with it."
     )
