@@ -88,13 +88,16 @@ org UUID through the `identity_bindings` row that org bootstrap created.
 |---|---|
 | Gates | Identical to tier-sync: `LEAF_BILLING_SYNC_LIVE` + secret, else **503**; wrong/missing `X-Billing-Sync-Secret` → **403** (constant-time). |
 | Body | `{external_authority: "auth0", external_subject: "<sub>"}` — POSTed in the body, never the URL, so the subject stays out of access logs. |
-| Semantics | Read-only lookup of `identity_bindings` (active row) → `{org_id}`. Unknown identity → **404** (honest missing linkage: an account predating platform bootstrap). |
-| Caller cadence | leaf_website calls this ONCE per org — the first subscription event with no stored linkage — then persists the UUID in its own DB (`Organization.platformOrgId`) and never asks again. `LEAF_BILLING_SYNC_ORG_MAP` remains an explicit operator override with top precedence. |
+| Semantics | Read-only lookup of `identity_bindings` → `{org_id}`, resolvable only for an **active, `role='owner'` binding to an active org**. Everything else → **404**: unknown identity (an account predating platform bootstrap), a non-owner binding (member/reviewer identities must not enumerate), and a non-active org (offboarding marks the org before revoking bindings; a UUID cached in that window would be durably persisted while tier-sync forever answers 409). |
+| Caller cadence | REQUIRED CONSUMER BEHAVIOR (implemented by leaf_website PR #172, verified by its `scripts/billing/tier-sync-e2e.ts`): call ONCE per org — the first subscription event with no stored linkage — persist the UUID in the caller's own DB (`Organization.platformOrgId`), never ask again; keep `LEAF_BILLING_SYNC_ORG_MAP` as an explicit operator override with top precedence. |
 
 Dev posture: `POST /api/orgs` accepts an optional `external_subject` when auth
 is off, bootstrapping org + binding in one call so leaf_website's e2e harness
 can prove bootstrap → resolve → tier-sync without Auth0. With `LEAF_AUTH_LIVE=1`
-that field is refused (422): a client-supplied identity is never trusted.
+that field is refused (**422, after successful authentication** — an
+unauthenticated call is already 401 at the gate, so the refusal is what a
+verified-but-miswired caller sees): a client-supplied identity is never
+trusted.
 
 ## 4. Lapse and grace
 
@@ -135,10 +138,10 @@ Nothing below is chippable; each step is an operator action:
   idempotency dedup) is a follow-up schema decision.
 * **Metering** — usage-based billing (`/api/usage` `agent` aggregates) is out
   of scope for the tier rail entirely.
-* **Org discovery for the webhook** — BUILT (2026-07-30), see §3.1. The
-  durable linkage is leaf_website's DB column `Organization.platformOrgId`,
-  first populated by `POST /api/billing/org-resolve` keyed on the org owner's
-  Auth0 `sub`. The location this section originally named —
+* **Org discovery for the webhook** — BUILT (2026-07-30), see §3.1: this repo
+  serves `POST /api/billing/org-resolve`; the companion consumer half
+  (leaf_website PR #172) persists the result as `Organization.platformOrgId`,
+  keyed on the org owner's Auth0 `sub`. The location this section originally named —
   `app_metadata.leaf.org_id` — was REJECTED: Auth0's PATCH merges only
   root-level `app_metadata` keys, and leaf_website's webhook replaces the
   whole `leaf` object on every subscription event, so a UUID stored there is

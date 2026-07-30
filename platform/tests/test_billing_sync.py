@@ -191,6 +191,28 @@ def test_resolve_authority_mismatch_is_404(client, live_sync):
     assert _resolve(client, subject, authority="google").status_code == 404
 
 
+def test_resolve_non_active_org_is_404(client, live_sync):
+    """Offboarding marks the org before revoking bindings; resolving in that
+    window must NOT hand out a UUID the caller would durably cache while
+    tier-sync forever answers 409 for it."""
+    subject = _unique_subject()
+    org = store.create_org_with_identity("Offboarding Org", "auth0", subject)
+    assert _resolve(client, subject).status_code == 200  # sanity: resolvable while active
+    with cursor() as cur:
+        cur.execute("UPDATE orgs SET status = 'offboarding' WHERE org_id = %(o)s",
+                    {"o": org.org_id})
+    assert _resolve(client, subject).status_code == 404
+
+
+def test_resolve_non_owner_binding_is_404(client, make_org, live_sync):
+    """The contract keys the linkage on the org OWNER's identity; an editor/
+    reviewer/read_only binding must not resolve (enumeration surface)."""
+    org = make_org(name="Role Test Org")
+    subject = _unique_subject()
+    store.create_identity_binding(org.org_id, "auth0", subject, role="editor")
+    assert _resolve(client, subject).status_code == 404
+
+
 # --------------------------------------------------------------------------- #
 # dev bootstrap seam: POST /api/orgs with external_subject binds the identity,
 # making the full webhook path (bootstrap -> resolve -> tier-sync) provable
@@ -220,3 +242,26 @@ def test_dev_seam_duplicate_subject_is_409(client, live_sync):
     assert first.status_code == 200
     again = client.post("/api/orgs", json={"name": "Dup B", "external_subject": subject})
     assert again.status_code == 409
+
+
+def test_dev_seam_refused_422_under_live_auth_with_valid_token(client, live_sync, monkeypatch):
+    """The 422 refusal fires AFTER successful authentication (unauthenticated
+    calls are already 401 at the gate) and leaves no write behind — neither
+    the verified subject nor the body-supplied one gains a binding."""
+    t1b = pytest.importorskip("test_wave_hardening_1b")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_AUTH0_ISSUER", t1b.ISS)
+    monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", t1b.AUD)
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", t1b.NS)
+    monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(t1b._JWKS_FILE))
+    verified_subject = _unique_subject()
+    body_subject = _unique_subject()
+    r = client.post(
+        "/api/orgs",
+        json={"name": "Live Seam Refusal", "external_subject": body_subject},
+        headers={"Authorization": "Bearer " + t1b._mint(
+            "unused", with_org=False, subject=verified_subject)},
+    )
+    assert r.status_code == 422, r.text
+    assert store.resolve_active_identity_binding("auth0", verified_subject) is None
+    assert store.resolve_active_identity_binding("auth0", body_subject) is None

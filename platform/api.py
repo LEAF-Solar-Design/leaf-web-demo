@@ -627,16 +627,25 @@ def billing_org_resolve(body: BillingOrgResolveBody,
     subscription event with no stored linkage — and persists the returned
     UUID in its own DB (Organization.platformOrgId). Same trusted-internal-
     caller model and fail-closed gates as tier-sync; read-only (resolves a
-    binding the platform already owns, writes nothing). Unknown identity ->
-    404 (honest missing linkage: an account predating platform bootstrap).
+    binding the platform already owns, writes nothing).
+
+    404 in every unresolvable case — unknown identity (an account predating
+    platform bootstrap), a non-OWNER binding (the contract keys the linkage
+    on the org owner; member/reviewer identities must not enumerate), and a
+    non-active org (offboarding marks the org BEFORE revoking its bindings,
+    and a caller caching a UUID in that window would durably persist a
+    linkage tier-sync forever answers 409 for).
     """
     _require_billing_sync_caller(x_billing_sync_secret)
     binding = store.resolve_active_identity_binding(
         body.external_authority, body.external_subject)
     if binding is None:
         raise HTTPException(status_code=404, detail="no platform org for this identity")
+    role = store.active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role != "owner":
+        raise HTTPException(status_code=404, detail="no platform org for this identity")
     org = store.get_org(binding.platform_tenant_id)
-    if org is None:  # binding to a purged org row — honest missing linkage
+    if org is None or org.status != "active":
         raise HTTPException(status_code=404, detail="no platform org for this identity")
     return {"org_id": str(org.org_id)}
 
