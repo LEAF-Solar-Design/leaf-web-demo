@@ -95,6 +95,10 @@ def strip_sql_noise(text: str) -> str:
         elif ch == "/" and text.startswith("/*", i):
             j = text.find("*/", i + 2)
             i = n if j == -1 else j + 2
+            # A block comment is a TOKEN SEPARATOR in SQL: `DROP/**/TRIGGER`
+            # is valid DDL. Removing it without a replacement would glue the
+            # tokens into DROPTRIGGER and evade every \b...\s+ pattern.
+            out.append(" ")
         elif ch == "'":
             j = i + 1
             while j < n:
@@ -110,6 +114,7 @@ def strip_sql_noise(text: str) -> str:
         elif ch == "$" and text.startswith("$$", i):
             j = text.find("$$", i + 2)
             i = n if j == -1 else j + 2
+            out.append(" ")  # same separator reasoning as block comments
         else:
             out.append(ch)
             i += 1

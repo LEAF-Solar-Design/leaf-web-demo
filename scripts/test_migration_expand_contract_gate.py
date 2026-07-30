@@ -63,6 +63,19 @@ def test_marker_must_reference_earlier_existing_migration(tmp_path):
     assert any("does not exist" in v for v in violations2)
 
 
+def test_block_comments_are_token_separators_not_glue(tmp_path):
+    """Round 3, finding 1: `DROP/**/TRIGGER` is valid SQL — stripping the
+    comment must leave a separator, not fuse the tokens past the detector."""
+    for i, sql in enumerate([
+            "DROP/**/TRIGGER trg ON t;",
+            "ALTER TYPE e RENAME/**/VALUE 'a' TO 'b';",
+            "DROP/* sneaky */TABLE users;",
+    ]):
+        root = _dir(tmp_path / f"glue{i}", {"0023_x.sql": sql + "\n"})
+        violations = gate.check_migrations(root)
+        assert violations and "marker" in violations[0], sql
+
+
 def test_comments_and_strings_never_trip_the_gate(tmp_path):
     root = _dir(tmp_path, {"0023_notes.sql": (
         "-- This note mentions DROP TABLE and RENAME COLUMN in prose.\n"

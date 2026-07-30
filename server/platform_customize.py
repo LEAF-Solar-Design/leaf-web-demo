@@ -623,10 +623,19 @@ def _reconcile(change_id: str, record: dict[str, Any]) -> dict[str, Any]:
         changed = True
     landed_marker = _read_marker(change_id, "landed")
     if (landed_marker and landed_marker.get("commit_sha") == commit_sha
-            and record.get("state") != LANDED):
-        # push-then-mark ordering: an existing land marker PROVES delivery
-        # completed (or push was disabled), so completing the projection is
-        # honest, not optimistic.
+            and record.get("state") == APPROVED
+            and _cosign_satisfied(change_id, record)):
+        # Heal ONLY the state land() can legitimately crash out of: the
+        # record was APPROVED when the marker was claimed (land() requires
+        # approved before claiming, and for fundamental changes the durable
+        # cosign marker must say approved). A landed marker seen against
+        # awaiting/denied can only be forged or misplaced — reconciling it
+        # would let a marker write skip co-sign, branch verification, and
+        # push, so it is deliberately IGNORED (the record stays authoritative
+        # and the anomaly is logged for the operator).
+        # push-then-mark ordering: within the legitimate window the marker
+        # PROVES delivery completed (or push was disabled), so completing the
+        # projection is honest, not optimistic.
         record.setdefault("push", None)
         if record["push"] is None:
             record["push"] = {"pushed": push_enabled(),
@@ -634,9 +643,25 @@ def _reconcile(change_id: str, record: dict[str, Any]) -> dict[str, Any]:
                               "at": landed_marker.get("at"), "healed": True}
         record["state"] = LANDED
         changed = True
+    elif landed_marker and record.get("state") not in (LANDED, APPROVED):
+        _LOG.warning(
+            "platform_customize: landed marker present against state=%s for "
+            "change %s — ignored (illegitimate heal window)",
+            record.get("state"), change_id)
     if changed:
         _write_record(record)
     return record
+
+
+def _cosign_satisfied(change_id: str, record: dict[str, Any]) -> bool:
+    """True when the change needs no co-sign, or the DURABLE marker approves
+    this exact commit. Used by the heal path so a forged landed marker cannot
+    stand in for the co-sign it never had."""
+    if not record.get("fundamental_paths"):
+        return True
+    marker = _read_marker(change_id, "cosign")
+    return bool(marker and marker.get("verdict") == "approved"
+                and marker.get("commit_sha") == record.get("commit_sha"))
 
 
 def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:

@@ -324,6 +324,39 @@ def test_crashed_land_heals_instead_of_wedging(lane_env):
     assert lane.status_view(change_id=cid, tenant_id=TENANT)["state"] == "landed"
 
 
+def test_forged_landed_marker_cannot_skip_cosign(lane_env):
+    """Round 3, finding 2: a landed marker against an awaiting/denied record
+    is outside the legitimate crash window (land() only claims from
+    `approved`), so reconcile must IGNORE it — never flip the record to
+    landed around the co-sign gate."""
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 11\n"}])
+    cid = view["change_id"]
+    assert view["state"] == "awaiting_cosign"
+    assert lane._claim_marker(cid, "landed", {
+        "commit_sha": view["commit_sha"], "at": "2026-07-30T00:00:00Z"})
+    # status does NOT heal to landed
+    assert lane.status_view(change_id=cid, tenant_id=TENANT)["state"] == "awaiting_cosign"
+    # landing still demands the co-sign
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=cid, tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
+    assert exc.value.code == "cosign_required"
+
+
+def test_forged_landed_marker_cannot_resurrect_a_denied_change(lane_env):
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 12\n"}])
+    cid = view["change_id"]
+    lane.cosign(change_id=cid, approver_subject="auth0|reviewer",
+                commit_sha=view["commit_sha"], approve=False)
+    assert lane._claim_marker(cid, "landed", {
+        "commit_sha": view["commit_sha"], "at": "2026-07-30T00:00:00Z"})
+    assert lane.status_view(change_id=cid, tenant_id=TENANT)["state"] == "denied"
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=cid, tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
+    assert exc.value.code == "change_not_landable"
+
+
 def test_crashed_cosign_heals_on_next_touch(lane_env):
     """A verdict marker with a stale awaiting record reconciles on read."""
     view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 8\n"}])
