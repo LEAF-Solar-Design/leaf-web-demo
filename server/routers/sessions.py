@@ -86,14 +86,14 @@ import base64
 import binascii
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 import deps
 import emf_metrics
@@ -295,55 +295,88 @@ def _image_magic_matches(media_type: str, decoded: bytes) -> bool:
     return int.from_bytes(decoded[4:8], "little") == len(decoded) - 8
 
 
-async def _read_bounded_body(request: Request) -> bytes:
-    """Read the body, refusing once it passes the cap rather than after.
+class _MessageBodyTooLarge(Exception):
+    """Raised inside the ASGI receive wrapper to abort an oversized body."""
 
-    A Content-Length check alone is not a memory bound: a chunked request
-    declares no length, so ``await request.body()`` would buffer the whole
-    stream first and only then measure it — the caller pays the memory before
-    the refusal. Reading chunk by chunk makes the cap the actual ceiling.
+
+class MessageBodyLimitMiddleware:
+    """Byte-counting ASGI guard on POST /api/sessions/{id}/messages.
+
+    Two things have to be true at once, and only a middleware gets both.
+
+    The cap must be a real MEMORY bound: a chunked request declares no
+    Content-Length, so any check that reads the body and then measures it has
+    already paid the cost. This wraps `receive` and aborts the moment the
+    cumulative body passes the cap, exactly as UploadBodyLimitMiddleware does
+    for the upload route.
+
+    And the body must still be parsed by FASTAPI. An earlier attempt read and
+    parsed it by hand inside a dependency, which meant reimplementing FastAPI's
+    error behaviour by hand too — and three reviews found three ways it
+    differed: an absent body became `{}` and answered 409 instead of 422, error
+    locations lost their `body` prefix, and JSON bytes sent as text/plain were
+    accepted where FastAPI refuses them. A dependency cannot fix that, because
+    FastAPI reads the body BEFORE it solves dependencies. Bounding the stream
+    underneath and letting the framework parse keeps one implementation of the
+    wire contract instead of two.
     """
-    declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > _MAX_MESSAGE_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
-    chunks: List[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > _MAX_MESSAGE_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="request exceeds the 1MB image message cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
+    _PATH = re.compile(r"^/api/sessions/[^/]+/messages$")
 
-async def _parse_message_request(request: Request) -> MessageRequest:
-    """Reject an oversized body before parsing, keeping FastAPI's 422 shape."""
-    raw = await _read_bounded_body(request)
-    # Reading the body by hand means reproducing FastAPI's errors by hand, and
-    # every difference is a silent wire change for EVERY malformed request, not
-    # just image ones. Three things have to match: the error shape (the app's
-    # envelope, rendered by envelopes.py from a RequestValidationError), the
-    # `body` prefix on every location, and the treatment of an ABSENT body —
-    # which is a missing required field, not an empty object. Defaulting it to
-    # `{}` let it through to the one-of check and answered 409 where the route
-    # used to answer 422.
-    if not raw.strip():
-        raise RequestValidationError(
-            [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}],
-        )
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RequestValidationError(
-            [{"type": "json_invalid", "loc": ("body", exc.pos), "msg": "JSON decode error",
-              "input": {}, "ctx": {"error": exc.msg}}],
-        ) from exc
-    try:
-        return MessageRequest.model_validate(payload)
-    except ValidationError as exc:
-        raise RequestValidationError(
-            [{**error, "loc": ("body", *error.get("loc", ()))} for error in exc.errors()],
-        ) from exc
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http" or scope.get("method") != "POST"
+                or not self._PATH.match(scope.get("path") or "")):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        declared = headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > _MAX_MESSAGE_BODY_BYTES:
+            await self._send_413(send)
+            return
+
+        seen = 0
+        response_started = False
+
+        async def counting_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body") or b"")
+                if seen > _MAX_MESSAGE_BODY_BYTES:
+                    raise _MessageBodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _MessageBodyTooLarge:
+            if response_started:  # pragma: no cover - the abort precedes the response
+                raise
+            await self._send_413(send)
+
+    @staticmethod
+    async def _send_413(send):
+        payload = json.dumps({
+            "error": {"error_code": "BAD_PARAMS",
+                      "message": "request exceeds the 1MB image message cap",
+                      "retryable": False},
+            "degraded_mode": False,
+        }).encode("utf-8")
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(payload)).encode())]})
+        await send({"type": "http.response.body", "body": payload})
+
 
 
 def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:
@@ -358,7 +391,10 @@ def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Di
     for index, image in enumerate(images, start=1):
         media_type = image.get("media_type")
         data = image.get("data")
-        if media_type not in _IMAGE_MEDIA_TYPES:
+        # isinstance FIRST: `media_type` comes straight from client JSON, and
+        # a list or dict is unhashable — `in` on a set would raise TypeError
+        # and turn a bad request into a 500.
+        if not isinstance(media_type, str) or media_type not in _IMAGE_MEDIA_TYPES:
             allowed = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
             raise ValueError(f"image {index} media_type must be one of: {allowed}")
         if not isinstance(data, str) or not data:
@@ -561,7 +597,7 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
 async def post_message_route(session_id: str, request: Request,
-                             req: MessageRequest = Depends(_parse_message_request),
+                             req: MessageRequest,
                              tenant=Depends(deps.require_active_tenant)):
     return post_message(session_id, req, request, tenant)
 

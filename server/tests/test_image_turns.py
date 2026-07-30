@@ -40,6 +40,9 @@ def client():
     app = FastAPI()
     install_error_handlers(app)
     app.include_router(sessions_router.router)
+    # The body cap is an ASGI middleware, not route code, so a client built
+    # without it would test a route that is no longer bounded.
+    app.add_middleware(sessions_router.MessageBodyLimitMiddleware)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -173,88 +176,97 @@ def test_a_chunked_body_cannot_outgrow_the_cap(client):
     """Content-Length is not a memory bound.
 
     A chunked request declares no length, so a guard that reads the whole body
-    and then measures it has already paid the memory. The refusal must happen
-    while reading.
+    and then measures it has already paid the memory. The refusal has to happen
+    while the bytes are still arriving, which is why this is a middleware: by
+    the time a route or even a dependency runs, FastAPI has already read the
+    body.
     """
-    # Tested against the reader directly. TestClient materialises a generator
-    # body on the CLIENT before the app ever runs, so an end-to-end request
-    # cannot show how much the server accepted — and the status code cannot
-    # either, since buffering everything and THEN measuring also answers 413.
-    # What separates the two is how many chunks get pulled.
     chunk_size = 65536
     total_chunks = 320
+    sent = {"count": 0}
 
-    class _CountingRequest:
-        def __init__(self):
-            self.headers = {}          # chunked: no content-length to check
-            self.pulled = 0
+    async def receive():
+        sent["count"] += 1
+        if sent["count"] > total_chunks:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": b"x" * chunk_size, "more_body": True}
 
-        async def stream(self):
-            for _ in range(total_chunks):
-                self.pulled += 1
-                yield b"x" * chunk_size
+    started = {}
 
-        async def body(self):
-            # What the un-streamed implementation would call: everything, at once.
-            self.pulled = total_chunks
-            return b"x" * (chunk_size * total_chunks)
+    async def send(message):
+        if message["type"] == "http.response.start":
+            started["status"] = message["status"]
 
-    request = _CountingRequest()
-    with pytest.raises(HTTPException) as raised:
-        asyncio.run(sessions_router._read_bounded_body(request))
-    assert raised.value.status_code == 413
+    async def never(scope, receive_, send_):  # pragma: no cover - must not be reached
+        while True:
+            message = await receive_()
+            if not message.get("more_body"):
+                break
 
+    middleware = sessions_router.MessageBodyLimitMiddleware(never)
+    scope = {"type": "http", "method": "POST",
+             "path": "/api/sessions/abc/messages", "headers": []}
+    asyncio.run(middleware(scope, receive, send))
+
+    assert started.get("status") == 413
     cap_in_chunks = sessions_router._MAX_MESSAGE_BODY_BYTES // chunk_size
-    assert request.pulled <= cap_in_chunks + 2, (
-        f"{request.pulled} chunks were accepted before refusing; the cap is "
+    assert sent["count"] <= cap_in_chunks + 2, (
+        f"{sent['count']} chunks were accepted before refusing; the cap is "
         f"~{cap_in_chunks} chunks, so the whole body was read first"
     )
 
 
-def test_malformed_json_keeps_the_apps_own_422_envelope(client):
-    """Body parsing must still raise the error the app already knows how to render.
+def test_an_image_media_type_of_the_wrong_type_is_400_not_500(client):
+    """`media_type` comes straight from client JSON.
 
-    Reading the body by hand made it tempting to answer with a bare
-    HTTPException, which collapses the app's `{ok, error:{code, message}}`
-    envelope into `{"detail": "invalid message body"}` for EVERY malformed
-    request, not just image ones. Routing through RequestValidationError keeps
-    envelopes.install_error_handlers in charge — including its rule that the
-    rejected value is never echoed back.
+    A list is unhashable, so testing membership in a set raises TypeError and
+    turns a bad request into a server error. The type check has to come first.
     """
     session_id = _session(client)
-    response = client.post(f"/api/sessions/{session_id}/messages", content=b"{not json")
-    assert response.status_code == 422
+    for bad in ([], {}, 5, None):
+        response = _post(client, session_id, {
+            "images": [{"media_type": bad, "data": base64.b64encode(_PNG).decode()}],
+        })
+        assert response.status_code == 400, f"{bad!r} gave {response.status_code}"
+
+
+
+_JSON = {"content-type": "application/json", "X-Tenant-Id": "image-tenant"}
+
+
+@pytest.mark.parametrize("label,kwargs,expected_type", [
+    ("malformed json", {"content": b"{not json", "headers": _JSON}, "json_invalid"),
+    # Whitespace is not an absent body: FastAPI tries to parse it and fails.
+    ("whitespace only", {"content": b"   ", "headers": _JSON}, "json_invalid"),
+    ("absent body", {"content": b"", "headers": _JSON}, "missing"),
+    # `null` is a body that says "nothing", which is a MISSING required field.
+    ("json null", {"content": b"null", "headers": _JSON}, "missing"),
+    ("json array", {"content": b"[]", "headers": _JSON}, "model_attributes_type"),
+    # JSON-shaped bytes sent as text/plain are NOT a JSON body to FastAPI.
+    ("wrong content type",
+     {"content": b'{"text":"hi"}',
+      "headers": {"content-type": "text/plain", "X-Tenant-Id": "image-tenant"}},
+     "model_attributes_type"),
+    ("wrong field type", {"json": {"text": 5}, "headers": {"X-Tenant-Id": "image-tenant"}},
+     "string_type"),
+])
+def test_malformed_bodies_keep_fastapis_own_error_for_each_case(client, label, kwargs, expected_type):
+    """One implementation of the wire contract, not two.
+
+    Reading the body by hand meant reproducing FastAPI's error behaviour by
+    hand, and three reviews found three ways it differed: an absent body became
+    an empty object and answered 409, error locations lost their `body` prefix,
+    and JSON bytes sent as text/plain were accepted where FastAPI refuses them.
+    The cap now lives in an ASGI middleware underneath the framework, so these
+    are FastAPI's own answers again — and this table is what pins them.
+    """
+    session_id = _session(client)
+    response = client.post(f"/api/sessions/{session_id}/messages", **kwargs)
+    assert response.status_code == 422, f"{label}: {response.text}"
     body = response.json()
-    assert body["error"]["error_code"] == "BAD_PARAMS"
-    assert "json_invalid" in body["error"]["message"]
-    assert "detail" not in body
-
-    # A well-formed body with a wrong FIELD TYPE takes the same route.
-    typed = client.post(f"/api/sessions/{session_id}/messages", json={"text": 5})
-    assert typed.status_code == 422
-    assert typed.json()["error"]["error_code"] == "BAD_PARAMS"
-
-
-def test_an_absent_body_is_a_missing_field_not_an_empty_object(client):
-    """The route used to answer 422 for no body; it must still.
-
-    Reading the body by hand made `or b"{}"` tempting. Every MessageRequest
-    field is optional, so an empty object validates, reaches the one-of check
-    and answers 409 — a different status for the same request than before.
-    """
-    session_id = _session(client)
-    response = client.post(f"/api/sessions/{session_id}/messages", content=b"")
-    assert response.status_code == 422, response.text
-    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
-
-
-def test_validation_locations_keep_the_body_prefix(client):
-    """`loc` is ('body', 'text'), not ('text',).
-
-    Clients read the location to point at the offending field. Validating the
-    parsed payload directly drops the prefix FastAPI puts there.
-    """
-    session_id = _session(client)
-    response = client.post(f"/api/sessions/{session_id}/messages", json={"text": 5})
-    assert response.status_code == 422
-    assert "'body', 'text'" in response.json()["error"]["message"]
+    assert body["error"]["error_code"] == "BAD_PARAMS", label
+    assert expected_type in body["error"]["message"], f"{label}: {body['error']['message']}"
+    # Every location keeps the `body` prefix a client reads to point at a field.
+    assert "'body'" in body["error"]["message"], label
+    # The rejected value is never echoed back (envelopes.py keeps loc/msg/type).
+    assert "input" not in body["error"]["message"], label
