@@ -64,7 +64,16 @@ export async function build(options) {
       // what was checked rather than whatever a later read happens to return.
       files[relativePath] = sha256(structure.contents.get(relativePath));
     }
-    const manifest = { version: 1, tier: options.tier, files, bundleDigest: bundleDigest(files) };
+    // `skills` carries what the loader used to re-derive by parsing YAML at
+    // mount time. Recording it here means the read happens once, offline, and
+    // the runtime just reads a field the digest already covers.
+    const manifest = {
+      version: 1,
+      tier: options.tier,
+      files,
+      skills: structure.skills,
+      bundleDigest: bundleDigest(files, structure.skills),
+    };
     await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     console.log(`READY: built ${options.tier} bundle with ${selected.length} skills at ${outputPath}`);
   } catch (error) {

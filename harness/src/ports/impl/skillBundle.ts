@@ -34,10 +34,14 @@ const SKILL_BYTES = 256 * 1024;
 const MAX_SKILLS = 250;
 const SHA256 = /^[a-f0-9]{64}$/;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
-const EXECUTABLE_KEYS = new Set([
-  "hooks", "allowed-tools", "allowedtools", "context", "agent", "agents",
-  "background", "monitor", "monitors", "command", "commands", "mcp", "mcpservers",
-]);
+const DESCRIPTION_BYTES = 8 * 1024;
+// There is no EXECUTABLE_KEYS list here any more. Refusing `hooks`, `context:
+// fork` and friends by inspection was always the weaker half of the argument —
+// the mount does not copy the source frontmatter, it writes a new one holding
+// name and description and nothing else, so no source key can survive whether
+// this module recognised it or not. The build still refuses them, loudly and
+// offline, so a curated skill that declares one is caught before deployment
+// rather than silently stripped at mount.
 const PLUGIN_KEYS = new Set(["name", "version", "description", "leafTier"]);
 const RESERVED_NAMES = new Set([
   "con", "prn", "aux", "nul",
@@ -60,204 +64,30 @@ function sha256(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function digest(files: Record<string, string>): string {
-  return sha256(Buffer.from(Object.keys(files).sort().map((path) => `${path}:${files[path]}`).join("\n")));
-}
-
-function plainTopLevelKey(line: string): string | null {
-  if (/^\s/.test(line) || line.trim() === "" || line.trimStart().startsWith("#")) return null;
-  const match = /^(?:"([^"]+)"|'([^']+)'|([^:\s][^:]*?))\s*:/.exec(line);
-  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? null)?.trim() ?? null;
-}
-
 /**
- * Read one frontmatter value starting at `index`, returning it and the line to
- * resume from.
+ * The pinned identity of a bundle: every file hash AND every re-emitted value.
  *
- * Block scalars are the reason this is not a one-liner. Real curated skills
- * write `description: >-` and continue on indented lines, so reading only the
- * text after the colon yields the literal string ">-" and throws the actual
- * description away. That value is what the model reads to decide whether a
- * skill is relevant, so losing it disables the skill quietly rather than
- * loudly. Folded (`>`) joins its lines with spaces, literal (`|`) keeps the
- * newlines, and a blank line is a paragraph break in both.
- */
-/**
- * Plain scalars a YAML reader resolves to something that is NOT a string.
+ * `skills` has to be in here. It is the one part of the artifact that is not a
+ * hashed file — the mount writes those descriptions into the document the model
+ * reads — so a digest over `files` alone would let an edited manifest change
+ * what a skill claims to do while still matching its pin.
  *
- * The set follows js-yaml's own resolvers rather than intuition, because the
- * near-misses are the whole problem: `.5` and `+.inf` are floats, `0b1010` is
- * an int, `1_000` is one thousand, and `1:30` is sexagesimal. Emitting any of
- * them as the text between the colon and the newline would put something in
- * the mounted document that the source did not say. Over-refusing here is
- * cheap and loud; under-refusing is a silent rewrite.
+ * Each line is JSON so the encoding is injective: a description containing a
+ * colon or a newline cannot be made to look like a different pair of fields.
  */
-const NON_STRING_PLAIN =
-  /^(null|~|true|false|yes|no|on|off|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])+)|[-+]?([0-9][0-9_]*(\.[0-9_]*)?|\.[0-9_]+)([eE][-+]?[0-9]+)?|[-+]?\.inf|\.nan|\[.*\]|\{.*\}|\d{4}-\d\d?-\d\d?(([Tt]|[ \t]+)\d\d?:\d\d:\d\d(\.\d+)?([ \t]*([Zz]|[-+]\d\d?(:?\d\d)?))?)?)$/i;
-
-/**
- * Decode a one-line YAML scalar, or return null meaning "present, but we will
- * not guess at it".
- *
- * Stripping the outer quotes is not decoding: `"a\nb"` is a newline to YAML and
- * a backslash-n to a naive strip, `'it''s'` is one apostrophe, and in a plain
- * scalar ` #` begins a comment. YAML separates on SPACE AND TAB only, so
- * JavaScript's `\s` — which includes NBSP and U+2028 — would cut a value where
- * YAML does not.
- */
-function readInlineScalar(raw: string): string | null {
-  const value = raw.replace(/^[ \t]+|[ \t]+$/g, "");
-  if (value.startsWith('"')) {
-    if (value.length < 2 || !/(^|[^\\])(\\\\)*"$/.test(value)) return null;
-    let out = "";
-    for (let i = 1; i < value.length - 1; i += 1) {
-      const ch = value[i]!;
-      // An unescaped quote before the end means this is not one scalar at all.
-      if (ch === '"') return null;
-      if (ch !== "\\") { out += ch; continue; }
-      const esc = value[++i];
-      if (esc === "u") {
-        const hex = value.slice(i + 1, i + 5);
-        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
-        out += String.fromCharCode(parseInt(hex, 16));
-        i += 4;
-        continue;
-      }
-      const simple: Record<string, string> = {
-        n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "/": "/",
-        b: "\b", f: "\f", "0": "\0", " ": " ",
-      };
-      const mapped = esc === undefined ? undefined : simple[esc];
-      // An escape we do not decode is one we would reproduce wrongly.
-      if (mapped === undefined) return null;
-      out += mapped;
-    }
-    return out;
-  }
-  if (value.startsWith("'")) {
-    if (value.length < 2 || !value.endsWith("'")) return null;
-    const inner = value.slice(1, -1);
-    // A doubled quote is the only escape here, so a lone one means the value is
-    // not what it looks like.
-    if (inner.replace(/''/g, "").includes("'")) return null;
-    return inner.replace(/''/g, "'");
-  }
-  const comment = value.search(/(^|[ \t])#/);
-  const text = (comment === -1 ? value : value.slice(0, comment)).replace(/[ \t]+$/, "");
-  if (text === "" || /^[&*!%@`]/.test(text) || NON_STRING_PLAIN.test(text)) return null;
-  return text;
+function digest(files: Record<string, string>, skills: Record<string, string>): string {
+  const lines = [
+    ...Object.keys(files).sort().map((path) => `file:${JSON.stringify([path, files[path]])}`),
+    ...Object.keys(skills).sort().map((name) => `skill:${JSON.stringify([name, skills[name]])}`),
+  ];
+  return sha256(Buffer.from(lines.join("\n")));
 }
 
-function readScalar(lines: string[], index: number, raw: string): { value: string | null; next: number } {
-  const header = raw.replace(/^[ \t]+|[ \t]+$/g, "");
-  if (!/^[>|]/.test(header)) {
-    // A plain or flow scalar can CONTINUE on more-indented lines: YAML folds
-    //     description: first
-    //       second
-    // into "first second", and `description: [` can open a sequence that closes
-    // pages later. Reading only the first line returns "first" or "[" and calls
-    // it exact. Both the continuation lines are consumed (so parsing resumes
-    // where YAML would) and the value is refused (so nothing is guessed at).
-    // A blank line does NOT end a plain scalar, and an indented comment is not
-    // content. So scan past both, and treat this as a continuation only if some
-    // indented, non-comment line actually follows. Stopping at the first blank
-    // returned "first" for
-    //     description: first
-    //
-    //       second
-    // which YAML folds to "first second".
-    let cursor = index + 1;
-    let lastContent = index;
-    while (cursor < lines.length) {
-      const line = lines[cursor]!;
-      if (line.trim() === "") { cursor += 1; continue; }
-      if (!/^[ \t]/.test(line)) break;
-      if (!line.trimStart().startsWith("#")) lastContent = cursor;
-      cursor += 1;
-    }
-    // Resume AFTER the continuation, or at the next line when there was none;
-    // blank and comment lines the outer loop skips on its own.
-    if (lastContent > index) return { value: null, next: lastContent + 1 };
-    return { value: readInlineScalar(header), next: index + 1 };
-  }
-  // ONLY the four plain headers, and then only a block whose text we can
-  // reproduce CHARACTER FOR CHARACTER. Everything else refuses. An explicit
-  // indentation indicator (`>2`, `|-4`) makes leading spaces content; `+` keeps
-  // trailing blank lines on purpose; a more-indented line inside a folded block
-  // is preserved verbatim by YAML rather than folded; and a tab is not YAML
-  // indentation at all. Each of those needs a real YAML engine to honour, and
-  // approximating any of them silently rewrites the description the model reads
-  // to decide a skill applies. Refusing is the honest option and it is loud:
-  // the bundle does not build.
-  const reproducible = /^[>|]-?$/.test(header);
-  const folded = header.startsWith(">");
-  const chomped = header.endsWith("-");
-  const content: string[] = [];
-  let cursor = index + 1;
-  for (; cursor < lines.length; cursor += 1) {
-    const line = lines[cursor]!;
-    // A line that is neither blank nor indented ends the block — that is where
-    // YAML resumes reading keys, so the caller must resume there too or an
-    // executable key hiding after a block scalar would never be inspected.
-    if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
-    content.push(line);
-  }
-  // Blank lines AFTER the text are chomped by YAML (`-` drops them, clip keeps
-  // exactly one newline), so they carry no content and a blank line before the
-  // next key is ordinary formatting. Blank lines BETWEEN text lines are content.
-  while (content.length && content[content.length - 1]!.trim() === "") content.pop();
-  // An unreproducible block still has a knowable EXTENT, and the caller has to
-  // resume after it either way or a key hiding below would never be inspected.
-  if (!reproducible) return { value: null, next: cursor };
-  if (!content.length) return { value: "", next: cursor };
-  const base = content[0]!.length - content[0]!.trimStart().length;
-  const parts: string[] = [];
-  for (const line of content) {
-    if (line.trim() === "") return { value: null, next: cursor };  // interior blank
-    if (/\t/.test(line.slice(0, base + 1))) return { value: null, next: cursor };  // tab indent
-    if (line.length - line.trimStart().length !== base) return { value: null, next: cursor };
-    if (/\s$/.test(line)) return { value: null, next: cursor };  // trailing space
-    parts.push(line.slice(base));
-  }
-  // Clip (`>` / `|`) keeps exactly one trailing newline; strip (`-`) keeps none.
-  // Emitting it makes the reproduction exact rather than nearly exact.
-  return { value: parts.join(folded ? " " : "\n") + (chomped ? "" : "\n"), next: cursor };
-}
-
-export function parseSkillFrontmatter(source: string): BundledSkill | null {
-  const match = FRONTMATTER.exec(source);
-  if (!match) return null;
-  const lines = match[1].split(/\r?\n/);
-  let name: string | null = null;
-  let description: string | null = null;
-  for (let index = 0; index < lines.length; index += 1) {
-    const key = plainTopLevelKey(lines[index]!);
-    if (!key) continue;
-    if (EXECUTABLE_KEYS.has(key.toLowerCase())) return null;
-    const line = lines[index]!;
-    const scalar = readScalar(lines, index, line.slice(line.indexOf(":") + 1));
-    index = scalar.next - 1;
-    // Only `name` and `description` are re-emitted into the mounted document,
-    // so only those two must be reproducible. Refusing a skill because some
-    // unrelated key holds `false` would reject a third of the real corpus for
-    // nothing; refusing one we would have to GUESS at is the whole point.
-    if (key === "name" && name === null) {
-      if (scalar.value === null) return null;
-      name = scalar.value;
-    }
-    if (key === "description" && description === null) {
-      if (scalar.value === null) return null;
-      description = scalar.value;
-    }
-  }
-  // A description is REQUIRED, not decorative: it is the only text the model
-  // reads when deciding whether a skill applies, so a skill without one is
-  // mounted and never chosen. Silently useless is the failure mode this whole
-  // module is built to avoid, and every curated skill already has one — an
-  // empty description means the artifact is malformed, not minimal.
-  if (!isValidSkillName(name) || !description) return null;
-  return { name, description };
-}
+// The frontmatter reader that used to live here is GONE. `name` is the
+// directory and `description` comes from the digest-covered manifest, so
+// nothing in the serving path reads YAML any more. tools/skills-bundle owns
+// the one remaining reader, offline, where a misread fails the build instead
+// of quietly rewriting the text the model reads to pick a skill.
 
 /**
  * Verify the exact artifact made by tools/skills-bundle/build.mjs.
@@ -318,12 +148,30 @@ export function verifyBundle(bundlePath: string, options: { expectedDigest?: str
     const manifestPath = join(root, "manifest.json");
     if (lstatSync(manifestPath).size > MANIFEST_BYTES) return reject("manifest.json exceeds size limit");
     const manifestBuffer = readFileSync(manifestPath);
-    let manifest: { version?: unknown; tier?: unknown; files?: unknown; bundleDigest?: unknown };
+    let manifest: { version?: unknown; tier?: unknown; files?: unknown; skills?: unknown; bundleDigest?: unknown };
     try { manifest = JSON.parse(manifestBuffer.toString("utf8")); } catch { return reject("manifest.json is invalid JSON"); }
     if (!manifest || manifest.version !== 1 || (manifest.tier !== "tenant-safe" && manifest.tier !== "operator")) return reject("manifest has invalid version or tier");
     if (!manifest.files || typeof manifest.files !== "object" || Array.isArray(manifest.files)) return reject("manifest files is not an object");
     const expectedFiles = manifest.files as Record<string, unknown>;
     if (Object.values(expectedFiles).some((hash) => typeof hash !== "string" || !SHA256.test(hash))) return reject("manifest has invalid file hash");
+    if (!manifest.skills || typeof manifest.skills !== "object" || Array.isArray(manifest.skills)) return reject("manifest skills is not an object");
+    const declaredSkills = manifest.skills as Record<string, unknown>;
+    // Descriptions are re-emitted verbatim into the mounted document, so they
+    // are bounded here rather than trusted: the manifest as a whole is already
+    // capped, but a single skill must not be able to spend the whole budget.
+    for (const [name, description] of Object.entries(declaredSkills)) {
+      if (!isValidSkillName(name)) return reject(`manifest declares an invalid skill name: ${name}`);
+      if (typeof description !== "string" || !description.trim()) return reject(`manifest skill has no description: ${name}`);
+      if (Buffer.byteLength(description) > DESCRIPTION_BYTES) return reject(`manifest skill description is too long: ${name}`);
+    }
+    // Exact correspondence, both directions: a skill on disk with no manifest
+    // entry would mount with no description, and a manifest entry with no
+    // directory would mount a skill whose body nothing hashed.
+    const declaredNames = Object.keys(declaredSkills).sort();
+    if (declaredNames.length !== skillNames.length
+      || declaredNames.some((name, index) => name !== skillNames[index])) {
+      return reject("manifest skill list does not exactly match disk");
+    }
 
     const inventory = [...files.keys()].filter((path) => path !== "manifest.json").sort();
     const declared = Object.keys(expectedFiles).sort();
@@ -342,7 +190,8 @@ export function verifyBundle(bundlePath: string, options: { expectedDigest?: str
       if (sha256(buffer) !== expectedFiles[path]) return reject(`hash mismatch: ${path}`);
       contents.set(path, buffer);
     }
-    if (typeof manifest.bundleDigest !== "string" || !SHA256.test(manifest.bundleDigest) || manifest.bundleDigest !== digest(expectedFiles as Record<string, string>)) return reject("bundle digest mismatch");
+    if (typeof manifest.bundleDigest !== "string" || !SHA256.test(manifest.bundleDigest)
+      || manifest.bundleDigest !== digest(expectedFiles as Record<string, string>, declaredSkills as Record<string, string>)) return reject("bundle digest mismatch");
     if (options.expectedDigest !== undefined && options.expectedDigest !== manifest.bundleDigest) return reject("bundle digest does not match deployment pin");
 
     const pluginBuffer = contents.get(".claude-plugin/plugin.json");
@@ -357,11 +206,13 @@ export function verifyBundle(bundlePath: string, options: { expectedDigest?: str
     for (const name of skillNames) {
       const buffer = contents.get(`skills/${name}/SKILL.md`);
       if (!buffer) return reject(`skill is missing from the verified inventory: ${name}`);
-      const text = buffer.toString("utf8");
-      const parsed = parseSkillFrontmatter(text);
-      if (!parsed || parsed.name !== name) return reject(`invalid skill frontmatter: ${name}`);
-      skills.push(parsed);
-      sources.set(name, text);
+      // No frontmatter parse. The name is the directory and the description
+      // comes from the manifest, both covered by the digest this already
+      // matched against the deployment pin. Reading YAML here bought nothing
+      // the hash chain does not already give, and cost six review rounds of
+      // scalar-reader defects.
+      skills.push({ name, description: declaredSkills[name] as string });
+      sources.set(name, buffer.toString("utf8"));
     }
     return { ok: true, tier: manifest.tier, skills, digest: manifest.bundleDigest, sources };
   } catch {
@@ -395,6 +246,13 @@ export function discoverSkills(bundlePath: string): BundledSkill[] {
  *    hooks, context: fork, monitors — cannot survive a document we construct.
  *    Allowlist by construction, which is the only version of this that has not
  *    been picked apart.
+ *
+ *    The values themselves no longer come from reading the source YAML either.
+ *    `name` is the directory and `description` is a digest-covered manifest
+ *    field, so the only thing this module does with frontmatter is delete it.
+ *    `JSON.stringify` is used for emission because a JSON string literal is
+ *    also a valid YAML double-quoted scalar, so what the SDK parses back is
+ *    exactly what the builder recorded.
  */
 export function materialiseVerifiedBundle(verified: VerifiedSkillBundle): string | null {
   let root: string | null = null;

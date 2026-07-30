@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { bundleDigest, parseBundledSkillName, sha256 } from "./common.mjs";
+import { bundleDigest, parseBundledSkillMeta, sha256 } from "./common.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BUILD = path.join(HERE, "build.mjs");
@@ -265,7 +265,7 @@ test("builder rejects an oversized SKILL.md", async (t) => {
 // Called DIRECTLY, because the enclosing directory validator happens to reject
 // these names first — which makes a disagreement with the loader invisible
 // rather than absent. The exported function has to carry the rule itself.
-test("parseBundledSkillName applies the loader's name rule", () => {
+test("parseBundledSkillMeta applies the loader's name rule", () => {
   const doc = (name) => `---
 name: ${name}
 description: real prose
@@ -273,8 +273,189 @@ description: real prose
 body
 `;
   for (const bad of ["CON", "probe.", "bad/name", "com1"]) {
-    assert.throws(() => parseBundledSkillName(doc(bad), "fixture"),
+    assert.throws(() => parseBundledSkillMeta(doc(bad), "fixture"),
       /invalid skill name/, `${bad} was accepted`);
   }
-  assert.equal(parseBundledSkillName(doc("good-name"), "fixture"), "good-name");
+  assert.deepEqual(parseBundledSkillMeta(doc("good-name"), "fixture"),
+    { name: "good-name", description: "real prose" });
+});
+
+
+// --------------------------------------------------------------------------- //
+// The frontmatter scalar corpus. This USED to live in the loader's test file
+// against a byte-identical second copy of this reader. The loader no longer
+// parses YAML at all — it reads the description out of the digest-covered
+// manifest — so these cases belong to the one reader that is left, here,
+// offline, where a refusal fails the build instead of a request.
+// --------------------------------------------------------------------------- //
+
+const CRLF = String.fromCharCode(13, 10);
+const LF = String.fromCharCode(10);
+const TAB = String.fromCharCode(9);
+const BS = String.fromCharCode(92);
+const Q = String.fromCharCode(34);
+
+const fm = (...body) =>
+  parseBundledSkillMeta(["---", ...body, "---", "prose"].join(CRLF) + CRLF, "fixture");
+/** The reader refuses by throwing, so "cannot read this" is an assertion of that. */
+const refuses = (label, ...body) =>
+  assert.throws(() => fm(...body), /fixture/, `${label} was accepted`);
+
+test("folds a >- description into one line", () => {
+  assert.equal(fm("name: skill-a", "description: >-", "  first line", "  second line").description,
+    "first line second line");
+});
+
+test("keeps the line breaks of a |- description", () => {
+  assert.equal(fm("name: skill-a", "description: |-", "  first line", "  second line").description,
+    "first line" + LF + "second line");
+});
+
+test("reproduces chomping exactly: strip drops the trailing newline, clip keeps one", () => {
+  assert.equal(fm("name: skill-a", "description: >-", "  text").description, "text");
+  assert.equal(fm("name: skill-a", "description: >", "  text").description, "text" + LF);
+  assert.equal(fm("name: skill-a", "description: |", "  a", "  b").description, "a" + LF + "b" + LF);
+});
+
+test("REFUSES text it would have to alter to read", () => {
+  // Each of these is content YAML keeps and a trim() would quietly destroy.
+  refuses("tab indent", "name: skill-a", "description: >-", `${TAB}text`);
+  refuses("trailing spaces", "name: skill-a", "description: >-", "  text   ");
+  refuses("interior blank", "name: skill-a", "description: >-", "  one", "", "  two");
+  refuses("whitespace-only interior", "name: skill-a", "description: >-", "  one", "    ", "  two");
+});
+
+test("allows the ordinary blank line between a block and the next key", () => {
+  // Trailing blanks are chomped by YAML, so refusing them would reject
+  // perfectly normal formatting and break the real corpus.
+  const parsed = fm("name: skill-a", "description: >-", "  text", "", "compatibility: claude-code");
+  assert.equal(parsed.description, "text");
+  assert.equal(parsed.name, "skill-a");
+});
+
+test("DECODES an inline scalar rather than stripping its quotes", () => {
+  // A double-quoted \n is a newline to YAML and a backslash-n to a naive strip;
+  // a doubled quote is one apostrophe; ` #` starts a comment.
+  assert.equal(fm("name: skill-a", `description: "one${BS}ntwo"`).description, "one" + LF + "two");
+  assert.equal(fm("name: skill-a", "description: 'it''s useful'").description, "it's useful");
+  assert.equal(fm("name: skill-a", "description: useful # note").description, "useful");
+  assert.equal(fm("name: skill-a", `description: "tab${BS}there"`).description, "tab" + TAB + "here");
+});
+
+test("REFUSES a scalar that is not one string", () => {
+  // An unescaped interior quote is not one scalar; a naive parity check on the
+  // closing quote accepts it and rewrites the value.
+  refuses("interior quote", "name: skill-a", `description: ${Q}a${Q}b${Q}`);
+  // ...and these are not strings at all to YAML. The near-misses are the point:
+  // each is a number or a keyword to a YAML reader, so emitting it as the text
+  // after the colon would say something the source did not.
+  for (const value of ["false", "null", "~", "3.14", "0x1f", "[a, b]", "{a: b}", "yes",
+                       ".5", "+.inf", "0b1010", "1_000", "1:30", "12:34:56", "Null", "TRUE"]) {
+    refuses(value, "name: skill-a", `description: ${value}`);
+  }
+  // A bare date is a TIMESTAMP to js-yaml's default schema, not the text.
+  refuses("bare date", "name: skill-a", "description: 2026-07-29");
+  refuses("timestamp", "name: skill-a", "description: 2026-07-29T10:30:00Z");
+  refuses("spaced timestamp", "name: skill-a", "description: 2026-07-29 10:30:00");
+  // ...but date-LED PROSE is a string, and refusing it would refuse the whole
+  // bundle over an ordinary description.
+  for (const prose of ["2026-07-29 release notes helper", "2026-07-29 to 2026-08-01",
+                       "2026-07-29TICKET helper"]) {
+    assert.equal(fm("name: skill-a", `description: ${prose}`).description, prose, prose);
+  }
+  // ...and prose that merely contains a colon or a comma is obviously fine.
+  assert.equal(fm("name: skill-a", "description: Use when: drafting, editing").description,
+    "Use when: drafting, editing");
+});
+
+test("REFUSES a plain scalar that continues on the next line", () => {
+  // YAML folds a more-indented continuation into the value, so
+  //   description: first
+  //     second
+  // is "first second". Reading only the first line returns "first" and calls it
+  // exact. A flow sequence opened with `[` and closed later is the same problem
+  // wearing a different hat.
+  refuses("indented continuation", "name: skill-a", "description: first", "  second");
+  // A BLANK LINE does not end a plain scalar, so this folds to "first second"
+  // too. Stopping at the blank returned "first" and called it exact.
+  refuses("blank then continuation", "name: skill-a", "description: first", "", "  second");
+  refuses("flow seq across a blank", "name: skill-a", "description: [", "", "  a, b]");
+  refuses("flow seq", "name: skill-a", "description: [", "  a, b]");
+  // ...but an indented COMMENT is not content, and neither is a trailing blank.
+  assert.equal(fm("name: skill-a", "description: real prose", "  # just a comment").description,
+    "real prose");
+  assert.equal(fm("name: skill-a", "description: real prose", "", "other: x").description,
+    "real prose");
+  // ...and the continuation is CONSUMED, so a key below it is still inspected.
+  refuses("key below a continuation", "name: skill-a", "description: real prose",
+    "some-key: first", "  continued", "context: fork");
+});
+
+test("uses YAML whitespace, not JavaScript whitespace, to find a comment", () => {
+  // A non-breaking space is not a YAML separator, so ` #` after one is NOT a
+  // comment. Cutting there would silently shorten a real description.
+  const NBSP = String.fromCharCode(160);
+  assert.equal(fm("name: skill-a", `description: keep${NBSP}#this`).description,
+    `keep${NBSP}#this`);
+  assert.equal(fm("name: skill-a", "description: cut here # not this").description, "cut here");
+});
+
+test("only requires exactness from the values it re-emits", () => {
+  // `name` and `description` are rewritten into the mounted document; nothing
+  // else is. Refusing a skill because an unrelated key holds `false` would
+  // reject a third of the real corpus and protect nothing.
+  const parsed = fm("name: skill-a", "description: real prose", "some-flag: false",
+                    "version: 3.14", "tags: [a, b]");
+  assert.equal(parsed.name, "skill-a");
+  assert.equal(parsed.description, "real prose");
+});
+
+test("REFUSES an inline scalar it cannot decode", () => {
+  refuses("unterminated double quote", "name: skill-a", `description: ${Q}unterminated`);
+  refuses("unterminated single quote", "name: skill-a", "description: 'unterminated");
+  refuses("bad escape", "name: skill-a", `description: ${Q}bad ${BS}q escape${Q}`);
+  refuses("short unicode escape", "name: skill-a", `description: ${Q}short ${BS}u12 unicode${Q}`);
+  refuses("anchor reference", "name: skill-a", "description: *anchor-reference");
+});
+
+test("REFUSES a skill with no usable description", () => {
+  // The description is the only text the model reads when deciding a skill
+  // applies, so an empty one mounts a skill that is never chosen — silently
+  // useless, which is the exact failure this pipeline exists to prevent.
+  refuses("empty block", "name: skill-a", "description: >-");
+  refuses("empty value", "name: skill-a", "description:");
+  refuses("absent", "name: skill-a");
+});
+
+test("REFUSES a block form it cannot reproduce exactly", () => {
+  // Each of these means something specific that folding would quietly rewrite:
+  // an explicit indentation indicator makes leading spaces content, and `+`
+  // keeps trailing blank lines on purpose.
+  for (const header of [">2-", ">-2", "|+", "|-4", ">+", "|2"]) {
+    refuses(header, "name: skill-a", `description: ${header}`, "  text");
+  }
+});
+
+test("REFUSES a folded block whose lines are not evenly indented", () => {
+  // YAML preserves the deeper indentation as structure; folding it away changes
+  // the text, so the bundle is refused instead.
+  refuses("uneven indent", "name: skill-a", "description: >-", "  even", "    deeper");
+});
+
+test("RESUMES after a block scalar, so a later executable key is still caught", () => {
+  // The guard that makes this work is the break on a dedented line. Without it
+  // the reader swallows `context: fork` as block content and the build ships a
+  // skill whose source declares a subagent fork.
+  refuses("context after block", "name: skill-a", "description: >-", "  text", "context: fork");
+  refuses("hooks after block", "name: skill-a", "description: >-", "  text", "hooks: [x]");
+  // ...and a harmless key after a block is still read normally.
+  assert.equal(
+    fm("name: skill-a", "description: >-", "  text", "compatibility: claude-code").name,
+    "skill-a");
+});
+
+test("REFUSES a description longer than the loader will accept", () => {
+  // The loader bounds a manifest description; if the build did not bound the
+  // same text, it would produce a bundle production refuses.
+  refuses("over-long", "name: skill-a", `description: ${"x".repeat(9000)}`);
 });

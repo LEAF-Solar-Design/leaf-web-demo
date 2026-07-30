@@ -6,6 +6,8 @@ export const MAX_SKILL_FILE_BYTES = 256 * 1024;
 // Mirrors harness/src/ports/impl/skillBundle.ts, the loader source of truth.
 export const MAX_SKILLS = 250;
 export const MAX_MANIFEST_BYTES = 64 * 1024;
+/** Mirrors DESCRIPTION_BYTES in the loader; both bound the same re-emitted text. */
+export const MAX_DESCRIPTION_BYTES = 8 * 1024;
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const RESERVED_NAMES = new Set([
   "con", "prn", "aux", "nul",
@@ -54,8 +56,24 @@ export function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
-export function bundleDigest(files) {
-  return sha256(Object.keys(files).sort().map((name) => `${name}:${files[name]}`).join("\n"));
+/**
+ * MUST stay byte-identical to `digest()` in
+ * harness/src/ports/impl/skillBundle.ts — a disagreement here is a bundle the
+ * build blesses and production refuses, or the reverse.
+ *
+ * `skills` is covered because the loader re-emits those descriptions into the
+ * mounted document. They are the only part of the artifact that is not a hashed
+ * file, so a digest over files alone would let an edited manifest change what a
+ * skill claims to do while still matching its deployment pin. Each line is JSON
+ * so the encoding is injective: a description holding a colon or a newline
+ * cannot be dressed up as a different pair of fields.
+ */
+export function bundleDigest(files, skills = {}) {
+  const lines = [
+    ...Object.keys(files).sort().map((name) => `file:${JSON.stringify([name, files[name]])}`),
+    ...Object.keys(skills).sort().map((name) => `skill:${JSON.stringify([name, skills[name]])}`),
+  ];
+  return sha256(lines.join("\n"));
 }
 
 export async function assertPlainFile(filePath, label, maxBytes = Infinity) {
@@ -216,7 +234,16 @@ export function readScalar(lines, index, raw) {
  * applies. Anything the loader refuses and this accepts is an artifact the
  * build gate calls READY and production then silently drops.
  */
-export function parseBundledSkillName(markdown, label) {
+/**
+ * The ONLY frontmatter reader left in the system, and it runs offline.
+ *
+ * The loader used to carry a byte-identical copy of this so it could read the
+ * same two values at mount time. That mirror is gone: the builder records what
+ * it read into the digest-covered manifest, and the runtime reads the manifest.
+ * A misread now fails the build, in front of an operator, instead of quietly
+ * rewriting the description the model uses to decide a skill applies.
+ */
+export function parseBundledSkillMeta(markdown, label) {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!frontmatter) fail(`${label} lacks YAML frontmatter`);
   const lines = frontmatter[1].split(/\r?\n/);
@@ -251,7 +278,12 @@ export function parseBundledSkillName(markdown, label) {
   // The runtime refuses a skill with no usable description, because that text
   // is the only thing the model reads when deciding the skill applies.
   if (!description) fail(`${label} lacks a usable frontmatter description`);
-  return name;
+  // The SAME ceiling the loader applies to a manifest description. Catching an
+  // over-long one here means the build fails rather than the deployment.
+  if (Buffer.byteLength(description) > MAX_DESCRIPTION_BYTES) {
+    fail(`${label} description exceeds ${MAX_DESCRIPTION_BYTES} bytes`);
+  }
+  return { name, description };
 }
 
 export async function readSkill(sourceRoot, name) {
@@ -404,6 +436,9 @@ export async function validateBundleStructure(bundlePath) {
   if (names.length === 0) fail("bundle contains no skills");
   const seen = new Set();
   const files = [".claude-plugin/plugin.json"];
+  // name -> description, read from the bytes hashed here and written into the
+  // manifest by the builder. This is what the loader mounts instead of parsing.
+  const skills = {};
   for (const name of names) {
     if (!isValidSkillName(name)) fail(`invalid bundled skill name: ${name}`);
     const key = name.toLowerCase();
@@ -418,9 +453,10 @@ export async function validateBundleStructure(bundlePath) {
     await assertPlainFile(skillPath, `bundled SKILL.md for ${name}`, MAX_SKILL_FILE_BYTES);
     const skillBuffer = await fs.readFile(skillPath);
     contents.set(`skills/${name}/SKILL.md`, skillBuffer);
-    const declaredName = parseBundledSkillName(skillBuffer.toString("utf8"), `bundled SKILL.md for ${name}`);
-    if (declaredName !== name) fail(`bundled SKILL.md name ${JSON.stringify(declaredName)} does not match directory ${JSON.stringify(name)}`);
+    const meta = parseBundledSkillMeta(skillBuffer.toString("utf8"), `bundled SKILL.md for ${name}`);
+    if (meta.name !== name) fail(`bundled SKILL.md name ${JSON.stringify(meta.name)} does not match directory ${JSON.stringify(name)}`);
+    skills[name] = meta.description;
     files.push(`skills/${name}/SKILL.md`);
   }
-  return { files: files.sort(), names: names.sort(), pluginPath, contents };
+  return { files: files.sort(), names: names.sort(), pluginPath, contents, skills };
 }
