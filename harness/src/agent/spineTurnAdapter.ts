@@ -248,6 +248,7 @@ export class SpineTurnAdapter implements ConverseRunner {
       sessionId: session.session_id,
       tenantId: input.tenant_id,
       ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.images?.length ? { images: input.images } : {}),
       ...(input.confirm
         ? {
             confirm: {

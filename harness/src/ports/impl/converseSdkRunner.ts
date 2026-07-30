@@ -90,7 +90,7 @@ import { grantSecrets, redactSecrets } from "../../redact.js";
 // --------------------------------------------------------------------------- //
 type CallToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 interface SdkModule {
-  query(args: { prompt: string; options: Record<string, unknown> }): AsyncIterable<unknown>;
+  query(args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }): AsyncIterable<unknown>;
   createSdkMcpServer(opts: Record<string, unknown>): unknown;
   tool(
     name: string,
@@ -274,13 +274,36 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     }, this.turnTimeoutS * 1000);
 
     const model = input.model ?? this.model;
+    /**
+     * A text turn stays a plain string, byte-identical to before. A turn with
+     * images becomes the SDK's structured user message: image blocks first,
+     * then the text block, the shape the vision spike proved reaches the model.
+     *
+     * Built fresh on every call, never hoisted into a variable. An async
+     * generator is consumed ONCE, and this runner re-queries on a missing SDK
+     * transcript — a hoisted generator would replay as an EMPTY prompt on that
+     * retry, silently dropping both the image and the question.
+     */
+    const withImages = (text: string): string | AsyncIterable<unknown> => {
+      if (!input.images?.length) return text;
+      const content = [
+        ...input.images.map((image) => ({
+          type: "image",
+          source: { type: "base64", media_type: image.media_type, data: image.data },
+        })),
+        { type: "text", text },
+      ];
+      return (async function* () {
+        yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+      })();
+    };
     // A bundle reaches the SDK only after its complete inventory is verified
     // against a REQUIRED deployment digest pin, and what mounts is a private
     // normalised snapshot of the verified bytes, never the source directory.
     const skillBundle = skillBundleAttachment();
     const query = (prompt: string, resume?: string): AsyncIterable<unknown> =>
       sdk.query({
-        prompt,
+        prompt: withImages(prompt),
         options: {
           env: childEnv,
           model,

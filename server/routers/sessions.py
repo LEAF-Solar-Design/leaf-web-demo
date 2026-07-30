@@ -61,15 +61,22 @@ start_turn does after the session guard — no ``turn_started`` event was
 appended, no request reached the harness, so nothing anywhere redeemed the
 approval and giving it back cannot produce a second redemption.
 
-``TurnRejected`` qualifies ONLY when it carries ``pre_harness`` (turn_runner
-sets it where no POST was attempted, or the connection was never established).
-Those legs answer ``BROKER_UNREACHABLE``, which ``_RETRYABLE_BY_CODE`` marks
-retryable — so skipping the give-back there would invite a retry against an
-approval already spent, which is the same defect this note exists to fix.
-``pre_harness`` DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll
-back: on a read timeout, or a rejection the harness itself returned, the
-harness may already be executing the tool call, and un-spending that approval
-is precisely the double-execution consume-once exists to prevent.
+``TurnRejected`` qualifies when it carries ``approval_unredeemed``. That covers
+``pre_harness`` (no POST was attempted, or the connection was never
+established) AND the refusals that reach the harness but are answered before
+the runner is ever entered: 400/431 request validation, 401 auth gate or
+missing grant, 413 body reader, 429 grant-pool exhaustion. In every one of
+those the grant is resolved before the session mirror and before ConverseLoop
+(``harness/src/agent/spineTurnAdapter.ts``), so nothing can have redeemed the
+confirmation. Those legs are marked retryable, so skipping the give-back would
+invite a retry against an approval already spent — the defect this note exists
+to fix.
+
+It DEFAULTS TO FALSE, so every ambiguous leg still refuses to roll back: on a
+read timeout, or a 500 the harness returned after ConverseLoop had already
+resolved a confirmation and begun acting on it, the harness may already be
+executing the tool call, and un-spending that approval is precisely the
+double-execution consume-once exists to prevent.
 
 Single redemption is preserved in both directions: a confirm whose turn really
 started still replays into ``already_consumed`` (see
@@ -82,11 +89,14 @@ says so rather than advertising a retry that could only fail — see
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
+import re
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -238,6 +248,10 @@ class CreateSessionRequest(BaseModel):
 class MessageRequest(BaseModel):
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
+    # Inline image attachments are bounded before the entitlement and approval
+    # gates. They are recorded in the transcript and sent to the harness, but
+    # never enter the busy-turn queue (which is in-memory).
+    images: Optional[List[Dict[str, Any]]] = None
     classifier_hint: Optional[Dict[str, Any]] = None
     # Per-turn model override (validated); falls back to the session's stored model.
     model: Optional[str] = None
@@ -250,6 +264,156 @@ class MessageRequest(BaseModel):
     # default), a busy session answers exactly the 409 it always has. Text-only:
     # a confirm or a credential_grant with queue=true is a 400, never queued.
     queue: Optional[bool] = False
+
+
+_IMAGE_MEDIA_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_MAX_IMAGES_PER_MESSAGE = 3
+_MAX_IMAGE_BYTES = 1024 * 1024
+_MAX_IMAGES_BYTES = 1024 * 1024
+# One decoded MiB expands to at most 1,398,104 base64 characters. Leave bounded
+# JSON framing room while refusing declared oversize bodies before FastAPI parses.
+_MAX_MESSAGE_BODY_BYTES = 1_500_000
+
+
+def _image_magic_matches(media_type: str, decoded: bytes) -> bool:
+    """Check the FULL signature, not a convenient prefix.
+
+    A four-byte PNG test passes anything beginning \\x89PNG, and "GIF8" admits
+    versions that are neither GIF87a nor GIF89a. The point of the check is that
+    the declared media_type and the actual bytes agree before those bytes become
+    a vision content block, so each signature is matched in full.
+    """
+    if media_type == "image/png":
+        return decoded.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        # SOI plus the first marker, and that is the whole signature. The byte
+        # after \\xff\\xd8\\xff is a marker code and legitimately varies, and
+        # JPEG has no fixed tail: real encoders emit files with bytes after EOI,
+        # which decoders read happily. Requiring EOI last rejected a genuine
+        # ffmpeg-produced photo with 16 bytes of padding. A check that turns
+        # away real user images is worse than the shallow one it replaced.
+        return decoded.startswith(b"\xff\xd8\xff")
+    if media_type == "image/gif":
+        return decoded.startswith(b"GIF87a") or decoded.startswith(b"GIF89a")
+    # RIFF, a little-endian size, then WEBP — and the declared size must
+    # actually describe the payload rather than being arbitrary filler.
+    if len(decoded) < 12 or not decoded.startswith(b"RIFF") or decoded[8:12] != b"WEBP":
+        return False
+    return int.from_bytes(decoded[4:8], "little") == len(decoded) - 8
+
+
+class _MessageBodyTooLarge(Exception):
+    """Raised inside the ASGI receive wrapper to abort an oversized body."""
+
+
+class MessageBodyLimitMiddleware:
+    """Byte-counting ASGI guard on POST /api/sessions/{id}/messages.
+
+    Two things have to be true at once, and only a middleware gets both.
+
+    The cap must be a real MEMORY bound: a chunked request declares no
+    Content-Length, so any check that reads the body and then measures it has
+    already paid the cost. This wraps `receive` and aborts the moment the
+    cumulative body passes the cap, exactly as UploadBodyLimitMiddleware does
+    for the upload route.
+
+    And FastAPI must still do the parsing, so there is ONE implementation of the
+    wire contract. A dependency cannot achieve both, because FastAPI reads the
+    body before it solves dependencies; bounding the stream underneath the
+    framework is what lets the framework keep the parsing.
+    """
+
+    _PATH = re.compile(r"^/api/sessions/[^/]+/messages$")
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http" or scope.get("method") != "POST"
+                or not self._PATH.match(scope.get("path") or "")):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        declared = headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > _MAX_MESSAGE_BODY_BYTES:
+            await self._send_413(send)
+            return
+
+        seen = 0
+        response_started = False
+
+        async def counting_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body") or b"")
+                if seen > _MAX_MESSAGE_BODY_BYTES:
+                    raise _MessageBodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _MessageBodyTooLarge:
+            if response_started:  # pragma: no cover - the abort precedes the response
+                raise
+            await self._send_413(send)
+
+    @staticmethod
+    async def _send_413(send):
+        payload = json.dumps({
+            "error": {"error_code": "BAD_PARAMS",
+                      "message": "request exceeds the 1MB image message cap",
+                      "retryable": False},
+            "degraded_mode": False,
+        }).encode("utf-8")
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(payload)).encode())]})
+        await send({"type": "http.response.body", "body": payload})
+
+
+
+def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:
+    """Validate decoded image bytes and their claimed media type."""
+    if images is None:
+        return None
+    if len(images) > _MAX_IMAGES_PER_MESSAGE:
+        raise ValueError(f"at most {_MAX_IMAGES_PER_MESSAGE} images are allowed per message")
+
+    total_size = 0
+    validated: List[Dict[str, str]] = []
+    for index, image in enumerate(images, start=1):
+        media_type = image.get("media_type")
+        data = image.get("data")
+        # isinstance FIRST: `media_type` comes straight from client JSON, and
+        # a list or dict is unhashable — `in` on a set would raise TypeError
+        # and turn a bad request into a 500.
+        if not isinstance(media_type, str) or media_type not in _IMAGE_MEDIA_TYPES:
+            allowed = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
+            raise ValueError(f"image {index} media_type must be one of: {allowed}")
+        if not isinstance(data, str) or not data:
+            raise ValueError(f"image {index} data must be non-empty base64")
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError, TypeError) as exc:
+            raise ValueError(f"image {index} data must be valid base64") from exc
+        if len(decoded) > _MAX_IMAGE_BYTES:
+            raise ValueError("each image must be at most 1MB decoded")
+        total_size += len(decoded)
+        if total_size > _MAX_IMAGES_BYTES:
+            raise ValueError("images must total at most 1MB decoded")
+        if not _image_magic_matches(media_type, decoded):
+            raise ValueError(f"image {index} media_type does not match its bytes")
+        validated.append({"media_type": media_type, "data": data})
+    return validated
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -434,18 +598,48 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
 # POST /api/sessions/{id}/messages
 # --------------------------------------------------------------------------- #
 @router.post("/api/sessions/{session_id}/messages")
+async def post_message_route(session_id: str, request: Request,
+                             req: MessageRequest,
+                             tenant=Depends(deps.require_active_tenant)):
+    return post_message(session_id, req, request, tenant)
+
+
 def post_message(session_id: str, req: MessageRequest, request: Request,
                  tenant=Depends(deps.require_active_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
     if _require_owned_session(session_id, tenant) is None:
         return _session_not_found(session_id)
 
-    # 2. exactly one of {text}|{confirm}.
+    # 2. Validate images before entitlement evaluation or approval consumption.
+    # This is deliberately refuse-not-truncate: a caller must choose a bounded
+    # attachment set instead of silently losing part of it.
+    try:
+        images = _validate_images(req.images)
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
+
+    # A message is text, images, or a confirmation. Confirmations cannot carry
+    # images because an approval resumes only its server-stored proposal.
     has_text = req.text is not None
     has_confirm = req.confirm is not None
-    if has_text == has_confirm:  # neither set, or both set
+    has_images = bool(images)
+    if has_confirm and has_images:
+        return error_response(
+            ErrorCode.BAD_PARAMS, "confirm turns cannot include images",
+            retryable=False, status_code=400,
+        )
+    if has_confirm and has_text:
         return error_response(
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
+            retryable=False, status_code=409,
+        )
+    if not has_confirm and not has_text and not has_images:
+        # 409, not 400: this is the SAME "neither" refusal deployed clients
+        # already classify (web/src/converse.js classifyAgentError keys on the
+        # 409+BAD_PARAMS pair). Adding `images` widened WHAT satisfies the rule;
+        # it must not change the answer when nothing does.
+        return error_response(
+            ErrorCode.BAD_PARAMS, "one of `text`, `images`, or `confirm` is required",
             retryable=False, status_code=409,
         )
 
@@ -464,6 +658,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if req.credential_grant is not None:
             return error_response(
                 ErrorCode.BAD_PARAMS, "credential_grant turns cannot be queued",
+                retryable=False, status_code=400,
+            )
+        if has_images:
+            # Queue entries live in this process. Retaining up to 5MB per
+            # session turns a small bounded request into an unbounded memory
+            # hazard, so image messages are direct-only.
+            return error_response(
+                ErrorCode.BAD_PARAMS, "image turns cannot be queued",
                 retryable=False, status_code=400,
             )
 
@@ -601,7 +803,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         turn_id = turn_runner.start_turn(
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
-            model=req.model, credential_grant=validated_grant,
+            model=req.model, credential_grant=validated_grant, images=images,
         )
     except turn_runner.TurnBusy:
         # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of
@@ -642,13 +844,41 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         # was never established). Those legs report BROKER_UNREACHABLE, which
         # _RETRYABLE_BY_CODE marks retryable, so without this the client is
         # told to retry an approval that has already been spent — the very bug
-        # the TurnBusy path fixes. `pre_harness` defaults False, so ambiguous
-        # legs (read timeout, an actual harness rejection) still never roll
-        # back; see the module docstring's APPROVAL GIVE-BACK note.
+        # the TurnBusy path fixes. The test is `approval_unredeemed`, which is
+        # WIDER than `pre_harness`: a request can reach the harness and still be
+        # refused before anything touches the confirmation (401 before the body
+        # is parsed, 413 in the body reader, 429 during grant acquisition — all
+        # before ConverseLoop). Those three used to burn the proposal with no
+        # way to retry. It still defaults False, so ambiguous legs (read
+        # timeout, a real harness rejection) never roll back; see the module
+        # docstring's APPROVAL GIVE-BACK note.
         approval_lost = False
-        if exc.pre_harness and confirmation_id is not None:
+        if exc.approval_unredeemed and confirmation_id is not None:
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
+        # Close the transcript the failed start opened. `turn_started` was
+        # appended before the rejection, and nothing downstream will ever
+        # terminate that turn — the relay only runs for accepted turns. The
+        # queued kicker has closed its own failed starts this way since it
+        # existed (turn_runner._kick_queued's TurnRejected leg); the DIRECT
+        # path answered its HTTP caller and just left the transcript dangling,
+        # for every synchronous rejection alike (401, 413, 429, 502). Same
+        # closure, same event shape, so a reloaded client sees a terminated
+        # turn instead of one stuck in-flight forever.
+        if exc.turn_id is not None:
+            try:
+                session_store.append_event(
+                    session_id, exc.turn_id, "error",
+                    {"error": {"error_code": exc.error_code,
+                               "message": exc.message},
+                     "stop_reason": "error"})
+            except Exception:  # noqa: BLE001
+                # The caller still gets its rejection response either way, but
+                # a silent append failure recreates exactly the dangling
+                # transcript this closure exists to prevent — say so.
+                print(f"[leaf-agent] transcript closure FAILED for turn "
+                      f"{exc.turn_id!r} on session {session_id!r}; the turn "
+                      f"dangles until repair", file=sys.stderr, flush=True)
         return _turn_rejected_response(exc, approval_lost=approval_lost)
 
     return JSONResponse(

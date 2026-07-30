@@ -18,7 +18,11 @@ What makes this suite distinct from its two live siblings:
         `LEAF_AUTHOR_HARNESS_URL` is the fallback (both exported by
         scripts/start-leaf.py; single-var deploys keep working);
       - the frozen ConverseTurnInput body on the wire: {tenant_id, session_id,
-        turn_id, drawing_id, messages, text|confirm} and NOTHING else — no
+        turn_id, drawing_id, messages, text|confirm, images?, model?,
+        credential_grant?} and NOTHING else (`images` is the additive,
+        optional, absent-safe vision field, see CONTRACT-ADDENDUM §2.1
+        "Inline images"; `model`/`credential_grant` are the mount-your-LLM
+        fields) — no
         ContextPacket/packet field (deliberate contract decision, census #12:
         ContextPacket has no live caller; chip 5 freezes this), no
         classifier_hint (durable-log-only);

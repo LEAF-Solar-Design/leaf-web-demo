@@ -38,6 +38,8 @@ import {
   replacePickerTrigger,
   setPromptHistorySession,
   setPromptHistoryValue,
+  clipboardImagesToAttachments,
+  IMAGE_MEDIA_TYPES,
 } from '../composer.js'
 
 const MCP_COMMAND = {
@@ -74,6 +76,7 @@ export default function PromptBox({
   // (composer.js filterRunnable), so the picker can never offer something this
   // client would silently ignore.
   commandActions = {},
+  imageAttachmentsEnabled = false,
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -89,11 +92,32 @@ export default function PromptBox({
   const [isComposing, setIsComposing] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
   const [mcpServers, setMcpServers] = useState([])
+  const [attachments, setAttachments] = useState([])
+  const [attachmentError, setAttachmentError] = useState(null)
+  const attachmentUrlsRef = useRef(new Set())
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
   // A PromptBox instance survives session switches, so retain histories in the
   // ref but reset only navigation state when its active session changes.
   historyRef.current = setPromptHistorySession(historyRef.current, sessionId)
+
+  const releaseAttachment = (image) => {
+    if (image?.thumbnailUrl) {
+      URL.revokeObjectURL(image.thumbnailUrl)
+      attachmentUrlsRef.current.delete(image.thumbnailUrl)
+    }
+  }
+  const clearAttachments = () => setAttachments((current) => {
+    for (const image of current) releaseAttachment(image)
+    return []
+  })
+  useEffect(() => {
+    clearAttachments()
+  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => {
+    for (const url of attachmentUrlsRef.current) URL.revokeObjectURL(url)
+    attachmentUrlsRef.current.clear()
+  }, [])
 
   // Both picker surfaces get the tenant-scoped, redacted list. Full resource
   // enumeration is a follow-up because it needs a harness proxy endpoint.
@@ -161,8 +185,36 @@ export default function PromptBox({
     if (sent.trim() && !routing) {
       historyRef.current = appendPromptHistory(historyRef.current, sent, sessionId)
     }
-    return onDispatch(override)
+    const dispatched = onDispatch(override, { images: attachments })
+    return Promise.resolve(dispatched).then((result) => {
+      if (result?.status === 202) clearAttachments()
+      return result
+    })
   }
+  const onPaste = (e) => {
+    if (!imageAttachmentsEnabled) {
+      if ([...(e.clipboardData?.items || [])].some((item) => item?.kind === 'file' && IMAGE_MEDIA_TYPES.has(item.type))) {
+        e.preventDefault()
+        setAttachmentError('Image paste is available in the assistant reply box.')
+      }
+      return
+    }
+    const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
+    if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
+    if (!result.attachments.length) return
+    e.preventDefault()
+    setAttachmentError(null)
+    setAttachments((current) => [...current, ...result.attachments.map((image) => {
+      const thumbnailUrl = URL.createObjectURL(image.file)
+      attachmentUrlsRef.current.add(thumbnailUrl)
+      return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
+    })])
+  }
+  const removeAttachment = (id) => setAttachments((current) => {
+    const found = current.find((image) => image.id === id)
+    releaseAttachment(found)
+    return current.filter((image) => image.id !== id)
+  })
   const complete = (t) => {
     if (!trigger) return
     const insertion = t.kind === 'resource' ? t.insertionText : `/${t.name} `
@@ -408,6 +460,7 @@ export default function PromptBox({
             onSelect={(e) => setCaret(e.target.selectionStart)}
             onCompositionStart={() => setIsComposing(true)}
             onCompositionEnd={() => setIsComposing(false)}
+            onPaste={onPaste}
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
@@ -422,6 +475,17 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
+        {(attachmentError || attachments.length > 0) && (
+          <div className="converse-note" role={attachmentError ? 'alert' : undefined}>
+            {attachmentError && <span className="dim">{attachmentError}</span>}
+            {attachments.map((image) => (
+              <span key={image.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
+                <img src={image.thumbnailUrl} alt="Pending image attachment" width="28" height="28" style={{ objectFit: 'cover' }} />
+                <button type="button" className="chip-neutral" onClick={() => removeAttachment(image.id)} aria-label="Remove image attachment">Remove</button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="bar-controls">
           <button
             type="button"

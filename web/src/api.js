@@ -22,13 +22,18 @@ import * as mockVersions from './mock/mockVersions.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
-const API_BASE = import.meta.env.VITE_API_BASE ?? ''
-const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
+// `import.meta.env?.` rather than `import.meta.env.`: vite always defines the
+// object, plain node never does, and the existing `?? ''` only defended against
+// a missing VALUE. Without the optional chain this module throws on import
+// outside vite, which put every pure function downstream of it out of reach of
+// a `node --test` unit test.
+const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
+const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env?.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
-const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
+const MOCK_DEFAULT = import.meta.env?.VITE_MOCK !== '0'
 // Tenant stub (X-Tenant-Id header) until real auth lands — matches the
 // server default so the broker ledger / job list stay consistent.
-const TENANT = import.meta.env.VITE_TENANT_ID || 'demo-tenant'
+const TENANT = import.meta.env?.VITE_TENANT_ID || 'demo-tenant'
 // Auth seam (auth0-identity-signup): the platform JWT lives in localStorage
 // under `leaf.jwt`. When present we attach `Authorization: Bearer <token>` to
 // EVERY /api call so LEAF_AUTH_LIVE=1 works from the UI; when absent, headers are

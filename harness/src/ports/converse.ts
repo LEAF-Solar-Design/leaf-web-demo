@@ -91,7 +91,8 @@ export interface InstantDrawingContext {
 /**
  * Body of `POST /turn`. `messages` is prior turn context, bounded and
  * assembled by the turn engine (never the full unbounded transcript).
- * Exactly one of `text` / `confirm` drives the turn — a fresh user message,
+ * Exactly one of a USER MESSAGE / `confirm` drives the turn. A user message
+ * is `text`, `images`, or both, so an uncaptioned image is a real turn
  * or the resume of a turn that halted on `confirmation_required` (the
  * turn engine attaches the original `proposed_run` proposal from the
  * `approvals` row so the runner never has to re-derive it).
@@ -104,6 +105,9 @@ export interface ConverseTurnInput {
   /** Prior context, bounded, built by the turn engine. */
   messages: Array<{ role: "user" | "assistant"; text: string }>;
   text?: string;
+  /** Inline vision blocks for this turn only. They are validated at the HTTP
+   * boundary and never added to the prior-text context. */
+  images?: Array<{ media_type: string; data: string }>;
   confirm?: {
     confirmation_id: string;
     approved: boolean;

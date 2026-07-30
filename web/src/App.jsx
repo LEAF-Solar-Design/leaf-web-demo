@@ -2322,6 +2322,7 @@ export default function App() {
             skills={catalogSkills}
             commandActions={slashCommandActions}
             sessionId={agentSessionId}
+            imageAttachmentsEnabled={false}
           />
         </div>
 

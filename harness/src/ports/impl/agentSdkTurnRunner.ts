@@ -96,7 +96,7 @@ import { findTool } from "../../registry/registerTool.js";
 // --------------------------------------------------------------------------- //
 type CallToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 interface SdkModule {
-  query(args: { prompt: string; options: Record<string, unknown> }): AsyncIterable<unknown>;
+  query(args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }): AsyncIterable<unknown>;
   createSdkMcpServer(opts: Record<string, unknown>): unknown;
   tool(
     name: string,
@@ -781,12 +781,21 @@ export class AgentSdkTurnRunner implements ConverseRunner {
   }
 }
 
-/** Fold the turn engine's bounded prior-turn context + the new user text into ONE
- *  prompt string, same "flat string prompt" shape AgentSdkRunner.ts already uses. */
-function buildPrompt(input: ConverseTurnInput): string {
+/** Fold the turn engine's bounded prior-turn context + the new user text into one
+ * prompt. Text-only turns remain byte-identical strings. Images use the SDK's
+ * structured user-message stream so the vision content blocks reach the model. */
+export function buildPrompt(input: ConverseTurnInput): string | AsyncIterable<unknown> {
   const history = input.messages.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n");
   const newTurn = input.text
     ? `User: ${input.text}`
     : "Continue from the result above and tell the user what happened.";
-  return [history, newTurn].filter((s) => s.length > 0).join("\n");
+  const text = [history, newTurn].filter((s) => s.length > 0).join("\n");
+  if (!input.images?.length) return text;
+  const content = [
+    ...input.images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.media_type, data: image.data } })),
+    { type: "text", text },
+  ];
+  return (async function* () {
+    yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  })();
 }

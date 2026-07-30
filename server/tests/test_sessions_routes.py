@@ -208,7 +208,11 @@ def test_messages_text_success_202_calls_start_turn(client, monkeypatch):
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured.update(tenant_id=tenant_id, session_id=session_id, text=text,
                         confirm=confirm, classifier_hint=classifier_hint,
                         model=model, credential_grant=credential_grant)
@@ -382,7 +386,11 @@ def test_messages_confirm_valid_builds_frozen_proposal_shape_from_approval_row(c
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured["confirm"] = confirm
         return "turn-resume-1"
 
@@ -441,7 +449,11 @@ def test_messages_confirm_reverse_a_rejection_stored_approved_false_wins(client,
     captured = {}
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         captured["confirm"] = confirm
         return "turn-resume-reversed"
 
@@ -487,7 +499,11 @@ def test_messages_confirm_replay_second_confirm_409_bad_params(client, monkeypat
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return f"turn-resume-{len(calls)}"
 
@@ -552,7 +568,11 @@ def test_messages_confirm_busy_gives_the_approval_back(client, monkeypatch):
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return f"turn-after-busy-{len(calls)}"
 
@@ -746,7 +766,11 @@ def test_messages_confirm_pre_harness_rejection_gives_the_approval_back(client, 
     calls = []
 
     def _fake_start_turn(tenant_id, session_id, *, text=None, confirm=None,
-                         classifier_hint=None, model=None, credential_grant=None):
+                         classifier_hint=None, model=None, credential_grant=None,
+                         **_additive):
+        # **_additive keeps these stubs alive as start_turn grows additive
+        # keywords (images, queued_id, tier, subject, planFirst...). Without it
+        # every new kwarg 500s six otherwise-unrelated route tests.
         calls.append(confirm)
         return "turn-after-pre-harness"
 
@@ -952,3 +976,62 @@ def test_zzz_real_sessions_db_still_absent():
         f"this suite MODIFIED the real DB at {REAL_DB_PATH} "
         f"(snapshot changed since import) — SESSIONS_DB redirect leaked"
     )
+
+
+def test_messages_confirm_unredeemed_rejection_gives_the_approval_back(client, monkeypatch):
+    """Round 9 finding: the router only gave an approval back on `pre_harness`,
+    which means "the request never left this process". But a request can REACH
+    the harness and still be refused before anything touches the confirmation —
+    401 before the body is parsed, 413 in the body reader, 429 during grant
+    acquisition, all before ConverseLoop. Those burned the proposal permanently
+    and told the client to retry something already spent."""
+    from envelopes import ErrorCode
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+    cid = _seed_approval(sid, tid)
+    session_store.decide_approval(cid, True, by=tid)
+
+    def _unredeemed(*a, **kw):
+        # Reached the harness (so NOT pre_harness) but refused before redemption.
+        raise turn_runner.TurnRejected(
+            429, ErrorCode.LLM_RATE_LIMITED, "slow down", approval_unredeemed=True)
+
+    monkeypatch.setattr(turn_runner, "start_turn", _unredeemed)
+    r = client.post(f"/api/sessions/{sid}/messages",
+                    json={"confirm": {"confirmationId": cid, "approved": True}},
+                    headers=_h(tid))
+    assert r.status_code == 429, r.text
+    assert session_store.get_approval(cid)["consumed"] is False, (
+        "a confirmation refused before the harness could redeem it must be "
+        "retryable — otherwise the proposal is burned with nothing to show"
+    )
+
+
+def test_direct_rejection_terminates_the_transcript_turn(client, monkeypatch):
+    """Round 10 MAJOR 1, confirmed by an adversarial consult: `turn_started` is
+    appended before the harness POST, and on a synchronous rejection the DIRECT
+    path answered its HTTP caller but never terminated the transcript turn —
+    for every rejection leg alike (401, 413, 429, 502). The queued kicker has
+    closed its own failed starts since it existed; the router now applies the
+    same closure, so a reloaded client sees a terminated turn instead of one
+    stuck in-flight forever."""
+    monkeypatch.delenv("LEAF_CONVERSE_HARNESS_URL", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    sess = _seed_session()
+    sid, tid = sess["session_id"], sess["tenant_id"]
+
+    r = client.post(f"/api/sessions/{sid}/messages",
+                    json={"text": "hello"}, headers=_h(tid))
+    assert r.status_code == 502, r.text
+
+    events = session_store.recent_events(sid, 50)
+    started = {e["turn_id"] for e in events if e.get("type") == "turn_started"}
+    terminal = {e["turn_id"] for e in events
+                if e.get("type") in ("turn_complete", "error")}
+    assert started, "the failed start must still record the user's message"
+    dangling = started - terminal
+    assert not dangling, f"turns left in-flight forever: {dangling}"
+    # ...and the terminal carries the rejection, so the transcript says WHY.
+    err = next(e for e in events if e.get("type") == "error")
+    assert err["data"]["error"]["error_code"] == "BROKER_UNREACHABLE"
+    assert err["data"]["stop_reason"] == "error"

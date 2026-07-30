@@ -58,7 +58,7 @@ export class SessionNotFoundError extends Error {
   }
 }
 
-/** 400 — message body must carry exactly one of text | confirm. */
+/** 400 — a body carries either a user message (text and/or images) or confirm. */
 export class BadMessageError extends Error {
   constructor(message: string) {
     super(message);
@@ -102,8 +102,10 @@ export interface ConverseLoopOptions {
 export interface ConverseMessageInput {
   sessionId: string;
   tenantId: string;
-  /** Exactly one of text | confirm (wire contract section 1). */
+  /** Exactly one of (text and/or images) | confirm (wire contract section 1). */
   text?: string;
+  /** Inline vision blocks, this turn only. Never stored as prior context. */
+  images?: Array<{ media_type: string; data: string }>;
   confirm?: { confirmationId: string; approved: boolean };
   /** The app-assembled context packet (section 4). Data, not instructions. */
   contextPacket: Record<string, unknown>;
@@ -158,10 +160,16 @@ export class ConverseLoop {
    * (and tests) await the persisted turn_complete.
    */
   async handleMessage(input: ConverseMessageInput): Promise<HandleMessageResult> {
-    const hasText = typeof input.text === "string" && input.text.length > 0;
+    // Images make a user message just as text does, so an image with no caption
+    // is a real turn. The invariant that matters is unchanged: a turn is EITHER
+    // a user message OR a confirmation, never both and never neither. POST /turn
+    // already refuses images on a confirm turn; this keeps the loop agreeing
+    // with it instead of throwing on a body the boundary accepted.
+    const hasImages = (input.images?.length ?? 0) > 0;
+    const hasText = (typeof input.text === "string" && input.text.length > 0) || hasImages;
     const hasConfirm = input.confirm !== undefined;
     if (hasText === hasConfirm) {
-      throw new BadMessageError("exactly one of text | confirm is required");
+      throw new BadMessageError("exactly one of text | images | confirm is required");
     }
 
     const session = await this.ports.store.getSession(input.sessionId);
@@ -412,6 +420,7 @@ export class ConverseLoop {
             }
           : {}),
         model: this.model,
+        ...(input.images?.length ? { images: input.images } : {}),
         tools,
         canUseTool,
       });

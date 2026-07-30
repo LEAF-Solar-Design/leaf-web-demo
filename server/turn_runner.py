@@ -4,16 +4,19 @@ addendum) — Turn-engine API v1 (FROZEN):
 
     class TurnBusy(Exception)
     class TurnRejected(Exception): status_code, error_code, message, extra,
-                                   pre_harness (additive, defaults False)
-    start_turn(tenant_id, session_id, *, text, confirm, classifier_hint) -> turn_id
+                                   pre_harness, approval_unredeemed
+                                   (both additive, both default False;
+                                   pre_harness implies approval_unredeemed)
+    start_turn(tenant_id, session_id, *, text, confirm, images, classifier_hint) -> turn_id
 
 This module is the ONLY place that POSTs to the harness's `POST /turn`
 (harness/src/ports/converse.ts, ConverseRunner / ConverseTurnInput). It owns
 the whole turn lifecycle: session guard, the `active_turn_id` compare-and-swap
 (session_store.try_begin_turn), durably recording the user's message as the
 `turn_started` event (the durable transcript source for `{text}` /
-`{confirm}` turns), relaying every NDJSON line the harness streams back into
-`session_events` verbatim, materializing an `approvals` row the moment a
+`{text+images}` / `{confirm}` turns), relaying every NDJSON line the harness
+streams back into `session_events` verbatim, materializing an `approvals` row
+the moment a
 `confirmation_required` event arrives, and guaranteeing the turn's
 `active_turn_id` lock is ALWAYS released — on an immediate harness rejection,
 on a clean `turn_complete`/`error`, on an unexpected stream failure, or (the
@@ -23,8 +26,9 @@ Semantics (frozen order):
 
     session exists (+ tenant match) guard
       -> try_begin_turn CAS                              (raise TurnBusy on loss)
-      -> append_event(..., 'turn_started', {text|confirm, classifier_hint})
+      -> append_event(..., 'turn_started', {text?, images?|confirm, classifier_hint})
       -> build bounded prior-context `messages[]` from the event log
+         (count-bounded AND byte-bounded — see MAX_PRIOR_CONTEXT_BYTES)
       -> POST {LEAF_CONVERSE_HARNESS_URL|LEAF_AUTHOR_HARNESS_URL}/turn,
          stream=True, timeout=(5, TURN_MAX_S)   (converse var preferred)
            immediate 401              -> TurnRejected(401, GRANT_REQUIRED, extra={grant_required:True})
@@ -180,9 +184,37 @@ def _harness_url() -> str:
 # bounded prior-context window (§2.1.2 "messages ... bounded, built by the
 # turn engine") — kept simple: fold the last PRIOR_EVENTS_WINDOW raw events
 # into per-turn {user, assistant} pairs, then keep only the most recent
-# MAX_PRIOR_MESSAGES of those.
+# MAX_PRIOR_MESSAGES of those, within a BYTE budget.
+#
+# The count alone is not a bound. Each message's text is whatever was said, and
+# an inbound message may be up to _MAX_MESSAGE_BODY_BYTES (1.5 MB), so 20 of
+# them is ~30 MB of "bounded" context. That left the harness's own /turn ceiling
+# with nothing to be sized against: a legitimate 1 MiB image plus ordinary
+# history could exceed it, and the resulting 413 surfaced as BROKER_UNREACHABLE.
+#
+# TWO bounds, applied in this order: each message is clipped to
+# MAX_PRIOR_MESSAGE_BYTES (tail kept, with a visible marker), then WHOLE
+# messages are dropped from the oldest end until the total fits
+# MAX_PRIOR_CONTEXT_BYTES. So an ordinary message — anything under the
+# per-message cap, which is all of them in practice — survives verbatim or not
+# at all, and only genuinely huge ones are truncated. An earlier version of this
+# comment claimed at most one message is ever clipped; that was wrong, since
+# four 200 KiB messages are four clipped messages.
 PRIOR_EVENTS_WINDOW = 400
 MAX_PRIOR_MESSAGES = 20
+MAX_PRIOR_MESSAGE_BYTES = 64 * 1024
+MAX_PRIOR_CONTEXT_BYTES = 256 * 1024
+# The ceiling the harness enforces on POST /turn (harness/src/server.ts
+# MAX_TURN_BODY_BYTES). The app measures its ENCODED body against this and
+# trims prior context until it fits, so the harness ceiling is an upper bound
+# on what this module sends rather than a number arrived at by arithmetic over
+# decoded text. Change one and change the other.
+MAX_FORWARD_BYTES = 2_000_000
+# The harness refuses this header above 16,384 characters, and node's own total
+# header limit is the same order, so anything larger is refused before the
+# handler runs. Kept strictly under both so the app never posts one.
+MAX_INSTANT_ASSIGNMENT_HEADER = 8 * 1024
+_TRUNCATION_MARKER = "\n[... earlier text omitted ...]"
 
 
 # --------------------------------------------------------------------------- #
@@ -345,13 +377,36 @@ class TurnRejected(Exception):
 
     def __init__(self, status_code: int, error_code: str, message: str,
                  extra: Optional[Dict[str, Any]] = None,
-                 pre_harness: bool = False) -> None:
+                 pre_harness: bool = False,
+                 approval_unredeemed: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.message = message
         self.extra = extra or {}
         self.pre_harness = pre_harness
+        self._approval_unredeemed = approval_unredeemed
+
+    @property
+    def approval_unredeemed(self) -> bool:
+        """True when the harness PROVABLY did not redeem a confirmation, so the
+        router may hand the approval back.
+
+        Wider than `pre_harness`, which means the request never left this
+        process at all. A request can reach the harness and still be refused
+        before anything touches the confirmation:
+
+          401  either the harness auth gate (before the body is even parsed) or
+               GrantRequiredError, and SpineTurnAdapter.runTurn resolves the
+               grant FIRST, before the session mirror and before ConverseLoop
+          413  readJsonBody, before validation or runner entry
+          429  GrantPoolUnavailableError, raised from that same acquisition
+
+        Each of those consumed an approval the app had already spent, so the
+        proposal was burned with no way to retry. `pre_harness` implies this,
+        never the reverse. It still DEFAULTS TO FALSE, so any leg that has not
+        been reasoned about is treated as "the harness may have acted"."""
+        return self.pre_harness or self._approval_unredeemed
 
 
 # --------------------------------------------------------------------------- #
@@ -410,7 +465,68 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
             messages.append({"role": "user", "text": slot["user"]})
         if slot["terminal"] and slot["parts"]:
             messages.append({"role": "assistant", "text": "".join(slot["parts"])})
-    return messages[-MAX_PRIOR_MESSAGES:]
+    return _fit_prior_context(messages[-MAX_PRIOR_MESSAGES:])
+
+
+def _encode_turn_body(payload: Dict[str, Any]) -> bytes:
+    """Serialise the forwarded turn, dropping OLDEST prior messages until the
+    encoded bytes fit MAX_FORWARD_BYTES.
+
+    Measured, not calculated. A byte budget over decoded text is not a bound on
+    what goes on the wire: JSON escapes `"` to two bytes and a control character
+    to six, so 262,144 bytes of quotes serialise to 524,288 — and the arithmetic
+    that sized the harness ceiling also assumed a fixed allowance for a
+    confirmation proposal whose `params` have no size limit at all. Both holes
+    close the same way: encode, look at the length, and trim until it fits.
+
+    Encoded with ensure_ascii=False (see the caller) so non-ASCII text costs its
+    UTF-8 length rather than six bytes per character."""
+    def encode(body: Dict[str, Any]) -> bytes:
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    raw = encode(payload)
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return raw
+    # Oldest first: the newest context is the context worth keeping, and this is
+    # the same direction _fit_prior_context already spends its budget.
+    while len(raw) > MAX_FORWARD_BYTES and messages:
+        messages.pop(0)
+        raw = encode(payload)
+    return raw
+
+
+def _clip(text: str) -> str:
+    """Keep the TAIL of an over-long message: the end of a turn carries the
+    conclusion, and for a user message it is where the actual ask usually is."""
+    raw = text.encode("utf-8")
+    if len(raw) <= MAX_PRIOR_MESSAGE_BYTES:
+        return text
+    marker = _TRUNCATION_MARKER.encode("utf-8")
+    keep = raw[-(MAX_PRIOR_MESSAGE_BYTES - len(marker)):]
+    # The cut can land mid-codepoint; drop the partial leading character.
+    return marker.decode("utf-8") + keep.decode("utf-8", "ignore")
+
+
+def _fit_prior_context(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Clip each message to MAX_PRIOR_MESSAGE_BYTES, then drop whole messages
+    from the OLDEST end until the total fits MAX_PRIOR_CONTEXT_BYTES. Newest
+    context is the context worth keeping, so the budget is spent from the end.
+
+    Note that clipping applies to EVERY message that is individually over the
+    per-message cap, not just the newest one: several huge messages produce
+    several clipped survivors."""
+    kept: List[Dict[str, str]] = []
+    total = 0
+    for msg in reversed(messages):
+        text = _clip(msg["text"])
+        size = len(text.encode("utf-8"))
+        if kept and total + size > MAX_PRIOR_CONTEXT_BYTES:
+            break
+        kept.append({"role": msg["role"], "text": text})
+        total += size
+    kept.reverse()
+    return kept
 
 
 def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
@@ -429,6 +545,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                classifier_hint: Optional[Dict[str, Any]] = None,
                model: Optional[str] = None,
                credential_grant: Optional[Dict[str, Any]] = None,
+               images: Optional[List[Dict[str, str]]] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
                queued_id: Optional[str] = None) -> str:
@@ -471,6 +588,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # this is the only chance to strip it (see _scrub_tree).
         if classifier_hint is not None:
             classifier_hint = _scrub_tree(classifier_hint, _secret)
+        # Image base64 is deliberately NOT scrubbed. Literal secret scanning is
+        # O(n) for each secret and binary image data is not a realistic secret
+        # sink. Images are bounded and validated at the HTTP boundary.
         # `confirm` is deliberately NOT scrubbed. Its proposal is built
         # server-side from the STORED approval row (routers/sessions.py builds
         # {tool, params, capability} from `approval`, never from the client), so
@@ -498,6 +618,15 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     user_data: Dict[str, Any] = {}
     if text is not None:
         user_data["text"] = text
+    if images:
+        # The harness receives full bytes on this turn's wire request. The
+        # durable event intentionally keeps only replay-safe metadata, so every
+        # later transcript fetch and prior-context build cannot multiply image
+        # payloads. The client renders an honest placeholder after reload.
+        user_data["images"] = [
+            {"media_type": image["media_type"], "bytes": len(base64.b64decode(image["data"]))}
+            for image in images
+        ]
     if queued_id is not None:
         # The promoted-from-queue identity, TRANSCRIPT-ONLY (additive event
         # field; the frozen harness wire payload below never carries it). The
@@ -560,6 +689,11 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["text"] = text
     if confirm is not None:
         payload["confirm"] = confirm
+    # The current harness validator accepts and ignores unknown fields. Forward
+    # this additive field now so its image-content-block lane can consume it
+    # without another server release.
+    if images:
+        payload["images"] = images
 
     # "Mount your LLM" (additive wire fields, only present when in play):
     #   - model: the per-turn override wins, else the session's stored model; an
@@ -587,10 +721,41 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # Keep the frozen turn body exact. This authenticated sidecar header is
         # consumed before the runner starts and never enters the transcript.
         encoded = json.dumps(instant_assignment, separators=(",", ":")).encode("utf-8")
-        harness_headers["x-leaf-instant-assignment"] = base64.urlsafe_b64encode(encoded).decode("ascii")
+        header = base64.urlsafe_b64encode(encoded).decode("ascii")
+        # BOUNDED HERE, not only at the harness. Assignment validation keeps
+        # extra fields and has no serialised-size limit, so this header could
+        # outgrow both the harness's own 16,384 check and node's total header
+        # limit — and a request refused by node's PARSER never reaches the
+        # handler, so it comes back as 431 rather than anything this module
+        # classifies. Refusing locally keeps that off the wire entirely, which
+        # also means a confirm turn cannot be spent on it.
+        if len(header) > MAX_INSTANT_ASSIGNMENT_HEADER:
+            _release_cas()
+            raise _rejected(413, ErrorCode.BAD_PARAMS,
+                            "instant assignment header is too large",
+                            pre_harness=True)
+        harness_headers["x-leaf-instant-assignment"] = header
 
+    # Encoded HERE rather than via `json=`, because requests' default encoder
+    # sets ensure_ascii=True and escapes every non-ASCII character to \uXXXX.
+    # That turns one emoji into 12 bytes and one CJK character into 6, so a
+    # 1,499,999-byte browser body could arrive at the harness as ~4.5 MB and
+    # blow a ceiling sized against the byte count the app actually accepted.
+    # UTF-8 is valid JSON, is what the browser sent, and makes the forwarded
+    # size track the inbound size instead of a 6x worst case.
+    body = _encode_turn_body(payload)
+    harness_headers["content-type"] = "application/json"
+    if len(body) > MAX_FORWARD_BYTES:
+        # Nothing left to trim: the user's own message does not fit. Answer here
+        # rather than posting a body the harness will refuse — same status and
+        # code the harness would have produced, minus a pointless round trip,
+        # and provably before anything could redeem a confirmation.
+        _release_cas()
+        raise _rejected(413, ErrorCode.BAD_PARAMS,
+                        "the turn payload exceeded the harness body ceiling",
+                        pre_harness=True)
     try:
-        resp = requests.post(f"{harness_url}/turn", json=payload,
+        resp = requests.post(f"{harness_url}/turn", data=body,
                              headers=harness_headers,
                              stream=True, timeout=(5, max_s))
     except requests.exceptions.ConnectTimeout as exc:
@@ -632,7 +797,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         msg = (body.get("message") or (body.get("error") or {}).get("message")
               or f"tenant {tenant_id!r} has no linked Claude grant")
         resp.close()
-        raise _rejected(401, ErrorCode.GRANT_REQUIRED, msg, extra={"grant_required": True})
+        raise _rejected(401, ErrorCode.GRANT_REQUIRED, msg, extra={"grant_required": True},
+                        approval_unredeemed=True)
 
     if resp.status_code == 429:
         _release_cas()
@@ -642,9 +808,45 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
             code = ErrorCode.LLM_RATE_LIMITED
         msg = body.get("message") or "harness reported a rate/quota limit"
         resp.close()
-        raise _rejected(429, code, msg)
+        raise _rejected(429, code, msg, approval_unredeemed=True)
+
+    if resp.status_code == 413:
+        # The payload was too big for the harness, which is a caller-visible
+        # BAD_PARAMS at 413 — the same answer the app's own body-cap middleware
+        # gives on this route. Folding it into the >= 400 branch below reported
+        # "broker unreachable" for a broker that answered perfectly well, and
+        # sent the caller looking for an outage instead of a smaller payload.
+        _release_cas()
+        rejected = _safe_json(resp) or {}
+        msg = (rejected.get("message") or (rejected.get("error") or {}).get("message")
+               or "the turn payload exceeded the harness body ceiling")
+        resp.close()
+        # NOT pre_harness — this request did reach the harness. It was refused
+        # in the body reader, before validation or runner entry, so ConverseLoop
+        # never ran and no confirmation was redeemed. Without that the router
+        # keeps the approval spent and an oversized confirm turn burns the
+        # proposal permanently, with no way to retry.
+        raise _rejected(413, ErrorCode.BAD_PARAMS, msg, approval_unredeemed=True)
+
+    if resp.status_code in (400, 431):
+        # Refused before the runner was entered, so no confirmation was
+        # redeemed: 400 is the harness's own body/header validation and 431 is
+        # node's PARSER rejecting oversized headers before the handler runs at
+        # all. The app bounds the one header it sends, so neither should be
+        # reachable — but "should not be reachable" is not a reason to leave a
+        # confirm turn burnable if it is.
+        _release_cas()
+        body = _safe_json(resp) or {}
+        msg = body.get("message") or (body.get("error") or {}).get("message") \
+            or f"harness rejected the request (HTTP {resp.status_code})"
+        resp.close()
+        raise _rejected(400, ErrorCode.BAD_PARAMS, msg, approval_unredeemed=True)
 
     if resp.status_code >= 400:
+        # Everything left is AMBIGUOUS and must stay that way. A 500 can be
+        # raised after ConverseLoop has already resolved a confirmation and
+        # started acting on it, so un-spending the approval here is exactly the
+        # double execution consume-once exists to prevent.
         _release_cas()
         body = _safe_json(resp) or {}
         msg = body.get("message") or f"harness returned HTTP {resp.status_code}"
@@ -1074,6 +1276,43 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             pass
 
 
+def _return_policy_consume(cid: str, session_id: str, tenant_id: str) -> bool:
+    """Give a policy-consumed approval back — with ONE attempt, never a retry.
+
+    Round 12: the previous version retried three times blindly, and a blind
+    retry can break single-redeem. Under dual-write a release can SUCCEED in
+    one store and raise in the other, so an attempt that reports failure may
+    have actually freed the row; another caller can then legitimately consume
+    it, and a later blind retry flips THAT consume back off while its turn is
+    running. The store has no consume generation to CAS against (`consumed` is
+    a bare 0/1 in both backends), so the only provably safe number of attempts
+    is one: at the moment of the first call the consumed row is still OURS —
+    nobody else can consume a consumed=1 row, and nothing else gives this cid
+    back — and no earlier partial release can have opened the window.
+
+    A failed single attempt is the documented, safe direction: the row stays
+    consumed-by-policy until its TTL expires, visibly (the alarmable metric
+    plus stderr — review round 6). A consume-generation token that would make
+    retries safe belongs to the approval-lifecycle redesign PR, alongside the
+    explicit redemption ack.
+
+    Returns True iff the row was flipped back this call."""
+    try:
+        if bool(session_store.unconsume_approval(cid, session_id, tenant_id)):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        emf_metrics.emit_approval_give_back_failed(
+            "policy_auto_confirm", confirmation_id=cid, session_id=session_id)
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"[leaf-agent] policy auto-confirm give-back FAILED for {cid!r} on "
+          f"session {session_id!r} — the row stays consumed until its TTL "
+          f"expires", file=sys.stderr, flush=True)
+    return False
+
+
 def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                             tier: Optional[str]) -> bool:
     """One candidate. True iff a confirm turn STARTED (the caller then stops:
@@ -1242,32 +1481,7 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # (see RESUMABLE above). The decision itself stands - it is ours,
             # and re-granting an already-granted gate would be the divergence
             # the gate-first ordering exists to prevent.
-            # The give-back gets THREE tries, and a persistent failure is
-            # reported on the ALARMABLE channel (the router's precedent for a
-            # destroyed approval): the row stays consumed-by-policy, unusable
-            # by a human under live auth, until its TTL expires — at which
-            # point the top check's `expired` branch releases the slot.
-            # Bounded and visible, never silent (review round 6, finding 1).
-            released = False
-            for _ in range(3):
-                try:
-                    released = bool(session_store.unconsume_approval(
-                        cid, session_id, tenant_id))
-                except Exception:  # noqa: BLE001
-                    released = False
-                if released:
-                    break
-            if not released:
-                try:
-                    emf_metrics.emit_approval_give_back_failed(
-                        "policy_auto_confirm", confirmation_id=cid,
-                        session_id=session_id)
-                except Exception:  # noqa: BLE001
-                    pass
-                print(f"[leaf-agent] policy auto-confirm give-back FAILED for "
-                      f"{cid!r} on session {session_id!r} — the row stays "
-                      f"consumed until its TTL expires",
-                      file=sys.stderr, flush=True)
+            _return_policy_consume(cid, session_id, tenant_id)
             # PARK it, so a later terminal actually retries (see
             # _pending_policy). Returning the consume alone left the decision
             # with nothing to rediscover it.
@@ -1281,11 +1495,13 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                   f"session {session_id!r}; approval {cid!r} parked for the "
                   f"next terminal", file=sys.stderr, flush=True)
         except TurnRejected as exc:
-            if exc.pre_harness:
-                try:
-                    session_store.unconsume_approval(cid, session_id, tenant_id)
-                except Exception:  # noqa: BLE001
-                    pass
+            # `approval_unredeemed`, NOT `pre_harness` (round 11): the router
+            # was widened to refund 400/401/413/429/431 but this third consume
+            # site kept the narrower test, so a policy auto-confirm hitting a
+            # missing grant (401) or an oversized forward (413) burned the
+            # approval permanently.
+            if exc.approval_unredeemed:
+                _return_policy_consume(cid, session_id, tenant_id)
             if exc.turn_id is not None:
                 # No HTTP caller to answer: close the transcript the failed
                 # start opened, the queue kicker's rule.

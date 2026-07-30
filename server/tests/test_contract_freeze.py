@@ -282,13 +282,20 @@ def test_s18_sse_vocabulary_frozen():
 def test_s21_turn_input_field_set_frozen_no_packet():
     """The live wire is §2.1 ConverseTurnInput. The field SET is exact: an added
     field fails, not just a removed one. `model` + `credential_grant` are the
-    ADDITIVE, OPTIONAL "mount your LLM" fields (both absent-safe on the wire); a
+    ADDITIVE, OPTIONAL "mount your LLM" fields (both absent-safe on the wire);
+    `images` is the same kind of addition for inline vision blocks, optional and
+    absent-safe, carried for one turn and never stored as prior context. A
     ContextPacket field remains explicitly forbidden (that is the §2.1 packet
-    decision, distinct from these per-session model/credential additions)."""
+    decision, distinct from these per-session additions).
+
+    This gate is why the field set is written out rather than derived: adding
+    `images` had to be a deliberate edit here, in the same commit, instead of a
+    silent wire change nobody reviewed."""
     block = _ts_balanced_block(CONVERSE_TS, "export interface ConverseTurnInput")
     assert _ts_field_names(block) == {"tenant_id", "session_id", "turn_id",
                                       "drawing_id", "messages", "text",
-                                      "confirm", "model", "credential_grant"}, (
+                                      "confirm", "model", "credential_grant",
+                                      "images"}, (
         f"ConverseTurnInput field set drifted: {sorted(_ts_field_names(block))}")
     assert "contextPacket" not in block and "context_packet" not in block, (
         "ConverseTurnInput grew a packet field — that is a §2.1 wire change, "

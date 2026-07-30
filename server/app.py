@@ -104,6 +104,11 @@ def initialize_customization_store() -> None:
 import guest_uploads as _guest_uploads_mw  # noqa: E402
 
 app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
+# Same idea for converse messages, which carry inline image bytes: bound the
+# stream before FastAPI reads it, and let FastAPI still do the parsing.
+from routers import sessions as _sessions_mw  # noqa: E402
+
+app.add_middleware(_sessions_mw.MessageBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),  # F17: env-driven allow-list, default-deny in live-auth

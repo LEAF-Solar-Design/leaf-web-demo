@@ -70,6 +70,11 @@ export function classifyAgentError(err) {
   // only a fresh proposal can proceed).
   if (err?.status === 410) return 'confirmation_expired'
   if (err?.status === 409 && code === 'bad_params') return 'approval_stale'
+  // 413 is also BAD_PARAMS, and falling through to 'unreachable' told the user
+  // we could not reach the assistant when the assistant had answered clearly:
+  // the payload is too big. That is a thing the user can act on (send fewer or
+  // smaller images), and an outage is not.
+  if (err?.status === 413) return 'too_large'
   if (err?.status === 401 || code === 'grant_required' || !!(err?.body && err.body.grant_required)) return 'grant'
   if (err?.status === 403 || code === 'entitlement_required' || !!(err?.body && err.body.entitlement_required)) return 'entitlement'
   return 'unreachable'
@@ -106,16 +111,18 @@ export function resetSession(drawingId) {
 }
 
 // --- Start a turn ---------------------------------------------------------
-// POST /api/sessions/{id}/messages — exactly one of text/confirm (wire §2).
+// POST /api/sessions/{id}/messages — exactly one of a user message (text
+// and/or images) or confirm (wire §2).
 // 202 {turn_id, status:"started"}; everything else throws tagged (409
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
-  text, confirm, classifier_hint, credential_grant, queue,
+  text, confirm, images, classifier_hint, credential_grant, queue,
 } = {}) {
   const payload = {}
   if (text != null) payload.text = text
   if (confirm != null) payload.confirm = confirm
+  if (images != null) payload.images = images
   if (classifier_hint != null) payload.classifier_hint = classifier_hint
   if (credential_grant != null) payload.credential_grant = credential_grant
   if (queue === true) payload.queue = true

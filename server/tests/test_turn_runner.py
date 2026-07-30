@@ -92,6 +92,7 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
     CHUNK_DELAY_S: float = 0.0                 # sleep between chunks (proves incremental streaming)
     SEND_TERMINATOR: bool = True               # False -> never send the final 0-chunk (hang)
     LAST_BODY: Optional[Dict[str, Any]] = None
+    LAST_RAW: Optional[bytes] = None
 
     def _write_chunk(self, raw: bytes) -> None:
         self.wfile.write(f"{len(raw):x}\r\n".encode("ascii") + raw + b"\r\n")
@@ -100,6 +101,10 @@ class _TurnStub(http.server.BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("content-length", 0) or 0)
         body = self.rfile.read(length)
+        # The RAW bytes, kept so a test can assert how the app ENCODED them
+        # and not merely what they decode to. The ASCII-escaping defect was
+        # invisible to anything that only looked at the parsed object.
+        type(self).LAST_RAW = body
         try:
             type(self).LAST_BODY = json.loads(body or b"{}")
         except Exception:
@@ -141,6 +146,7 @@ def turn_stub():
     _TurnStub.CHUNK_DELAY_S = 0.0
     _TurnStub.SEND_TERMINATOR = True
     _TurnStub.LAST_BODY = None
+    _TurnStub.LAST_RAW = None
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TurnStub)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -982,11 +988,12 @@ def test_second_turn_carries_prior_turn_as_messages(monkeypatch, turn_stub):
 
 
 # =========================================================================== #
-# pre_harness classification (routers/sessions.py's APPROVAL GIVE-BACK). The
-# router un-spends a consumed approval IFF TurnRejected.pre_harness is set, so
-# a leg wrongly marked pre_harness can un-spend an approval the harness is
-# already acting on. Getting this boundary right IS the safety property.
-# (sol-critic round 2, blocker 1.)
+# Rejection classification (routers/sessions.py's APPROVAL GIVE-BACK). The
+# router un-spends a consumed approval IFF TurnRejected.approval_unredeemed is
+# set (pre_harness implies it; 400/401/413/429/431 set it directly), so a leg
+# wrongly marked can un-spend an approval the harness is already acting on.
+# Getting this boundary right IS the safety property.
+# (sol-critic round 2, blocker 1; widened round 9-11.)
 # =========================================================================== #
 def _reject_from_post_error(monkeypatch, exc, url="http://127.0.0.1:9/"):
     """Drive start_turn to its POST and make requests.post raise `exc`."""
@@ -1306,3 +1313,377 @@ def test_concurrent_orphan_cancels_append_exactly_one_terminal_event(monkeypatch
     assert sum(1 for e in events if e["type"] == "turn_complete") == 1, \
         [e["type"] for e in events]
     assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# A harness 413 is the caller's payload problem, not an outage.
+# --------------------------------------------------------------------------- #
+def test_immediate_413_maps_to_bad_params_not_broker_unreachable(monkeypatch, turn_stub):
+    """Round 7 finding: the harness's own body ceiling answered 413, and the
+    >= 400 catch-all reported it as `502 BROKER_UNREACHABLE` — sending the
+    caller to look for an outage instead of shrinking the payload."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 413
+    stub.IMMEDIATE_BODY = {"error": {"message": "request body exceeds the harness cap"}}
+
+    sess = _new_session("tenant-413")
+    session_id = sess["session_id"]
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-413", session_id, text="hi")
+    exc = ei.value
+    assert exc.status_code == 413
+    assert exc.error_code == ErrorCode.BAD_PARAMS
+    assert exc.error_code != ErrorCode.BROKER_UNREACHABLE
+    assert "harness cap" in exc.message
+    # the turn lock is released like every other immediate rejection
+    assert session_store.get_session(session_id)["active_turn_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Prior context is bounded in BYTES, not only in message count.
+# --------------------------------------------------------------------------- #
+def _ctx_bytes(messages):
+    return sum(len(m["text"].encode("utf-8")) for m in messages)
+
+
+def test_prior_context_is_byte_bounded_not_just_count_bounded():
+    """MAX_PRIOR_MESSAGES caps the COUNT; without a byte budget, 20 messages of
+    unbounded text is unbounded context, and the harness /turn ceiling has
+    nothing to be sized against."""
+    huge = [{"role": "user", "text": "x" * 200_000} for _ in range(20)]
+    fitted = turn_runner._fit_prior_context(huge)
+
+    assert _ctx_bytes(fitted) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(fitted) < len(huge)  # whole messages were dropped to fit
+    # 20 x 200KB would be 4 MB on the wire before this bound existed
+    assert _ctx_bytes(huge) > 10 * turn_runner.MAX_PRIOR_CONTEXT_BYTES
+
+
+def test_prior_context_keeps_the_newest_messages_verbatim():
+    """The budget is spent from the newest end, and what survives is not clipped
+    — a mid-sentence cut through every message would be worse than dropping the
+    oldest ones outright."""
+    messages = [{"role": "user", "text": f"msg-{i}: " + "y" * 50_000} for i in range(20)]
+    fitted = turn_runner._fit_prior_context(messages)
+
+    assert fitted[-1] == messages[-1]              # newest survives byte-for-byte
+    assert fitted[0]["text"].startswith("msg-")    # no partial leading message
+    assert all(m in messages for m in fitted)      # every kept message is verbatim
+
+
+def test_a_single_oversized_message_is_clipped_with_a_marker():
+    """One message alone can exceed the per-message cap; that one is truncated
+    (tail kept) rather than dropped, so the newest turn never vanishes."""
+    one = [{"role": "user", "text": "lead " + "z" * 300_000 + " THE ACTUAL ASK"}]
+    fitted = turn_runner._fit_prior_context(one)
+
+    assert len(fitted) == 1
+    text = fitted[0]["text"]
+    assert len(text.encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+    assert text.startswith(turn_runner._TRUNCATION_MARKER)
+    assert text.endswith("THE ACTUAL ASK")   # the tail is what was kept
+
+
+def test_clipping_never_emits_a_broken_codepoint():
+    """The byte cut can land mid-character; the result must still be text."""
+    clipped = turn_runner._clip("\u4e2d" * 100_000)
+    assert len(clipped.encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+    clipped.encode("utf-8").decode("utf-8")   # raises if a partial codepoint survived
+
+
+def test_ordinary_history_is_untouched():
+    """The bound must not perturb the normal case at all."""
+    normal = [{"role": "user", "text": "count entities per layer"},
+              {"role": "assistant", "text": "There are 412 entities across 9 layers."}]
+    assert turn_runner._fit_prior_context(normal) == normal
+
+
+def test_prior_messages_applies_the_byte_bound_on_the_real_path():
+    """The bound has to be wired into `_prior_messages`, not merely available:
+    testing `_fit_prior_context` alone passed happily with the call site
+    removed."""
+    sess = _new_session("tenant-prior-bytes")
+    session_id = sess["session_id"]
+    for i in range(12):
+        tid = f"prior-turn-{i}"
+        session_store.append_event(session_id, tid, "turn_started", {"text": "u" * 120_000})
+        session_store.append_event(session_id, tid, "text_delta", {"text": "a" * 120_000})
+        session_store.append_event(session_id, tid, "turn_complete", {"stop_reason": "end_turn"})
+
+    messages = turn_runner._prior_messages(session_id, exclude_turn_id="not-a-real-turn")
+
+    assert messages, "the fold itself must still work"
+    assert _ctx_bytes(messages) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(messages) <= turn_runner.MAX_PRIOR_MESSAGES
+    # 24 x 120KB of raw history folded down to the budget
+    assert _ctx_bytes(messages) < 24 * 120_000
+
+
+# --------------------------------------------------------------------------- #
+# The forwarded body must not balloon on non-ASCII text.
+# --------------------------------------------------------------------------- #
+def test_forwarded_body_is_utf8_not_ascii_escaped(monkeypatch, turn_stub):
+    r"""Round 8 finding: `requests.post(json=...)` uses ensure_ascii=True, so
+    every non-ASCII character is escaped to \uXXXX. One emoji becomes 12 bytes
+    and one CJK character 6, which means a body the app legitimately accepted at
+    1.5 MB could reach the harness at ~4.5 MB and blow a ceiling sized against
+    the byte count the app checked."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+
+    sess = _new_session("tenant-utf8")
+    text = "\u4e2d\u6587" * 2000          # 4000 CJK characters
+    turn_runner.start_turn("tenant-utf8", sess["session_id"], text=text)
+    _wait_until(lambda: stub.LAST_RAW is not None)
+
+    raw = stub.LAST_RAW
+    assert raw is not None
+    # The value survives intact...
+    assert stub.LAST_BODY["text"] == text
+    # ...and it was sent as UTF-8, not as escapes. 4000 CJK characters are
+    # 12,000 UTF-8 bytes but 24,000 bytes of \uXXXX.
+    assert b"\\u4e2d" not in raw
+    assert text.encode("utf-8") in raw
+    # The forwarded size tracks the text size instead of doubling it.
+    assert len(raw) < 2 * len(text.encode("utf-8"))
+
+
+def test_an_oversized_turn_gives_the_approval_back(monkeypatch, turn_stub):
+    """Round 8 finding: the route consumes the approval before start_turn. A
+    harness 413 happens before ConverseLoop, so nothing redeemed it — but
+    without `pre_harness` the router keeps it spent and the proposal is burned
+    permanently, with no way to retry."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 413
+    stub.IMMEDIATE_BODY = {"error": {"message": "request body exceeds the harness cap"}}
+
+    sess = _new_session("tenant-413-confirm")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-413-confirm", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 413
+    # THE assertion: this is what lets routers/sessions.py hand the approval
+    # back. NOT pre_harness — this request did reach the harness; it was refused
+    # in the body reader, before validation or runner entry.
+    assert exc.approval_unredeemed is True
+    assert exc.pre_harness is False
+
+
+def test_several_huge_messages_are_each_clipped(monkeypatch):
+    """The policy is clip-then-drop, and the comment used to claim at most one
+    message is ever truncated. Four 200 KiB messages are four clipped
+    survivors, so the claim was wrong and this pins what actually happens."""
+    messages = [{"role": "user", "text": f"m{i} " + "z" * 200_000} for i in range(10)]
+    fitted = turn_runner._fit_prior_context(messages)
+
+    assert _ctx_bytes(fitted) <= turn_runner.MAX_PRIOR_CONTEXT_BYTES
+    assert len(fitted) > 1, "several survive, they are not collapsed to one"
+    for msg in fitted:
+        assert len(msg["text"].encode("utf-8")) <= turn_runner.MAX_PRIOR_MESSAGE_BYTES
+        assert msg["text"].startswith(turn_runner._TRUNCATION_MARKER)
+    # ...and an ordinary-sized message is still returned byte-for-byte.
+    small = [{"role": "user", "text": "ordinary"}]
+    assert turn_runner._fit_prior_context(small) == small
+
+
+# --------------------------------------------------------------------------- #
+# The forwarded body is bounded by MEASUREMENT, not by arithmetic.
+# --------------------------------------------------------------------------- #
+def test_json_escaping_cannot_push_the_forward_over_the_ceiling(monkeypatch, turn_stub):
+    """Round 9 finding: the prior-context budget counted DECODED utf-8 bytes,
+    but JSON escapes a quote to two bytes and a control character to six. Four
+    64 KiB messages of quotes are 262,144 bytes of context that serialise to
+    524,288 — so a legal turn could still exceed the harness ceiling."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+
+    sess = _new_session("tenant-escaping")
+    session_id = sess["session_id"]
+    # Prior context made entirely of quotes: maximal JSON expansion. Sized at
+    # 32,768 per message so eight of them fill MAX_PRIOR_CONTEXT_BYTES exactly
+    # (8 x 32,768 = 262,144) rather than stopping short of it.
+    for i in range(4):
+        tid = f"quote-turn-{i}"
+        session_store.append_event(session_id, tid, "turn_started", {"text": '"' * 32_768})
+        session_store.append_event(session_id, tid, "text_delta", {"text": '"' * 32_768})
+        session_store.append_event(session_id, tid, "turn_complete", {"stop_reason": "end_turn"})
+
+    # Sized so the sum genuinely exceeds the ceiling: 262,144 decoded bytes of
+    # quotes serialise to 524,288, and 1,480,000 + 524,288 > 2,000,000. With a
+    # smaller message the test passes whether or not the trim exists, which is
+    # exactly how the first version of it reported a defect as fixed.
+    text = "x" * 1_500_000
+    fitted = turn_runner._prior_messages(session_id, exclude_turn_id="none")
+    assert _ctx_bytes(fitted) == turn_runner.MAX_PRIOR_CONTEXT_BYTES, (
+        "the fixture must fill the context budget, or this passes whether or "
+        "not the trim exists — which is how its first version reported a "
+        "defect as fixed")
+
+    turn_runner.start_turn("tenant-escaping", session_id, text=text)
+    _wait_until(lambda: stub.LAST_RAW is not None)
+
+    # THE assertion: what actually went on the wire fits the harness ceiling.
+    assert len(stub.LAST_RAW) <= turn_runner.MAX_FORWARD_BYTES
+    # ...it was over before trimming, so the trim is what did it.
+    assert len(text.encode()) + _ctx_bytes(fitted) * 2 > turn_runner.MAX_FORWARD_BYTES
+    # ...and the user's own message survived intact; only context was trimmed.
+    assert stub.LAST_BODY["text"] == text
+    assert len(stub.LAST_BODY["messages"]) < len(fitted)
+
+
+def test_encode_turn_body_trims_oldest_first():
+    payload = {
+        "tenant_id": "t", "session_id": "s", "turn_id": "u", "drawing_id": "d",
+        "text": "the ask",
+        "messages": [{"role": "user", "text": f"m{i} " + '"' * 300_000} for i in range(6)],
+    }
+    raw = turn_runner._encode_turn_body(payload)
+
+    assert len(raw) <= turn_runner.MAX_FORWARD_BYTES
+    kept = payload["messages"]
+    assert len(kept) < 6, "context must actually be trimmed"
+    # The survivors are the NEWEST ones, contiguous with the end.
+    assert kept[-1]["text"].startswith("m5 ")
+    assert json.loads(raw)["text"] == "the ask"
+
+
+def test_an_unshrinkable_payload_is_refused_before_it_is_posted(monkeypatch, turn_stub):
+    """With no prior context left to drop, posting a body the harness will
+    refuse buys nothing. Answer here, and mark the approval unredeemed: nothing
+    left the process, so no confirmation can have been touched."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner, "MAX_FORWARD_BYTES", 5_000)
+
+    sess = _new_session("tenant-unshrinkable")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-unshrinkable", sess["session_id"], text="y" * 50_000)
+    exc = ei.value
+    assert exc.status_code == 413
+    assert exc.error_code == ErrorCode.BAD_PARAMS
+    assert exc.approval_unredeemed is True
+    assert stub.LAST_RAW is None, "nothing may be posted"
+    assert session_store.get_session(sess["session_id"])["active_turn_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 401 and 429 are refused before anything can redeem a confirmation.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("status,body,expected_code", [
+    (401, {"grant_required": True, "error": {"message": "no grant"}}, ErrorCode.GRANT_REQUIRED),
+    (429, {"errorCode": "llm_rate_limited", "message": "slow down"}, ErrorCode.LLM_RATE_LIMITED),
+    (413, {"error": {"message": "too big"}}, ErrorCode.BAD_PARAMS),
+])
+def test_pre_redemption_refusals_give_the_approval_back(monkeypatch, turn_stub,
+                                                        status, body, expected_code):
+    """SpineTurnAdapter.runTurn resolves the grant FIRST, before the session
+    mirror and before ConverseLoop, and the harness auth 401 lands even earlier
+    than that. So none of these can have redeemed a confirmation — but the app
+    consumes the approval before start_turn, so without this the proposal is
+    burned permanently and the client is told to retry something already spent."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = status
+    stub.IMMEDIATE_BODY = body
+
+    sess = _new_session(f"tenant-unredeemed-{status}")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn(f"tenant-unredeemed-{status}", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == status
+    assert exc.error_code == expected_code
+    assert exc.approval_unredeemed is True
+
+
+def test_an_ambiguous_rejection_still_keeps_the_approval_spent():
+    """The fail-safe default. Anything not reasoned about is treated as "the
+    harness may have acted", so an approval whose tool call might be running is
+    never handed back."""
+    exc = turn_runner.TurnRejected(502, ErrorCode.BROKER_UNREACHABLE, "stream died")
+    assert exc.approval_unredeemed is False
+    assert exc.pre_harness is False
+    # ...and pre_harness implies it, never the reverse.
+    assert turn_runner.TurnRejected(502, ErrorCode.BROKER_UNREACHABLE, "x",
+                                    pre_harness=True).approval_unredeemed is True
+
+
+def test_an_oversized_instant_assignment_header_never_reaches_the_wire(monkeypatch, turn_stub):
+    """Round 10 finding: the assignment header was base64-encoded with no size
+    check, while assignment validation keeps extra fields and bounds nothing.
+    Past node's header limit the PARSER answers 431 before the handler runs, so
+    the app never even sees a status it classifies — and a confirm turn stayed
+    consumed. Bounding it here keeps it off the wire."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    sess = _new_session("tenant-big-header")
+    huge = {"executor_id": "e", "session": "s", "padding": "p" * 40_000}
+    monkeypatch.setattr(turn_runner.instant_execution, "assignment_for_session",
+                        lambda *_a: huge)
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-big-header", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 413
+    assert exc.approval_unredeemed is True
+    assert stub.LAST_RAW is None, "an unsendable request must not be posted"
+    assert session_store.get_session(sess["session_id"])["active_turn_id"] is None
+
+
+@pytest.mark.parametrize("status", [400, 431])
+def test_pre_runner_request_rejections_give_the_approval_back(monkeypatch, turn_stub, status):
+    """400 is the harness's own request validation and 431 is node's parser
+    refusing oversized headers before the handler runs. Both precede runner
+    entry, so a confirm refused this way must stay retryable."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = status
+    stub.IMMEDIATE_BODY = {"error": {"message": "rejected"}}
+
+    sess = _new_session(f"tenant-prerunner-{status}")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn(f"tenant-prerunner-{status}", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 400
+    assert exc.error_code == ErrorCode.BAD_PARAMS
+    assert exc.approval_unredeemed is True
+
+
+def test_a_harness_500_stays_ambiguous(monkeypatch, turn_stub):
+    """The line this must not cross. A 500 can be raised AFTER ConverseLoop
+    resolved a confirmation and began acting on it, so the approval stays
+    spent."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 500
+    stub.IMMEDIATE_BODY = {"error": {"message": "boom"}}
+
+    sess = _new_session("tenant-500")
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-500", sess["session_id"],
+                               confirm={"confirmationId": "c-1", "approved": True})
+    exc = ei.value
+    assert exc.status_code == 502
+    assert exc.error_code == ErrorCode.BROKER_UNREACHABLE
+    assert exc.approval_unredeemed is False, (
+        "a 500 may follow a redeemed confirmation; un-spending it is the "
+        "double execution consume-once prevents"
+    )

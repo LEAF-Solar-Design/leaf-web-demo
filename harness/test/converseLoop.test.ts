@@ -115,6 +115,29 @@ describe("ConverseLoop — sessions", () => {
     ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
+  it("treats images as a user message, and still refuses images on a confirm", async () => {
+    // POST /turn accepts an image with no caption, so the loop has to as well —
+    // otherwise the boundary says yes and the loop throws on a body it just
+    // approved. What stays true is the real invariant: a turn is EITHER a user
+    // message or a confirmation.
+    const { loop } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const images = [{ media_type: "image/png", data: "iVBORw0KGgo=" }];
+    const started = await loop.handleMessage({
+      sessionId: s.session_id, tenantId: "demo-tenant", images, contextPacket: PACKET,
+    });
+    await started.done;
+    await expect(
+      loop.handleMessage({
+        sessionId: s.session_id,
+        tenantId: "demo-tenant",
+        images,
+        confirm: { confirmationId: "x", approved: true },
+        contextPacket: PACKET,
+      }),
+    ).rejects.toBeInstanceOf(BadMessageError);
+  });
+
   it("requires exactly one of text | confirm", async () => {
     const { loop } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

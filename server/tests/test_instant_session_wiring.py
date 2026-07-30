@@ -353,7 +353,7 @@ def test_turn_back_edge_receives_assignment_without_transcript_persistence(monke
     )
 
     def _post(_url, **kwargs):
-        captured["body"] = kwargs["json"]
+        captured["body"] = json.loads(kwargs["data"])
         captured["headers"] = kwargs["headers"]
         return _Response()
 

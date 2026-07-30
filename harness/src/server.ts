@@ -145,11 +145,94 @@ function harnessAuthDenial(
   return null;
 }
 
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+/**
+ * Body ceilings. A size check that runs AFTER the body is buffered is not a
+ * size check at all: the memory is already spent, and a chunked request
+ * declares no length to check up front. So the ceiling is enforced per chunk.
+ *
+ * Two values because the routes are not alike.
+ *
+ * `/turn` is sized against what the APP can legitimately forward, which is more
+ * than what the app accepts from the browser:
+ *
+ * comfortably above the app's own 1,500,000-byte inbound cap, with room for the
+ * prior context, ids, credential grant and framing the app adds afterwards.
+ *
+ * The app MEASURES its encoded body against this same number
+ * (turn_runner.MAX_FORWARD_BYTES) and trims prior context until it fits, so
+ * this is an upper bound on what the app sends rather than a figure arrived at
+ * by arithmetic. That matters because arithmetic over decoded text kept being
+ * wrong in ways that only showed up on real input: prior context was
+ * count-bounded rather than byte-bounded; `requests`' default encoder escapes
+ * non-ASCII to \uXXXX and turned one emoji into 12 bytes; and even after
+ * byte-bounding, JSON escapes `"` to two bytes and a control character to six,
+ * so a budget over decoded text is not a budget over the wire. Change this
+ * number and change MAX_FORWARD_BYTES with it.
+ *
+ * Every other route gets a generous default, because a customization publish
+ * carries a staged receipt and a registered run carries arbitrary tool params:
+ * bounding those to the IMAGE budget would refuse legitimate payloads that have
+ * nothing to do with images.
+ */
+const MAX_TURN_BODY_BYTES = 2_000_000;
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** How long one peer may hold a socket while sending (node's default is 300s). */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    let seen = 0;
+    let refused = false;
+    const tooLarge = (): AuthorLoopError =>
+      new AuthorLoopError("request body exceeds the harness cap", 413);
+
+    // Over the cap: STOP BUFFERING, keep reading, and answer at `end`.
+    //
+    // Memory is what the ceiling defends, and discarding costs none of it. The
+    // reason to keep reading at all is that WHEN the 413 is written decides
+    // whether the client ever reads it: the response carries
+    // `connection: close`, node half-closes as soon as it is written, and a
+    // peer still uploading gets a broken pipe and reports a network failure
+    // instead of the envelope. That reset is not cosmetic — the app maps a
+    // dropped connection to BROKER_UNREACHABLE, so the caller is told the
+    // harness is down when it actually answered "your payload is too big".
+    //
+    // Two smarter-looking versions of this were both worse. Destroying the
+    // socket at a byte allowance reset every oversized DECLARED request on the
+    // 8 MiB routes, because refusal there happens before the first byte and the
+    // whole body counts against the allowance. Answering early and pausing
+    // deadlocked: node will not finish a response whose request nobody is
+    // reading, so the socket never closed at all.
+    //
+    // What bounds this is not a byte budget but `requestTimeout` on the server
+    // (see `listen`), which is the honest control for "a peer is holding a
+    // socket too long" and applies to every request, not just refused ones.
+    const refuse = (): void => {
+      if (refused) return;
+      refused = true;
+      chunks.length = 0;
+    };
+
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > maxBytes) refuse();
+
+    req.on("data", (c: Buffer) => {
+      if (refused) return;                 // read and drop; nothing accumulates
+      seen += c.length;
+      // Measured as it arrives, not afterwards: a chunked body declares no
+      // length, so buffering first and checking later defeats the point.
+      if (seen > maxBytes) return refuse();
+      chunks.push(c);
+    });
     req.on("end", () => {
+      // The body has finished arriving, so closing the connection now cannot
+      // break the peer's write side — this is the point at which a 413 is
+      // actually readable by the client that caused it.
+      if (refused) return reject(tooLarge());
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) return resolve({});
       try {
@@ -172,7 +255,13 @@ function requiredText(body: Record<string, unknown>, field: string): string {
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json" });
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  // 413 always closes. The request that caused it was read but never used, and
+  // a refused request is not a good candidate for connection reuse. readJsonBody
+  // reads it through to `end` precisely so that closing here cannot break a peer
+  // that is still writing.
+  if (status === 413) headers.connection = "close";
+  res.writeHead(status, headers);
   res.end(payload);
 }
 
@@ -187,10 +276,69 @@ type ConverseTurnValidation = {
   instantDrawingContext?: InstantDrawingContext;
 } | { ok: false; message: string };
 
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_IMAGES_PER_MESSAGE = 3;
+const MAX_IMAGE_BYTES = 1024 * 1024;
+const MAX_IMAGES_BYTES = 1024 * 1024;
+
 /**
- * Minimal validation of ConverseTurnInput: the four required id fields, and at
- * least one of `text` / `confirm` to drive the turn. Deliberately does not
- * validate deeper into `confirm.proposal` — that is the runner's job. `messages`
+ * Signatures matched in FULL, and matched the same way the app matches them
+ * (server/routers/sessions.py `_image_magic_matches`). Two independent checks
+ * are the point — the harness does not trust that the app validated — but if
+ * they disagree the app accepts a request the harness then rejects, which the
+ * user experiences as an unexplained failure after a successful upload.
+ */
+function imageMagicMatches(mediaType: string, bytes: Buffer): boolean {
+  if (mediaType === "image/png") {
+    return bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mediaType === "image/jpeg") {
+    // SOI plus the first marker, and that is the whole signature. JPEG has no
+    // fixed tail — real encoders emit bytes after EOI and decoders read them
+    // fine — so requiring EOI last turns away genuine photos.
+    return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+  }
+  if (mediaType === "image/gif") {
+    const header = bytes.subarray(0, 6).toString("ascii");
+    return header === "GIF87a" || header === "GIF89a";
+  }
+  if (bytes.length < 12) return false;
+  return bytes.subarray(0, 4).toString("ascii") === "RIFF"
+    && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+    && bytes.readUInt32LE(4) === bytes.length - 8;
+}
+
+function validateImages(value: unknown): { ok: true; images: NonNullable<ConverseTurnInput["images"]> } | { ok: false; message: string } {
+  if (!Array.isArray(value)) return { ok: false, message: "images must be an array" };
+  if (value.length > MAX_IMAGES_PER_MESSAGE) return { ok: false, message: `at most ${MAX_IMAGES_PER_MESSAGE} images are allowed per message` };
+  let total = 0;
+  const images: NonNullable<ConverseTurnInput["images"]> = [];
+  for (const [offset, raw] of value.entries()) {
+    const index = offset + 1;
+    if (!isRecord(raw) || !IMAGE_MEDIA_TYPES.has(raw.media_type as string)) {
+      return { ok: false, message: `image ${index} media_type must be png, jpeg, webp, or gif` };
+    }
+    if (typeof raw.data !== "string" || !raw.data) return { ok: false, message: `image ${index} data must be non-empty base64` };
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.data) || raw.data.length % 4 !== 0) {
+      return { ok: false, message: `image ${index} data must be valid base64` };
+    }
+    const bytes = Buffer.from(raw.data, "base64");
+    if (!bytes.length) return { ok: false, message: `image ${index} data must be non-empty base64` };
+    if (bytes.length > MAX_IMAGE_BYTES) return { ok: false, message: "each image must be at most 1MB decoded" };
+    total += bytes.length;
+    if (total > MAX_IMAGES_BYTES) return { ok: false, message: "images must total at most 1MB decoded" };
+    const media_type = raw.media_type as string;
+    if (!imageMagicMatches(media_type, bytes)) return { ok: false, message: `image ${index} media_type does not match its bytes` };
+    images.push({ media_type, data: raw.data });
+  }
+  return { ok: true, images };
+}
+
+/**
+ * Minimal validation of ConverseTurnInput: the four required id fields, and
+ * exactly one of (`text` and/or `images`) | `confirm` to drive the turn.
+ * Deliberately does not validate deeper into `confirm.proposal` — that is the
+ * runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
  * missing array here should not be a reason to reject the whole request).
  */
@@ -207,8 +355,23 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   const hasText = typeof body.text === "string" && body.text.length > 0;
   const rawConfirm = body.confirm;
   const hasConfirm = typeof rawConfirm === "object" && rawConfirm !== null;
-  if (!hasText && !hasConfirm) {
-    return { ok: false, message: "one of text or confirm is required" };
+  let images: NonNullable<ConverseTurnInput["images"]> | undefined;
+  if (body.images !== undefined) {
+    const validated = validateImages(body.images);
+    if (!validated.ok) return validated;
+    images = validated.images;
+  }
+  // A turn is a user message (text and/or images) OR a confirmation, never both
+  // and never neither — the same rule ConverseLoop enforces. Both halves have to
+  // be checked HERE, at the boundary, because the adapter acquires a grant and
+  // writes the confirmation mirror before the loop ever sees the body: leaving
+  // `text + confirm` to the loop turned a boundary 400 into a post-side-effect
+  // 500. Refusing images-with-confirm but not text-with-confirm was the gap.
+  if (!hasText && !hasConfirm && !images?.length) {
+    return { ok: false, message: "one of text, images, or confirm is required" };
+  }
+  if (hasConfirm && (hasText || images?.length)) {
+    return { ok: false, message: "a turn carries either text/images or confirm, not both" };
   }
 
   const messages = Array.isArray(body.messages)
@@ -217,6 +380,7 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
 
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
   if (hasText) input.text = body.text as string;
+  if (images?.length) input.images = images;
   if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
 
   // Per-session "mount your LLM" fields — OPTIONAL and additive. Validated here
@@ -544,7 +708,7 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       }
 
       if (method === "POST" && path === "/turn") {
-        const body = await readJsonBody(req);
+        const body = await readJsonBody(req, MAX_TURN_BODY_BYTES);
         const validated = validateConverseTurnInput(body);
         if (!validated.ok) {
           return send(res, 400, { error: { message: validated.message } });
@@ -614,6 +778,12 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
       const server = createHttpServer((req, res) => {
         void handler(req, res);
       });
+      // How long any one peer may hold a socket while sending. This is the
+      // bound on an over-cap body being read and discarded, and on a slow
+      // writer generally — node's default is 300s, which is a long time to
+      // occupy a connection for a request already known to be refused. 8 MiB
+      // in 120s is 70 KB/s, far below anything a real client does.
+      server.requestTimeout = REQUEST_TIMEOUT_MS;
       server.listen(port);
       return server;
     },

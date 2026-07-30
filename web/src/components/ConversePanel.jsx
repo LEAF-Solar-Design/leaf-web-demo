@@ -18,6 +18,8 @@ import {
   questionChoiceState,
   reconcileQueuedTurn,
   shouldRetryWithQueue,
+  clipboardImagesToAttachments,
+  thumbnailImages,
 } from '../composer.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
@@ -67,6 +69,7 @@ function bannerFor(e) {
   if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan.' }
   if (kind === 'approval_stale') return { kind, message: 'That request was already decided — ask the assistant to propose it again.' }
   if (kind === 'confirmation_expired') return { kind, message: 'That confirmation expired — ask the assistant to propose it again.' }
+  if (kind === 'too_large') return { kind, message: 'That message is too large — try fewer or smaller images.' }
   return { kind, message: 'Couldn’t reach the assistant — your built tools keep working.' }
 }
 
@@ -90,6 +93,9 @@ export default function ConversePanel({
   const [questionChoices, setQuestionChoices] = useState({ sendingQuestionIds: [] })
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
+  const [attachments, setAttachments] = useState([])
+  const [attachmentError, setAttachmentError] = useState(null)
+  const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
   const queueStateRef = useRef(createQueuedTurnState())
@@ -97,12 +103,26 @@ export default function ConversePanel({
     queueStateRef.current = next
     setQueuedTurn(next.queuedTurn)
   }
+  const releaseAttachment = (image) => {
+    if (image?.thumbnailUrl) {
+      URL.revokeObjectURL(image.thumbnailUrl)
+      attachmentUrlsRef.current.delete(image.thumbnailUrl)
+    }
+  }
+  const clearAttachments = () => setAttachments((current) => {
+    for (const image of current) releaseAttachment(image)
+    return []
+  })
+  useEffect(() => () => {
+    for (const url of attachmentUrlsRef.current) URL.revokeObjectURL(url)
+    attachmentUrlsRef.current.clear()
+  }, [])
 
   // Stream lifecycle: one open stream per session, replay from seq 0 (the
   // transcript is durable — a remount recovers the whole conversation).
   useEffect(() => {
     if (!sessionId) return undefined
-    setEvents([]); setLocalTurns([]); setSendErr(null)
+    setEvents([]); setLocalTurns([]); setSendErr(null); clearAttachments()
     setDecidedLocal({}); setDeciding(null)
     setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
@@ -163,8 +183,10 @@ export default function ConversePanel({
       // and render a blank bubble. They are transcript-only records.
       if (type === 'turn_queued' || type === 'turn_queue_dropped') continue
       const t = turnOf(env.turn_id)
-      if (type === 'turn_started') {
-        t.started = true
+        if (type === 'turn_started') {
+          t.started = true
+          t.images = thumbnailImages(data.images)
+          t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
         quota = false; grant = false // a fresh turn clears the paused banners
       } else if (type === 'text_delta') {
         const last = t.feed[t.feed.length - 1]
@@ -225,6 +247,12 @@ export default function ConversePanel({
   const userTextByTurn = useMemo(() => {
     const m = new Map()
     for (const u of allUserTurns) if (u.turnId && u.text) m.set(u.turnId, u.text)
+    return m
+  }, [allUserTurns])
+
+  const localImagesByTurn = useMemo(() => {
+    const m = new Map()
+    for (const u of allUserTurns) if (u.turnId && u.images) m.set(u.turnId, thumbnailImages(u.images))
     return m
   }, [allUserTurns])
 
@@ -290,12 +318,22 @@ export default function ConversePanel({
     return () => document.removeEventListener('keydown', onEsc)
   }, [busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const attachmentPayloads = async () => Promise.all(attachments.map((image) => new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Could not read the image attachment.'))
+    reader.onload = () => {
+      const data = String(reader.result || '').split(',', 2)[1] || ''
+      resolve({ media_type: image.media_type, data })
+    }
+    reader.readAsDataURL(image.file)
+  })))
+
   const send = async (nextText = input) => {
     const text = String(nextText).trim()
-    if (!text || busy) return false
+    if ((!text && !attachments.length) || busy) return false
     let delivered = false
     setSending(true); setSendErr(null)
-    const accept = (res) => {
+    const accept = (res, images) => {
       if (res.status === 'queued') {
         const queued = acceptQueuedTurn(queueStateRef.current, {
           queuedId: res.queued_id || null,
@@ -306,16 +344,19 @@ export default function ConversePanel({
           setLocalTurns((prev) => [...prev, queued.turn])
         }
       } else {
-        setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text }])
+        setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       setInput('')
+      clearAttachments()
+      setAttachmentError(null)
     }
     try {
+      const images = await attachmentPayloads()
       try {
-        accept(await postMessage(sessionId, { text }))
+        accept(await postMessage(sessionId, { ...(text ? { text } : {}), ...(images.length ? { images } : {}) }), images)
       } catch (e) {
-        if (!shouldRetryWithQueue(classifyAgentError(e), { text })) throw e
-        accept(await postMessage(sessionId, { text, queue: true }))
+        if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
+        accept(await postMessage(sessionId, { text, queue: true }), images)
       }
       delivered = true
     } catch (e) {
@@ -334,6 +375,24 @@ export default function ConversePanel({
       setQuestionChoices((state) => clearSendingQuestion(state, questionId))
     }
   }
+
+  const onPaste = (e) => {
+    const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
+    if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
+    if (!result.attachments.length) return
+    e.preventDefault()
+    setAttachmentError(null)
+    setAttachments((current) => [...current, ...result.attachments.map((image) => {
+      const thumbnailUrl = URL.createObjectURL(image.file)
+      attachmentUrlsRef.current.add(thumbnailUrl)
+      return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
+    })])
+  }
+  const removeAttachment = (id) => setAttachments((current) => {
+    const found = current.find((image) => image.id === id)
+    releaseAttachment(found)
+    return current.filter((image) => image.id !== id)
+  })
 
   // §7 split-turn decision: (a) record the approval, (b) post the confirm
   // message that starts the resume turn. Optimistic local mark; the
@@ -584,6 +643,12 @@ export default function ConversePanel({
             {userTextByTurn.get(t.turnId) && (
               <div className="converse-msg user">{userTextByTurn.get(t.turnId)}</div>
             )}
+            {(t.images?.length ? t.images : localImagesByTurn.get(t.turnId))?.map((src, index) => (
+              <img key={`${t.turnId}-image-${index}`} src={src} alt="User attached image" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
+            ))}
+            {t.imageDescriptors?.length > 0 && (
+              <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
+            )}
             {t.feed.map(renderFeedItem)}
             {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
               <div className="converse-turnfoot">
@@ -603,7 +668,10 @@ export default function ConversePanel({
         )}
         {pendingUserTurns.map((u) => (
           <div key={u.turnId} className="converse-turn">
-            <div className="converse-msg user">{u.text}</div>
+            {(u.text || u.images?.length > 0) && <div className="converse-msg user">{u.text}</div>}
+            {thumbnailImages(u.images).map((src, index) => (
+              <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
+            ))}
             <div className="converse-note">
               <span className="dot live pulse" aria-hidden="true" />
               <span className="dim">thinking…</span>
@@ -619,11 +687,22 @@ export default function ConversePanel({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send() }
           }}
+          onPaste={onPaste}
           placeholder={busy ? 'Assistant is working…' : 'Reply to the assistant…'}
           disabled={busy}
           spellCheck={false}
           aria-label="Reply to the assistant"
         />
+        {(attachmentError || attachments.length > 0) && (
+          <span className="dim" role={attachmentError ? 'alert' : undefined}>
+            {attachmentError || attachments.map((image) => (
+              <span key={image.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 4 }}>
+                <img src={image.thumbnailUrl} alt="Pending image attachment" width="24" height="24" style={{ objectFit: 'cover' }} />
+                <button type="button" className="chip-neutral" onClick={() => removeAttachment(image.id)} aria-label="Remove image attachment">Remove</button>
+              </span>
+            ))}
+          </span>
+        )}
         {busy && stoppableTurnId ? (
           // While a turn runs, Send has nothing to do (the input is disabled),
           // so the primary control becomes Stop — the terminal client's Esc,
@@ -639,7 +718,7 @@ export default function ConversePanel({
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         ) : (
-          <button type="button" className="chip-act" onClick={send} disabled={busy || !input.trim()}>
+          <button type="button" className="chip-act" onClick={send} disabled={busy || (!input.trim() && !attachments.length)}>
             {sending ? 'Sending…' : 'Send'}
           </button>
         )}

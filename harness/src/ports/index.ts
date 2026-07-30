@@ -607,6 +607,12 @@ export interface ConverseRunInput {
   resumeFallbackUserMessage?: string;
   /** Model id (e.g. LEAF_SPINE_MODEL). undefined => runner/account default. */
   model?: string;
+  /**
+   * Inline vision blocks for THIS turn only. They are validated at the HTTP
+   * boundary and never enter the durable prior-text context, so a replayed or
+   * resumed turn does not carry megabytes of base64 with it.
+   */
+  images?: Array<{ media_type: string; data: string }>;
   tools: ToolExecutor;
   canUseTool: CanUseTool;
 }

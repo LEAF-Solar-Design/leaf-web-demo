@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentSdkTurnRunner,
+  buildPrompt,
   chunkText,
   mapSdkMessage,
   resolveWrapperTarget,
@@ -114,6 +115,27 @@ describe("chunkText", () => {
     const chunks = chunkText(text);
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.join("")).toBe(text);
+  });
+});
+
+describe("buildPrompt", () => {
+  it("keeps text-only prompts byte-identical and emits image blocks before text", async () => {
+    const input = {
+      tenant_id: "acme", session_id: "s", turn_id: "t", drawing_id: "d",
+      messages: [{ role: "assistant" as const, text: "Earlier answer" }], text: "inspect this",
+    };
+    expect(buildPrompt(input)).toBe("Assistant: Earlier answer\nUser: inspect this");
+    const prompt = buildPrompt({ ...input, images: [{ media_type: "image/png", data: "iVBORw0KGgo=" }] });
+    expect(typeof prompt).not.toBe("string");
+    const messages = [];
+    for await (const message of prompt as AsyncIterable<unknown>) messages.push(message);
+    expect(messages).toEqual([{
+      type: "user", parent_tool_use_id: null,
+      message: { role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+        { type: "text", text: "Assistant: Earlier answer\nUser: inspect this" },
+      ] },
+    }]);
   });
 });
 
