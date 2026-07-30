@@ -279,10 +279,13 @@ def _image_magic_matches(media_type: str, decoded: bytes) -> bool:
     if media_type == "image/png":
         return decoded.startswith(b"\x89PNG\r\n\x1a\n")
     if media_type == "image/jpeg":
-        # SOI plus the first marker. JPEG has no longer fixed prefix: the byte
-        # after \\xff\\xd8\\xff is a marker code and legitimately varies. EOI
-        # pins the other end.
-        return decoded.startswith(b"\xff\xd8\xff") and decoded.endswith(b"\xff\xd9")
+        # SOI plus the first marker, and that is the whole signature. The byte
+        # after \\xff\\xd8\\xff is a marker code and legitimately varies, and
+        # JPEG has no fixed tail: real encoders emit files with bytes after EOI,
+        # which decoders read happily. Requiring EOI last rejected a genuine
+        # ffmpeg-produced photo with 16 bytes of padding. A check that turns
+        # away real user images is worse than the shallow one it replaced.
+        return decoded.startswith(b"\xff\xd8\xff")
     if media_type == "image/gif":
         return decoded.startswith(b"GIF87a") or decoded.startswith(b"GIF89a")
     # RIFF, a little-endian size, then WEBP — and the declared size must
@@ -316,11 +319,20 @@ async def _read_bounded_body(request: Request) -> bytes:
 async def _parse_message_request(request: Request) -> MessageRequest:
     """Reject an oversized body before parsing, keeping FastAPI's 422 shape."""
     raw = await _read_bounded_body(request)
-    # The 422 body must stay FastAPI's own: clients parse `detail` as a LIST of
-    # error objects, and collapsing it to a bare string is a silent wire change
-    # for every malformed request, not just image ones.
+    # Reading the body by hand means reproducing FastAPI's errors by hand, and
+    # every difference is a silent wire change for EVERY malformed request, not
+    # just image ones. Three things have to match: the error shape (the app's
+    # envelope, rendered by envelopes.py from a RequestValidationError), the
+    # `body` prefix on every location, and the treatment of an ABSENT body —
+    # which is a missing required field, not an empty object. Defaulting it to
+    # `{}` let it through to the one-of check and answered 409 where the route
+    # used to answer 422.
+    if not raw.strip():
+        raise RequestValidationError(
+            [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}],
+        )
     try:
-        payload = json.loads(raw or b"{}")
+        payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RequestValidationError(
             [{"type": "json_invalid", "loc": ("body", exc.pos), "msg": "JSON decode error",
@@ -329,7 +341,9 @@ async def _parse_message_request(request: Request) -> MessageRequest:
     try:
         return MessageRequest.model_validate(payload)
     except ValidationError as exc:
-        raise RequestValidationError(exc.errors()) from exc
+        raise RequestValidationError(
+            [{**error, "loc": ("body", *error.get("loc", ()))} for error in exc.errors()],
+        ) from exc
 
 
 def _validate_images(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, str]]]:

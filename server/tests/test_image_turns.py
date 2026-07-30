@@ -143,8 +143,8 @@ def test_full_signatures_are_required_not_prefixes(client):
     for media_type, forged in (
         ("image/png", b"\x89PNG" + b"junk-not-a-png"),
         ("image/gif", b"GIF8" + b"0a" + b"junk"),
-        ("image/jpeg", b"\xff\xd8\xff" + b"no-end-of-image-marker"),
         ("image/webp", b"RIFF" + (999).to_bytes(4, "little") + b"WEBPshort"),
+        ("image/jpeg", b"not-a-jpeg-at-all"),
     ):
         response = _post(client, session_id, {
             "images": [_image(base64.b64encode(forged).decode(), media_type=media_type)],
@@ -157,6 +157,10 @@ def test_full_signatures_are_required_not_prefixes(client):
         ("image/png", _PNG),
         ("image/gif", b"GIF89a" + b"\x00" * 4),
         ("image/jpeg", b"\xff\xd8\xff\xe0" + b"\x00" * 4 + b"\xff\xd9"),
+        # Real encoders emit bytes AFTER end-of-image and decoders read them
+        # fine. ffmpeg produces such files. Rejecting them turns away genuine
+        # photos, which is worse than the shallow check this replaced.
+        ("image/jpeg", b"\xff\xd8\xff\xe0" + b"\x00" * 4 + b"\xff\xd9" + b"\x00" * 16),
         ("image/webp", _webp()),
     ):
         response = _post(client, session_id, {
@@ -229,3 +233,28 @@ def test_malformed_json_keeps_the_apps_own_422_envelope(client):
     typed = client.post(f"/api/sessions/{session_id}/messages", json={"text": 5})
     assert typed.status_code == 422
     assert typed.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_an_absent_body_is_a_missing_field_not_an_empty_object(client):
+    """The route used to answer 422 for no body; it must still.
+
+    Reading the body by hand made `or b"{}"` tempting. Every MessageRequest
+    field is optional, so an empty object validates, reaches the one-of check
+    and answers 409 — a different status for the same request than before.
+    """
+    session_id = _session(client)
+    response = client.post(f"/api/sessions/{session_id}/messages", content=b"")
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+def test_validation_locations_keep_the_body_prefix(client):
+    """`loc` is ('body', 'text'), not ('text',).
+
+    Clients read the location to point at the offending field. Validating the
+    parsed payload directly drops the prefix FastAPI puts there.
+    """
+    session_id = _session(client)
+    response = client.post(f"/api/sessions/{session_id}/messages", json={"text": 5})
+    assert response.status_code == 422
+    assert "'body', 'text'" in response.json()["error"]["message"]

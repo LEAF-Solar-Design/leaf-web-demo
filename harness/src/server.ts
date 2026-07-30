@@ -213,10 +213,10 @@ function imageMagicMatches(mediaType: string, bytes: Buffer): boolean {
     return bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   }
   if (mediaType === "image/jpeg") {
-    // SOI plus the first marker; the byte after it varies legitimately, so EOI
-    // pins the other end.
-    return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
-      && bytes.subarray(-2).equals(Buffer.from([0xff, 0xd9]));
+    // SOI plus the first marker, and that is the whole signature. JPEG has no
+    // fixed tail — real encoders emit bytes after EOI and decoders read them
+    // fine — so requiring EOI last turns away genuine photos.
+    return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
   }
   if (mediaType === "image/gif") {
     const header = bytes.subarray(0, 6).toString("ascii");
