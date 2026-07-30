@@ -88,19 +88,45 @@ def test_failed_provision_call_records_status_and_exception_type(tmp_path, monke
     class _Boom(RuntimeError):
         pass
 
-    def _explode(*_args, **_kwargs):
-        raise _Boom("connection refused")
-
     import requests
-    monkeypatch.setattr(requests, "post", _explode)
+
+    class _Response:
+        status_code = 503
+
+        def raise_for_status(self):
+            raise requests.HTTPError("service unavailable", response=self)
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Response())
     with pytest.raises(CustomizationServiceError) as caught:
         _ensure_bare_repo("66666666-6666-4666-8666-666666666666")
     detail = caught.value.detail
     assert "harness_provision_failed" in detail
-    assert "_Boom" in detail
+    assert "HTTPError" in detail
     assert "/author/repository" in detail
-    # The name of this test promises the status, so hold it to that.
-    assert "status=" in detail
+    # The REAL status the harness answered, not merely the presence of "status=".
+    # An implementation that hardcoded status=None or a wrong value fails here.
+    assert "status=503" in detail
+
+
+def test_a_transport_failure_with_no_response_records_no_status(monkeypatch, tmp_path):
+    """The other half: a refused connection has no HTTP status to report."""
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "unused-by-the-stub")
+
+    class _Boom(RuntimeError):
+        pass
+
+    import requests
+
+    def _explode(*_args, **_kwargs):
+        raise _Boom("connection refused")
+
+    monkeypatch.setattr(requests, "post", _explode)
+    with pytest.raises(CustomizationServiceError) as caught:
+        _ensure_bare_repo("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    assert "status=None" in caught.value.detail
+    assert "_Boom" in caught.value.detail
 
 
 def test_git_failure_carries_stderr(tmp_path):
@@ -173,11 +199,73 @@ def _authorize_publish(monkeypatch, raiser):
     )
 
 
-def test_a_real_route_logs_the_frames_of_an_unexpected_failure(caplog, monkeypatch):
-    """Blocker: calling the funnel directly cannot prove the routes pass cause=.
+CHANGE_SET = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 
-    Reverting any route's `cause=exc` back to a bare `except Exception:` makes this
-    fail, because the ERROR record disappears.
+# Every route that hands an unexpected exception to the funnel, with a body its
+# model accepts. Reverting `cause=exc` on any one of these drops its ERROR record,
+# so the parametrised test below fails for that route specifically.
+ALL_HANDOFFS = [
+    ("/api/author", {"description": "count panels", "mode": "build"},
+     {"Idempotency-Key": "k-author"}, "customization_stage_failed"),
+    ("/api/author/stage",
+     {"description": "count panels", "mode": "build", "idempotency_key": "k-stage"},
+     {}, "customization_stage_failed"),
+    ("/api/author/publication-requests", {"change_set_id": CHANGE_SET},
+     {}, "customization_publish_failed"),
+    ("/api/author/confirmations",
+     {"contract": "leaf.customization.v1", "tenant_id": TENANT,
+      "change_set_id": CHANGE_SET, "state": "staged", "base_commit": "a" * 40,
+      "staged_commit": "b" * 40, "catalog_digest": "c" * 64,
+      "platform_release": "r1", "workspace_contract_digest": "d" * 64,
+      "idempotency_key": "k-confirm"},
+     {}, "customization_publish_failed"),
+    ("/api/author/rollback",
+     {"change_set_id": CHANGE_SET, "idempotency_key": "k-rollback"},
+     {}, "customization_rollback_failed"),
+]
+
+
+def _tenant_route_client(monkeypatch, raiser):
+    """Mount the router with the JWT dependency satisfied, so /api/* is reachable."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: raiser()), raising=True,
+    )
+    route_app = FastAPI()
+    route_app.include_router(author_router.router)
+    route_app.dependency_overrides[author_router.deps.require_tenant] = lambda: TENANT
+    return TestClient(route_app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("path,body,headers,code", ALL_HANDOFFS)
+def test_every_tenant_route_reports_its_unexpected_failure(
+    caplog, monkeypatch, path, body, headers, code
+):
+    """Blocker: one covered route left the other five free to regress silently."""
+    def _raise():
+        raise RuntimeError(SENTINEL)
+
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    client = _tenant_route_client(monkeypatch, _raise)
+    response = client.post(path, json=body, headers=headers)
+    assert response.status_code == 503, response.text
+    assert response.json()["reason_code"] == code
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, f"{path} must report its unexpected failure"
+    assert "RuntimeError" in errors[0].getMessage()
+
+
+def test_a_real_route_logs_the_frames_of_an_unexpected_failure(caplog, monkeypatch):
+    """The sixth handoff, on a route that authenticates from headers.
+
+    Covers /internal/customization/authorize-publish; the five tenant routes are
+    covered by the parametrised test above.
     """
     def _raise():
         raise RuntimeError(SENTINEL)
@@ -250,6 +338,111 @@ def test_a_detail_carrying_refusal_still_warns(caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings, "a 503 carrying a detail must warn"
     assert "head_missing" in warnings[0].getMessage()
+
+
+def _raise_with_secret_in_source():
+    raise RuntimeError("password=literal-secret-in-source-9f3a")
+
+
+def test_the_source_line_at_the_raise_site_is_never_echoed(caplog, monkeypatch):
+    """traceback.format_tb renders each frame's SOURCE, not just its location.
+
+    So a literal at the raise site is reproduced verbatim in the log. Only a
+    location-only rendering (extract_tb, filename:lineno:function) is safe. This
+    fails if format_tb, str(cause) or exc_info comes back.
+    """
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    client = _tenant_route_client(monkeypatch, _raise_with_secret_in_source)
+    response = client.post(
+        "/api/author/stage",
+        json={"description": "count panels", "mode": "build", "idempotency_key": "k"},
+    )
+    assert response.status_code == 503
+    rendered = "\n".join(
+        r.getMessage() + (str(r.exc_info) if r.exc_info else "") for r in caplog.records
+    )
+    assert "literal-secret-in-source-9f3a" not in rendered
+    assert "password=" not in rendered
+    # It must still say where the fault was, or the log is useless.
+    assert "_raise_with_secret_in_source" in rendered
+    assert "RuntimeError" in rendered
+
+
+def test_an_unknown_change_set_is_a_caller_error_not_an_operator_event(caplog, monkeypatch):
+    """The change-set id is caller-supplied, and authority is checked after load.
+
+    Any tenant member can name arbitrary ids, so this must not cost one ERROR per
+    request. The response is unchanged.
+    """
+    from customization_models import ChangeSetNotFoundError
+
+    def _raise():
+        raise ChangeSetNotFoundError("change set was not found")
+
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    client = _tenant_route_client(monkeypatch, _raise)
+    response = client.post(
+        "/api/author/confirmations",
+        json={"contract": "leaf.customization.v1", "tenant_id": TENANT,
+              "change_set_id": CHANGE_SET, "state": "staged", "base_commit": "a" * 40,
+              "staged_commit": "b" * 40, "catalog_digest": "c" * 64,
+              "platform_release": "r1", "workspace_contract_digest": "d" * 64,
+              "idempotency_key": "k-confirm"},
+    )
+    assert response.status_code == 503
+    assert response.json()["reason_code"] == "customization_publish_failed"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        "a caller-supplied unknown id must not reach WARNING or ERROR"
+    )
+    assert [r for r in caplog.records if r.levelno == logging.DEBUG]
+
+
+def test_a_detail_free_503_does_not_warn():
+    """Keying the level on status rather than content reopens the amplification.
+
+    With auth off, five /api/* routes refuse at the gate with a detail-free 503,
+    so `status >= 500` would let a caller drive one WARNING per request.
+    """
+    import logging as _logging
+    records = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture()
+    author_router._LOG.addHandler(handler)
+    author_router._LOG.setLevel(_logging.DEBUG)
+    try:
+        author_router._customization_error(
+            CustomizationServiceError("customization_auth_required", 503)
+        )
+    finally:
+        author_router._LOG.removeHandler(handler)
+    assert records, "it must still be visible somewhere"
+    assert all(r.levelno < _logging.WARNING for r in records)
+
+
+def test_platform_store_failure_names_itself(monkeypatch):
+    """`tenant_identity_binding_unavailable` had two detail-free 503 branches."""
+    import platform_link
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused/db")
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+
+    def _boom():
+        raise RuntimeError("store is not reachable")
+
+    monkeypatch.setattr(platform_link, "platform_store", _boom)
+
+    class _Tenant(str):
+        subject = "auth0|abc"
+
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service._binding(_Tenant(TENANT))
+    assert caught.value.code == "tenant_identity_binding_unavailable"
+    assert "platform_store_unavailable" in caught.value.detail
+    assert "RuntimeError" in caught.value.detail
 
 
 def test_harness_stage_and_publish_failures_carry_their_cause():

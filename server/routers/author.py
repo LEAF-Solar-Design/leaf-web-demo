@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
+from customization_models import ChangeSetNotFoundError
 from customization_service import CustomizationServiceError, CustomizationService
 from customization_flags import enabled as customization_enabled
 from deps import fb
@@ -376,25 +377,37 @@ def _customization_error(
     handlers that would otherwise discard an unexpected exception whole: pass it
     and the traceback is logged instead of lost.
     """
-    if cause is not None:
-        # Frames only, never `exc_info` and never str(cause). A traceback renders
-        # the exception message and every chained cause, and a psycopg or client
-        # error can carry a DSN, a token or a row value. Where it broke is the
-        # diagnostic; the payload is not.
-        frames = "".join(traceback.format_tb(cause.__traceback__)).strip()
+    if isinstance(cause, ChangeSetNotFoundError):
+        # The change-set id comes straight from the request body, and
+        # /api/author/confirmations loads it before checking the caller's
+        # authority, so any tenant member can name arbitrary ids. That is a caller
+        # error, not an operator event: it must not cost one ERROR per request.
+        # The response is unchanged.
+        _LOG.debug("customization_refused: code=%s cause=change_set_not_found", exc.code)
+    elif cause is not None:
+        # Location only: file, line and function, never `exc_info`, never
+        # str(cause), and never the rendered source line. A traceback carries the
+        # exception message and every chained cause, and format_tb additionally
+        # echoes the source text of each frame, so a literal at the raise site
+        # would be reproduced verbatim. Where it broke is the diagnostic; nothing
+        # about the payload is.
+        frames = " | ".join(
+            f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}"
+            for f in traceback.extract_tb(cause.__traceback__)
+        )
         _LOG.error(
             "customization_refused: code=%s cause=%s at %s",
-            exc.code, type(cause).__name__,
-            " | ".join(frames.split("\n")) if frames else "<no frames>",
+            exc.code, type(cause).__name__, frames or "<no frames>",
         )
-    elif exc.detail or exc.status_code >= 500:
-        _LOG.warning(
-            "customization_refused: code=%s detail=%s", exc.code, exc.detail or "-"
-        )
+    elif exc.detail:
+        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail)
     else:
-        # A 4xx with nothing to add is a caller error, and the /internal/* routes
-        # authenticate inside the handler on a public ALB. Warning here would let
-        # an unauthenticated caller drive log growth one line per request.
+        # Nothing to add means nothing to say. Several of these routes are
+        # reachable by an unauthorized caller (the /internal/* pair authenticates
+        # inside the handler, and with auth off the /api/* lifecycle routes refuse
+        # at the gate), so a level keyed on status rather than on content lets a
+        # caller drive one log line per request. Count these with metrics or the
+        # access log, not a line each.
         _LOG.debug("customization_refused: code=%s", exc.code)
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
