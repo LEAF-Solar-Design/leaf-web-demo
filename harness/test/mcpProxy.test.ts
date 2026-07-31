@@ -271,18 +271,13 @@ describe("proxyTenantMcpServer end to end", () => {
     await proxied!.close();
   });
 
-  it("bounds every upstream call, and relays progress only when asked", async () => {
-    // THIS ASSERTS WIRING, NOT BEHAVIOUR, and that is a deliberate compromise
-    // worth naming rather than hiding. Normally "the option is set" is exactly
-    // the kind of test this file argues against — the redirect test above
-    // asserts the target got zero hits, not that redirect:"error" was passed.
-    //
-    // But the property here is a 120-SECOND deadline. A behavioural test would
-    // have to outlast the SDK's hidden 60s default to prove anything, and a
-    // minute of wall clock per run is a worse defect than the one it guards.
-    // Round 7 proposed this shape explicitly. The mechanism itself is verified
-    // at the source instead: shared/protocol.js applies
-    // DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000 when options.timeout is undefined.
+  it("relays progress only when the downstream subscribed to it", async () => {
+    // The DEADLINE is covered behaviourally by the test above; what is left
+    // here is the one property with no cheap behavioural probe: that no
+    // progress handler is installed when the downstream never subscribed.
+    // Emitting progress for a token the downstream never registered is an
+    // "unknown token" protocol error, and the absence of a callback is the
+    // whole fix, so a wiring assertion is the honest instrument for it.
     const upstream = await upstreamMcp([
       { name: "alpha", description: "t", inputSchema: { type: "object" as const } },
     ]);
@@ -316,15 +311,13 @@ describe("proxyTenantMcpServer end to end", () => {
     expect(upstreamCalls.length).toBeGreaterThan(0);
     const options = upstreamCalls.at(-1)!.options!;
 
-    // An explicit ceiling, not the SDK's invisible 60s one.
-    expect(options.timeout).toBe(120_000);
-    // Progress may DEFER the deadline but never escape it: without a total
-    // bound, a tenant server emitting progress on a timer holds the call open
-    // forever, and the tenant controls that server.
-    expect(options.resetTimeoutOnProgress).toBe(true);
-    expect(options.maxTotalTimeout).toBe(120_000);
-    // Cancellation must reach upstream rather than orphaning the tenant call.
+    // Cancellation must reach upstream rather than orphaning the tenant call,
+    // and this signal is also what carries our deadline.
     expect(options.signal).toBeInstanceOf(AbortSignal);
+    // The SDK's own timeout knobs are deliberately NOT set: they were the
+    // source of round 8's defect, and the signal is now the whole deadline.
+    expect(options.timeout).toBeUndefined();
+    expect(options.maxTotalTimeout).toBeUndefined();
     // No progressToken was supplied downstream, so there is no subscription to
     // feed. Emitting anyway is an "unknown token" protocol error, not a bonus.
     expect(options.onprogress).toBeUndefined();
@@ -332,6 +325,65 @@ describe("proxyTenantMcpServer end to end", () => {
     await downstream.close();
     await proxied!.close();
   });
+
+  it("cuts off an upstream that never answers, on our deadline", async () => {
+    // ROUND 8 REFUTED MY OWN ROUND-7 FIX. I had bounded the call with the SDK's
+    // `maxTotalTimeout`, which bounds nothing: `_resetTimeout` runs only from
+    // the progress handler (shared/protocol.js:434-436) and checks elapsed time
+    // at that instant, so one progress frame just under the total buys a whole
+    // fresh `timeout` window — a ~2x ceiling that the tenant's server times.
+    //
+    // Two earlier versions of THIS test were vacuous and both passed with the
+    // fix removed, which is why the shape below is deliberately dumb:
+    //   1. streaming progress continuously — that trips the SDK's own total
+    //      check promptly, so it never exercised the reset abuse;
+    //   2. a single late progress frame — the right attack on paper, but the
+    //      SDK never dispatched the SSE frame to its reset path, so BOTH arms
+    //      measured 623ms and the test could not tell them apart.
+    // Chasing the SDK's SSE plumbing was the wrong fix. Removing the ambiguity
+    // was: there is now ONE deadline, ours, and an upstream that simply never
+    // answers proves it. No progress, no SDK timeout, nothing else that could
+    // be the thing cutting the call off.
+    const budgetMs = 400;
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "silent", version: "1.0.0" },
+          }));
+        }
+        // tools/call: hold the connection open and never reply.
+        if (message.method === "tools/call") return;
+        res.writeHead(202).end();
+      });
+    });
+
+    const proxied = await proxyTenantMcpServer(
+      { name: "silent", url: upstream.url }, () => {}, budgetMs);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    // The downstream's own timeout is set far higher, so if this call comes
+    // back quickly it is because OUR wall ended it and nothing else.
+    const started = Date.now();
+    await expect(downstream.callTool(
+      { name: "forever", arguments: {} }, undefined, { timeout: budgetMs * 25 },
+    )).rejects.toThrow();
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeGreaterThanOrEqual(budgetMs * 0.5);   // not an instant error
+    expect(elapsed).toBeLessThan(budgetMs * 4);               // and not the 10s downstream cap
+
+    await downstream.close();
+    await proxied!.close();
+  }, 30_000);
 
   it("returns null instead of throwing when the upstream is unreachable", async () => {
     const dead = await listen((_req, res) => { res.destroy(); });

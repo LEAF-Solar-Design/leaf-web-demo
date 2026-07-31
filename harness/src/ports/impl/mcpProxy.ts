@@ -111,6 +111,10 @@ export function guardedFetch(originalHost: string): typeof fetch {
 export async function proxyTenantMcpServer(
   config: McpServerConfig,
   report: (message: string) => void = console.error,
+  // Internal, NOT read from `config`: the tenant must not get to choose how
+  // long we will hold a connection open for them. Exists so the deadline can be
+  // tested in milliseconds instead of minutes.
+  requestTimeoutMs: number = UPSTREAM_REQUEST_TIMEOUT_MS,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
@@ -216,36 +220,55 @@ export async function proxyTenantMcpServer(
       // protocol error rather than a helpful extra. No token means no progress
       // subscription, so there is nothing to forward.
       const progressToken = request.params?._meta?.progressToken;
-      return client.request(
-        { method: "tools/call", params: request.params },
-        CallToolResultSchema,
-        {
-          // Cancellation must reach upstream: without the signal, a downstream
-          // abort leaves the tenant call running and the response is dropped on
-          // the floor.
-          signal: extra.signal,
-          timeout: UPSTREAM_REQUEST_TIMEOUT_MS,
-          // A tool that keeps reporting progress is alive, so let progress
-          // extend the per-request deadline rather than killing useful long
-          // work at a fixed wall...
-          resetTimeoutOnProgress: true,
-          // ...but BOUND THE TOTAL, or that becomes a hold-forever primitive: a
-          // tenant server that emits progress on a timer keeps the call alive
-          // indefinitely, and the tenant controls that server. Round 7 flagged
-          // it and it is the right call for a module whose whole premise is
-          // that the upstream is untrusted. Progress can defer the deadline,
-          // never escape it.
-          maxTotalTimeout: UPSTREAM_REQUEST_TIMEOUT_MS,
-          // Progress notifications are the only feedback a long tool gives.
-          // Swallowing them makes a working call look hung.
-          onprogress: progressToken === undefined ? undefined : (progress) => {
-            void extra.sendNotification({
-              method: "notifications/progress",
-              params: { ...progress, progressToken },
-            }).catch(() => {});
-          },
-        },
+
+      // ONE DEADLINE, OURS. The SDK's timeout trio does not bound what it looks
+      // like it bounds: `_resetTimeout` runs ONLY from the progress handler
+      // (shared/protocol.js:434-436) and compares elapsed time at that instant,
+      // so a progress notification arriving just under `maxTotalTimeout` grants
+      // a FULL fresh `timeout` window. With both set to 120s the real ceiling
+      // is ~240s, and a tenant server emitting progress on a timer picks the
+      // moment. Round 8 caught that; round 7's fix (setting maxTotalTimeout)
+      // did not actually fix it.
+      //
+      // Rather than tune three interacting knobs until they happen to compose,
+      // this drops all of them and keeps a single wall clock: an AbortSignal
+      // driven by setTimeout, progress-independent by construction. One
+      // authority for "how long may a tenant hold this connection", which is
+      // also the only version of this that can be tested without racing the
+      // SDK's internals.
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(new Error("mcp_upstream_call_timeout")),
+        requestTimeoutMs,
       );
+      // Either the downstream giving up or our wall expiring ends the call.
+      const signal = AbortSignal.any([extra.signal, deadline.signal]);
+
+      try {
+        return await client.request(
+          { method: "tools/call", params: request.params },
+          CallToolResultSchema,
+          {
+            // Cancellation must reach upstream, and this signal carries BOTH
+            // reasons: the downstream giving up, and our deadline expiring.
+            // Without it a tenant call runs on with nobody reading the answer.
+            //
+            // No `timeout` / `maxTotalTimeout` / `resetTimeoutOnProgress` here
+            // on purpose — see above. The signal is the whole deadline.
+            signal,
+            // Progress notifications are the only feedback a long tool gives.
+            // Swallowing them makes a working call look hung.
+            onprogress: progressToken === undefined ? undefined : (progress) => {
+              void extra.sendNotification({
+                method: "notifications/progress",
+                params: { ...progress, progressToken },
+              }).catch(() => {});
+            },
+          },
+        );
+      } finally {
+        clearTimeout(timer);
+      }
     });
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
