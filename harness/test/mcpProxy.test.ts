@@ -10,7 +10,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -266,6 +266,68 @@ describe("proxyTenantMcpServer end to end", () => {
     // ...and the omission is REPORTED, not silent — an operator seeing a tool
     // missing from a tenant catalogue needs to know why.
     expect(diagnostics.join(" ")).toContain("task-required");
+
+    await downstream.close();
+    await proxied!.close();
+  });
+
+  it("bounds every upstream call, and relays progress only when asked", async () => {
+    // THIS ASSERTS WIRING, NOT BEHAVIOUR, and that is a deliberate compromise
+    // worth naming rather than hiding. Normally "the option is set" is exactly
+    // the kind of test this file argues against — the redirect test above
+    // asserts the target got zero hits, not that redirect:"error" was passed.
+    //
+    // But the property here is a 120-SECOND deadline. A behavioural test would
+    // have to outlast the SDK's hidden 60s default to prove anything, and a
+    // minute of wall clock per run is a worse defect than the one it guards.
+    // Round 7 proposed this shape explicitly. The mechanism itself is verified
+    // at the source instead: shared/protocol.js applies
+    // DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000 when options.timeout is undefined.
+    const upstream = await upstreamMcp([
+      { name: "alpha", description: "t", inputSchema: { type: "object" as const } },
+    ]);
+    const proxied = await proxyTenantMcpServer({ name: "opts", url: upstream.url }, () => {});
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    // Hold the ORIGINAL before spying, and call through it — calling the
+    // prototype property instead re-enters the mock and recurses forever.
+    // Both clients issue a "tools/call" here (downstream's, then the proxy's
+    // upstream one nested inside it), so the entries are tagged by instance and
+    // the downstream's own call is excluded. A first attempt restored the spy
+    // on the first call it saw, which was the downstream's, and captured
+    // nothing from the code under test.
+    const original = Client.prototype.request;
+    const seen: Array<{ self: unknown; options?: Record<string, unknown> }> = [];
+    const spy = vi.spyOn(Client.prototype, "request").mockImplementation(
+      function (this: Client, req: never, schema: never, options?: Record<string, unknown>) {
+        seen.push({ self: this, options });
+        return original.call(this, req, schema, options as never);
+      } as never);
+
+    try {
+      await downstream.callTool({ name: "alpha", arguments: {} });
+    } finally {
+      spy.mockRestore();
+    }
+    const upstreamCalls = seen.filter((entry) => entry.self !== downstream);
+    expect(upstreamCalls.length).toBeGreaterThan(0);
+    const options = upstreamCalls.at(-1)!.options!;
+
+    // An explicit ceiling, not the SDK's invisible 60s one.
+    expect(options.timeout).toBe(120_000);
+    // Progress may DEFER the deadline but never escape it: without a total
+    // bound, a tenant server emitting progress on a timer holds the call open
+    // forever, and the tenant controls that server.
+    expect(options.resetTimeoutOnProgress).toBe(true);
+    expect(options.maxTotalTimeout).toBe(120_000);
+    // Cancellation must reach upstream rather than orphaning the tenant call.
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    // No progressToken was supplied downstream, so there is no subscription to
+    // feed. Emitting anyway is an "unknown token" protocol error, not a bonus.
+    expect(options.onprogress).toBeUndefined();
 
     await downstream.close();
     await proxied!.close();

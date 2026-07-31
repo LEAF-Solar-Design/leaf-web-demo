@@ -209,8 +209,14 @@ export async function proxyTenantMcpServer(
       }
       return { ...listed, tools: usable };
     });
-    instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-      client.request(
+    instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      // ONLY RELAY PROGRESS THE DOWNSTREAM ASKED FOR. Round 7: falling back to
+      // `extra.requestId` when no token was supplied emits notifications for a
+      // token the downstream never registered, which is an "unknown token"
+      // protocol error rather than a helpful extra. No token means no progress
+      // subscription, so there is nothing to forward.
+      const progressToken = request.params?._meta?.progressToken;
+      return client.request(
         { method: "tools/call", params: request.params },
         CallToolResultSchema,
         {
@@ -220,19 +226,27 @@ export async function proxyTenantMcpServer(
           signal: extra.signal,
           timeout: UPSTREAM_REQUEST_TIMEOUT_MS,
           // A tool that keeps reporting progress is alive, so let progress
-          // extend the deadline rather than killing useful long work at a fixed
-          // wall.
+          // extend the per-request deadline rather than killing useful long
+          // work at a fixed wall...
           resetTimeoutOnProgress: true,
+          // ...but BOUND THE TOTAL, or that becomes a hold-forever primitive: a
+          // tenant server that emits progress on a timer keeps the call alive
+          // indefinitely, and the tenant controls that server. Round 7 flagged
+          // it and it is the right call for a module whose whole premise is
+          // that the upstream is untrusted. Progress can defer the deadline,
+          // never escape it.
+          maxTotalTimeout: UPSTREAM_REQUEST_TIMEOUT_MS,
           // Progress notifications are the only feedback a long tool gives.
           // Swallowing them makes a working call look hung.
-          onprogress: (progress) => {
+          onprogress: progressToken === undefined ? undefined : (progress) => {
             void extra.sendNotification({
               method: "notifications/progress",
-              params: { ...progress, progressToken: request.params?._meta?.progressToken ?? extra.requestId },
+              params: { ...progress, progressToken },
             }).catch(() => {});
           },
         },
-      ));
+      );
+    });
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
     // live upstream client with no owner. Close it before giving up.
