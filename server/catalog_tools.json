@@ -99,7 +99,7 @@
       },
       "code_digest": "sha256:3b77e442801655fbc89e6bca0cf15d13bf5482d7ea28d1f856abc7a307c1fbd2",
       "artifact_digest": "sha256:3b77e442801655fbc89e6bca0cf15d13bf5482d7ea28d1f856abc7a307c1fbd2",
-      "batch_fallback": true,
+      "batch_fallback": false,
       "provenance": {"author": "agent", "created": "2026-07-28T00:00:00Z"}
     }
   ]
