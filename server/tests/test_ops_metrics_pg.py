@@ -170,6 +170,14 @@ def test_tool_and_tenant_aggregates_over_real_postgres():
     assert by_tool["string_sizer"]["usd_est"] == pytest.approx(0.02)
     assert by_tool["string_sizer"]["engine_seconds_p95"] == pytest.approx(4.0, abs=1e-6)
 
+    # ---- the fleet-scope queries' ts-leading index exists (0024) ----
+    with db.get_pool().connection() as conn:
+        idx = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'broker_usage_ledger' "
+            "AND indexname = 'broker_usage_ledger_ts_idx'"
+        ).fetchone()
+    assert idx is not None, "0024 ts-leading index missing: fleet windows would full-scan"
+
     # ---- per-tenant fleet fan-out: our tenant appears with reconciled sums ----
     f = ops_metrics_read.tenant_metrics(window_seconds=3600, limit=500)
     mine = next(row for row in f["tenants"] if row["tenant_id"] == tenant)
