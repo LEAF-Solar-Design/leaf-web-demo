@@ -1010,7 +1010,14 @@ def test_stage_retry_preserves_callback_recorded_harness_response(
     else:
         assert result["tool"] == expected_tool
         assert result["preview"] == harness_fields["preview"]
-    assert policy_calls == [(ChangeState.STAGED, None)]
+    assert policy_calls[0][0] is ChangeState.STAGED
+    policy_body = policy_calls[0][1]
+    if expected_tool is None:
+        assert policy_body is None
+    else:
+        assert policy_body["receipt"]["state"] == "staged"
+        assert policy_body["tool"] == expected_tool
+        assert policy_body["preview"] == harness_fields["preview"]
 
 
 def test_rollback_requires_r6_and_owner_or_editor(tmp_path, monkeypatch):

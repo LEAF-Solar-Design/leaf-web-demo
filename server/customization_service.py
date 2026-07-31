@@ -562,7 +562,10 @@ class CustomizationService:
             # and return that durable result in the same retry. When this is
             # the original harness response racing its callback, preserve the
             # generated tool and preview for the browser that initiated it.
-            self._verify_stage_policy(durable)
+            response_body = (
+                body if "tool" in body or "preview" in body else None
+            )
+            self._verify_stage_policy(durable, response_body)
             return self._receipt(
                 durable, tool=body.get("tool"), preview=body.get("preview")
             )
