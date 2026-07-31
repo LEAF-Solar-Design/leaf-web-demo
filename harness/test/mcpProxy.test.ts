@@ -14,7 +14,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
@@ -229,56 +228,44 @@ describe("proxyTenantMcpServer end to end", () => {
     await proxied!.close();
   });
 
-  it("forwards a task-required tool instead of refusing it locally", async () => {
-    // ROUND 5, and this is a PRODUCT bug rather than a test gap. The proxy used
-    // the SDK's typed `client.callTool()` helper, which refuses any tool whose
-    // `execution.taskSupport` is "required" by throwing InvalidRequest (-32600)
-    // WITHOUT sending anything upstream.
+  it("hides task-required tools rather than advertising ones it cannot invoke", async () => {
+    // ROUND 6 REVERSED ROUND 5's FIX HERE, and the correction is the point.
     //
-    // The trap is that the refusal is armed by the proxy's own forwarded
-    // listTools: that call populates the client's task-tool cache, so the tool
-    // lists perfectly and then every call to it fails. A tenant server offering
-    // one would look healthy and be entirely unusable.
+    // Round 5 found that client.callTool() refuses a tool whose
+    // `execution.taskSupport` is "required" with -32600, armed by the proxy's
+    // own forwarded listTools. True, and the raw-request switch below fixes it.
+    // But the test I wrote to prove task-required tools then WORKED was false:
+    // it passed only because my fixture answered a plain `tools/call`, which a
+    // spec-compliant upstream is entitled to reject. Task-required tools are
+    // callable only through the experimental task methods, which this proxy
+    // neither implements nor negotiates as a capability.
     //
-    // THE TWO HANDLERS ARE COUPLED, which matters if you ever falsify this:
-    // reverting callTool alone leaves this test GREEN, because the raw
-    // tools/list forward never populates the cache the refusal reads. It takes
-    // BOTH typed helpers to reproduce. I got that wrong once and briefly had a
-    // vacuous test that proved nothing.
-    const upstream = await upstreamMcp([{
-      name: "slow-render",
-      description: "a tool the upstream runs as a task",
-      inputSchema: { type: "object" as const },
-      execution: { taskSupport: "required" },
-    }]);
-    const proxied = await proxyTenantMcpServer({ name: "tasky", url: upstream.url }, () => {});
+    // So the honest surface is to not advertise them. Forwarding one would put
+    // a tool in front of the model that fails on every call. The tenant's other
+    // tools keep working; nothing silently pretends.
+    const upstream = await upstreamMcp([
+      { name: "quick", description: "ordinary", inputSchema: { type: "object" as const } },
+      {
+        name: "slow-render",
+        description: "a tool the upstream runs as a task",
+        inputSchema: { type: "object" as const },
+        execution: { taskSupport: "required" },
+      },
+    ]);
+    const diagnostics: string[] = [];
+    const proxied = await proxyTenantMcpServer(
+      { name: "tasky", url: upstream.url }, (m) => diagnostics.push(m));
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await proxied!.instance.server.connect(serverSide);
     const downstream = new Client({ name: "downstream", version: "1.0.0" });
     await downstream.connect(clientSide);
 
-    // List first — this is what armed the local refusal.
+    // The usable tool survives; the un-invokable one is gone.
     const listed = await downstream.listTools();
-    expect(listed.tools[0]?.execution).toEqual({ taskSupport: "required" });
-
-    // `downstream.request(...)`, not `downstream.callTool(...)`, and the reason
-    // is worth writing down: the DOWNSTREAM client enforces the very same rule.
-    // Going through its typed helper throws -32600 in the test process before
-    // the proxy is ever consulted, so that route cannot tell a fixed proxy from
-    // a broken one. A raw request is exactly what arrives on the wire, so it
-    // isolates the only behaviour this module controls.
-    //
-    // Be precise about what this fixes: the proxy no longer adds its OWN
-    // refusal. A downstream caller that insists on `callTool()` for a
-    // task-required tool still gets refused by its own client, correctly — the
-    // MCP answer there is callToolStream. This test pins that the proxy stopped
-    // being a second, invisible source of that failure.
-    const result = await downstream.request(
-      { method: "tools/call", params: { name: "slow-render", arguments: {} } },
-      CallToolResultSchema,
-    );
-    expect(JSON.stringify(result.content)).toContain("called slow-render");
-    expect(upstream.params.some((p) => p.name === "slow-render")).toBe(true);
+    expect(listed.tools.map((tool) => tool.name)).toEqual(["quick"]);
+    // ...and the omission is REPORTED, not silent — an operator seeing a tool
+    // missing from a tenant catalogue needs to know why.
+    expect(diagnostics.join(" ")).toContain("task-required");
 
     await downstream.close();
     await proxied!.close();
@@ -287,13 +274,19 @@ describe("proxyTenantMcpServer end to end", () => {
   it("returns null instead of throwing when the upstream is unreachable", async () => {
     const dead = await listen((_req, res) => { res.destroy(); });
     const diagnostics: string[] = [];
+    // AN authToken IS SUPPLIED ON PURPOSE. Round 6 (NIT): this test claimed to
+    // prove the diagnostic leaks no token while passing a config that had none,
+    // so the assertion could never have failed. A secret the test never creates
+    // is a secret the test cannot catch.
+    const secret = "tenant-secret-do-not-log-3f9a2c";
     const proxied = await proxyTenantMcpServer(
-      { name: "down", url: dead.url }, (m) => diagnostics.push(m));
+      { name: "down", url: dead.url, authToken: secret }, (m) => diagnostics.push(m));
 
     // A tenant server being down must degrade the turn, never fail it.
     expect(proxied).toBeNull();
     expect(diagnostics.join(" ")).toContain("did not connect");
-    // ...and the diagnostic carries the name only, never the URL or a token.
+    // ...and the diagnostic carries the name only, never the URL or the token.
     expect(diagnostics.join(" ")).not.toContain(dead.url);
+    expect(diagnostics.join(" ")).not.toContain(secret);
   });
 });

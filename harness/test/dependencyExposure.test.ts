@@ -67,5 +67,11 @@ describe("transitive HTTP dependency exposure", () => {
 
     // THE assertion: nothing node loads for this import is Hono.
     expect(loaded.filter((file) => /hono/i.test(file))).toEqual([]);
-  });
+    // Vitest's DEFAULT 5s test timeout is not enough for this one. It spawns a
+    // node subprocess that loads the whole SDK under loader hooks: ~1.4s alone,
+    // but well past 5s when the full suite is running in parallel around it.
+    // Caught by the full gate after it passed standalone — the exact shape of a
+    // test that is green locally and flaky in CI. The budget matches the
+    // subprocess's own 120s ceiling so one bound governs, not two.
+  }, 120_000);
 });

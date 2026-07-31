@@ -44,6 +44,21 @@ import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpBridge.js";
 /** How long to wait for the upstream handshake before giving up on a server. */
 const CONNECT_TIMEOUT_MS = 10_000;
 
+/**
+ * How long an upstream tool call may run.
+ *
+ * MUST BE SET EXPLICITLY. The SDK applies DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000
+ * whenever `options.timeout` is undefined (shared/protocol.js), so leaving it
+ * off silently caps every tenant tool at 60s — while the harness itself allows
+ * a 120s request (REQUEST_TIMEOUT_MS in server.ts). A tool that legitimately
+ * runs 60-120s would fail at the proxy well before the turn deadline, and the
+ * default is invisible at this call site, which is what makes it dangerous.
+ *
+ * Matched to the harness budget rather than guessed: the proxy should not be
+ * the component that decides a turn is over.
+ */
+const UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+
 export type ProxiedMcpServer = { name: string; instance: McpServer; close: () => Promise<void> };
 
 /**
@@ -149,17 +164,75 @@ export async function proxyTenantMcpServer(
     //
     // The real downstream client applies both of those itself, where they
     // belong. Doing it here too is double enforcement that can only subtract.
-    // The result schemas are `z.looseObject`, so unknown fields survive the
-    // parse and forwarding stays lossless.
+    //
+    // FORWARDING IS NOT BYTE-LOSSLESS, and an earlier version of this comment
+    // wrongly claimed it was. Measured against SDK 1.29.0: result-LEVEL unknown
+    // fields survive (those schemas are z.looseObject), but unknown fields
+    // nested inside a tool DEFINITION or a content BLOCK are stripped. Round 6
+    // caught the false claim.
+    //
+    // The proxy cannot fix that, and it is worth knowing why before someone
+    // tries: the same stripping happens at the DOWNSTREAM client's own parse.
+    // A handler returning `{name, inputSchema, vendorX}` directly, with no
+    // proxy in the path at all, still reaches a downstream `listTools()` with
+    // vendorX gone. Making this side permissive would buy nothing end to end,
+    // so the honest thing is to state the limit rather than add machinery that
+    // does not move it.
     //
     // FORWARD THE PARAMS, including the pagination cursor. Calling listTools()
     // bare made every page request return page one, so a downstream client
     // paging through a large tenant catalogue would loop on the first page
     // forever. Round 3 caught this; it is a product bug, not a test gap.
-    instance.server.setRequestHandler(ListToolsRequestSchema, async (request) =>
-      client.request({ method: "tools/list", params: request.params }, ListToolsResultSchema));
-    instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      client.request({ method: "tools/call", params: request.params }, CallToolResultSchema));
+    instance.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
+      const listed = await client.request(
+        { method: "tools/list", params: request.params },
+        ListToolsResultSchema,
+        { signal: extra.signal, timeout: UPSTREAM_REQUEST_TIMEOUT_MS },
+      );
+      // DO NOT ADVERTISE WHAT WE CANNOT INVOKE. A tool declaring
+      // `execution.taskSupport: "required"` is callable only through the
+      // experimental task methods (tasks/create and friends), which this proxy
+      // does not implement and does not negotiate as a capability. Forwarding
+      // it would put a tool in front of the model that fails on every call, and
+      // a spec-compliant upstream is entitled to reject the plain tools/call we
+      // would send.
+      //
+      // Round 6 caught this: an earlier test appeared to prove task-required
+      // tools worked, but only because the FIXTURE answered a plain call that a
+      // compliant server would refuse. Dropping them is the honest surface —
+      // the tenant's other tools keep working, and nothing silently pretends.
+      // Supporting them properly means implementing task forwarding, which is a
+      // separate change, not a comment.
+      const usable = listed.tools.filter((tool) => tool.execution?.taskSupport !== "required");
+      if (usable.length !== listed.tools.length) {
+        report(`[leaf-mcp] ${JSON.stringify(config.name)}: hid ${listed.tools.length - usable.length} task-required tool(s); task execution is not proxied`);
+      }
+      return { ...listed, tools: usable };
+    });
+    instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      client.request(
+        { method: "tools/call", params: request.params },
+        CallToolResultSchema,
+        {
+          // Cancellation must reach upstream: without the signal, a downstream
+          // abort leaves the tenant call running and the response is dropped on
+          // the floor.
+          signal: extra.signal,
+          timeout: UPSTREAM_REQUEST_TIMEOUT_MS,
+          // A tool that keeps reporting progress is alive, so let progress
+          // extend the deadline rather than killing useful long work at a fixed
+          // wall.
+          resetTimeoutOnProgress: true,
+          // Progress notifications are the only feedback a long tool gives.
+          // Swallowing them makes a working call look hung.
+          onprogress: (progress) => {
+            void extra.sendNotification({
+              method: "notifications/progress",
+              params: { ...progress, progressToken: request.params?._meta?.progressToken ?? extra.requestId },
+            }).catch(() => {});
+          },
+        },
+      ));
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
     // live upstream client with no owner. Close it before giving up.
