@@ -34,8 +34,7 @@ export function prepareCatalogRunParams(tool, params, context, overlays = {}) {
     if (property?.default !== undefined) prepared[key] = property.default
   }
   Object.assign(prepared, params || {}, overlays || {})
-  if ((tool?.capabilities || []).includes('drawing.write')
-      && Object.hasOwn(tool?.params?.properties || {}, 'drawing_id')) {
+  if ((tool?.capabilities || []).includes('drawing.write')) {
     const drawingId = context?.drawingArtifactId || context?.drawingId
     if (typeof drawingId !== 'string' || !drawingId) {
       throw new TypeError('drawing.write tools require an active drawing')

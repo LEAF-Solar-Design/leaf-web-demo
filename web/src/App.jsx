@@ -567,9 +567,9 @@ export default function App() {
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
-    const seat = (d) => {
+    const seat = (d, options = {}) => {
       if (!alive) return
-      seatIntake(d)
+      seatIntake(d, options)
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -579,9 +579,23 @@ export default function App() {
       return () => { alive = false }
     }
     getSession(mock, DRAWING_SOURCE)
-      .then(({ intake: d, tenant: t, tier: ti, org: o }) => {
+      .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
-        seat(d); setTenant(t); setTier(ti); setOrg(o)
+        let drawingSummary = null
+        if (!mock) {
+          try {
+            drawingSummary = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+          } catch {
+            // Keep the intake readable, but leave its version unknown. The
+            // run-intent gate below refuses live legacy writes in this state.
+          }
+        }
+        if (!alive) return
+        seat(d, {
+          drawingId: REQUESTED_DRAWING_ID,
+          ...(drawingSummary ? { drawingState: drawingSummary } : {}),
+        })
+        setTenant(t); setTier(ti); setOrg(o)
       })
       .catch((e) => {
         if (!alive) return
@@ -933,7 +947,7 @@ export default function App() {
     workspace,
     selectedVersionId: canonicalVersionId,
     drawingState,
-    fallbackDrawingId: DEFAULT_DRAWING_ID,
+    fallbackDrawingId: REQUESTED_DRAWING_ID,
   }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
@@ -965,6 +979,15 @@ export default function App() {
       return
     }
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    if (
+      !mock
+      && isWrite
+      && catalogRunContextRef.current.projectId == null
+      && catalogRunContextRef.current.drawingVersion == null
+    ) {
+      setRunErr('The current drawing version is not ready. Refresh the drawing before running a write tool.')
+      return
+    }
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
     const prepared = prepareRunParams(catalogTool, decision.params)
     const staged = stageRunIntent(runIntentStateRef.current, {

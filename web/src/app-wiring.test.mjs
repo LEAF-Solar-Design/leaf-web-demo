@@ -74,4 +74,23 @@ describe('App.jsx wiring', () => {
     assert.match(promptBox, /if \(!imageAttachmentsEnabled\)/)
     assert.match(promptBox, /Image paste is available in the assistant reply box/)
   })
+
+  it('seats live intake with the mapped store drawing and its durable version summary', () => {
+    assert.match(
+      stripped,
+      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*REQUESTED_DRAWING_ID\)/,
+    )
+    assert.match(
+      stripped,
+      /drawingId:\s*REQUESTED_DRAWING_ID[\s\S]*drawingState:\s*drawingSummary/,
+    )
+    assert.match(stripped, /fallbackDrawingId:\s*REQUESTED_DRAWING_ID/)
+  })
+
+  it('refuses a live legacy write when version bootstrap did not produce a pin', () => {
+    assert.match(
+      stripped,
+      /!mock\s*&&\s*isWrite\s*&&\s*catalogRunContextRef\.current\.projectId\s*==\s*null\s*&&\s*catalogRunContextRef\.current\.drawingVersion\s*==\s*null[\s\S]*setRunErr\([\s\S]*return/,
+    )
+  })
 })
