@@ -86,6 +86,7 @@ import {
   resolveMcpAttachment,
   type McpAttachment,
   type McpBridgeStore,
+  type McpHostResolver,
 } from "./mcpBridge.js";
 import { findTool } from "../../registry/registerTool.js";
 
@@ -345,9 +346,10 @@ export async function resolveMcpAttachmentSafely(
   store: McpBridgeStore,
   tenantId: string,
   report: (message: string) => void = console.error,
+  resolver?: McpHostResolver,
 ): Promise<McpAttachment | null> {
   try {
-    return await resolveMcpAttachment(store, tenantId, report);
+    return await resolveMcpAttachment(store, tenantId, report, resolver);
   } catch {
     // The store error can include arbitrary corrupted input. Keep diagnostics tied to
     // the bridge's redacted formatter rather than rendering the error or configuration.

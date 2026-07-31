@@ -60,8 +60,8 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
     await store.set("tenant-a", [{ name: "alpha", url: "https://alpha.example.test/mcp", authToken: SENTINEL_A }]);
     await store.set("tenant-b", [{ name: "bravo", url: "https://bravo.example.test/mcp", authToken: SENTINEL_B }]);
 
-    const optionsA = turnOptions(await resolveMcpAttachmentSafely(store, "tenant-a"));
-    const optionsB = turnOptions(await resolveMcpAttachmentSafely(store, "tenant-b"));
+    const optionsA = turnOptions(await resolveMcpAttachmentSafely(store, "tenant-a", console.error, async () => "203.0.113.10"));
+    const optionsB = turnOptions(await resolveMcpAttachmentSafely(store, "tenant-b", console.error, async () => "203.0.113.10"));
     const renderedA = JSON.stringify(optionsA.mcpServers);
     const renderedB = JSON.stringify(optionsB.mcpServers);
 
