@@ -904,8 +904,9 @@ def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypa
     assert configured_calls == []
 
 
-def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("include_tool", [False, True])
+def test_stage_callback_completed_response_preserves_validated_tool_or_retries_receipt_only(
+    tmp_path, monkeypatch, include_tool
 ):
     store = SQLiteCustomizationStore(tmp_path / "customization.db")
     service = CustomizationService(store)
@@ -947,6 +948,11 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
         lambda change, body=None: policy_calls.append((change.state, body)),
     )
 
+    proposed_tool = {
+        "name": "centered-test-prism",
+        "capabilities": ["drawing.write"],
+    }
+
     def callback_completed(change_tenant, description, change):
         receipt = {
             "contract": "leaf.customization.v1",
@@ -973,7 +979,14 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
             platform_release=change.desired_platform_release,
             workspace_contract_digest=change.workspace_contract_digest,
         )
-        return {"receipt": receipt}
+        return {
+            "receipt": receipt,
+            **(
+                {"tool": proposed_tool, "preview": {"summary": "Adds a prism"}}
+                if include_tool
+                else {}
+            ),
+        }
 
     monkeypatch.setattr(service, "_harness_stage", callback_completed)
 
@@ -986,8 +999,14 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
 
     assert result["receipt"]["state"] == "staged"
     assert result["receipt"]["staged_commit"] == STAGED
-    assert "tool" not in result
-    assert policy_calls == [(ChangeState.STAGED, None)]
+    if include_tool:
+        assert result["tool"] == proposed_tool
+        assert result["preview"] == {"summary": "Adds a prism"}
+        assert policy_calls[0][0] is ChangeState.STAGED
+        assert policy_calls[0][1]["tool"] == proposed_tool
+    else:
+        assert "tool" not in result
+        assert policy_calls == [(ChangeState.STAGED, None)]
 
 
 def test_rollback_requires_r6_and_owner_or_editor(tmp_path, monkeypatch):

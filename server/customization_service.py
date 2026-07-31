@@ -557,11 +557,17 @@ class CustomizationService:
             if self._raw_receipt(durable) != receipt:
                 raise CustomizationServiceError("staged_receipt_mismatch")
             # The authenticated callback validates policy before it records
-            # STAGED. A retry may therefore receive only the durable receipt
-            # after the first response was lost. Revalidate the committed tree
-            # and return that durable result in the same retry.
-            self._verify_stage_policy(durable)
-            return self._receipt(durable)
+            # STAGED. The first harness response can still carry the proposed
+            # tool, while a retry after a lost response carries only the
+            # durable receipt. Revalidate any proposed tool against the
+            # committed catalog before returning it to the browser.
+            if body.get("tool") is None:
+                self._verify_stage_policy(durable)
+                return self._receipt(durable)
+            self._verify_stage_policy(durable, body)
+            return self._receipt(
+                durable, tool=body.get("tool"), preview=body.get("preview")
+            )
         self._verify_stage_policy(proposed, body)
         change = durable
         if change.state is ChangeState.STAGING:
