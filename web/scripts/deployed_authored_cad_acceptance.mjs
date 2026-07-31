@@ -4,17 +4,17 @@
  *
  * Default mode is a staging-only preflight. It proves one coherent release, two
  * real tenant identities, linked Claude grants, and a clean browser workbench
- * without request interception. Loading the workbench may initialize version 1
- * of the two explicitly named acceptance drawings. `--execute` adds authoring,
- * approval, read-only preview, cross-tenant authority checks, pinned-write
- * rejection probes, version, orbit, undo, and redo. No mode can target a
- * production hostname.
+ * without request interception. Preflight uses two explicitly named synthetic
+ * drawing IDs. `--execute` uploads the tracked DWG through the public account
+ * path, then adds authoring, approval, read-only preview, cross-tenant authority
+ * checks, pinned-write rejection probes, version, orbit, undo, and redo. No mode
+ * can target a production hostname.
  */
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SOURCE_SHA = /^[a-f0-9]{40}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -128,7 +128,7 @@ function tenantConfig(env, label, runId) {
       `${prefix}REQUEST must contain the run id and be at most 1000 characters`,
     )
   }
-  return { label, id, jwt, drawingId, request }
+  return { label, id, jwt, plannedDrawingId: drawingId, drawingId, request }
 }
 
 export function validateConfig(env = process.env, execute = false) {
@@ -302,6 +302,98 @@ export async function requestJson(
   } finally {
     clearTimeout(timer)
   }
+}
+
+const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+
+export async function provisionAcceptanceDrawing(
+  config,
+  tenant,
+  sourceBytes,
+  { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
+) {
+  const check = `live_dwg_${tenant.label}`
+  if (!(sourceBytes instanceof Uint8Array) || sourceBytes.byteLength === 0) {
+    throw new AcceptanceError(check, 'the tracked acceptance DWG is empty')
+  }
+  const form = new FormData()
+  form.append('file', new Blob([sourceBytes]), `acceptance-${config.runId}-${tenant.label}.dwg`)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  let upload
+  try {
+    const response = await fetchImpl(new URL('/api/drawings/upload', `${config.apiUrl}/`), {
+      method: 'POST',
+      redirect: 'error',
+      credentials: 'omit',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${tenant.jwt}`,
+      },
+      body: form,
+    })
+    upload = { status: response.status, body: await parseJsonResponse(response, check) }
+  } catch (error) {
+    if (error instanceof AcceptanceError) throw error
+    throw new AcceptanceError(check, `DWG upload failed: ${error?.name || 'Error'}`)
+  } finally {
+    clearTimeout(timer)
+  }
+  if (upload.status !== 202
+      || !UUID.test(upload.body?.drawing_id || '')
+      || upload.body?.tenant_id !== tenant.id) {
+    throw new AcceptanceError(check, `DWG upload returned an invalid HTTP ${upload.status} receipt`)
+  }
+  const drawingId = upload.body.drawing_id
+  let status = upload.body
+  for (let attempt = 0; status?.status !== 'ready' && attempt < maxPolls; attempt += 1) {
+    if (status?.status === 'failed') {
+      throw new AcceptanceError(check, status?.error?.message || 'DWG extraction failed')
+    }
+    await waitImpl(pollMs)
+    const observed = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${encodeURIComponent(drawingId)}/upload-status`,
+      { fetchImpl },
+    )
+    if (observed.status !== 200) {
+      throw new AcceptanceError(check, `DWG extraction status returned HTTP ${observed.status}`)
+    }
+    status = observed.body
+  }
+  if (status?.status !== 'ready') {
+    throw new AcceptanceError(check, 'DWG extraction did not finish before the acceptance deadline')
+  }
+  return drawingId
+}
+
+export async function waitForTerminalJob(
+  config,
+  tenant,
+  jobId,
+  { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
+) {
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    const observed = await requestJson(
+      config,
+      tenant,
+      `/api/jobs/${encodeURIComponent(jobId)}`,
+      { fetchImpl },
+    )
+    if (observed.status !== 200) {
+      throw new AcceptanceError('authored_job', `job status returned HTTP ${observed.status}`)
+    }
+    if (observed.body?.status === 'failed') {
+      const error = observed.body.error || {}
+      const detail = [error.error_code, error.message].filter(Boolean).join(': ')
+      throw new AcceptanceError('authored_job', detail || 'the authored write job failed')
+    }
+    if (observed.body?.status === 'complete') return observed.body
+    await waitImpl(pollMs)
+  }
+  throw new AcceptanceError('authored_job', 'the authored write job did not finish before the acceptance deadline')
 }
 
 export function evaluateReadiness(body, expectedRevision) {
@@ -730,20 +822,28 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       runResponse.status() !== 202 ||
       runRequest?.tool !== staged.toolName ||
       runRequest?.dwg !== tenant.drawingId ||
-      runRequest?.dwg_version !== 1
+      runRequest?.dwg_version !== 1 ||
+      runRequest?.params?.drawing_id !== tenant.drawingId
     ) {
       throw new AcceptanceError(
         'exact_write',
         'the exact staged tool was not submitted against acceptance drawing version 1',
       )
     }
-    await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
-      .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
     const runBody = await runResponse.json()
     const jobId = runBody?.job_id
     if (typeof jobId !== 'string' || !jobId) {
       throw new AcceptanceError('exact_write', 'the accepted write did not return a job id')
     }
+    const job = await waitForTerminalJob(config, tenant, jobId)
+    const newVersion = job?.result?.result?.new_version
+    if (job?.result?.ok !== true
+        || newVersion?.drawing_id !== tenant.drawingId
+        || newVersion?.version !== 2) {
+      throw new AcceptanceError('authored_job', 'the completed authored write did not create exact version 2')
+    }
+    await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
+      .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
     const canvas = page.locator('canvas').first()
@@ -1136,6 +1236,18 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const config = validateConfig(env, args.execute)
     const startedAt = new Date().toISOString()
     const api = await runApiPreflight(config)
+    if (args.execute) {
+      const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../data/rooftop_demo.dwg')
+      const sourceBytes = readFileSync(sourcePath)
+      const drawingIds = await Promise.all(
+        config.tenants.map((tenant) => provisionAcceptanceDrawing(config, tenant, sourceBytes)),
+      )
+      config.tenants = config.tenants.map((tenant, index) => ({
+        ...tenant,
+        drawingId: drawingIds[index],
+      }))
+      api.live_dwg_inputs = { status: 'ready', count: drawingIds.length }
+    }
     const browser = await runBrowserAcceptance(config, args.execute)
     api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
     api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)

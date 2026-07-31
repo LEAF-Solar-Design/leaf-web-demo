@@ -46,7 +46,8 @@ export default function RoutePanel({
   )
   const confident = !!route && route.lane === 'run' && route.confidence >= 0.7
   const params = useMemo(
-    () => (toolObj ? { ...defaultsOf(toolObj.params), ...(route?.params || {}) } : (route?.params || {})),
+    () => (route?.runIntent?.params
+      || (toolObj ? { ...defaultsOf(toolObj.params), ...(route?.params || {}) } : (route?.params || {}))),
     [toolObj, route],
   )
   const isWrite = (toolObj?.capabilities || []).includes('drawing.write')

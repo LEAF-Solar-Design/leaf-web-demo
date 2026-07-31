@@ -16,11 +16,13 @@ import {
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
+  provisionAcceptanceDrawing,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
   validateConfig,
   validateStagedAuthorResponse,
+  waitForTerminalJob,
 } from './deployed_authored_cad_acceptance.mjs'
 
 const REVISION = 'f'.repeat(40)
@@ -296,6 +298,48 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.throws(
       () => evaluateReadiness(ready({ source_revision: 'e'.repeat(40) }), REVISION),
       /does not match/,
+    )
+  })
+
+  it('provisions a tenant-owned live DWG and waits for extraction readiness', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const drawingId = '11111111-1111-4111-8111-111111111111'
+    const calls = []
+    const fetchImpl = async (url, options) => {
+      calls.push({ url: String(url), options })
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        assert.ok(options.body instanceof FormData)
+        assert.equal(options.headers.Authorization, `Bearer ${TOKEN_A}`)
+        return response(202, { drawing_id: drawingId, tenant_id: tenant.id, status: 'extracting' })
+      }
+      return response(200, { drawing_id: drawingId, tenant_id: tenant.id, status: 'ready' })
+    }
+    assert.equal(
+      await provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {}, maxPolls: 2 },
+      ),
+      drawingId,
+    )
+    assert.deepEqual(calls.map((call) => new URL(call.url).pathname), [
+      '/api/drawings/upload',
+      `/api/drawings/${drawingId}/upload-status`,
+    ])
+  })
+
+  it('reports a terminal broker failure before waiting for browser version state', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const fetchImpl = async () => response(200, {
+      status: 'failed',
+      error: { error_code: 'BAD_PARAMS', message: 'unknown drawing' },
+    })
+    await assert.rejects(
+      () => waitForTerminalJob(config, tenant, 'job-one', { fetchImpl, waitImpl: async () => {} }),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'authored_job'
+        && error.message === 'BAD_PARAMS: unknown drawing',
     )
   })
 
