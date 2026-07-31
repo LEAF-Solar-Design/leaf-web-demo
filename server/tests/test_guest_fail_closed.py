@@ -474,6 +474,38 @@ def test_live_write_refuses_non_dwg_uploaded_source():
     assert "DWG source" in env["error"]["message"]
 
 
+def test_live_write_refuses_unreadable_legacy_upload_marker():
+    import store
+    import time
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must not be reached")
+
+    backend = store.InMemoryBackend()
+    backend.put(
+        store.manifest_key("acme-solar", "u-corrupt1"),
+        json.dumps({
+            "schema": 1, "tenant_id": "acme-solar",
+            "drawing_id": "u-corrupt1", "head": 1, "latest": 1,
+            "versions": [], "checkout": None,
+        }).encode(),
+    )
+    backend.put(
+        write_loop.upload_marker_key("acme-solar", "u-corrupt1"),
+        b"{not-json",
+    )
+
+    env, status = write_loop.run_write_live(
+        {"name": "delete-marked-panel"}, {"drawing_id": "u-corrupt1"},
+        "acme-solar", backend=backend, da=_NeverCalledDa(),
+        t0=time.perf_counter(),
+    )
+
+    assert status == 400
+    assert "unknown format" in env["error"]["message"]
+
+
 def test_storage_cutover_gate_blocks_authored_app_drawing_mutations(client, monkeypatch):
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
     headers = {"X-Tenant-Id": "account-a"}

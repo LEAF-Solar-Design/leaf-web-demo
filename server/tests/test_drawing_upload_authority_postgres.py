@@ -125,6 +125,211 @@ def _temp_blob(data: bytes) -> str:
     return name
 
 
+def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
+    tenant, drawing = "authority-tenant", "authority-drawing"
+    backend = store.InMemoryBackend()
+    source = b"AC1032" + b"\x00" * 32
+    backend.put(store.drawing_version_key(tenant, drawing, 1), source)
+    manifest = {
+        "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
+        "head": 1, "latest": 1, "versions": [{"v": 1}], "checkout": None,
+    }
+    marker_reads = []
+    monkeypatch.setattr(store, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(store, "authorize_checkout", lambda *_args: None)
+
+    def read_marker(_backend, marker_tenant, marker_drawing):
+        marker_reads.append((marker_tenant, marker_drawing))
+        return {"status": "ready", "source_ext": ".dwg"}
+
+    monkeypatch.setattr(guest_uploads, "read_marker", read_marker)
+
+    class _ReachedDa:
+        def ephemeral_input_key(self, *_args, **_kwargs):
+            raise RuntimeError("authority-aware guards passed")
+
+    env, status = write_loop.run_write_live(
+        {"name": "authority-probe"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=_ReachedDa(), t0=time.perf_counter(),
+    )
+
+    assert status == 502
+    assert "authority-aware guards passed" in env["error"]["message"]
+    assert marker_reads == [(tenant, drawing)]
+
+
+def test_live_write_marker_probe_uses_selected_authority(monkeypatch):
+    tenant, drawing = "marker-tenant", "marker-drawing"
+    backend = store.InMemoryBackend()
+    backend.put(
+        store.manifest_key(tenant, drawing),
+        b'{"schema":1,"tenant_id":"marker-tenant",'
+        b'"drawing_id":"marker-drawing","head":1,"latest":1,'
+        b'"versions":[],"checkout":null}',
+    )
+    monkeypatch.setattr(
+        guest_uploads, "read_marker",
+        lambda *_args: {"status": "ready", "source_ext": ".dxf"},
+    )
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must not be reached")
+
+    env, status = write_loop.run_write_live(
+        {"name": "authority-probe"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=_NeverCalledDa(), t0=time.perf_counter(),
+    )
+
+    assert status == 400
+    assert "DWG source" in env["error"]["message"]
+
+
+class _LiveWriteDa:
+    def __init__(self, source: bytes):
+        self.source = source
+        self.staged = {}
+        self.submissions = 0
+
+    def ephemeral_input_key(self, name, tenant_id, ts):
+        return f"t/{tenant_id}/in/{ts}_{name}"
+
+    def upload_scratch_object(self, local_path, key):
+        self.staged[key] = Path(local_path).read_bytes()
+
+    def scratch_signed_download_url(self, key):
+        assert self.staged[key] == self.source
+        return "https://aps.test/input"
+
+    def scratch_signed_upload_url(self, key):
+        return "upload-key", "https://aps.test/output"
+
+    def activity_qualified(self, name):
+        return f"owner.{name}+prod"
+
+    def submit_workitem(self, *_args, **_kwargs):
+        self.submissions += 1
+        return {"id": "wi-postgres-authority", "status": "success"}
+
+    def finalize_scratch_upload(self, _object_key, upload_key):
+        assert upload_key == "upload-key"
+
+    def download_scratch_object(self, _object_key):
+        return self.source + b"-updated"
+
+    def delete_scratch_object(self, _object_key):
+        pass
+
+    def extract(self, local_path):
+        assert Path(local_path).read_bytes() == self.source + b"-updated"
+        return {"layers": ["Updated"], "polylines": []}
+
+    def _engine_seconds(self, _status):
+        return 1.0
+
+
+@requires_database
+def test_live_write_uses_postgres_manifest_with_filesystem_blobs(
+    postgres_authority, monkeypatch, tmp_path,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+
+    class UploadFinalizationBackend(store.InMemoryBackend):
+        def put(self, key, data):
+            if key == store.manifest_key(tenant, drawing):
+                return
+            super().put(key, data)
+
+    backend = UploadFinalizationBackend()
+    source = b"AC1032" + b"\x00" * 64
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(source)
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+    assert store.acquire_checkout(backend, tenant, drawing, "session-a", 600)
+    assert not backend.exists(store.manifest_key(tenant, drawing))
+    assert not backend.exists(write_loop.upload_marker_key(tenant, drawing))
+
+    marker_reads = []
+
+    def read_marker(_backend, marker_tenant, marker_drawing):
+        marker_reads.append((marker_tenant, marker_drawing))
+        return {"status": "ready", "source_ext": ".dwg"}
+
+    monkeypatch.setattr(guest_uploads, "read_marker", read_marker)
+    da = _LiveWriteDa(source)
+    env, status = write_loop.run_write_live(
+        {"name": "postgres-live-write"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=da, t0=time.perf_counter(), holder="session-a",
+    )
+
+    assert status == 200
+    assert env["result"]["new_version"] == {
+        "drawing_id": drawing, "version": 2, "parent": 1,
+    }
+    assert marker_reads
+    assert set(marker_reads) == {(tenant, drawing)}
+    assert da.submissions == 1
+    assert store.load_manifest(backend, tenant, drawing)["head"] == 2
+
+
+@requires_database
+def test_live_write_unknown_postgres_drawing_fails_before_marker_or_da(
+    postgres_authority, monkeypatch,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+
+    def marker_must_not_be_read(*_args):
+        raise AssertionError("missing drawing must fail before upload marker lookup")
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must not be reached")
+
+    monkeypatch.setattr(guest_uploads, "read_marker", marker_must_not_be_read)
+    env, status = write_loop.run_write_live(
+        {"name": "postgres-live-write"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=_NeverCalledDa(), t0=time.perf_counter(),
+        holder="session-a",
+    )
+
+    assert status == 400
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert "drawing not in store" in env["error"]["message"]
+
+
+@requires_database
+def test_live_write_reads_postgres_dxf_marker_before_da(
+    postgres_authority, monkeypatch, tmp_path,
+):
+    token = uuid.uuid4().hex
+    tenant, drawing = f"tenant-{token}", f"drawing-{token}"
+    backend = store.InMemoryBackend()
+    initial = tmp_path / "initial.dwg"
+    initial.write_bytes(b"AC1032" + b"\x00" * 32)
+    store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+
+    monkeypatch.setattr(
+        guest_uploads, "read_marker",
+        lambda *_args: {"status": "ready", "source_ext": ".dxf"},
+    )
+
+    class _NeverCalledDa:
+        def __getattr__(self, name):
+            raise AssertionError(f"da.{name} must not be reached")
+
+    env, status = write_loop.run_write_live(
+        {"name": "postgres-live-write"}, {"drawing_id": drawing}, tenant,
+        backend=backend, da=_NeverCalledDa(), t0=time.perf_counter(),
+        holder="session-a",
+    )
+
+    assert status == 400
+    assert "DWG source" in env["error"]["message"]
+
+
 @requires_database
 def test_pending_upload_row_blocks_demo_bootstrap(postgres_authority):
     token = uuid.uuid4().hex

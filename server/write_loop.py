@@ -1014,7 +1014,9 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     drawing_id = _drawing_id(params)
     scratch_keys = []
     try:
-        if not backend.exists(store.manifest_key(tenant_id, drawing_id)):
+        try:
+            store.load_manifest(backend, tenant_id, drawing_id)
+        except KeyError:
             return (err_envelope(ErrorCode.BAD_PARAMS,
                                  f"drawing not in store: {tenant_id}/{drawing_id} "
                                  f"(ingest it before a live write)", retryable=False,
@@ -1025,18 +1027,20 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         # bytes. An UPLOADED drawing records its source format in the upload
         # marker; anything non-.dwg (a DXF's intake-JSON mock blob) must refuse
         # honestly here rather than hand APS a mislabeled file.
-        if backend.exists(upload_marker_key(tenant_id, drawing_id)):
-            import guest_uploads
-            if guest_uploads.upload_store_mode() == "postgres":
-                marker = guest_uploads.read_marker(
-                    backend, tenant_id, drawing_id) or {}
-            else:
-                try:
-                    marker = json.loads(backend.get(
-                        upload_marker_key(
-                            tenant_id, drawing_id)).decode("utf-8"))
-                except (KeyError, ValueError):
-                    marker = {}
+        import guest_uploads
+        marker = guest_uploads.read_marker(
+            backend, tenant_id, drawing_id)
+        if (
+            marker is None
+            and guest_uploads.upload_store_mode() == "legacy"
+            and backend.exists(upload_marker_key(tenant_id, drawing_id))
+        ):
+            # A present legacy marker that cannot be decoded is not the same
+            # as no upload marker. Its source format is unknown, so refuse it
+            # before any paid APS work instead of treating the drawing as a
+            # trusted native DWG.
+            marker = {}
+        if marker is not None:
             source_ext = str(marker.get("source_ext") or "")
             if not source_ext:
                 # Pre-round-4 markers (schema 1, no source_ext field): fall
