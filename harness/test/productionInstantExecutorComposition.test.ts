@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
-import { createProductionInstantExecutorClient } from "../src/server.js";
+import {
+  createConfiguredInstantExecutorClient,
+  createProductionInstantExecutorClient,
+} from "../src/server.js";
 
 const requiredEnv = {
   LEAF_INSTANT_EXECUTOR_CA_FILE: "C:/run/secrets/executor-ca.pem",
@@ -10,6 +14,40 @@ const requiredEnv = {
 };
 
 describe("production instant executor composition", () => {
+  it.each(["1", "true", "yes", "on", "TRUE"])(
+    "constructs the configured client when the instant flag is %s",
+    (flag) => {
+      const client = { invoke: vi.fn(), cancel: vi.fn() };
+      const factory = vi.fn(() => client);
+
+      expect(createConfiguredInstantExecutorClient(factory, {
+        ...requiredEnv,
+        LEAF_INSTANT_EXECUTION_ENABLED: flag,
+      })).toBe(client);
+      expect(factory).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([undefined, "", "0", "false", "off"])(
+    "does not require executor credentials when the instant flag is %s",
+    (flag) => {
+      const factory = vi.fn();
+
+      expect(createConfiguredInstantExecutorClient(factory, {
+        LEAF_INSTANT_EXECUTION_ENABLED: flag,
+      })).toBeUndefined();
+      expect(factory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("wires and closes the configured client in the deployed serve entrypoint", () => {
+    const source = readFileSync(new URL("../scripts/serve.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("createConfiguredInstantExecutorClient(");
+    expect(source).toContain("instantExecutor: instantExecutorHandle");
+    expect(source).toContain("instantExecutorHandle?.close()");
+  });
+
   it("constructs the direct executor client with mounted TLS file paths and a fixed server name", () => {
     const client = { invoke: vi.fn(), cancel: vi.fn() };
     const factory = vi.fn(() => client);

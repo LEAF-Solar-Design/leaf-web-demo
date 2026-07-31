@@ -872,6 +872,16 @@ export function createProductionInstantExecutorClient<T>(
   });
 }
 
+/** Keep every production entrypoint on the same default-off instant client gate. */
+export function createConfiguredInstantExecutorClient<T>(
+  factory: ProductionInstantExecutorClientFactory<T>,
+  env: NodeJS.ProcessEnv = process.env,
+): T | undefined {
+  return envFlagOn(env.LEAF_INSTANT_EXECUTION_ENABLED)
+    ? createProductionInstantExecutorClient(factory, env)
+    : undefined;
+}
+
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
@@ -889,12 +899,9 @@ export async function startReal(port = 8130): Promise<Server> {
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
-  const instantExecutionEnabled = envFlagOn(process.env.LEAF_INSTANT_EXECUTION_ENABLED);
-  const instantExecutor = instantExecutionEnabled
-    ? createProductionInstantExecutorClient(
-        (options) => new HttpInstantExecutorClient(options),
-      )
-    : undefined;
+  const instantExecutor = createConfiguredInstantExecutorClient(
+    (options) => new HttpInstantExecutorClient(options),
+  );
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
   const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;

@@ -42,7 +42,7 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 import { Pool } from "pg";
 
-import { createHarness } from "../src/server.js";
+import { createConfiguredInstantExecutorClient, createHarness } from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
 import { authorRunnerMode, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { createShutdownHandler } from "../src/shutdown.js";
@@ -55,6 +55,7 @@ import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
+import { HttpInstantExecutorClient } from "../src/ports/impl/instantExecutorClient.js";
 import {
   assertHarnessCatalog,
   type HarnessColumn,
@@ -88,6 +89,7 @@ const BROKER_URL = process.env.BROKER_URL ?? "http://127.0.0.1:8140";
 const TENANT_FIXTURE =
   process.env.LEAF_TENANT_FIXTURE ?? join(REPO_ROOT, "harness", "test", "fixtures", "tenant-repo");
 let sessionStoreHandle: SessionStoreHandle | null = null;
+let instantExecutorHandle: HttpInstantExecutorClient | null = null;
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
@@ -139,6 +141,9 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
   // Durable loop-side store (SDK resume ids, transcript mirror, confirmation
   // mirrors). File remains the default. PostgreSQL is explicit and fails closed
   // when its URL is absent; schema creation never happens at process startup.
+  instantExecutorHandle = createConfiguredInstantExecutorClient(
+    (options) => new HttpInstantExecutorClient(options),
+  ) ?? null;
   sessionStoreHandle = createSessionStore();
   log(`[harness] converse session authority: ${sessionStoreHandle.kind}`);
   return new SpineTurnAdapter({
@@ -147,6 +152,7 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
     gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
     store: sessionStoreHandle.store,
     runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
+    ...(instantExecutorHandle ? { instantExecutor: instantExecutorHandle } : {}),
   });
 }
 
@@ -294,6 +300,7 @@ async function main(): Promise<void> {
     exit: (code) => process.exit(code),
     cleanup: () => {
       stopGitWorker();
+      instantExecutorHandle?.close();
       // Sessions are durable in Postgres, so exit need not block on the pool
       // close; attempt a best-effort graceful close and log any failure.
       void (sessionStoreHandle?.close() ?? Promise.resolve()).catch(
