@@ -206,6 +206,63 @@ def test_fresh_id_and_demo_ingest_identical_bytes(client):
     assert json.loads(raw.decode("utf-8"))  # sanity: still valid JSON
 
 
+def test_live_bootstrap_stores_real_dwg_with_bound_intake(tmp_path, monkeypatch):
+    """A fresh live project drawing is a real APS input, not JSON mislabeled
+    as HostDwg. Its read surface comes from the source-bound intake cache.
+    """
+    import store  # noqa: PLC0415
+
+    monkeypatch.setenv("APS_LIVE", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+
+    write_loop.ensure_demo_drawing(
+        backend, "live-bootstrap", "project-drawing")
+
+    version, key = store.resolve_version(
+        backend, "live-bootstrap", "project-drawing", "head")
+    assert version == 1
+    assert backend.get(key) == write_loop.DEMO_DWG_PATH.read_bytes()
+    read_version, intake = write_loop.read_intake(
+        backend, "live-bootstrap", "project-drawing", "head")
+    assert read_version == 1
+    assert len(intake["polylines"]) == CACHED_POLYLINE_COUNT
+
+
+def test_legacy_live_bootstrap_bridges_exact_tracked_intake_to_dwg(
+        tmp_path, monkeypatch):
+    """An existing pre-fix v1 remains immutable but executes from its exact,
+    repository-bound DWG counterpart.
+    """
+    import store  # noqa: PLC0415
+
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    backend = store.InMemoryBackend()
+    source = write_loop.CACHED_INTAKE_PATH.read_bytes()
+    legacy_source = tmp_path / "legacy.intake.json"
+    legacy_source.write_bytes(source)
+    ingested = store.ingest_drawing(
+        backend, "legacy-live", str(legacy_source), drawing_id="project-drawing")
+    assert ingested == {"drawing_id": "project-drawing", "version": 1}
+    version, key = store.resolve_version(
+        backend, "legacy-live", "project-drawing", "head")
+    assert version == 1
+    stored_source = backend.get(key)
+
+    execution_source, bridged = write_loop._live_execution_source_bytes(
+        stored_source)
+
+    assert bridged is True
+    assert execution_source == write_loop.DEMO_DWG_PATH.read_bytes()
+    assert backend.get(key) == source
+
+
+def test_live_write_rejects_unbound_json_source():
+    with pytest.raises(ValueError, match="without a canonical DWG binding"):
+        write_loop._live_execution_source_bytes(b'{"not":"the tracked intake"}')
+
+
 # --------------------------------------------------------------------------- #
 # 4. path-traversal / malformed drawing_id is rejected, not auto-bootstrapped
 # --------------------------------------------------------------------------- #

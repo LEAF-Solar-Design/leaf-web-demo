@@ -432,6 +432,67 @@ def test_broker_live_run_rejects_traversal_before_loading_da(monkeypatch, tmp_pa
     assert b'"error_code":"BAD_PARAMS"' in response.body
 
 
+def test_live_write_resolves_input_from_version_store_not_local_registry(monkeypatch):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    monkeypatch.setattr(
+        broker, "_run_quota_preflight", lambda _tenant, _tier, _tool: None)
+    monkeypatch.setattr(
+        broker,
+        "_resolve_live_dwg",
+        lambda _dwg: pytest.fail("live write consulted the local DWG registry"),
+    )
+
+    class _Da:
+        def run_tool(self):
+            raise AssertionError("run_write_live owns the DA call")
+
+    da = _Da()
+    backend = object()
+    calls = []
+    monkeypatch.setattr(broker, "_get_da", lambda: da)
+    monkeypatch.setattr(
+        broker.write_loop, "default_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr(
+        broker.write_loop,
+        "run_write_live",
+        lambda tool, params, tenant_id, **kwargs: (
+            calls.append((tool, params, tenant_id, kwargs))
+            or (_ok_env(), 200)
+        ),
+    )
+    tool = {
+        "name": "authored-write",
+        "version": "1.0.0",
+        "capabilities": ["drawing.write"],
+        "params_schema": {"type": "object"},
+    }
+
+    env, status = broker._execute(
+        broker.BrokerRunRequest(
+            tenant_id="tenant-a",
+            tool=tool,
+            params={"drawing_id": "project-drawing"},
+            dwg="project-drawing",
+            dwg_version=1,
+            aps_live=True,
+        ),
+        tool,
+        "authored_write",
+        0.0,
+        {},
+    )
+
+    assert status == 200
+    assert env["ok"] is True
+    assert len(calls) == 1
+    assert calls[0][2] == "tenant-a"
+    assert calls[0][3]["backend"] is backend
+    assert calls[0][3]["da"] is da
+    assert calls[0][3]["version"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # F4(a): caller-auth on /broker/* (shared secret via X-Broker-Secret header)
 # --------------------------------------------------------------------------- #

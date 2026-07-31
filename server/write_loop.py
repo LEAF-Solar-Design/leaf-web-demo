@@ -45,6 +45,7 @@ from tenant_id_validator import validate_tenant_id
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
 CACHED_INTAKE_PATH = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
+DEMO_DWG_PATH = PROJECT_ROOT / "data" / "rooftop_demo.dwg"
 LOGGER = logging.getLogger(__name__)
 
 # Make da/store.py importable. APPEND (never front-insert) so a stdlib module is
@@ -516,6 +517,32 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     return v, intake
 
 
+def _live_execution_source_bytes(stored_source: bytes) -> Tuple[bytes, bool]:
+    """Return bytes safe to submit as HostDwg and whether they were bridged.
+
+    Early live demo bootstraps stored the tracked rooftop intake JSON as v1.
+    Bridge only that exact immutable artifact to its paired tracked DWG. Any
+    other JSON object fails closed rather than being mislabeled as HostDwg.
+    """
+    try:
+        decoded = json.loads(stored_source.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return stored_source, False
+    if not isinstance(decoded, dict):
+        return stored_source, False
+    cached = CACHED_INTAKE_PATH.read_bytes()
+    if not hmac.compare_digest(
+        hashlib.sha256(stored_source).digest(),
+        hashlib.sha256(cached).digest(),
+    ):
+        raise ValueError(
+            "live write source is intake JSON without a canonical DWG binding")
+    source = DEMO_DWG_PATH.read_bytes()
+    if not source:
+        raise ValueError("canonical demo DWG source is empty")
+    return source, True
+
+
 def _transform_number(value: Any, field: str, handle: str) -> float:
     """Return one finite transform number, rejecting JSON booleans as numbers."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -678,8 +705,10 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
 # demo bootstrap
 # --------------------------------------------------------------------------- #
 def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
-    """Bootstrap ANY first-seen `drawing_id` (v1 = cached intake JSON) on first use
-    at APS_LIVE=0, via the identical `store.ingest_drawing` path the well-known
+    """Bootstrap ANY first-seen `drawing_id` on first use.
+
+    At APS_LIVE=0, v1 remains the cached intake JSON via the identical
+    `store.ingest_drawing` path the well-known
     `demo` drawing has always used — `demo` is now just one instance of this
     general rule (its resulting v1 is byte-identical to before: same source file,
     same ingest call). Generalizes the earlier demo-only special case per
@@ -745,12 +774,16 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
                 "drawing mutations are temporarily disabled for a storage cutover")
         if backend.exists(store.manifest_key(tenant_id, drawing_id)):
             return
-        data = CACHED_INTAKE_PATH.read_bytes()
-        fd, tmp = tempfile.mkstemp(suffix=".intake.json")
+        live = os.environ.get("APS_LIVE", "0").strip() == "1"
+        source_path = DEMO_DWG_PATH if live else CACHED_INTAKE_PATH
+        data = source_path.read_bytes()
+        fd, tmp = tempfile.mkstemp(suffix=".dwg" if live else ".intake.json")
+        ingested = False
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
             store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+            ingested = True
         except ValueError:
             pass  # race: another request bootstrapped it first
         finally:
@@ -758,6 +791,10 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
                 os.remove(tmp)
             except OSError:
                 pass
+        if ingested and live:
+            intake = json.loads(CACHED_INTAKE_PATH.read_text(encoding="utf-8"))
+            publish_intake_cache(
+                backend, tenant_id, drawing_id, 1, data, intake)
 
 
 # --------------------------------------------------------------------------- #
@@ -1027,7 +1064,10 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         ts = int(time.time())
         run_nonce = secrets.token_hex(8)
         head_v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
-        if isinstance(backend, store.OSSBackend):
+        stored_source = backend.get(vkey)
+        execution_source, bridged_legacy_bootstrap = (
+            _live_execution_source_bytes(stored_source))
+        if isinstance(backend, store.OSSBackend) and not bridged_legacy_bootstrap:
             in_url = da.signed_download_url(vkey)
         else:
             # The persistent drawing blob lives on shared EFS. Stage only this
@@ -1046,7 +1086,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             fd, staged_input = tempfile.mkstemp(suffix=".dwg")
             try:
                 with os.fdopen(fd, "wb") as fh:
-                    fh.write(backend.get(vkey))
+                    fh.write(execution_source)
                 if hasattr(da, "upload_scratch_object"):
                     da.upload_scratch_object(staged_input, input_key)
                 else:

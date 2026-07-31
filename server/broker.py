@@ -2470,20 +2470,6 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                              retryable=False, tool=tool.get("name")),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-    live_dwg: Optional[Path] = None
-    if req.aps_live:
-        # This guard must precede every live read/write branch, DA client lookup,
-        # signed URL, Activity, and WorkItem submission. Native APS cannot emit
-        # the signed callback receipt, so the reserved flag must never degrade
-        # into a polling WorkItem through a branch-specific path.
-        _require_supported_live_completion_mode()
-        try:
-            live_dwg = _resolve_live_dwg(req.dwg)
-        except ValueError as exc:
-            return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                 tool=tool.get("name")),
-                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
     #     unchanged live/mock paths below, so the read backbone is byte-identical.
@@ -2496,6 +2482,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         # (byte-identical to before this feature).
         base_version = req.dwg_version if req.dwg_version is not None else "head"
         if req.aps_live:
+            # Live writes resolve HostDwg from the versioned drawing store in
+            # run_write_live. A same-named broker-local DWG is not authoritative
+            # for a project drawing and must not be required here.
+            _require_supported_live_completion_mode()
             da = _get_da()
             if da is not None and hasattr(da, "run_tool"):
                 backend = write_loop.default_backend(aps_live=True, da=da)
@@ -2527,6 +2517,15 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:
+        # Live reads still use the broker-local DWG registry. Validate the name
+        # before credential loading and any APS-capable call.
+        _require_supported_live_completion_mode()
+        try:
+            live_dwg = _resolve_live_dwg(req.dwg)
+        except ValueError as exc:
+            return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                 tool=tool.get("name")),
+                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         da = _get_da()
         if da is None or not hasattr(da, "run_tool"):
             degraded = True  # fall back to the pure-python path, flagged
