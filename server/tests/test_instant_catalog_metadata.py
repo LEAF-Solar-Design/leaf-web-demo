@@ -84,6 +84,6 @@ def test_tracked_instant_tool_source_matches_its_catalog_digest():
 
     assert tool["execution_class"] == "instant"
     assert tool["capabilities"] == ["drawing.read"]
-    assert tool["batch_fallback"] is True
+    assert tool["batch_fallback"] is False
     assert tool["code_digest"] == digest
     assert tool["artifact_digest"] == digest
