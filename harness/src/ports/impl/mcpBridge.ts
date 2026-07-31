@@ -82,9 +82,13 @@ function unbracketHost(host: string): string {
  * missed (100.64/10 CGNAT, 198.18/15 benchmark, 224/4 multicast, 240/4
  * reserved, ff02::1, fec0::1) and the answer to "you missed a range" is not
  * one more range, it is to invert the question: an address is allowed only if
- * it is GLOBAL UNICAST and outside every IANA special-purpose block. Anything
- * unrecognised is refused, so the next special range IANA assigns is refused
- * without a code change.
+ * it is GLOBAL UNICAST and outside the special-purpose blocks listed below.
+ * Anything that is not recognisably global unicast is refused by default.
+ *
+ * NOT a claim of exhaustive IANA parity — round 3 rightly shot that down. The
+ * target is internal-routing surfaces (private, loopback, link-local, CGNAT,
+ * benchmark, multicast, reserved, translation and documentation space). Blocks
+ * IANA marks globally reachable are deliberately allowed.
  *
  * Documentation prefixes (192.0.2/24, 198.51.100/24, 203.0.113/24,
  * 2001:db8::/32) are refused too: they are not routable, so a tenant naming
@@ -101,11 +105,39 @@ export function isForbiddenMcpAddress(address: string): boolean {
     if (embedded) return !isGlobalUnicastIpv4(embedded);
     const parts = hextets(normalized);
     if (!parts || parts.some((h) => !Number.isInteger(h))) return true;
-    // Global unicast is 2000::/3 and nothing else. That single test refuses
-    // ::, ::1, fc00::/7, fe80::/10, fec0::/10 and ff00::/8 without naming them.
-    const global = parts[0] >= 0x2000 && parts[0] <= 0x3fff;
-    const documentation = parts[0] === 0x2001 && parts[1] === 0x0db8;
-    return !global || documentation;
+    // 2000::/3 is the ASSIGNABLE envelope, not a reachability allowlist —
+    // round 3's correction, and it also disproved my claim that a future
+    // special range would be refused for free: 3fff::/20 (documentation) sits
+    // inside 2000::/3 and was allowed. Membership in 2000::/3 is necessary,
+    // never sufficient; the special-purpose blocks INSIDE it are subtracted
+    // explicitly, exactly like the IPv4 table.
+    if (parts[0] < 0x2000 || parts[0] > 0x3fff) return true;
+    return IPV6_SPECIAL_INSIDE_GLOBAL.some(([prefix, bits]) => inV6Block(parts, prefix, bits));
+  }
+  return true;
+}
+
+/**
+ * IANA special-purpose blocks that live INSIDE 2000::/3, so membership in the
+ * global-unicast envelope does not imply public reachability.
+ */
+const IPV6_SPECIAL_INSIDE_GLOBAL: ReadonlyArray<readonly [readonly number[], number]> = [
+  [[0x2001, 0x0002], 48],   // benchmarking — the v6 counterpart of 198.18/15
+  [[0x2001, 0x0010], 28],   // ORCHID (deprecated)
+  [[0x2001, 0x0020], 28],   // ORCHIDv2
+  [[0x2001, 0x0db8], 32],   // documentation
+  [[0x2002], 16],           // 6to4 transition space
+  [[0x3fff], 20],           // documentation (newer)
+] as const;
+
+/** True when the expanded hextets fall inside prefix/bits. */
+function inV6Block(parts: number[], prefix: readonly number[], bits: number): boolean {
+  let remaining = bits;
+  for (let index = 0; index < 8 && remaining > 0; index += 1) {
+    const width = Math.min(16, remaining);
+    const mask = width === 16 ? 0xffff : (0xffff << (16 - width)) & 0xffff;
+    if (((parts[index] ?? 0) & mask) !== ((prefix[index] ?? 0) & mask)) return false;
+    remaining -= width;
   }
   return true;
 }

@@ -38,6 +38,13 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["198.51.100.1", "TEST-NET-2"],
     ["203.0.113.1", "TEST-NET-3"],
     ["2001:db8::1", "IPv6 documentation"],
+    // Round 3: all of these sit INSIDE 2000::/3, so envelope membership
+    // is necessary but never sufficient.
+    ["2001:2::1", "IPv6 benchmarking (counterpart of 198.18/15)"],
+    ["2001:10::1", "ORCHID"],
+    ["2001:20::1", "ORCHIDv2"],
+    ["2002:7f00:1::", "6to4 transition space wrapping 127.0.0.1"],
+    ["3fff::1", "newer documentation prefix"],
   ])("refuses %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(true);
     expect(isAllowedMcpHost(address)).toBe(false);
