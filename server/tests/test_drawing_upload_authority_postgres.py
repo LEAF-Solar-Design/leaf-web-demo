@@ -234,7 +234,14 @@ def test_live_write_uses_postgres_manifest_with_filesystem_blobs(
 ):
     token = uuid.uuid4().hex
     tenant, drawing = f"tenant-{token}", f"drawing-{token}"
-    backend = store.InMemoryBackend()
+
+    class UploadFinalizationBackend(store.InMemoryBackend):
+        def put(self, key, data):
+            if key == store.manifest_key(tenant, drawing):
+                return
+            super().put(key, data)
+
+    backend = UploadFinalizationBackend()
     source = b"AC1032" + b"\x00" * 64
     initial = tmp_path / "initial.dwg"
     initial.write_bytes(source)
