@@ -53,14 +53,15 @@ def _insert_job(conn, job_id, tenant, status, progress, now):
     )
 
 
-def _insert_ledger(conn, event_key, tenant, status, aps_live, engine_seconds, usd_est, now):
+def _insert_ledger(conn, event_key, tenant, status, aps_live, engine_seconds, usd_est, now,
+                   tool="panel_layout"):
     conn.execute(
         "INSERT INTO broker_usage_ledger "
         "(event_key, ts, tenant_id, tool, engine_op, aps_endpoint, aps_live, "
         " engine_seconds, usd_est, status) "
-        "VALUES (%(ek)s, %(ts)s, %(t)s, 'panel_layout', 'SOLVE', %(ep)s, %(live)s, "
+        "VALUES (%(ek)s, %(ts)s, %(t)s, %(tool)s, 'SOLVE', %(ep)s, %(live)s, "
         " %(eng)s, %(usd)s, %(st)s)",
-        {"ek": event_key, "ts": now, "t": tenant, "ep": _APS_ENDPOINT,
+        {"ek": event_key, "ts": now, "t": tenant, "tool": tool, "ep": _APS_ENDPOINT,
          "live": aps_live, "eng": engine_seconds, "usd": usd_est, "st": status},
     )
 
@@ -130,3 +131,61 @@ def test_read_model_over_real_postgres():
     assert drill[f"{job_running}:broker-run"]["job"]["status"] == "running"
     assert drill[f"{orphan}:broker-run"]["job_correlated"] is False
     assert drill[f"{orphan}:broker-run"]["job"] is None
+
+
+def test_tool_and_tenant_aggregates_over_real_postgres():
+    """Executes the GROUP BY aggregates the mocked router tests cannot cover.
+    Two tools with denial-exclusion, plus the fleet per-tenant fan-out (scoped
+    assertions only, so a shared DB stays deterministic)."""
+    db = broker_pg_store._load_db()
+    db.apply_migration()
+    store = broker_pg_store.PostgresBrokerStore(db)
+
+    tenant = f"obs-agg-{uuid.uuid4()}"
+    now = time.time()
+    # panel_layout: ok(2.0s, $0.01) + quota denial (excluded from runs + cost)
+    # string_sizer: WORKITEM_FAILED but CHARGEABLE (4.0s, $0.02) — counts
+    rows = [
+        (str(uuid.uuid4()) + ":broker-run", "ok", True, 2.0, 0.01, "panel_layout"),
+        (str(uuid.uuid4()) + ":broker-run", "quota_exceeded", True, None, None, "panel_layout"),
+        (str(uuid.uuid4()) + ":broker-run", "WORKITEM_FAILED", True, 4.0, 0.02, "string_sizer"),
+    ]
+    for event_key, status, aps_live, engine_seconds, usd, tool in rows:
+        _admit(store, event_key, tenant)
+        with db.get_pool().connection() as conn:
+            _insert_ledger(conn, event_key, tenant, status, aps_live,
+                           engine_seconds, usd, now, tool=tool)
+
+    # ---- per-tool (tenant-scoped) ----
+    t = ops_metrics_read.tool_metrics(window_seconds=3600, tenant_id=tenant)
+    by_tool = {row["tool"]: row for row in t["tools"]}
+    assert by_tool["panel_layout"]["attempts"] == 2
+    assert by_tool["panel_layout"]["runs"] == 1          # denial excluded
+    assert by_tool["panel_layout"]["denied"] == 1
+    assert by_tool["panel_layout"]["ok_runs"] == 1
+    assert by_tool["panel_layout"]["usd_est"] == pytest.approx(0.01)
+    assert by_tool["string_sizer"]["runs"] == 1
+    assert by_tool["string_sizer"]["error_runs"] == 1
+    # chargeable FAILED run counts toward cost (same rule as fleet_metrics)
+    assert by_tool["string_sizer"]["usd_est"] == pytest.approx(0.02)
+    assert by_tool["string_sizer"]["engine_seconds_p95"] == pytest.approx(4.0, abs=1e-6)
+
+    # ---- the fleet-scope queries' ts-leading index exists (0024) ----
+    with db.get_pool().connection() as conn:
+        idx = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'broker_usage_ledger' "
+            "AND indexname = 'broker_usage_ledger_ts_idx'"
+        ).fetchone()
+    assert idx is not None, "0024 ts-leading index missing: fleet windows would full-scan"
+
+    # ---- per-tenant fleet fan-out: our tenant appears with reconciled sums ----
+    f = ops_metrics_read.tenant_metrics(window_seconds=3600, limit=500)
+    mine = next(row for row in f["tenants"] if row["tenant_id"] == tenant)
+    assert mine["attempts"] == 3
+    assert mine["runs"] == 2
+    assert mine["denied"] == 1
+    assert mine["error_runs"] == 1
+    assert mine["live_runs"] == 2
+    assert mine["usd_est"] == pytest.approx(0.03)
+    assert mine["engine_seconds_sum"] == pytest.approx(6.0, abs=1e-6)
+    assert mine["last_ts"] is not None

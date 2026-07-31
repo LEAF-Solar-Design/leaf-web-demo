@@ -291,3 +291,119 @@ def run_drilldown(limit: int = 50, tenant_id: Optional[str] = None,
             } if correlated else None),
         })
     return out
+
+
+# --------------------------------------------------------------------------- #
+# per-tool / per-tenant aggregates (broker_usage_ledger)
+# --------------------------------------------------------------------------- #
+def tool_metrics(window_seconds: int = 86_400,
+                 tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """Per-tool aggregates over a trailing window. Same denial-exclusion rule
+    as ``fleet_metrics`` (``runs``/``usd_est`` exclude the two denial statuses)
+    so per-tool numbers reconcile with the fleet rollup and /api/usage."""
+    now = time.time()
+    window_seconds = max(60, min(int(window_seconds), 30 * int(_DAY_SECONDS)))
+    since = now - window_seconds
+    where = "WHERE ts >= %(since)s"
+    params: Dict[str, Any] = {"since": float(since)}
+    if tenant_id:
+        where += " AND tenant_id = %(tenant_id)s"
+        params["tenant_id"] = str(tenant_id)
+    db = _db()
+    with db.get_pool().connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+              tool,
+              COUNT(*)                                              AS attempts,
+              COUNT(*) FILTER (WHERE {_EXECUTED})                   AS runs,
+              COUNT(*) FILTER (WHERE NOT ({_EXECUTED}))             AS denied,
+              COUNT(*) FILTER (WHERE status = 'ok')                 AS ok_runs,
+              COUNT(*) FILTER (WHERE {_EXECUTED} AND status <> 'ok') AS error_runs,
+              COALESCE(SUM(usd_est) FILTER (
+                  WHERE usd_est IS NOT NULL AND {_EXECUTED}), 0)    AS usd_est,
+              COALESCE(SUM(engine_seconds) FILTER (
+                  WHERE engine_seconds IS NOT NULL), 0)             AS engine_seconds_sum,
+              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY engine_seconds)
+                  FILTER (WHERE engine_seconds IS NOT NULL)         AS p95,
+              MAX(ts)                                               AS last_ts
+            FROM broker_usage_ledger
+            {where}
+            GROUP BY tool
+            ORDER BY runs DESC, attempts DESC, tool
+            """,
+            params,
+        ).fetchall()
+    tools = [{
+        "tool": r["tool"],
+        "attempts": int(r["attempts"] or 0),
+        "runs": int(r["runs"] or 0),
+        "denied": int(r["denied"] or 0),
+        "ok_runs": int(r["ok_runs"] or 0),
+        "error_runs": int(r["error_runs"] or 0),
+        "usd_est": round(float(r["usd_est"] or 0.0), 6),
+        "engine_seconds_sum": round(float(r["engine_seconds_sum"] or 0.0), 3),
+        "engine_seconds_p95": _round_opt(r["p95"]),
+        "last_ts": _round_opt(r["last_ts"], 3),
+    } for r in rows]
+    return {
+        "scope": tenant_id or "fleet",
+        "window_seconds": window_seconds,
+        "generated_at": now,
+        "tools": tools,
+    }
+
+
+def tenant_metrics(window_seconds: int = 86_400,
+                   limit: int = 100) -> Dict[str, Any]:
+    """Per-tenant aggregates over a trailing window — who runs, who errs, who
+    costs. Ordered by spend (executed runs' usd) then run count so the tenants
+    an operator most needs to see surface first. ``limit`` bounds the fleet
+    fan-out (a tenant beyond it is visible via the tenant-scoped rollup)."""
+    now = time.time()
+    window_seconds = max(60, min(int(window_seconds), 30 * int(_DAY_SECONDS)))
+    limit = max(1, min(int(limit), 500))
+    since = now - window_seconds
+    db = _db()
+    with db.get_pool().connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+              tenant_id,
+              COUNT(*)                                              AS attempts,
+              COUNT(*) FILTER (WHERE {_EXECUTED})                   AS runs,
+              COUNT(*) FILTER (WHERE NOT ({_EXECUTED}))             AS denied,
+              COUNT(*) FILTER (WHERE status = 'ok')                 AS ok_runs,
+              COUNT(*) FILTER (WHERE {_EXECUTED} AND status <> 'ok') AS error_runs,
+              COUNT(*) FILTER (WHERE aps_live AND {_EXECUTED})      AS live_runs,
+              COALESCE(SUM(usd_est) FILTER (
+                  WHERE usd_est IS NOT NULL AND {_EXECUTED}), 0)    AS usd_est,
+              COALESCE(SUM(engine_seconds) FILTER (
+                  WHERE engine_seconds IS NOT NULL), 0)             AS engine_seconds_sum,
+              MAX(ts)                                               AS last_ts
+            FROM broker_usage_ledger
+            WHERE ts >= %(since)s
+            GROUP BY tenant_id
+            ORDER BY usd_est DESC, runs DESC, tenant_id
+            LIMIT %(limit)s
+            """,
+            {"since": float(since), "limit": limit},
+        ).fetchall()
+    tenants = [{
+        "tenant_id": r["tenant_id"],
+        "attempts": int(r["attempts"] or 0),
+        "runs": int(r["runs"] or 0),
+        "denied": int(r["denied"] or 0),
+        "ok_runs": int(r["ok_runs"] or 0),
+        "error_runs": int(r["error_runs"] or 0),
+        "live_runs": int(r["live_runs"] or 0),
+        "usd_est": round(float(r["usd_est"] or 0.0), 6),
+        "engine_seconds_sum": round(float(r["engine_seconds_sum"] or 0.0), 3),
+        "last_ts": _round_opt(r["last_ts"], 3),
+    } for r in rows]
+    return {
+        "window_seconds": window_seconds,
+        "generated_at": now,
+        "limit": limit,
+        "tenants": tenants,
+    }
