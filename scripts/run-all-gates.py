@@ -331,6 +331,13 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 11),
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
+        # The per-tenant DAILY AUTHORING cap. Shipped without a gate entry, the
+        # same gap the site-demo lane above had: only the WEB half of this
+        # feature (web-author-quota-gate) was registered, so every server-side
+        # test of the cap only ever ran by hand. The cap is a precondition for
+        # stranger-facing authoring, so it does not get to be unenforced in CI.
+        Suite("server-author-quota", "server tests/test_author_quota.py", "pytest", SERVER,
+              _py_pytest("tests/test_author_quota.py"), 57),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 12),
         # One process per file (below) is exactly why the cross-file connection

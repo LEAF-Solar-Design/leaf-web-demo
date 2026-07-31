@@ -498,7 +498,25 @@ def _customization_error(
 def _quota_exceeded_response(tenant_id: str,
                              exc: author_quota.AuthorQuotaExceeded) -> JSONResponse:
     """The 429 the daily authoring cap answers with, in the same wire shape the
-    daily RUN quota already uses (only ``quota_kind`` differs)."""
+    daily RUN quota already uses (only ``quota_kind`` differs).
+
+    INFO, not WARNING and not DEBUG. A refusal is caller-driven and expected, so
+    by the _is_caller_driven reasoning above it must not cost a WARNING each and
+    must not page anyone. But DEBUG is where the other caller-driven refusals go
+    precisely because they carry no signal, and this one does: it is the ONLY
+    trace a refusal leaves. Deployments run at INFO, so a DEBUG line would keep
+    the cap exactly as unobservable as it was — and "no quota events in the log
+    group" would stay equally consistent with the cap never firing and with it
+    refusing every attempt.
+
+    Counter facts only: tenant, tier, limit, used and the UTC day the charge was
+    keyed on. Never the description, the idempotency key, or anything else
+    free-text from the request.
+    """
+    _LOG.info(
+        "daily_author_quota_refused: tenant=%s tier=%s limit=%s used=%s day=%s",
+        tenant_id, exc.tier, exc.limit, exc.used, exc.day,
+    )
     usage = author_quota.usage_policy()
     body = usage.daily_author_envelope(tenant_id, exc.tier, exc.limit, exc.used)
     body["degraded_mode"] = False  # the wire schema requires a boolean

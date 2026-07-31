@@ -57,14 +57,17 @@ class AuthorQuotaStoreError(RuntimeError):
 class AuthorQuotaExceeded(Exception):
     """The tenant has spent its authoring attempts for the UTC day.
 
-    Carries the facts the 429 envelope reports. Raised from the charge point,
-    which sits immediately before the harness call, so a request refused for any
-    other reason never reaches it.
+    Carries the facts the 429 envelope reports, plus the UTC counter day the
+    charge was actually keyed on, which the router logs. The day is carried
+    rather than recomputed at response time so the log names the window the
+    refusal belongs to even when the answer is written after 00:00 UTC.
+    Raised from the charge point, which sits immediately before the harness
+    call, so a request refused for any other reason never reaches it.
     """
 
-    def __init__(self, tier: str, limit: int, used: int) -> None:
+    def __init__(self, tier: str, limit: int, used: int, day: str) -> None:
         super().__init__(f"daily authoring limit reached ({used}/{limit})")
-        self.tier, self.limit, self.used = tier, limit, used
+        self.tier, self.limit, self.used, self.day = tier, limit, used, day
 
 
 # Deployment postures where a per-process counter is honest: a developer's
@@ -275,12 +278,12 @@ def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> Non
     limit = usage.daily_author_quota()
     if limit is None:
         return  # no quota configured -> prior behavior, no store touched
+    day = usage.author_quota_day(now_ts)
     accepted, used = charge(
-        tenant_id, usage.author_quota_day(now_ts), limit,
-        require_durable=durability_required(),
+        tenant_id, day, limit, require_durable=durability_required(),
     )
     if not accepted:
-        raise AuthorQuotaExceeded(tier, limit, used)
+        raise AuthorQuotaExceeded(tier, limit, used, day)
 
 
 def reset_usage_policy() -> None:
