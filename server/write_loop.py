@@ -1030,6 +1030,16 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         import guest_uploads
         marker = guest_uploads.read_marker(
             backend, tenant_id, drawing_id)
+        if (
+            marker is None
+            and guest_uploads.upload_store_mode() == "legacy"
+            and backend.exists(upload_marker_key(tenant_id, drawing_id))
+        ):
+            # A present legacy marker that cannot be decoded is not the same
+            # as no upload marker. Its source format is unknown, so refuse it
+            # before any paid APS work instead of treating the drawing as a
+            # trusted native DWG.
+            marker = {}
         if marker is not None:
             source_ext = str(marker.get("source_ext") or "")
             if not source_ext:
