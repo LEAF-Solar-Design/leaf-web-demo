@@ -14,6 +14,8 @@ an ephemeral, per-task file — legacy fleet trends are the EMF plane's job.
     GET /api/ops/metrics?window=&tenant_id=                    -> fleet/tenant rollup
     GET /api/ops/metrics/inflight?limit=&tenant_id=            -> live in-flight job tail
     GET /api/ops/metrics/runs?limit=&tenant_id=&status=&tool=  -> ledger<->job drill-down
+    GET /api/ops/metrics/tools?window=&tenant_id=              -> per-tool aggregates
+    GET /api/ops/metrics/tenants?window=&limit=                -> per-tenant aggregates
 """
 from __future__ import annotations
 
@@ -73,6 +75,40 @@ def ops_metrics_inflight(limit: int = 100, tenant_id: Optional[str] = None,
         return error_response(ErrorCode.INTERNAL, f"inflight query failed: {exc}",
                               retryable=True)
     return with_envelope_fields({"jobs": jobs, "count": len(jobs)})
+
+
+@router.get("/api/ops/metrics/tools")
+def ops_metrics_tools(window: int = 86_400, tenant_id: Optional[str] = None,
+                      x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    guard = _requires_postgres()
+    if guard is not None:
+        return guard
+    try:
+        data = ops_metrics_read.tool_metrics(window_seconds=window, tenant_id=tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(ErrorCode.INTERNAL, f"tool metrics query failed: {exc}",
+                              retryable=True)
+    return with_envelope_fields(data)
+
+
+@router.get("/api/ops/metrics/tenants")
+def ops_metrics_tenants(window: int = 86_400, limit: int = 100,
+                        x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    guard = _requires_postgres()
+    if guard is not None:
+        return guard
+    try:
+        data = ops_metrics_read.tenant_metrics(window_seconds=window, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(ErrorCode.INTERNAL, f"tenant metrics query failed: {exc}",
+                              retryable=True)
+    return with_envelope_fields(data)
 
 
 @router.get("/api/ops/metrics/runs")
