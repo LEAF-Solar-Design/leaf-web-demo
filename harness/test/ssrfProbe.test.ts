@@ -175,6 +175,13 @@ describe("the fix route for redirects and rebinding exists in the SDK surface", 
     // The escape hatch: hand the SDK a server INSTANCE we control the transport of.
     expect(dts).toMatch(/type:\s*'sdk';/);
     expect(dts).toMatch(/instance:\s*McpServer/);
+    // ...and, the part round 7 caught missing: that the arm is actually IN the
+    // union `mcpServers` accepts. Asserting only that the declarations exist
+    // left the guard green when the arm was removed from McpServerConfig —
+    // the same vacuity as the test this one replaced.
+    const union = /export declare type McpServerConfig =([^;]+);/.exec(dts);
+    expect(union).not.toBeNull();
+    expect(union![1]).toContain("McpSdkServerConfigWithInstance");
   });
 
   it("the MCP client transport accepts requestInit and a custom fetch", async () => {
