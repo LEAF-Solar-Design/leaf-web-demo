@@ -45,6 +45,19 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["2001:20::1", "ORCHIDv2"],
     ["2002:7f00:1::", "6to4 transition space wrapping 127.0.0.1"],
     ["3fff::1", "newer documentation prefix"],
+    // Round 4: enumerating the children of 2001::/23 left these allowed.
+    ["2001::1", "Teredo"],
+    ["2001:40::1", "unallocated remainder of 2001::/23"],
+    ["2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff", "top of 2001::/23"],
+    ["3ffe::1", "former 6bone, IANA-reserved"],
+    ["3ffe:831f::1", "6bone/Teredo historical"],
+    ["2002::1", "6to4 transition space"],
+    ["3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "top of 3ffe::/16"],
+    ["2001:1::1", "Port Control Protocol anycast, inside 2001::/23"],
+    // The envelope's own edges: 2000::/3 is 2000:: through 3fff:ffff…, so
+    // anything at or past 4000:: is not global unicast at all.
+    ["4000::1", "above the 2000::/3 envelope"],
+    ["1fff::1", "below the 2000::/3 envelope"],
   ])("refuses %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(true);
     expect(isAllowedMcpHost(address)).toBe(false);
@@ -57,6 +70,13 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["::ffff:93.184.216.34", "dotted v4-mapped public"],
     ["64:ff9b::5db8:d822", "NAT64 public"],
     ["2606:4700::1111", "ordinary public v6"],
+    // Just OUTSIDE the refused blocks — the over-refusal guard. Two entries I
+    // first wrote here were actually INSIDE 2002::/16 and 3ffe::/16, so the
+    // code was right and the fixture was wrong; they moved to the refused list.
+    ["2000::1", "bottom of global unicast, below 2001::/23"],
+    ["2003::1", "just above 6to4"],
+    ["2400::1", "APNIC space"],
+    ["3ffd::1", "just below 3ffe::/16"],
   ])("allows %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(false);
     expect(isAllowedMcpHost(address)).toBe(true);

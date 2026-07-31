@@ -87,8 +87,13 @@ function unbracketHost(host: string): string {
  *
  * NOT a claim of exhaustive IANA parity — round 3 rightly shot that down. The
  * target is internal-routing surfaces (private, loopback, link-local, CGNAT,
- * benchmark, multicast, reserved, translation and documentation space). Blocks
- * IANA marks globally reachable are deliberately allowed.
+ * benchmark, multicast, reserved, translation and documentation space).
+ *
+ * One deliberate exception to "IANA-globally-reachable stays allowed":
+ * ORCHIDv2 (2001:20::/28) is refused even though IANA marks it reachable,
+ * because RFC 7343 defines it as an overlay IDENTIFIER rather than an
+ * IP-layer locator — nothing an MCP server can actually be hosted at. It
+ * falls inside the 2001::/23 parent this refuses wholesale.
  *
  * Documentation prefixes (192.0.2/24, 198.51.100/24, 203.0.113/24,
  * 2001:db8::/32) are refused too: they are not routable, so a tenant naming
@@ -122,11 +127,18 @@ export function isForbiddenMcpAddress(address: string): boolean {
  * global-unicast envelope does not imply public reachability.
  */
 const IPV6_SPECIAL_INSIDE_GLOBAL: ReadonlyArray<readonly [readonly number[], number]> = [
-  [[0x2001, 0x0002], 48],   // benchmarking — the v6 counterpart of 198.18/15
-  [[0x2001, 0x0010], 28],   // ORCHID (deprecated)
-  [[0x2001, 0x0020], 28],   // ORCHIDv2
-  [[0x2001, 0x0db8], 32],   // documentation
+  // The whole IETF-protocol-assignments PARENT, not its children one at a
+  // time. Round 4 showed enumeration losing again: subtracting benchmarking
+  // (2001:2::/48) and ORCHID (2001:10::/28, 2001:20::/28) still left Teredo
+  // (2001::/32) and the unallocated remainder of 2001::/23 allowed. None of
+  // that /23 is ordinary global unicast for a real service, so the parent is
+  // the honest unit. This also refuses ORCHIDv2 even though IANA marks it
+  // globally reachable: RFC 7343 defines it as an overlay IDENTIFIER, not an
+  // IP-layer locator, so it is not a destination an MCP server can live at.
+  [[0x2001], 23],
+  [[0x2001, 0x0db8], 32],   // documentation (sits ABOVE the /23, so listed separately)
   [[0x2002], 16],           // 6to4 transition space
+  [[0x3ffe], 16],           // former 6bone, IANA-reserved
   [[0x3fff], 20],           // documentation (newer)
 ] as const;
 
