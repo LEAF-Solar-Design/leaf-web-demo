@@ -559,9 +559,13 @@ class CustomizationService:
             # The authenticated callback validates policy before it records
             # STAGED. A retry may therefore receive only the durable receipt
             # after the first response was lost. Revalidate the committed tree
-            # and return that durable result in the same retry.
+            # and return that durable result in the same retry. When this is
+            # the original harness response racing its callback, preserve the
+            # generated tool and preview for the browser that initiated it.
             self._verify_stage_policy(durable)
-            return self._receipt(durable)
+            return self._receipt(
+                durable, tool=body.get("tool"), preview=body.get("preview")
+            )
         self._verify_stage_policy(proposed, body)
         change = durable
         if change.state is ChangeState.STAGING:

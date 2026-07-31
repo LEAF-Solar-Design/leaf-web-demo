@@ -904,8 +904,27 @@ def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypa
     assert configured_calls == []
 
 
-def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("harness_fields", "expected_tool"),
+    [
+        ({}, None),
+        (
+            {
+                "tool": {
+                    "name": "add-centered-test-prism",
+                    "capabilities": ["drawing.write"],
+                },
+                "preview": {"summary": "Adds a centered test prism."},
+            },
+            {
+                "name": "add-centered-test-prism",
+                "capabilities": ["drawing.write"],
+            },
+        ),
+    ],
+)
+def test_stage_retry_preserves_callback_recorded_harness_response(
+    tmp_path, monkeypatch, harness_fields, expected_tool
 ):
     store = SQLiteCustomizationStore(tmp_path / "customization.db")
     service = CustomizationService(store)
@@ -973,7 +992,7 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
             platform_release=change.desired_platform_release,
             workspace_contract_digest=change.workspace_contract_digest,
         )
-        return {"receipt": receipt}
+        return {"receipt": receipt, **harness_fields}
 
     monkeypatch.setattr(service, "_harness_stage", callback_completed)
 
@@ -986,7 +1005,11 @@ def test_stage_retry_returns_callback_recorded_receipt_in_one_call(
 
     assert result["receipt"]["state"] == "staged"
     assert result["receipt"]["staged_commit"] == STAGED
-    assert "tool" not in result
+    if expected_tool is None:
+        assert "tool" not in result
+    else:
+        assert result["tool"] == expected_tool
+        assert result["preview"] == harness_fields["preview"]
     assert policy_calls == [(ChangeState.STAGED, None)]
 
 
