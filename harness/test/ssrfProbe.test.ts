@@ -151,31 +151,37 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
 });
 
 /**
- * Round 5 found a hole this layer CANNOT close, so it is pinned instead of
- * papered over: the Agent SDK's http MCP config is `{ type, url, headers }`
- * with no fetch override and no requestInit, and the MCP transport's own fetch
- * follows redirects. An approved public endpoint can therefore 307 to a private
- * address. Not exploitable today (nothing live mounts this bridge), and a hard
- * blocker on #322.
+ * Round 6 refuted my "unfixable at this layer" claim AND proved the wake-up
+ * test I wrote to guard it was vacuous: its regex captured only the type/url/
+ * headers lines, so a mutation inserting `fetch?: FetchLike` right after
+ * `headers` still passed.
  *
- * This test is the WAKE-UP: if the SDK ever gains a fetch/redirect seam, it
- * fails and says to go close the hole, rather than the limitation quietly
- * outliving everyone who remembers it.
+ * The replacement asserts the OPPOSITE thing, because the opposite thing is
+ * what is true: the SDK does expose a route that closes redirect SSRF and DNS
+ * rebinding — the `{ type: "sdk", instance }` config variant plus a transport
+ * that accepts requestInit and a custom fetch. This test exists so nobody
+ * (including me, a second time) re-derives "it cannot be done here" from the
+ * http variant alone.
  */
-describe("known limitation: redirects cannot be controlled from here", () => {
-  it("the SDK's http MCP config still exposes no fetch or redirect control", async () => {
+describe("the fix route for redirects and rebinding exists in the SDK surface", () => {
+  const read = async (relative: string): Promise<string> => {
     const { readFileSync } = await import("node:fs");
     const { fileURLToPath } = await import("node:url");
-    const dts = readFileSync(
-      fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts", import.meta.url)), "utf8");
+    return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+  };
 
-    // The http variant of McpServerConfig, as shipped.
-    const httpConfig = /type:\s*'http';\s*\n\s*url:\s*string;\s*\n\s*headers\?:[^\n]*\n/.exec(dts);
-    expect(httpConfig).not.toBeNull();
-    const shape = httpConfig![0];
-    // If either of these starts appearing, the redirect hole becomes fixable
-    // and this PR's residual should be closed instead of documented.
-    expect(shape).not.toMatch(/fetch/);
-    expect(shape).not.toMatch(/requestInit|redirect/);
+  it("McpServerConfig accepts an in-process sdk instance, not only a url", async () => {
+    const dts = await read("../node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts");
+    // The escape hatch: hand the SDK a server INSTANCE we control the transport of.
+    expect(dts).toMatch(/type:\s*'sdk';/);
+    expect(dts).toMatch(/instance:\s*McpServer/);
+  });
+
+  it("the MCP client transport accepts requestInit and a custom fetch", async () => {
+    const dts = await read("../node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.d.ts");
+    // Whole-file assertions, NOT a captured substring — that is exactly how the
+    // previous version of this test managed to miss an inserted property.
+    expect(dts).toMatch(/requestInit\?:/);
+    expect(dts).toMatch(/fetch\?:\s*FetchLike/);
   });
 });

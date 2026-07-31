@@ -437,19 +437,27 @@ export async function resolveMcpAttachment(
       report(`[leaf-mcp] skipping tenant MCP server with unsafe or unresolvable host: ${describeConfig(config)}`);
       continue;
     }
-    // *** KNOWN, UNFIXABLE AT THIS LAYER: HTTP REDIRECTS ***
-    // Everything above validates the URL's HOST. The Agent SDK's http MCP
-    // config is `{ type, url, headers }` — no fetch override, no requestInit —
-    // so the transport's own `fetch` follows redirects and an approved public
-    // endpoint can 307 to a private address (verified against
-    // @modelcontextprotocol/sdk streamableHttp.js, which calls
-    // `(this._fetch ?? fetch)(this._url, init)`).
+    // *** KNOWN GAP, WITH A KNOWN FIX: HTTP REDIRECTS AND DNS REBINDING ***
+    // Everything above validates the URL's HOST, which a redirect defeats: the
+    // transport's fetch follows a 307, so an approved public endpoint can send
+    // the MCP POST to a private address. Resolve-then-connect leaves a
+    // rebinding window for the same reason.
     //
-    // This is NOT exploitable today: no live composition mounts this bridge
-    // (pinned by the converse-runner tests). It IS a hard blocker on admitting
-    // tenant MCP to the live lane (#322), alongside the DNS-rebinding window —
-    // both need transport-level control (a pinned-IP dialer with redirects
-    // disabled) or an egress proxy, neither of which mcpBridge can reach.
+    // I previously recorded this as unfixable at this layer. THAT WAS WRONG,
+    // and the correction matters more than the original note. `McpServerConfig`
+    // is a union: besides `{ type: "http", url }` it accepts
+    // `{ type: "sdk", instance }` (sdk.d.ts), and the MCP client transport
+    // takes both `requestInit` and a custom `fetch`
+    // (streamableHttp.d.ts). So this layer CAN close both holes, by connecting
+    // upstream itself through a StreamableHTTPClientTransport with redirects
+    // disabled and the validated IP pinned, proxying through an in-process SDK
+    // MCP server, and returning that instance instead of a URL.
+    //
+    // Not done here, deliberately: that is a transport rewrite, not an
+    // extraction, and it is precisely the work #322 must do to admit tenant MCP
+    // to the live lane. Nothing live mounts this bridge today (pinned by the
+    // converse-runner composition test), so the gap is not reachable — but it
+    // is a BLOCKER on #322, and the design above is the way to clear it.
     attachment[config.name] = {
       type: "http",
       url: config.url,
