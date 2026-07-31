@@ -28,6 +28,23 @@ export function normalizeRunParams(params) {
   return freeze(normalize(params || {}))
 }
 
+export function prepareCatalogRunParams(tool, params, context, overlays = {}) {
+  const prepared = {}
+  for (const [key, property] of Object.entries(tool?.params?.properties || {})) {
+    if (property?.default !== undefined) prepared[key] = property.default
+  }
+  Object.assign(prepared, params || {}, overlays || {})
+  if ((tool?.capabilities || []).includes('drawing.write')
+      && Object.hasOwn(tool?.params?.properties || {}, 'drawing_id')) {
+    const drawingId = context?.drawingArtifactId || context?.drawingId
+    if (typeof drawingId !== 'string' || !drawingId) {
+      throw new TypeError('drawing.write tools require an active drawing')
+    }
+    prepared.drawing_id = drawingId
+  }
+  return normalizeRunParams(prepared)
+}
+
 export function createCatalogRunContext({
   tenantId, orgId = null, projectId = null, workspace = null,
   selectedVersionId = null, drawingState = null, fallbackDrawingId,

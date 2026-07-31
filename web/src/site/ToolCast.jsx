@@ -57,6 +57,7 @@ import {
   createCatalogToolSnapshot,
   createRunIntentState,
   dismissRunIntent,
+  prepareCatalogRunParams,
   stageRunIntent,
 } from '../runIntent.js'
 import { navigate } from './router.js'
@@ -139,14 +140,6 @@ function agentBannerFor(error) {
   if (kind === 'busy') return { kind, message: 'The assistant is mid-turn. The catalog route is still available.' }
   if (kind === 'rate_limited') return { kind, message: 'AI is rate-limited. The catalog route is still available; retry shortly.' }
   return { kind: 'unreachable', message: 'AI assistant unavailable. The catalog route is still available.' }
-}
-
-function defaultsOf(schema) {
-  const defaults = {}
-  for (const [key, property] of Object.entries(schema?.properties || {})) {
-    if (property.default !== undefined) defaults[key] = property.default
-  }
-  return defaults
 }
 
 function phaseLabel(phase) {
@@ -580,7 +573,7 @@ export default function ToolCast({
       return undefined
     }
     const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
-    const effectiveParams = { ...defaultsOf(tool.params), ...(decision.params || {}) }
+    const effectiveParams = prepareCatalogRunParams(tool, decision.params, context)
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `try-intent-${id}`,
       toolName: tool.name,

@@ -30,7 +30,7 @@ import {
 } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
-  dismissRunIntent, stageRunIntent,
+  dismissRunIntent, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
@@ -926,13 +926,6 @@ export default function App() {
     return createWorkspaceProject(name)
   }, [createWorkspaceProject])
 
-  const prepareRunParams = useCallback((tool, params) => {
-    const isWrite = (tool.capabilities || []).includes('drawing.write')
-    return selectedHandle
-      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
-      : (params || {})
-  }, [selectedHandle])
-
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId: tenant || config.tenant,
     orgId,
@@ -944,6 +937,14 @@ export default function App() {
   }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
+
+  const prepareRunParams = useCallback((tool, params) => {
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    const overlays = selectedHandle
+      ? { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
+      : {}
+    return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
+  }, [selectedHandle])
 
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {

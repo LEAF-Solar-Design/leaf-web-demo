@@ -3,6 +3,7 @@ import {
   confirmRunIntent,
   createCatalogToolSnapshot,
   createRunIntentState,
+  prepareCatalogRunParams,
   stageRunIntent,
 } from '../src/runIntent.js'
 
@@ -48,6 +49,29 @@ for (const [label, change] of [
 }
 assert(!confirmRunIntent(staged.state, request, { now: 1000 + 5 * 60 * 1000 + 1 }).ok,
   'an expired confirmation must fail closed')
+
+const authoredWrite = {
+  ...tool,
+  params: {
+    type: 'object',
+    properties: {
+      drawing_id: { type: 'string', default: 'cat-workbench' },
+      height: { type: 'number', default: 100 },
+    },
+  },
+}
+assert(
+  prepareCatalogRunParams(authoredWrite, {}, context).drawing_id === 'drawing-1',
+  'a drawing.write schema default must not redirect a run away from the active drawing',
+)
+assert(
+  prepareCatalogRunParams(authoredWrite, { drawing_id: 'other-drawing' }, context).drawing_id === 'drawing-1',
+  'a drawing.write route param must not redirect a run away from the active drawing',
+)
+assert(
+  prepareCatalogRunParams(authoredWrite, {}, context).height === 100,
+  'ordinary JSON-schema defaults must still be applied',
+)
 
 // Normalize newlines before matching. Some assertions span a line break, so
 // Windows CRLF checkouts must use the same source form as Linux CI.
