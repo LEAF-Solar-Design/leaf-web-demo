@@ -52,6 +52,7 @@ export const AUTHORED_TOOL = {
     sha256: 'a'.repeat(64), grants: ['drawing.read'], reviewer: null,
   },
 }
+export const AUTHORED_CATALOG_DIGEST = `sha256:${'f'.repeat(64)}`
 const AUTHOR_RECEIPT = {
   contract: 'leaf.customization.v1', tenant_id: 'cat-litmus-tenant',
   change_set_id: '11111111-1111-4111-8111-111111111111', state: 'staged',
@@ -148,7 +149,15 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
       : [],
     built_tools: [],
   })
-  if (path === '/api/tools') return json({ tools: [COUNT_TOOL, CAT_TOOL, ...(state.authorPublished ? [AUTHORED_TOOL] : [])] })
+  if (path === '/api/tools') return json({
+    tools: [
+      COUNT_TOOL,
+      CAT_TOOL,
+      ...(state.authorPublished
+        ? [{ ...AUTHORED_TOOL, catalog_digest: AUTHORED_CATALOG_DIGEST }]
+        : []),
+    ],
+  })
   if (path === '/api/capabilities') return json({
     families: [{
       family_id: 'drawing-tools',
@@ -214,7 +223,7 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
       contract: 'leaf.customization.v1', tenant_id: 'cat-litmus-tenant',
       change_set_id: AUTHOR_RECEIPT.change_set_id, state: 'published',
       catalog_commit: AUTHOR_RECEIPT.staged_commit, catalog_digest: AUTHOR_RECEIPT.catalog_digest,
-      platform_release: AUTHOR_RECEIPT.platform_release, tool: AUTHORED_TOOL,
+      platform_release: AUTHOR_RECEIPT.platform_release,
     })
   }
   if (path === '/api/run' && method === 'POST' && body.tool === 'count-panels') {
@@ -222,6 +231,16 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
     return json({ job_id: 'catalog-job-0001' }, 202)
   }
   if (path === '/api/run' && method === 'POST' && body.tool === AUTHORED_TOOL.name) {
+    if (body.catalog_digest !== AUTHORED_CATALOG_DIGEST) {
+      return json({
+        ok: false,
+        error: {
+          error_code: 'BAD_PARAMS',
+          message: 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again',
+          retryable: false,
+        },
+      }, 409)
+    }
     state.authorJob = true
     return json({ job_id: 'author-job-0001' }, 202)
   }
