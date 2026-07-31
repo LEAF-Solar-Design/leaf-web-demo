@@ -7,10 +7,16 @@ import {
   describeConfig,
   FileMcpBridgeStore,
   InMemoryMcpBridgeStore,
+  isAllowedMcpHost,
+  resolveAllowedMcpHost,
   resolveMcpAttachment,
 } from "../src/ports/impl/mcpBridge.js";
 
 const SENTINEL = "SENTINEL_BEARER_XYZ";
+// The mount-time DNS gate would otherwise hit REAL DNS for the .test fixture
+// hosts and fail closed. Every mount-path test injects this public resolver;
+// the gate's own tests inject private/failing ones.
+const publicResolver = async () => "93.184.216.34";
 
 function config(name: string, token = SENTINEL) {
   return { name, url: `https://${name}.example.test/mcp?secret=not-for-logs`, authToken: token };
@@ -22,7 +28,7 @@ function scratch(): string {
 
 describe("MCP bridge tenant isolation and redaction", () => {
   it("returns null when a tenant has no attachment", async () => {
-    expect(await resolveMcpAttachment(new InMemoryMcpBridgeStore(), "missing-tenant")).toBeNull();
+    expect(await resolveMcpAttachment(new InMemoryMcpBridgeStore(), "missing-tenant", console.error, publicResolver)).toBeNull();
   });
 
   it("attaches only the requesting tenant's bearer", async () => {
@@ -30,8 +36,8 @@ describe("MCP bridge tenant isolation and redaction", () => {
     await store.set("tenant-a", [config("alpha", "BEARER_FOR_A")]);
     await store.set("tenant-b", [config("bravo", "BEARER_FOR_B")]);
 
-    const attachmentA = JSON.stringify(await resolveMcpAttachment(store, "tenant-a"));
-    const attachmentB = JSON.stringify(await resolveMcpAttachment(store, "tenant-b"));
+    const attachmentA = JSON.stringify(await resolveMcpAttachment(store, "tenant-a", console.error, publicResolver));
+    const attachmentB = JSON.stringify(await resolveMcpAttachment(store, "tenant-b", console.error, publicResolver));
     expect(attachmentA).toContain("BEARER_FOR_A");
     expect(attachmentA).not.toContain("BEARER_FOR_B");
     expect(attachmentB).toContain("BEARER_FOR_B");
@@ -50,6 +56,23 @@ describe("MCP bridge tenant isolation and redaction", () => {
 });
 
 describe("MCP bridge validation", () => {
+  it.each([
+    "127.0.0.1", "localhost", "10.2.3.4", "172.16.2.3", "192.168.2.3",
+    "169.254.169.254", "::1", "[fc00::1]", "0.0.0.0",
+  ])("refuses forbidden host %s at set-time", async (host) => {
+    const store = new InMemoryMcpBridgeStore();
+    const url = host.includes(":") && !host.startsWith("[") ? `http://[${host}]/mcp` : `http://${host}/mcp`;
+    expect(isAllowedMcpHost(host)).toBe(false);
+    await expect(store.set("tenant", [{ name: "unsafe-host", url }])).rejects.toThrow("mcp_bridge_invalid_config");
+  });
+
+  it("allows a dotted public host at set-time and checks its resolved address again at execute-time", async () => {
+    expect(isAllowedMcpHost("public.example.test")).toBe(true);
+    await expect(new InMemoryMcpBridgeStore().set("tenant", [{ name: "public", url: "https://public.example.test/mcp" }])).resolves.toBeUndefined();
+    await expect(resolveAllowedMcpHost("public.example.test", async () => "93.184.216.34")).resolves.toBe(true);
+    await expect(resolveAllowedMcpHost("public.example.test", async () => "10.0.0.8")).resolves.toBe(false);
+  });
+
   it.each(["evil),Bash", "../../x", "trailing.", "converse", "CONVERSE", "converse__evil", "CONVERSE__X"])("refuses hostile server name %s", async (name) => {
     const store = new InMemoryMcpBridgeStore();
     await expect(store.set("tenant", [config(name)])).rejects.toThrow("mcp_bridge_invalid_config");
@@ -84,7 +107,7 @@ describe("file-backed MCP bridge store", () => {
     writeFileSync(join(dir, filename), JSON.stringify([config("converse__evil")]) + "\n", "utf8");
 
     const diagnostics: string[] = [];
-    expect(await resolveMcpAttachment(new FileMcpBridgeStore({ dir }), tenantId, (message) => diagnostics.push(message))).toBeNull();
+    expect(await resolveMcpAttachment(new FileMcpBridgeStore({ dir }), tenantId, (message) => diagnostics.push(message), publicResolver)).toBeNull();
     expect(diagnostics.join("\n")).toContain('authToken="<redacted>"');
     expect(diagnostics.join("\n")).not.toContain(SENTINEL);
   });
@@ -108,11 +131,49 @@ describe("file-backed MCP bridge store", () => {
     await store.set("tenant-b", [config("bravo", "BEARER_FOR_B")]);
 
     const reopened = new FileMcpBridgeStore({ dir });
-    const attachmentA = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-a"));
-    const attachmentB = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-b"));
+    const attachmentA = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-a", console.error, publicResolver));
+    const attachmentB = JSON.stringify(await resolveMcpAttachment(reopened, "tenant-b", console.error, publicResolver));
     expect(attachmentA).toContain("BEARER_FOR_A");
     expect(attachmentA).not.toContain("BEARER_FOR_B");
     expect(attachmentB).toContain("BEARER_FOR_B");
     expect(attachmentB).not.toContain("BEARER_FOR_A");
+  });
+});
+
+describe("MCP bridge mount-time DNS gate", () => {
+  it("skips a server whose public-looking host resolves to a private address, mounts the rest", async () => {
+    const store = new InMemoryMcpBridgeStore();
+    await store.set("tenant", [config("rebinder"), config("honest")]);
+    const diagnostics: string[] = [];
+    // The SDK connects to every mounted URL at session start, so a host that
+    // passed set-time validation but RESOLVES private must not be handed over.
+    const resolver = async (host: string) =>
+      host.startsWith("rebinder") ? "169.254.169.254" : "93.184.216.34";
+    const attachment = await resolveMcpAttachment(store, "tenant", (m) => diagnostics.push(m), resolver);
+    expect(attachment).not.toBeNull();
+    expect(Object.keys(attachment!)).toEqual(["honest"]);
+    expect(diagnostics.join(" ")).toContain("unsafe or unresolvable host");
+    // ...and the diagnostic stays redacted: no token, no URL path.
+    expect(diagnostics.join(" ")).not.toContain(SENTINEL);
+    expect(diagnostics.join(" ")).not.toContain("secret=");
+  });
+
+  it("skips a server whose host does not resolve at all (fail closed)", async () => {
+    const store = new InMemoryMcpBridgeStore();
+    await store.set("tenant", [config("ghost")]);
+    const attachment = await resolveMcpAttachment(store, "tenant", () => {}, async () => {
+      throw new Error("NXDOMAIN");
+    });
+    expect(attachment).toBeNull();
+  });
+
+  it("skips a server when ANY resolved address is private (multi-answer)", async () => {
+    const store = new InMemoryMcpBridgeStore();
+    await store.set("tenant", [config("mixed")]);
+    const attachment = await resolveMcpAttachment(store, "tenant", () => {}, async () => [
+      { address: "93.184.216.34" },
+      { address: "10.0.0.7" },
+    ]);
+    expect(attachment).toBeNull();
   });
 });

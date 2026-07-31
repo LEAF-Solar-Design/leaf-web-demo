@@ -761,3 +761,31 @@ describe("ConverseSdkRunner — instance isolation", () => {
     expect(doneOf(b).sdkSessionId).toBe("sdk-session-OTHER");
   });
 });
+
+// --------------------------------------------------------------------------- //
+// Runtime composition: what the SDK actually receives as mcpServers.
+//
+// PR #360 round 3: source-text assertions that serve.ts contains no bridge
+// identifier all stay green if it imports an innocuously named wrapper
+// (`TenantAwareRunner`) that mounts the bridge through another module. The only
+// assertion a wrapper cannot slip past is one that reads the options object the
+// SDK was handed. Any tenant MCP server — by wrapper, indirect import, or ports
+// injection — appears here as an extra key.
+// --------------------------------------------------------------------------- //
+
+describe("ConverseSdkRunner — mounted MCP surface", () => {
+  it("hands the SDK exactly one server, `spine`, with no tools and no setting sources", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(mock), makeInput());
+
+    expect(mock.queries.length).toBeGreaterThan(0);
+    for (const query of mock.queries) {
+      const mounted = Object.keys((query.options.mcpServers ?? {}) as Record<string, unknown>);
+      expect(mounted).toEqual(["spine"]);
+      // The lane's other deny-all invariants travel with it, so this one test
+      // fails loudly if the converse surface widens for any reason.
+      expect(query.options.tools).toEqual([]);
+      expect(query.options.settingSources).toEqual([]);
+    }
+  });
+});
