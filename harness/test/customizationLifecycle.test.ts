@@ -180,6 +180,33 @@ describe("customizationLifecycle", () => {
     expect(modelToolset).not.toHaveProperty("publish");
   });
 
+  it("stages safely when the isolated author worktree has a different owner", async () => {
+    const { agent, bare, loop } = await setup();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const originalRun = agent.run.bind(agent);
+    const previousDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    agent.run = async (input) => {
+      const result = await originalRun(input);
+      process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+      return result;
+    };
+
+    let staged: Awaited<ReturnType<AuthorLoop["stage"]>>;
+    try {
+      staged = await loop.stage(TENANT, "count entities per layer", request(CHANGE_B, base));
+    } finally {
+      if (previousDifferentOwner === undefined) {
+        delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      } else {
+        process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousDifferentOwner;
+      }
+    }
+
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+    expect(git(bare.dir, ["rev-parse", `refs/leaf/changes/${CHANGE_B}`]))
+      .toBe(staged.receipt.staged_commit);
+  });
+
   it("keeps two staged changes isolated", async () => {
     const { bare, loop } = await setup();
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
