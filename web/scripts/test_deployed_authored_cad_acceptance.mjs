@@ -17,6 +17,7 @@ import {
   proveExecutedDrawingIsolation,
   provePinnedWriteRejections,
   provisionAcceptanceDrawing,
+  provisionAcceptanceDrawings,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
@@ -326,6 +327,34 @@ describe('deployed authored CAD acceptance checks', () => {
       '/api/drawings/upload',
       `/api/drawings/${drawingId}/upload-status`,
     ])
+  })
+
+  it('provisions tenant DWGs sequentially for the single-slot APS pool', async () => {
+    const config = validateConfig(environment(), true)
+    const calls = []
+    let finishFirst
+    let finishSecond
+    const first = new Promise((resolve) => { finishFirst = resolve })
+    const second = new Promise((resolve) => { finishSecond = resolve })
+    const provisionImpl = async (_config, tenant) => {
+      calls.push(tenant.label)
+      return tenant.label === 'A' ? first : second
+    }
+
+    const pending = provisionAcceptanceDrawings(
+      config,
+      new Uint8Array([1, 2, 3]),
+      { provisionImpl },
+    )
+    await Promise.resolve()
+    assert.deepEqual(calls, ['A'])
+
+    finishFirst('drawing-a')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(calls, ['A', 'B'])
+
+    finishSecond('drawing-b')
+    assert.deepEqual(await pending, ['drawing-a', 'drawing-b'])
   })
 
   it('reports a terminal broker failure before waiting for browser version state', async () => {
