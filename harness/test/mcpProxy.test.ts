@@ -46,7 +46,7 @@ describe("guardedFetch refuses redirects", () => {
     // IP literal as the host: skips the DNS re-check, so the ONLY thing that
     // can make this throw is the redirect refusal. With a fake hostname an
     // ENOTFOUND would satisfy rejects.toThrow() and prove nothing.
-    const fetchGuarded = guardedFetch("127.0.0.1");
+    const fetchGuarded = guardedFetch("127.0.0.1", 30_000);
     await expect(fetchGuarded(redirector.url, { method: "POST", body: "{}" })).rejects.toThrow();
 
     // THE assertion. Not "an option was set" — the redirect target was never
@@ -58,7 +58,7 @@ describe("guardedFetch refuses redirects", () => {
     const ok = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1")(ok.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1", 30_000)(ok.url, { method: "POST" });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
@@ -72,7 +72,7 @@ describe("guardedFetch re-checks the destination before every request", () => {
     // and the test exercises the same code path production takes.
     const upstream = await listen((_req, res) => { res.writeHead(200).end("{}"); });
     const url = upstream.url.replace("127.0.0.1", "localhost");
-    await expect(guardedFetch("localhost")(url, { method: "POST" }))
+    await expect(guardedFetch("localhost", 30_000)(url, { method: "POST" }))
       .rejects.toThrow(/became_unsafe/);
   });
 
@@ -82,7 +82,7 @@ describe("guardedFetch re-checks the destination before every request", () => {
     const upstream = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1")(upstream.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1", 30_000)(upstream.url, { method: "POST" });
     expect(response.status).toBe(200);
   });
 });
@@ -314,9 +314,13 @@ describe("proxyTenantMcpServer end to end", () => {
     // Cancellation must reach upstream rather than orphaning the tenant call,
     // and this signal is also what carries our deadline.
     expect(options.signal).toBeInstanceOf(AbortSignal);
-    // The SDK's own timeout knobs are deliberately NOT set: they were the
-    // source of round 8's defect, and the signal is now the whole deadline.
-    expect(options.timeout).toBeUndefined();
+    // `timeout` MUST be set: omitting it selects the SDK's hidden 60s default
+    // rather than "no timeout" (shared/protocol.js:712). What made round 8's
+    // version unsound was resetTimeoutOnProgress, which stays off, so this is a
+    // plain timer no upstream progress can push back — and maxTotalTimeout is
+    // then meaningless.
+    expect(options.timeout).toBe(120_000);
+    expect(options.resetTimeoutOnProgress).toBeUndefined();
     expect(options.maxTotalTimeout).toBeUndefined();
     // No progressToken was supplied downstream, so there is no subscription to
     // feed. Emitting anyway is an "unknown token" protocol error, not a bonus.
@@ -345,6 +349,11 @@ describe("proxyTenantMcpServer end to end", () => {
     // answers proves it. No progress, no SDK timeout, nothing else that could
     // be the thing cutting the call off.
     const budgetMs = 400;
+    // Track the live upstream sockets. Round 9 (WARN): the previous version
+    // asserted local rejection and then closed the proxy immediately, so it
+    // could not have caught the real leak — the call rejected while the tenant
+    // socket stayed open until the whole proxy shut down.
+    let callSocket: import("node:net").Socket | undefined;
     const upstream = await listen((req, res) => {
       let body = "";
       req.on("data", (c) => { body += c; });
@@ -358,7 +367,7 @@ describe("proxyTenantMcpServer end to end", () => {
           }));
         }
         // tools/call: hold the connection open and never reply.
-        if (message.method === "tools/call") return;
+        if (message.method === "tools/call") { callSocket = req.socket; return; }
         res.writeHead(202).end();
       });
     });
@@ -379,7 +388,22 @@ describe("proxyTenantMcpServer end to end", () => {
     const elapsed = Date.now() - started;
 
     expect(elapsed).toBeGreaterThanOrEqual(budgetMs * 0.5);   // not an instant error
-    expect(elapsed).toBeLessThan(budgetMs * 4);               // and not the 10s downstream cap
+    // Upper bound widened from 4x to 12x on round 9's warning: 1.6s could fail
+    // after a ~1.2s event-loop stall on a loaded CI box. The point is to
+    // separate "our wall fired" from "the downstream's 10s cap fired", and 4.8s
+    // still does that with room to spare.
+    expect(elapsed).toBeLessThan(budgetMs * 12);
+
+    // THE LEAK ASSERTION, made BEFORE closing anything: rejecting the promise
+    // is not enough if the tenant's socket survives it. A tenant that stops
+    // answering must not be able to pin connections open for the life of the
+    // proxy.
+    // Counting ALL open sockets was wrong: HTTP keep-alive legitimately holds
+    // the handshake connection, so that assertion failed on healthy behaviour.
+    // The claim is specifically about the socket carrying the abandoned call.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(callSocket).toBeDefined();
+    expect(callSocket!.destroyed).toBe(true);
 
     await downstream.close();
     await proxied!.close();

@@ -84,7 +84,20 @@ export type ProxiedMcpServer = { name: string; instance: McpServer; close: () =>
  * needs an undici Dispatcher with a custom `connect.lookup`, which keeps the
  * URL intact while choosing the address — the named follow-up on this PR.
  */
-export function guardedFetch(originalHost: string): typeof fetch {
+export function guardedFetch(
+  originalHost: string,
+  // THE DEADLINE BELONGS HERE, at the socket. Round 9: aborting the SDK request
+  // cancels its protocol bookkeeping but never reaches `transport.send` — the
+  // transport dials with its OWN process-wide controller
+  // (client/streamableHttp.js:304), so a timed-out POST or SSE body stays open
+  // until the entire proxy closes. Reproduced by the reviewer: the call
+  // rejected at 149ms and the socket was still open 250ms later.
+  //
+  // A per-request timeout signal on the fetch itself is what actually closes
+  // the connection, and a tenant that stops answering must not be able to pin
+  // sockets open for the life of the proxy.
+  requestTimeoutMs: number,
+): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
     // An IP literal was already validated and cannot change under us; only a
@@ -95,7 +108,12 @@ export function guardedFetch(originalHost: string): typeof fetch {
         throw new Error("mcp_upstream_host_became_unsafe");
       }
     }
-    return fetch(url, { ...init, redirect: "error" });
+    // Keep whatever signal the transport supplied (that is how close() still
+    // tears everything down) and add our own wall on top.
+    const signal = init?.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(requestTimeoutMs)])
+      : AbortSignal.timeout(requestTimeoutMs);
+    return fetch(url, { ...init, redirect: "error", signal });
   }) as typeof fetch;
 }
 
@@ -118,7 +136,7 @@ export async function proxyTenantMcpServer(
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
-    fetch: guardedFetch(url.hostname),
+    fetch: guardedFetch(url.hostname, requestTimeoutMs),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},
   });
 
@@ -253,9 +271,19 @@ export async function proxyTenantMcpServer(
             // reasons: the downstream giving up, and our deadline expiring.
             // Without it a tenant call runs on with nobody reading the answer.
             //
-            // No `timeout` / `maxTotalTimeout` / `resetTimeoutOnProgress` here
-            // on purpose — see above. The signal is the whole deadline.
             signal,
+            // SET THIS EXPLICITLY. Omitting it does not mean "no timeout" — it
+            // means `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`
+            // (shared/protocol.js:712), i.e. the hidden 60s cap round 6 found,
+            // firing at half the budget. Round 9 caught me removing the option
+            // and reintroducing exactly the bug I had fixed.
+            //
+            // What made round 8's version unsound was `resetTimeoutOnProgress`,
+            // not this. Left off (the default), this is a plain timer that no
+            // amount of upstream progress can push back, so it agrees with the
+            // wall above instead of fighting it. `maxTotalTimeout` is then
+            // meaningless and stays unset.
+            timeout: requestTimeoutMs,
             // Progress notifications are the only feedback a long tool gives.
             // Swallowing them makes a working call look hung.
             onprogress: progressToken === undefined ? undefined : (progress) => {
