@@ -75,34 +75,71 @@ function unbracketHost(host: string): string {
   return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 }
 
-/** True when an IP address is not safe for a tenant-controlled MCP endpoint. */
+/**
+ * True when an IP address is not safe for a tenant-controlled MCP endpoint.
+ *
+ * ALLOWLIST, not a denylist. Round 2 refuted the denylist by naming ranges it
+ * missed (100.64/10 CGNAT, 198.18/15 benchmark, 224/4 multicast, 240/4
+ * reserved, ff02::1, fec0::1) and the answer to "you missed a range" is not
+ * one more range, it is to invert the question: an address is allowed only if
+ * it is GLOBAL UNICAST and outside every IANA special-purpose block. Anything
+ * unrecognised is refused, so the next special range IANA assigns is refused
+ * without a code change.
+ *
+ * Documentation prefixes (192.0.2/24, 198.51.100/24, 203.0.113/24,
+ * 2001:db8::/32) are refused too: they are not routable, so a tenant naming
+ * one is either confused or probing.
+ */
 export function isForbiddenMcpAddress(address: string): boolean {
   const normalized = unbracketHost(address).toLowerCase();
-  if (isIP(normalized) === 4) {
-    const [a, b] = normalized.split(".").map(Number);
-    return a === 0
-      || a === 10
-      || a === 127
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168)
-      || (a === 169 && b === 254);
-  }
+  if (isIP(normalized) === 4) return !isGlobalUnicastIpv4(normalized);
   if (isIP(normalized) === 6) {
-    if (normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
-    // EMBEDDED IPv4 MUST BE DECODED, not pattern-matched on the dotted form.
-    // `new URL("http://[::ffff:127.0.0.1]/")` hands back hostname
-    // "[::ffff:7f00:1]" — node normalises the dotted tail into hextets — so a
-    // regex looking for ::ffff:a.b.c.d misses the exact address it exists to
-    // catch, and a connection to ::ffff:7f00:1 really does reach a listener
-    // bound to 127.0.0.1. Expanding to hextets and reading the low 32 bits
-    // catches every spelling of the same address, and covers the other two
-    // v4-in-v6 embeddings while we are here (v4-compatible ::a.b.c.d, and
-    // NAT64 64:ff9b::/96, which a translator will happily route to the
-    // embedded v4).
+    // Embedded IPv4 decides first: ::ffff:7f00:1 IS 127.0.0.1 on the wire, and
+    // `new URL("http://[::ffff:127.0.0.1]/")` hands back exactly that hex form,
+    // which is where a text-matching version of this check lost (round 1).
     const embedded = embeddedIpv4(normalized);
-    return embedded ? isForbiddenMcpAddress(embedded) : false;
+    if (embedded) return !isGlobalUnicastIpv4(embedded);
+    const parts = hextets(normalized);
+    if (!parts || parts.some((h) => !Number.isInteger(h))) return true;
+    // Global unicast is 2000::/3 and nothing else. That single test refuses
+    // ::, ::1, fc00::/7, fe80::/10, fec0::/10 and ff00::/8 without naming them.
+    const global = parts[0] >= 0x2000 && parts[0] <= 0x3fff;
+    const documentation = parts[0] === 0x2001 && parts[1] === 0x0db8;
+    return !global || documentation;
   }
   return true;
+}
+
+/** IANA special-purpose IPv4 blocks, as [first octet-matched predicate]. */
+function isGlobalUnicastIpv4(address: string): boolean {
+  const octets = address.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return false;
+  const [a, b, c] = octets;
+  const value = ((a << 24) >>> 0) + (b << 16) + (c << 8) + octets[3];
+  const inBlock = (net: string, bits: number): boolean => {
+    const [na, nb, nc, nd] = net.split(".").map(Number);
+    const base = ((na << 24) >>> 0) + (nb << 16) + (nc << 8) + nd;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return ((value & mask) >>> 0) === ((base & mask) >>> 0);
+  };
+  const special = [
+    ["0.0.0.0", 8],          // this network
+    ["10.0.0.0", 8],         // private
+    ["100.64.0.0", 10],      // carrier-grade NAT (round 2)
+    ["127.0.0.0", 8],        // loopback
+    ["169.254.0.0", 16],     // link-local, incl. cloud metadata
+    ["172.16.0.0", 12],      // private
+    ["192.0.0.0", 24],       // IETF protocol assignments
+    ["192.0.2.0", 24],       // TEST-NET-1
+    ["192.88.99.0", 24],     // 6to4 relay anycast (deprecated)
+    ["192.168.0.0", 16],     // private
+    ["198.18.0.0", 15],      // benchmarking (round 2)
+    ["198.51.100.0", 24],    // TEST-NET-2
+    ["203.0.113.0", 24],     // TEST-NET-3
+    ["224.0.0.0", 4],        // multicast (round 2)
+    ["240.0.0.0", 4],        // reserved, incl. 255.255.255.255 broadcast
+  ] as const;
+  return !special.some(([net, bits]) => inBlock(net, bits));
 }
 
 /** The eight hextets of an IPv6 address, or null when it cannot be expanded. */
@@ -135,7 +172,8 @@ function embeddedIpv4(address: string): string | null {
   const compatible = a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0;
   const nat64 = a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0;
   if (!mapped && !compatible && !nat64) return null;
-  // ::  and ::1 are handled above; a zero tail here is not an embedded address.
+  // `::` and `::1` are addresses in their own right, not embeddings of
+  // 0.0.0.0 / 0.0.0.1 — and both are refused by the 2000::/3 test anyway.
   if (compatible && g === 0 && h <= 1) return null;
   return `${(g >> 8) & 0xff}.${g & 0xff}.${(h >> 8) & 0xff}.${h & 0xff}`;
 }

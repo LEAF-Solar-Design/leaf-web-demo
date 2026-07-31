@@ -16,7 +16,7 @@ const SENTINEL = "SENTINEL_BEARER_XYZ";
 // The mount-time DNS gate would otherwise hit REAL DNS for the .test fixture
 // hosts and fail closed. Every mount-path test injects this public resolver;
 // the gate's own tests inject private/failing ones.
-const publicResolver = async () => "203.0.113.10";
+const publicResolver = async () => "93.184.216.34";
 
 function config(name: string, token = SENTINEL) {
   return { name, url: `https://${name}.example.test/mcp?secret=not-for-logs`, authToken: token };
@@ -69,7 +69,7 @@ describe("MCP bridge validation", () => {
   it("allows a dotted public host at set-time and checks its resolved address again at execute-time", async () => {
     expect(isAllowedMcpHost("public.example.test")).toBe(true);
     await expect(new InMemoryMcpBridgeStore().set("tenant", [{ name: "public", url: "https://public.example.test/mcp" }])).resolves.toBeUndefined();
-    await expect(resolveAllowedMcpHost("public.example.test", async () => "203.0.113.8")).resolves.toBe(true);
+    await expect(resolveAllowedMcpHost("public.example.test", async () => "93.184.216.34")).resolves.toBe(true);
     await expect(resolveAllowedMcpHost("public.example.test", async () => "10.0.0.8")).resolves.toBe(false);
   });
 
@@ -148,7 +148,7 @@ describe("MCP bridge mount-time DNS gate", () => {
     // The SDK connects to every mounted URL at session start, so a host that
     // passed set-time validation but RESOLVES private must not be handed over.
     const resolver = async (host: string) =>
-      host.startsWith("rebinder") ? "169.254.169.254" : "203.0.113.10";
+      host.startsWith("rebinder") ? "169.254.169.254" : "93.184.216.34";
     const attachment = await resolveMcpAttachment(store, "tenant", (m) => diagnostics.push(m), resolver);
     expect(attachment).not.toBeNull();
     expect(Object.keys(attachment!)).toEqual(["honest"]);
@@ -171,7 +171,7 @@ describe("MCP bridge mount-time DNS gate", () => {
     const store = new InMemoryMcpBridgeStore();
     await store.set("tenant", [config("mixed")]);
     const attachment = await resolveMcpAttachment(store, "tenant", () => {}, async () => [
-      { address: "203.0.113.10" },
+      { address: "93.184.216.34" },
       { address: "10.0.0.7" },
     ]);
     expect(attachment).toBeNull();

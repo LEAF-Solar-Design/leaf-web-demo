@@ -22,6 +22,22 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["::", "unspecified"],
     ["fe80::1", "link-local"],
     ["fc00::1", "unique local"],
+    // Round 2: the denylist missed all of these, which is why the policy is
+    // now an allowlist. Each one is a real internal-routing surface.
+    ["100.64.0.1", "carrier-grade NAT, routed inside many deployments"],
+    ["198.18.0.1", "benchmark/infrastructure space"],
+    ["224.0.0.1", "IPv4 multicast all-hosts"],
+    ["240.0.0.1", "reserved"],
+    ["255.255.255.255", "broadcast"],
+    ["192.0.0.1", "IETF protocol assignments"],
+    ["192.88.99.1", "deprecated 6to4 relay anycast"],
+    ["ff02::1", "IPv6 multicast all-nodes"],
+    ["fec0::1", "deprecated site-local"],
+    // Documentation prefixes are not routable; naming one is confusion or probing.
+    ["192.0.2.1", "TEST-NET-1"],
+    ["198.51.100.1", "TEST-NET-2"],
+    ["203.0.113.1", "TEST-NET-3"],
+    ["2001:db8::1", "IPv6 documentation"],
   ])("refuses %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(true);
     expect(isAllowedMcpHost(address)).toBe(false);
@@ -30,9 +46,9 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
   // The other half of the guarantee: decoding must not over-refuse. A public
   // address wearing a v4-in-v6 spelling is still public.
   it.each([
-    ["::ffff:cb00:7110", "hex v4-mapped 203.0.113.16"],
-    ["::ffff:203.0.113.16", "dotted v4-mapped public"],
-    ["64:ff9b::cb00:7110", "NAT64 public"],
+    ["::ffff:5db8:d822", "hex v4-mapped 93.184.216.34"],
+    ["::ffff:93.184.216.34", "dotted v4-mapped public"],
+    ["64:ff9b::5db8:d822", "NAT64 public"],
     ["2606:4700::1111", "ordinary public v6"],
   ])("allows %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(false);
@@ -62,16 +78,40 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
  * fix.
  */
 describe("scope: the live converse runner still mounts no tenant MCP", () => {
-  it("ConverseSdkRunner passes only the spine server, and never touches the bridge", async () => {
+  const read = async (relative: string): Promise<string> => {
     const { readFileSync } = await import("node:fs");
     const { fileURLToPath } = await import("node:url");
-    const source = readFileSync(
-      fileURLToPath(new URL("../src/ports/impl/converseSdkRunner.ts", import.meta.url)), "utf8");
+    return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+  };
 
+  it("ConverseSdkRunner passes only the spine server, and never touches the bridge", async () => {
+    const source = await read("../src/ports/impl/converseSdkRunner.ts");
     expect(source).toMatch(/mcpServers:\s*\{\s*spine:\s*server\s*\}/);
-    // If this ever fails, tenant MCP reached the live lane and the held #322
-    // ruling was bypassed — the mount gate above is then load-bearing, not
-    // defence in depth, and the DNS-rebinding residual becomes a blocker.
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
+  });
+
+  it("the production COMPOSITION picks that runner and mounts no bridge", async () => {
+    // Round 2 was right that reading the runner alone is not enough: the live
+    // selection happens in server.ts's startReal, and a runner swap or wrapper
+    // THERE could mount tenant MCP while a runner-only test stayed green.
+    const source = await read("../src/server.ts");
+    // The one place a converse runner is chosen for production.
+    expect(source).toMatch(/runnerFor:\s*\(grant\)\s*=>\s*new ConverseSdkRunner\(\{\s*grant\s*\}\)/);
+    expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
+  });
+
+  it("the serve entrypoint composes the same way", async () => {
+    // dist/scripts/serve.js is the container's CMD, so this file decides what
+    // actually runs in production — see the deployed-entrypoint lesson.
+    const source = await read("../scripts/serve.ts");
+    expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
+  });
+
+  it("only the NON-live runner reaches the bridge", async () => {
+    // The positive half: if this stops being true, the bridge either went live
+    // (the held #322 ruling) or went dead. Either way this PR's framing must
+    // be revisited, and the DNS-rebinding residual re-triaged.
+    const dead = await read("../src/ports/impl/agentSdkTurnRunner.ts");
+    expect(dead).toMatch(/resolveEnvMcpAttachment/);
   });
 });
