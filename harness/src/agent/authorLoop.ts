@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
@@ -28,6 +28,7 @@ import {
   TenantChangeRepo,
   type TenantChangeSet,
 } from "../ports/impl/tenantChangeRepo.js";
+import { scrubSecrets } from "../ports/impl/envScrub.js";
 import type {
   AuthorResponse,
   AgentRunResult,
@@ -214,10 +215,23 @@ export class AuthorLoop {
       throw new AuthorLoopError("authored manifest does not match the validated tool", 422);
     }
 
+    // EFS checkouts can retain the access-point UID even though the harness can
+    // read and write them. Bind trust to this exact resolved checkout for this
+    // read-only command. Never use a wildcard safe.directory entry.
+    const resolvedRepoDir = realpathSync(repoDir).replaceAll("\\", "/");
     const status = execFileSync(
       "git",
-      ["-C", repoDir, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-      { encoding: "utf8" },
+      [
+        "-c",
+        `safe.directory=${resolvedRepoDir}`,
+        "-C",
+        resolvedRepoDir,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+      ],
+      { encoding: "utf8", env: scrubSecrets(process.env) },
     );
     const changed = status
       .split("\0")
