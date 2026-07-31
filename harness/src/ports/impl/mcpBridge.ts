@@ -89,10 +89,55 @@ export function isForbiddenMcpAddress(address: string): boolean {
   }
   if (isIP(normalized) === 6) {
     if (normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
-    const mappedV4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    return mappedV4 ? isForbiddenMcpAddress(mappedV4[1]) : false;
+    // EMBEDDED IPv4 MUST BE DECODED, not pattern-matched on the dotted form.
+    // `new URL("http://[::ffff:127.0.0.1]/")` hands back hostname
+    // "[::ffff:7f00:1]" — node normalises the dotted tail into hextets — so a
+    // regex looking for ::ffff:a.b.c.d misses the exact address it exists to
+    // catch, and a connection to ::ffff:7f00:1 really does reach a listener
+    // bound to 127.0.0.1. Expanding to hextets and reading the low 32 bits
+    // catches every spelling of the same address, and covers the other two
+    // v4-in-v6 embeddings while we are here (v4-compatible ::a.b.c.d, and
+    // NAT64 64:ff9b::/96, which a translator will happily route to the
+    // embedded v4).
+    const embedded = embeddedIpv4(normalized);
+    return embedded ? isForbiddenMcpAddress(embedded) : false;
   }
   return true;
+}
+
+/** The eight hextets of an IPv6 address, or null when it cannot be expanded. */
+function hextets(address: string): number[] | null {
+  const [head, tail] = address.split("::", 2);
+  const parse = (part: string): number[] =>
+    part ? part.split(":").filter(Boolean).map((h) => Number.parseInt(h, 16)) : [];
+  // A dotted tail (::ffff:1.2.3.4) contributes two hextets, not one.
+  const expand = (part: string): number[] => {
+    const dotted = part.match(/(\d+\.\d+\.\d+\.\d+)$/);
+    if (!dotted) return parse(part);
+    const octets = dotted[1].split(".").map(Number);
+    if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return [];
+    return [...parse(part.slice(0, dotted.index)), (octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]];
+  };
+  const left = expand(head);
+  if (tail === undefined) return left.length === 8 ? left : null;
+  const right = expand(tail);
+  const gap = 8 - left.length - right.length;
+  if (gap < 0) return null;
+  return [...left, ...Array(gap).fill(0), ...right];
+}
+
+/** The dotted IPv4 embedded in a v6 address (mapped, compatible, or NAT64), else null. */
+function embeddedIpv4(address: string): string | null {
+  const parts = hextets(address);
+  if (!parts || parts.some((h) => !Number.isInteger(h))) return null;
+  const [a, b, c, d, e, f, g, h] = parts;
+  const mapped = a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0xffff;
+  const compatible = a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0;
+  const nat64 = a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0;
+  if (!mapped && !compatible && !nat64) return null;
+  // ::  and ::1 are handled above; a zero tail here is not an embedded address.
+  if (compatible && g === 0 && h <= 1) return null;
+  return `${(g >> 8) & 0xff}.${g & 0xff}.${(h >> 8) & 0xff}.${h & 0xff}`;
 }
 
 /** Set-time policy. A DNS name must be dotted, and literals must be public. */
