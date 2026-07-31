@@ -2,7 +2,12 @@ import { expect, test } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { REQUEST, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import {
+  AUTHORED_CATALOG_DIGEST,
+  REQUEST,
+  catProofResponse,
+  makeCatProofState,
+} from './catProofFixture.mjs'
 import { writeProofReceipt } from './proofReceipt.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -19,6 +24,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   let catalogRunHeaders = null
   let authorStageBody = null
   let authorRegisterBody = null
+  let authoredRunBody = null
   let grantLinkBody = null
 
   await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
@@ -34,6 +40,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     if (url.pathname === '/api/run' && body.tool === 'count-panels') catalogRunHeaders = await request.allHeaders()
     if (url.pathname === '/api/author/stage') authorStageBody = body
     if (url.pathname === '/api/author/register') authorRegisterBody = body
+    if (url.pathname === '/api/run' && body.tool === 'count-panels-near-edge') authoredRunBody = body
     if (url.pathname === '/api/tenant/claude-grant' && request.method() === 'POST') grantLinkBody = body
     const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, proofState)
     await route.fulfill({
@@ -167,6 +174,17 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByRole('button', { name: 'Run count-panels-near-edge' })).toBeVisible()
   expect(proofState.authorJob).toBe(false)
   await page.getByRole('button', { name: 'Run count-panels-near-edge' }).click()
+  expect(authoredRunBody?.catalog_digest).toBe(AUTHORED_CATALOG_DIGEST)
+  const registerIndex = apiEndpoints.lastIndexOf('POST /api/author/register')
+  const toolsRefreshIndex = apiEndpoints.findIndex(
+    (endpoint, index) => index > registerIndex && endpoint === 'GET /api/tools',
+  )
+  const authoredRunIndex = apiEndpoints.findIndex(
+    (endpoint, index) => index > toolsRefreshIndex && endpoint === 'POST /api/run',
+  )
+  expect(registerIndex).toBeGreaterThanOrEqual(0)
+  expect(toolsRefreshIndex).toBeGreaterThan(registerIndex)
+  expect(authoredRunIndex).toBeGreaterThan(toolsRefreshIndex)
   await page.getByRole('tab', { name: 'Execution' }).click()
   await expect(page.getByTestId('catalog-run-result')).toContainText('count-panels-near-edge')
   await expect(page.getByTestId('catalog-run-result')).toContainText('Passed')

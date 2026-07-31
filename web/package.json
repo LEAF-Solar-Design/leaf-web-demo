@@ -22,9 +22,10 @@
     "check:unified-pins": "node scripts/check_unified_behavior_pins.mjs",
     "proof:cat:api": "node e2e/catProofApi.mjs",
     "check:customization": "node scripts/check_customization.mjs",
-    "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs && node scripts/check_web_container_config.mjs",
+    "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs && node scripts/check_web_container_config.mjs && npm run check:published-catalog-tool",
     "check:checkout-identity": "node scripts/check_checkout_identity.mjs",
     "check:deployed-acceptance-contract": "node --test scripts/test_deployed_authored_cad_acceptance.mjs",
+    "check:published-catalog-tool": "node --test src/site/publishedCatalogTool.test.mjs",
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
     "check:workbench-id": "node --test src/site/workbenchId.test.mjs"
   },

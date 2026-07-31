@@ -41,6 +41,7 @@ import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
+import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import useJobController from '../controllers/useJobController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
@@ -560,7 +561,10 @@ export default function ToolCast({
   }, [capabilityCatalog.families, catalog.actions])
   const armCatalogDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') return decision
-    const tool = tools.find((candidate) => candidate.name === decision.tool)
+    const refreshedTool = decision.refreshedTool?.name === decision.tool
+      ? decision.refreshedTool
+      : null
+    const tool = refreshedTool || tools.find((candidate) => candidate.name === decision.tool)
     if (!tool) return decision
     if ((tool.capabilities || []).includes('drawing.write') && writeLocked) {
       setError(drawing.mutationsBlocked
@@ -585,7 +589,8 @@ export default function ToolCast({
       toolSnapshot: createCatalogToolSnapshot(tool),
     })
     runIntentStateRef.current = staged.state
-    return { ...decision, params: staged.intent.params, runIntent: staged.intent }
+    const { refreshedTool: _refreshedTool, ...publicDecision } = decision
+    return { ...publicDecision, params: staged.intent.params, runIntent: staged.intent }
   }, [catalogRunContext, checkout.lockedByOther, drawing.mutationsBlocked, tools, writeLocked])
   catalogDecisionRef.current = armCatalogDecision
 
@@ -749,16 +754,25 @@ export default function ToolCast({
     return { ...published, tool }
   }, [catalog.actions, sessionReady, showToast])
 
-  const useAuthoredTool = useCallback((tool) => {
+  const useAuthoredTool = useCallback(async (tool) => {
     if (!sessionReady || !tool) return
-    setSelectedCatalogTool(tool)
+    const refreshedTools = await catalog.actions.loadTools()
+    let runnableTool
+    try {
+      runnableTool = resolvePublishedCatalogTool(tool, refreshedTools)
+    } catch (cause) {
+      setError(cause?.message || 'The published tool is not ready to run yet.')
+      return
+    }
+    setSelectedCatalogTool(runnableTool)
     catalog.actions.commitDecision({
       lane: 'run',
-      tool: tool.name,
+      tool: runnableTool.name,
       params: {},
       confidence: 0.99,
-      rationale: `Authored just now. Confirm to run ${tool.name}.`,
+      rationale: `Authored just now. Confirm to run ${runnableTool.name}.`,
       alternatives: [],
+      refreshedTool: runnableTool,
     })
   }, [catalog.actions, sessionReady])
 
