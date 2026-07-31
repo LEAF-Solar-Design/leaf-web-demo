@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
@@ -74,6 +75,31 @@ describe("guardedFetch re-checks the destination before every request", () => {
     const url = upstream.url.replace("127.0.0.1", "localhost");
     await expect(guardedFetch("localhost")(url, { method: "POST" }))
       .rejects.toThrow(/became_unsafe/);
+  });
+
+  it("re-checks on EVERY request, not just the first", async () => {
+    // Round 11 (WARN): the test below fires a single request, so it could not
+    // distinguish "re-checks before each request" from "checked once at mount".
+    // The whole point of this guard is the SECOND and later calls — a name that
+    // was safe at mount time is exactly the one that turns hostile later.
+    let resolutions = 0;
+    const upstream = await listen((_req, res) => {
+      resolutions += 1;
+      res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+    });
+    const fetchGuarded = guardedFetch("127.0.0.1");
+    await fetchGuarded(upstream.url, { method: "POST" });
+    await fetchGuarded(upstream.url, { method: "POST" });
+    await fetchGuarded(upstream.url, { method: "POST" });
+    expect(resolutions).toBe(3);
+
+    // And with a NAME, every one of those calls must refuse — not just the
+    // first — which is what proves the check is per-request.
+    const named = upstream.url.replace("127.0.0.1", "localhost");
+    const guardedByName = guardedFetch("localhost");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(guardedByName(named, { method: "POST" })).rejects.toThrow(/became_unsafe/);
+    }
   });
 
   it("allows an IP literal that was already validated, without re-resolving", async () => {
@@ -140,6 +166,12 @@ describe("proxyTenantMcpServer end to end", () => {
             : send({ tools, nextCursor: "page-2" });
         }
         if (message.method === "tools/call") {
+          // Declares an outputSchema but answers with content only. The SDK's
+          // TYPED callTool helper rejects this locally; a raw request forwards
+          // it. That asymmetry is what the raw-forwarding test below detects.
+          if (message.params?.name === "schematic") {
+            return send({ content: [{ type: "text", text: "no structured content here" }] });
+          }
           if (message.params?.name === "explode") {
             return send({ content: [{ type: "text", text: "upstream refused" }], isError: true });
           }
@@ -246,6 +278,12 @@ describe("proxyTenantMcpServer end to end", () => {
     const upstream = await upstreamMcp([
       { name: "quick", description: "ordinary", inputSchema: { type: "object" as const } },
       {
+        name: "maybe-task",
+        description: "task-capable but callable normally",
+        inputSchema: { type: "object" as const },
+        execution: { taskSupport: "optional" },
+      },
+      {
         name: "slow-render",
         description: "a tool the upstream runs as a task",
         inputSchema: { type: "object" as const },
@@ -260,9 +298,13 @@ describe("proxyTenantMcpServer end to end", () => {
     const downstream = new Client({ name: "downstream", version: "1.0.0" });
     await downstream.connect(clientSide);
 
-    // The usable tool survives; the un-invokable one is gone.
+    // The usable tools survive; only the un-invokable one is gone. Round 11
+    // (WARN): without an "optional" tool in the fixture, an OVERBROAD filter
+    // that hid every task-aware tool would have passed this just as happily.
+    // "optional" means a plain tools/call is valid, so hiding it would silently
+    // shrink a tenant's catalogue.
     const listed = await downstream.listTools();
-    expect(listed.tools.map((tool) => tool.name)).toEqual(["quick"]);
+    expect(listed.tools.map((tool) => tool.name)).toEqual(["quick", "maybe-task"]);
     // ...and the omission is REPORTED, not silent — an operator seeing a tool
     // missing from a tenant catalogue needs to know why.
     expect(diagnostics.join(" ")).toContain("task-required");
@@ -321,6 +363,52 @@ describe("proxyTenantMcpServer end to end", () => {
     expect(options.maxTotalTimeout).toBeUndefined();
     // Downstream cancellation is still forwarded.
     expect(options.signal).toBeInstanceOf(AbortSignal);
+
+    await downstream.close();
+    await proxied!.close();
+  });
+
+  it("forwards raw, so a helper-only refusal never fires at the proxy", async () => {
+    // ROUND 11 (WARN): every other e2e assertion here would pass unchanged if
+    // both handlers were swapped back to the SDK's typed helpers, because none
+    // of them trigger a helper-ONLY refusal. The raw-request choice — the whole
+    // "this module adds no client-side policy" claim — was therefore untested.
+    //
+    // This is the asymmetry: `client.callTool()` throws InvalidRequest when a
+    // tool declares an outputSchema and the response carries no
+    // structuredContent. A raw `client.request()` forwards the upstream's
+    // answer as-is and lets the real client decide. A tenant server is entitled
+    // to answer this way, and the model should see what it said.
+    //
+    // THE TWO HANDLERS ARE COUPLED — the same trap as the task-required test,
+    // and it caught me a second time. Swapping callTool alone leaves this
+    // GREEN, because the outputSchema validator is populated by the TYPED
+    // listTools; with a raw tools/list there is no cached validator to fire.
+    // A falsification must swap BOTH, or it proves nothing.
+    const upstream = await upstreamMcp([{
+      name: "schematic",
+      description: "declares an output schema",
+      inputSchema: { type: "object" as const },
+      outputSchema: { type: "object" as const, properties: { value: { type: "number" as const } } },
+    }]);
+    const proxied = await proxyTenantMcpServer({ name: "raw", url: upstream.url }, () => {});
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    // listTools first: that is what arms the helper's outputSchema validator,
+    // exactly as it arms the task refusal.
+    await downstream.listTools();
+
+    // Raw on the downstream side too, or the SAME rule fires in the test
+    // process and masks what the proxy did.
+    const result = await downstream.request(
+      { method: "tools/call", params: { name: "schematic", arguments: {} } },
+      CallToolResultSchema,
+    );
+    expect(JSON.stringify(result.content)).toContain("no structured content here");
+    expect(result.isError).toBeUndefined();
 
     await downstream.close();
     await proxied!.close();

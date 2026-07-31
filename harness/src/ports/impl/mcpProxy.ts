@@ -33,9 +33,12 @@
  *      promptly close the upstream socket. The SDK transport dials with its own
  *      process-wide controller (client/streamableHttp.js), so the abandoned
  *      POST or SSE body survives until the whole proxy closes.
- *   2. A resumable SSE response can time out and then be RECONNECTED by the
- *      SDK, each attempt starting a fresh clock, so a per-request wall does not
- *      bound total upstream time on its own.
+ *   2. SSE retries are not bounded at all. The protocol timer is created once
+ *      per request, so a reconnecting stream is covered by no per-fetch timer
+ *      after that. (An earlier draft of this note said each retry "starts a
+ *      fresh clock" — that described the pre-cut code, not this one, and review
+ *      caught the stale wording. The effect is the same either way: total
+ *      upstream time is not bounded here.)
  *   3. Upstream progress notifications are not relayed downstream, so a long
  *      tool call gives the model no intermediate feedback.
  *
@@ -231,11 +234,6 @@ export async function proxyTenantMcpServer(
       return { ...listed, tools: usable };
     });
     instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      // ONLY RELAY PROGRESS THE DOWNSTREAM ASKED FOR. Round 7: falling back to
-      // `extra.requestId` when no token was supplied emits notifications for a
-      // token the downstream never registered, which is an "unknown token"
-      // protocol error rather than a helpful extra. No token means no progress
-      // subscription, so there is nothing to forward.
       return client.request(
         { method: "tools/call", params: request.params },
         CallToolResultSchema,
