@@ -1003,9 +1003,9 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 
 | Method | Path | Behaviour |
 |---|---|---|
-| POST | `/api/sessions` | `{drawing_id, project_id?}` → `{session_id, status, created_at}`. Idempotent per (tenant, drawing). Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
+| POST | `/api/sessions` | `{drawing_id, model?, policy?}` → `{session_id, status, created_at, model, policy, instant_ready, instant_reason}`. (`project_id` was listed here historically but is **not** a field on `CreateSessionRequest`; pydantic drops it silently.) Idempotent per (tenant, drawing). `model` is the per-session "mount your LLM" choice (§18.7): validated against the allowlist and persisted, so later turns inherit it; an unknown id is 400 `BAD_PARAMS`. Omitting `model` on a repeat POST leaves the stored choice untouched. Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
 | GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
-| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 413 `BAD_PARAMS` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The 413 has three sources that are indistinguishable to the caller and mean the same thing: the app's own body-cap middleware, the app measuring its own encoded forward, and a 413 relayed from the harness. All three are `approval_unredeemed`, so a confirm turn refused this way keeps its approval and can be retried with a smaller payload. The same holds for 401 and 429, which are also refused before anything can redeem a confirmation. Forwards the frozen §2.1 `ConverseTurnInput` to the harness with the resolved tenant id. (The superseded §18-era sentence about assembling a ContextPacket is removed here: the wire-correction note above is the live behaviour, and `server/context_packet.py` has no live caller.) |
+| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?, model?, credential_grant?, queue?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 413 `BAD_PARAMS` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The 413 has three sources that are indistinguishable to the caller and mean the same thing: the app's own body-cap middleware, the app measuring its own encoded forward, and a 413 relayed from the harness. All three are `approval_unredeemed`, so a confirm turn refused this way keeps its approval and can be retried with a smaller payload. The same holds for 401 and 429, which are also refused before anything can redeem a confirmation. Forwards the frozen §2.1 `ConverseTurnInput` to the harness with the resolved tenant id. (The superseded §18-era sentence about assembling a ContextPacket is removed here: the wire-correction note above is the live behaviour, and `server/context_packet.py` has no live caller.) |
 | GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
 | GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
 | DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |
@@ -1230,6 +1230,74 @@ fallback, and nothing in §18 assumes either answer.
 > default, `server/jobs.py:53`; per-job SSE 0.5 s poll, `server/routers/jobs.py:145`;
 > public job API/schema unchanged) work at full fidelity — public API and behavior
 > identical to today's product.
+
+### 18.7 Mount your LLM — per-session model + bring-your-own credential
+
+A session may choose which Claude model runs its turns, and a turn may carry the
+caller's own Agent SDK credential instead of the tenant's linked grant. Both fields are
+ADDITIVE and OPTIONAL: a request that omits them behaves exactly as before, and the
+harness falls back to its env default (`LEAF_SPINE_MODEL`, else `claude-sonnet-5`).
+
+**Model allowlist** (`server/turn_runner.py` `ALLOWED_MODELS`, mirrored in
+`harness/src/ports/modelAllowlist.ts`): `claude-sonnet-5`, `claude-opus-4-8`,
+`claude-haiku-4-5`, `claude-fable-5`. Anything else is 400 `BAD_PARAMS` at the app
+boundary, and is rejected again at the harness's own `POST /turn` validation — an
+unknown id never reaches `sdk.query`. The runner is the Anthropic Claude Agent SDK
+only; a multi-provider adapter is a separate lane, not this contract.
+
+**Precedence**, highest first: the message's `model` → the session's stored `model`
+(set at `POST /api/sessions`) → `LEAF_SPINE_MODEL` → `claude-sonnet-5`.
+
+**Credential grant** (`credential_grant` on a message, never on session create), exactly
+one of:
+
+```
+{"kind": "api_key", "api_key": "<token>"}
+{"kind": "oauth",   "oauth_token": "<token>"}
+```
+
+It is used for THAT turn only. The app validates the shape, forwards it on the frozen
+§2.1 `ConverseTurnInput` as `credential_grant`, and the harness maps it to the internal
+`AgentGrant` injected into the runner's scrubbed child env (`buildScrubbedEnv`) in place
+of `OAuthGrantProvider.getGrant`. Any other shape is 400 `BAD_PARAMS`.
+
+The token itself must **look like** a credential: at least 24 characters, printable
+ASCII (`0x21`–`0x7E`), no whitespace. This floor is load-bearing, not cosmetic — the
+harness strips the credential from the transcript by literal match, so a value like
+`"a"`, `"error"`, or `"` would either shred ordinary text or be unstrippable. The rule
+is kept byte-identical to `PRINTABLE_ASCII` in `harness/src/redact.ts`, because a value
+accepted here but unstrippable there is the worst of both (sol-critic #117 round 4,
+#123 rounds 6-8). Real `sk-ant-…` keys and OAuth tokens run to ~100 chars, so nothing
+genuine is rejected.
+
+**Secret discipline** (all enforced, each with a regression test):
+
+- **TLS required.** A `credential_grant` may only ride an encrypted request.
+  `X-Forwarded-Proto` is CALLER-CONTROLLED and is consulted ONLY when the deployment
+  asserts it sits behind a rewriting proxy via `LEAF_TRUST_FORWARDED_PROTO=1`;
+  otherwise the real transport decides. `LEAF_ALLOW_INSECURE_CREDENTIAL=1` is the
+  explicit dev/test opt-out. Every flag fails CLOSED.
+- **Never persisted.** The credential is not written to `sessions`, `session_events`, or
+  any transcript row; only `model` is persisted (a `sessions.model` column, migration
+  `0019_sessions_model.sql`).
+- **Never logged or echoed.** A credential the user pastes into their own prompt is
+  stripped at the SOURCE — once, in `SpineTurnAdapter.runTurn`, from `text` and
+  `messages[].text` before the turn runs. Scrubbing the source rather than each sink is
+  deliberate (PR #123 round 7): sink-by-sink redaction made the harness and app-gate
+  argument hashes disagree, so approval replay died as `args_mismatch`, and walking
+  event objects to redact keys dropped colliding fields and let `__proto__` mutate the
+  rebuilt prototype. Every downstream copy — transcript, gate pending record,
+  confirmation `args_json`, wire — derives from the one scrubbed input, so they agree by
+  construction. Only long, whitespace-free values are eligible (`isRedactableSecret`) and
+  removal is LITERAL (`stripSecrets`), so a pasted Git SHA is not shredded. Because the
+  model never receives the credential, it cannot echo it into a `text_delta`.
+- **Not leaked by validation errors.** The 422 handler allowlists `loc`/`msg`/`type`, so
+  a future pydantic key cannot start echoing the offending `input` value.
+- **Not queueable.** A `credential_grant` message never parks in the busy-turn queue
+  (which is in-memory) — see the `TURN_IN_PROGRESS` row in §18.4.
+
+Shipped in PRs #117 / #123 / #133 (three sol-critic RED rounds; the TLS gate above is
+the fix for the round-1 blocker that made it spoofable).
 
 ## §19 Guest drawing uploads (ephemeral tenants, honest retention, fail-closed extraction)
 
