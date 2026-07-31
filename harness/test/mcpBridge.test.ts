@@ -177,4 +177,3 @@ describe("MCP bridge mount-time DNS gate", () => {
     expect(attachment).toBeNull();
   });
 });
-

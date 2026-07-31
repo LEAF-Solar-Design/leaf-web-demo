@@ -117,6 +117,21 @@ export function isForbiddenMcpAddress(address: string): boolean {
     // never sufficient; the special-purpose blocks INSIDE it are subtracted
     // explicitly, exactly like the IPv4 table.
     if (parts[0] < 0x2000 || parts[0] > 0x3fff) return true;
+    // Teredo is the one carve-out INSIDE the 2001::/23 refusal. Round 5 was
+    // right that refusing it over-refuses: a Teredo address is globally
+    // routable to a host behind someone else's NAT (RFC 4380), which is the
+    // public internet, not our internal network — the thing this policy exists
+    // to protect. It is admitted only when BOTH IPv4 addresses it embeds (the
+    // Teredo server, and the client's public NAT address, stored obfuscated)
+    // are themselves public, so it cannot be used to smuggle 127.0.0.1 or
+    // 169.254.169.254 through a v6 spelling.
+    if (inV6Block(parts, [0x2001, 0x0000], 32)) {
+      const server = `${(parts[2] >> 8) & 0xff}.${parts[2] & 0xff}.${(parts[3] >> 8) & 0xff}.${parts[3] & 0xff}`;
+      const client4 = (parts[6] ^ 0xffff) & 0xffff;
+      const client5 = (parts[7] ^ 0xffff) & 0xffff;
+      const client = `${(client4 >> 8) & 0xff}.${client4 & 0xff}.${(client5 >> 8) & 0xff}.${client5 & 0xff}`;
+      return !isGlobalUnicastIpv4(server) || !isGlobalUnicastIpv4(client);
+    }
     return IPV6_SPECIAL_INSIDE_GLOBAL.some(([prefix, bits]) => inV6Block(parts, prefix, bits));
   }
   return true;
@@ -422,6 +437,19 @@ export async function resolveMcpAttachment(
       report(`[leaf-mcp] skipping tenant MCP server with unsafe or unresolvable host: ${describeConfig(config)}`);
       continue;
     }
+    // *** KNOWN, UNFIXABLE AT THIS LAYER: HTTP REDIRECTS ***
+    // Everything above validates the URL's HOST. The Agent SDK's http MCP
+    // config is `{ type, url, headers }` — no fetch override, no requestInit —
+    // so the transport's own `fetch` follows redirects and an approved public
+    // endpoint can 307 to a private address (verified against
+    // @modelcontextprotocol/sdk streamableHttp.js, which calls
+    // `(this._fetch ?? fetch)(this._url, init)`).
+    //
+    // This is NOT exploitable today: no live composition mounts this bridge
+    // (pinned by the converse-runner tests). It IS a hard blocker on admitting
+    // tenant MCP to the live lane (#322), alongside the DNS-rebinding window —
+    // both need transport-level control (a pinned-IP dialer with redirects
+    // disabled) or an egress proxy, neither of which mcpBridge can reach.
     attachment[config.name] = {
       type: "http",
       url: config.url,

@@ -46,11 +46,14 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["2002:7f00:1::", "6to4 transition space wrapping 127.0.0.1"],
     ["3fff::1", "newer documentation prefix"],
     // Round 4: enumerating the children of 2001::/23 left these allowed.
-    ["2001::1", "Teredo"],
     ["2001:40::1", "unallocated remainder of 2001::/23"],
     ["2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff", "top of 2001::/23"],
     ["3ffe::1", "former 6bone, IANA-reserved"],
     ["3ffe:831f::1", "6bone/Teredo historical"],
+    // ...but Teredo must not smuggle a private address through the v6
+    // spelling: server 10.0.0.1, and client 127.0.0.1 obfuscated.
+    ["2001:0:a00:1:0:0:ffff:fefe", "Teredo with a PRIVATE embedded server"],
+    ["2001:0:808:808:0:0:80ff:fffe", "Teredo whose client decodes to 127.0.0.1"],
     ["2002::1", "6to4 transition space"],
     ["3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "top of 3ffe::/16"],
     ["2001:1::1", "Port Control Protocol anycast, inside 2001::/23"],
@@ -77,6 +80,10 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
     ["2003::1", "just above 6to4"],
     ["2400::1", "APNIC space"],
     ["3ffd::1", "just below 3ffe::/16"],
+    // Teredo with PUBLIC embedded addresses: server 8.8.8.8, client
+    // 93.184.216.34 obfuscated (XOR ffff per hextet). Round 5 was right
+    // that blanket-refusing 2001::/32 over-refuses.
+    ["2001:0:808:808:0:0:a247:27dd", "Teredo, both embedded IPv4s public"],
   ])("allows %s (%s)", (address) => {
     expect(isForbiddenMcpAddress(address)).toBe(false);
     expect(isAllowedMcpHost(address)).toBe(true);
@@ -140,5 +147,35 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
     // be revisited, and the DNS-rebinding residual re-triaged.
     const dead = await read("../src/ports/impl/agentSdkTurnRunner.ts");
     expect(dead).toMatch(/resolveEnvMcpAttachment/);
+  });
+});
+
+/**
+ * Round 5 found a hole this layer CANNOT close, so it is pinned instead of
+ * papered over: the Agent SDK's http MCP config is `{ type, url, headers }`
+ * with no fetch override and no requestInit, and the MCP transport's own fetch
+ * follows redirects. An approved public endpoint can therefore 307 to a private
+ * address. Not exploitable today (nothing live mounts this bridge), and a hard
+ * blocker on #322.
+ *
+ * This test is the WAKE-UP: if the SDK ever gains a fetch/redirect seam, it
+ * fails and says to go close the hole, rather than the limitation quietly
+ * outliving everyone who remembers it.
+ */
+describe("known limitation: redirects cannot be controlled from here", () => {
+  it("the SDK's http MCP config still exposes no fetch or redirect control", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const dts = readFileSync(
+      fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts", import.meta.url)), "utf8");
+
+    // The http variant of McpServerConfig, as shipped.
+    const httpConfig = /type:\s*'http';\s*\n\s*url:\s*string;\s*\n\s*headers\?:[^\n]*\n/.exec(dts);
+    expect(httpConfig).not.toBeNull();
+    const shape = httpConfig![0];
+    // If either of these starts appearing, the redirect hole becomes fixable
+    // and this PR's residual should be closed instead of documented.
+    expect(shape).not.toMatch(/fetch/);
+    expect(shape).not.toMatch(/requestInit|redirect/);
   });
 });
