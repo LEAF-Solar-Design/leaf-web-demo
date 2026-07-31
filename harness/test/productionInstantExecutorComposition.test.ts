@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createProductionInstantExecutorClient } from "../src/server.js";
+import {
+  createEnabledProductionInstantExecutorClient,
+  createProductionInstantExecutorClient,
+} from "../src/server.js";
 
 const requiredEnv = {
   LEAF_INSTANT_EXECUTOR_CA_FILE: "C:/run/secrets/executor-ca.pem",
@@ -10,6 +13,25 @@ const requiredEnv = {
 };
 
 describe("production instant executor composition", () => {
+  it("constructs the client when instant execution is enabled", () => {
+    const client = { invoke: vi.fn(), cancel: vi.fn() };
+    const factory = vi.fn(() => client);
+
+    expect(createEnabledProductionInstantExecutorClient(factory, {
+      ...requiredEnv,
+      LEAF_INSTANT_EXECUTION_ENABLED: "1",
+    })).toBe(client);
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it("does not require credentials when instant execution is disabled", () => {
+    const factory = vi.fn();
+    expect(createEnabledProductionInstantExecutorClient(factory, {
+      LEAF_INSTANT_EXECUTION_ENABLED: "0",
+    })).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
   it("constructs the direct executor client with mounted TLS file paths and a fixed server name", () => {
     const client = { invoke: vi.fn(), cancel: vi.fn() };
     const factory = vi.fn(() => client);
