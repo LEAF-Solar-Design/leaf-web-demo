@@ -32,13 +32,16 @@ Acceptance covered here:
   * memory counters are refused wherever they would not be a real cap;
   * auth-off callers share ONE anonymous budget (the tenant id is a header);
   * a misconfigured/unreachable counter store fails CLOSED (503), never open;
-  * the 429 body carries the shape the frontend already understands.
+  * the 429 body carries the shape the frontend already understands;
+  * a refusal emits one greppable INFO line carrying the counter facts, on both
+    metered lanes, so the cap can be audited from the log group at all.
 
 Run:  cd server && python -m pytest tests/test_author_quota.py -q
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -410,6 +413,73 @@ def test_attempts_are_admitted_up_to_the_cap_then_refused(monkeypatch, r5_author
     assert body["degraded_mode"] is False
     # the refused attempt never reached the harness-backed stage path
     assert len(r5_author.staged) == 2
+
+
+def test_a_refusal_is_logged_with_the_counter_facts(monkeypatch, caplog, r5_author):
+    """A refusal must leave a trace an operator can query for.
+
+    Before this, the refusal path logged nothing at all: a refused attempt was
+    visible only as an access-log 429. That made "no quota events in the log
+    group" evidence of nothing, because the observation could not have come out
+    any other way -- it fit the cap working perfectly and the cap refusing every
+    attempt equally well.
+
+    INFO, not WARNING: a caller drives this and it is an expected budget state,
+    so it must not page anyone. INFO, not DEBUG: deployments run at INFO, so a
+    DEBUG line would leave the cap exactly as unobservable as it was.
+    """
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    usage = _load_usage()
+    assert r5_author.call(tenant="tenant-a") == {"status": "staged"}
+
+    with caplog.at_level(logging.INFO, logger=author_router._LOG.name):
+        response = r5_author.call(
+            tenant="tenant-a", key="secret-key", description="secret description",
+        )
+    assert response.status_code == 429
+    body = json.loads(response.body)
+
+    refusals = [r for r in caplog.records
+                if r.getMessage().startswith("daily_author_quota_refused:")]
+    assert len(refusals) == 1, "exactly one refusal line per refused attempt"
+    line = refusals[0].getMessage()
+    assert refusals[0].levelno == logging.INFO
+    assert "tenant=tenant-a" in line
+    # the counter facts agree with the envelope the caller was handed, so the
+    # log and the 429 cannot drift into telling two different stories
+    assert f"tier={body['tier']}" in line
+    assert f"limit={body['limit']}" in line
+    assert f"used={body['used']}" in line
+    # the UTC counter day the charge was actually keyed on
+    assert f"day={usage.author_quota_day()}" in line
+    # never free-text from the request
+    assert "secret" not in line
+
+
+def test_an_admitted_attempt_logs_no_refusal(monkeypatch, caplog, r5_author):
+    """The token must mean what an operator queries it for. If it were emitted on
+    the admitted path too, a count of it would measure traffic, not refusals."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "2")
+    with caplog.at_level(logging.INFO, logger=author_router._LOG.name):
+        assert r5_author.call() == {"status": "staged"}
+    assert not [r for r in caplog.records
+                if "daily_author_quota_refused:" in r.getMessage()]
+
+
+def test_the_legacy_path_refusal_is_logged_too(monkeypatch, caplog, legacy_author):
+    """Both metered lanes answer through _quota_exceeded_response, so both are
+    observable. The auth-off lane meters one shared anonymous budget, and the
+    log names that principal rather than the unverified request header."""
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    assert legacy_author.call(tenant="tenant-a") == {"source": "template"}
+
+    with caplog.at_level(logging.INFO, logger=author_router._LOG.name):
+        assert legacy_author.call(tenant="tenant-b").status_code == 429
+
+    refusals = [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("daily_author_quota_refused:")]
+    assert len(refusals) == 1
+    assert f"tenant={author_router.ANONYMOUS_QUOTA_PRINCIPAL}" in refusals[0]
 
 
 def test_a_retry_that_reaches_the_harness_counts_again(monkeypatch, r5_author):
