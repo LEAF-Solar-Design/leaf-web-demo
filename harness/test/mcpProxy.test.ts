@@ -145,11 +145,20 @@ describe("proxyTenantMcpServer end to end", () => {
   }
 
   it("connects, and forwards the upstream tool listing verbatim", async () => {
-    const upstream = await upstreamMcp([{
+    // ANNOTATIONS AND _meta ARE PART OF THE FIXTURE ON PURPOSE. Round 4: the
+    // assertion below used objectContaining and named only the three fields
+    // this fixture carried, so a proxy that silently dropped a tool's
+    // annotations — the hints a client uses to decide whether a tool is
+    // read-only or destructive before running it — would still have passed.
+    const alpha = {
       name: "alpha",
       description: "an upstream tool",
       inputSchema: { type: "object", properties: { depth: { type: "number" } }, required: ["depth"] },
-    }]);
+      outputSchema: { type: "object", properties: { echo: { type: "object" } } },
+      annotations: { title: "Alpha", readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+      _meta: { "tenant/origin": "upstream-catalogue" },
+    };
+    const upstream = await upstreamMcp([alpha]);
     const proxied = await proxyTenantMcpServer(
       { name: "tenant-server", url: upstream.url }, () => {});
 
@@ -166,15 +175,15 @@ describe("proxyTenantMcpServer end to end", () => {
     const downstream = new Client({ name: "downstream", version: "1.0.0" });
     await downstream.connect(clientSide);
 
-    // The whole tool definition must survive, not just its name: a proxy that
-    // rebuilt definitions instead of forwarding them would pass a name check
-    // while silently changing what the model is told a tool accepts.
+    // The whole tool definition must survive BYTE FOR BYTE, not just its name:
+    // a proxy that rebuilt definitions instead of forwarding them would pass a
+    // name check while silently changing what the model is told a tool accepts.
+    // EXACT equality against the upstream object, not objectContaining — the
+    // partial form cannot see a dropped field, which is the failure mode that
+    // matters most here (a lost destructiveHint downgrades a dangerous tool to
+    // a safe-looking one).
     const listed = await downstream.listTools();
-    expect(listed.tools).toEqual([expect.objectContaining({
-      name: "alpha",
-      description: "an upstream tool",
-      inputSchema: { type: "object", properties: { depth: { type: "number" } }, required: ["depth"] },
-    })]);
+    expect(listed.tools).toEqual([alpha]);
     expect(listed.nextCursor).toBe("page-2");
 
     // PAGINATION: the cursor must reach upstream, or page two repeats page one.
