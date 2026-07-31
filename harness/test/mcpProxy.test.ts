@@ -46,7 +46,7 @@ describe("guardedFetch refuses redirects", () => {
     // IP literal as the host: skips the DNS re-check, so the ONLY thing that
     // can make this throw is the redirect refusal. With a fake hostname an
     // ENOTFOUND would satisfy rejects.toThrow() and prove nothing.
-    const fetchGuarded = guardedFetch("127.0.0.1", 30_000);
+    const fetchGuarded = guardedFetch("127.0.0.1");
     await expect(fetchGuarded(redirector.url, { method: "POST", body: "{}" })).rejects.toThrow();
 
     // THE assertion. Not "an option was set" — the redirect target was never
@@ -58,7 +58,7 @@ describe("guardedFetch refuses redirects", () => {
     const ok = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1", 30_000)(ok.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1")(ok.url, { method: "POST" });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
@@ -72,7 +72,7 @@ describe("guardedFetch re-checks the destination before every request", () => {
     // and the test exercises the same code path production takes.
     const upstream = await listen((_req, res) => { res.writeHead(200).end("{}"); });
     const url = upstream.url.replace("127.0.0.1", "localhost");
-    await expect(guardedFetch("localhost", 30_000)(url, { method: "POST" }))
+    await expect(guardedFetch("localhost")(url, { method: "POST" }))
       .rejects.toThrow(/became_unsafe/);
   });
 
@@ -82,7 +82,7 @@ describe("guardedFetch re-checks the destination before every request", () => {
     const upstream = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1", 30_000)(upstream.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1")(upstream.url, { method: "POST" });
     expect(response.status).toBe(200);
   });
 });
@@ -271,13 +271,17 @@ describe("proxyTenantMcpServer end to end", () => {
     await proxied!.close();
   });
 
-  it("relays progress only when the downstream subscribed to it", async () => {
-    // The DEADLINE is covered behaviourally by the test above; what is left
-    // here is the one property with no cheap behavioural probe: that no
-    // progress handler is installed when the downstream never subscribed.
-    // Emitting progress for a token the downstream never registered is an
-    // "unknown token" protocol error, and the absence of a callback is the
-    // whole fix, so a wiring assertion is the honest instrument for it.
+  it("sets an explicit request timeout instead of inheriting the SDK's hidden 60s", async () => {
+    // A WIRING assertion, which this file otherwise argues against, kept for a
+    // specific reason: omitting `timeout` does not mean "no timeout", it means
+    // `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC` (shared/protocol.js),
+    // a 60s cap firing at half the harness's own 120s budget. That default is
+    // invisible at the call site, and this PR's history includes removing the
+    // option under the belief that it meant no timeout — reintroducing the bug
+    // it had already fixed. This is the guard against doing that a third time.
+    //
+    // A behavioural version would have to outlast 60s of wall clock, which is a
+    // worse defect than the one it guards.
     const upstream = await upstreamMcp([
       { name: "alpha", description: "t", inputSchema: { type: "object" as const } },
     ]);
@@ -287,13 +291,11 @@ describe("proxyTenantMcpServer end to end", () => {
     const downstream = new Client({ name: "downstream", version: "1.0.0" });
     await downstream.connect(clientSide);
 
-    // Hold the ORIGINAL before spying, and call through it — calling the
-    // prototype property instead re-enters the mock and recurses forever.
-    // Both clients issue a "tools/call" here (downstream's, then the proxy's
-    // upstream one nested inside it), so the entries are tagged by instance and
-    // the downstream's own call is excluded. A first attempt restored the spy
-    // on the first call it saw, which was the downstream's, and captured
-    // nothing from the code under test.
+    // Hold the ORIGINAL before spying — calling the prototype property instead
+    // re-enters the mock and recurses forever. Both clients issue a tools/call
+    // (downstream's, then the proxy's nested upstream one), so entries are
+    // tagged by instance; an earlier version restored the spy on the first call
+    // it saw, which was the downstream's, and captured nothing under test.
     const original = Client.prototype.request;
     const seen: Array<{ self: unknown; options?: Record<string, unknown> }> = [];
     const spy = vi.spyOn(Client.prototype, "request").mockImplementation(
@@ -311,103 +313,18 @@ describe("proxyTenantMcpServer end to end", () => {
     expect(upstreamCalls.length).toBeGreaterThan(0);
     const options = upstreamCalls.at(-1)!.options!;
 
-    // Cancellation must reach upstream rather than orphaning the tenant call,
-    // and this signal is also what carries our deadline.
-    expect(options.signal).toBeInstanceOf(AbortSignal);
-    // `timeout` MUST be set: omitting it selects the SDK's hidden 60s default
-    // rather than "no timeout" (shared/protocol.js:712). What made round 8's
-    // version unsound was resetTimeoutOnProgress, which stays off, so this is a
-    // plain timer no upstream progress can push back — and maxTotalTimeout is
-    // then meaningless.
     expect(options.timeout).toBe(120_000);
+    // resetTimeoutOnProgress is what makes this subsystem subtle: it lets a
+    // progress frame reset the timer, so with maxTotalTimeout the real ceiling
+    // becomes ~2x the budget at a moment the TENANT picks. Both stay unset.
     expect(options.resetTimeoutOnProgress).toBeUndefined();
     expect(options.maxTotalTimeout).toBeUndefined();
-    // No progressToken was supplied downstream, so there is no subscription to
-    // feed. Emitting anyway is an "unknown token" protocol error, not a bonus.
-    expect(options.onprogress).toBeUndefined();
+    // Downstream cancellation is still forwarded.
+    expect(options.signal).toBeInstanceOf(AbortSignal);
 
     await downstream.close();
     await proxied!.close();
   });
-
-  it("cuts off an upstream that never answers, on our deadline", async () => {
-    // ROUND 8 REFUTED MY OWN ROUND-7 FIX. I had bounded the call with the SDK's
-    // `maxTotalTimeout`, which bounds nothing: `_resetTimeout` runs only from
-    // the progress handler (shared/protocol.js:434-436) and checks elapsed time
-    // at that instant, so one progress frame just under the total buys a whole
-    // fresh `timeout` window — a ~2x ceiling that the tenant's server times.
-    //
-    // Two earlier versions of THIS test were vacuous and both passed with the
-    // fix removed, which is why the shape below is deliberately dumb:
-    //   1. streaming progress continuously — that trips the SDK's own total
-    //      check promptly, so it never exercised the reset abuse;
-    //   2. a single late progress frame — the right attack on paper, but the
-    //      SDK never dispatched the SSE frame to its reset path, so BOTH arms
-    //      measured 623ms and the test could not tell them apart.
-    // Chasing the SDK's SSE plumbing was the wrong fix. Removing the ambiguity
-    // was: there is now ONE deadline, ours, and an upstream that simply never
-    // answers proves it. No progress, no SDK timeout, nothing else that could
-    // be the thing cutting the call off.
-    const budgetMs = 400;
-    // Track the live upstream sockets. Round 9 (WARN): the previous version
-    // asserted local rejection and then closed the proxy immediately, so it
-    // could not have caught the real leak — the call rejected while the tenant
-    // socket stayed open until the whole proxy shut down.
-    let callSocket: import("node:net").Socket | undefined;
-    const upstream = await listen((req, res) => {
-      let body = "";
-      req.on("data", (c) => { body += c; });
-      req.on("end", () => {
-        const message = JSON.parse(body || "{}");
-        if (message.method === "initialize") {
-          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
-            protocolVersion: "2025-06-18",
-            capabilities: { tools: {} },
-            serverInfo: { name: "silent", version: "1.0.0" },
-          }));
-        }
-        // tools/call: hold the connection open and never reply.
-        if (message.method === "tools/call") { callSocket = req.socket; return; }
-        res.writeHead(202).end();
-      });
-    });
-
-    const proxied = await proxyTenantMcpServer(
-      { name: "silent", url: upstream.url }, () => {}, budgetMs);
-    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    await proxied!.instance.server.connect(serverSide);
-    const downstream = new Client({ name: "downstream", version: "1.0.0" });
-    await downstream.connect(clientSide);
-
-    // The downstream's own timeout is set far higher, so if this call comes
-    // back quickly it is because OUR wall ended it and nothing else.
-    const started = Date.now();
-    await expect(downstream.callTool(
-      { name: "forever", arguments: {} }, undefined, { timeout: budgetMs * 25 },
-    )).rejects.toThrow();
-    const elapsed = Date.now() - started;
-
-    expect(elapsed).toBeGreaterThanOrEqual(budgetMs * 0.5);   // not an instant error
-    // Upper bound widened from 4x to 12x on round 9's warning: 1.6s could fail
-    // after a ~1.2s event-loop stall on a loaded CI box. The point is to
-    // separate "our wall fired" from "the downstream's 10s cap fired", and 4.8s
-    // still does that with room to spare.
-    expect(elapsed).toBeLessThan(budgetMs * 12);
-
-    // THE LEAK ASSERTION, made BEFORE closing anything: rejecting the promise
-    // is not enough if the tenant's socket survives it. A tenant that stops
-    // answering must not be able to pin connections open for the life of the
-    // proxy.
-    // Counting ALL open sockets was wrong: HTTP keep-alive legitimately holds
-    // the handshake connection, so that assertion failed on healthy behaviour.
-    // The claim is specifically about the socket carrying the abandoned call.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    expect(callSocket).toBeDefined();
-    expect(callSocket!.destroyed).toBe(true);
-
-    await downstream.close();
-    await proxied!.close();
-  }, 30_000);
 
   it("returns null instead of throwing when the upstream is unreachable", async () => {
     const dead = await listen((_req, res) => { res.destroy(); });

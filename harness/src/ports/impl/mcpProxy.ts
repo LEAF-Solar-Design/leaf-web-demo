@@ -24,6 +24,27 @@
  * The proxy is deliberately DUMB: it forwards tool listing and tool calls and
  * nothing else. It is a network boundary, not a policy layer; the policy lives
  * in ConverseLoop's deny rules and the app gate, exactly where it did before.
+ *
+ * LIMITATIONS, stated because they are real and NOT fixed here. Connection
+ * LIFETIME is deliberately out of scope for this module as it stands, after
+ * five review rounds each found a fresh defect in it:
+ *
+ *   1. Cancelling or timing out a call rejects the pending promise but does not
+ *      promptly close the upstream socket. The SDK transport dials with its own
+ *      process-wide controller (client/streamableHttp.js), so the abandoned
+ *      POST or SSE body survives until the whole proxy closes.
+ *   2. A resumable SSE response can time out and then be RECONNECTED by the
+ *      SDK, each attempt starting a fresh clock, so a per-request wall does not
+ *      bound total upstream time on its own.
+ *   3. Upstream progress notifications are not relayed downstream, so a long
+ *      tool call gives the model no intermediate feedback.
+ *
+ * None of these are SSRF holes: redirects stay closed and the DNS re-check
+ * still runs on every request, which is what this module exists for. They are
+ * resource-lifetime and ergonomics problems. The work is preserved on
+ * `lane/mcp-proxy-deadlines`, where it can be designed against the SDK's actual
+ * behaviour instead of patched a round at a time. Do not describe this module
+ * as bounding tenant connection lifetime until that lands.
  */
 
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -84,20 +105,7 @@ export type ProxiedMcpServer = { name: string; instance: McpServer; close: () =>
  * needs an undici Dispatcher with a custom `connect.lookup`, which keeps the
  * URL intact while choosing the address — the named follow-up on this PR.
  */
-export function guardedFetch(
-  originalHost: string,
-  // THE DEADLINE BELONGS HERE, at the socket. Round 9: aborting the SDK request
-  // cancels its protocol bookkeeping but never reaches `transport.send` — the
-  // transport dials with its OWN process-wide controller
-  // (client/streamableHttp.js:304), so a timed-out POST or SSE body stays open
-  // until the entire proxy closes. Reproduced by the reviewer: the call
-  // rejected at 149ms and the socket was still open 250ms later.
-  //
-  // A per-request timeout signal on the fetch itself is what actually closes
-  // the connection, and a tenant that stops answering must not be able to pin
-  // sockets open for the life of the proxy.
-  requestTimeoutMs: number,
-): typeof fetch {
+export function guardedFetch(originalHost: string): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
     // An IP literal was already validated and cannot change under us; only a
@@ -108,12 +116,7 @@ export function guardedFetch(
         throw new Error("mcp_upstream_host_became_unsafe");
       }
     }
-    // Keep whatever signal the transport supplied (that is how close() still
-    // tears everything down) and add our own wall on top.
-    const signal = init?.signal
-      ? AbortSignal.any([init.signal, AbortSignal.timeout(requestTimeoutMs)])
-      : AbortSignal.timeout(requestTimeoutMs);
-    return fetch(url, { ...init, redirect: "error", signal });
+    return fetch(url, { ...init, redirect: "error" });
   }) as typeof fetch;
 }
 
@@ -129,14 +132,10 @@ export function guardedFetch(
 export async function proxyTenantMcpServer(
   config: McpServerConfig,
   report: (message: string) => void = console.error,
-  // Internal, NOT read from `config`: the tenant must not get to choose how
-  // long we will hold a connection open for them. Exists so the deadline can be
-  // tested in milliseconds instead of minutes.
-  requestTimeoutMs: number = UPSTREAM_REQUEST_TIMEOUT_MS,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
-    fetch: guardedFetch(url.hostname, requestTimeoutMs),
+    fetch: guardedFetch(url.hostname),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},
   });
 
@@ -237,66 +236,28 @@ export async function proxyTenantMcpServer(
       // token the downstream never registered, which is an "unknown token"
       // protocol error rather than a helpful extra. No token means no progress
       // subscription, so there is nothing to forward.
-      const progressToken = request.params?._meta?.progressToken;
-
-      // ONE DEADLINE, OURS. The SDK's timeout trio does not bound what it looks
-      // like it bounds: `_resetTimeout` runs ONLY from the progress handler
-      // (shared/protocol.js:434-436) and compares elapsed time at that instant,
-      // so a progress notification arriving just under `maxTotalTimeout` grants
-      // a FULL fresh `timeout` window. With both set to 120s the real ceiling
-      // is ~240s, and a tenant server emitting progress on a timer picks the
-      // moment. Round 8 caught that; round 7's fix (setting maxTotalTimeout)
-      // did not actually fix it.
-      //
-      // Rather than tune three interacting knobs until they happen to compose,
-      // this drops all of them and keeps a single wall clock: an AbortSignal
-      // driven by setTimeout, progress-independent by construction. One
-      // authority for "how long may a tenant hold this connection", which is
-      // also the only version of this that can be tested without racing the
-      // SDK's internals.
-      const deadline = new AbortController();
-      const timer = setTimeout(
-        () => deadline.abort(new Error("mcp_upstream_call_timeout")),
-        requestTimeoutMs,
+      return client.request(
+        { method: "tools/call", params: request.params },
+        CallToolResultSchema,
+        {
+          // Downstream cancellation, forwarded. See the LIMITATIONS note in the
+          // module header: this rejects the pending call but does NOT promptly
+          // close the upstream socket, which is deferred work, not a claim.
+          signal: extra.signal,
+          // SET THIS EXPLICITLY. Omitting it does not mean "no timeout" — it
+          // means `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`
+          // (shared/protocol.js:712), i.e. a 60s cap firing at half the
+          // harness's own 120s budget, so a tool legitimately running 60-120s
+          // would die here for no stated reason.
+          //
+          // `resetTimeoutOnProgress` is deliberately NOT set. That flag is what
+          // makes this subsystem subtle: it lets a progress notification reset
+          // the timer, and combined with `maxTotalTimeout` the real ceiling
+          // becomes ~2x the budget at a moment the tenant chooses. Left off,
+          // this is a plain timer nothing upstream can push back.
+          timeout: UPSTREAM_REQUEST_TIMEOUT_MS,
+        },
       );
-      // Either the downstream giving up or our wall expiring ends the call.
-      const signal = AbortSignal.any([extra.signal, deadline.signal]);
-
-      try {
-        return await client.request(
-          { method: "tools/call", params: request.params },
-          CallToolResultSchema,
-          {
-            // Cancellation must reach upstream, and this signal carries BOTH
-            // reasons: the downstream giving up, and our deadline expiring.
-            // Without it a tenant call runs on with nobody reading the answer.
-            //
-            signal,
-            // SET THIS EXPLICITLY. Omitting it does not mean "no timeout" — it
-            // means `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`
-            // (shared/protocol.js:712), i.e. the hidden 60s cap round 6 found,
-            // firing at half the budget. Round 9 caught me removing the option
-            // and reintroducing exactly the bug I had fixed.
-            //
-            // What made round 8's version unsound was `resetTimeoutOnProgress`,
-            // not this. Left off (the default), this is a plain timer that no
-            // amount of upstream progress can push back, so it agrees with the
-            // wall above instead of fighting it. `maxTotalTimeout` is then
-            // meaningless and stays unset.
-            timeout: requestTimeoutMs,
-            // Progress notifications are the only feedback a long tool gives.
-            // Swallowing them makes a working call look hung.
-            onprogress: progressToken === undefined ? undefined : (progress) => {
-              void extra.sendNotification({
-                method: "notifications/progress",
-                params: { ...progress, progressToken },
-              }).catch(() => {});
-            },
-          },
-        );
-      } finally {
-        clearTimeout(timer);
-      }
     });
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
