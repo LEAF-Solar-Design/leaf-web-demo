@@ -237,8 +237,12 @@ describe("POST /author (build route) - hermetic e2e", () => {
   });
 
   it("rejects an author runner that changes a file outside the submitted package", async () => {
+    const previousDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
     const runner = new TamperingAgentRunner((input, result) => {
       writeFileSync(join(input.repoDir, "unexpected.txt"), "smuggled edit\n", "utf8");
+      // Reproduce the live stage boundary by making Git evaluate this exact
+      // temporary worktree as if it were owned by a different UID.
+      process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
       return result;
     });
     const loop = new AuthorLoop({
@@ -248,8 +252,16 @@ describe("POST /author (build route) - hermetic e2e", () => {
       agentRunner: runner,
     });
 
-    await expect(loop.buildLegacyAuthOff("tenant-tamper", "count entities per layer"))
-      .rejects.toThrow("changed files outside the submitted tool package");
+    try {
+      await expect(loop.buildLegacyAuthOff("tenant-tamper", "count entities per layer"))
+        .rejects.toThrow("changed files outside the submitted tool package");
+    } finally {
+      if (previousDifferentOwner === undefined) {
+        delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      } else {
+        process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousDifferentOwner;
+      }
+    }
 
     const repoDir = tenantRepo.lastCheckout!.dir;
     expect(git(repoDir, ["log", `--author=${HARNESS_IDENTITY.email}`, "--format=%H"]).trim())

@@ -215,15 +215,15 @@ export class AuthorLoop {
       throw new AuthorLoopError("authored manifest does not match the validated tool", 422);
     }
 
-    // EFS checkouts can retain the access-point UID even though the harness can
-    // read and write them. Bind trust to this exact resolved checkout for this
-    // read-only command. Never use a wildcard safe.directory entry.
+    // The isolated author boundary can make Git observe a different owner for
+    // this worktree. Reset inherited trust, then bind this command to only the
+    // exact resolved checkout. Never use a wildcard safe.directory entry.
     const resolvedRepoDir = realpathSync(repoDir).replaceAll("\\", "/");
     const status = execFileSync(
       "git",
       [
-        "-c",
-        `safe.directory=${resolvedRepoDir}`,
+        "-c", "safe.directory=",
+        "-c", `safe.directory=${resolvedRepoDir}`,
         "-C",
         resolvedRepoDir,
         "status",

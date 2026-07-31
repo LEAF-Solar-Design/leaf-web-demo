@@ -4,7 +4,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubSecrets } from "./envScrub.js";
@@ -68,7 +68,11 @@ export class TenantChangeRepo {
 
   private git(args: string[], cwd = this.opts.repoDir): string {
     try {
-      return execFileSync("git", args, {
+      const safeDirectories = new Set([cwd, this.opts.repoDir].map((dir) =>
+        realpathSync(dir).replaceAll("\\", "/")));
+      const safeConfig = ["-c", "safe.directory="];
+      for (const dir of safeDirectories) safeConfig.push("-c", `safe.directory=${dir}`);
+      return execFileSync("git", [...safeConfig, ...args], {
         cwd,
         encoding: "utf8",
         env: scrubSecrets(process.env),
@@ -82,11 +86,7 @@ export class TenantChangeRepo {
   /** Read a ref without treating an absent ref as an error. */
   readRef(ref: string): string | null {
     try {
-      return execFileSync("git", ["rev-parse", "--verify", "--quiet", ref], {
-        cwd: this.opts.repoDir,
-        encoding: "utf8",
-        env: scrubSecrets(process.env),
-      }).trim() || null;
+      return this.git(["rev-parse", "--verify", "--quiet", ref]).trim() || null;
     } catch {
       return null;
     }
