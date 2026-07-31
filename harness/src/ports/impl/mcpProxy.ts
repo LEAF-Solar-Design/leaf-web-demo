@@ -131,7 +131,12 @@ export async function proxyTenantMcpServer(
   // to change what the model is told a tool accepts. Passing the upstream's own
   // listing through untouched cannot drift from it.
   try {
-    instance.server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools());
+    // FORWARD THE PARAMS, including the pagination cursor. Calling listTools()
+    // bare made every page request return page one, so a downstream client
+    // paging through a large tenant catalogue would loop on the first page
+    // forever. Round 3 caught this; it is a product bug, not a test gap.
+    instance.server.setRequestHandler(ListToolsRequestSchema, async (request) =>
+      client.listTools(request.params));
     instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
       client.callTool(request.params));
   } catch (error) {

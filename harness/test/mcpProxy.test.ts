@@ -102,14 +102,16 @@ describe("guardedFetch re-checks the destination before every request", () => {
 describe("proxyTenantMcpServer end to end", () => {
   const rpc = (id: unknown, result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
 
-  async function upstreamMcp(tools: Array<{ name: string; description: string }>) {
+  async function upstreamMcp(tools: Array<Record<string, unknown>>) {
     const calls: string[] = [];
+    const params: Array<Record<string, unknown>> = [];
     const server = await listen((req, res) => {
       let body = "";
       req.on("data", (c) => { body += c; });
       req.on("end", () => {
         const message = JSON.parse(body || "{}");
         calls.push(message.method);
+        if (message.params) params.push(message.params);
         const send = (result: unknown) => {
           res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, result));
         };
@@ -121,19 +123,33 @@ describe("proxyTenantMcpServer end to end", () => {
           });
         }
         if (message.method === "tools/list") {
-          return send({ tools: tools.map((t) => ({ ...t, inputSchema: { type: "object" } })) });
+          // Paginated: page one carries nextCursor, page two is reached only if
+          // the proxy forwards the cursor.
+          return message.params?.cursor === "page-2"
+            ? send({ tools: [{ name: "omega", description: "second page", inputSchema: { type: "object" } }] })
+            : send({ tools, nextCursor: "page-2" });
         }
         if (message.method === "tools/call") {
-          return send({ content: [{ type: "text", text: `called ${message.params?.name}` }] });
+          if (message.params?.name === "explode") {
+            return send({ content: [{ type: "text", text: "upstream refused" }], isError: true });
+          }
+          return send({
+            content: [{ type: "text", text: `called ${message.params?.name}` }],
+            structuredContent: { echo: message.params?.arguments },
+          });
         }
         res.writeHead(202).end();          // notifications
       });
     });
-    return { ...server, calls };
+    return { ...server, calls, params };
   }
 
   it("connects, and forwards the upstream tool listing verbatim", async () => {
-    const upstream = await upstreamMcp([{ name: "alpha", description: "an upstream tool" }]);
+    const upstream = await upstreamMcp([{
+      name: "alpha",
+      description: "an upstream tool",
+      inputSchema: { type: "object", properties: { depth: { type: "number" } }, required: ["depth"] },
+    }]);
     const proxied = await proxyTenantMcpServer(
       { name: "tenant-server", url: upstream.url }, () => {});
 
@@ -150,12 +166,34 @@ describe("proxyTenantMcpServer end to end", () => {
     const downstream = new Client({ name: "downstream", version: "1.0.0" });
     await downstream.connect(clientSide);
 
+    // The whole tool definition must survive, not just its name: a proxy that
+    // rebuilt definitions instead of forwarding them would pass a name check
+    // while silently changing what the model is told a tool accepts.
     const listed = await downstream.listTools();
-    expect(listed.tools.map((tool) => tool.name)).toEqual(["alpha"]);
-    expect(listed.tools[0]!.description).toBe("an upstream tool");
+    expect(listed.tools).toEqual([expect.objectContaining({
+      name: "alpha",
+      description: "an upstream tool",
+      inputSchema: { type: "object", properties: { depth: { type: "number" } }, required: ["depth"] },
+    })]);
+    expect(listed.nextCursor).toBe("page-2");
 
-    const called = await downstream.callTool({ name: "alpha", arguments: {} });
+    // PAGINATION: the cursor must reach upstream, or page two repeats page one.
+    const page2 = await downstream.listTools({ cursor: "page-2" });
+    expect(page2.tools.map((tool) => tool.name)).toEqual(["omega"]);
+    expect(upstream.params.some((p) => p.cursor === "page-2")).toBe(true);
+
+    // ARGUMENTS: nested and non-empty, compared exactly at the upstream, so
+    // argument loss or mangling cannot pass.
+    const args = { depth: 3, nested: { flag: true, list: [1, "two"] } };
+    const called = await downstream.callTool({ name: "alpha", arguments: args });
     expect(JSON.stringify(called.content)).toContain("called alpha");
+    expect(called.structuredContent).toEqual({ echo: args });
+    const callParams = upstream.params.find((p) => p.name === "alpha");
+    expect(callParams?.arguments).toEqual(args);
+
+    // ERRORS: isError must survive rather than being flattened into success.
+    const failed = await downstream.callTool({ name: "explode", arguments: {} });
+    expect(failed.isError).toBe(true);
 
     // The upstream really received both, rather than the proxy answering itself.
     expect(upstream.calls).toContain("tools/list");

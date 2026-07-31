@@ -57,7 +57,7 @@ describe("transitive HTTP dependency exposure", () => {
     // A walk that cannot resolve an edge has not proved anything about it.
     expect(closure.unresolved).toEqual([]);
     // Guards against the walk silently collapsing to a handful of files again.
-    expect(closure.files).toBeGreaterThan(100);
+    expect(closure.files).toBeGreaterThan(200);
     expect(closure.offenders).toEqual([]);
   });
 });
