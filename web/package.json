@@ -13,6 +13,7 @@
     "proof:fixture": "playwright test --workers=1 e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs e2e/unified-walk.spec.mjs e2e/converse-session-controller.spec.mjs e2e/negative/denial-paths.spec.mjs e2e/reduced-motion.spec.mjs e2e/session-gate.spec.mjs e2e/responsive-keyboard.spec.mjs e2e/accessibility-surface.spec.mjs e2e/keyboard-ladder.spec.mjs e2e/drawer-focus.spec.mjs e2e/viewer-controls.spec.mjs e2e/natural-language-routing.spec.mjs e2e/trust-notices.spec.mjs e2e/ops-surface.spec.mjs e2e/structured-failure-surface.spec.mjs e2e/provider-lifetime.spec.mjs e2e/post-write-refresh.spec.mjs e2e/controllers/session/session-controller.spec.mjs e2e/demand-capture.spec.mjs e2e/hp01-first-run-coach.spec.mjs",
     "proof:local": "playwright test --config playwright.local.config.mjs",
     "proof:version-restore": "playwright test e2e/local/version-restore.spec.mjs --config playwright.config.mjs",
+    "proof:author-quota-gate": "playwright test e2e/author-quota-gate.spec.mjs --config playwright.config.mjs",
     "proof:local:managed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_unified_local_proof.ps1",
     "proof:guest": "playwright test --config playwright.guest.config.mjs",
     "proof:guest:managed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_unified_local_proof.ps1 -Mode guest",
