@@ -5,7 +5,7 @@ import { runMock } from '../src/mock/mockEngine.js'
 import * as versions from '../src/mock/mockVersions.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
-  createRunSubmissionRequest, dismissRunIntent, stageRunIntent,
+  createRunSubmissionRequest, dismissRunIntent, prepareCatalogRunParams, stageRunIntent,
 } from '../src/runIntent.js'
 
 function assert(condition, message) {
@@ -201,5 +201,24 @@ assert(runHeaders['Idempotency-Key'] === 'catalog-session:1',
   'canonical request omitted the confirmed intent idempotency key')
 assert(runBody.catalog_digest === `sha256:${'c'.repeat(64)}`,
   'canonical request omitted the server-issued catalog digest')
+
+const legacyContext = createCatalogRunContext({
+  tenantId: 'tenant-legacy',
+  drawingState: { drawing_id: 'demo', version: 4, head: 4, latest: 4 },
+  fallbackDrawingId: 'demo',
+})
+const legacyParams = prepareCatalogRunParams(writeTool, { handle: target }, legacyContext)
+const legacyRequest = createRunSubmissionRequest(
+  writeTool.name,
+  legacyParams,
+  legacyContext.drawingId,
+  { dwgVersion: legacyContext.drawingVersion },
+)
+assert(legacyRequest.body.dwg === 'demo',
+  'legacy /app request did not target the mapped store drawing')
+assert(legacyRequest.body.dwg_version === 4,
+  'legacy /app request omitted the current drawing head')
+assert(legacyRequest.body.params.drawing_id === 'demo',
+  'legacy /app write params were not bound to the mapped store drawing')
 
 console.log('CATALOG_CONFIRMATION_OK')

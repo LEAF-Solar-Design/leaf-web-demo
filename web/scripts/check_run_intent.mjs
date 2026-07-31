@@ -61,6 +61,10 @@ const authoredWrite = {
   },
 }
 assert(
+  prepareCatalogRunParams(tool, { handle: '9462' }, context).drawing_id === 'drawing-1',
+  'a drawing.write tool must be bound to the active drawing even when its schema omits drawing_id',
+)
+assert(
   prepareCatalogRunParams(authoredWrite, {}, context).drawing_id === 'drawing-1',
   'a drawing.write schema default must not redirect a run away from the active drawing',
 )
