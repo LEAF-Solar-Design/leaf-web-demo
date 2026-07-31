@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 function sourceFiles(root: string): string[] {
@@ -31,65 +32,32 @@ describe("transitive HTTP dependency exposure", () => {
   });
 
   it("proves server/mcp.js cannot reach Hono, which is why importing it is allowed", () => {
-    // The narrowing above is only safe while this holds, so it is CHECKED.
-    // Round 1 was right that the first version of this walker was too weak: it
-    // followed only relative `from` imports, so a dynamic import, a
-    // side-effect import, or a hop into another PACKAGE could have carried a
-    // route it never saw. All three are followed now.
-    const modules = join(process.cwd(), "node_modules");
-    const seen = new Set<string>();
-    const bare = new Set<string>();
-    const offenders: string[] = [];
+    // The narrowing above is only safe while this holds, so it is CHECKED — and
+    // the check was wrong TWICE before it was right, which is worth recording
+    // because a security guard that quietly under-walks is worse than none:
+    //   r1: followed only relative `from` imports.
+    //   r2: discarded package SUBPATHS, so @modelcontextprotocol/sdk/validation/ajv
+    //       resolved to a nonexistent index and the walk stopped silently.
+    //   then: createRequire().resolve() is COMMONJS resolution, so it walked
+    //       dist/cjs/** while this ESM project loads dist/esm/** — the guard was
+    //       proving something about a copy that never runs. Caught by injecting
+    //       Hono into the ESM twin and watching the test stay green.
+    // The walk therefore runs in a real node subprocess using node's own ESM
+    // resolver, which is the only resolver that sees what actually loads.
+    const script = join(process.cwd(), "test/fixtures/esm-import-closure.mjs");
+    const raw = execFileSync(process.execPath,
+      // The flag is REQUIRED: without it import.meta.resolve ignores the parent
+      // and returns wrong-but-existing-looking paths, which made the walk stop
+      // at 2 files while reporting zero unresolved edges. The script self-checks
+      // for this and reports it as an unresolved edge rather than a clean pass.
+      ["--experimental-import-meta-resolve", script, "@modelcontextprotocol/sdk/server/mcp.js", "hono"],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 120_000 });
+    const closure = JSON.parse(raw) as { files: number; unresolved: string[]; offenders: string[] };
 
-    const walk = (file: string): void => {
-      if (seen.has(file) || !existsSync(file)) return;
-      seen.add(file);
-      const text = readFileSync(file, "utf8");
-      if (/hono/i.test(text)) offenders.push(file);
-      // `from "x"`, bare `import "x"`, and `import("x")` alike.
-      const specifiers = [
-        ...[...text.matchAll(/from\s*["']([^"']+)["']/g)].map((m) => m[1]),
-        ...[...text.matchAll(/import\s*["']([^"']+)["']/g)].map((m) => m[1]),
-        ...[...text.matchAll(/import\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]),
-      ];
-      for (const specifier of specifiers) {
-        if (specifier.startsWith(".")) {
-          const resolved = join(dirname(file), specifier);
-          walk(resolved.endsWith(".js") ? resolved : `${resolved}.js`);
-        } else {
-          // A hop out of the package. Record the package name; its own graph is
-          // judged by dependency NAME below, which is what would reveal Hono
-          // arriving through a future SDK update.
-          bare.add(specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : specifier.split("/")[0]);
-        }
-      }
-    };
-    walk(join(modules, "@modelcontextprotocol/sdk/dist/esm/server/mcp.js"));
-
-    // Follow each bare hop INTO ITS FILES, not just its manifest. The
-    // distinction is the whole finding: the MCP SDK package has always DEPENDED
-    // on Hono (its server transports use it), so a manifest-level check fails
-    // on a true-but-irrelevant fact. What the guard actually asks is whether
-    // importing server/mcp.js ever LOADS Hono, and only the file graph answers
-    // that. A first version of this assertion got it wrong and said so loudly,
-    // which is the correct failure mode for a security guard.
-    const entryOf = (name: string): string | null => {
-      const manifest = join(modules, name, "package.json");
-      if (!existsSync(manifest)) return null;
-      const pkg = JSON.parse(readFileSync(manifest, "utf8"));
-      const candidate = pkg.module
-        ?? (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : pkg.exports?.["."]?.import?.default ?? pkg.exports?.["."]?.import)
-        ?? pkg.main;
-      return typeof candidate === "string" ? join(modules, name, candidate) : null;
-    };
-    for (const name of bare) {
-      const entry = entryOf(name);
-      if (entry) walk(entry);
-    }
-
-    expect(seen.size).toBeGreaterThan(1);
-    expect(offenders).toEqual([]);
-    // Bare hops were followed into their own files, so `seen` spans packages.
-    expect(bare.size).toBeGreaterThan(0);
+    // A walk that cannot resolve an edge has not proved anything about it.
+    expect(closure.unresolved).toEqual([]);
+    // Guards against the walk silently collapsing to a handful of files again.
+    expect(closure.files).toBeGreaterThan(100);
+    expect(closure.offenders).toEqual([]);
   });
 });

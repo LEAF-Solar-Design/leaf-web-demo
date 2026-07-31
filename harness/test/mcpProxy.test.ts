@@ -12,6 +12,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+
 import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
 const servers: Server[] = [];
@@ -134,10 +137,31 @@ describe("proxyTenantMcpServer end to end", () => {
     const proxied = await proxyTenantMcpServer(
       { name: "tenant-server", url: upstream.url }, () => {});
 
-    // THE assertion round 1 needed: the function returns something at all.
     expect(proxied).not.toBeNull();
     expect(proxied!.name).toBe("tenant-server");
     expect(upstream.calls).toContain("initialize");
+
+    // ROUND 2: asserting the proxy merely RETURNS left the forwarding handlers
+    // unexecuted — deleting tools/list and tools/call would still have passed.
+    // So drive it from the DOWNSTREAM side, the way the Agent SDK would, and
+    // make the upstream prove it saw the forwarded calls.
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    const listed = await downstream.listTools();
+    expect(listed.tools.map((tool) => tool.name)).toEqual(["alpha"]);
+    expect(listed.tools[0]!.description).toBe("an upstream tool");
+
+    const called = await downstream.callTool({ name: "alpha", arguments: {} });
+    expect(JSON.stringify(called.content)).toContain("called alpha");
+
+    // The upstream really received both, rather than the proxy answering itself.
+    expect(upstream.calls).toContain("tools/list");
+    expect(upstream.calls).toContain("tools/call");
+
+    await downstream.close();
     await proxied!.close();
   });
 
