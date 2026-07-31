@@ -811,6 +811,13 @@ def build_suites() -> List[Suite]:
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
               [_npm(), "run", "proof:version-restore"], None),
+        # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM §17). The
+        # only thing standing between that refusal and a red "Couldn't author
+        # the tool" is api.js tagging quota_kind=="daily_author"; nothing else
+        # covered that, so a rename on either side would have shipped silently.
+        Suite("web-author-quota-gate",
+              "web daily authoring 429 renders a calm QuotaGate", "script", WEB,
+              [_npm(), "run", "proof:author-quota-gate"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
