@@ -155,8 +155,7 @@ def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
 
     assert status == 502
     assert "authority-aware guards passed" in env["error"]["message"]
-    assert marker_reads
-    assert set(marker_reads) == {(tenant, drawing)}
+    assert marker_reads == [(tenant, drawing)]
 
 
 def test_live_write_marker_probe_uses_selected_authority(monkeypatch):
@@ -268,7 +267,8 @@ def test_live_write_uses_postgres_manifest_with_filesystem_blobs(
     assert env["result"]["new_version"] == {
         "drawing_id": drawing, "version": 2, "parent": 1,
     }
-    assert marker_reads == [(tenant, drawing)]
+    assert marker_reads
+    assert set(marker_reads) == {(tenant, drawing)}
     assert da.submissions == 1
     assert store.load_manifest(backend, tenant, drawing)["head"] == 2
 
