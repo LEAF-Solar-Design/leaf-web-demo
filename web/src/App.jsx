@@ -567,9 +567,9 @@ export default function App() {
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
-    const seat = (d) => {
+    const seat = (d, options = {}) => {
       if (!alive) return
-      seatIntake(d)
+      seatIntake(d, options)
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -579,9 +579,22 @@ export default function App() {
       return () => { alive = false }
     }
     getSession(mock, DRAWING_SOURCE)
-      .then(({ intake: d, tenant: t, tier: ti, org: o }) => {
+      .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
-        seat(d); setTenant(t); setTier(ti); setOrg(o)
+        let drawingSummary = null
+        if (!mock) {
+          try {
+            drawingSummary = await getDrawingVersions(false, DRAWING_SOURCE)
+          } catch {
+            // Session intake remains usable when version history is temporarily
+            // unavailable. Write actions stay unpinned and therefore fail closed.
+          }
+        }
+        if (!alive) return
+        seat(d, drawingSummary
+          ? { drawingId: DRAWING_SOURCE, drawingState: drawingSummary }
+          : {})
+        setTenant(t); setTier(ti); setOrg(o)
       })
       .catch((e) => {
         if (!alive) return
@@ -1249,11 +1262,23 @@ export default function App() {
   const onPublishAuthor = useCallback(async (staged) => {
     try {
       const res = await publishStagedAuthor(mock, staged)
-      const tool = res.tool || staged.tool
+      let tool = res.tool || staged.tool
+      if (!mock) {
+        // The staged object predates publication and has no server-issued
+        // per-tool catalog digest. Resolve the published flat-catalog record
+        // before exposing "Run it now", so the first confirmation is pinned to
+        // the exact definition that POST /api/run will resolve.
+        const refreshedTools = await getTools(false)
+        const publishedTool = refreshedTools.find((candidate) => candidate.name === tool.name)
+        if (!publishedTool?.catalog_digest) {
+          throw new Error('The tool was published, but its runnable catalog record is not ready. Refresh the catalog and try again.')
+        }
+        tool = publishedTool
+      }
       upsertTool(tool)
       // Re-group the catalog so the new tool lands in "Custom authored tools"
       // (visible re-fetch of the grouped capabilities).
-      loadCatalog()
+      await loadCatalog()
       // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
       // it is visible even when the author section is collapsed / scrolled away.
       showToast({

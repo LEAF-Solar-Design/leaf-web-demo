@@ -74,4 +74,18 @@ describe('App.jsx wiring', () => {
     assert.match(promptBox, /if \(!imageAttachmentsEnabled\)/)
     assert.match(promptBox, /Image paste is available in the assistant reply box/)
   })
+
+  it('waits for the authoritative published catalog tool before exposing it to Run it now', () => {
+    assert.match(
+      stripped,
+      /refreshedTools\s*=\s*await getTools\(false\)[\s\S]*publishedTool\?\.catalog_digest[\s\S]*upsertTool\(tool\)[\s\S]*await loadCatalog\(\)/,
+    )
+  })
+
+  it('seats live session intake with the durable drawing version summary', () => {
+    assert.match(
+      stripped,
+      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*DRAWING_SOURCE\)[\s\S]*drawingId:\s*DRAWING_SOURCE,\s*drawingState:\s*drawingSummary/,
+    )
+  })
 })
