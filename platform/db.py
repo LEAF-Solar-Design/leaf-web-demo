@@ -566,6 +566,8 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "broker": {
         "broker_usage_ledger_tenant_ts_idx": _catalog_contract(
             "broker_usage_ledger", "(tenant_id, ts)"),
+        "broker_usage_ledger_ts_idx": _catalog_contract(
+            "broker_usage_ledger", "(ts)"),
         "broker_run_admissions_tenant_state_idx": _catalog_contract(
             "broker_run_admissions", "(tenant_id, state)"),
         "broker_aps_slots_held_idx": _catalog_contract(
