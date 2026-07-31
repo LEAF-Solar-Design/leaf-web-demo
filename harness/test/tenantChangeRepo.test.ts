@@ -123,4 +123,36 @@ describe("TenantChangeRepo", () => {
     changes.cleanupWorktree(first);
     changes.cleanupWorktree(second);
   });
+
+  it("uses only command-scoped trust for a foreign-owned bare repo and worktree", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const isolatedGlobalConfig = join(root, "isolated-global.gitconfig");
+    writeFileSync(isolatedGlobalConfig, "", "utf8");
+    const previousOwnerTest = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+    process.env.GIT_CONFIG_GLOBAL = isolatedGlobalConfig;
+
+    let staged = "";
+    try {
+      const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+      const created = changes.create(CHANGE_A, base);
+      writeFileSync(join(created.dir, "foreign-owned.txt"), "safe\n", "utf8");
+      staged = changes.stageCommit(created, "stage foreign-owned worktree");
+      changes.cleanupWorktree(created);
+
+      const resumed = changes.createOrResume(CHANGE_A, base);
+      expect(resumed.stagedSha).toBe(staged);
+      expect(changes.publishToMain(resumed, base)).toBe(staged);
+      changes.cleanupWorktree(resumed);
+    } finally {
+      if (previousOwnerTest === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+      else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousOwnerTest;
+      if (previousGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+    }
+
+    expect(readFileSync(isolatedGlobalConfig, "utf8")).toBe("");
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(staged);
+  });
 });
