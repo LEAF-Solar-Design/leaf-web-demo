@@ -34,7 +34,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   CallToolRequestSchema,
+  CallToolResultSchema,
   ListToolsRequestSchema,
+  ListToolsResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpBridge.js";
@@ -131,14 +133,33 @@ export async function proxyTenantMcpServer(
   // to change what the model is told a tool accepts. Passing the upstream's own
   // listing through untouched cannot drift from it.
   try {
+    // `client.request(...)`, NOT `client.listTools()` / `client.callTool()`.
+    // Those are typed helpers that apply CLIENT-SIDE POLICY on top of the wire
+    // call, and policy is the one thing this module must not add:
+    //
+    //   - callTool REFUSES a tool whose `execution.taskSupport` is "required",
+    //     throwing InvalidRequest (-32600) locally. The refusal is armed by the
+    //     listTools we forward just above (it populates the client's cache), so
+    //     a tenant server offering a task-required tool would list perfectly
+    //     and then fail EVERY call, without one byte reaching upstream.
+    //   - callTool also re-validates `structuredContent` against the tool's
+    //     outputSchema and throws when a tool declaring one returns none. That
+    //     turns an upstream RESPONSE into a proxy-side EXCEPTION, so the model
+    //     never sees what the tenant server actually said.
+    //
+    // The real downstream client applies both of those itself, where they
+    // belong. Doing it here too is double enforcement that can only subtract.
+    // The result schemas are `z.looseObject`, so unknown fields survive the
+    // parse and forwarding stays lossless.
+    //
     // FORWARD THE PARAMS, including the pagination cursor. Calling listTools()
     // bare made every page request return page one, so a downstream client
     // paging through a large tenant catalogue would loop on the first page
     // forever. Round 3 caught this; it is a product bug, not a test gap.
     instance.server.setRequestHandler(ListToolsRequestSchema, async (request) =>
-      client.listTools(request.params));
+      client.request({ method: "tools/list", params: request.params }, ListToolsResultSchema));
     instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      client.callTool(request.params));
+      client.request({ method: "tools/call", params: request.params }, CallToolResultSchema));
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
     // live upstream client with no owner. Close it before giving up.

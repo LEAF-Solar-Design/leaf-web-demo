@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Tenant-facing design-time author loop on the Anthropic Agent SDK (NL prompt -> deterministic tool package -> register). Design-time only: registered tools run with ZERO LLM.",
   "engines": {
-    "node": ">=18.18"
+    "node": ">=20"
   },
   "scripts": {
     "test": "node --import ./test/enableAuthoredExecution.mjs ./node_modules/vitest/vitest.mjs run --testTimeout=20000 --hookTimeout=30000",

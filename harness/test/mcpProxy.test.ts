@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
@@ -102,6 +103,16 @@ describe("guardedFetch re-checks the destination before every request", () => {
 describe("proxyTenantMcpServer end to end", () => {
   const rpc = (id: unknown, result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
 
+  // Page two carries description and _meta, not just a name. Round 5 (NIT):
+  // the pagination assertion compared `tools.map(t => t.name)`, so a proxy that
+  // reached page two and then dropped every other field on it stayed green.
+  const PAGE_TWO_TOOL = {
+    name: "omega",
+    description: "second page",
+    inputSchema: { type: "object" as const },
+    _meta: { "tenant/page": 2 },
+  };
+
   async function upstreamMcp(tools: Array<Record<string, unknown>>) {
     const calls: string[] = [];
     const params: Array<Record<string, unknown>> = [];
@@ -126,7 +137,7 @@ describe("proxyTenantMcpServer end to end", () => {
           // Paginated: page one carries nextCursor, page two is reached only if
           // the proxy forwards the cursor.
           return message.params?.cursor === "page-2"
-            ? send({ tools: [{ name: "omega", description: "second page", inputSchema: { type: "object" } }] })
+            ? send({ tools: [PAGE_TWO_TOOL] })
             : send({ tools, nextCursor: "page-2" });
         }
         if (message.method === "tools/call") {
@@ -187,8 +198,10 @@ describe("proxyTenantMcpServer end to end", () => {
     expect(listed.nextCursor).toBe("page-2");
 
     // PAGINATION: the cursor must reach upstream, or page two repeats page one.
+    // Compared WHOLE, not by name: reaching page two and then flattening it is
+    // the same loss as never reaching it.
     const page2 = await downstream.listTools({ cursor: "page-2" });
-    expect(page2.tools.map((tool) => tool.name)).toEqual(["omega"]);
+    expect(page2.tools).toEqual([PAGE_TWO_TOOL]);
     expect(upstream.params.some((p) => p.cursor === "page-2")).toBe(true);
 
     // ARGUMENTS: nested and non-empty, compared exactly at the upstream, so
@@ -200,13 +213,72 @@ describe("proxyTenantMcpServer end to end", () => {
     const callParams = upstream.params.find((p) => p.name === "alpha");
     expect(callParams?.arguments).toEqual(args);
 
-    // ERRORS: isError must survive rather than being flattened into success.
+    // ERRORS: isError must survive rather than being flattened into success —
+    // AND so must the message. Round 5: asserting only the boolean let a proxy
+    // drop the upstream's explanation, which is the part the model reads to
+    // correct itself; a bare "it failed" gives it nothing to act on.
     const failed = await downstream.callTool({ name: "explode", arguments: {} });
     expect(failed.isError).toBe(true);
+    expect(failed.content).toEqual([{ type: "text", text: "upstream refused" }]);
 
     // The upstream really received both, rather than the proxy answering itself.
     expect(upstream.calls).toContain("tools/list");
     expect(upstream.calls).toContain("tools/call");
+
+    await downstream.close();
+    await proxied!.close();
+  });
+
+  it("forwards a task-required tool instead of refusing it locally", async () => {
+    // ROUND 5, and this is a PRODUCT bug rather than a test gap. The proxy used
+    // the SDK's typed `client.callTool()` helper, which refuses any tool whose
+    // `execution.taskSupport` is "required" by throwing InvalidRequest (-32600)
+    // WITHOUT sending anything upstream.
+    //
+    // The trap is that the refusal is armed by the proxy's own forwarded
+    // listTools: that call populates the client's task-tool cache, so the tool
+    // lists perfectly and then every call to it fails. A tenant server offering
+    // one would look healthy and be entirely unusable.
+    //
+    // THE TWO HANDLERS ARE COUPLED, which matters if you ever falsify this:
+    // reverting callTool alone leaves this test GREEN, because the raw
+    // tools/list forward never populates the cache the refusal reads. It takes
+    // BOTH typed helpers to reproduce. I got that wrong once and briefly had a
+    // vacuous test that proved nothing.
+    const upstream = await upstreamMcp([{
+      name: "slow-render",
+      description: "a tool the upstream runs as a task",
+      inputSchema: { type: "object" as const },
+      execution: { taskSupport: "required" },
+    }]);
+    const proxied = await proxyTenantMcpServer({ name: "tasky", url: upstream.url }, () => {});
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    // List first — this is what armed the local refusal.
+    const listed = await downstream.listTools();
+    expect(listed.tools[0]?.execution).toEqual({ taskSupport: "required" });
+
+    // `downstream.request(...)`, not `downstream.callTool(...)`, and the reason
+    // is worth writing down: the DOWNSTREAM client enforces the very same rule.
+    // Going through its typed helper throws -32600 in the test process before
+    // the proxy is ever consulted, so that route cannot tell a fixed proxy from
+    // a broken one. A raw request is exactly what arrives on the wire, so it
+    // isolates the only behaviour this module controls.
+    //
+    // Be precise about what this fixes: the proxy no longer adds its OWN
+    // refusal. A downstream caller that insists on `callTool()` for a
+    // task-required tool still gets refused by its own client, correctly — the
+    // MCP answer there is callToolStream. This test pins that the proxy stopped
+    // being a second, invisible source of that failure.
+    const result = await downstream.request(
+      { method: "tools/call", params: { name: "slow-render", arguments: {} } },
+      CallToolResultSchema,
+    );
+    expect(JSON.stringify(result.content)).toContain("called slow-render");
+    expect(upstream.params.some((p) => p.name === "slow-render")).toBe(true);
 
     await downstream.close();
     await proxied!.close();
