@@ -369,6 +369,18 @@ export async function provisionAcceptanceDrawing(
   return drawingId
 }
 
+export async function provisionAcceptanceDrawings(
+  config,
+  sourceBytes,
+  { provisionImpl = provisionAcceptanceDrawing } = {},
+) {
+  const drawingIds = []
+  for (const tenant of config.tenants) {
+    drawingIds.push(await provisionImpl(config, tenant, sourceBytes))
+  }
+  return drawingIds
+}
+
 export async function waitForTerminalJob(
   config,
   tenant,
@@ -1239,9 +1251,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (args.execute) {
       const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../data/rooftop_demo.dwg')
       const sourceBytes = readFileSync(sourcePath)
-      const drawingIds = await Promise.all(
-        config.tenants.map((tenant) => provisionAcceptanceDrawing(config, tenant, sourceBytes)),
-      )
+      const drawingIds = await provisionAcceptanceDrawings(config, sourceBytes)
       config.tenants = config.tenants.map((tenant, index) => ({
         ...tenant,
         drawingId: drawingIds[index],
