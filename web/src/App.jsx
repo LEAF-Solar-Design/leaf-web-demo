@@ -587,7 +587,8 @@ export default function App() {
             drawingSummary = await getDrawingVersions(false, DRAWING_SOURCE)
           } catch {
             // Session intake remains usable when version history is temporarily
-            // unavailable. Write actions stay unpinned and therefore fail closed.
+            // unavailable. The run-intent gate below refuses legacy writes until
+            // a durable drawing version is available.
           }
         }
         if (!alive) return
@@ -977,6 +978,15 @@ export default function App() {
       return
     }
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    if (
+      !mock
+      && isWrite
+      && catalogRunContextRef.current.projectId == null
+      && catalogRunContextRef.current.drawingVersion == null
+    ) {
+      setRunErr('The current drawing version is not ready. Refresh the drawing before running a write tool.')
+      return
+    }
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
     const prepared = prepareRunParams(catalogTool, decision.params)
     const staged = stageRunIntent(runIntentStateRef.current, {

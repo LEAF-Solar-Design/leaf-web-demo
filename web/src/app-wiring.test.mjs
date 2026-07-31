@@ -88,4 +88,11 @@ describe('App.jsx wiring', () => {
       /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*DRAWING_SOURCE\)[\s\S]*drawingId:\s*DRAWING_SOURCE,\s*drawingState:\s*drawingSummary/,
     )
   })
+
+  it('refuses a legacy write intent when no durable drawing version is loaded', () => {
+    assert.match(
+      stripped,
+      /isWrite[\s\S]*projectId\s*==\s*null[\s\S]*drawingVersion\s*==\s*null[\s\S]*current drawing version is not ready/,
+    )
+  })
 })
