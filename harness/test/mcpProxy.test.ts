@@ -12,7 +12,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { guardedFetch } from "../src/ports/impl/mcpProxy.js";
+import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
 const servers: Server[] = [];
 
@@ -43,7 +43,7 @@ describe("guardedFetch refuses redirects", () => {
     // IP literal as the host: skips the DNS re-check, so the ONLY thing that
     // can make this throw is the redirect refusal. With a fake hostname an
     // ENOTFOUND would satisfy rejects.toThrow() and prove nothing.
-    const fetchGuarded = guardedFetch("127.0.0.1", "127.0.0.1");
+    const fetchGuarded = guardedFetch("127.0.0.1");
     await expect(fetchGuarded(redirector.url, { method: "POST", body: "{}" })).rejects.toThrow();
 
     // THE assertion. Not "an option was set" — the redirect target was never
@@ -55,7 +55,7 @@ describe("guardedFetch refuses redirects", () => {
     const ok = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1", "127.0.0.1")(ok.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1")(ok.url, { method: "POST" });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
@@ -69,7 +69,7 @@ describe("guardedFetch re-checks the destination before every request", () => {
     // and the test exercises the same code path production takes.
     const upstream = await listen((_req, res) => { res.writeHead(200).end("{}"); });
     const url = upstream.url.replace("127.0.0.1", "localhost");
-    await expect(guardedFetch("127.0.0.1", "localhost")(url, { method: "POST" }))
+    await expect(guardedFetch("localhost")(url, { method: "POST" }))
       .rejects.toThrow(/became_unsafe/);
   });
 
@@ -79,7 +79,78 @@ describe("guardedFetch re-checks the destination before every request", () => {
     const upstream = await listen((_req, res) => {
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const response = await guardedFetch("127.0.0.1", "127.0.0.1")(upstream.url, { method: "POST" });
+    const response = await guardedFetch("127.0.0.1")(upstream.url, { method: "POST" });
     expect(response.status).toBe(200);
+  });
+});
+
+/**
+ * END TO END, and the reason this exists is worth stating: round 1 found that
+ * proxyTenantMcpServer ALWAYS threw — `new McpServer()` without the tools
+ * capability makes setRequestHandler reject — and four passing tests never
+ * noticed, because every one of them tested guardedFetch and none of them
+ * called the function that does the work.
+ *
+ * The upstream here is a hand-rolled JSON-RPC responder rather than the SDK's
+ * own server transport, deliberately: that transport is the one carrying the
+ * Hono exposure the dependencyExposure guard exists for, and a test has no
+ * business dragging it in to prove a point about the client side.
+ */
+describe("proxyTenantMcpServer end to end", () => {
+  const rpc = (id: unknown, result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
+
+  async function upstreamMcp(tools: Array<{ name: string; description: string }>) {
+    const calls: string[] = [];
+    const server = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        calls.push(message.method);
+        const send = (result: unknown) => {
+          res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, result));
+        };
+        if (message.method === "initialize") {
+          return send({
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "upstream", version: "1.0.0" },
+          });
+        }
+        if (message.method === "tools/list") {
+          return send({ tools: tools.map((t) => ({ ...t, inputSchema: { type: "object" } })) });
+        }
+        if (message.method === "tools/call") {
+          return send({ content: [{ type: "text", text: `called ${message.params?.name}` }] });
+        }
+        res.writeHead(202).end();          // notifications
+      });
+    });
+    return { ...server, calls };
+  }
+
+  it("connects, and forwards the upstream tool listing verbatim", async () => {
+    const upstream = await upstreamMcp([{ name: "alpha", description: "an upstream tool" }]);
+    const proxied = await proxyTenantMcpServer(
+      { name: "tenant-server", url: upstream.url }, () => {});
+
+    // THE assertion round 1 needed: the function returns something at all.
+    expect(proxied).not.toBeNull();
+    expect(proxied!.name).toBe("tenant-server");
+    expect(upstream.calls).toContain("initialize");
+    await proxied!.close();
+  });
+
+  it("returns null instead of throwing when the upstream is unreachable", async () => {
+    const dead = await listen((_req, res) => { res.destroy(); });
+    const diagnostics: string[] = [];
+    const proxied = await proxyTenantMcpServer(
+      { name: "down", url: dead.url }, (m) => diagnostics.push(m));
+
+    // A tenant server being down must degrade the turn, never fail it.
+    expect(proxied).toBeNull();
+    expect(diagnostics.join(" ")).toContain("did not connect");
+    // ...and the diagnostic carries the name only, never the URL or a token.
+    expect(diagnostics.join(" ")).not.toContain(dead.url);
   });
 });

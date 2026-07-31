@@ -13,8 +13,11 @@
  *
  * Neither is fixable while the SDK owns the connection. So this module takes it
  * over: it connects upstream itself, through a transport that refuses redirects
- * and dials only the address that was validated, and exposes the result as an
- * in-process MCP server. `McpServerConfig` accepts
+ * outright and re-checks the destination immediately before every request, and
+ * exposes the result as an in-process MCP server. Redirects are CLOSED;
+ * rebinding is NARROWED to a one-lookup window, not eliminated — see
+ * guardedFetch for why pinning the address is not available on node, and do
+ * not describe this as a completed rebinding defence. `McpServerConfig` accepts
  * `{ type: "sdk", instance }` alongside the URL form, so the Agent SDK never
  * sees a tenant-controlled URL at all — it talks to a local object.
  *
@@ -64,7 +67,7 @@ export type ProxiedMcpServer = { name: string; instance: McpServer; close: () =>
  * needs an undici Dispatcher with a custom `connect.lookup`, which keeps the
  * URL intact while choosing the address — the named follow-up on this PR.
  */
-export function guardedFetch(_address: string, originalHost: string): typeof fetch {
+export function guardedFetch(originalHost: string): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
     // An IP literal was already validated and cannot change under us; only a
@@ -90,12 +93,11 @@ export function guardedFetch(_address: string, originalHost: string): typeof fet
  */
 export async function proxyTenantMcpServer(
   config: McpServerConfig,
-  address: string,
   report: (message: string) => void = console.error,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
-    fetch: guardedFetch(address, url.hostname),
+    fetch: guardedFetch(url.hostname),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},
   });
 
@@ -112,15 +114,33 @@ export async function proxyTenantMcpServer(
   }
   clearTimeout(timer);
 
-  const instance = new McpServer({ name: config.name, version: "1.0.0" });
+  // `capabilities: { tools: {} }` is REQUIRED, not decorative: without it the
+  // first setRequestHandler below throws "Server does not support tools".
+  // Round 1 found that this function therefore never worked at all — my tests
+  // covered guardedFetch and never once called proxyTenantMcpServer, so a
+  // fatal runtime failure shipped behind four passing tests. The end-to-end
+  // test added alongside this fix is the actual remedy; the capability is just
+  // the line it exposed.
+  const instance = new McpServer(
+    { name: config.name, version: "1.0.0" },
+    { capabilities: { tools: {} } },
+  );
   // RAW forwarding through the low-level server, deliberately. Registering
   // tools through McpServer's typed helper would require translating each
   // upstream JSON Schema into zod and back, and every translation is a chance
   // to change what the model is told a tool accepts. Passing the upstream's own
   // listing through untouched cannot drift from it.
-  instance.server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools());
-  instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
-    client.callTool(request.params));
+  try {
+    instance.server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools());
+    instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
+      client.callTool(request.params));
+  } catch (error) {
+    // The connection already succeeded, so anything failing here would leave a
+    // live upstream client with no owner. Close it before giving up.
+    await client.close().catch(() => {});
+    report(`[leaf-mcp] tenant MCP server could not be proxied: ${JSON.stringify(config.name)}`);
+    return null;
+  }
 
   return { name: config.name, instance, close: () => client.close() };
 }
