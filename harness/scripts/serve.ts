@@ -42,7 +42,10 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 import { Pool } from "pg";
 
-import { createHarness } from "../src/server.js";
+import {
+  createEnabledProductionInstantExecutorClient,
+  createHarness,
+} from "../src/server.js";
 import { redactTokens } from "../src/redact.js";
 import { authorRunnerMode, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { createShutdownHandler } from "../src/shutdown.js";
@@ -55,6 +58,7 @@ import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
+import { HttpInstantExecutorClient } from "../src/ports/impl/instantExecutorClient.js";
 import {
   assertHarnessCatalog,
   type HarnessColumn,
@@ -88,6 +92,7 @@ const BROKER_URL = process.env.BROKER_URL ?? "http://127.0.0.1:8140";
 const TENANT_FIXTURE =
   process.env.LEAF_TENANT_FIXTURE ?? join(REPO_ROOT, "harness", "test", "fixtures", "tenant-repo");
 let sessionStoreHandle: SessionStoreHandle | null = null;
+let instantExecutorClient: HttpInstantExecutorClient | null = null;
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
@@ -141,12 +146,16 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
   // when its URL is absent; schema creation never happens at process startup.
   sessionStoreHandle = createSessionStore();
   log(`[harness] converse session authority: ${sessionStoreHandle.kind}`);
+  instantExecutorClient = createEnabledProductionInstantExecutorClient(
+    (options) => new HttpInstantExecutorClient(options),
+  ) ?? null;
   return new SpineTurnAdapter({
     oauth,
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
     gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
     store: sessionStoreHandle.store,
     runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
+    ...(instantExecutorClient ? { instantExecutor: instantExecutorClient } : {}),
   });
 }
 
@@ -301,6 +310,7 @@ async function main(): Promise<void> {
           log(`[harness] session store close failed: ${(error as Error).message}`);
         },
       );
+      instantExecutorClient?.close();
     },
   });
   process.on("SIGINT", () => shutdown("SIGINT"));
