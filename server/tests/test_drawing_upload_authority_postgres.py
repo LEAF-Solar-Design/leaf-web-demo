@@ -164,7 +164,8 @@ def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
     )
 
     assert status == 502
-    assert "authority-aware guards passed" in env["error"]["message"]
+    assert env["error"]["message"] == "live drawing mutation failed"
+    assert "authority-aware guards passed" not in str(env)
     assert marker_reads == [(tenant, drawing), (tenant, drawing)]
 
 

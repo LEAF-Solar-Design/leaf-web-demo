@@ -1091,7 +1091,7 @@ def _plan_number(value: float) -> float:
 
 
 def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
-    """Model the fixed extractor's lossy OCS text round trip for one addition."""
+    """Model the fixed extractor's lossy OCS text round trip for one write."""
     # This pure parser module is copied into both app and broker images. Reuse
     # its arbitrary-axis transform so verification cannot drift from extraction.
     from intake_parse import o2w
@@ -1112,7 +1112,7 @@ def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
 
 
 def _polyline_effect_matches(
-    expected: Dict[str, Any], actual: Dict[str, Any], *, added: bool = False,
+    expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
@@ -1120,7 +1120,7 @@ def _polyline_effect_matches(
         return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
-    if added:
+    if extracted:
         try:
             expected_points = _expected_extracted_points(expected_points)
         except (ArithmeticError, IndexError, TypeError, ValueError):
@@ -1170,15 +1170,30 @@ def verify_live_mutation_effects(
         if handle in actual_by_handle:
             raise ValueError(f"removed handle {handle!r} remains in output")
     removed = set(canonical.get("removed", []))
+    transformed = {
+        item["handle"] for item in canonical.get("transforms", [])
+    }
+    expected_by_handle = {
+        str(entity.get("handle")): entity
+        for entity in expected.get("polylines") or []
+        if isinstance(entity, dict) and entity.get("handle") is not None
+    }
     for entity in base_polylines:
         if not isinstance(entity, dict) or entity.get("handle") is None:
             continue
         handle = str(entity["handle"])
         if handle not in removed and handle not in actual_by_handle:
             raise ValueError(f"unchanged handle {handle!r} is missing from output")
-        if (handle not in removed
-                and not _polyline_effect_matches(entity, actual_by_handle[handle])):
-            raise ValueError(f"unchanged handle {handle!r} was modified in output")
+        if handle in removed:
+            continue
+        expected_entity = (
+            expected_by_handle[handle] if handle in transformed else entity)
+        if not _polyline_effect_matches(
+                expected_entity, actual_by_handle[handle],
+                extracted=handle in transformed):
+            effect = "transformed" if handle in transformed else "unchanged"
+            raise ValueError(
+                f"{effect} handle {handle!r} has unexpected output geometry")
     base_handles = {
         str(entity.get("handle")) for entity in base_polylines
         if isinstance(entity, dict) and entity.get("handle") is not None
@@ -1194,7 +1209,7 @@ def verify_live_mutation_effects(
         match_index = next(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate, added=True)),
+             and _polyline_effect_matches(entity, candidate, extracted=True)),
             None,
         )
         if match_index is None:
@@ -1547,10 +1562,11 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             raise ValueError("authored planner result must be an object")
         canonical = validate_mutations(
             base_intake, planner_result.get("mutations"),
-            allow_transforms=False, allow_xdata=False,
+            allow_transforms=True, allow_xdata=False,
         )
         # Planar lowering happens during emission, still before any APS call.
-        plan_bytes = emit_plan(canonical, base_sha256=base_sha)
+        plan_bytes = emit_plan(
+            canonical, base_sha256=base_sha, base_intake=base_intake)
         plan_digest = plan_sha256(plan_bytes)
         tool_definition = {
             key: value for key, value in tool.items()
@@ -1629,8 +1645,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         if status.get("status") != "success":
             return (err_envelope(
                 ErrorCode.WORKITEM_FAILED,
-                f"write WorkItem {status.get('id')} status={status.get('status')} "
-                f"report={status.get('reportUrl')}", retryable=True,
+                "APS write WorkItem did not succeed", retryable=True,
                 tool=name, version=tool_version,
             ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
         out_bytes = _scratch_download_bytes(da, out_key, upload_key)
@@ -1721,8 +1736,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             retryable=False, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
+        # Transport exceptions can contain signed APS or object-store URLs.
+        # Keep their text out of the client envelope. The exception class is
+        # enough to group the failure without persisting credential-shaped data.
+        LOGGER.error("live authored write failed: %s", type(exc).__name__)
         return (err_envelope(
-            ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
+            ErrorCode.WORKITEM_FAILED, "live drawing mutation failed",
             retryable=True, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
     finally:
