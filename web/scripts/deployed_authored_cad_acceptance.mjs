@@ -676,6 +676,26 @@ export async function openTryAuthorSurface(page) {
   }
 }
 
+export async function openDrawingView(page) {
+  try {
+    const viewTab = page.getByRole('tab', { name: 'View', exact: true })
+    await viewTab.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    if (!await viewTab.isEnabled()) {
+      throw new AcceptanceError(
+        'browser_execute',
+        'the drawing View tab is disabled after the authored write completed',
+      )
+    }
+    await viewTab.click()
+  } catch (error) {
+    if (error instanceof AcceptanceError) throw error
+    throw new AcceptanceError(
+      'browser_execute',
+      `could not open the drawing View tab: ${error?.name || 'Error'}`,
+    )
+  }
+}
+
 export async function takeEditingCheckout(page, apiUrl, drawingId) {
   try {
     const take = page.getByRole('button', { name: 'Take edit lock', exact: true })
@@ -888,6 +908,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
+    await openDrawingView(page)
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
     const canvas = page.locator('canvas').first()
