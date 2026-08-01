@@ -660,7 +660,7 @@ def build_suites() -> List[Suite]:
         # local AutoCAD runtime or tracked demo DWG is unavailable.
         Suite("da-mutation-apply-accoreconsole",
               "da test_mutation_apply_accoreconsole.py", "pytest", DA,
-              _py_pytest("test_mutation_apply_accoreconsole.py"), 2,
+              _py_pytest("test_mutation_apply_accoreconsole.py"), 1,
               allowed_skip_reasons=(
                   r"local AutoCAD 2026 console and tracked demo DWG are required",
               )),
