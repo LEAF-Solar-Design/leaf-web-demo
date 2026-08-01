@@ -370,6 +370,13 @@ def test_a_live_write_registers_its_workitem_too(monkeypatch, tmp_path):
         "schema": 1, "tenant_id": "tenant-reap", "drawing_id": "d1",
         "head": 1, "latest": 1, "versions": [{"v": 1, "key": vkey}],
         "checkout": None}).encode())
+    write_loop.publish_intake_cache(
+        backend, "tenant-reap", "d1", 1, b"DWGBYTES",
+        {"dwg": "d1", "layers": ["Panels"], "polylines": [{
+            "handle": "A", "layer": "Panels", "closed": True,
+            "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "xdata": None,
+        }]},
+    )
 
     seen = {}
 
@@ -398,6 +405,9 @@ def test_a_live_write_registers_its_workitem_too(monkeypatch, tmp_path):
     env, status_code = write_loop.run_write_live(
         {"name": "w"}, {"drawing_id": "d1"}, "tenant-reap",
         backend=backend, da=da, t0=0.0,
+        run_tool_dynamic_fn=lambda *_args, **_kwargs: {
+            "ok": True, "result": {"mutations": {"removed": ["A"]}},
+        },
         on_submitted=broker._submission_recorder(req, "write-token"))
 
     assert env["ok"] is False and status_code >= 400, "the stub WorkItem failed"

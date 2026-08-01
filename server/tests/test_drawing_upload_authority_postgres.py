@@ -130,6 +130,13 @@ def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
     backend = store.InMemoryBackend()
     source = b"AC1032" + b"\x00" * 32
     backend.put(store.drawing_version_key(tenant, drawing, 1), source)
+    write_loop.publish_intake_cache(
+        backend, tenant, drawing, 1, source,
+        {"dwg": drawing, "layers": ["Panels"], "polylines": [{
+            "handle": "A", "layer": "Panels", "closed": True,
+            "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "xdata": None,
+        }]},
+    )
     manifest = {
         "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
         "head": 1, "latest": 1, "versions": [{"v": 1}], "checkout": None,
@@ -151,11 +158,14 @@ def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
     env, status = write_loop.run_write_live(
         {"name": "authority-probe"}, {"drawing_id": drawing}, tenant,
         backend=backend, da=_ReachedDa(), t0=time.perf_counter(),
+        run_tool_dynamic_fn=lambda *_args, **_kwargs: {
+            "ok": True, "result": {"mutations": {"removed": ["A"]}},
+        },
     )
 
     assert status == 502
     assert "authority-aware guards passed" in env["error"]["message"]
-    assert marker_reads == [(tenant, drawing)]
+    assert marker_reads == [(tenant, drawing), (tenant, drawing)]
 
 
 def test_live_write_marker_probe_uses_selected_authority(monkeypatch):
@@ -198,7 +208,8 @@ class _LiveWriteDa:
         self.staged[key] = Path(local_path).read_bytes()
 
     def scratch_signed_download_url(self, key):
-        assert self.staged[key] == self.source
+        assert self.staged[key] == self.source or self.staged[key].startswith(
+            b"LEAF_MUTATION_PLAN|1\n")
         return "https://aps.test/input"
 
     def scratch_signed_upload_url(self, key):
@@ -246,6 +257,13 @@ def test_live_write_uses_postgres_manifest_with_filesystem_blobs(
     initial = tmp_path / "initial.dwg"
     initial.write_bytes(source)
     store.ingest_drawing(backend, tenant, str(initial), drawing_id=drawing)
+    write_loop.publish_intake_cache(
+        backend, tenant, drawing, 1, source,
+        {"dwg": drawing, "layers": ["Panels"], "polylines": [{
+            "handle": "A", "layer": "Panels", "closed": True,
+            "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "xdata": None,
+        }]},
+    )
     assert store.acquire_checkout(backend, tenant, drawing, "session-a", 600)
     assert not backend.exists(store.manifest_key(tenant, drawing))
     assert not backend.exists(write_loop.upload_marker_key(tenant, drawing))
@@ -261,6 +279,9 @@ def test_live_write_uses_postgres_manifest_with_filesystem_blobs(
     env, status = write_loop.run_write_live(
         {"name": "postgres-live-write"}, {"drawing_id": drawing}, tenant,
         backend=backend, da=da, t0=time.perf_counter(), holder="session-a",
+        run_tool_dynamic_fn=lambda *_args, **_kwargs: {
+            "ok": True, "result": {"mutations": {"removed": ["A"]}},
+        },
     )
 
     assert status == 200

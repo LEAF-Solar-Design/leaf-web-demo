@@ -2495,6 +2495,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 # It needs the same correlation.
                 return write_loop.run_write_live(tool, params, req.tenant_id,
                                                  backend=backend, da=da, t0=t0,
+                                                 run_tool_dynamic_fn=run_dynamic,
                                                  ledger_entry=entry, version=base_version,
                                                  holder=req.checkout_holder,
                                                  fence=req.checkout_fence,
