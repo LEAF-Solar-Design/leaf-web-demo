@@ -1,0 +1,97 @@
+"""Local AutoCAD canary for the fixed mutation-plan interpreter.
+
+This test is offline and non-billable. It mutates only a temporary copy of the
+tracked demo DWG, then re-extracts that copy with the same local AutoCAD 2026
+console runtime used to build the proven APS scripts.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from apply_lisp import build_apply_scr
+from intake_parse import parse
+from lisp import build_scr
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ACCORECONSOLE = Path(
+    r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe"
+)
+SOURCE_DWG = PROJECT_ROOT / "data" / "rooftop_demo.dwg"
+SOURCE_INTAKE = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
+
+
+@pytest.mark.skipif(
+    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
+    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+)
+def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
+    source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
+    removed_handle = source_intake["polylines"][0]["handle"]
+    host = tmp_path / "host.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+
+    plan = "\r\n".join([
+        "LEAF_MUTATION_PLAN|1",
+        f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}",
+        f"REMOVE|{removed_handle}",
+        "ADD|LEAF_APPLY_CANARY|0,0,1|0|0,0;12,0;12,12;0,12",
+        "",
+    ])
+    (tmp_path / "mutation-plan.txt").write_text(
+        plan, encoding="ascii", newline="",
+    )
+    (tmp_path / "apply.scr").write_text(
+        build_apply_scr(), encoding="ascii", newline="",
+    )
+
+    applied = subprocess.run(
+        [str(ACCORECONSOLE), "/i", str(host), "/s", str(tmp_path / "apply.scr")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    output = tmp_path / "output.dwg"
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert output.exists() and output.stat().st_size > 0, (
+        applied.stdout + applied.stderr
+    )
+
+    (tmp_path / "extract.scr").write_text(
+        build_scr("families.txt"), encoding="ascii", newline="",
+    )
+    extracted = subprocess.run(
+        [str(ACCORECONSOLE), "/i", str(output), "/s", str(tmp_path / "extract.scr")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    families = tmp_path / "families.txt"
+    assert extracted.returncode == 0, extracted.stdout + extracted.stderr
+    assert families.exists() and families.stat().st_size > 0
+
+    intake = parse(families, "canary")
+    handles = {item["handle"] for item in intake["polylines"]}
+    assert removed_handle not in handles
+    added = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_APPLY_CANARY"
+    ]
+    assert len(added) == 1
+    assert added[0]["closed"] is True
+    assert added[0]["pts"] == [
+        [0.0, 0.0, 0.0],
+        [12.0, 0.0, 0.0],
+        [12.0, 12.0, 0.0],
+        [0.0, 12.0, 0.0],
+    ]

@@ -13,6 +13,7 @@ OUT_LOCALNAME = "output.dwg"
 
 _LISP_LINES = (
     '(setvar "CMDECHO" 0)',
+    '(setvar "FILEDIA" 0)',
     '(defun leaf-chars-ok (s allowed / i ok) (setq i 1 ok (> (strlen s) 0)) (while (and ok (<= i (strlen s))) (if (not (vl-string-search (substr s i 1) allowed)) (setq ok nil)) (setq i (1+ i))) ok)',
     '(defun leaf-find (s token start / i found) (setq i start) (while (and (<= i (strlen s)) (not found)) (if (= (substr s i 1) token) (setq found i) (setq i (1+ i)))) found)',
     '(defun leaf-split (s token / at start out) (setq start 1) (while (setq at (leaf-find s token start)) (setq out (cons (substr s start (- at start)) out) start (1+ at))) (reverse (cons (substr s start) out)))',
