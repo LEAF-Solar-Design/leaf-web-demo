@@ -21,6 +21,7 @@ import {
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
+  takeEditingCheckout,
   validateConfig,
   validateStagedAuthorResponse,
   waitForTerminalJob,
@@ -243,6 +244,64 @@ describe('deployed authored CAD acceptance checks', () => {
       (error) => error instanceof AcceptanceError
         && error.check === 'author_surface'
         && /TimeoutError/.test(error.message),
+    )
+  })
+
+  it('takes and proves the drawing checkout before authored execution', async () => {
+    const calls = []
+    const take = {
+      waitFor: async (options) => calls.push(['take.waitFor', options]),
+      click: async () => calls.push(['take.click']),
+    }
+    const held = {
+      waitFor: async (options) => calls.push(['held.waitFor', options]),
+    }
+    const response = {
+      url: () => 'https://staging-api.leaf.test/api/drawings/drawing-a/checkout',
+      request: () => ({ method: () => 'POST' }),
+      status: () => 200,
+    }
+    const page = {
+      getByRole: (role, options) => {
+        calls.push(['getByRole', role, options])
+        return take
+      },
+      waitForResponse: async (predicate, options) => {
+        calls.push(['waitForResponse', options])
+        assert.equal(predicate(response), true)
+        return response
+      },
+      getByText: (text, options) => {
+        calls.push(['getByText', text, options])
+        return held
+      },
+    }
+
+    await takeEditingCheckout(page, 'https://staging-api.leaf.test', 'drawing-a')
+    assert.deepEqual(calls, [
+      ['getByRole', 'button', { name: 'Take edit lock', exact: true }],
+      ['take.waitFor', { state: 'visible', timeout: 30_000 }],
+      ['waitForResponse', { timeout: 30_000 }],
+      ['take.click'],
+      ['getByText', 'You hold the edit lock', { exact: true }],
+      ['held.waitFor', { state: 'visible', timeout: 30_000 }],
+    ])
+  })
+
+  it('reports a rejected drawing checkout by acceptance stage', async () => {
+    const page = {
+      getByRole: () => ({ waitFor: async () => {}, click: async () => {} }),
+      waitForResponse: async () => ({
+        url: () => 'https://staging-api.leaf.test/api/drawings/drawing-a/checkout',
+        request: () => ({ method: () => 'POST' }),
+        status: () => 409,
+      }),
+    }
+    await assert.rejects(
+      () => takeEditingCheckout(page, 'https://staging-api.leaf.test', 'drawing-a'),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'checkout'
+        && /HTTP 409/.test(error.message),
     )
   })
 
