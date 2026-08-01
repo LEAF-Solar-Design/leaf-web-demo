@@ -383,19 +383,38 @@ class ToolPublicationPolicyRequest(BaseModel):
         extra = "forbid"
 
 
-def _require_publication_policy_admin(
+def _require_account_owner(
     tenant=Depends(deps.require_active_tenant),
 ) -> deps.TenantContext:
-    """Require both verified JWT admin factors for the current tenant."""
-    if (not deps.auth_live()
-            or not isinstance(tenant, deps.TenantContext)
-            or tenant.tier != "admin"
-            or not isinstance(tenant.subject, str)
-            or not tenant.subject.strip()
-            or tenant.subject not in deps.admin_subjects()):
+    """Require the current account's authoritative owner binding."""
+    if (not deps.auth_live() or not isinstance(tenant, deps.TenantContext)
+            or not tenant.subject):
         raise HTTPException(
             status_code=403,
-            detail="platform admin authority required",
+            detail="account owner authority required",
+        )
+    try:
+        import platform_link
+
+        store = platform_link.platform_store()
+        binding = store.resolve_active_identity_binding("auth0", tenant.subject)
+        if binding is None or str(binding.platform_tenant_id) != str(tenant):
+            raise HTTPException(
+                status_code=403, detail="account owner authority required"
+            )
+        role = store.active_identity_role(
+            binding.platform_tenant_id, binding.binding_id
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - authority outages fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="platform identity binding authority is unavailable",
+        ) from exc
+    if role != "owner":
+        raise HTTPException(
+            status_code=403, detail="account owner authority required"
         )
     return tenant
 
@@ -426,7 +445,7 @@ def _tool_publication_policy_body(
 
 @router.get("/api/admin/account-controls")
 def get_tool_publication_policy(
-    tenant: deps.TenantContext = Depends(_require_publication_policy_admin),
+    tenant: deps.TenantContext = Depends(_require_account_owner),
 ) -> Dict[str, Any]:
     try:
         state = agent_policy.load_tenant_state(str(tenant))
@@ -448,7 +467,7 @@ def get_tool_publication_policy(
 @router.put("/api/admin/account-controls")
 def put_tool_publication_policy(
     req: ToolPublicationPolicyRequest,
-    tenant: deps.TenantContext = Depends(_require_publication_policy_admin),
+    tenant: deps.TenantContext = Depends(_require_account_owner),
 ) -> Any:
     tenant_id = str(tenant)
     try:
@@ -481,7 +500,7 @@ def put_tool_publication_policy(
                     req.tool_publication_approval_required
                 ),
                 "actor_subject": tenant.subject,
-                "via": "account_admin",
+                "via": "account_owner",
             },
         )
         return _tool_publication_policy_body(

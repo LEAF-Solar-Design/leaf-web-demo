@@ -1589,12 +1589,12 @@ human review. A missing, invalid, or unavailable policy authority fails closed a
 does not auto-publish. A disabled publication action blocks publication. An
 existing durable denial also remains denied.
 
-A current-tenant platform administrator may enable strict independent approval
-through `GET|PUT /api/admin/account-controls`. Both verified factors are required:
-the live JWT must resolve to tier `admin`, and its subject must remain in the
-server-owned `LEAF_PLATFORM_ADMIN_SUBJECTS` allowlist. The PUT body is
+A current account owner may enable strict independent approval through
+`GET|PUT /api/admin/account-controls`. The verified JWT subject must resolve to
+the current tenant's active platform identity binding, and the server re-reads
+that binding's current role and requires `owner` for every request. The PUT body is
 `{tool_publication_approval_required:boolean, expected_revision:int}`. Writes use
 compare-and-set revision control, preserve unrelated tenant policy fields, and
-audit the verified administrator subject. The browser never receives an approval
+audit the verified account owner subject. The browser never receives an approval
 secret or confirmation material. When strict mode is on, the existing independent
 approval, denial, expiry, receipt verification, and recovery rules remain in force.
