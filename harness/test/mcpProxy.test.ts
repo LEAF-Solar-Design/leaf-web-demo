@@ -433,6 +433,126 @@ describe("proxyTenantMcpServer end to end", () => {
     await proxied!.close();
   });
 
+  it("fails fast when the upstream drops a call stream, and does not loop", async () => {
+    // THE ATTACK THE PER-FETCH DESIGN COULD NOT STOP. When the SDK's SSE stream
+    // drops it reconnects, and a per-fetch AbortSignal.timeout gives each
+    // reconnect a fresh clock. The tenant also controls the retry counter:
+    // `_scheduleReconnection` defaults `attemptCount = 0` and only increments on
+    // FAILURE, so accept-then-drop cycles never converge. Together those made
+    // the call outlive any per-fetch bound.
+    //
+    // The fix is one deadline per CALL, carried through AsyncLocalStorage so
+    // every fetch that call makes — original POST, reconnects, DELETE — sees
+    // the SAME signal, still counting down from when the call began.
+    const budgetMs = 800;
+    const hits: string[] = [];
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        hits.push(`${req.method}:${message.method ?? "-"}`);
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "flap", version: "1.0.0" },
+          }));
+        }
+        if (message.method === "tools/call" || req.method === "GET") {
+          // Accept the stream, then drop it. Repeat forever. Headers alone are
+          // enough — the SDK treats the stream as open once they arrive, so no
+          // SSE frame is needed to make it reconnect on the drop.
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+          setTimeout(() => res.destroy(), budgetMs / 8);
+          return;
+        }
+        res.writeHead(202).end();
+      });
+    });
+
+    const proxied = await proxyTenantMcpServer(
+      { name: "flap", url: upstream.url }, () => {}, budgetMs);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    const started = Date.now();
+    await expect(downstream.callTool(
+      { name: "x", arguments: {} }, undefined, { timeout: budgetMs * 30 },
+    )).rejects.toThrow();
+    const elapsed = Date.now() - started;
+
+    // The call dies on the drop rather than being retried into a long stall.
+    // Well under the budget, so it is the drop ending it and not our deadline.
+    expect(elapsed).toBeLessThan(budgetMs * 0.6);
+    expect(hits.filter((hit) => hit.endsWith("tools/call"))).toHaveLength(1);
+
+    // Then sit IDLE. If accept-then-drop reset the retry counter the way the
+    // retracted note claimed, connection-level GETs would climb on their own.
+    // They do not: this is the assertion that keeps the retraction honest, and
+    // it FAILS if a future SDK bump introduces the loop the note used to
+    // describe — which is exactly when someone needs to know.
+    const getsAfterCall = hits.filter((hit) => hit.startsWith("GET")).length;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const getsAfterIdle = hits.filter((hit) => hit.startsWith("GET")).length;
+    expect(getsAfterIdle - getsAfterCall).toBeLessThanOrEqual(1);
+
+    await downstream.close();
+    await proxied!.close();
+  }, 60_000);
+
+  it("closes the upstream socket when the call deadline expires", async () => {
+    // THE REAL DEFECT, and the only reason this module reaches into
+    // AsyncLocalStorage. Aborting an SDK request rejects the pending promise
+    // but the transport dials with its OWN controller, so the abandoned socket
+    // survived the rejection — measured in review as a call rejecting at 149ms
+    // with its socket still alive 250ms later. A tenant that stops answering
+    // could accumulate sockets for the life of the proxy.
+    //
+    // Rejecting is not the property. The socket closing is.
+    const budgetMs = 400;
+    let callSocket: import("node:net").Socket | undefined;
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "silent", version: "1.0.0" },
+          }));
+        }
+        // Hold the call open and never answer.
+        if (message.method === "tools/call") { callSocket = req.socket; return; }
+        res.writeHead(202).end();
+      });
+    });
+
+    const proxied = await proxyTenantMcpServer(
+      { name: "silent", url: upstream.url }, () => {}, budgetMs);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    await expect(downstream.callTool(
+      { name: "forever", arguments: {} }, undefined, { timeout: budgetMs * 25 },
+    )).rejects.toThrow();
+
+    // Checked BEFORE closing anything: closing the proxy would reclaim the
+    // socket anyway and prove nothing about the deadline.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(callSocket).toBeDefined();
+    expect(callSocket!.destroyed).toBe(true);
+
+    await downstream.close();
+    await proxied!.close();
+  }, 30_000);
+
   it("returns null instead of throwing when the upstream is unreachable", async () => {
     const dead = await listen((_req, res) => { res.destroy(); });
     const diagnostics: string[] = [];

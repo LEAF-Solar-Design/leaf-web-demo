@@ -36,20 +36,23 @@
  *      matters and two earlier drafts of this note got it wrong: it is one
  *      controller per transport, not one per process, so the blast radius is
  *      this tenant's connection, not the whole harness.
- *   2. SSE reconnection is effectively UNBOUNDED, and `maxRetries: 2` does not
- *      say otherwise. That limit counts CONSECUTIVE FAILED attempts:
- *      `_scheduleReconnection` takes `attemptCount = 0` by default and only
- *      increments it when an attempt fails (client/streamableHttp.js:138-154),
- *      so an upstream that ACCEPTS a reconnect and then drops the stream starts
- *      a fresh count every cycle and can loop indefinitely. The protocol timer
- *      is created once per request, so those reconnect fetches carry no
- *      deadline of their own either.
+ *   2. RETRACTED — the "unbounded SSE reconnection" this note used to claim does
+ *      not reproduce. The claim came from reading `_scheduleReconnection`
+ *      (client/streamableHttp.js:138-154), where `attemptCount` defaults to 0
+ *      and increments only on failure, and inferring that accept-then-drop
+ *      cycles reset the counter forever. Plausible, and wrong.
  *
- *      Three drafts of this note were wrong before this one — process-wide vs
- *      transport-wide scope, then "each retry starts a fresh clock", then
- *      reading maxRetries as a total. Stated precisely now because this note is
- *      the specification for the deferred lane, and an overstated limitation
- *      misleads exactly as much as an overstated guarantee.
+ *      MEASURED against an upstream that accepts every stream and destroys it
+ *      immediately: a tools/call whose stream drops REJECTS IN ~180ms with no
+ *      reconnect at all, and the connection-level GET stream sat at ONE request
+ *      over three idle seconds rather than climbing. There is no loop to bound
+ *      and no resource lever here. See the reconnect test.
+ *
+ *      Four drafts of this note were wrong in four different ways before the
+ *      experiment settled it — process-wide vs transport-wide scope, "each
+ *      retry starts a fresh clock", maxRetries as a total, and finally the
+ *      whole premise. Every one of those came from reading the SDK rather than
+ *      running it. A limitation asserted from code-reading is a hypothesis.
  *   3. Upstream progress notifications are not relayed downstream, so a long
  *      tool call gives the model no intermediate feedback.
  *
@@ -61,6 +64,7 @@
  * as bounding tenant connection lifetime until that lands.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
@@ -93,6 +97,27 @@ const CONNECT_TIMEOUT_MS = 10_000;
  * the component that decides a turn is over.
  */
 const UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * The deadline for the tool call currently in flight, readable from inside
+ * guardedFetch.
+ *
+ * WHY AMBIENT STATE, which is normally a smell: there is no other seam. The
+ * problem being solved is that aborting an SDK request rejects the pending
+ * promise but leaves the upstream SOCKET open — measured previously as a call
+ * rejecting at 149ms with its socket still alive 250ms later. Closing it
+ * requires the deadline to reach the fetch, and the transport owns its own
+ * fetch calls, exposing no per-request hook to pass anything through.
+ * AsyncLocalStorage is the only way to get the call's signal down to
+ * guardedFetch, which does hold the socket.
+ *
+ * NOT justified by SSE reconnection, though an earlier draft of this comment
+ * claimed it was. That claim came from reading `_scheduleReconnection` rather
+ * than running it, and the experiment refuted it: a tools/call whose stream
+ * drops rejects in ~180ms without reconnecting at all. The mechanism is right;
+ * the reason given for it was not.
+ */
+const activeCallDeadline = new AsyncLocalStorage<AbortSignal>();
 
 export type ProxiedMcpServer = { name: string; instance: McpServer; close: () => Promise<void> };
 
@@ -130,7 +155,14 @@ export function guardedFetch(originalHost: string): typeof fetch {
         throw new Error("mcp_upstream_host_became_unsafe");
       }
     }
-    return fetch(url, { ...init, redirect: "error" });
+    // Compose the CALL's deadline into this fetch, whatever fetch it is: the
+    // original POST, an SSE reconnect, a session DELETE. The transport supplies
+    // its own signal (that is how close() tears everything down), so keep it
+    // and add ours rather than replacing it.
+    const callDeadline = activeCallDeadline.getStore();
+    const signals = [init?.signal, callDeadline].filter(Boolean) as AbortSignal[];
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    return fetch(url, { ...init, redirect: "error", ...(signal ? { signal } : {}) });
   }) as typeof fetch;
 }
 
@@ -146,6 +178,9 @@ export function guardedFetch(originalHost: string): typeof fetch {
 export async function proxyTenantMcpServer(
   config: McpServerConfig,
   report: (message: string) => void = console.error,
+  // Internal, NOT read from `config`: a tenant must not choose how long we hold
+  // a connection for them. Exists so the deadline is testable in milliseconds.
+  requestTimeoutMs: number = UPSTREAM_REQUEST_TIMEOUT_MS,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
@@ -245,14 +280,22 @@ export async function proxyTenantMcpServer(
       return { ...listed, tools: usable };
     });
     instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      return client.request(
+      // ONE deadline for the whole call, opened here and visible to every fetch
+      // the SDK makes while it runs. `AbortSignal.timeout` starts counting now,
+      // so reconnects inherit the REMAINING time rather than a fresh budget —
+      // that is the entire difference from the per-fetch attempt this replaces.
+      const deadline = AbortSignal.any([
+        extra.signal,
+        AbortSignal.timeout(requestTimeoutMs),
+      ]);
+      return activeCallDeadline.run(deadline, () => client.request(
         { method: "tools/call", params: request.params },
         CallToolResultSchema,
         {
-          // Downstream cancellation, forwarded. See the LIMITATIONS note in the
-          // module header: this rejects the pending call but does NOT promptly
-          // close the upstream socket, which is deferred work, not a claim.
-          signal: extra.signal,
+          // The composed deadline: downstream cancellation OR our wall. This
+          // rejects the pending call; guardedFetch closes the socket, because
+          // the same signal reaches the fetch itself.
+          signal: deadline,
           // SET THIS EXPLICITLY. Omitting it does not mean "no timeout" — it
           // means `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`
           // (shared/protocol.js:712), i.e. a 60s cap firing at half the
@@ -264,9 +307,9 @@ export async function proxyTenantMcpServer(
           // the timer, and combined with `maxTotalTimeout` the real ceiling
           // becomes ~2x the budget at a moment the tenant chooses. Left off,
           // this is a plain timer nothing upstream can push back.
-          timeout: UPSTREAM_REQUEST_TIMEOUT_MS,
+          timeout: requestTimeoutMs,
         },
-      );
+      ));
     });
   } catch (error) {
     // The connection already succeeded, so anything failing here would leave a
