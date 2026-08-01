@@ -10,9 +10,13 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "server"))
 
 from apply_lisp import build_apply_scr
 from intake_parse import o2w, parse
@@ -20,7 +24,6 @@ from lisp import build_scr
 from mutation_plan import world_to_ocs
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ACCORECONSOLE = Path(
     r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe"
 )
