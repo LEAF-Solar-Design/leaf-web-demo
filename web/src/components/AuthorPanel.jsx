@@ -320,6 +320,9 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const secs = Math.floor(elapsedMs / 1000)
   const prov = authored ? readProvenance(authored) : null
   const provLine = authored ? authoredProvLine(authored) : null
+  const publicationStatus = authored?.publication_status || null
+  const publicationPending = publicationStatus === 'awaiting_approval'
+  const publicationDenied = publicationStatus === 'denied'
 
   return (
     <div className="author-panel author-inner">
@@ -384,7 +387,13 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           {!authored.published && (
             <div className="customization-state" role="status">
               <span className="dot square" aria-hidden="true" />
-              <span>{authored.demo ? 'Demo preview staged. Publish to make it available in this demo.' : 'Staged and awaiting approval. It is not runnable until publication succeeds.'}</span>
+              <span>{authored.demo
+                ? 'Demo preview staged. Publish to make it available in this demo.'
+                : publicationPending
+                  ? 'Awaiting independent approval. It remains staged and is not runnable.'
+                  : publicationDenied
+                    ? 'Publication was denied. The staged tool was not published.'
+                    : 'Staged and ready to publish. It is not runnable until publication succeeds.'}</span>
             </div>
           )}
           {authored.published && authored.demo_session_only && (
@@ -401,8 +410,14 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           )}
           <pre className="code"><code>{authored.code}</code></pre>
           {!authored.published ? (
-            <button className="chip-act" onClick={publish} disabled={publishing}>
-              {publishing ? 'Publishing…' : 'Publish tool'}
+            <button className="chip-act" onClick={publicationDenied ? submit : publish} disabled={publishing || busy}>
+              {publicationDenied
+                ? (busy ? 'Authoring…' : 'Stage again')
+                : publishing
+                  ? (publicationPending ? 'Checking…' : 'Publishing…')
+                  : publicationPending
+                    ? 'Check approval & resume'
+                    : 'Request publication'}
             </button>
           ) : (
             <button className="chip-act" onClick={() => onUseAuthored(authored.tool)}>

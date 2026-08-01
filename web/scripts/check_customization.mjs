@@ -10,11 +10,14 @@ function assert(ok, message) {
 }
 
 assert(api.includes("'/api/author/stage'"), 'live authoring must use the canonical R5 stage route')
-assert(api.includes("'/api/author/register'"), 'live authoring must use the canonical R6 register route')
-assert(api.includes("'/api/author/confirmations'"), 'publish must obtain a server confirmation')
+assert(api.includes("'/api/author/publication-requests'"), 'live authoring must use the publication continuation route')
+assert(!api.includes("'/api/author/register'"), 'browser authoring must not call the internal register route')
+assert(!api.includes("'/api/author/confirmations'"), 'browser authoring must not request confirmation material')
 assert(!app.includes('authorTool('), 'the live build flow must not call legacy authorTool')
-assert(panel.includes('Staged and awaiting approval. It is not runnable until publication succeeds.'), 'staged state must say it is not runnable')
-assert(panel.includes('Publish tool'), 'staged state must require an explicit Publish action')
+assert(panel.includes('Staged and ready to publish. It is not runnable until publication succeeds.'), 'initial staged state must not claim approval is required')
+assert(panel.includes('Awaiting independent approval. It remains staged and is not runnable.'), 'awaiting state must be explicit')
+assert(panel.includes('Publication was denied. The staged tool was not published.'), 'denied state must be calm and explicit')
+assert(panel.includes('Request publication') && panel.includes('Check approval & resume') && panel.includes('Stage again'), 'publication lifecycle actions must be explicit')
 assert(!panel.includes('Tool authored'), 'live staged panel must not claim legacy authoring success')
 assert(app.includes('stageAuthorTool') && app.includes('publishStagedAuthor'), 'app must separate staging from publishing')
 

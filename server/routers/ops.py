@@ -37,9 +37,9 @@ from typing import Any, Dict, Optional, Set
 from uuid import uuid4
 
 import requests
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 import agent_audit
 import agent_ledger
@@ -373,6 +373,141 @@ def ops_agent_enable(
 
 class AgentOverlayRequest(BaseModel):
     overlay: Dict[str, Any]
+
+
+class ToolPublicationPolicyRequest(BaseModel):
+    tool_publication_approval_required: StrictBool
+    expected_revision: StrictInt = Field(..., ge=0)
+
+    class Config:
+        extra = "forbid"
+
+
+def _require_publication_policy_admin(
+    tenant=Depends(deps.require_active_tenant),
+) -> deps.TenantContext:
+    """Require both verified JWT admin factors for the current tenant."""
+    if (not deps.auth_live()
+            or not isinstance(tenant, deps.TenantContext)
+            or tenant.tier != "admin"
+            or not isinstance(tenant.subject, str)
+            or not tenant.subject.strip()
+            or tenant.subject not in deps.admin_subjects()):
+        raise HTTPException(
+            status_code=403,
+            detail="platform admin authority required",
+        )
+    return tenant
+
+
+def _tool_publication_policy_body(
+    tenant_id: str, state: Dict[str, Any], *, allow_disabled_state: bool = False
+) -> Dict[str, Any]:
+    overlay = state.get("overlay")
+    if not isinstance(overlay, dict):
+        raise agent_policy.PolicyError("tenant overlay must be a mapping")
+    action = agent_policy.effective_action(
+        agent_policy.load_policy(),
+        "request_publication",
+        tenant_overlay=overlay,
+    )
+    if action is None:
+        raise agent_policy.PolicyError("request_publication policy is unavailable")
+    if not action.enabled and not allow_disabled_state:
+        raise agent_policy.PolicyError("tool publication is disabled for this account")
+    return {
+        "tenant_id": tenant_id,
+        "tool_publication_approval_required": (
+            not action.enabled or action.policy != "auto"
+        ),
+        "revision": int(state.get("revision", 0)),
+    }
+
+
+@router.get("/api/admin/account-controls")
+def get_tool_publication_policy(
+    tenant: deps.TenantContext = Depends(_require_publication_policy_admin),
+) -> Dict[str, Any]:
+    try:
+        state = agent_policy.load_tenant_state(str(tenant))
+        return _tool_publication_policy_body(str(tenant), state)
+    except agent_policy.PolicyError as exc:
+        if "tool publication is disabled" in str(exc):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="tool publication policy authority unavailable",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - authority outages fail closed
+        raise HTTPException(
+            status_code=503,
+            detail="tool publication policy authority unavailable",
+        ) from exc
+
+
+@router.put("/api/admin/account-controls")
+def put_tool_publication_policy(
+    req: ToolPublicationPolicyRequest,
+    tenant: deps.TenantContext = Depends(_require_publication_policy_admin),
+) -> Any:
+    tenant_id = str(tenant)
+    try:
+        current = agent_policy.load_tenant_state(tenant_id)
+        overlay = dict(current["overlay"])
+        publication = overlay.get("request_publication", {})
+        if not isinstance(publication, dict):
+            raise agent_policy.PolicyError(
+                "request_publication overlay must be a mapping"
+            )
+        publication = dict(publication)
+        if req.tool_publication_approval_required:
+            publication["policy"] = "always-confirm"
+            overlay["request_publication"] = publication
+        else:
+            publication.pop("policy", None)
+            if publication:
+                overlay["request_publication"] = publication
+            else:
+                overlay.pop("request_publication", None)
+        entry = agent_policy.set_tenant_overlay(
+            tenant_id,
+            overlay,
+            expected_revision=req.expected_revision,
+            audit_event={
+                "kind": "tool_publication_policy",
+                "scope": "tenant",
+                "tenant_id": tenant_id,
+                "tool_publication_approval_required": (
+                    req.tool_publication_approval_required
+                ),
+                "actor_subject": tenant.subject,
+                "via": "account_admin",
+            },
+        )
+        return _tool_publication_policy_body(
+            tenant_id, entry, allow_disabled_state=True
+        )
+    except agent_policy.PolicyError as exc:
+        if "stale agent tenant state revision" in str(exc):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                str(exc),
+                retryable=True,
+                status_code=409,
+            )
+        return error_response(
+            ErrorCode.INTERNAL,
+            "tool publication policy authority unavailable",
+            retryable=True,
+            status_code=503,
+        )
+    except Exception:  # noqa: BLE001 - authority outages fail closed
+        return error_response(
+            ErrorCode.INTERNAL,
+            "tool publication policy authority unavailable",
+            retryable=True,
+            status_code=503,
+        )
 
 
 @router.put("/api/ops/agent/tenants/{tid}/overlay")

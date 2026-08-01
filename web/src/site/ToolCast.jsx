@@ -763,10 +763,12 @@ export default function ToolCast({
     if (!sessionReady) return undefined
     const published = await publishStagedAuthor(PUBLIC_DEMO, staged)
     const tool = published.tool || staged.tool
-    catalog.actions.upsertTool(tool)
-    await catalog.actions.loadCatalog()
-    const message = `Tool published, ${tool.name}`
-    showToast({ text: message, action: { label: 'View', onClick: () => setLeftView('author') } })
+    if (published.published) {
+      catalog.actions.upsertTool(tool)
+      await catalog.actions.loadCatalog()
+      const message = `Tool published, ${tool.name}`
+      showToast({ text: message, action: { label: 'View', onClick: () => setLeftView('author') } })
+    }
     return { ...published, tool }
   }, [catalog.actions, sessionReady, showToast])
 

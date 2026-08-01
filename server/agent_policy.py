@@ -231,7 +231,7 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "high", "timeout_s": 600, "audit_extra": [],
         },
         "request_publication": {
-            "description": "Request or resume publication of one durable staged change. The request carries only change_set_id; the app loads all receipt fields and requires an independent R6 confirmation before publication.",
+            "description": "Request or resume publication of one durable staged change. The request carries only change_set_id; the app loads all receipt fields and applies the current account publication policy before publication.",
             "rung": 6, "required_capability": "deploy", "policy": "auto",
             "tenant_tightenable": False,
             "dispatch": {"kind": "app_api", "routes": ["POST /api/author/publication-requests"]},

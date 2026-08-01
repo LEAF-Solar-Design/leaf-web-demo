@@ -1574,3 +1574,27 @@ now resolves.
 
 §15.C's other statements are unaffected: the harness path still does NOT persist
 to `server/authored/` or `_AUTHORED`, and `source` / `static_scan` are unchanged.
+
+## §24 Account-controlled authored-tool publication (supersedes §21 R6 routing)
+
+`POST /api/author/publication-requests` is the browser and agent publication
+continuation. It accepts only `change_set_id`; the server reloads the durable
+staged receipt and keeps commit, digest, tenant, and one-use confirmation binding
+off the browser wire.
+
+Independent publication approval is disabled by default. In that mode the server
+issues a reserved server-subject confirmation for the exact staged receipt and
+publishes it in the same replay-safe request. This is a technical receipt, not a
+human review. A missing, invalid, or unavailable policy authority fails closed and
+does not auto-publish. A disabled publication action blocks publication. An
+existing durable denial also remains denied.
+
+A current-tenant platform administrator may enable strict independent approval
+through `GET|PUT /api/admin/account-controls`. Both verified factors are required:
+the live JWT must resolve to tier `admin`, and its subject must remain in the
+server-owned `LEAF_PLATFORM_ADMIN_SUBJECTS` allowlist. The PUT body is
+`{tool_publication_approval_required:boolean, expected_revision:int}`. Writes use
+compare-and-set revision control, preserve unrelated tenant policy fields, and
+audit the verified administrator subject. The browser never receives an approval
+secret or confirmation material. When strict mode is on, the existing independent
+approval, denial, expiry, receipt verification, and recovery rules remain in force.

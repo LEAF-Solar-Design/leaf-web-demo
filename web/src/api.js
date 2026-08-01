@@ -363,6 +363,44 @@ export async function setTenantDisabled(tenantId, disabled) {
   return res.json()
 }
 
+// --- Current-account administration ------------------------------------
+// These calls rely only on the signed-in user's bearer token. Internal ops
+// and customization approval secrets must never enter the browser request.
+export async function getAccountControls() {
+  const res = await apiFetch(
+    `${API_BASE}/api/admin/account-controls`,
+    { headers: authHeaders() },
+    '/api/admin/account-controls',
+  )
+  if (!res.ok) {
+    const e = new Error(`GET /api/admin/account-controls -> ${res.status}`)
+    e.status = res.status
+    throw e
+  }
+  return res.json()
+}
+
+export async function updateAccountControls(toolPublicationApprovalRequired, expectedRevision) {
+  const res = await apiFetch(
+    `${API_BASE}/api/admin/account-controls`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        tool_publication_approval_required: Boolean(toolPublicationApprovalRequired),
+        expected_revision: expectedRevision,
+      }),
+    },
+    '/api/admin/account-controls',
+  )
+  if (!res.ok) {
+    const e = new Error(`PUT /api/admin/account-controls -> ${res.status}`)
+    e.status = res.status
+    throw e
+  }
+  return res.json()
+}
+
 // --- Per-tenant spend / quota meter (thin ledger-backed read) -----------
 // GET /api/usage -> {tenant_id, today:{runs, usd_est}, total:{runs, usd_est},
 //   cap:{usd_cap, remaining, enabled}, updated_at} (§10-enveloped). LIVE only —
@@ -943,51 +981,34 @@ export async function stageAuthorTool(mock, description) {
   return body
 }
 
-// Keep confirmation issuance isolated: a server lane may change this additive
-// endpoint without changing the frozen R6 register request below.
-async function issuePublishConfirmation(receipt) {
-  const path = '/api/author/confirmations'
-  const res = await apiFetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify(receipt),
-  }, path)
-  const body = await res.json().catch(() => null)
-  if (!res.ok) throw customizationError('POST', path, res.status, body)
-  if (!body || typeof body.confirmation_id !== 'string' || !body.confirmation_id) {
-    throw new Error('The publish confirmation was unavailable. The staged tool was not published.')
-  }
-  return body.confirmation_id
-}
-
-// R6: obtain one server confirmation, then post exactly the receipt-bound fields.
+// Request publication or resume an existing request. The server owns approval
+// policy, durable continuation, and the exact receipt used for publication.
 export async function publishStagedAuthor(mock, staged) {
   if (!staged || !staged.receipt) throw new Error('A staged tool is required before publishing.')
   if (mock) {
     await nap(250)
     registerMockCatalogTool(staged.tool)
-    return { ...staged, published: true, demo: true, demo_session_only: true }
+    return { ...staged, published: true, publication_status: 'published', demo: true, demo_session_only: true }
   }
   const receipt = staged.receipt
-  const confirmation_id = await issuePublishConfirmation(receipt)
-  const path = '/api/author/register'
-  const publish = {
-    change_set_id: receipt.change_set_id,
-    staged_commit: receipt.staged_commit,
-    catalog_digest: receipt.catalog_digest,
-    platform_release: receipt.platform_release,
-    workspace_contract_digest: receipt.workspace_contract_digest,
-    confirmation_id,
-    idempotency_key: requestId(),
-  }
+  const path = '/api/author/publication-requests'
   const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify(publish),
+    body: JSON.stringify({ change_set_id: receipt.change_set_id }),
   }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)
-  return { ...staged, ...body, published: true }
+  const publicationStatus = body?.status
+  if (!['published', 'awaiting_approval', 'denied'].includes(publicationStatus)) {
+    throw new Error('The publication request returned an unknown status. The staged tool was not published.')
+  }
+  return {
+    ...staged,
+    ...body,
+    published: publicationStatus === 'published',
+    publication_status: publicationStatus,
+  }
 }
 
 // --- Demand capture ------------------------------------------------------
