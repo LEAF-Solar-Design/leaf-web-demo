@@ -20,9 +20,10 @@ class Response:
 
 
 class Http:
-    def __init__(self, post=(), patch=(), get=()):
+    def __init__(self, post=(), patch=(), get=(), delete=()):
         self.responses = {
             "post": list(post), "patch": list(patch), "get": list(get),
+            "delete": list(delete),
         }
         self.calls = []
 
@@ -38,6 +39,9 @@ class Http:
 
     def get(self, url, **kwargs):
         return self._call("get", url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        return self._call("delete", url, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +129,28 @@ def test_readiness_resolves_alias_version_and_matches(monkeypatch):
         "activity": {"alias": "prod", "version": 7},
     }
     assert http.calls[1][1].endswith("/activities/LeafApplyMutations/versions/7")
+
+
+def test_alias_state_captures_version_or_absence(monkeypatch):
+    http = Http(get=[Response(200, {"version": 7}), Response(404)])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.alias_state() == {
+        "id": "LeafApplyMutations", "alias": "prod", "exists": True,
+        "version": 7,
+    }
+    assert subject.alias_state() == {
+        "id": "LeafApplyMutations", "alias": "prod", "exists": False,
+        "version": None,
+    }
+
+
+def test_restore_alias_repoints_or_removes_exact_alias(monkeypatch):
+    http = Http(patch=[Response(200)], delete=[Response(204)])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.restore_alias(3)["version"] == 3
+    assert json.loads(http.calls[0][2]["data"]) == {"version": 3}
+    assert subject.restore_alias(None)["exists"] is False
+    assert http.calls[1][0] == "delete"
 
 
 @pytest.mark.parametrize("mutation,expected", [

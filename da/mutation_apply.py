@@ -79,6 +79,12 @@ def _get(path: str):
     )
 
 
+def _delete(path: str):
+    return requests.delete(
+        f"{client.DA}{path}", headers=client._auth_headers(), timeout=_TIMEOUT,
+    )
+
+
 def _require_status(response, allowed: tuple[int, ...], operation: str) -> None:
     if response.status_code not in allowed:
         # APS bodies can echo request data. Do not leak them through errors.
@@ -120,6 +126,46 @@ def provision_activity() -> dict[str, Any]:
     return {
         "id": ACTIVITY_ID, "alias": ALIAS, "version": version,
         "advanced": advanced,
+    }
+
+
+def alias_state() -> dict[str, Any]:
+    """Capture the exact rollback target without changing APS state."""
+    response = _get(f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}")
+    if response.status_code == 404:
+        return {"id": ACTIVITY_ID, "alias": ALIAS, "exists": False, "version": None}
+    _require_status(response, (200,), "activity alias read")
+    try:
+        value = response.json()
+    except ValueError as exc:
+        raise RuntimeError("activity alias read returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("activity alias read returned invalid JSON")
+    return {
+        "id": ACTIVITY_ID, "alias": ALIAS, "exists": True,
+        "version": _version(value, "activity alias"),
+    }
+
+
+def restore_alias(version: int | None) -> dict[str, Any]:
+    """Restore the captured prod alias target, including prior absence."""
+    path = f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}"
+    if version is None:
+        response = _delete(path)
+        _require_status(response, (200, 204, 404), "activity alias delete")
+        return {"id": ACTIVITY_ID, "alias": ALIAS, "exists": False, "version": None}
+    if isinstance(version, bool) or version < 1:
+        raise ValueError("restore version must be a positive integer")
+    response = _patch(path, {"version": version})
+    if response.status_code == 404:
+        response = _post(
+            f"/activities/{ACTIVITY_ID}/aliases",
+            {"id": ALIAS, "version": version},
+        )
+    _require_status(response, (200, 201), "activity alias restore")
+    return {
+        "id": ACTIVITY_ID, "alias": ALIAS, "exists": True,
+        "version": version,
     }
 
 
@@ -167,9 +213,12 @@ def main(argv: list[str] | None = None) -> int:
     """Protected operator CLI with stable, nonsecret JSON receipts."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("provision", "readiness"):
+    for command in ("provision", "readiness", "alias-state"):
         child = subparsers.add_parser(command)
         child.add_argument("--json", action="store_true", dest="as_json")
+    restore = subparsers.add_parser("restore-alias")
+    restore.add_argument("--version", required=True)
+    restore.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
 
     if args.command == "provision":
@@ -180,6 +229,36 @@ def main(argv: list[str] | None = None) -> int:
             # headers, or signed fields. The protected runner gets only this
             # stable fail-closed receipt.
             result = {"ok": False, "operation": "provision", "error": "provision failed"}
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+            return 1
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if args.command == "alias-state":
+        try:
+            result = {"ok": True, "operation": "alias-state", **alias_state()}
+        except Exception:
+            result = {
+                "ok": False, "operation": "alias-state",
+                "error": "alias snapshot failed",
+            }
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+            return 1
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if args.command == "restore-alias":
+        try:
+            version = None if args.version == "absent" else int(args.version)
+            result = {
+                "ok": True, "operation": "restore-alias",
+                **restore_alias(version),
+            }
+        except Exception:
+            result = {
+                "ok": False, "operation": "restore-alias",
+                "error": "alias restore failed",
+            }
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 1
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
