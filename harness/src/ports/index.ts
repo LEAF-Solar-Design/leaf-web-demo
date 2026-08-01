@@ -694,6 +694,10 @@ export interface InstantExecutorClient {
 
 export interface SubmitRunRequest {
   tenantId: string;
+  /** App-owned turn authority. The app resolves subject and tier from this
+   * tuple; the harness never supplies either value. */
+  authoritySessionId?: string;
+  authorityTurnId?: string;
   /** Registered tool NAME (catalog key) — never code. */
   tool: string;
   params: Record<string, unknown>;

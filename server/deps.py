@@ -644,6 +644,31 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
                          backedge=True)
 
 
+def backedge_run_identity(tenant: Any, authority_session_id: Optional[str],
+                          authority_turn_id: Optional[str]) -> Optional[Any]:
+    """Resolve live conversational run authority from the app-owned turn.
+
+    Direct JWT and auth-off callers keep their existing identity. A verified
+    dispatch back edge must name an active, same-tenant app session and turn;
+    the harness cannot supply a tier or subject. The shared resolver reads the
+    turn subject and then re-resolves its current platform tenant and tier.
+    Missing, stale, superseded, foreign, or unavailable authority returns None
+    so /api/run refuses before catalog or entitlement evaluation.
+    """
+    if not auth_live() or not isinstance(tenant, TenantContext):
+        return tenant
+    if not getattr(tenant, "backedge", False):
+        return tenant
+    resolved = backedge_author_identity(
+        tenant, authority_session_id, authority_turn_id
+    )
+    if (not isinstance(resolved, TenantContext)
+            or not resolved.subject
+            or str(resolved) != str(tenant)):
+        return None
+    return resolved
+
+
 def require_tenant(
     request: Request,
     x_tenant_id: Optional[str] = Header(default=None),

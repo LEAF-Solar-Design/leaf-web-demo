@@ -79,6 +79,91 @@ def test_backedge_restores_the_current_platform_tier(session):
     assert elevated.backedge is True
 
 
+def test_backedge_run_uses_the_active_turns_current_platform_tier(
+    session, monkeypatch
+):
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-run", 60, tier="restricted", subject=ALICE,
+    )
+    caller = deps.TenantContext("tenant-a", tier="restricted", backedge=True)
+
+    resolved = deps.backedge_run_identity(caller, session_id, "turn-run")
+
+    assert resolved is not None
+    assert resolved.subject == ALICE
+    assert resolved.tier == "hosted_pro"
+    assert resolved.backedge is True
+
+
+@pytest.mark.parametrize("session_id,turn_id,tenant_id", [
+    (None, "turn-run", "tenant-a"),
+    ("missing-session", "turn-run", "tenant-a"),
+    ("real", "wrong-turn", "tenant-a"),
+    ("real", "turn-run", "tenant-b"),
+])
+def test_backedge_run_fails_closed_without_the_exact_active_turn(
+    session, session_id, turn_id, tenant_id, monkeypatch
+):
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    real_session = session["session_id"]
+    assert session_store.try_begin_turn(
+        real_session, "turn-run", 60, tier="hosted_pro", subject=ALICE,
+    )
+    if session_id == "real":
+        session_id = real_session
+
+    assert deps.backedge_run_identity(
+        backedge(tenant_id), session_id, turn_id
+    ) is None
+
+
+def test_backedge_run_authority_outage_fails_closed(session, monkeypatch):
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-run", 60, tier="hosted_pro", subject=ALICE,
+    )
+    monkeypatch.setattr(
+        session_store,
+        "active_turn_subject",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+
+    assert deps.backedge_run_identity(
+        backedge(), session_id, "turn-run"
+    ) is None
+
+
+def test_backedge_run_rejects_a_superseded_turn(session, monkeypatch):
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-old", 60, tier="hosted_pro", subject=ALICE,
+    )
+    assert session_store.try_begin_turn(
+        session_id, "turn-new", 0, tier="hosted_pro", subject=MALLORY,
+    )
+
+    assert deps.backedge_run_identity(
+        backedge(), session_id, "turn-old"
+    ) is None
+    resolved = deps.backedge_run_identity(
+        backedge(), session_id, "turn-new"
+    )
+    assert resolved is not None and resolved.subject == MALLORY
+
+
+def test_direct_jwt_run_identity_never_borrows_turn_authority(session):
+    caller = deps.TenantContext(
+        "tenant-a", tier="hosted_pro", subject=MALLORY,
+    )
+    assert deps.backedge_run_identity(
+        caller, session["session_id"], "any-turn"
+    ) is caller
+
+
 def test_a_mid_turn_platform_downgrade_takes_effect(
     session, monkeypatch,
 ):
@@ -396,6 +481,201 @@ def test_real_author_route_uses_current_platform_tier(
         "tier": "hosted_pro",
         "subject": ALICE,
     }
+
+
+def test_real_run_route_uses_active_turn_authority_not_stale_broker_tier(
+    session, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers import jobs as jobs_router
+
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-run-route", 60,
+        tier="hosted_pro", subject=ALICE,
+    )
+    tool = {
+        "name": "drape-onto-spheres",
+        "description": "Drape arrays onto spheres",
+        "capabilities": ["drawing.write"],
+    }
+    digest = deps.catalog_tool_digest(tool)
+    catalog_pin = {
+        "catalog_commit": "a" * 40,
+        "effective_catalog_digest": "b" * 64,
+    }
+    seen = {}
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(deps, "find_tool", lambda name, tenant: tool)
+    def entitlements_for(tier):
+        seen["tier"] = tier
+        return {"run_write": True}
+
+    monkeypatch.setattr(
+        jobs_router.entitlements, "entitlements_for", entitlements_for,
+    )
+    monkeypatch.setattr(
+        jobs_router.entitlements,
+        "tool_required_capability",
+        lambda _tool: "run_write",
+    )
+    monkeypatch.setattr(
+        jobs_router, "_checkout_identity", lambda *_args: ("anonymous", None)
+    )
+    monkeypatch.setattr(
+        jobs_router.jobs.platform_link,
+        "resolve_submission_context",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(jobs_router, "_legacy_drawing_head", lambda *_args: 7)
+    monkeypatch.setattr(
+        jobs_router.customization_service,
+        "effective_catalog_pin",
+        lambda _tenant: catalog_pin,
+    )
+
+    class _LegacyStore:
+        @staticmethod
+        def authority_mode():
+            return "legacy"
+
+    monkeypatch.setattr(jobs_router, "_store", lambda: _LegacyStore())
+    def submit_job(tenant, *_args, **_kwargs):
+        seen["tenant"] = str(tenant)
+        return "job-run-route"
+
+    monkeypatch.setattr(jobs_router.jobs, "submit_job", submit_job)
+
+    app = FastAPI()
+    app.include_router(jobs_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="restricted", backedge=True,
+    )
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/run",
+        json={
+            "tool": "drape-onto-spheres",
+            "params": {},
+            "dwg": "drawing-a",
+            "dwg_version": 7,
+            "expected_drawing_head": 7,
+            "catalog_digest": digest,
+            "tool_manifest_sha256": digest,
+            **catalog_pin,
+        },
+        headers={
+            "X-Authority-Session-Id": session_id,
+            "X-Authority-Turn-Id": "turn-run-route",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert seen == {"tier": "hosted_pro", "tenant": "tenant-a"}
+
+
+def test_real_resolved_backedge_write_without_exact_pins_submits_no_job(
+    session, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers import jobs as jobs_router
+
+    session_id = session["session_id"]
+    assert session_store.try_begin_turn(
+        session_id, "turn-write-without-pins", 60,
+        tier="hosted_pro", subject=ALICE,
+    )
+    tool = {
+        "name": "drape-onto-spheres",
+        "description": "Drape arrays onto spheres",
+        "capabilities": ["drawing.write"],
+    }
+    digest = deps.catalog_tool_digest(tool)
+    submitted = []
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(deps, "find_tool", lambda *_args: tool)
+    monkeypatch.setattr(
+        jobs_router.entitlements, "entitlements_for",
+        lambda _tier: {"run_write": True},
+    )
+    monkeypatch.setattr(
+        jobs_router.entitlements, "tool_required_capability",
+        lambda _tool: "run_write",
+    )
+    monkeypatch.setattr(
+        jobs_router, "_checkout_identity", lambda *_args: ("anonymous", None)
+    )
+    monkeypatch.setattr(
+        jobs_router.jobs.platform_link,
+        "resolve_submission_context",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        jobs_router.jobs, "submit_job",
+        lambda *_args, **_kwargs: submitted.append(True) or "unexpected-job",
+    )
+
+    app = FastAPI()
+    app.include_router(jobs_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="restricted", backedge=True,
+    )
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/run",
+        json={
+            "tool": "drape-onto-spheres",
+            "params": {},
+            "dwg": "drawing-a",
+            "catalog_digest": digest,
+        },
+        headers={
+            "X-Authority-Session-Id": session_id,
+            "X-Authority-Turn-Id": "turn-write-without-pins",
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "requires exact catalog and drawing pins" in response.text
+    assert submitted == []
+
+
+def test_real_run_route_refuses_missing_turn_before_catalog_lookup(
+    session, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers import jobs as jobs_router
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda *_args: pytest.fail("unbound run reached catalog lookup"),
+    )
+    app = FastAPI()
+    app.include_router(jobs_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="restricted", backedge=True,
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/run",
+        json={
+            "tool": "drape-onto-spheres",
+            "params": {},
+            "dwg": "drawing-a",
+            "catalog_digest": "a" * 64,
+        },
+    )
+
+    assert response.status_code == 403
+    assert "active same-account turn authority" in response.text
 
 
 # --------------------------------------------------------------------------- #

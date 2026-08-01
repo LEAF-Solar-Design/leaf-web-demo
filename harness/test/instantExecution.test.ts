@@ -29,6 +29,7 @@ async function run(loop: ConverseLoop, session: SessionRecord, a?: InstantSessio
   const result = await loop.handleMessage({
     sessionId: session.session_id, tenantId: session.tenant_id, text: `RUN:instant-read PARAMS:${JSON.stringify(p)}`,
     contextPacket: {}, instantAssignment: a, instantDrawingContext: drawing,
+    authoritySessionId: "app-session-instant", authorityTurnId: "app-turn-instant",
   });
   await result.done;
 }
@@ -53,7 +54,7 @@ describe("instant run_capability", () => {
   it("selects the direct executor, not /api/run, for a valid instant assignment", async () => {
     const { loop, appRun, instant } = setup();
     const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
-    await run(loop, session, assignment(session.session_id), { layer: "Panels" });
+    await run(loop, session, assignment("app-session-instant"), { layer: "Panels" });
     expect(instant.calls).toHaveLength(1);
     expect(appRun.submitCalls).toHaveLength(0);
     expect(instant.calls[0]!.invocation).toMatchObject({ capability: { capability_id: "drawing.read", tool_id: "instant-read" }, drawing_context: drawing });
@@ -64,8 +65,8 @@ describe("instant run_capability", () => {
     const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     const wrong = assignment("other-session");
     await run(loop, session, wrong);
-    await run(loop, session, { ...assignment(session.session_id), expires_at: "2020-01-01T00:00:00Z" });
-    await run(loop, session, assignment(session.session_id), { redis_password: "nope" });
+    await run(loop, session, { ...assignment("app-session-instant"), expires_at: "2020-01-01T00:00:00Z" });
+    await run(loop, session, assignment("app-session-instant"), { redis_password: "nope" });
     expect(instant.calls).toHaveLength(0);
     expect(appRun.submitCalls).toHaveLength(0);
   });
@@ -74,8 +75,12 @@ describe("instant run_capability", () => {
     const { loop, appRun, instant, store } = setup({ batch_fallback: true });
     instant.failure = new Error("network down");
     const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
-    await run(loop, session, assignment(session.session_id));
+    await run(loop, session, assignment("app-session-instant"));
     expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      authoritySessionId: "app-session-instant",
+      authorityTurnId: "app-turn-instant",
+    });
     const events = await store.eventsAfter(session.session_id, 0);
     expect(events.find((event) => event.type === "job_linked")?.data).toMatchObject({ route: "batch_fallback", reason: "instant_transport_failure" });
   });
@@ -85,10 +90,18 @@ describe("instant run_capability", () => {
     const first = await missingAssignment.loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await run(missingAssignment.loop, first);
     expect(missingAssignment.appRun.submitCalls).toHaveLength(1);
+    expect(missingAssignment.appRun.submitCalls[0]).toMatchObject({
+      authoritySessionId: "app-session-instant",
+      authorityTurnId: "app-turn-instant",
+    });
 
     const disabledExecutor = setup({ batch_fallback: true }, false);
     const second = await disabledExecutor.loop.createOrGetSession("demo-tenant", "rooftop_demo");
-    await run(disabledExecutor.loop, second, assignment(second.session_id));
+    await run(disabledExecutor.loop, second, assignment("app-session-instant"));
     expect(disabledExecutor.appRun.submitCalls).toHaveLength(1);
+    expect(disabledExecutor.appRun.submitCalls[0]).toMatchObject({
+      authoritySessionId: "app-session-instant",
+      authorityTurnId: "app-turn-instant",
+    });
   });
 });

@@ -326,12 +326,16 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
 
 
 @router.post("/api/run")
-def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_tenant),
+def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
         authorization: Optional[str] = Header(default=None),
-        x_checkout_capability: Optional[str] = Header(default=None)):
+        x_checkout_capability: Optional[str] = Header(default=None),
+        authority_session_id: Optional[str] = Header(
+            default=None, alias="X-Authority-Session-Id"),
+        authority_turn_id: Optional[str] = Header(
+            default=None, alias="X-Authority-Turn-Id")):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -347,6 +351,20 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     against any active lock.
     """
     # SUBMIT-LATENCY CLOCK (emf SubmitLatency, emitted just before the 202).
+    # Authority resolution is part of submission and belongs inside this clock.
+    submit_t0 = time.perf_counter()
+    resolved_tenant = deps.backedge_run_identity(
+        tenant_id, authority_session_id, authority_turn_id
+    )
+    if resolved_tenant is None:
+        return error_response(
+            ErrorCode.FORBIDDEN,
+            "active same-account turn authority is required for conversational runs",
+            retryable=False,
+            status_code=403,
+        )
+    tenant_id = resolved_tenant
+
     # Started at the first statement of the body so it covers every unit of work
     # this handler does to turn a request into a job_id. It does NOT cover the
     # ASGI/dependency prologue that ran before the body (deps.require_tenant and
@@ -355,7 +373,6 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     # middleware, and the work it misses is fixed-cost: a regression in what this
     # contract is about — resolution, gating, and the durable insert below — is
     # inside the window.
-    submit_t0 = time.perf_counter()
     # TENANT-SCOPED resolution (wave 4): resolve the tool from the REQUESTING tenant's
     # catalog (globals + that tenant's own repo tools). A tool authored by another
     # tenant is not in this tenant's catalog -> UNKNOWN_TOOL, so it can never be run
@@ -438,7 +455,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 or (
                     deps.auth_live()
                     and isinstance(tenant_id, deps.TenantContext)
-                    and tenant_id.subject is None
+                    and getattr(tenant_id, "backedge", False)
                 )
             )
             exact_pin_values = (

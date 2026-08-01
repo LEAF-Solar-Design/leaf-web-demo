@@ -400,12 +400,22 @@ describe("ConverseLoop — read auto-dispatch", () => {
   it("run_capability on a READ tool dispatches inline via the wait path", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
-    await sendText(loop, s, "RUN:count-by-layer");
+    const turn = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      text: "RUN:count-by-layer",
+      contextPacket: PACKET,
+      authoritySessionId: "app-session-1",
+      authorityTurnId: "app-turn-1",
+    });
+    await turn.done;
 
     // Dispatch went through submitRun with the section-7 payload + 15s wait budget.
     expect(appRun.submitCalls).toHaveLength(1);
     expect(appRun.submitCalls[0]).toMatchObject({
       tenantId: "demo-tenant",
+      authoritySessionId: "app-session-1",
+      authorityTurnId: "app-turn-1",
       tool: "count-by-layer",
       params: {},
       dwg: "rooftop_demo",

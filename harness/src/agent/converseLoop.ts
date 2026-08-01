@@ -875,6 +875,8 @@ export class ConverseLoop {
           const batchFallback = async (reason: string): Promise<SpineToolResult> => {
             const fallback = await appRun.submitRun({
               tenantId, tool: target, params, dwg, catalogDigest,
+              authoritySessionId: ctx.authoritySessionId,
+              authorityTurnId: ctx.authorityTurnId,
               wait: true, waitTimeoutS: this.readWaitS,
             });
             await ctx.emit("job_linked", {
@@ -931,6 +933,8 @@ export class ConverseLoop {
         // Read tools may wait inline (fast path); writes are long jobs — async row.
         const res = await appRun.submitRun({
           tenantId,
+          authoritySessionId: ctx.authoritySessionId,
+          authorityTurnId: ctx.authorityTurnId,
           tool: target,
           params,
           dwg,

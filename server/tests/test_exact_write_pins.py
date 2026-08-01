@@ -175,6 +175,9 @@ def test_catalog_generation_or_manifest_drift_creates_no_job(monkeypatch):
 
 def test_backedge_write_requires_complete_exact_pins(monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setattr(
+        jobs_router.deps, "backedge_run_identity", lambda tenant, *_args: tenant,
+    )
     monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: WRITE_TOOL)
     monkeypatch.setattr(jobs_router.entitlements, "resolve_tier", lambda _tenant: "hosted_pro")
     submitted = []
@@ -193,7 +196,9 @@ def test_backedge_write_requires_complete_exact_pins(monkeypatch):
     response = jobs_router.run(
         req,
         wait=0,
-        tenant_id=jobs_router.deps.TenantContext("pin-tenant", tier="hosted_pro"),
+        tenant_id=jobs_router.deps.TenantContext(
+            "pin-tenant", tier="hosted_pro", subject="auth0|alice", backedge=True,
+        ),
         x_org_id=None,
         x_project_id=None,
         idempotency_key=None,
