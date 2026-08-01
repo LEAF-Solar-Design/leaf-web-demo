@@ -399,8 +399,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
     # write_loop resolves the target from `params.drawing_id`, NOT from `dwg`
     # (which names the intake source). Asking it means the capability is verified
     # against the drawing that will actually be published to.
+    target_drawing_id = write_loop.target_drawing_id(params)
     checkout_holder, checkout_fence = _checkout_identity(
-        tenant_id, write_loop.target_drawing_id(params), x_checkout_capability)
+        tenant_id, target_drawing_id, x_checkout_capability)
 
     try:
         platform_context = jobs.platform_link.resolve_submission_context(
@@ -481,6 +482,23 @@ def run(req: RunRequest, wait: int = 0, tenant_id: str = Depends(deps.require_te
                 if current_head != req.expected_drawing_head:
                     raise ValueError(
                         "drawing head changed after approval; refresh drawing state and confirm again")
+            if required == "run_write":
+                store = _store()
+                if store.authority_mode() == "postgres":
+                    # Refuse before the durable job insert. The worker repeats
+                    # this check immediately before paid APS work, closing the
+                    # race between this preflight and execution. Legacy keeps
+                    # its first-write bootstrap and unlocked-write contract.
+                    backend = write_loop.backend_for_tenant(
+                        str(tenant_id), aps_live=False, da=None)
+                    try:
+                        store.authorize_checkout(
+                            backend, str(tenant_id), target_drawing_id,
+                            checkout_holder, checkout_fence)
+                    except store.CheckoutDenied as exc:
+                        return error_response(
+                            ErrorCode.FORBIDDEN, str(exc), retryable=False,
+                            status_code=403)
             job_id = jobs.submit_job(
                 tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
                 org_id=resolved_org, project_id=resolved_project,

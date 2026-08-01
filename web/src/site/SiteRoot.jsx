@@ -7,7 +7,7 @@
 // regardless of path — every pre-existing deep link keeps working byte-for-
 // byte. Checked ONCE at boot; navigate() preserves the search string.
 
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRoute, navigate } from './router.js'
 import { sceneForPath } from './routeScene.js'
 import StageLayer from './StageLayer.jsx'
@@ -15,7 +15,7 @@ import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
-import { liveDrawingId } from './workbenchId.js'
+import { liveDrawingId, rememberLiveDrawingId } from './workbenchId.js'
 import {
   getDrawingIntake,
   getDrawingVersions,
@@ -44,13 +44,19 @@ function bootWantsApp(search, path = window.location.pathname) {
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
-// Keep the shared workspace controller on the same session-scoped drawing as
-// ToolCast. The protected acceptance seeds this value before boot, and both
-// consumers must honor it from the first render instead of briefly exposing
-// the old fixture id.
-const OPERATOR_DRAWING_ID = liveDrawingId()
-const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
-const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
+const DEMO_VALUE = new URLSearchParams(window.location.search).get('demo')
+const PUBLIC_DEMO = DEMO_VALUE === '1' && !isSignedIn()
+const LIVE_DEMO = DEMO_VALUE === 'tour' || (DEMO_VALUE === '1' && isSignedIn())
+const PROOF_MODE =
+  import.meta.env.VITE_CAT_PROOF === '1' ||
+  new URLSearchParams(window.location.search).get('proof') === '1'
+const INITIAL_OPERATOR_DRAWING_ID = PROOF_MODE
+  ? 'cat-panels'
+  : PUBLIC_DEMO
+    ? 'demo'
+    : LIVE_DEMO
+      ? 'rooftop_demo'
+    : liveDrawingId()
 const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
 const loadVersion = (drawingId, version) => getDrawingIntake(PUBLIC_DEMO, drawingId, version)
 // /try does not render delta chips. Its recovery-only restore controls need
@@ -75,6 +81,7 @@ export default function SiteRoot() {
   const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
   const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
   const [operatorOverlay, setOperatorOverlay] = useState(null)
+  const [operatorDrawingId, setOperatorDrawingId] = useState(INITIAL_OPERATOR_DRAWING_ID)
   const drawingOptions = useMemo(() => ({
     loadHead,
     loadVersion,
@@ -83,13 +90,13 @@ export default function SiteRoot() {
     redoVersion,
     onApplyIntake: setOperatorIntake,
     onResetSelection: () => setOperatorSelectedHandle(null),
-    initialDrawingState: {
-      drawing_id: OPERATOR_DRAWING_ID,
-      version: 1,
-      head: 1,
-      latest: 1,
-    },
   }), [])
+  const promoteOperatorDrawing = useCallback((receipt) => {
+    const drawingId = receipt?.drawing_id || null
+    if (!drawingId) return
+    setOperatorDrawingId(drawingId)
+    if (receipt.tenant_kind === 'account') rememberLiveDrawingId(drawingId)
+  }, [])
 
   useEffect(() => {
     if (!authCallbackPending) return
@@ -162,7 +169,7 @@ export default function SiteRoot() {
 
   return (
     <WorkspaceControllerProvider
-      drawingId={scene === 'tool' ? OPERATOR_DRAWING_ID : 'rooftop_demo'}
+      drawingId={scene === 'tool' ? operatorDrawingId : 'rooftop_demo'}
       drawingOptions={drawingOptions}
     >
       <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
@@ -178,6 +185,8 @@ export default function SiteRoot() {
         <LandingCast onTryTool={() => navigate('/try')} />
         <ToolCast
           active={scene === 'tool'}
+          drawingId={operatorDrawingId}
+          onDrawingReady={promoteOperatorDrawing}
           onFitDrawing={() => stageLayerRef.current?.fit()}
           onViewModeChange={setOperatorViewMode}
           onVisibleLayersChange={setOperatorVisibleLayers}

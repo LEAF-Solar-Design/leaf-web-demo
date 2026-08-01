@@ -3,8 +3,8 @@ import { describe, it } from 'node:test'
 import {
   CANONICAL_DRAWING_ID,
   WORKBENCH_ID_KEY,
-  freshDrawingId,
   liveDrawingId,
+  rememberLiveDrawingId,
 } from './workbenchId.js'
 
 function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
@@ -43,7 +43,7 @@ describe('live workbench drawing id', () => {
     }
   })
 
-  it('replaces any id the server would reject, and persists the replacement', () => {
+  it('rejects every id the server would reject without replacing it', () => {
     const rejected = [
       '../evil',
       'Evil-Drawing',
@@ -57,34 +57,32 @@ describe('live workbench drawing id', () => {
     ]
     for (const id of rejected) {
       const scope = scopeWith({ [WORKBENCH_ID_KEY]: id })
-      const resolved = liveDrawingId(scope)
-      assert.notEqual(resolved, id, id)
-      assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/, id)
-      assert.equal(scope._store.get(WORKBENCH_ID_KEY), resolved, id)
+      assert.equal(liveDrawingId(scope), null, id)
+      assert.equal(scope._store.get(WORKBENCH_ID_KEY), id, id)
       assert.ok(!CANONICAL_DRAWING_ID.test(id), id)
     }
   })
 
-  it('mints and persists a fresh id when nothing is seeded', () => {
+  it('returns an honest empty state when nothing is seeded', () => {
     const scope = scopeWith({})
-    const resolved = liveDrawingId(scope)
-    assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/)
-    assert.equal(scope._store.get(WORKBENCH_ID_KEY), resolved)
-    assert.ok(CANONICAL_DRAWING_ID.test(resolved))
+    assert.equal(liveDrawingId(scope), null)
+    assert.equal(scope._store.has(WORKBENCH_ID_KEY), false)
   })
 
-  it('falls back to a fresh id when reading storage throws', () => {
-    const resolved = liveDrawingId(scopeWith({}, { throwOnGet: true }))
-    assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/)
+  it('returns an honest empty state when reading storage throws', () => {
+    assert.equal(liveDrawingId(scopeWith({}, { throwOnGet: true })), null)
   })
 
-  it('still returns a usable id when persisting throws', () => {
-    // A write failure must not leave the surface without a drawing id. The id
-    // is then per-load rather than per-session, which is the honest outcome
-    // when the browser refuses to remember anything.
-    const resolved = liveDrawingId(scopeWith({}, { throwOnSet: true }))
-    assert.match(resolved, /^cat-workbench-[0-9a-z-]+$/)
-    assert.ok(CANONICAL_DRAWING_ID.test(resolved))
+  it('persists only a server-canonical completed upload id', () => {
+    const scope = scopeWith({})
+    assert.equal(rememberLiveDrawingId('u-completed-upload', scope), true)
+    assert.equal(scope._store.get(WORKBENCH_ID_KEY), 'u-completed-upload')
+    assert.equal(rememberLiveDrawingId('../invented', scope), false)
+    assert.equal(scope._store.get(WORKBENCH_ID_KEY), 'u-completed-upload')
+  })
+
+  it('keeps the in-memory upload usable when persistence is unavailable', () => {
+    assert.equal(rememberLiveDrawingId('u-completed-upload', scopeWith({}, { throwOnSet: true })), false)
   })
 
   it('rejects a trailing newline, unlike a bare python re.match', () => {
@@ -93,12 +91,6 @@ describe('live workbench drawing id', () => {
     // strictly tighter, which is the safe direction for a value that becomes a
     // storage key.
     assert.ok(!CANONICAL_DRAWING_ID.test('demo\n'))
-    assert.notEqual(liveDrawingId(scopeWith({ [WORKBENCH_ID_KEY]: 'demo\n' })), 'demo\n')
-  })
-
-  it('mints ids that are themselves canonical without crypto.randomUUID', () => {
-    const scope = scopeWith({})
-    scope.crypto = {}
-    assert.ok(CANONICAL_DRAWING_ID.test(freshDrawingId(scope)))
+    assert.equal(liveDrawingId(scopeWith({ [WORKBENCH_ID_KEY]: 'demo\n' })), null)
   })
 })
