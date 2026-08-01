@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from apply_lisp import build_apply_scr
-from intake_parse import parse
+from intake_parse import o2w, parse
 from lisp import build_scr
 
 
@@ -42,6 +42,10 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}",
         f"REMOVE|{removed_handle}",
         "ADD|LEAF_APPLY_CANARY|0,0,1|0|0,0;12,0;12,12;0,12",
+        (
+            "ADD|LEAF_TILTED_CANARY|0,0.707106781,0.707106781|0|"
+            "20,0;32,0;32,12;20,12"
+        ),
         "",
     ])
     (tmp_path / "mutation-plan.txt").write_text(
@@ -95,3 +99,15 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         [12.0, 12.0, 0.0],
         [0.0, 12.0, 0.0],
     ]
+    tilted = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_TILTED_CANARY"
+    ]
+    assert len(tilted) == 1
+    normal = (0.0, 0.707106781, 0.707106781)
+    expected_tilted = [
+        [round(value, 3) for value in o2w((x, y, 0.0), normal)]
+        for x, y in ((20, 0), (32, 0), (32, 12), (20, 12))
+    ]
+    assert tilted[0]["pts"] == expected_tilted
+    assert len({point[2] for point in tilted[0]["pts"]}) > 1
