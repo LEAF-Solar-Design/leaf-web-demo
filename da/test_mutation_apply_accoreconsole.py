@@ -17,6 +17,7 @@ import pytest
 from apply_lisp import build_apply_scr
 from intake_parse import o2w, parse
 from lisp import build_scr
+from mutation_plan import world_to_ocs
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,19 @@ SOURCE_INTAKE = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
 def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
     removed_handle = source_intake["polylines"][0]["handle"]
+    transformed_source = source_intake["polylines"][1]
+    transformed_handle = transformed_source["handle"]
+    transformed_target = [
+        [point[0] + 5.0, point[1] + 7.0, point[2]]
+        for point in transformed_source["pts"]
+    ]
+    lowered_transform = world_to_ocs(transformed_target)
+    transform_normal = ",".join(
+        format(value, ".12g") for value in lowered_transform["normal"])
+    transform_vertices = ";".join(
+        ",".join(format(value, ".12g") for value in point)
+        for point in lowered_transform["points"]
+    )
     host = tmp_path / "host.dwg"
     shutil.copyfile(SOURCE_DWG, host)
 
@@ -41,6 +55,11 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         "LEAF_MUTATION_PLAN|1",
         f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}",
         f"REMOVE|{removed_handle}",
+        (
+            f"TRANSFORM|{transformed_handle}|{transform_normal}|"
+            f"{format(lowered_transform['elevation'], '.12g')}|"
+            f"{transform_vertices}"
+        ),
         "ADD|LEAF_APPLY_CANARY|0,0,1|0|0,0;12,0;12,12;0,12",
         (
             "ADD|LEAF_TILTED_CANARY|0,0.707106781,0.707106781|0|"
@@ -87,6 +106,17 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     intake = parse(families, "canary")
     handles = {item["handle"] for item in intake["polylines"]}
     assert removed_handle not in handles
+    transformed = next(
+        item for item in intake["polylines"]
+        if item["handle"] == transformed_handle
+    )
+    assert transformed["layer"] == transformed_source["layer"]
+    for actual_point, expected_point in zip(
+        transformed["pts"], transformed_target
+    ):
+        assert actual_point == pytest.approx(expected_point, abs=0.001)
+    assert transformed["closed"] == transformed_source["closed"]
+    assert transformed["xdata"] == transformed_source["xdata"]
     added = [
         item for item in intake["polylines"]
         if item["layer"] == "LEAF_APPLY_CANARY"
