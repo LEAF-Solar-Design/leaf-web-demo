@@ -114,7 +114,7 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     for actual_point, expected_point in zip(
         transformed["pts"], transformed_target
     ):
-        assert actual_point == pytest.approx(expected_point, abs=0.001)
+        assert actual_point == pytest.approx(expected_point, abs=0.000501)
     assert transformed["closed"] == transformed_source["closed"]
     assert transformed["xdata"] == transformed_source["xdata"]
     added = [

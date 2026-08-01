@@ -500,7 +500,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_broker_boundary.py"), 46),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
-              _py_pytest("tests/test_live_mutation_plan.py"), 20),
+              _py_pytest("tests/test_live_mutation_plan.py"), 26),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),
@@ -655,6 +655,15 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_extract_dxf_activity.py"), 5),
         Suite("da-mutation-apply", "da test_mutation_apply.py", "pytest", DA,
               _py_pytest("test_mutation_apply.py"), 22),
+        # Windows operator hosts run the non-billable AutoCAD engine canary.
+        # Linux CI must still collect the suite and may skip only when the named
+        # local AutoCAD runtime or tracked demo DWG is unavailable.
+        Suite("da-mutation-apply-accoreconsole",
+              "da test_mutation_apply_accoreconsole.py", "pytest", DA,
+              _py_pytest("test_mutation_apply_accoreconsole.py"), 0,
+              allowed_skip_reasons=(
+                  r"local AutoCAD 2026 console and tracked demo DWG are required",
+              )),
         # --- tenant customization control plane (one process per file) --- #
         Suite("server-customization-authority", "server customization authority", "pytest",
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
