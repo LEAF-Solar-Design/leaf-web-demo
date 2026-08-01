@@ -210,20 +210,17 @@ export function catProofResponse({ method, path, body = {}, query = {} }, state)
       telemetry: { turns: 2, input_tokens: 1200, output_tokens: 480, total_cost_usd: 0.012, models: ['fixture-agent'] },
     })
   }
-  if (path === '/api/author/confirmations' && method === 'POST') {
+  if (path === '/api/author/publication-requests' && method === 'POST') {
     if (!state.independentApproved) return json({
-      reason_code: 'independent_approval_pending',
-      error: { code: 'independent_approval_pending', message: 'independent_approval_pending' },
-    }, 409)
-    return json({ confirmation_id: 'publish-confirmation-0001' })
-  }
-  if (path === '/api/author/register' && method === 'POST') {
+      contract: 'leaf.customization.v1',
+      change_set_id: AUTHOR_RECEIPT.change_set_id,
+      status: 'awaiting_approval',
+    })
     state.authorPublished = true
     return json({
       contract: 'leaf.customization.v1', tenant_id: 'cat-litmus-tenant',
-      change_set_id: AUTHOR_RECEIPT.change_set_id, state: 'published',
-      catalog_commit: AUTHOR_RECEIPT.staged_commit, catalog_digest: AUTHOR_RECEIPT.catalog_digest,
-      platform_release: AUTHOR_RECEIPT.platform_release,
+      change_set_id: AUTHOR_RECEIPT.change_set_id, status: 'published',
+      catalog_digest: AUTHOR_RECEIPT.catalog_digest,
     })
   }
   if (path === '/api/run' && method === 'POST' && body.tool === 'count-panels') {

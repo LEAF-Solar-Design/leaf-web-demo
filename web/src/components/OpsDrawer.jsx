@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getOpsTenants, setTenantDisabled } from '../api.js'
+import { getAccountControls, getOpsTenants, setTenantDisabled, updateAccountControls } from '../api.js'
 import './popovers.css'
 
 // Internal ops drawer — visible only with ?ops=1 in the URL. A DT2 right drawer
@@ -23,6 +23,12 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(null) // tenant_id awaiting confirm
   const [acting, setActing] = useState(null)         // tenant_id with an action in flight
+  const [accountControls, setAccountControls] = useState(null)
+  const [accountLoading, setAccountLoading] = useState(false)
+  const [accountForbidden, setAccountForbidden] = useState(false)
+  const [accountErr, setAccountErr] = useState(null)
+  const [accountConfirming, setAccountConfirming] = useState(false)
+  const [accountActing, setAccountActing] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null); setForbidden(false)
@@ -36,7 +42,19 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  const loadAccountControls = useCallback(async () => {
+    setAccountLoading(true); setAccountErr(null); setAccountForbidden(false); setAccountConfirming(false)
+    try {
+      setAccountControls(await getAccountControls())
+    } catch (e) {
+      if (e && e.status === 403) { setAccountForbidden(true); setAccountControls(null) }
+      else { setAccountErr(String(e.message || e)); setAccountControls(null) }
+    } finally {
+      setAccountLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load(); loadAccountControls() }, [load, loadAccountControls])
 
   useEffect(() => {
     restoreRef.current = document.activeElement
@@ -101,6 +119,26 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     }
   }, [load])
 
+  const actOnAccountControl = useCallback(async () => {
+    if (!accountControls) return
+    const nextRequired = !Boolean(accountControls.tool_publication_approval_required)
+    setAccountActing(true); setAccountErr(null)
+    try {
+      const updated = await updateAccountControls(nextRequired, accountControls.revision)
+      setAccountControls(updated)
+      setAccountConfirming(false)
+    } catch (e) {
+      if (e && e.status === 403) setAccountForbidden(true)
+      else if (e && e.status === 409) {
+        setAccountConfirming(false)
+        setAccountErr('Account controls changed elsewhere. Refresh before trying again.')
+      }
+      else setAccountErr(String(e.message || e))
+    } finally {
+      setAccountActing(false)
+    }
+  }, [accountControls])
+
   return (
     <aside ref={drawerRef} className={`drawer${exiting ? ' exit' : ''}`} role="dialog" aria-modal="true" aria-label="Internal ops" onKeyDown={ownKeyboard}>
       <div className="drawer-head">
@@ -112,6 +150,66 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       </div>
 
       <div className="drawer-body">
+        <section className="ops-account-controls" aria-labelledby="ops-account-controls-title">
+          <div className="ops-section-head">
+            <div>
+              <div id="ops-account-controls-title" className="ops-section-title">Current account</div>
+              <div className="ops-section-copy">Tool authoring publication policy</div>
+            </div>
+          </div>
+
+          {accountLoading && !accountControls && (
+            <div className="skeleton-row" aria-label="Loading account controls" />
+          )}
+          {accountForbidden && (
+            <div className="ops-note">Account admin required to manage tool publication approval.</div>
+          )}
+          {accountErr && !accountForbidden && (
+            <div className="field-err" role="alert"><span className="dot red" />{accountErr}</div>
+          )}
+          {accountControls && !accountForbidden && (
+            <div className="ops-control-row">
+              <div className="ops-control-main">
+                <span className="ops-control-label">Require independent approval before publishing authored tools</span>
+                <span className="ops-control-help">
+                  {accountControls.tool_publication_approval_required
+                    ? 'On. An independent trusted approver must approve each publication.'
+                    : 'Off. Authored tools can publish without an independent approval.'}
+                </span>
+              </div>
+              {accountConfirming ? (
+                <div className="ops-control-confirm">
+                  <span className="confirm-q">
+                    {accountControls.tool_publication_approval_required
+                      ? 'Turn off independent publication approval?'
+                      : 'Turn on strict independent publication approval?'}
+                  </span>
+                  <button className="chip-act" onClick={actOnAccountControl} disabled={accountActing}>
+                    {accountActing ? 'Saving…' : 'Confirm'}
+                  </button>
+                  <button className="chip-neutral" onClick={() => setAccountConfirming(false)} disabled={accountActing}>
+                    Keep current
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className={accountControls.tool_publication_approval_required ? 'chip-act' : 'chip-neutral'}
+                  onClick={() => setAccountConfirming(true)}
+                  disabled={accountActing}
+                  aria-label={`${accountControls.tool_publication_approval_required ? 'On' : 'Off'}: require independent approval before publishing authored tools`}
+                >
+                  {accountControls.tool_publication_approval_required ? 'On' : 'Off'}
+                </button>
+              )}
+            </div>
+          )}
+          {(accountErr || accountForbidden) && (
+            <button className="chip-act" onClick={loadAccountControls} disabled={accountLoading}>
+              {accountLoading ? 'Refreshing…' : 'Refresh account controls'}
+            </button>
+          )}
+        </section>
+
         {forbidden && (
           <div className="ops-note">ops role required — this surface needs the QA/internal role.</div>
         )}
@@ -190,12 +288,12 @@ export default function OpsDrawer({ onDismiss, exiting }) {
           </table>
         )}
 
-        <button className="chip-act drawer-act" onClick={load} disabled={loading}>
-          {loading ? 'Refreshing…' : 'Refresh'}
+        <button className="chip-act drawer-act" onClick={() => { load(); loadAccountControls() }} disabled={loading || accountLoading}>
+          {loading || accountLoading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 
-      <div className="drawer-foot">GET /api/ops/tenants · server-authorized internal access</div>
+      <div className="drawer-foot">Account controls use signed-in admin access · tenant operations use server-authorized internal access</div>
     </aside>
   )
 }

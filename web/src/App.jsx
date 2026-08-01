@@ -1274,22 +1274,24 @@ export default function App() {
     try {
       const res = await publishStagedAuthor(mock, staged)
       const tool = res.tool || staged.tool
-      upsertTool(tool)
-      // Re-group the catalog so the new tool lands in "Custom authored tools"
-      // (visible re-fetch of the grouped capabilities).
-      loadCatalog()
-      // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
-      // it is visible even when the author section is collapsed / scrolled away.
-      showToast({
-        text: `Tool published — ${tool.name}`,
-        action: {
-          label: 'View',
-          onClick: () => {
-            setAuthorOpen(true)
-            setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+      if (res.published) {
+        upsertTool(tool)
+        // Re-group the catalog so the new tool lands in "Custom authored tools"
+        // (visible re-fetch of the grouped capabilities).
+        loadCatalog()
+        // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
+        // it is visible even when the author section is collapsed / scrolled away.
+        showToast({
+          text: `Tool published — ${tool.name}`,
+          action: {
+            label: 'View',
+            onClick: () => {
+              setAuthorOpen(true)
+              setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+            },
           },
-        },
-      })
+        })
+      }
       return { ...res, tool }
     } finally {
       setTourLanded(true)

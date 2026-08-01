@@ -36,6 +36,7 @@ from uuid import uuid4
 from psycopg import Error as PostgresError
 
 import author_quota
+import agent_policy
 import deps
 import entitlements
 import platform_link
@@ -768,7 +769,7 @@ class CustomizationService:
     def request_publication(
         self, *, tenant: Any, change_set_id: str
     ) -> dict[str, Any]:
-        """Continue an independently approved publish from durable server data."""
+        """Continue publication from durable data under the account policy."""
         tenant_id = _tenant_id(tenant)
         if not deps.auth_live():
             raise CustomizationServiceError("customization_auth_required", 503)
@@ -808,14 +809,31 @@ class CustomizationService:
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
             raise CustomizationServiceError("publication_request_not_available")
 
+        # Denial is terminal for the durable request regardless of later
+        # account-policy changes. It is resolved before policy or receipt
+        # lookup so no subsequent authority can revive the denied work.
+        if (change.state is ChangeState.STAGED
+                and continuation.get("status") == "denied"):
+            return self._publication_status(change, "denied")
+
+        publication_enabled, approval_required = self._publication_policy_state(
+            tenant_id
+        )
+        if not publication_enabled:
+            raise CustomizationServiceError("tool_publication_disabled", 409)
+
         confirmation_id = continuation.get("confirmation_id")
         if change.state is ChangeState.STAGED:
             record = self.store.find_unconsumed_confirmation(
                 tenant_id=tenant_id, change_set_id=change.change_set_id
             )
+            if (approval_required and record is not None
+                    and self._is_automatic_publication_confirmation(record)):
+                record = None
+            if (record is None
+                    and not approval_required):
+                record = self._issue_automatic_publication_confirmation(change)
             if record is None:
-                if continuation.get("status") == "denied":
-                    return self._publication_status(change, "denied")
                 return self._publication_status(change, "awaiting_approval")
             if confirmation_id != record["confirmation_id"]:
                 continuation = self.store.bind_publication_confirmation(
@@ -858,6 +876,64 @@ class CustomizationService:
         if durable.state is not ChangeState.PUBLISHED:
             raise CustomizationServiceError("customization_publish_incomplete", 503)
         return self._publication_status(durable, "published")
+
+    @staticmethod
+    def _publication_policy_state(tenant_id: str) -> tuple[bool, bool]:
+        """Read the account's tighten-only publication policy.
+
+        Missing state means approval is off. An unavailable or invalid policy
+        authority requires approval, so an outage can never auto-publish.
+        """
+        try:
+            state = agent_policy.load_tenant_state(tenant_id)
+            action = agent_policy.effective_action(
+                agent_policy.load_policy(),
+                "request_publication",
+                tenant_overlay=state["overlay"],
+            )
+        except Exception:  # noqa: BLE001 - policy authority outages fail closed
+            return True, True
+        if action is None:
+            return True, True
+        return action.enabled, action.policy != "auto"
+
+    @staticmethod
+    def _is_automatic_publication_confirmation(record: Mapping[str, Any]) -> bool:
+        payload = record.get("payload")
+        return (
+            isinstance(payload, Mapping)
+            and payload.get("approver_subject")
+            == "leaf:server:auto-publication-policy"
+        )
+
+    def _issue_automatic_publication_confirmation(
+        self, change: ChangeSet
+    ) -> dict[str, Any]:
+        """Mint the same exact, signed, one-use receipt as manual approval.
+
+        The fixed subject is server-owned and distinct from every Auth0 author.
+        It grants no reusable authority and appears in the durable publication
+        audit as the approver subject.
+        """
+        confirmation = self._authority().issue_publish_confirmation(
+            staged_change=StagedChange(
+                change.tenant_id,
+                change.change_set_id,
+                change.staged_commit or "",
+                change.catalog_digest or "",
+                change.desired_platform_release,
+                change.workspace_contract_digest,
+                change.author_subject,
+                True,
+            ),
+            author_binding=TenantBinding(
+                change.tenant_id, change.author_subject, "owner", True
+            ),
+            staff_authority=StaffAuthority(
+                "leaf:server:auto-publication-policy", True, True
+            ),
+        )
+        return {"confirmation_id": confirmation.confirmation_id}
 
     def deny_publication(
         self, *, tenant_id: str, change_set_id: str

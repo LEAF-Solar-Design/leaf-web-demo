@@ -23,7 +23,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   const apiEndpoints = []
   let catalogRunHeaders = null
   let authorStageBody = null
-  let authorRegisterBody = null
+  const authorPublicationBodies = []
   let authoredRunBody = null
   let grantLinkBody = null
 
@@ -39,7 +39,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
     }
     if (url.pathname === '/api/run' && body.tool === 'count-panels') catalogRunHeaders = await request.allHeaders()
     if (url.pathname === '/api/author/stage') authorStageBody = body
-    if (url.pathname === '/api/author/register') authorRegisterBody = body
+    if (url.pathname === '/api/author/publication-requests') authorPublicationBodies.push(body)
     if (url.pathname === '/api/run' && body.tool === 'count-panels-near-edge') authoredRunBody = body
     if (url.pathname === '/api/tenant/claude-grant' && request.method() === 'POST') grantLinkBody = body
     const result = catProofResponse({ method: request.method(), path: url.pathname, body, query: Object.fromEntries(url.searchParams) }, proofState)
@@ -143,39 +143,32 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await page.getByLabel('What should the tool do?').fill('count panels within 24in of the roof edge')
   await page.getByRole('button', { name: 'Generate tool' }).click()
   await expect(page.getByText('count-panels-near-edge')).toBeVisible()
-  await expect(page.getByText(/Staged and awaiting approval/)).toBeVisible()
+  await expect(page.getByText(/Staged and ready to publish/)).toBeVisible()
   mark('author staged')
   expect(authorStageBody).toMatchObject({ description: 'count panels within 24in of the roof edge', mode: 'build' })
   expect(authorStageBody?.idempotency_key).toBeTruthy()
 
-  await page.getByRole('button', { name: 'Publish tool' }).click()
-  await expect(page.getByText(/independent reviewer has not approved/)).toBeVisible()
+  await page.getByRole('button', { name: 'Request publication' }).click()
+  await expect(page.getByText(/Awaiting independent approval/)).toBeVisible()
   mark('author review gate')
-  expect(authorRegisterBody).toBeNull()
+  expect(authorPublicationBodies).toEqual([{
+    change_set_id: '11111111-1111-4111-8111-111111111111',
+  }])
   proofState.independentApproved = true
-  await page.getByRole('button', { name: 'Publish tool' }).click()
+  await page.getByRole('button', { name: 'Check approval & resume' }).click()
   await expect(page.getByRole('button', { name: 'Run it now' })).toBeVisible()
   await expect(page.locator('.toast')).toContainText('Tool published, count-panels-near-edge')
-  expect(authorRegisterBody).toMatchObject({
-    change_set_id: '11111111-1111-4111-8111-111111111111',
-    confirmation_id: 'publish-confirmation-0001',
-    staged_commit: 'c'.repeat(40),
-    catalog_digest: 'd'.repeat(64),
-    workspace_contract_digest: 'e'.repeat(64),
-  })
-  expect(authorRegisterBody?.idempotency_key).toBeTruthy()
-  expect(authorRegisterBody.idempotency_key).not.toBe(authorStageBody.idempotency_key)
-  expect(Object.keys(authorRegisterBody).sort()).toEqual([
-    'catalog_digest', 'change_set_id', 'confirmation_id', 'idempotency_key',
-    'platform_release', 'staged_commit', 'workspace_contract_digest',
-  ].sort())
+  expect(authorPublicationBodies).toEqual([
+    { change_set_id: '11111111-1111-4111-8111-111111111111' },
+    { change_set_id: '11111111-1111-4111-8111-111111111111' },
+  ])
 
   await page.getByRole('button', { name: 'Run it now' }).click()
   await expect(page.getByRole('button', { name: 'Run count-panels-near-edge' })).toBeVisible()
   expect(proofState.authorJob).toBe(false)
   await page.getByRole('button', { name: 'Run count-panels-near-edge' }).click()
   expect(authoredRunBody?.catalog_digest).toBe(AUTHORED_CATALOG_DIGEST)
-  const registerIndex = apiEndpoints.lastIndexOf('POST /api/author/register')
+  const registerIndex = apiEndpoints.lastIndexOf('POST /api/author/publication-requests')
   const toolsRefreshIndex = apiEndpoints.findIndex(
     (endpoint, index) => index > registerIndex && endpoint === 'GET /api/tools',
   )
