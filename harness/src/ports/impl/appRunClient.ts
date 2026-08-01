@@ -148,23 +148,36 @@ export class HttpAppRunClient implements AppRunClient {
    * out — the caller gets {job_id, status} and the model can job_status later.
    */
   async submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse> {
-    const body = await this.request(req.tenantId, "POST", `/api/run`, {
-      tool: req.tool,
-      params: req.params,
-      dwg: req.dwg,
-      catalog_digest: req.catalogDigest,
-      ...(req.drawingVersion !== undefined ? { dwg_version: req.drawingVersion } : {}),
-      ...(req.expectedDrawingHead !== undefined
-        ? { expected_drawing_head: req.expectedDrawingHead }
-        : {}),
-      ...(req.catalogCommit !== undefined ? { catalog_commit: req.catalogCommit } : {}),
-      ...(req.effectiveCatalogDigest !== undefined
-        ? { effective_catalog_digest: req.effectiveCatalogDigest }
-        : {}),
-      ...(req.toolManifestSha256 !== undefined
-        ? { tool_manifest_sha256: req.toolManifestSha256 }
-        : {}),
-    });
+    const body = await this.request(
+      req.tenantId,
+      "POST",
+      `/api/run`,
+      {
+        tool: req.tool,
+        params: req.params,
+        dwg: req.dwg,
+        catalog_digest: req.catalogDigest,
+        ...(req.drawingVersion !== undefined ? { dwg_version: req.drawingVersion } : {}),
+        ...(req.expectedDrawingHead !== undefined
+          ? { expected_drawing_head: req.expectedDrawingHead }
+          : {}),
+        ...(req.catalogCommit !== undefined ? { catalog_commit: req.catalogCommit } : {}),
+        ...(req.effectiveCatalogDigest !== undefined
+          ? { effective_catalog_digest: req.effectiveCatalogDigest }
+          : {}),
+        ...(req.toolManifestSha256 !== undefined
+          ? { tool_manifest_sha256: req.toolManifestSha256 }
+          : {}),
+      },
+      {
+        ...(req.authoritySessionId
+          ? { "x-authority-session-id": req.authoritySessionId }
+          : {}),
+        ...(req.authorityTurnId
+          ? { "x-authority-turn-id": req.authorityTurnId }
+          : {}),
+      },
+    );
     const jobId = String(body.job_id ?? "");
     let status = String(body.status ?? "submitted");
     if (!req.wait || !jobId) return { job_id: jobId, status };

@@ -113,6 +113,8 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
         ...(text !== undefined ? { text } : {}),
         ...(confirm !== undefined ? { confirm } : {}),
         contextPacket: { drawing: { id: "rooftop_demo" } },
+        authoritySessionId: "app-session-runtime-separation",
+        authorityTurnId: "app-turn-runtime-separation",
       });
       await done;
     };
@@ -130,6 +132,8 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
     expect(appRun.submitCalls.length).toBe(2); // the read + the confirmed write
     const ALLOWED_KEYS = new Set([
       "tenantId",
+      "authoritySessionId",
+      "authorityTurnId",
       "tool",
       "params",
       "dwg",
@@ -148,6 +152,10 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
       expect(typeof call.tool).toBe("string");
       expect(appRun.catalog.some((c) => c.name === call.tool)).toBe(true);
       expect(typeof call.dwg).toBe("string");
+      expect(call.authoritySessionId).toBe("app-session-runtime-separation");
+      expect(call.authorityTurnId).toBe("app-turn-runtime-separation");
+      expect(call).not.toHaveProperty("subject");
+      expect(call).not.toHaveProperty("tier");
       expect(call.catalogDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
       // Params are plain data and carry no authored code / drawing deltas.
       const paramsJson = JSON.stringify(call.params);

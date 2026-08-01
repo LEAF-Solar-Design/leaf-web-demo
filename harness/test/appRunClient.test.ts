@@ -86,3 +86,40 @@ describe("HttpAppRunClient authoring identity", () => {
     expect(sink.headers?.has("x-authority-turn-id")).toBe(false);
   });
 });
+
+describe("HttpAppRunClient run identity", () => {
+  it("sends only the app-owned authority tuple as run headers", async () => {
+    let headers = new Headers();
+    let body: Record<string, unknown> = {};
+    const client = new HttpAppRunClient({
+      baseUrl: "https://app.invalid",
+      dispatchSecret: "test-secret",
+      fetchImpl: async (_input, init) => {
+        headers = new Headers(init?.headers ?? {});
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ job_id: "job-1", status: "submitted" }), {
+          status: 202,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await client.submitRun({
+      tenantId: "tenant-a",
+      authoritySessionId: "app-session-1",
+      authorityTurnId: "app-turn-1",
+      tool: "drape-onto-spheres",
+      params: {},
+      dwg: "drawing-a",
+      catalogDigest: "digest-1",
+    });
+
+    expect(headers.get("x-authority-session-id")).toBe("app-session-1");
+    expect(headers.get("x-authority-turn-id")).toBe("app-turn-1");
+    expect(headers.get("x-author-subject")).toBeNull();
+    expect(body).not.toHaveProperty("tier");
+    expect(body).not.toHaveProperty("subject");
+    expect(body).not.toHaveProperty("authoritySessionId");
+    expect(body).not.toHaveProperty("authorityTurnId");
+  });
+});
