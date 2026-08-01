@@ -10,7 +10,7 @@ describe("author repository validation safety", () => {
   it("binds Git trust to the exact resolved checkout without wildcard trust", () => {
     expect(source).toContain("const resolvedRepoDir = realpathSync(repoDir)");
     expect(source).toContain('`safe.directory=${resolvedRepoDir}`');
-    expect(source).toContain('"-C",\n        resolvedRepoDir');
+    expect(source).toMatch(/"-C",\r?\n\s+resolvedRepoDir/);
     expect(source).not.toContain('safe.directory=*');
   });
 

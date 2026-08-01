@@ -283,6 +283,117 @@ def test_matching_new_entity_without_a_handle_is_refused(tmp_path):
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
 
 
+def test_live_effect_verification_accepts_extractor_coordinate_quantization():
+    base = {"dwg": "source.dwg", "layers": [], "polylines": []}
+    added = _entity("CENTERED", "Leaf Output")
+    added["pts"] = [
+        [10.0005, 20.0005, 0.0],
+        [12.0625, 20.0625, 0.0],
+        [12.0625, 22.0625, 0.0],
+        [-10.0625, 22.0625, 0.0],
+    ]
+    actual = {
+        "dwg": "output.dwg",
+        "layers": ["Leaf Output"],
+        "polylines": [{
+            **copy.deepcopy(added),
+            "handle": "APS1",
+            "pts": [
+                [10.001, 20.001, 0.0],
+                [12.063, 20.063, 0.0],
+                [12.063, 22.063, 0.0],
+                [-10.063, 22.063, 0.0],
+            ],
+        }],
+    }
+
+    write_loop.verify_live_mutation_effects(
+        base, actual, {"added": [added]},
+    )
+
+
+def test_live_effect_verification_rejects_change_beyond_extractor_precision():
+    base = {"dwg": "source.dwg", "layers": [], "polylines": []}
+    added = _entity("CENTERED", "Leaf Output")
+    actual = {
+        "dwg": "output.dwg",
+        "layers": ["Leaf Output"],
+        "polylines": [{
+            **copy.deepcopy(added),
+            "handle": "APS1",
+            "pts": [[0.001, 0.0, 0.0], *added["pts"][1:]],
+        }],
+    }
+
+    with pytest.raises(ValueError, match="added polyline"):
+        write_loop.verify_live_mutation_effects(
+            base, actual, {"added": [added]},
+        )
+
+
+def test_live_effect_verification_models_tilted_plane_extraction():
+    base = {"dwg": "source.dwg", "layers": [], "polylines": []}
+    added = _entity("TILTED", "Leaf Output")
+    added["pts"] = [
+        [15000.1234, 1000.5678, 10.1234],
+        [15010.1234, 1000.5678, 12.1234],
+        [15010.1234, 1010.5678, 12.1234],
+        [15000.1234, 1010.5678, 10.1234],
+    ]
+    actual = {
+        "dwg": "output.dwg",
+        "layers": ["Leaf Output"],
+        "polylines": [{
+            **copy.deepcopy(added),
+            "handle": "APS1",
+            "pts": [
+                [15000.128, 1000.568, 10.121],
+                [15010.128, 1000.568, 12.121],
+                [15010.128, 1010.568, 12.121],
+                [15000.128, 1010.568, 10.121],
+            ],
+        }],
+    }
+
+    write_loop.verify_live_mutation_effects(
+        base, actual, {"added": [added]},
+    )
+
+
+def test_live_effect_verification_preserves_open_unchanged_polylines():
+    unchanged = _entity("A")
+    unchanged["closed"] = False
+    base = {"dwg": "source.dwg", "layers": ["Panels"],
+            "polylines": [unchanged]}
+    added = _entity("B", "Leaf Output")
+    actual_added = copy.deepcopy(added)
+    actual_added["handle"] = "APS1"
+    actual = {"dwg": "output.dwg", "layers": ["Panels", "Leaf Output"],
+              "polylines": [copy.deepcopy(unchanged), actual_added]}
+
+    write_loop.verify_live_mutation_effects(
+        base, actual, {"added": [added]},
+    )
+
+
+def test_live_effect_verification_rejects_changed_closed_state():
+    unchanged = _entity("A")
+    base = {"dwg": "source.dwg", "layers": ["Panels"],
+            "polylines": [unchanged]}
+    added = _entity("B", "Leaf Output")
+    actual_unchanged = copy.deepcopy(unchanged)
+    actual_unchanged["closed"] = False
+    actual_added = copy.deepcopy(added)
+    actual_added["handle"] = "APS1"
+    actual = {"dwg": "output.dwg", "layers": ["Panels", "Leaf Output"],
+              "polylines": [actual_unchanged, actual_added]}
+
+    with pytest.raises(ValueError, match="unchanged handle"):
+        write_loop.verify_live_mutation_effects(
+            base, actual, {"added": [added]},
+        )
+
+
 def test_live_publish_uses_parent_head_cas(monkeypatch, tmp_path):
     backend = _store(tmp_path)
     planner, _ = _planner()

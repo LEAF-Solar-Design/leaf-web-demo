@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -46,6 +47,7 @@ from mutation_plan import (
     emit_plan,
     plan_sha256,
     validate_mutations,
+    world_to_ocs,
 )
 from tenant_id_validator import validate_tenant_id
 
@@ -1077,13 +1079,53 @@ def _point_close(left: Any, right: Any, tolerance: float = 1e-5) -> bool:
         return False
 
 
-def _polyline_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
+def _extractor_round(value: float, places: int) -> float:
+    # Measured on AutoCAD 2026 W.164.0.0: RTOS mode 2 rounds decimal ties
+    # away from zero (10.0625 -> 10.063, -10.0625 -> -10.063).
+    quantum = Decimal(1).scaleb(-places)
+    return float(Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP))
+
+
+def _plan_number(value: float) -> float:
+    value = 0.0 if abs(value) < 5e-13 else value
+    return float(format(value, ".12g"))
+
+
+def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
+    """Model the fixed extractor's lossy OCS text round trip for one addition."""
+    # This pure parser module is copied into both app and broker images. Reuse
+    # its arbitrary-axis transform so verification cannot drift from extraction.
+    from intake_parse import o2w
+
+    lowered = world_to_ocs(points)
+    normal = tuple(
+        _extractor_round(_plan_number(value), 6)
+        for value in lowered["normal"])
+    elevation = _extractor_round(
+        _plan_number(lowered["elevation"]), 3)
+    extracted = []
+    for point in lowered["points"]:
+        x = _extractor_round(_plan_number(point[0]), 3)
+        y = _extractor_round(_plan_number(point[1]), 3)
+        world = o2w((x, y, elevation), normal)
+        extracted.append([round(value, 3) for value in world])
+    return extracted
+
+
+def _polyline_effect_matches(
+    expected: Dict[str, Any], actual: Dict[str, Any], *, added: bool = False,
+) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
-    if actual.get("closed") is not True:
+    if expected.get("closed") is not actual.get("closed"):
         return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
+    if added:
+        try:
+            expected_points = _expected_extracted_points(expected_points)
+        except (ArithmeticError, IndexError, TypeError, ValueError):
+            return False
     return (
         len(expected_points) == len(actual_points)
         and all(_point_close(left, right)
@@ -1153,7 +1195,7 @@ def verify_live_mutation_effects(
         match_index = next(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate)),
+             and _polyline_effect_matches(entity, candidate, added=True)),
             None,
         )
         if match_index is None:

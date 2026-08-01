@@ -386,3 +386,20 @@ Risks:
 - Inline source must never reach live APS or in-process execution.
 - The broker ledger and responses must never record source text.
 - Existing published-tool and built-in execution must remain unchanged when no staged source is supplied.
+# Authored CAD extraction-precision repair
+
+- [x] Capture the failed staging job and establish focused green baselines.
+- [x] Add regressions for axis-aligned and tilted extractor precision.
+- [x] Match live effects at the extractor's declared coordinate precision.
+- [x] Register the live mutation suite in the repository gate.
+- [x] Measure AutoCAD tie rounding and bind reconstruction to the real parser.
+- [x] Pin decimal, negative, exponent, and closed-state counterexamples.
+- [x] Register the fixed mutation interpreter's 22 offline tests in CI.
+- [x] Make the Git trust safety assertion portable across LF and CRLF worktrees.
+- [x] Run focused and full repository gates and review the final diff.
+- [ ] Publish and prove the staging-only fix.
+
+Risks:
+
+- Verification must still reject geometry changes larger than the extractor can represent.
+- The live write window stays closed until a new immutable release is ready.
