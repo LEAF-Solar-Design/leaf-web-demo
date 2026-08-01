@@ -76,6 +76,10 @@ GUEST_TENANT_PREFIX = "guest-"
 # Fixed reviewed Activity. Tenant-authored code can produce data only; it can
 # never select an Activity or supply executable input to Design Automation.
 WRITE_ACTIVITY = "LeafApplyMutations"
+# The canonical DA extractor rounds WCS coordinates to three decimals. Live
+# effect verification accepts only the maximum half-quantum shift plus
+# floating-point slack.
+EXTRACTED_POINT_ABS_TOLERANCE = 0.000501
 
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
@@ -1061,7 +1065,13 @@ def _scratch_download_bytes(da: Any, key: str, upload_key: str) -> bytes:
     return da.download_object(key)
 
 
-def _point_close(left: Any, right: Any, tolerance: float = 1e-5) -> bool:
+def _point_close(
+    left: Any,
+    right: Any,
+    tolerance: float = EXTRACTED_POINT_ABS_TOLERANCE,
+) -> bool:
+    # Keep exact layer, topology, vertex-order, and entity-count checks in the
+    # caller; this tolerance applies only to each extracted coordinate.
     if not isinstance(left, list) or not isinstance(right, list):
         return False
     if len(left) < 2 or len(right) < 2:
