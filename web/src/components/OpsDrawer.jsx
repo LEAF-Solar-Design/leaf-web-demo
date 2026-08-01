@@ -162,7 +162,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
             <div className="skeleton-row" aria-label="Loading account controls" />
           )}
           {accountForbidden && (
-            <div className="ops-note">Account admin required to manage tool publication approval.</div>
+            <div className="ops-note">Account owner required to manage tool publication approval.</div>
           )}
           {accountErr && !accountForbidden && (
             <div className="field-err" role="alert"><span className="dot red" />{accountErr}</div>

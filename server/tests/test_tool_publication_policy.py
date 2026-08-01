@@ -1,5 +1,7 @@
-"""Admin account control for the tool-publication approval policy."""
+"""Account-owner control for the tool-publication approval policy."""
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -7,51 +9,101 @@ import pytest
 
 import agent_policy
 import deps
+import platform_link
 from routers import ops as ops_router
 
 
-def _client(monkeypatch, tenant):
+class _BindingStore:
+    def __init__(self, tenant_id="tenant-a", role="owner", *, missing=False,
+                 unavailable=False):
+        self.tenant_id = tenant_id
+        self.role = role
+        self.missing = missing
+        self.unavailable = unavailable
+
+    def resolve_active_identity_binding(self, provider, subject):
+        assert provider == "auth0"
+        assert subject
+        if self.unavailable:
+            raise RuntimeError("binding authority unavailable")
+        if self.missing:
+            return None
+        return SimpleNamespace(
+            platform_tenant_id=self.tenant_id,
+            binding_id="binding-1",
+        )
+
+    def active_identity_role(self, tenant_id, binding_id):
+        assert str(tenant_id) == self.tenant_id
+        assert binding_id == "binding-1"
+        return self.role
+
+
+def _client(monkeypatch, tenant, *, authority=None):
     app = FastAPI()
     app.include_router(ops_router.router)
     app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
     monkeypatch.setattr(deps, "auth_live", lambda: True)
+    if authority is None:
+        authority = _BindingStore(str(tenant))
+    monkeypatch.setattr(platform_link, "platform_store", lambda: authority)
     return TestClient(app)
 
 
 @pytest.mark.parametrize(
-    "tenant,allowlist",
+    "tenant,authority,status_code",
     [
-        (deps.TenantContext("tenant-a", tier="hosted_pro", subject="auth0|admin"),
-         {"auth0|admin"}),
-        (deps.TenantContext("tenant-a", tier="admin", subject="auth0|other"),
-         {"auth0|admin"}),
-        (deps.TenantContext("tenant-a", tier="admin"), {"auth0|admin"}),
-        ("tenant-a", {"auth0|admin"}),
+        (
+            deps.TenantContext("tenant-a", tier="hosted_pro", subject="auth0|owner"),
+            _BindingStore(role="editor"),
+            403,
+        ),
+        (
+            deps.TenantContext("tenant-a", tier="hosted_pro", subject="auth0|owner"),
+            _BindingStore(tenant_id="tenant-b"),
+            403,
+        ),
+        (
+            deps.TenantContext("tenant-a", tier="hosted_pro", subject="auth0|owner"),
+            _BindingStore(missing=True),
+            403,
+        ),
+        (deps.TenantContext("tenant-a", tier="hosted_pro"), _BindingStore(), 403),
+        ("tenant-a", _BindingStore(), 403),
+        (
+            deps.TenantContext("tenant-a", tier="hosted_pro", subject="auth0|owner"),
+            _BindingStore(unavailable=True),
+            503,
+        ),
     ],
 )
-def test_account_control_requires_both_verified_admin_factors(
-    monkeypatch, tenant, allowlist
+def test_account_control_denies_non_owner_or_unavailable_authority(
+    monkeypatch, tenant, authority, status_code
 ):
     calls = []
-    monkeypatch.setattr(deps, "admin_subjects", lambda: frozenset(allowlist))
     monkeypatch.setattr(
         agent_policy, "set_tenant_overlay", lambda *a, **k: calls.append((a, k))
     )
-    client = _client(monkeypatch, tenant)
+    client = _client(monkeypatch, tenant, authority=authority)
 
-    assert client.get("/api/admin/account-controls").status_code == 403
+    get_response = client.get("/api/admin/account-controls")
+    assert get_response.status_code == status_code
     assert client.put("/api/admin/account-controls", json={
         "tool_publication_approval_required": False,
         "expected_revision": 0,
-    }).status_code == 403
+    }).status_code == status_code
+    if status_code == 403:
+        assert "account owner authority" in get_response.text
+    else:
+        assert "binding authority" in get_response.text
     assert calls == []
 
 
 def test_account_control_get_defaults_off_without_secrets(monkeypatch):
     tenant = deps.TenantContext(
-        "tenant-a", tier="admin", subject="auth0|admin", authority_resolved=True
+        "tenant-a", tier="hosted_pro", subject="auth0|owner", authority_resolved=True
     )
-    monkeypatch.setattr(deps, "admin_subjects", lambda: frozenset({"auth0|admin"}))
+    monkeypatch.setattr(deps, "admin_subjects", lambda: frozenset())
     monkeypatch.setattr(agent_policy, "load_tenant_state", lambda _tid: {
         "agent_disabled": False,
         "overlay": {"run_read_tool": {"policy": "always-confirm"}},
@@ -133,6 +185,7 @@ def test_account_control_put_preserves_overlay_and_audits_admin(monkeypatch):
     assert calls[0][2]["expected_revision"] == 4
     audit = calls[0][2]["audit_event"]
     assert audit["actor_subject"] == "auth0|admin"
+    assert audit["via"] == "account_owner"
     assert response.json()["tool_publication_approval_required"] is True
 
 
