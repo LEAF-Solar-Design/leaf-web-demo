@@ -54,6 +54,16 @@ async function post(path, payload) {
   return { res, body }
 }
 
+async function get(path) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'GET',
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+  })
+  const body = await res.json().catch(() => null)
+  noteUnauthorized(res, path)
+  return { res, body }
+}
+
 // Coarse error classification for the calm degraded surfaces (wire §8 codes
 // are lowercase on the wire, like the existing quota_exceeded).
 export function classifyAgentError(err) {
@@ -204,6 +214,25 @@ export async function approve(confirmationId, approved) {
   )
   if (!res.ok) throw tagged(res, body, `POST /api/agent/approvals/${confirmationId} -> ${res.status}`)
   return body || { resolved: true, approved: !!approved }
+}
+
+export async function listPendingApprovals(sessionId, limit = 100) {
+  const bounded = Math.max(1, Math.min(Number(limit) || 100, 100))
+  const query = `session_id=${encodeURIComponent(sessionId)}&limit=${bounded}`
+  const { res, body } = await get(`/api/agent/approvals/pending?${query}`)
+  if (!res.ok) throw tagged(res, body, `GET /api/agent/approvals/pending -> ${res.status}`)
+  return Array.isArray(body?.approvals) ? body.approvals : []
+}
+
+export async function resolveApproval(
+  confirmationId, owningSessionId, approved, decisionRecorded = false,
+) {
+  if (!decisionRecorded) {
+    await approve(confirmationId, approved)
+  }
+  return postMessage(owningSessionId, {
+    confirm: { confirmationId, approved: !!approved },
+  })
 }
 
 // --- Event stream ---------------------------------------------------------

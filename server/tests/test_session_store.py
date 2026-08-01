@@ -343,6 +343,47 @@ def test_get_approval_not_found():
     assert session_store.get_approval("no-such-confirmation") is None
 
 
+def test_list_pending_approvals_is_tenant_scoped_live_and_newest_first():
+    owner = "tenant-pending-list"
+    other = "tenant-pending-other"
+    owner_session = session_store.get_or_create_session(owner, "drawing-pending-owner")
+    other_session = session_store.get_or_create_session(other, "drawing-pending-other")
+
+    def seed(cid, session, tenant, ttl_s=60):
+        session_store.create_approval(
+            cid, session["session_id"], tenant, f"turn-{cid}",
+            tool="drape-arrays", params={"sphere_count": 3},
+            capability="drawing.write", rationale="changes the drawing",
+            kind="proposed_run", payload={"private": "not-for-list"}, ttl_s=ttl_s,
+        )
+
+    seed("pending-old", owner_session, owner)
+    time.sleep(0.01)
+    seed("pending-new", owner_session, owner)
+    seed("pending-other", other_session, other)
+    seed("pending-decided", owner_session, owner)
+    assert session_store.decide_approval("pending-decided", False, by="auth0|owner") == "recorded"
+    seed("pending-decided-other", owner_session, owner)
+    assert session_store.decide_approval(
+        "pending-decided-other", True, by="auth0|other") == "recorded"
+    seed("pending-consumed", owner_session, owner)
+    assert session_store.decide_approval("pending-consumed", True, by=owner) == "recorded"
+    session_store.consume_approval("pending-consumed", owner_session["session_id"], owner)
+    seed("pending-expired", owner_session, owner, ttl_s=-1)
+
+    rows = session_store.list_pending_approvals(
+        owner, owner_session["session_id"], "auth0|owner", limit=10)
+    assert [row["confirmation_id"] for row in rows] == [
+        "pending-decided", "pending-new", "pending-old"]
+    assert rows[0]["decided"] is True
+    assert rows[0]["approved"] is False
+    assert rows[0]["session_id"] == owner_session["session_id"]
+    assert rows[0]["params"] == {"sphere_count": 3}
+    assert all(row["tenant_id"] == owner for row in rows)
+    assert [row["confirmation_id"] for row in session_store.list_pending_approvals(
+        owner, owner_session["session_id"], "auth0|owner", limit=1)] == ["pending-decided"]
+
+
 # --------------------------------------------------------------------------- #
 # (d) decide_approval second call -> 'already_decided'
 # --------------------------------------------------------------------------- #

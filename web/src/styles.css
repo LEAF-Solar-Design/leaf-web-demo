@@ -1609,6 +1609,14 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-size: 12px;
 }
 .converse-confirm { align-self: stretch; } /* the strip-decision confirm card spans the log */
+.converse-pending {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-tint);
+}
+.converse-pending-head { display: flex; align-items: center; gap: 8px; }
 .converse-note { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .converse-turnfoot {
   display: flex; align-items: center; gap: 10px;

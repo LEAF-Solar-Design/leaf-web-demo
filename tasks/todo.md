@@ -352,6 +352,20 @@ Risks:
 - [ ] Obtain an independent exact approval and run the protected authored-CAD execute acceptance.
 - [ ] Repeat the signed-in browser proof and complete the requirement-by-requirement audit.
 
+# Recoverable pending approvals in `/app`
+
+- [x] Add a bounded session-scoped API for live decisions and same-actor resume recovery.
+- [x] Show pending approvals independently of the current conversation transcript.
+- [x] Resume an approved or denied item through its owning session, then reconcile the queue.
+- [x] Prove tenant isolation, expiry filtering, refresh recovery, and correct session routing.
+- [ ] Run focused backend and frontend checks, review the diff, and deploy staging through the protected lane.
+
+Risks:
+
+- Approval IDs and rows must not leak across tenants.
+- The client must resume the session stored on the approval, not whichever session is currently open.
+- Expired, decided, or consumed approvals must never appear actionable.
+
 Risks:
 
 - Catalog fallback must not weaken tenant isolation or R5/R6 publication approval.

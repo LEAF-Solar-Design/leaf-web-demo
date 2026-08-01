@@ -9,7 +9,14 @@
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { openStream, postMessage, approve, cancelTurn, classifyAgentError } from '../converse.js'
+import {
+  openStream,
+  postMessage,
+  resolveApproval,
+  listPendingApprovals,
+  cancelTurn,
+  classifyAgentError,
+} from '../converse.js'
 import {
   acceptQueuedTurn,
   clearSendingQuestion,
@@ -90,6 +97,8 @@ export default function ConversePanel({
   const [sendErr, setSendErr] = useState(null)     // {kind, message} from a failed send/approve
   const [decidedLocal, setDecidedLocal] = useState({}) // confirmation_id -> approved (optimistic; the confirmation_resolved event reconciles)
   const [deciding, setDeciding] = useState(null)   // confirmation_id with an approve/deny in flight
+  const [pendingApprovals, setPendingApprovals] = useState([])
+  const [pendingApprovalsError, setPendingApprovalsError] = useState(false)
   const [questionChoices, setQuestionChoices] = useState({ sendingQuestionIds: [] })
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
@@ -143,6 +152,24 @@ export default function ConversePanel({
     })
     return () => stream.close()
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let closed = false
+    const refresh = async () => {
+      try {
+        const approvals = await listPendingApprovals(sessionId)
+        if (!closed) {
+          setPendingApprovals(approvals)
+          setPendingApprovalsError(false)
+        }
+      } catch {
+        if (!closed) setPendingApprovalsError(true)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(refresh, 5000)
+    return () => { closed = true; window.clearInterval(timer) }
+  }, [sessionId])
 
   // Keep the log pinned to the newest event while streaming.
   useEffect(() => {
@@ -403,27 +430,28 @@ export default function ConversePanel({
   // The confirm payload uses the harness §1 camelCase key (confirmationId):
   // the app forwards req.confirm verbatim, and the harness messages route
   // accepts no other spelling.
-  const decide = async (confirmationId, ok, blocked = false) => {
+  const decide = async (
+    confirmationId, ok, blocked = false, owningSessionId = sessionId,
+    decisionRecorded = false,
+  ) => {
     if (deciding || (ok && blocked)) return
     setDeciding(confirmationId); setSendErr(null)
     try {
-      try {
-        await approve(confirmationId, ok)
-      } catch (e) {
-        // 409 approval_stale means the decision is ALREADY recorded — this
-        // click is a retry after step (b) failed (409 busy from another tab's
-        // turn, transient network), and grant_approval refuses re-deciding.
-        // The resume turn is still owed, so fall through to the confirm
-        // message; the server gate stays authoritative (a mismatched or
-        // expired record denies the dispatch, and a truly expired one
-        // surfaces on the confirm post as its own 410 banner).
-        if (classifyAgentError(e) !== 'approval_stale') throw e
-      }
-      const res = await postMessage(sessionId, { confirm: { confirmationId, approved: ok } })
+      const res = await resolveApproval(
+        confirmationId, owningSessionId, ok, decisionRecorded)
       setDecidedLocal((m) => ({ ...m, [confirmationId]: ok }))
-      setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text: null }])
+      setPendingApprovals((current) => current.filter(
+        (approval) => approval.confirmation_id !== confirmationId))
+      if (owningSessionId === sessionId) {
+        setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text: null }])
+      }
     } catch (e) {
       setSendErr(bannerFor(e))
+      const kind = classifyAgentError(e)
+      if (kind === 'approval_stale' || kind === 'confirmation_expired' || kind === 'not_found') {
+        setPendingApprovals((current) => current.filter(
+          (approval) => approval.confirmation_id !== confirmationId))
+      }
     } finally {
       setDeciding(null)
     }
@@ -432,6 +460,61 @@ export default function ConversePanel({
   const showQuota = model.quota || sendErr?.kind === 'quota'
   const showGrant = model.grant || sendErr?.kind === 'grant'
   const showOtherErr = sendErr && sendErr.kind !== 'quota' && sendErr.kind !== 'grant'
+
+  const renderPendingApproval = (approval) => {
+    const isWrite = approval.capability === 'drawing.write'
+    const summary = paramsSummary(approval.params)
+    const resumeRequired = approval.resume_required === true
+    return (
+      <div key={approval.confirmation_id} className="strip-decision converse-confirm">
+        <span className="dot square" aria-hidden="true" />
+        <span className="strip-sentence">
+          Run <span className="route-tool">{approval.tool || 'requested tool'}</span>
+          {approval.capability && <>{' '}<span className={`cap ${isWrite ? 'write' : 'read'}`}>{approval.capability}</span></>}
+          {summary && <span className="dim"> · {summary}</span>}
+          <span className="dim"> · {approval.rationale || 'waiting for your decision'}</span>
+        </span>
+        {resumeRequired ? (
+          <button
+            type="button"
+            className="chip-act"
+            disabled={deciding === approval.confirmation_id || (approval.approved && isWrite && writeLocked)}
+            onClick={() => decide(
+              approval.confirmation_id,
+              !!approval.approved,
+              !!approval.approved && isWrite && writeLocked,
+              approval.session_id,
+              true,
+            )}
+          >
+            {deciding === approval.confirmation_id
+              ? 'Resuming…'
+              : (approval.approved ? 'Resume approved request' : 'Complete denial')}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="chip-act"
+              disabled={deciding === approval.confirmation_id || (isWrite && writeLocked)}
+              onClick={() => decide(
+                approval.confirmation_id, true, isWrite && writeLocked, approval.session_id)}
+            >
+              {deciding === approval.confirmation_id ? 'Sending…' : (isWrite && writeLocked ? 'Editing locked' : 'Approve')}
+            </button>
+            <button
+              type="button"
+              className="chip-neutral"
+              disabled={deciding === approval.confirmation_id}
+              onClick={() => decide(approval.confirmation_id, false, false, approval.session_id)}
+            >
+              Deny
+            </button>
+          </>
+        )}
+      </div>
+    )
+  }
 
   const renderFeedItem = (item, i) => {
     if (item.kind === 'text') {
@@ -504,6 +587,8 @@ export default function ConversePanel({
       const settledOk = resolved ? resolved.approved : localPick
       const isWrite = item.capability === 'drawing.write'
       const summary = item.kind === 'proposal' ? paramsSummary(item.params) : null
+      if (!settled && pendingApprovals.some(
+        (approval) => approval.confirmation_id === item.id)) return null
       return (
         <div key={i} className="strip-decision converse-confirm">
           <span className="dot square" aria-hidden="true" />
@@ -629,6 +714,17 @@ export default function ConversePanel({
       )}
       {showOtherErr && (
         <div className="banner"><span>{sendErr.message}</span></div>
+      )}
+
+      {(pendingApprovals.length > 0 || pendingApprovalsError) && (
+        <section className="converse-pending" aria-label="Pending approvals">
+          <div className="converse-pending-head">
+            <span className="converse-title">Pending approvals</span>
+            {pendingApprovals.length > 0 && <span className="chip-neutral">{pendingApprovals.length}</span>}
+            {pendingApprovalsError && <span className="dim">Could not refresh</span>}
+          </div>
+          {pendingApprovals.map(renderPendingApproval)}
+        </section>
       )}
 
       <div className="converse-log" ref={logRef}>
