@@ -36,11 +36,20 @@
  *      matters and two earlier drafts of this note got it wrong: it is one
  *      controller per transport, not one per process, so the blast radius is
  *      this tenant's connection, not the whole harness.
- *   2. SSE reconnection is bounded in COUNT but not in TIME. The transport
- *      retries a dropped stream at most twice (maxRetries: 2, default
- *      reconnection options), while the protocol timer is created once per
- *      request, so the reconnect fetches themselves carry no per-fetch
- *      deadline. Unbounded socket lifetime, not an unbounded retry loop.
+ *   2. SSE reconnection is effectively UNBOUNDED, and `maxRetries: 2` does not
+ *      say otherwise. That limit counts CONSECUTIVE FAILED attempts:
+ *      `_scheduleReconnection` takes `attemptCount = 0` by default and only
+ *      increments it when an attempt fails (client/streamableHttp.js:138-154),
+ *      so an upstream that ACCEPTS a reconnect and then drops the stream starts
+ *      a fresh count every cycle and can loop indefinitely. The protocol timer
+ *      is created once per request, so those reconnect fetches carry no
+ *      deadline of their own either.
+ *
+ *      Three drafts of this note were wrong before this one — process-wide vs
+ *      transport-wide scope, then "each retry starts a fresh clock", then
+ *      reading maxRetries as a total. Stated precisely now because this note is
+ *      the specification for the deferred lane, and an overstated limitation
+ *      misleads exactly as much as an overstated guarantee.
  *   3. Upstream progress notifications are not relayed downstream, so a long
  *      tool call gives the model no intermediate feedback.
  *
