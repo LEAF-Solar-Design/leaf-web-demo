@@ -911,9 +911,12 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await openDrawingView(page)
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
-    const canvas = page.locator('canvas').first()
-    const cameraMount = page.locator('[data-camera-position][data-camera-target]')
+    await page.getByTestId('focus-3d').click()
+    const cameraMount = page.locator(
+      '.viewer-canvas[data-view-mode="panel-sculpture"][data-camera-position][data-camera-target]',
+    )
     await cameraMount.waitFor({ state: 'visible', timeout: 30_000 })
+    const canvas = cameraMount.locator('canvas')
     const beforeCameraPose = await cameraMount.evaluate((mount) =>
       `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}`,
     )
@@ -925,7 +928,9 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await page.mouse.up()
     await page.waitForFunction(
       ({ previous }) => {
-        const mount = document.querySelector('[data-camera-position][data-camera-target]')
+        const mount = document.querySelector(
+          '.viewer-canvas[data-view-mode="panel-sculpture"][data-camera-position][data-camera-target]',
+        )
         return mount && `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}` !== previous
       },
       { previous: beforeCameraPose },
