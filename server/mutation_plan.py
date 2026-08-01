@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 MAX_PLAN_BYTES = 1_048_576
@@ -285,15 +285,63 @@ def _fmt(value: float) -> str:
     return format(value, ".12g")
 
 
-def emit_plan(canonical: Dict[str, Any], *, base_sha256: str) -> bytes:
+def transformed_points(
+    points: List[List[float]], transform: Dict[str, Any],
+) -> List[List[float]]:
+    """Apply one frozen panel-transform/v1 operation in world XY."""
+    center_x = sum(float(point[0]) for point in points) / len(points)
+    center_y = sum(float(point[1]) for point in points) / len(points)
+    radians = math.radians(float(transform.get("rotation_deg", 0)))
+    cosine, sine = math.cos(radians), math.sin(radians)
+    dx, dy = float(transform["dx"]), float(transform["dy"])
+    result = []
+    for point in points:
+        relative_x = float(point[0]) - center_x
+        relative_y = float(point[1]) - center_y
+        transformed = list(point)
+        transformed[0] = round(
+            center_x + relative_x * cosine - relative_y * sine + dx, 9)
+        transformed[1] = round(
+            center_y + relative_x * sine + relative_y * cosine + dy, 9)
+        transformed[0] = 0.0 if transformed[0] == 0 else transformed[0]
+        transformed[1] = 0.0 if transformed[1] == 0 else transformed[1]
+        result.append(transformed)
+    return result
+
+
+def emit_plan(
+    canonical: Dict[str, Any], *, base_sha256: str,
+    base_intake: Optional[Dict[str, Any]] = None,
+) -> bytes:
     """Emit the exact data-only Activity input for one canonical mutation set."""
     if not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
         raise ValueError("base_sha256 must be lowercase hex")
-    if canonical.get("transforms"):
-        raise ValueError("live mutation plans do not yet support transforms")
     lines = ["LEAF_MUTATION_PLAN|1", f"BASE_SHA256|{base_sha256}"]
     for handle in canonical.get("removed", []):
         lines.append(f"REMOVE|{handle}")
+    if canonical.get("transforms"):
+        if base_intake is None:
+            raise ValueError("base_intake is required for live transforms")
+        existing = _existing_by_handle(base_intake)
+        for transform in canonical["transforms"]:
+            handle = transform["handle"]
+            entity = existing.get(handle)
+            if entity is None:
+                raise ValueError(f"transform handle {handle!r} is unavailable")
+            points = entity.get("pts")
+            if not isinstance(points, list) or len(points) < 3:
+                raise ValueError(
+                    f"transform handle {handle!r} has invalid source geometry")
+            target = transformed_points(points, transform)
+            lowered = world_to_ocs(target)
+            normal = ",".join(_fmt(value) for value in lowered["normal"])
+            vertices = ";".join(
+                ",".join(_fmt(value) for value in point)
+                for point in lowered["points"]
+            )
+            lines.append(
+                f"TRANSFORM|{handle}|{normal}|"
+                f"{_fmt(lowered['elevation'])}|{vertices}")
     for entity in canonical.get("added", []):
         lowered = world_to_ocs(entity["pts"])
         layer = entity["layer"]
