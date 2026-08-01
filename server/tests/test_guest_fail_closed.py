@@ -27,6 +27,17 @@ ROOFTOP = json.loads((SERVER_DIR.parent / "data" / "rooftop_demo.intake.json")
                      .read_text(encoding="utf-8"))
 
 
+def _live_remove_fixture():
+    return {"dwg": "source.dwg", "layers": ["Panels"], "polylines": [{
+        "handle": "A", "layer": "Panels", "closed": True,
+        "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "xdata": None,
+    }]}
+
+
+def _live_remove_planner(*_args, **_kwargs):
+    return {"ok": True, "result": {"mutations": {"removed": ["A"]}}}
+
+
 def test_upload_extract_event_key_is_attempt_bound():
     first = broker_client.extract_event_key(
         "tenant-a", "drawing-a", upload=True, attempt="attempt-1")
@@ -635,6 +646,8 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
         write_loop.upload_marker_key(tenant, drawing),
         json.dumps({"status": "ready", "source_ext": ".dwg"}).encode(),
     )
+    write_loop.publish_intake_cache(
+        backend, tenant, drawing, 1, raw, _live_remove_fixture())
 
     class DA:
         def __init__(self):
@@ -648,7 +661,8 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
             self.staged[key] = Path(local_path).read_bytes()
 
         def scratch_signed_download_url(self, key):
-            assert self.staged[key] == raw
+            assert self.staged[key] == raw or self.staged[key].startswith(
+                b"LEAF_MUTATION_PLAN|1\n")
             return "https://aps.test/input"
 
         def scratch_signed_upload_url(self, key):
@@ -685,12 +699,13 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
         backend=backend,
         da=da,
         t0=time.perf_counter(),
+        run_tool_dynamic_fn=_live_remove_planner,
     )
 
     assert status == 200
     assert env["result"]["new_version"]["version"] == 2
     assert backend.get(store.drawing_version_key(tenant, drawing, 2)) == raw + b"updated"
-    assert len(da.deleted) == 2
+    assert len(da.deleted) == 3
     assert all(key.startswith(f"t/{tenant}/") for key in da.deleted)
 
 
@@ -721,6 +736,8 @@ def test_live_write_publication_failure_reports_committed_truth(fault, readable)
         write_loop.upload_marker_key(tenant, drawing),
         json.dumps({"status": "ready", "source_ext": ".dwg"}).encode(),
     )
+    write_loop.publish_intake_cache(
+        backend, tenant, drawing, 1, raw, _live_remove_fixture())
 
     original_publish = backend.put_if_absent_or_verify
     cache_key = write_loop.intake_cache_key(tenant, drawing, 2)
@@ -755,6 +772,7 @@ def test_live_write_publication_failure_reports_committed_truth(fault, readable)
     env, status = write_loop.run_write_live(
         {"name": "write"}, {"drawing_id": drawing}, tenant,
         backend=backend, da=da, t0=time.perf_counter(),
+        run_tool_dynamic_fn=_live_remove_planner,
     )
 
     assert status == 200 and env["ok"] is True
@@ -801,6 +819,8 @@ def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
                 "checkout": None,
             }).encode(),
         )
+        write_loop.publish_intake_cache(
+            backend, tenant, drawing, 1, raw, _live_remove_fixture())
 
         class DA:
             def __init__(self):
@@ -839,6 +859,7 @@ def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
         env, status = write_loop.run_write_live(
             {"name": "write"}, {"drawing_id": drawing}, tenant,
             backend=backend, da=da, t0=time.perf_counter(),
+            run_tool_dynamic_fn=_live_remove_planner,
         )
         assert status == 200, env
         return da.inputs[0], da.outputs[0]

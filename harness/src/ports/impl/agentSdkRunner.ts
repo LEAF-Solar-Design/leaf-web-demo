@@ -271,21 +271,21 @@ the proposed edit in result["mutations"].
 To add geometry, use result["mutations"]["added"] with one or more intake-shaped
 closed polylines. Each added entity must contain a deterministic unique handle,
 a layer, closed:true, and at least three [x, y, z] points. Represent requested
-prisms and cylinders as their closed 2D drawing footprints. Compute placement
-from the existing intake bounds. For example:
+3D forms as faceted closed planar polylines. Every entity's points must be
+coplanar, but separate entities may use different planes and Z coordinates. For
+example, drape a panel array over a sphere by replacing each source panel with a
+tilted planar panel tangent to the sphere at that panel's target center. Compute
+placement from the existing intake bounds. For example:
   {"added": [
     {"handle": "LEAF-AUTHORED-1", "layer": "LEAF_AUTHORED",
      "closed": true, "pts": [[0,0,0], [10,0,0], [10,10,0], [0,10,0]]}
   ]}
 
-To move existing panels, use:
-  {"transforms": [
-    {"handle": "AB12", "dx": 10.0, "dy": -5.0, "rotation_deg": 0.0}
-  ]}
-Each handle must name one existing intake polyline. dx and dy are offsets from the
-panel's current centroid, not absolute coordinates. Preserve panels by emitting
-exactly one transform for every selected panel and no added or removed entities.
-Keep abs(dx) and abs(dy) <= 10000 and rotation_deg in [-360, 360].
+To replace or move existing panels, put their real AutoCAD handles in
+result["mutations"]["removed"] and put the replacement planar polylines in
+result["mutations"]["added"]. Do not emit result["mutations"]["transforms"] for
+a live drawing write. Live transforms and non-planar individual polylines are not
+supported yet and will fail before any paid CAD work starts.
 
 Every drawing.write params schema must include:
   "drawing_id": string, default "cat-workbench"
@@ -295,10 +295,11 @@ the platform will not apply them or create a version. aps_test_run automatically
 forces dry_run=true for drawing.write candidates, so it is safe. A normal approved
 runtime call applies the mutations and the platform creates immutable vN+1.
 
-For a panel silhouette, derive target centroids deterministically, sort source
-panels by stable handle, pair them in that order, and return one transform per
-panel. Do not invent a special engine_op implementation. The persisted tool.py is
-the implementation and may use any descriptive snake_case engine_op.`;
+For a panel sculpture, derive target centers and local tangent planes
+deterministically, sort source panels by stable handle, and return one removal and
+one planar replacement per panel. Do not invent a special engine_op
+implementation. The persisted tool.py is the implementation and may use any
+descriptive snake_case engine_op.`;
 
 // --------------------------------------------------------------------------- //
 // The runner

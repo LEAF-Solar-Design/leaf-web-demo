@@ -11,10 +11,12 @@ Pure-python: `requests` is stubbed, no network, no APS, no credential.
 
   cd C:/tmp/leaf-web-demo/da && python -m pytest test_on_submitted_hook.py -q
 """
+import json
 import os
 import sys
 
 import pytest
+import requests
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -40,6 +42,18 @@ class _Resp:
 
     def json(self):
         return self._payload
+
+
+class _ErrorResp:
+    def __init__(self, status_code, text):
+        self.status_code = status_code
+        self.text = text
+
+    def raise_for_status(self):
+        raise requests.HTTPError(
+            f"{self.status_code} Client Error for url: https://should-not-leak.example/workitems",
+            response=self,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +129,58 @@ def test_omitting_the_callback_leaves_the_call_unchanged(monkeypatch):
     monkeypatch.setattr(client, "_poll_workitem",
                         lambda wid, **_kw: {"id": wid, "status": "success"})
     assert client.submit_workitem("activity-x", {})["id"] == "wi-live-3"
+
+
+def test_submit_error_preserves_bounded_sanitized_json_detail(monkeypatch):
+    secret = "aps-client-secret-must-not-leak"
+    signed_url = "https://signed.example/output?X-Amz-Credential=must-not-leak"
+    body = {
+        "diagnostic": "Activity LeafWriteProbe+prod was not found",
+        "url": signed_url,
+        "client_secret": secret,
+    }
+    monkeypatch.setattr(
+        client.requests, "post",
+        lambda *a, **k: _ErrorResp(400, json.dumps(body)),
+    )
+
+    with pytest.raises(requests.HTTPError) as caught:
+        client.submit_workitem("activity-x", {}, poll=False)
+
+    message = str(caught.value)
+    assert "HTTP 400" in message
+    assert "Activity LeafWriteProbe+prod was not found" in message
+    assert secret not in message
+    assert signed_url not in message
+    assert "must-not-leak" not in message
+    assert "should-not-leak" not in message
+    assert len(message.split(": ", 1)[1].encode("utf-8")) <= (
+        client._WORKITEM_ERROR_DETAIL_MAX_BYTES
+    )
+    assert caught.value.response.status_code == 400
+
+
+def test_submit_error_bounds_and_scrubs_text_detail(monkeypatch):
+    bearer = "Bearer " + "s" * 80
+    raw = (
+        "upstream rejected request at https://signed.example/input?token=leak "
+        f"authorization={bearer} "
+        + "diagnostic-word " * 500
+    )
+    monkeypatch.setattr(client.requests, "post",
+                        lambda *a, **k: _ErrorResp(503, raw))
+
+    with pytest.raises(requests.HTTPError) as caught:
+        client.submit_workitem("activity-x", {}, poll=False)
+
+    message = str(caught.value)
+    detail = message.split(": ", 1)[1]
+    assert "HTTP 503" in message
+    assert "https://" not in detail
+    assert "Bearer" not in detail
+    assert "s" * 80 not in detail
+    assert detail.endswith("<truncated>")
+    assert len(detail.encode("utf-8")) <= client._WORKITEM_ERROR_DETAIL_MAX_BYTES
 
 
 def test_run_tool_forwards_the_callback_to_the_live_submit(monkeypatch):
