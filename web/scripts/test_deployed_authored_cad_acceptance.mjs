@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   AcceptanceError,
   approveIsolatedStagedPublication,
+  browserTenantForMode,
   buildReceipt,
   evaluateReadiness,
   evaluateDeploymentIdentity,
@@ -182,6 +183,20 @@ describe('deployed authored CAD acceptance configuration', () => {
 })
 
 describe('deployed authored CAD acceptance checks', () => {
+  it('uses the curated read-only drawing in preflight and uploaded drawings in execute', () => {
+    const tenant = {
+      label: 'A',
+      drawingId: 'acceptance-run-a',
+      jwt: TOKEN_A,
+    }
+
+    assert.deepEqual(browserTenantForMode(tenant, false), {
+      ...tenant,
+      drawingId: 'rooftop_demo',
+    })
+    assert.equal(browserTenantForMode(tenant, true), tenant)
+  })
+
   it('opens authoring through the /try Author tab, not the /app section', async () => {
     const calls = []
     const authorRequest = {
@@ -721,6 +736,36 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.equal(receipt.images.web, DIGEST)
     assert.equal(receipt.external_evidence.status, 'required')
     assert.ok(receipt.external_evidence.requirements.some((item) => item.includes('restart')))
+  })
+
+  it('records the actual shared preflight workbench separately from planned drawings', () => {
+    const config = validateConfig(environment(), false)
+    const workbenchHash = sha256('rooftop_demo')
+    const receipt = buildReceipt(
+      config,
+      deploymentIdentity(),
+      { tenant_header_override: 'denied' },
+      config.tenants.map((tenant) => ({
+        label: tenant.label,
+        executed: false,
+        workbench_hash: workbenchHash,
+        _workbench_id: 'rooftop_demo',
+      })),
+      '2026-07-26T00:00:00Z',
+      '2026-07-26T00:01:00Z',
+    )
+
+    assert.equal(receipt.mode, 'preflight')
+    assert.equal(receipt.tenants[0].drawing_hash, workbenchHash)
+    assert.equal(receipt.tenants[1].drawing_hash, workbenchHash)
+    assert.equal(
+      receipt.tenants[0].planned_drawing_hash,
+      sha256(config.tenants[0].plannedDrawingId),
+    )
+    assert.notEqual(
+      receipt.tenants[0].planned_drawing_hash,
+      receipt.tenants[1].planned_drawing_hash,
+    )
   })
 
   it('contains no route interception API in the deployed browser driver', () => {

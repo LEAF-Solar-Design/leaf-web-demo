@@ -4,11 +4,12 @@
  *
  * Default mode is a staging-only preflight. It proves one coherent release, two
  * real tenant identities, linked Claude grants, and a clean browser workbench
- * without request interception. Preflight uses two explicitly named synthetic
- * drawing IDs. `--execute` uploads the tracked DWG through the public account
- * path, then adds authoring, approval, read-only preview, cross-tenant authority
- * checks, pinned-write rejection probes, version, orbit, undo, and redo. No mode
- * can target a production hostname.
+ * without request interception. Preflight opens the shared curated read-only
+ * drawing under both authenticated tenants; its configured acceptance IDs are
+ * plans for execute mode, not browser evidence. `--execute` uploads the tracked
+ * DWG through the public account path, then adds authoring, approval, read-only
+ * preview, cross-tenant authority checks, pinned-write rejection probes,
+ * version, orbit, undo, and redo. No mode can target a production hostname.
  */
 
 import { createHash } from 'node:crypto'
@@ -974,15 +975,21 @@ async function runBrowserTenant(config, tenant, browser, execute) {
   }
 }
 
+export function browserTenantForMode(tenant, execute) {
+  return execute ? tenant : { ...tenant, drawingId: 'rooftop_demo' }
+}
+
 export async function runBrowserAcceptance(config, execute = false, chromiumImpl = undefined) {
   const chromium = chromiumImpl || (await import('@playwright/test')).chromium
   const browser = await chromium.launch({ headless: true })
   try {
     const results = []
     for (const tenant of config.tenants) {
-      results.push(await runBrowserTenant(config, tenant, browser, execute))
+      results.push(await runBrowserTenant(
+        config, browserTenantForMode(tenant, execute), browser, execute,
+      ))
     }
-    if (results[0].workbench_hash === results[1].workbench_hash) {
+    if (execute && results[0].workbench_hash === results[1].workbench_hash) {
       throw new AcceptanceError(
         'browser_isolation',
         'the two tenant browser sessions received the same workbench',
@@ -1214,10 +1221,15 @@ export function buildReceipt(
     images: Object.fromEntries(
       REQUIRED_SERVICES.map((name) => [name, deploymentIdentity.services[name].image_digest]),
     ),
-    tenants: config.tenants.map((tenant) => ({
+    tenants: config.tenants.map((tenant, index) => ({
       label: tenant.label,
       tenant_hash: sha256(tenant.id),
-      drawing_hash: sha256(tenant.drawingId),
+      drawing_hash: config.execute
+        ? sha256(tenant.drawingId)
+        : browser[index].workbench_hash,
+      planned_drawing_hash: config.execute
+        ? null
+        : sha256(tenant.plannedDrawingId),
     })),
     api,
     browser: browser.map(({

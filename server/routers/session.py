@@ -12,6 +12,26 @@ from envelopes import ErrorCode, error_response, with_envelope_fields
 router = APIRouter()
 
 
+def _stored_drawing_intake(tenant: str, drawing_id: str):
+    """Read an existing tenant drawing without crossing the APS boundary.
+
+    Account uploads are already extracted into the credential-free drawing
+    store before the browser opens them.  A missing manifest means this is a
+    curated library drawing, so the live route may continue to the broker.
+    """
+    import store  # noqa: PLC0415 - lazy store boundary
+    import write_loop  # noqa: PLC0415 - lazy store boundary
+
+    backend = write_loop.upload_backend_for_tenant(str(tenant))
+    try:
+        store.load_manifest(backend, str(tenant), drawing_id)
+    except KeyError:
+        return None
+    _, intake = write_loop.read_intake(
+        backend, str(tenant), drawing_id, "head")
+    return intake
+
+
 @router.get("/api/session")
 def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant)):
     """Return the Intake JSON (contract section 1). APS_LIVE=0 -> cached sample.
@@ -22,9 +42,27 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
     The success body additively echoes that canonical `tenant_id`/`org_id`.
 
     APS_LIVE=1 extraction crosses the same internal broker boundary as tool
-    runs. The app process never imports the APS client or reads its credential.
+    runs. The app process never calls the APS client or reads its credential.
     """
     if deps.APS_LIVE:
+        import write_loop  # noqa: PLC0415 - lazy, keeps module import surface
+
+        try:
+            intake = _stored_drawing_intake(str(tenant), dwg)
+        except write_loop.ProofStateUnreadable as exc:
+            return error_response(
+                ErrorCode.INTERNAL, str(exc), retryable=True,
+                status_code=503)
+        except (KeyError, ValueError) as exc:
+            return error_response(
+                ErrorCode.INTERNAL,
+                f"stored drawing is unreadable: {exc}",
+                retryable=False,
+                status_code=500,
+            )
+        if intake is not None:
+            return deps.tenant_echo(
+                with_envelope_fields({"intake": intake}), tenant)
         try:
             response = requests.post(
                 f"{broker_client.broker_url()}/broker/extract",

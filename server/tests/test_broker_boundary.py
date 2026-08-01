@@ -16,6 +16,7 @@ if str(SERVER_DIR) not in sys.path:
 import broker  # noqa: E402
 import broker_client  # noqa: E402
 import tool_loader  # noqa: E402
+import write_loop  # noqa: E402
 from routers import session as session_router  # noqa: E402
 
 
@@ -63,6 +64,96 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
     source = Path(session_router.__file__).read_text(encoding="utf-8")
     assert "get_da_client" not in source
     assert "da.client" not in source
+
+
+def test_live_session_reads_uploaded_drawing_from_tenant_store(
+        tmp_path, monkeypatch):
+    import store  # noqa: PLC0415
+
+    tenant = "tenant-upload-owner"
+    drawing_id = "9d1d6816-1978-4c38-b9df-e0b2b2b0903d"
+    backend = store.InMemoryBackend()
+    source = tmp_path / "uploaded.intake.json"
+    source.write_text(
+        json.dumps({"polylines": [{"handle": "OWNER", "layer": "Panels",
+                                    "pts": [[1, 2], [3, 4]]}]}),
+        encoding="utf-8",
+    )
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing_id)
+
+    monkeypatch.setattr(session_router.deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(
+        session_router.requests, "post",
+        lambda *_a, **_k: pytest.fail("stored drawing must not reach broker"),
+    )
+
+    body = session_router.session(dwg=drawing_id, tenant=tenant)
+
+    assert body["intake"]["polylines"][0]["handle"] == "OWNER"
+
+
+def test_live_session_never_reads_another_tenants_uploaded_drawing(
+        tmp_path, monkeypatch):
+    import store  # noqa: PLC0415
+
+    owner = "tenant-upload-owner"
+    intruder = "tenant-upload-intruder"
+    drawing_id = "6f594bad-70e0-472d-9bf9-a0a73c4ffb3e"
+    backend = store.InMemoryBackend()
+    source = tmp_path / "private.intake.json"
+    source.write_text(
+        json.dumps({"polylines": [{"handle": "PRIVATE", "layer": "Panels",
+                                    "pts": [[5, 6], [7, 8]]}]}),
+        encoding="utf-8",
+    )
+    store.ingest_drawing(backend, owner, str(source), drawing_id=drawing_id)
+    calls = []
+
+    def fake_post(url, *, json, headers, timeout):
+        calls.append((url, json, headers, timeout))
+        return _Response(404, {
+            "ok": False,
+            "error": {"error_code": "BAD_PARAMS", "message": "unknown drawing",
+                      "retryable": False},
+            "degraded_mode": False,
+        })
+
+    monkeypatch.setattr(session_router.deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(session_router.broker_client, "broker_url",
+                        lambda: "http://broker:8140")
+    monkeypatch.setattr(session_router.broker_client, "broker_headers", lambda: {})
+    monkeypatch.setattr(session_router.requests, "post", fake_post)
+
+    response = session_router.session(dwg=drawing_id, tenant=intruder)
+
+    assert response.status_code == 404
+    assert b"PRIVATE" not in response.body
+    assert calls[0][1]["tenant_id"] == intruder
+
+
+def test_live_session_does_not_retry_durable_stored_drawing_corruption(
+        monkeypatch):
+    monkeypatch.setattr(session_router.deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        session_router, "_stored_drawing_intake",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("digest mismatch")),
+    )
+    monkeypatch.setattr(
+        session_router.requests, "post",
+        lambda *_a, **_k: pytest.fail("corrupt stored drawing must not reach broker"),
+    )
+
+    response = session_router.session(
+        dwg="4071d443-e5cb-4dd1-bc14-3b0bec735577", tenant="tenant-a")
+    body = json.loads(response.body)
+
+    assert response.status_code == 500
+    assert body["error"]["retryable"] is False
+    assert "digest mismatch" in body["error"]["message"]
 
 
 def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
