@@ -1598,8 +1598,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         if status.get("status") != "success":
             return (err_envelope(
                 ErrorCode.WORKITEM_FAILED,
-                f"write WorkItem {status.get('id')} status={status.get('status')} "
-                f"report={status.get('reportUrl')}", retryable=True,
+                "APS write WorkItem did not succeed", retryable=True,
                 tool=name, version=tool_version,
             ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
         out_bytes = _scratch_download_bytes(da, out_key, upload_key)
@@ -1690,8 +1689,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             retryable=False, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
+        # Transport exceptions can contain signed APS or object-store URLs.
+        # Keep their text out of the client envelope. The exception class is
+        # enough to group the failure without persisting credential-shaped data.
+        LOGGER.error("live authored write failed: %s", type(exc).__name__)
         return (err_envelope(
-            ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
+            ErrorCode.WORKITEM_FAILED, "live drawing mutation failed",
             retryable=True, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
     finally:
