@@ -674,6 +674,35 @@ export async function openTryAuthorSurface(page) {
   }
 }
 
+export async function takeEditingCheckout(page, apiUrl, drawingId) {
+  try {
+    const take = page.getByRole('button', { name: 'Take edit lock', exact: true })
+    await take.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    const checkoutUrl = `${apiUrl}/api/drawings/${encodeURIComponent(drawingId)}/checkout`
+    const checkoutResponsePromise = page.waitForResponse(
+      (response) => response.url() === checkoutUrl
+        && response.request().method() === 'POST',
+      { timeout: DEFAULT_TIMEOUT_MS },
+    )
+    await take.click()
+    const checkoutResponse = await checkoutResponsePromise
+    if (checkoutResponse.status() !== 200) {
+      throw new AcceptanceError(
+        'checkout',
+        `taking the edit lock returned HTTP ${checkoutResponse.status()}`,
+      )
+    }
+    await page.getByText('You hold the edit lock', { exact: true })
+      .waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+  } catch (error) {
+    if (error instanceof AcceptanceError) throw error
+    throw new AcceptanceError(
+      'checkout',
+      `could not take the acceptance drawing edit lock: ${error?.name || 'Error'}`,
+    )
+  }
+}
+
 async function runBrowserTenant(config, tenant, browser, execute) {
   const context = await browser.newContext({
     baseURL: config.webUrl,
@@ -762,6 +791,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     if (!execute) return result
 
+    await takeEditingCheckout(page, config.apiUrl, tenant.drawingId)
     const authorRequest = await openTryAuthorSurface(page)
     await authorRequest.fill(tenant.request)
     const stageResponsePromise = page.waitForResponse(
