@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "server"))
+sys.path.append(str(PROJECT_ROOT / "server"))
 
 from apply_lisp import build_apply_scr
 from intake_parse import o2w, parse
