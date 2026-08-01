@@ -35,11 +35,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime, timezone
 
 import requests
+from requests import HTTPError as RequestsHTTPError
 
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # resolve sibling imports when imported from elsewhere
@@ -75,6 +77,72 @@ HOSTDWG_LOCALNAME = "input.dwg"
 HOSTDXF_LOCALNAME = "input.dxf"
 
 _HTTP_TIMEOUT = 60
+_WORKITEM_ERROR_DETAIL_MAX_BYTES = 512
+_WORKITEM_ERROR_INPUT_MAX_CHARS = 4096
+_SENSITIVE_ERROR_KEYS = {
+    "accesstoken", "authorization", "clientsecret", "password",
+    "refreshtoken", "secret", "signedurl", "token", "url",
+}
+
+
+def _scrub_workitem_error_text(value: str) -> str:
+    """Remove credential-shaped data and URLs from an APS error string."""
+    value = re.sub(r"https?://[^\s\"'<>]+", "<redacted-url>", value,
+                   flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:Bearer|Basic)\s+[^\s,;]+", "<redacted-authorization>",
+                   value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\b(access_token|authorization|client_secret|password|refresh_token|"
+        r"secret|signed_url|token|url)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+        lambda match: f"{match.group(1)}=<redacted>", value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        "<redacted-token>", value,
+    )
+    value = re.sub(r"\b[A-Za-z0-9_+/=-]{64,}\b", "<redacted-token>", value)
+    return " ".join(value.split())
+
+
+def _scrub_workitem_error_json(value, key: str | None = None):
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower()) if key else None
+    if normalized_key in _SENSITIVE_ERROR_KEYS:
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {str(k): _scrub_workitem_error_json(v, str(k))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_workitem_error_json(item) for item in value]
+    if isinstance(value, str):
+        return _scrub_workitem_error_text(value)
+    return value
+
+
+def _bounded_workitem_error_detail(response) -> str:
+    """Return a small, log-safe excerpt of an APS WorkItem error response."""
+    try:
+        raw = str(response.text or "")[:_WORKITEM_ERROR_INPUT_MAX_CHARS]
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        detail = _scrub_workitem_error_text(raw)
+    else:
+        detail = json.dumps(
+            _scrub_workitem_error_json(parsed),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    encoded = detail.encode("utf-8")
+    if len(encoded) <= _WORKITEM_ERROR_DETAIL_MAX_BYTES:
+        return detail
+    marker = b"<truncated>"
+    prefix = encoded[:_WORKITEM_ERROR_DETAIL_MAX_BYTES - len(marker)]
+    return prefix.decode("utf-8", "ignore") + marker.decode("ascii")
 
 
 # --------------------------------------------------------------------------- #
@@ -519,7 +587,19 @@ def submit_workitem(activity_id: str, arguments: dict,
         r = requests.post(f"{DA}/workitems",
                           headers={**_auth_headers(), "Content-Type": "application/json"},
                           data=json.dumps(body), timeout=_HTTP_TIMEOUT)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except RequestsHTTPError as exc:
+            status = getattr(r, "status_code", "unknown")
+            detail = _bounded_workitem_error_detail(r)
+            message = f"APS WorkItem submission failed with HTTP {status}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise RequestsHTTPError(
+                message,
+                request=getattr(exc, "request", None),
+                response=getattr(exc, "response", None) or r,
+            ) from exc
         wi = r.json()
         if on_submitted is not None:
             try:
