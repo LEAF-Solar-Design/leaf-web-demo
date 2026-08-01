@@ -376,7 +376,7 @@ def build_suites() -> List[Suite]:
         Suite("server-live-lsp-resolution", "server tests/test_live_lsp_resolution.py",
               "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-live-mutation-plan", "server tests/test_live_mutation_plan.py",
-              "pytest", SERVER, _py_pytest("tests/test_live_mutation_plan.py"), 21),
+              "pytest", SERVER, _py_pytest("tests/test_live_mutation_plan.py"), 23),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
               "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 6),
         Suite("server-job-migration-concurrent", "server tests/test_job_migration_concurrent.py",

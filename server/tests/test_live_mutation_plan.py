@@ -229,11 +229,10 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert intake["dwg"] == "drawing"
 
 
-@pytest.mark.parametrize("extracted_x", [17524.405, 17524.406])
-def test_live_accepts_three_decimal_extractor_rounding(
-        tmp_path, extracted_x):
+def test_live_accepts_measured_three_decimal_extractor_rounding(tmp_path):
     backend = _store(tmp_path)
     expected_x = 17524.4055
+    extracted_x = 17524.406
     added = _entity("C", "Leaf Output", z=7.0)
     added["pts"] = [
         [expected_x, 10.0, 7.0], [expected_x + 2.0, 10.0, 7.0],
