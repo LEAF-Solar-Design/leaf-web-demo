@@ -1129,15 +1129,29 @@ def verify_live_mutation_effects(
         if handle in actual_by_handle:
             raise ValueError(f"removed handle {handle!r} remains in output")
     removed = set(canonical.get("removed", []))
+    transformed = {
+        item["handle"] for item in canonical.get("transforms", [])
+    }
+    expected_by_handle = {
+        str(entity.get("handle")): entity
+        for entity in expected.get("polylines") or []
+        if isinstance(entity, dict) and entity.get("handle") is not None
+    }
     for entity in base_polylines:
         if not isinstance(entity, dict) or entity.get("handle") is None:
             continue
         handle = str(entity["handle"])
         if handle not in removed and handle not in actual_by_handle:
             raise ValueError(f"unchanged handle {handle!r} is missing from output")
-        if (handle not in removed
-                and not _polyline_effect_matches(entity, actual_by_handle[handle])):
-            raise ValueError(f"unchanged handle {handle!r} was modified in output")
+        if handle in removed:
+            continue
+        expected_entity = (
+            expected_by_handle[handle] if handle in transformed else entity)
+        if not _polyline_effect_matches(
+                expected_entity, actual_by_handle[handle]):
+            effect = "transformed" if handle in transformed else "unchanged"
+            raise ValueError(
+                f"{effect} handle {handle!r} has unexpected output geometry")
     base_handles = {
         str(entity.get("handle")) for entity in base_polylines
         if isinstance(entity, dict) and entity.get("handle") is not None
@@ -1506,10 +1520,11 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             raise ValueError("authored planner result must be an object")
         canonical = validate_mutations(
             base_intake, planner_result.get("mutations"),
-            allow_transforms=False, allow_xdata=False,
+            allow_transforms=True, allow_xdata=False,
         )
         # Planar lowering happens during emission, still before any APS call.
-        plan_bytes = emit_plan(canonical, base_sha256=base_sha)
+        plan_bytes = emit_plan(
+            canonical, base_sha256=base_sha, base_intake=base_intake)
         plan_digest = plan_sha256(plan_bytes)
         tool_definition = {
             key: value for key, value in tool.items()

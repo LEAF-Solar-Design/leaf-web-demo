@@ -55,10 +55,11 @@ def auth(monkeypatch):
 def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     script = apply_lisp.build_apply_scr()
     assert script.endswith("\r\n")
-    assert "REMOVE" in script and "ADD" in script
+    assert "REMOVE" in script and "TRANSFORM" in script and "ADD" in script
     assert "LEAF_MUTATION_PLAN|1" in script
     assert "BASE_SHA256" in script
     assert "AcDbPolyline" in script and "(cons 210 normal)" in script
+    assert "(entmod out)" in script and "(entupd e)" in script
     assert '"mutation-plan.txt"' in script
     assert '"output.dwg"' in script
     lowered = script.lower()

@@ -44,7 +44,10 @@ def test_non_demo_tenant_cat_write_persists_passes_oracle_and_undoes(
         _read_pbm(FIXTURE_DIR / "sitting-v1.pbm"),
         key=lambda point: (point[1], point[0]),
     )
-    handles = [f"P{index:04d}" for index in range(len(pixels))]
+    # Match real AutoCAD handles. The live validator intentionally accepts
+    # hexadecimal handles only, so the cat proof must use the same identity
+    # contract instead of fixture-only labels.
+    handles = [f"{index + 1:X}" for index in range(len(pixels))]
     before = {
         "dwg": "cat.dwg",
         "layers": ["PANELS"],

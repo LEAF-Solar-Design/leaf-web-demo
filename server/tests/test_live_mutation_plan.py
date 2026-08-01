@@ -141,6 +141,30 @@ def test_distinct_mutations_emit_distinct_canonical_data_plans():
     assert b"LEAFMARK" not in first_plan
 
 
+def test_transform_emits_server_lowered_target_geometry_for_existing_handle():
+    base = _base()
+    canonical = validate_mutations(base, {
+        "transforms": [{
+            "handle": "A", "dx": 10, "dy": -3, "rotation_deg": 90,
+        }],
+    })
+    plan = emit_plan(
+        canonical, base_sha256="3" * 64, base_intake=base)
+    assert (
+        b"TRANSFORM|A|0,0,1|0|12,-3;12,-1;10,-1;10,-3\n"
+        in plan
+    )
+    assert b"dx" not in plan and b"rotation" not in plan
+
+
+def test_transform_plan_requires_exact_base_intake():
+    canonical = validate_mutations(_base(), {
+        "transforms": [{"handle": "A", "dx": 1, "dy": 0}],
+    })
+    with pytest.raises(ValueError, match="base_intake"):
+        emit_plan(canonical, base_sha256="4" * 64)
+
+
 @pytest.mark.parametrize("bad", [
     {"script": "(command \"erase\")"},
     {"removed": ["UNKNOWN"]},
@@ -227,6 +251,49 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert env["result"]["new_version"]["version"] == 2
     _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
     assert intake["dwg"] == "drawing"
+
+
+def test_live_transform_preserves_handle_and_verifies_target_geometry(tmp_path):
+    backend = _store(tmp_path)
+    mutations = {
+        "transforms": [{
+            "handle": "A", "dx": 5, "dy": 2, "rotation_deg": 90,
+        }],
+    }
+    planner, _ = _planner(mutations)
+    output = _base()
+    output["polylines"][0]["pts"] = [
+        [7.0, 2.0, 0.0], [7.0, 4.0, 0.0],
+        [5.0, 4.0, 0.0], [5.0, 2.0, 0.0],
+    ]
+    da = FakeDa(output)
+    env, status = write_loop.run_write_live(
+        {"name": "arrange-panels-as-cat", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend, da=da,
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+    assert status == 200, env
+    assert b"TRANSFORM|A|" in next(
+        value for key, value in da.staged.items() if key.endswith(".txt"))
+    _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
+    assert intake["polylines"][0]["handle"] == "A"
+    assert intake["polylines"][0]["pts"] == output["polylines"][0]["pts"]
+
+
+def test_live_transform_geometry_mismatch_never_publishes(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner({
+        "transforms": [{"handle": "A", "dx": 5, "dy": 2}],
+    })
+    da = FakeDa(_base())
+    env, status = write_loop.run_write_live(
+        {"name": "arrange-panels-as-cat"}, {"drawing_id": "drawing"},
+        "tenant", backend=backend, da=da, t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    assert status == 502
+    assert "transformed handle" in env["error"]["message"]
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
 
 
 def test_reextract_mismatch_never_publishes(tmp_path):
