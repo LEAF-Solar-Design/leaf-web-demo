@@ -229,6 +229,73 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert intake["dwg"] == "drawing"
 
 
+@pytest.mark.parametrize("extracted_x", [17524.405, 17524.406])
+def test_live_accepts_three_decimal_extractor_rounding(
+        tmp_path, extracted_x):
+    backend = _store(tmp_path)
+    expected_x = 17524.4055
+    added = _entity("C", "Leaf Output", z=7.0)
+    added["pts"] = [
+        [expected_x, 10.0, 7.0], [expected_x + 2.0, 10.0, 7.0],
+        [expected_x + 2.0, 12.0, 7.0], [expected_x, 12.0, 7.0],
+    ]
+    planner, _ = _planner({"removed": ["A"], "added": [added]})
+    extracted = copy.deepcopy(added)
+    extracted["handle"] = "APS1"
+    for point in extracted["pts"]:
+        point[0] = extracted_x + (2.0 if point[0] > expected_x else 0.0)
+    output = {
+        "dwg": "temp-output.dwg",
+        "layers": ["Panels", "Leaf Output"],
+        "polylines": [_entity("B", z=3.0), extracted],
+    }
+
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(output), t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 200, env
+    assert env["result"]["new_version"]["version"] == 2
+    _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
+    published = next(
+        entity for entity in intake["polylines"]
+        if entity["handle"] == "APS1"
+    )
+    assert published["pts"] == extracted["pts"]
+
+
+def test_live_rejects_full_extractor_quantum_geometry_drift(tmp_path):
+    backend = _store(tmp_path)
+    added = _entity("C", "Leaf Output", z=7.0)
+    added["pts"] = [
+        [17524.405, 10.0, 7.0], [17526.405, 10.0, 7.0],
+        [17526.405, 12.0, 7.0], [17524.405, 12.0, 7.0],
+    ]
+    planner, _ = _planner({"removed": ["A"], "added": [added]})
+    extracted = copy.deepcopy(added)
+    extracted["handle"] = "APS1"
+    for point in extracted["pts"]:
+        point[0] += 0.001
+    output = {
+        "dwg": "temp-output.dwg",
+        "layers": ["Panels", "Leaf Output"],
+        "polylines": [_entity("B", z=3.0), extracted],
+    }
+
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(output), t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 502
+    assert "added polyline" in env["error"]["message"]
+    manifest = store.load_manifest(backend, "tenant", "drawing")
+    assert manifest["head"] == 1 and manifest["latest"] == 1
+
+
 def test_reextract_mismatch_never_publishes(tmp_path):
     backend = _store(tmp_path)
     planner, _ = _planner()
