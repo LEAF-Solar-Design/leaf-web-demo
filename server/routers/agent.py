@@ -157,6 +157,49 @@ def _not_found(confirmation_id: str):
     )
 
 
+def _pending_projection(approval: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose only the fields needed for an informed decision and resume."""
+    return {
+        "confirmation_id": approval["confirmation_id"],
+        "session_id": approval["session_id"],
+        "turn_id": approval["turn_id"],
+        "tool": approval["tool"],
+        "params": approval["params"],
+        "capability": approval["capability"],
+        "rationale": approval["rationale"],
+        "kind": approval["kind"],
+        "decided": approval["decided"],
+        "approved": approval["approved"],
+        "resume_required": bool(approval["decided"] and not approval["consumed"]),
+        "created_at": approval["created_at"],
+        "expires_at": approval["expires_at"],
+    }
+
+
+def _decision_actor(tenant: Any) -> str:
+    subject = getattr(tenant, "subject", None)
+    return subject if isinstance(subject, str) and subject else str(tenant)
+
+
+@router.get("/api/agent/approvals/pending")
+def pending_approvals(session_id: str, limit: int = 100,
+                      tenant=Depends(deps.require_active_tenant)) -> Any:
+    """List live approvals for the current owned conversation session."""
+    session = session_store.get_session(session_id)
+    if session is None or session["tenant_id"] != str(tenant):
+        return error_response(
+            ErrorCode.SESSION_NOT_FOUND, f"unknown session_id {session_id!r}",
+            retryable=False, status_code=404,
+        )
+    rows = session_store.list_pending_approvals(
+        str(tenant), session_id, _decision_actor(tenant), limit=limit)
+    approvals = [_pending_projection(row) for row in rows]
+    return deps.tenant_echo(
+        with_envelope_fields({"approvals": approvals, "count": len(approvals)}),
+        tenant,
+    )
+
+
 @router.post("/api/agent/approvals/{confirmation_id}")
 def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
                      tenant=Depends(deps.require_active_tenant)):
@@ -167,10 +210,7 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         # existence leak to a caller who isn't the owning tenant.
         return _not_found(confirmation_id)
 
-    decision_subject = getattr(tenant, "subject", None)
-    decision_actor = (decision_subject
-                      if isinstance(decision_subject, str) and decision_subject
-                      else str(tenant))
+    decision_actor = _decision_actor(tenant)
 
     # Spine unification (census #12 chip 1): land the decision in the §18 gate
     # store FIRST — the resume turn's gate consult redeems THAT args-bound
@@ -243,6 +283,18 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
     if outcome == "not_found":
         return _not_found(confirmation_id)
     if outcome == "already_decided":
+        recorded = session_store.get_approval(confirmation_id)
+        if (recorded is not None
+                and recorded["decided_by"] == decision_actor
+                and recorded["approved"] == bool(req.approved)):
+            return deps.tenant_echo(
+                with_envelope_fields({
+                    "resolved": True,
+                    "approved": bool(req.approved),
+                    "already_resolved": True,
+                }),
+                tenant,
+            )
         return error_response(
             ErrorCode.BAD_PARAMS,
             f"confirmation_id {confirmation_id!r} already decided",

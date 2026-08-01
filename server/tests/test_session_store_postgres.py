@@ -276,6 +276,26 @@ def test_shadow_append_never_writes_postgres(monkeypatch):
     ) == 7
 
 
+def test_pending_approval_read_routes_to_postgres_with_one_timestamp(monkeypatch):
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "postgres")
+    calls = []
+
+    def read(tenant_id, session_id, decided_by, limit, *, now):
+        calls.append((tenant_id, session_id, decided_by, limit, now))
+        return [{"confirmation_id": "confirm-pg"}]
+
+    monkeypatch.setattr(session_store, "_pg_list_pending_approvals", read)
+    monkeypatch.setattr(
+        session_store, "_legacy_list_pending_approvals",
+        lambda *_args, **_kwargs: pytest.fail("postgres authority must not read SQLite"),
+    )
+    rows = session_store.list_pending_approvals(
+        "tenant-pg", "session-pg", "auth0|alice", limit=12)
+    assert rows == [{"confirmation_id": "confirm-pg"}]
+    assert calls[0][:4] == ("tenant-pg", "session-pg", "auth0|alice", 12)
+    assert isinstance(calls[0][4], float)
+
+
 requires_database = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
     reason="PostgreSQL integration test requires explicit DATABASE_URL",
@@ -379,6 +399,28 @@ def test_two_database_writers_redeem_approval_once(postgres_session_schema):
         thread.join(timeout=30)
 
     assert sorted(outcomes) == ["already_consumed", "consumed"]
+
+
+@requires_database
+def test_postgres_pending_approval_inbox_recovers_decided_row(postgres_session_schema):
+    token = uuid.uuid4().hex
+    tenant_id = f"pg-pending-tenant-{token}"
+    actor = f"auth0|{token}"
+    session = session_store.get_or_create_session(
+        tenant_id, f"pg-pending-drawing-{token}")
+    confirmation_id = f"pg-pending-{token}"
+    session_store.create_approval(
+        confirmation_id, session["session_id"], tenant_id, "turn-pending",
+        "drape-arrays", {"sphere_count": 3}, "drawing.write", "test",
+        "proposed_run", None, 60,
+    )
+    assert session_store.decide_approval(
+        confirmation_id, True, by=actor) == "recorded"
+    rows = session_store.list_pending_approvals(
+        tenant_id, session["session_id"], actor)
+    assert [row["confirmation_id"] for row in rows] == [confirmation_id]
+    assert rows[0]["decided"] is True
+    assert rows[0]["approved"] is True
 
 
 def test_dual_write_turn_fence_compares_the_subject(monkeypatch):

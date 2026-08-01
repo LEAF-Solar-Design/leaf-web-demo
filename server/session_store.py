@@ -567,6 +567,31 @@ def get_approval(confirmation_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_approval(rows[0]) if rows else None
 
 
+def list_pending_approvals(
+    tenant_id: str, session_id: str, decided_by: str, limit: int = 100, *,
+    now: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Return one session's live decision and resume inbox, newest first.
+
+    The SQL predicate is the authority. It returns undecided rows plus a
+    same-actor decision that still needs its confirm resume. Expired, consumed,
+    and other-actor decided rows never become actionable client state. The
+    decision and confirm routes still re-check tenant, session, expiry, actor,
+    and exact-once consumption under their existing transaction fences.
+    """
+    bounded = max(1, min(int(limit), 100))
+    observed_at = time.time() if now is None else float(now)
+    rows = _query(
+        "SELECT * FROM approvals"
+        " WHERE tenant_id = ? AND session_id = ? AND consumed = 0"
+        " AND (decided = 0 OR decided_by = ?)"
+        " AND (expires_at IS NULL OR expires_at > ?)"
+        " ORDER BY created_at DESC, confirmation_id DESC LIMIT ?",
+        (str(tenant_id), str(session_id), str(decided_by), observed_at, bounded),
+    )
+    return [_row_to_approval(row) for row in rows]
+
+
 def decide_approval(confirmation_id: str, approved: bool, by: Optional[str] = None) -> str:
     """Record a decision exactly once, atomically (check-then-set under the
     lock so two concurrent decide calls can never both win). Returns:
@@ -749,6 +774,7 @@ _legacy_active_turn_subject = active_turn_subject
 _legacy_end_turn = end_turn
 _legacy_create_approval = create_approval
 _legacy_get_approval = get_approval
+_legacy_list_pending_approvals = list_pending_approvals
 _legacy_decide_approval = decide_approval
 _legacy_consume_approval = consume_approval
 _legacy_unconsume_approval = unconsume_approval
@@ -1120,6 +1146,26 @@ def _pg_get_approval(confirmation_id: str) -> Optional[Dict[str, Any]]:
     return _pg_approval(row) if row else None
 
 
+def _pg_list_pending_approvals(
+    tenant_id: str, session_id: str, decided_by: str, limit: int = 100, *,
+    now: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    bounded = max(1, min(int(limit), 100))
+    observed_at = time.time() if now is None else float(now)
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM app_approvals"
+            " WHERE tenant_id = %s AND session_id = %s AND consumed = FALSE"
+            " AND (decided = FALSE OR decided_by = %s)"
+            " AND (expires_at IS NULL OR expires_at > %s)"
+            " ORDER BY created_at DESC, confirmation_id DESC LIMIT %s",
+            (str(tenant_id), str(session_id), str(decided_by), observed_at, bounded),
+        )
+        rows = cur.fetchall()
+    return [_pg_approval(row) for row in rows]
+
+
 def _pg_decide_approval(
     confirmation_id: str, approved: bool, by: Optional[str] = None,
 ) -> str:
@@ -1429,6 +1475,25 @@ def get_approval(confirmation_id: str) -> Optional[Dict[str, Any]]:
         if right is not None:
             right.pop("expired", None)
         _shadow_equal("approval", left, right)
+    return legacy
+
+
+def list_pending_approvals(
+    tenant_id: str, session_id: str, decided_by: str, limit: int = 100,
+) -> List[Dict[str, Any]]:
+    mode = _store_mode()
+    observed_at = time.time()
+    if mode == "postgres":
+        return _pg_list_pending_approvals(
+            tenant_id, session_id, decided_by, limit, now=observed_at)
+    legacy = _legacy_list_pending_approvals(
+        tenant_id, session_id, decided_by, limit, now=observed_at)
+    if mode in _SHADOW_READ_MODES:
+        postgres = _pg_list_pending_approvals(
+            tenant_id, session_id, decided_by, limit, now=observed_at)
+        left = [{k: v for k, v in row.items() if k != "expired"} for row in legacy]
+        right = [{k: v for k, v in row.items() if k != "expired"} for row in postgres]
+        _shadow_equal("pending approvals", left, right)
     return legacy
 
 

@@ -236,6 +236,87 @@ def test_decide_cross_tenant_404_bad_params_same_shape_as_unknown(client):
     assert stored["decided"] is False
 
 
+def test_list_pending_approvals_returns_only_callers_live_rows(client):
+    first = _seed_approval(tenant_id="tenant-pending-api", tool="drape-arrays")
+    second = _seed_approval(tenant_id="tenant-pending-api", tool="second-tool")
+    _seed_approval(tenant_id="tenant-pending-intruder", tool="private-tool")
+    session_store.decide_approval(second["confirmation_id"], False, by="tenant-pending-api")
+
+    r = client.get(
+        f"/api/agent/approvals/pending?session_id={first['session_id']}&limit=10",
+        headers=_h("tenant-pending-api"),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    assert body["approvals"] == [{
+        "confirmation_id": first["confirmation_id"],
+        "session_id": first["session_id"],
+        "turn_id": first["turn_id"],
+        "tool": "drape-arrays",
+        "params": {"length_ft": 12},
+        "capability": "drawing.write",
+        "rationale": "adds a home-run",
+        "kind": "proposed_run",
+        "decided": False,
+        "approved": None,
+        "resume_required": False,
+        "created_at": session_store.get_approval(first["confirmation_id"])["created_at"],
+        "expires_at": session_store.get_approval(first["confirmation_id"])["expires_at"],
+    }]
+
+
+def test_list_pending_approvals_recovers_same_actor_decided_unconsumed(client):
+    seed = _seed_approval(tenant_id="tenant-resume-api", tool="drape-arrays")
+    assert session_store.decide_approval(
+        seed["confirmation_id"], True, by="tenant-resume-api") == "recorded"
+
+    r = client.get(
+        f"/api/agent/approvals/pending?session_id={seed['session_id']}",
+        headers=_h("tenant-resume-api"),
+    )
+    assert r.status_code == 200, r.text
+    approval = r.json()["approvals"][0]
+    assert approval["confirmation_id"] == seed["confirmation_id"]
+    assert approval["approved"] is True
+    assert approval["resume_required"] is True
+
+
+def test_list_pending_approvals_cross_tenant_session_is_same_as_unknown(client):
+    seed = _seed_approval(tenant_id="tenant-session-owner")
+    cross = client.get(
+        f"/api/agent/approvals/pending?session_id={seed['session_id']}",
+        headers=_h("tenant-session-intruder"),
+    )
+    unknown = client.get(
+        "/api/agent/approvals/pending?session_id=no-such-session",
+        headers=_h("tenant-session-intruder"),
+    )
+    assert cross.status_code == unknown.status_code == 404
+    assert cross.json()["error"]["error_code"] == unknown.json()["error"]["error_code"] == "session_not_found"
+
+
+def test_same_decision_retry_is_idempotent_but_opposite_retry_is_rejected(client):
+    approved = _seed_approval(tenant_id="tenant-idempotent")
+    first = client.post(
+        f"/api/agent/approvals/{approved['confirmation_id']}",
+        json={"approved": True}, headers=_h("tenant-idempotent"),
+    )
+    same = client.post(
+        f"/api/agent/approvals/{approved['confirmation_id']}",
+        json={"approved": True}, headers=_h("tenant-idempotent"),
+    )
+    opposite = client.post(
+        f"/api/agent/approvals/{approved['confirmation_id']}",
+        json={"approved": False}, headers=_h("tenant-idempotent"),
+    )
+    assert first.status_code == 200
+    assert same.status_code == 200
+    assert same.json()["already_resolved"] is True
+    assert opposite.status_code == 409
+    assert session_store.get_approval(approved["confirmation_id"])["approved"] is True
+
+
 # --------------------------------------------------------------------------- #
 # already-decided -> 409, original decision preserved
 # --------------------------------------------------------------------------- #
