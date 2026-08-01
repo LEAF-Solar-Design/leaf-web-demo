@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   classifyAgentError,
   ensureSession,
@@ -10,9 +10,24 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   const [sessionId, setSessionId] = useState(null)
   const [turns, setTurns] = useState([])
   const sessionRef = useRef(null)
+  const drawingRef = useRef(drawingId)
+
+  useEffect(() => {
+    const previousDrawingId = drawingRef.current
+    drawingRef.current = drawingId
+    if (previousDrawingId === drawingId) return
+    resetSession(previousDrawingId)
+    sessionRef.current = null
+    setSessionId(null)
+    setTurns([])
+  }, [drawingId])
 
   const attach = useCallback(async () => {
+    const requestedDrawingId = drawingId
     const next = await ensureSession(drawingId)
+    if (drawingRef.current !== requestedDrawingId) {
+      throw new Error('Drawing changed while starting the conversation')
+    }
     sessionRef.current = next.session_id
     setSessionId(next.session_id)
     return next.session_id

@@ -49,7 +49,6 @@ import useCheckoutController from '../controllers/checkout/useCheckoutController
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
-import { liveDrawingId } from './workbenchId.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
   confirmRunIntent,
@@ -74,13 +73,19 @@ const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shap
 const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
-const DRAWING_SOURCE = PROOF_MODE ? 'cat' : 'rooftop_demo'
-const DEMO_REQUESTED = new URLSearchParams(window.location.search).get('demo') === '1'
+const DEMO_VALUE = new URLSearchParams(window.location.search).get('demo')
 // A signed-in user gets the live session and mounted-account path on the same
 // CAD surface. Only an anonymous demo remains fully local.
-const PUBLIC_DEMO = DEMO_REQUESTED && !isSignedIn()
-const LIVE_TOUR_REQUESTED = new URLSearchParams(window.location.search).get('demo') === 'tour'
-const DRAWING_ID = PROOF_MODE ? 'cat-panels' : liveDrawingId()
+const PUBLIC_DEMO = DEMO_VALUE === '1' && !isSignedIn()
+const LIVE_TOUR_REQUESTED = DEMO_VALUE === 'tour'
+const LIVE_DEMO = LIVE_TOUR_REQUESTED || (DEMO_VALUE === '1' && isSignedIn())
+const MODE_DRAWING_ID = PROOF_MODE
+  ? 'cat-panels'
+  : PUBLIC_DEMO
+    ? 'demo'
+    : LIVE_DEMO
+      ? 'rooftop_demo'
+      : null
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
 const UNIFIED_TOUR_STEPS = [
@@ -143,6 +148,7 @@ function agentBannerFor(error) {
 }
 
 function phaseLabel(phase) {
+  if (phase === 'empty') return 'No drawing yet'
   if (phase === 'loading') return PROOF_MODE ? 'Loading drawing' : 'Connecting backend'
   if (phase === 'ready') return PROOF_MODE ? 'Drawing ready' : 'Backend ready'
   if (phase === 'starting') return 'Starting request'
@@ -188,6 +194,8 @@ let sessionWasActiveThisPageLoad = false
 
 export default function ToolCast({
   active,
+  drawingId,
+  onDrawingReady,
   onFitDrawing,
   onViewModeChange,
   onVisibleLayersChange,
@@ -198,6 +206,8 @@ export default function ToolCast({
   const [prompt, setPrompt] = useState(PROOF_MODE ? CAT_REQUEST : '')
   const { converse, drawing, drawingEvent, drawingError, instanceId } = useWorkspaceControllers()
   const { sessionId, turns, startTurn, clear: clearConverse, resetCached } = converse
+  const startTurnRef = useRef(startTurn)
+  startTurnRef.current = startTurn
   const platformSession = useSessionController()
   const sessionAuthRequired = platformSession.status === 'required'
   const sessionReady = PUBLIC_DEMO || platformSession.status === 'active'
@@ -280,13 +290,13 @@ export default function ToolCast({
     },
     startAgentTurn: async (text, hint) => {
       if (!sessionReadyRef.current) return undefined
-      const response = await startTurn(text, hint)
+      const response = await startTurnRef.current(text, hint)
       setLeftView('operator')
       setPhase('proposal')
       return response
     },
     agentBannerFor,
-  }), [requireAuth, startTurn])
+  }), [requireAuth])
 
   useEffect(() => {
     if (!drawingEvent) return
@@ -311,6 +321,8 @@ export default function ToolCast({
     redo: redoDrawingVersion,
   } = drawing.actions
   const version = drawing.head
+  const hasDrawing = Boolean(drawing.shown && drawing.drawingState?.drawing_id)
+  const canOperate = sessionReady && hasDrawing
   const { canUndo, canRedo } = drawing
   const panelCount = drawing.shown?.polylines?.length || null
   const selection = useMemo(() => selectedEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
@@ -341,21 +353,30 @@ export default function ToolCast({
 
   useEffect(() => {
     if (!active) return undefined
-    if (platformSession.status === 'active' && drawing.shown) {
+    const requestedDrawingId = MODE_DRAWING_ID || drawingId
+    const drawingSource = PROOF_MODE ? 'cat' : PUBLIC_DEMO ? 'rooftop_demo' : requestedDrawingId
+    if (drawing.shown && drawing.drawingState?.drawing_id === requestedDrawingId) {
       setPhase(Number(drawing.head) > 1 ? 'complete' : 'ready')
+      return undefined
+    }
+    if (!drawingSource) {
+      setWorkspaceBootstrapRequired(false)
+      setError(null)
+      setPhase('empty')
+      if (!isSignedIn()) requireAuth('/api/session')
       return undefined
     }
     let live = true
     platformSession.actions.checking()
     setWorkspaceBootstrapRequired(false)
     setPhase('loading')
-    getSession(PUBLIC_DEMO, DRAWING_SOURCE)
+    getSession(PUBLIC_DEMO, drawingSource)
       .then((data) => {
         if (!live) return
         if (PUBLIC_DEMO) mockVersions.seedBase(data.intake)
         seatIntake(data.intake, {
-          drawingId: DRAWING_ID,
-          drawingState: { drawing_id: DRAWING_ID, version: 1, head: 1, latest: 1 },
+          drawingId: requestedDrawingId,
+          drawingState: { drawing_id: requestedDrawingId, version: 1, head: 1, latest: 1 },
           apply: true,
         })
         setTenantId(data.tenant || 'try-surface')
@@ -384,7 +405,7 @@ export default function ToolCast({
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, platformSession.actions, requireAuth, seatIntake, sessionRetry])
+  }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, requireAuth, seatIntake, sessionRetry])
 
   const showToast = useCallback((next) => {
     toastSeqRef.current += 1
@@ -417,6 +438,7 @@ export default function ToolCast({
 
   const onUploadReady = useCallback(async ({ receipt, view }) => {
     seatVersion(view, { drawingId: receipt.drawing_id, source: 'upload', event: 'upload' })
+    onDrawingReady?.(receipt)
     setTenantId(receipt.tenant_id || tenantId)
     setGuestDrawing(receipt.tenant_kind === 'guest' ? {
       drawingId: receipt.drawing_id,
@@ -424,8 +446,9 @@ export default function ToolCast({
     } : null)
     setPhase('ready')
     setError(null)
+    if (receipt.tenant_kind === 'account') platformSession.actions.activate(receipt)
     showToast({ text: `Drawing ready, ${view?.intake?.dwg || receipt.drawing_id}`, action: { label: 'View', onClick: () => setRightView('view') } })
-  }, [seatVersion, showToast, tenantId])
+  }, [onDrawingReady, platformSession.actions, seatVersion, showToast, tenantId])
 
   const drawingUpload = useDrawingUploadController({ onReady: onUploadReady })
 
@@ -485,7 +508,7 @@ export default function ToolCast({
   const writeEntitled = platform.isEntitled('run_write')
   const checkout = useCheckoutController({
     mock: transportMock,
-    drawingId: drawing.drawingState?.drawing_id || DRAWING_ID,
+    drawingId: drawing.drawingState?.drawing_id || null,
     holder: checkoutHolder,
   })
   const writeLocked = checkout.writeLocked || drawing.mutationsBlocked
@@ -499,7 +522,7 @@ export default function ToolCast({
   }, [checkout.actions, sessionReady])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
   const currentProjectName = selectCurrentProjectName(workspace)
-  const activeDrawingId = drawing.drawingState?.drawing_id || DRAWING_ID
+  const activeDrawingId = drawing.drawingState?.drawing_id || null
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId,
     orgId: workspace.orgId,
@@ -507,8 +530,8 @@ export default function ToolCast({
     workspace: workspace.workspace,
     selectedVersionId: workspace.canonicalVersionId,
     drawingState: drawing.drawingState,
-    fallbackDrawingId: DRAWING_ID,
-  }), [drawing.drawingState, tenantId, workspace.canonicalVersionId, workspace.openProjectId, workspace.orgId, workspace.workspace])
+    fallbackDrawingId: activeDrawingId,
+  }), [activeDrawingId, drawing.drawingState, tenantId, workspace.canonicalVersionId, workspace.openProjectId, workspace.orgId, workspace.workspace])
 
   const catalog = useCatalogController({
     services: catalogServices,
@@ -588,7 +611,7 @@ export default function ToolCast({
   catalogDecisionRef.current = armCatalogDecision
 
   const requestCatalogRun = useCallback((tool, params) => {
-    if (!sessionReady) return
+    if (!canOperate) return
     setSelectedCatalogTool(tool)
     setLeftView('catalog')
     catalog.actions.commitDecision({
@@ -599,10 +622,10 @@ export default function ToolCast({
       rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
     })
-  }, [catalog.actions, sessionReady])
+  }, [canOperate, catalog.actions])
 
   const runCatalogTool = useCallback(async (intent, tool, params) => {
-    if (!sessionReady || !tool || busy || jobRunning) {
+    if (!canOperate || !tool || busy || jobRunning) {
       catalog.actions.dismissRoute()
       return
     }
@@ -670,7 +693,7 @@ export default function ToolCast({
     catalog.actions.dismissRoute()
     if (!PUBLIC_DEMO && workspace.openProjectId) workspace.rehydrate()
     if (!PUBLIC_DEMO) checkout.actions.refresh()
-  }, [busy, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.shown, jobRunning, runTrackedJob, sessionReady, workspace, writeLocked])
+  }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.shown, jobRunning, runTrackedJob, workspace, writeLocked])
 
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
     const drawingId = drawing.drawingState?.drawing_id
@@ -902,7 +925,7 @@ export default function ToolCast({
 
   const dispatchRequest = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
-    if (!text || platformSession.status !== 'active' || busy || jobRunning || routing) return
+    if (!text || platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing) return
     setError(null)
     setPhase('starting')
     if (text.startsWith('/')) setLeftView('catalog')
@@ -923,7 +946,7 @@ export default function ToolCast({
     if (decision) setPhase('proposal')
     else setPhase('failed')
     return decision
-  }, [busy, catalog.actions, jobRunning, platformSession.status, prompt, routing])
+  }, [busy, catalog.actions, hasDrawing, jobRunning, platformSession.status, prompt, routing])
 
   const runRequest = useCallback(() => dispatchRequest(), [dispatchRequest])
 
@@ -973,7 +996,7 @@ export default function ToolCast({
     if (event.key === 'Enter') runRequest()
   }
 
-  const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' ? 'hollow' : 'live')
+  const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
 
   return (
     <>
@@ -997,7 +1020,7 @@ export default function ToolCast({
           <span className={`dot ${statusClass}${phase === 'running' ? ' pulse' : ''}`} />
           {phaseLabel(phase)}
         </span>
-        <span className="tc-version" data-testid="version-head">Version {version ?? 'pending'}</span>
+        <span className="tc-version" data-testid="version-head">{version == null ? 'No version' : `Version ${version}`}</span>
         {sculpture && (
           <button
             type="button"
@@ -1022,9 +1045,9 @@ export default function ToolCast({
         </div>
         <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
-          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!sessionReady} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
-          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!sessionReady} onClick={() => setLeftView('author')}>Author</button>
-          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!sessionReady} onClick={() => setLeftView('workspace')}>Project</button>
+          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
+          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
@@ -1061,7 +1084,11 @@ export default function ToolCast({
           ) : (
             <div className="tc-operator-empty">
               <span className={`dot ${phase === 'loading' ? 'live pulse' : 'hollow'}`} />
-              <span>{phase === 'loading' ? 'Loading the drawing backend' : 'Type the request in the command bar. The proposal will stay in this rail.'}</span>
+              <span>{phase === 'loading'
+                ? 'Loading the drawing backend'
+                : phase === 'empty'
+                  ? 'No drawing yet. Upload a DWG or DXF to begin.'
+                  : 'Type the request in the command bar. The proposal will stay in this rail.'}</span>
             </div>
           ))}
           {leftView === 'catalog' && (
@@ -1134,9 +1161,9 @@ export default function ToolCast({
         <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
           <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
-          <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!sessionReady} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest || 1}</span></button>
+          <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>
           <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} disabled={!sessionReady} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
-          <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} onClick={() => setRightView('view')}>View</button>
+          <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} disabled={!hasDrawing} onClick={() => setRightView('view')}>View</button>
         </div>
         <div id="operations-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`operations-tab-${rightView}`} tabIndex={0}>
         {rightView === 'execution' && <><div className="tc-events">
@@ -1453,12 +1480,12 @@ export default function ToolCast({
                 ? `Try: ${CAT_REQUEST}`
                 : 'Describe a change to this drawing. Nothing runs until you submit it.'}
             />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
+            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
           </div>
           <div className="tc-bar-controls">
             <span className="tc-bar-chip">Scope · this drawing</span>
             <span className="tc-bar-scopes">{PUBLIC_DEMO ? 'message · review · run · version' : 'plan · approve · execute · version'}</span>
-            <span className="tc-bar-proj">{activeDrawingId}</span>
+            <span className="tc-bar-proj">{activeDrawingId || 'No drawing'}</span>
             <span className="key tc-bar-key">⌘K</span>
           </div>
         </div>

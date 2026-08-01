@@ -1,6 +1,9 @@
 """Exact catalog and drawing generation pins for conversational writes."""
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from routers import capabilities as capabilities_router
@@ -15,6 +18,14 @@ WRITE_TOOL = {
     "description": "Arrange existing panels into a cat.",
     "capabilities": ["drawing.write"],
     "entry": "tools/arrange-panels-as-cat/tool.py",
+    "params": {"type": "object", "properties": {}},
+}
+READ_TOOL = {
+    "name": "count-cat-panels",
+    "version": "1.0.0",
+    "description": "Count panels without changing the drawing.",
+    "capabilities": [],
+    "entry": "tools/count-cat-panels/tool.py",
     "params": {"type": "object", "properties": {}},
 }
 COMMIT = "a" * 40
@@ -107,10 +118,10 @@ def test_fresh_enabled_tenant_without_effective_catalog_gets_base_generation(
     } == {expected["effective_catalog_digest"]}
 
 
-def _request(**changes):
-    digest = jobs_router.deps.catalog_tool_digest(WRITE_TOOL)
+def _request(tool=WRITE_TOOL, **changes):
+    digest = jobs_router.deps.catalog_tool_digest(tool)
     values = {
-        "tool": WRITE_TOOL["name"],
+        "tool": tool["name"],
         "params": {},
         "dwg": "cat-panels",
         "dwg_version": 7,
@@ -192,3 +203,199 @@ def test_backedge_write_requires_complete_exact_pins(monkeypatch):
     assert response.status_code == 409
     assert submitted == []
     assert "requires exact catalog and drawing pins" in response.body.decode("utf-8")
+
+
+class _CheckoutDenied(Exception):
+    pass
+
+
+def _prepare_write_route(monkeypatch, events, authorize):
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: WRITE_TOOL)
+    monkeypatch.setattr(jobs_router, "_legacy_drawing_head", lambda *_args: 7)
+    monkeypatch.setattr(
+        jobs_router.customization_service,
+        "effective_catalog_pin",
+        lambda _tenant: {
+            "catalog_commit": COMMIT,
+            "effective_catalog_digest": CATALOG,
+        },
+    )
+    monkeypatch.setattr(
+        jobs_router,
+        "_checkout_identity",
+        lambda _tenant, drawing, _capability: (
+            events.append(("identity", drawing)) or ("checkout-owner", 9)
+        ),
+    )
+    backend = object()
+    monkeypatch.setattr(
+        jobs_router.write_loop,
+        "backend_for_tenant",
+        lambda tenant, *, aps_live, da: (
+            events.append(("backend", tenant, aps_live, da)) or backend
+        ),
+    )
+    monkeypatch.setattr(
+        jobs_router,
+        "_store",
+        lambda: SimpleNamespace(
+            CheckoutDenied=_CheckoutDenied,
+            authority_mode=lambda: "postgres",
+            authorize_checkout=authorize,
+        ),
+    )
+    return backend
+
+
+@pytest.mark.parametrize(
+    ("denial", "status", "error_code", "message"),
+    [
+        (ValueError("an active checkout is required to publish a version"), 400,
+         "BAD_PARAMS",
+         "active checkout is required"),
+        (_CheckoutDenied("checkout fence 8 is stale"), 403, "FORBIDDEN", "stale"),
+        (_CheckoutDenied("drawing is checked out by 'other'"), 403,
+         "FORBIDDEN", "other"),
+    ],
+)
+def test_write_checkout_denial_creates_no_durable_job(
+    monkeypatch, denial, status, error_code, message,
+):
+    events = []
+
+    def authorize(*_args):
+        events.append(("authorize",))
+        raise denial
+
+    _prepare_write_route(monkeypatch, events, authorize)
+    monkeypatch.setattr(
+        jobs_router.jobs,
+        "submit_job",
+        lambda *_args, **_kwargs: events.append(("submit",)) or "unexpected-job",
+    )
+
+    response = _run(_request(params={"drawing_id": "edited-cat"}))
+
+    assert response.status_code == status
+    body = json.loads(response.body)
+    assert body["error"]["error_code"] == error_code
+    assert message in body["error"]["message"]
+    assert ("submit",) not in events
+
+
+def test_authorized_write_checks_target_before_durable_submit(monkeypatch):
+    events = []
+
+    def authorize(backend, tenant, drawing, holder, fence):
+        events.append(("authorize", backend, tenant, drawing, holder, fence))
+
+    expected_backend = _prepare_write_route(monkeypatch, events, authorize)
+    monkeypatch.setattr(
+        jobs_router.jobs,
+        "submit_job",
+        lambda *_args, **_kwargs: events.append(("submit",)) or "job-1",
+    )
+
+    response = _run(_request(
+        params={"drawing_id": "edited-cat"},
+        dwg="intake-source",
+    ))
+
+    assert response.status_code == 202
+    authorize_event = next(event for event in events if event[0] == "authorize")
+    assert authorize_event == (
+        "authorize", expected_backend, "pin-tenant", "edited-cat",
+        "checkout-owner", 9,
+    )
+    assert events.index(authorize_event) < events.index(("submit",))
+    assert ("identity", "edited-cat") in events
+
+
+def test_read_run_does_not_require_checkout(monkeypatch):
+    events = []
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: READ_TOOL)
+    monkeypatch.setattr(
+        jobs_router,
+        "_checkout_identity",
+        lambda *_args: ("anonymous", None),
+    )
+    monkeypatch.setattr(
+        jobs_router,
+        "_store",
+        lambda: (_ for _ in ()).throw(AssertionError("read consulted checkout store")),
+    )
+    monkeypatch.setattr(
+        jobs_router.jobs,
+        "submit_job",
+        lambda *_args, **_kwargs: events.append("submit") or "read-job",
+    )
+
+    response = _run(_request(
+        READ_TOOL,
+        dwg_version=None,
+        expected_drawing_head=None,
+        catalog_commit=None,
+        effective_catalog_digest=None,
+        tool_manifest_sha256=None,
+    ))
+
+    assert response.status_code == 202
+    assert events == ["submit"]
+
+
+def test_canonical_run_does_not_require_legacy_checkout(monkeypatch):
+    canonical_tool = {
+        **READ_TOOL,
+        "name": "canonical-cat-solver",
+        "capabilities": ["solve"],
+        "canonical_only": True,
+    }
+    version_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: canonical_tool)
+    monkeypatch.setattr(
+        jobs_router.jobs.platform_link,
+        "resolve_submission_context",
+        lambda *_args: {
+            "org_id": "pin-tenant",
+            "project_id": "project-1",
+            "authority_mode": "postgres_canonical",
+        },
+    )
+    submitted = []
+    monkeypatch.setattr(
+        jobs_router.jobs.platform_link,
+        "submit_canonical_solve",
+        lambda *_args: submitted.append("canonical") or "canonical-job",
+    )
+    monkeypatch.setattr(
+        jobs_router,
+        "_checkout_identity",
+        lambda *_args: ("anonymous", None),
+    )
+    monkeypatch.setattr(
+        jobs_router,
+        "_store",
+        lambda: (_ for _ in ()).throw(AssertionError("canonical run consulted checkout store")),
+    )
+
+    response = jobs_router.run(
+        _request(
+            canonical_tool,
+            dwg=version_id,
+            dwg_version=None,
+            expected_drawing_head=None,
+            catalog_commit=None,
+            effective_catalog_digest=None,
+            tool_manifest_sha256=None,
+        ),
+        wait=0,
+        tenant_id="pin-tenant",
+        x_org_id="pin-tenant",
+        x_project_id="project-1",
+        idempotency_key=None,
+        authorization=None,
+        x_checkout_capability=None,
+    )
+
+    assert response.status_code == 202
+    assert submitted == ["canonical"]

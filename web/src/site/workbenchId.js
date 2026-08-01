@@ -1,5 +1,6 @@
-// The live workbench drawing id: minted per browser session, and seedable by a
-// protected operator before the page loads.
+// The live workbench drawing id is supplied by a completed upload or seeded by
+// a protected operator before the page loads. An empty browser session has no
+// drawing, so this module must never invent one.
 //
 // A seeded id is honoured when it is already canonical under the ONE shared id
 // rule the server enforces (server/tenant_id_validator.py, mirrored by
@@ -14,20 +15,23 @@
 export const WORKBENCH_ID_KEY = 'leaf.cat.workbench.id.v1'
 export const CANONICAL_DRAWING_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/
 
-export function freshDrawingId(scope = globalThis) {
-  const randomId = scope.crypto?.randomUUID?.()
-  if (randomId) return `cat-workbench-${randomId}`
-  return `cat-workbench-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-}
-
 export function liveDrawingId(scope = globalThis) {
   try {
     const existing = scope.sessionStorage?.getItem(WORKBENCH_ID_KEY)
     if (CANONICAL_DRAWING_ID.test(existing || '')) return existing
-    const created = freshDrawingId(scope)
-    scope.sessionStorage?.setItem(WORKBENCH_ID_KEY, created)
-    return created
   } catch {
-    return freshDrawingId(scope)
+    // Storage can be unavailable in private browsing. That is still an empty
+    // state, not permission to fabricate a drawing identity.
+  }
+  return null
+}
+
+export function rememberLiveDrawingId(drawingId, scope = globalThis) {
+  if (!CANONICAL_DRAWING_ID.test(drawingId || '')) return false
+  try {
+    scope.sessionStorage?.setItem(WORKBENCH_ID_KEY, drawingId)
+    return true
+  } catch {
+    return false
   }
 }

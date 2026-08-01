@@ -3,7 +3,6 @@ import { defineConfig } from '@playwright/test'
 export default defineConfig({
   testDir: './e2e',
   testMatch: 'live-service-surface.spec.mjs',
-  grep: /exact session-seeded drawing id/,
   workers: 1,
   outputDir: '../artifacts/live-service-surface/test-results',
   reporter: [['list'], ['html', {
