@@ -70,6 +70,10 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
             f"{transform_vertices}"
         ),
         "ADD|LEAF_APPLY_CANARY|0,0,1|0|0,0;12,0;12,12;0,12",
+        "ADD|LEAF_ROUNDING_CANARY|0,0,1|0|10.0625,20.0625;12.0625,20.0625;12.0625,22.0625;10.0625,22.0625",
+        "ADD|LEAF_DECIMAL_CANARY|0,0,1|0|10.0005,20.0005;12.0005,20.0005;12.0005,22.0005;10.0005,22.0005",
+        "ADD|LEAF_NEGATIVE_CANARY|0,0,1|0|-10.0625,-20.0625;-12.0625,-20.0625;-12.0625,-22.0625;-10.0625,-22.0625",
+        "ADD|LEAF_EXPONENT_CANARY|0,0,1|0|3e-05,0;1,0;1,1;0,1",
         (
             "ADD|LEAF_TILTED_CANARY|0,0.707106781,0.707106781|0|"
             "20,0;32,0;32,12;20,12"
@@ -138,12 +142,54 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         [12.0, 12.0, 0.0],
         [0.0, 12.0, 0.0],
     ]
+    rounded = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_ROUNDING_CANARY"
+    ]
+    assert len(rounded) == 1
+    assert rounded[0]["pts"] == [
+        [10.063, 20.063, 0.0],
+        [12.063, 20.063, 0.0],
+        [12.063, 22.063, 0.0],
+        [10.063, 22.063, 0.0],
+    ]
+    decimal = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_DECIMAL_CANARY"
+    ]
+    assert len(decimal) == 1
+    assert decimal[0]["pts"] == [
+        [10.001, 20.001, 0.0],
+        [12.001, 20.001, 0.0],
+        [12.001, 22.001, 0.0],
+        [10.001, 22.001, 0.0],
+    ]
+    negative = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_NEGATIVE_CANARY"
+    ]
+    assert len(negative) == 1
+    assert negative[0]["pts"] == [
+        [-10.063, -20.063, 0.0],
+        [-12.063, -20.063, 0.0],
+        [-12.063, -22.063, 0.0],
+        [-10.063, -22.063, 0.0],
+    ]
+    exponent = [
+        item for item in intake["polylines"]
+        if item["layer"] == "LEAF_EXPONENT_CANARY"
+    ]
+    assert len(exponent) == 1
+    assert exponent[0]["pts"] == [
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+    ]
     tilted = [
         item for item in intake["polylines"]
         if item["layer"] == "LEAF_TILTED_CANARY"
     ]
     assert len(tilted) == 1
-    normal = (0.0, 0.707106781, 0.707106781)
+    normal = (0.0, 0.707107, 0.707107)
     expected_tilted = [
         [round(value, 3) for value in o2w((x, y, 0.0), normal)]
         for x, y in ((20, 0), (32, 0), (32, 12), (20, 12))

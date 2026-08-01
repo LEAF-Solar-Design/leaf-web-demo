@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -46,6 +47,7 @@ from mutation_plan import (
     emit_plan,
     plan_sha256,
     validate_mutations,
+    world_to_ocs,
 )
 from tenant_id_validator import validate_tenant_id
 
@@ -74,11 +76,6 @@ GUEST_TENANT_PREFIX = "guest-"
 # Fixed reviewed Activity. Tenant-authored code can produce data only; it can
 # never select an Activity or supply executable input to Design Automation.
 WRITE_ACTIVITY = "LeafApplyMutations"
-# The canonical DA extractor rounds WCS coordinates to three decimals. Live
-# effect verification accepts only the maximum half-quantum shift plus
-# floating-point slack.
-EXTRACTED_POINT_ABS_TOLERANCE = 0.000501
-
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
 
@@ -1063,13 +1060,7 @@ def _scratch_download_bytes(da: Any, key: str, upload_key: str) -> bytes:
     return da.download_object(key)
 
 
-def _point_close(
-    left: Any,
-    right: Any,
-    tolerance: float = EXTRACTED_POINT_ABS_TOLERANCE,
-) -> bool:
-    # Keep exact layer, topology, vertex-order, and entity-count checks in the
-    # caller; this tolerance applies only to each extracted coordinate.
+def _point_close(left: Any, right: Any, tolerance: float = 1e-5) -> bool:
     if not isinstance(left, list) or not isinstance(right, list):
         return False
     if len(left) < 2 or len(right) < 2:
@@ -1087,13 +1078,53 @@ def _point_close(
         return False
 
 
-def _polyline_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
+def _extractor_round(value: float, places: int) -> float:
+    # Measured on AutoCAD 2026 W.164.0.0: RTOS mode 2 rounds decimal ties
+    # away from zero (10.0625 -> 10.063, -10.0625 -> -10.063).
+    quantum = Decimal(1).scaleb(-places)
+    return float(Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP))
+
+
+def _plan_number(value: float) -> float:
+    value = 0.0 if abs(value) < 5e-13 else value
+    return float(format(value, ".12g"))
+
+
+def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
+    """Model the fixed extractor's lossy OCS text round trip for one write."""
+    # This pure parser module is copied into both app and broker images. Reuse
+    # its arbitrary-axis transform so verification cannot drift from extraction.
+    from intake_parse import o2w
+
+    lowered = world_to_ocs(points)
+    normal = tuple(
+        _extractor_round(_plan_number(value), 6)
+        for value in lowered["normal"])
+    elevation = _extractor_round(
+        _plan_number(lowered["elevation"]), 3)
+    extracted = []
+    for point in lowered["points"]:
+        x = _extractor_round(_plan_number(point[0]), 3)
+        y = _extractor_round(_plan_number(point[1]), 3)
+        world = o2w((x, y, elevation), normal)
+        extracted.append([round(value, 3) for value in world])
+    return extracted
+
+
+def _polyline_effect_matches(
+    expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
+) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
-    if actual.get("closed") is not True:
+    if expected.get("closed") is not actual.get("closed"):
         return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
+    if extracted:
+        try:
+            expected_points = _expected_extracted_points(expected_points)
+        except (ArithmeticError, IndexError, TypeError, ValueError):
+            return False
     return (
         len(expected_points) == len(actual_points)
         and all(_point_close(left, right)
@@ -1158,7 +1189,8 @@ def verify_live_mutation_effects(
         expected_entity = (
             expected_by_handle[handle] if handle in transformed else entity)
         if not _polyline_effect_matches(
-                expected_entity, actual_by_handle[handle]):
+                expected_entity, actual_by_handle[handle],
+                extracted=handle in transformed):
             effect = "transformed" if handle in transformed else "unchanged"
             raise ValueError(
                 f"{effect} handle {handle!r} has unexpected output geometry")
@@ -1177,7 +1209,7 @@ def verify_live_mutation_effects(
         match_index = next(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate)),
+             and _polyline_effect_matches(entity, candidate, extracted=True)),
             None,
         )
         if match_index is None:

@@ -500,7 +500,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_broker_boundary.py"), 46),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
-              _py_pytest("tests/test_live_mutation_plan.py"), 26),
+              _py_pytest("tests/test_live_mutation_plan.py"), 30),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),
