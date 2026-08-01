@@ -18,6 +18,23 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { guardedFetch, proxyTenantMcpServer } from "../src/ports/impl/mcpProxy.js";
 
+// Round 12: counting HTTP hits could not distinguish "resolves before every
+// request" from "resolved once and cached", and the reviewer's cache mutation
+// survived the old test. Counting the actual dns.lookup calls is the only
+// thing that separates them. vi.hoisted because vi.mock is lifted above the
+// imports, so a plain outer binding would not exist yet when the factory runs.
+const dnsProbe = vi.hoisted(() => ({ hosts: [] as string[] }));
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns/promises")>();
+  return {
+    ...actual,
+    lookup: (host: string, options?: unknown) => {
+      dnsProbe.hosts.push(host);
+      return (actual.lookup as (h: string, o?: unknown) => Promise<unknown>)(host, options);
+    },
+  };
+});
+
 const servers: Server[] = [];
 
 async function listen(handler: Parameters<typeof createServer>[1]): Promise<{ url: string; port: number }> {
@@ -82,24 +99,26 @@ describe("guardedFetch re-checks the destination before every request", () => {
     // distinguish "re-checks before each request" from "checked once at mount".
     // The whole point of this guard is the SECOND and later calls — a name that
     // was safe at mount time is exactly the one that turns hostile later.
-    let resolutions = 0;
     const upstream = await listen((_req, res) => {
-      resolutions += 1;
       res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     });
-    const fetchGuarded = guardedFetch("127.0.0.1");
-    await fetchGuarded(upstream.url, { method: "POST" });
-    await fetchGuarded(upstream.url, { method: "POST" });
-    await fetchGuarded(upstream.url, { method: "POST" });
-    expect(resolutions).toBe(3);
 
-    // And with a NAME, every one of those calls must refuse — not just the
-    // first — which is what proves the check is per-request.
+    // A NAME, so the DNS branch actually runs, and the refusal must repeat on
+    // every attempt — a name that was safe at mount time is precisely the one
+    // that turns hostile later, so a once-at-mount check protects nothing.
     const named = upstream.url.replace("127.0.0.1", "localhost");
     const guardedByName = guardedFetch("localhost");
+    dnsProbe.hosts.length = 0;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await expect(guardedByName(named, { method: "POST" })).rejects.toThrow(/became_unsafe/);
     }
+
+    // THE assertion, and the reason it counts lookups rather than HTTP hits:
+    // a cached or hoisted single resolution passes every behavioural check
+    // here, because the refusal would repeat from the cached answer. Only the
+    // call count separates "re-resolves each time" from "resolved once".
+    expect(dnsProbe.hosts.filter((host) => host === "localhost")).toEqual(
+      ["localhost", "localhost", "localhost"]);
   });
 
   it("allows an IP literal that was already validated, without re-resolving", async () => {

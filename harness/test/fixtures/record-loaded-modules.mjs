@@ -20,7 +20,7 @@
  */
 import { createRequire, register } from "node:module";
 import { writeFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const [target, outputPath] = process.argv.slice(2);
 const recorded = new Set();

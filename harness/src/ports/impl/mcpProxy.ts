@@ -30,15 +30,17 @@
  * five review rounds each found a fresh defect in it:
  *
  *   1. Cancelling or timing out a call rejects the pending promise but does not
- *      promptly close the upstream socket. The SDK transport dials with its own
- *      process-wide controller (client/streamableHttp.js), so the abandoned
- *      POST or SSE body survives until the whole proxy closes.
- *   2. SSE retries are not bounded at all. The protocol timer is created once
- *      per request, so a reconnecting stream is covered by no per-fetch timer
- *      after that. (An earlier draft of this note said each retry "starts a
- *      fresh clock" — that described the pre-cut code, not this one, and review
- *      caught the stale wording. The effect is the same either way: total
- *      upstream time is not bounded here.)
+ *      promptly close the upstream socket. The transport dials with its own
+ *      TRANSPORT-wide controller (client/streamableHttp.js), so the abandoned
+ *      POST or SSE body survives until this proxy's client is closed. Scope
+ *      matters and two earlier drafts of this note got it wrong: it is one
+ *      controller per transport, not one per process, so the blast radius is
+ *      this tenant's connection, not the whole harness.
+ *   2. SSE reconnection is bounded in COUNT but not in TIME. The transport
+ *      retries a dropped stream at most twice (maxRetries: 2, default
+ *      reconnection options), while the protocol timer is created once per
+ *      request, so the reconnect fetches themselves carry no per-fetch
+ *      deadline. Unbounded socket lifetime, not an unbounded retry loop.
  *   3. Upstream progress notifications are not relayed downstream, so a long
  *      tool call gives the model no intermediate feedback.
  *
