@@ -106,6 +106,22 @@ class FakeDa:
         return 2.0
 
 
+class FailedDa(FakeDa):
+    def submit_workitem(self, activity, arguments, **kwargs):
+        self.submissions.append((activity, arguments, kwargs))
+        return {
+            "id": "wi-secret",
+            "status": "failed",
+            "reportUrl": "https://reports.test/output?token=do-not-return",
+        }
+
+
+class RaisingDa(FakeDa):
+    def submit_workitem(self, activity, arguments, **kwargs):
+        raise RuntimeError(
+            "request failed at https://objects.test/input?signature=do-not-return")
+
+
 def _actual_success():
     added = copy.deepcopy(_mutations()["added"][0])
     added["handle"] = "APS1"
@@ -227,6 +243,36 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert env["result"]["new_version"]["version"] == 2
     _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
     assert intake["dwg"] == "drawing"
+
+
+def test_live_workitem_failure_never_returns_report_url(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+    da = FailedDa(_actual_success())
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=da, t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    assert status == 502
+    assert env["error"]["message"] == "APS write WorkItem did not succeed"
+    assert "report" not in json.dumps(env).lower()
+    assert "do-not-return" not in json.dumps(env)
+
+
+def test_live_transport_exception_never_returns_exception_text(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+    da = RaisingDa(_actual_success())
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=da, t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    assert status == 502
+    assert env["error"]["message"] == "live drawing mutation failed"
+    assert "https://" not in json.dumps(env)
+    assert "do-not-return" not in json.dumps(env)
 
 
 def test_reextract_mismatch_never_publishes(tmp_path):
