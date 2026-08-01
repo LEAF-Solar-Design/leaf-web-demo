@@ -54,7 +54,9 @@ describe("Agent SDK author contract", () => {
     expect(AUTHOR_SYSTEM_PROMPT).toContain("MUST validate the candidate");
     expect(AUTHOR_SYSTEM_PROMPT).toContain("receive ok:true before finishing");
     expect(AUTHOR_RUNNER_GUIDE).toContain('result["mutations"]["added"]');
-    expect(AUTHOR_RUNNER_GUIDE).toContain("closed 2D drawing footprints");
+    expect(AUTHOR_RUNNER_GUIDE).toContain("faceted closed planar polylines");
+    expect(AUTHOR_RUNNER_GUIDE).toContain('result["mutations"]["removed"]');
+    expect(AUTHOR_RUNNER_GUIDE).toContain("Live transforms");
   });
 
   it("runs a trusted default broker test when the model stops after validation", async () => {
