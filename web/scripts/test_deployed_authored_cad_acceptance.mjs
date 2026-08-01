@@ -806,7 +806,20 @@ describe('deployed authored CAD acceptance checks', () => {
     const completedVersion = source.indexOf("filter({ hasText: 'Version 2' })")
     const openView = source.indexOf('await openDrawingView(page)', completedVersion)
     const cameraControls = source.indexOf("getByTestId('camera-controls')", openView)
-    assert.ok(completedVersion >= 0 && openView > completedVersion && cameraControls > openView)
+    const focus3d = source.indexOf("getByTestId('focus-3d').click()", cameraControls)
+    const sculptureMount = source.indexOf(
+      '.viewer-canvas[data-view-mode="panel-sculpture"][data-camera-position][data-camera-target]',
+      focus3d,
+    )
+    const scopedCanvas = source.indexOf("cameraMount.locator('canvas')", sculptureMount)
+    assert.ok(
+      completedVersion >= 0
+        && openView > completedVersion
+        && cameraControls > openView
+        && focus3d > cameraControls
+        && sculptureMount > focus3d
+        && scopedCanvas > sculptureMount,
+    )
   })
 
   it('counts mutating API requests on both allowed browser origins', () => {

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { REQUEST, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
 async function install(page) {
   const state = makeCatProofState()
@@ -35,6 +35,39 @@ test('the named resident viewer supports pan and zoom and Fit restores its bound
   const restored = await mount.evaluate((element) => element.__cadviewer.project(0, 0))
   expect(Math.hypot(restored.x - baseline.x, restored.y - baseline.y)).toBeLessThan(2)
   await expect(canvas).toHaveAttribute('data-resident-proof', 'same-canvas')
+})
+
+test('the Version 2 sculpture can orbit at the deployed acceptance viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await install(page)
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await page.getByRole('textbox', { name: 'Command bar' }).fill(REQUEST)
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
+  await approval.getByRole('button', { name: 'Approve' }).click()
+  await expect(page.getByTestId('version-head')).toContainText('Version 2', { timeout: 15_000 })
+
+  await page.getByRole('tab', { name: 'View', exact: true }).click()
+  await expect(page.getByTestId('camera-controls')).toBeVisible()
+  await page.getByTestId('focus-3d').click()
+  const mount = page.getByRole('region', { name: 'Drawing viewer' }).locator(
+    '.viewer-canvas[data-view-mode="panel-sculpture"][data-camera-position][data-camera-target]',
+  )
+  await expect(mount).toBeVisible()
+  const canvas = mount.locator('canvas')
+  await expect(canvas).toBeVisible()
+  const before = await mount.evaluate((element) =>
+    `${element.dataset.cameraPosition}|${element.dataset.cameraTarget}`,
+  )
+  const box = await canvas.boundingBox()
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.4, { steps: 8 })
+  await page.mouse.up()
+  await expect.poll(() => mount.evaluate((element) =>
+    `${element.dataset.cameraPosition}|${element.dataset.cameraTarget}`,
+  )).not.toBe(before)
 })
 
 test('WebGL loss keeps a 2D drawing visible and offers a real retry', async ({ page }) => {
