@@ -20,7 +20,7 @@ import CheckoutChip from './CheckoutChip.jsx'
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
 export default function CheckoutControls({
-  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, busy, onTake, onRelease, onRetry,
+  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, busy, disabled = false, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
     // Both states pause writes, and only the wording differs. Every read now
@@ -41,7 +41,7 @@ export default function CheckoutControls({
           Could not read the edit lock — writes paused
         </span>
         {onRetry && (
-          <button className="chip-act" onClick={onRetry} disabled={busy}>
+          <button className="chip-act" onClick={onRetry} disabled={busy || disabled}>
             Retry
           </button>
         )}
@@ -64,7 +64,7 @@ export default function CheckoutControls({
         <CheckoutChip checkout={lockedByOther} />
         {note && <span className={staleByOther ? 'checkout-stale' : 'checkout-legacy'}>{note}</span>}
         {canTake && (
-          <button className="chip-act" onClick={onTake} disabled={busy}>
+          <button className="chip-act" onClick={onTake} disabled={busy || disabled}>
             Take edit lock
           </button>
         )}
@@ -76,7 +76,7 @@ export default function CheckoutControls({
     return (
       <span className="checkout-controls" role="status">
         <span className="checkout-mine">You hold the edit lock</span>
-        <button className="chip-act" onClick={onRelease} disabled={busy}>
+        <button className="chip-act" onClick={onRelease} disabled={busy || disabled}>
           Release
         </button>
       </span>
@@ -84,7 +84,7 @@ export default function CheckoutControls({
   }
 
   return (
-    <button className="chip-act" onClick={onTake} disabled={busy}>
+    <button className="chip-act" onClick={onTake} disabled={busy || disabled}>
       Take edit lock
     </button>
   )

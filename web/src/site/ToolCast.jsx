@@ -1200,6 +1200,7 @@ export default function ToolCast({
             unknown={checkout.unknown}
             readFailed={checkout.readFailed}
             busy={checkout.busy}
+            disabled={!sessionReady || !activeDrawingId}
             onTake={takeCheckout}
             onRelease={releaseCheckout}
             onRetry={checkout.actions.refresh}
