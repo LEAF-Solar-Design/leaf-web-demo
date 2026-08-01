@@ -69,7 +69,7 @@ silence) or clamping to 0 (which would turn one bad character into the flood).
 | GET | `/api/jobs/{job_id}/stream` | SSE status transitions until terminal |
 | GET | `/api/jobs?tenant_id=&limit=` | recent jobs (reconnect after tab close) |
 | GET | `/api/capabilities` | tools grouped into families; internal/QA tools filtered server-side (`X-Internal-Role: qa` opts in) |
-| GET | `/api/session?dwg=` | `{intake: <§1>}` (cached at APS_LIVE=0) |
+| GET | `/api/session?dwg=` | `{intake: <§1>}`; reads an existing tenant upload from the credential-free drawing store, otherwise resolves a curated drawing through the broker at `APS_LIVE=1` (cached demo at `APS_LIVE=0`) |
 | GET | `/api/tools` | flat back-compat tool list (registry + authored) |
 | POST | `/api/author` | `{description}` → `{tool, code, preview}`; registered + runnable |
 | GET | `/api/health` | diagnostics |
