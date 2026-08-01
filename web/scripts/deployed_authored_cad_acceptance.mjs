@@ -607,14 +607,15 @@ export function validateStagedAuthorResponse(body, tenant) {
   const changeSetId = body?.receipt?.change_set_id
   const toolName = body?.tool?.name
   const capabilities = body?.tool?.capabilities
+  const allowedCapabilities = new Set(['drawing.read', 'drawing.write'])
   if (
     !UUID.test(String(changeSetId || '')) ||
     body?.receipt?.state !== 'staged' ||
     typeof toolName !== 'string' ||
     !toolName ||
     !Array.isArray(capabilities) ||
-    capabilities.length !== 1 ||
-    capabilities[0] !== 'drawing.write'
+    !capabilities.includes('drawing.write') ||
+    !capabilities.every((capability) => allowedCapabilities.has(capability))
   ) {
     throw new AcceptanceError(
       'author_stage',

@@ -621,7 +621,7 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.doesNotThrow(() => requireCameraMotion('1,2,3|4,5,6', '2,2,3|4,5,6'))
   })
 
-  it('requires distinct staged tool identities, exact capability, and request-bound change sets', () => {
+  it('requires distinct staged tool identities, a known write capability, and request-bound change sets', () => {
     const config = validateConfig(environment(), true)
     const staged = (toolName, changeSetId) => ({
       receipt: { state: 'staged', change_set_id: changeSetId },
@@ -630,6 +630,20 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.deepEqual(
       validateStagedAuthorResponse(staged('cat_tool', '11111111-1111-4111-8111-111111111111'), config.tenants[0]),
       { toolName: 'cat_tool', changeSetId: '11111111-1111-4111-8111-111111111111' },
+    )
+    assert.deepEqual(
+      validateStagedAuthorResponse({
+        ...staged('cat_tool', '11111111-1111-4111-8111-111111111111'),
+        tool: { name: 'cat_tool', capabilities: ['drawing.read', 'drawing.write'] },
+      }, config.tenants[0]),
+      { toolName: 'cat_tool', changeSetId: '11111111-1111-4111-8111-111111111111' },
+    )
+    assert.throws(
+      () => validateStagedAuthorResponse({
+        ...staged('cat_tool', '11111111-1111-4111-8111-111111111111'),
+        tool: { name: 'cat_tool', capabilities: ['drawing.read'] },
+      }, config.tenants[0]),
+      /did not stage one novel drawing.write tool/,
     )
     assert.throws(
       () => validateStagedAuthorResponse({
