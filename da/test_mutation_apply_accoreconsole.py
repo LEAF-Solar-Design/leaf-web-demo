@@ -31,6 +31,12 @@ SOURCE_DWG = PROJECT_ROOT / "data" / "rooftop_demo.dwg"
 SOURCE_INTAKE = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
 
 
+def test_engine_canary_contract_is_portable_and_wired():
+    assert SOURCE_DWG.exists() and SOURCE_INTAKE.exists()
+    assert "TRANSFORM" in build_apply_scr()
+    assert "families.txt" in build_scr("families.txt")
+
+
 @pytest.mark.skipif(
     not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
     reason="local AutoCAD 2026 console and tracked demo DWG are required",
