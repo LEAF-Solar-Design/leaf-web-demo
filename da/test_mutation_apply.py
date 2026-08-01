@@ -145,12 +145,32 @@ def test_alias_state_captures_version_or_absence(monkeypatch):
 
 
 def test_restore_alias_repoints_or_removes_exact_alias(monkeypatch):
-    http = Http(patch=[Response(200)], delete=[Response(204)])
+    http = Http(
+        patch=[Response(200)], delete=[Response(204)],
+        get=[Response(200, {"version": 3}), Response(404)],
+    )
     monkeypatch.setattr(subject, "requests", http)
     assert subject.restore_alias(3)["version"] == 3
     assert json.loads(http.calls[0][2]["data"]) == {"version": 3}
     assert subject.restore_alias(None)["exists"] is False
-    assert http.calls[1][0] == "delete"
+    assert [call[0] for call in http.calls] == ["patch", "get", "delete", "get"]
+
+
+def test_restore_alias_recreates_missing_alias_and_reads_it_back(monkeypatch):
+    http = Http(
+        patch=[Response(404)], post=[Response(201)],
+        get=[Response(200, {"version": 5})],
+    )
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.restore_alias(5)["version"] == 5
+    assert [call[0] for call in http.calls] == ["patch", "post", "get"]
+
+
+def test_restore_alias_fails_on_wrong_readback(monkeypatch):
+    http = Http(patch=[Response(200)], get=[Response(200, {"version": 6})])
+    monkeypatch.setattr(subject, "requests", http)
+    with pytest.raises(RuntimeError, match="readback mismatch"):
+        subject.restore_alias(5)
 
 
 @pytest.mark.parametrize("mutation,expected", [
@@ -208,6 +228,24 @@ def test_cli_readiness_mismatch_exits_nonzero(monkeypatch, capsys):
         "operation": "readiness", "ready": False,
         "mismatches": ["activity engine mismatch"],
     }
+
+
+@pytest.mark.parametrize("raw,expected", [("9", 9), ("absent", None)])
+def test_cli_restore_alias_parses_and_receipts(monkeypatch, capsys, raw, expected):
+    observed = []
+
+    def restore(version):
+        observed.append(version)
+        return {
+            "id": "LeafApplyMutations", "alias": "prod",
+            "exists": version is not None, "version": version,
+        }
+
+    monkeypatch.setattr(subject, "restore_alias", restore)
+    assert subject.main(["restore-alias", "--version", raw, "--json"]) == 0
+    assert observed == [expected]
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["ok"] is True and receipt["version"] == expected
 
 
 def test_cli_failure_redacts_exception(monkeypatch, capsys):

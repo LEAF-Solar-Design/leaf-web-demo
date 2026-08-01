@@ -153,20 +153,20 @@ def restore_alias(version: int | None) -> dict[str, Any]:
     if version is None:
         response = _delete(path)
         _require_status(response, (200, 204, 404), "activity alias delete")
-        return {"id": ACTIVITY_ID, "alias": ALIAS, "exists": False, "version": None}
-    if isinstance(version, bool) or version < 1:
-        raise ValueError("restore version must be a positive integer")
-    response = _patch(path, {"version": version})
-    if response.status_code == 404:
-        response = _post(
-            f"/activities/{ACTIVITY_ID}/aliases",
-            {"id": ALIAS, "version": version},
-        )
-    _require_status(response, (200, 201), "activity alias restore")
-    return {
-        "id": ACTIVITY_ID, "alias": ALIAS, "exists": True,
-        "version": version,
-    }
+    else:
+        if isinstance(version, bool) or version < 1:
+            raise ValueError("restore version must be a positive integer")
+        response = _patch(path, {"version": version})
+        if response.status_code == 404:
+            response = _post(
+                f"/activities/{ACTIVITY_ID}/aliases",
+                {"id": ALIAS, "version": version},
+            )
+        _require_status(response, (200, 201), "activity alias restore")
+    observed = alias_state()
+    if observed["exists"] is not (version is not None) or observed["version"] != version:
+        raise RuntimeError("activity alias restore readback mismatch")
+    return observed
 
 
 def _read_json(path: str, operation: str) -> dict[str, Any]:
