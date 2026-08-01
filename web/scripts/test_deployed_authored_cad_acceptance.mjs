@@ -13,6 +13,7 @@ import {
   evaluateDeploymentIdentity,
   main,
   isMutatingApiRequest,
+  openDrawingView,
   openTryAuthorSurface,
   proveExecutedAuthorityIsolation,
   proveExecutedDrawingIsolation,
@@ -260,6 +261,28 @@ describe('deployed authored CAD acceptance checks', () => {
         && error.check === 'author_surface'
         && /TimeoutError/.test(error.message),
     )
+  })
+
+  it('returns from Jobs to the drawing View before checking camera controls', async () => {
+    const calls = []
+    const viewTab = {
+      waitFor: async (options) => calls.push(['tab.waitFor', options]),
+      isEnabled: async () => true,
+      click: async () => calls.push(['tab.click']),
+    }
+    const page = {
+      getByRole: (role, options) => {
+        calls.push(['getByRole', role, options])
+        return viewTab
+      },
+    }
+
+    await openDrawingView(page)
+    assert.deepEqual(calls, [
+      ['getByRole', 'tab', { name: 'View', exact: true }],
+      ['tab.waitFor', { state: 'visible', timeout: 30_000 }],
+      ['tab.click'],
+    ])
   })
 
   it('takes and proves the drawing checkout before authored execution', async () => {
@@ -780,6 +803,10 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes("waitUntil: 'networkidle'"))
     assert.equal(source.match(/waitUntil: 'domcontentloaded'/g)?.length, 2)
     assert.equal(source.match(/hasText: 'Backend ready'/g)?.length, 2)
+    const completedVersion = source.indexOf("filter({ hasText: 'Version 2' })")
+    const openView = source.indexOf('await openDrawingView(page)', completedVersion)
+    const cameraControls = source.indexOf("getByTestId('camera-controls')", openView)
+    assert.ok(completedVersion >= 0 && openView > completedVersion && cameraControls > openView)
   })
 
   it('counts mutating API requests on both allowed browser origins', () => {
