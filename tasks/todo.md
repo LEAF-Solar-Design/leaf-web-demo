@@ -417,3 +417,9 @@ Risks:
 
 - Verification must still reject geometry changes larger than the extractor can represent.
 - The live write window stays closed until a new immutable release is ready.
+# Reload-safe checkout handoff (2026-08-02)
+
+- [x] Add a one-use, short-lived session handoff for an active checkout capability.
+- [x] Consume it only for the exact holder and drawing, then hold an exclusive browser lock before installing authority.
+- [x] Prove stale/mismatched rejection, one-use deletion, failed-race remint, and unchanged duplicate-tab isolation.
+- [x] Run focused checks, build, checkout server tests, relevant staging gates, and self-review before deployment.
