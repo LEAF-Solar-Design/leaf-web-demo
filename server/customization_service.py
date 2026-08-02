@@ -572,6 +572,97 @@ class CustomizationService:
         # which is why the unit is an attempt and not a change-set row.
         author_quota.enforce(tenant_id, tier)
         body = self._harness_stage(tenant_id, description, change)
+        return self._reconcile_staging(change, body)
+
+    def enqueue_stage(
+        self, *, tenant: Any, description: str, mode: str,
+        idempotency_key: str, target_tool_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Reserve and charge one exact stage request without calling the harness."""
+        tenant_id = _tenant_id(tenant)
+        if not enabled(5, tenant_id):
+            raise CustomizationServiceError("customization_stage_disabled", 404)
+        if (mode != "build" or not isinstance(description, str)
+                or not description.strip() or len(description) > 8000):
+            raise CustomizationServiceError("invalid_stage_request", 422)
+        if target_tool_name is not None and (
+            not isinstance(target_tool_name, str)
+            or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", target_tool_name)
+            or len(target_tool_name) > 64
+        ):
+            raise CustomizationServiceError("invalid_stage_request", 422)
+        binding = _binding(tenant)
+        tier = entitlements.resolve_tier(tenant)
+        if not entitlements.entitlements_for(tier).get("build", False):
+            raise CustomizationServiceError("builder_entitlement_missing", 403)
+        self._authority().authorize_stage(
+            binding=binding,
+            builder_entitlement=BuilderEntitlement(
+                tenant_id, binding.subject, True, True
+            ),
+        )
+        release = self._release()
+        try:
+            prior = self.store.get_change_set_by_idempotency(
+                tenant_id=tenant_id, idempotency_key=idempotency_key
+            )
+            base = prior.base_commit
+        except ChangeSetNotFoundError:
+            if _harness_misconfigured():
+                raise CustomizationServiceError(
+                    "customization_harness_unavailable", 503
+                )
+            bare = _ensure_bare_repo(tenant_id)
+            base = _git(bare, "rev-parse", "refs/heads/main")
+        fingerprint = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        change, created = self.store.reserve_stage(
+            tenant_id=tenant_id, idempotency_key=idempotency_key,
+            base_commit=base, desired_platform_release=release.release_id,
+            workspace_contract_digest=release.workspace_contract_sha256,
+            author_subject=binding.subject or "", change_set_id=str(uuid4()),
+            change_kind="revise" if target_tool_name else "create",
+            target_tool_name=target_tool_name, request_description=description,
+            request_fingerprint=fingerprint,
+        )
+        if created:
+            try:
+                author_quota.enforce(tenant_id, tier)
+            except Exception:
+                self.store.transition(
+                    tenant_id=tenant_id, change_set_id=change.change_set_id,
+                    next_state=ChangeState.FAILED,
+                    expected_version=change.version,
+                    idempotency_key=f"admission-failed:{idempotency_key}",
+                    expected_state=ChangeState.CREATED,
+                    reason_code="stage_admission_failed",
+                )
+                raise
+            change = self.store.transition(
+                tenant_id=tenant_id, change_set_id=change.change_set_id,
+                next_state=ChangeState.STAGING,
+                expected_version=change.version,
+                idempotency_key=f"stage:{idempotency_key}",
+                expected_state=ChangeState.CREATED,
+            )
+        return self.stage_status_change(change)
+
+    def execute_stage(self, change: ChangeSet) -> dict[str, Any]:
+        if change.state is not ChangeState.STAGING or not change.request_description:
+            raise CustomizationServiceError("stage_not_available")
+        return self._execute_staging(change, change.request_description)
+
+    def _execute_staging(
+        self, change: ChangeSet, description: str
+    ) -> dict[str, Any]:
+        tenant_id = change.tenant_id
+        body = self._harness_stage(tenant_id, description, change)
+        return self._reconcile_staging(change, body)
+
+    def _reconcile_staging(
+        self, change: ChangeSet, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        tenant_id = change.tenant_id
+        idempotency_key = change.idempotency_key
         raw_receipt = body.get("receipt")
         if not isinstance(raw_receipt, Mapping):
             raise CustomizationServiceError("invalid_staged_receipt", 502)
@@ -613,6 +704,90 @@ class CustomizationService:
             raise CustomizationServiceError("stage_not_available")
         self._verify_stage_policy(change, body)
         return self._receipt(change, tool=body.get("tool"), preview=body.get("preview"))
+
+    def stage_status(self, *, tenant: Any, change_set_id: str) -> dict[str, Any]:
+        change = self.store.get_change_set(
+            tenant_id=_tenant_id(tenant), change_set_id=change_set_id
+        )
+        return self.stage_status_change(change)
+
+    def stage_status_change(self, change: ChangeSet) -> dict[str, Any]:
+        if change.staged_commit and change.catalog_digest:
+            status = "staged"
+        elif change.state is ChangeState.FAILED:
+            status = "failed"
+        elif (change.state is ChangeState.STAGING and change.stage_lease_owner
+              and (change.stage_lease_expires_at or 0) > int(time.time() * 1000)):
+            status = "running"
+        else:
+            status = "queued"
+        result: dict[str, Any] = {
+            "contract": "leaf.customization-stage-job.v1",
+            "change_set_id": change.change_set_id,
+            "status": status,
+            "change_kind": change.change_kind,
+            "attempt": change.stage_attempt,
+            "phase": (
+                "staged" if status == "staged"
+                else "failed" if status == "failed"
+                else "authoring" if status == "running"
+                else "queued"
+            ),
+            "updated_at": change.updated_at,
+            "poll_url": f"/api/author/stages/{change.change_set_id}",
+            "retry_after_ms": 1000,
+        }
+        if change.target_tool_name:
+            result["target_tool_name"] = change.target_tool_name
+        if status == "staged":
+            receipt = self._raw_receipt(change)
+            result["receipt"] = receipt
+            result["result"] = {"tool": self._staged_tool(change)}
+        elif status == "failed":
+            result["error"] = {
+                "reason_code": change.stage_error_code or "customization_stage_failed",
+                "retryable": bool(change.stage_error_retryable),
+            }
+        return result
+
+    @staticmethod
+    def _staged_tool(change: ChangeSet) -> dict[str, Any]:
+        """Read the authored tool from the receipt-bound commit, never main."""
+        try:
+            bare = _bare_repo(change.tenant_id)
+            staged_registry = json.loads(_git_blob(
+                bare,
+                f"{change.staged_commit}:registry.json",
+            ).decode("utf-8"))
+            base_registry = json.loads(_git_blob(
+                bare,
+                f"{change.base_commit}:registry.json",
+            ).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CustomizationServiceError("invalid_staged_catalog", 502) from exc
+        staged_tools = staged_registry.get("tools") if isinstance(staged_registry, dict) else None
+        base_tools = base_registry.get("tools") if isinstance(base_registry, dict) else None
+        if not isinstance(staged_tools, list) or not isinstance(base_tools, list):
+            raise CustomizationServiceError("invalid_staged_catalog", 502)
+        staged_by_name = {
+            item.get("name"): item for item in staged_tools
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+        if change.change_kind == "revise":
+            tool = staged_by_name.get(change.target_tool_name)
+        else:
+            base_names = {
+                item.get("name") for item in base_tools
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            added = [
+                item for name, item in staged_by_name.items()
+                if name not in base_names
+            ]
+            tool = added[0] if len(added) == 1 else None
+        if not isinstance(tool, dict):
+            raise CustomizationServiceError("invalid_staged_catalog", 502)
+        return dict(tool)
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         url, secret = _harness_config()
@@ -856,6 +1031,8 @@ class CustomizationService:
             change = self.store.get_change_set(
                 tenant_id=tenant_id, change_set_id=change_set_id
             )
+            if change.state is ChangeState.STAGING:
+                return self._publication_status(change, "staging")
             continuation = self.store.get_or_create_publication_request(
                 tenant_id=tenant_id, change_set_id=change.change_set_id
             )

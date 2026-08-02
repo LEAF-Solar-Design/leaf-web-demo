@@ -24,6 +24,7 @@ os.environ.setdefault("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
 # app.py starts the guest-purge daemon at import time. It must stay out of the
 # shared pytest process because its delayed sweeps otherwise race test stores.
 os.environ.setdefault("LEAF_GUEST_PURGE_DISABLED", "1")
+os.environ.setdefault("LEAF_CUSTOMIZATION_STAGE_WORKER_DISABLED", "1")
 
 
 def _jobs_connection_is_closed(conn: sqlite3.Connection) -> bool:

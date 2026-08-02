@@ -619,12 +619,17 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             CustomizationServiceError("idempotency_key_required", 422)
         )
     try:
-        return CustomizationService.configured().stage(
+        service = CustomizationService.configured()
+        enqueue = getattr(service, "enqueue_stage", service.stage)
+        result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
         )
+        if result.get("contract") == "leaf.customization-stage-job.v1":
+            return JSONResponse(status_code=202, content=result)
+        return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
     except author_quota.AuthorQuotaExceeded as exc:
@@ -649,17 +654,49 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
     if denied is not None:
         return denied
     try:
-        return CustomizationService.configured().stage(
+        service = CustomizationService.configured()
+        enqueue = getattr(service, "enqueue_stage", service.stage)
+        result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
         )
+        if result.get("contract") == "leaf.customization-stage-job.v1":
+            return JSONResponse(status_code=202, content=result)
+        return result
     # Same cap as /api/author: both routes reach the harness through stage(),
     # which is where the charge lives, so neither can bypass it via the other.
     except author_quota.AuthorQuotaExceeded as exc:
         return _quota_exceeded_response(str(tenant), exc)
     except author_quota.AuthorQuotaStoreError as exc:
         return _quota_store_error(exc)
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
+
+
+@router.get("/api/author/stages/{change_set_id}")
+def stage_status(
+    change_set_id: str, tenant=Depends(deps.require_tenant)
+) -> Dict[str, Any]:
+    denied = _customization_gate(5, tenant)
+    if denied is not None:
+        return denied
+    try:
+        return CustomizationService.configured().stage_status(
+            tenant=tenant, change_set_id=change_set_id
+        )
+    except ChangeSetNotFoundError:
+        return _customization_error(
+            CustomizationServiceError("stage_not_available", 404)
+        )
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
