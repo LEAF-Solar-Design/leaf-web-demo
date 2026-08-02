@@ -32,6 +32,7 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -39,6 +40,7 @@ PROJECT_ROOT = SERVER_DIR.parent
 
 # The authority-owned table bound to the shared counter primitive (migration 0023).
 COUNTER_TABLE = "author_quota_counters"
+ATTEMPT_TABLE = "author_quota_attempts"
 # One namespace for this authority; the day and tenant live in the counter key.
 COUNTER_NAMESPACE = "author_daily"
 
@@ -48,6 +50,7 @@ _USAGE_POLICY: Any = None
 _MEMORY_LOCK = threading.Lock()
 # {counter_key: value} — reset implicitly, since a new UTC day is a new key.
 _MEMORY_STATE: dict[str, int] = {}
+_MEMORY_ATTEMPTS: dict[str, tuple[str, int, bool, int]] = {}
 
 
 class AuthorQuotaStoreError(RuntimeError):
@@ -146,7 +149,7 @@ def _postgres_counter():
 
 
 def _cleanup_old_counters(conn) -> None:
-    """Delete at most 100 expired rows, as the guest cap authority does."""
+    """Delete bounded batches of expired counter and replay rows."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days())
     conn.execute(
         f"""
@@ -161,9 +164,24 @@ def _cleanup_old_counters(conn) -> None:
         """,
         {"cutoff": cutoff},
     )
+    conn.execute(
+        f"""
+        DELETE FROM {ATTEMPT_TABLE}
+        WHERE ctid IN (
+          SELECT ctid
+          FROM {ATTEMPT_TABLE}
+          WHERE created_at < %(cutoff)s
+          ORDER BY created_at
+          LIMIT 100
+        )
+        """,
+        {"cutoff": cutoff},
+    )
 
 
-def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
+def _postgres_charge(
+    key: str, limit: int, attempt_key: str | None = None
+) -> Tuple[bool, int]:
     # Package loading and counter construction are INSIDE the wrapper: an import
     # or initialization failure is a store outage like any other, and must become
     # the opaque 503 refusal rather than escaping as a raw 500.
@@ -172,9 +190,39 @@ def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
         counter = _postgres_counter()
 
         def consume(conn):
+            if attempt_key is not None:
+                # Serialize exact concurrent replays before either transaction
+                # reads or charges. A hash collision only adds contention.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%(key)s, 0))",
+                    {"key": attempt_key},
+                )
+                prior = conn.execute(
+                    "SELECT counter_key, quota_limit, accepted, used "
+                    f"FROM {ATTEMPT_TABLE} WHERE attempt_key = %(attempt_key)s",
+                    {"attempt_key": attempt_key},
+                ).fetchone()
+                if prior is not None:
+                    if (prior["counter_key"], int(prior["quota_limit"])) != (key, limit):
+                        raise AuthorQuotaStoreError(
+                            "author quota idempotency key belongs to another attempt"
+                        )
+                    return SimpleNamespace(
+                        accepted=bool(prior["accepted"]), value=int(prior["used"])
+                    )
             result = counter.consume_in_transaction(
                 conn, namespace=COUNTER_NAMESPACE, key=key, limit=limit,
             )
+            if attempt_key is not None:
+                conn.execute(
+                    f"INSERT INTO {ATTEMPT_TABLE} "
+                    "(attempt_key, counter_key, quota_limit, accepted, used) "
+                    "VALUES (%(attempt_key)s, %(counter_key)s, %(limit)s, "
+                    "%(accepted)s, %(used)s)",
+                    {"attempt_key": attempt_key, "counter_key": key,
+                     "limit": limit, "accepted": bool(result.accepted),
+                     "used": int(result.value)},
+                )
             if result.accepted:
                 _cleanup_old_counters(conn)
             return result
@@ -189,17 +237,31 @@ def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
     return bool(result.accepted), int(result.value)
 
 
-def _memory_charge(key: str, limit: int) -> Tuple[bool, int]:
+def _memory_charge(
+    key: str, limit: int, attempt_key: str | None = None
+) -> Tuple[bool, int]:
     with _MEMORY_LOCK:
+        if attempt_key is not None and attempt_key in _MEMORY_ATTEMPTS:
+            prior_key, prior_limit, accepted, used = _MEMORY_ATTEMPTS[attempt_key]
+            if (prior_key, prior_limit) != (key, limit):
+                raise AuthorQuotaStoreError(
+                    "author quota idempotency key belongs to another attempt"
+                )
+            return accepted, used
         used = _MEMORY_STATE.get(key, 0)
         if used + 1 > limit:
+            if attempt_key is not None:
+                _MEMORY_ATTEMPTS[attempt_key] = (key, limit, False, used)
             return False, used
         _MEMORY_STATE[key] = used + 1
+        if attempt_key is not None:
+            _MEMORY_ATTEMPTS[attempt_key] = (key, limit, True, used + 1)
         return True, used + 1
 
 
 def charge(tenant_id: str, day: str, limit: int, *,
-           require_durable: bool = False) -> Tuple[bool, int]:
+           require_durable: bool = False,
+           idempotency_key: str | None = None) -> Tuple[bool, int]:
     """Charge one authoring attempt against ``limit`` for ``tenant_id`` on ``day``.
 
     Returns ``(accepted, value)``. On acceptance ``value`` is the count INCLUDING
@@ -221,8 +283,8 @@ def charge(tenant_id: str, day: str, limit: int, *,
             "or restarts")
     key = counter_key(tenant_id, day)
     if store_mode() == "postgres":
-        return _postgres_charge(key, limit)
-    return _memory_charge(key, limit)
+        return _postgres_charge(key, limit, idempotency_key)
+    return _memory_charge(key, limit, idempotency_key)
 
 
 def durability_required() -> bool:
@@ -258,7 +320,10 @@ def usage_policy():
     return _USAGE_POLICY
 
 
-def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> None:
+def enforce(
+    tenant_id: str, tier: str, *, now_ts: Optional[float] = None,
+    idempotency_key: str | None = None,
+) -> None:
     """Charge one authoring attempt, or refuse. Returns ``None`` to PROCEED.
 
     Call this at the LAST point before authoring spends money, so a request
@@ -281,6 +346,7 @@ def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> Non
     day = usage.author_quota_day(now_ts)
     accepted, used = charge(
         tenant_id, day, limit, require_durable=durability_required(),
+        idempotency_key=idempotency_key,
     )
     if not accepted:
         raise AuthorQuotaExceeded(tier, limit, used, day)
@@ -296,6 +362,7 @@ def reset_memory_state() -> None:
     """Clear the in-process counter (tests only)."""
     with _MEMORY_LOCK:
         _MEMORY_STATE.clear()
+        _MEMORY_ATTEMPTS.clear()
 
 
 def reset_postgres_counter() -> None:

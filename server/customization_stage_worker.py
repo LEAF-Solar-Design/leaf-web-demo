@@ -73,7 +73,19 @@ def run_once(
     guard = StageLeaseGuard(service.store, change, owner, lease_seconds)
     guard.start()
     try:
-        service.execute_stage(change)
+        body = service.dispatch_stage(change)
+        guard.close()
+        durable = service.store.get_change_set(
+            tenant_id=change.tenant_id, change_set_id=change.change_set_id
+        )
+        if durable.state is ChangeState.STAGED:
+            return True
+        if guard.lost.is_set():
+            return True
+        service.reconcile_stage_worker(
+            change, body, lease_owner=owner,
+            lease_attempt=change.stage_attempt,
+        )
     except CustomizationServiceError as exc:
         guard.close()
         durable = service.store.get_change_set(

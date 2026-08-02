@@ -227,6 +227,30 @@ def test_charge_counts_per_tenant_per_day():
     assert author_quota.charge("tenant-a", "2026-07-31", 2) == (True, 1)
 
 
+def test_memory_charge_replays_an_admission_without_double_counting():
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-b"
+    ) == (True, 2)
+
+
+def test_memory_charge_replays_a_refusal_without_changing_the_counter():
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-b"
+    ) == (False, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-b"
+    ) == (False, 1)
+
+
 def test_counter_key_carries_day_and_tenant():
     assert author_quota.counter_key("tenant-a", "2026-07-30") == "2026-07-30:tenant-a"
 
@@ -282,6 +306,14 @@ def test_migration_matches_the_shared_counter_contract():
     for column in ("namespace", "counter_key", "value", "updated_at"):
         assert column in sql
     assert "PRIMARY KEY (namespace, counter_key)" in sql
+
+    admission_sql = (PROJECT_ROOT / "platform" / "migrations" /
+                     "0027_author_quota_idempotency.sql").read_text(
+                         encoding="utf-8"
+                     )
+    assert f"CREATE TABLE IF NOT EXISTS {author_quota.ATTEMPT_TABLE}" in admission_sql
+    for column in ("attempt_key", "counter_key", "quota_limit", "accepted", "used"):
+        assert column in admission_sql
 
 
 def test_retention_window_is_bounded(monkeypatch):
