@@ -268,6 +268,32 @@ def stage(store, change, prefix: str):
     )
 
 
+def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
+    description = "postgres async race"
+    change, created = store.reserve_stage(
+        tenant_id="pg-stage-race", idempotency_key="pg-stage-race",
+        base_commit=BASE, desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        change_kind="create", target_tool_name=None,
+        request_description=description,
+        request_fingerprint=__import__("hashlib").sha256(
+            description.encode()
+        ).hexdigest(),
+    )
+    assert created
+    store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        expected_state=ChangeState.CREATED, idempotency_key="pg-stage-race-queued",
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(
+            lambda owner: store.claim_stage(owner=owner, lease_seconds=30),
+            ("pg-worker-a", "pg-worker-b"),
+        ))
+    assert sum(claim is not None for claim in claims) == 1
+
+
 def test_postgres_full_publication_and_tenant_isolation(store) -> None:
     staged = stage(store, create(store, "pg-tenant-a", "pg-create-a"), "pg-a")
     awaiting = store.transition(
