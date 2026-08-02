@@ -627,8 +627,8 @@ class CustomizationService:
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
                       "idempotencyKey": change.idempotency_key,
-                      **({"targetToolName": change.target_tool_name}
-                         if change.target_tool_name else {})},
+                      **({"targetToolName": getattr(change, "target_tool_name", None)}
+                         if getattr(change, "target_tool_name", None) else {})},
             )
             response.raise_for_status()
             body = response.json()

@@ -140,7 +140,10 @@ describe("customizationLifecycle", () => {
       JSON.stringify({ ...existing, entry: "tool.py" }, null, 2) + "\n",
     );
     git(seed.dir, ["add", "."]);
-    git(seed.dir, ["commit", "-m", "seed authored package"]);
+    git(seed.dir, [
+      "-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai",
+      "commit", "-m", "seed authored package",
+    ]);
     git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
 

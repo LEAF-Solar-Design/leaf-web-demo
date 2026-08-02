@@ -52,6 +52,7 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (22, "sessions_active_turn_subject"),
                 (23, "author_quota_counters"),
                 (24, "ops_read_ts_index"),
+                (25, "customization_revision_binding"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
