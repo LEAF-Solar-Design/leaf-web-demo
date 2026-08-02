@@ -207,6 +207,7 @@ export default function App() {
   const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
+  const [authorTargetTool, setAuthorTargetTool] = useState(null)
 
   // --- projects / orgs workspace (UI wave 2, item 1) ---
 
@@ -443,6 +444,7 @@ export default function App() {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     },
     openAuthor: (text) => {
+      setAuthorTargetTool(null)
       setAuthorSeed(text)
       setAuthorSignal((value) => value + 1)
       setAuthorOpen(true)
@@ -1265,10 +1267,25 @@ export default function App() {
   }, [attachSharedJob, mock])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
-  const onAuthor = useCallback(async (description) => {
+  const onAuthor = useCallback(async (description, targetToolName = null) => {
     // R5 only stages bytes. It must not place a tool in the runnable catalog.
-    return stageAuthorTool(mock, description)
+    return stageAuthorTool(mock, description, targetToolName)
   }, [mock])
+
+  const onReviseAuthoredTool = useCallback((tool) => {
+    if (!tool?.name) return
+    setAuthorTargetTool(tool.name)
+    setAuthorSeed('')
+    setAuthorSignal((value) => value + 1)
+    setAuthorOpen(true)
+    setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+  }, [])
+
+  const onCancelAuthorRevision = useCallback(() => {
+    setAuthorTargetTool(null)
+    setAuthorSeed('')
+    setAuthorSignal((value) => value + 1)
+  }, [])
 
   const onPublishAuthor = useCallback(async (staged) => {
     try {
@@ -1448,6 +1465,7 @@ export default function App() {
   }, [catalogActions, running])
 
   const onOpenAuthor = useCallback(() => {
+    setAuthorTargetTool(null)
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
   }, [])
@@ -1949,6 +1967,9 @@ export default function App() {
               selectedTool={selectedTool}
               onRequestRun={onRequestCatalogRun}
               onOpenTool={setOpenTool}
+              onReviseTool={fam.family_id === 'custom-authored' || fam.family_id === 'custom'
+                ? onReviseAuthoredTool
+                : undefined}
             />
           </Section>
         ))}
@@ -1966,6 +1987,8 @@ export default function App() {
             seed={authorSeed}
             seedSignal={authorSignal}
             seedAutoSubmit={tourOn}
+            targetToolName={authorTargetTool}
+            onCancelRevision={onCancelAuthorRevision}
             notLinked={claudeNotLinked}
             onLinkClaude={() => setClaudeOpen(true)}
             buildEntitled={canBuild}

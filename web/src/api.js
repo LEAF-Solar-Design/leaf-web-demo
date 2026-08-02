@@ -953,7 +953,7 @@ function requestId() {
 
 // R5: stage only. The server resolves base and policy fields, while this client
 // carries the public contract request and never treats staging as publication.
-export async function stageAuthorTool(mock, description) {
+export async function stageAuthorTool(mock, description, targetToolName = null) {
   if (mock) {
     await nap(700)
     const authored = authorMock(description)
@@ -962,8 +962,12 @@ export async function stageAuthorTool(mock, description) {
       error.unsupported = true
       throw error
     }
+    const tool = targetToolName
+      ? { ...authored.tool, name: targetToolName }
+      : authored.tool
     return {
       ...authored,
+      tool,
       demo: true,
       receipt: { change_set_id: `demo-${requestId()}`, state: 'staged' },
       diff_summary: 'Demo preview only. No live tenant catalog changed.',
@@ -974,7 +978,12 @@ export async function stageAuthorTool(mock, description) {
   const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify({ description, mode: 'build', idempotency_key: requestId() }),
+    body: JSON.stringify({
+      description,
+      mode: 'build',
+      idempotency_key: requestId(),
+      ...(targetToolName ? { target_tool_name: targetToolName } : {}),
+    }),
   }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)

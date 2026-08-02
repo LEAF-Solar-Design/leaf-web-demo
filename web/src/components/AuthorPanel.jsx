@@ -224,7 +224,7 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -239,6 +239,15 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const lastSignal = useRef(null)
   const startRef = useRef(null)
   const authoredRef = useRef(null)
+  const descRef = useRef(null)
+
+  useEffect(() => {
+    setDesc('')
+    setErr(null)
+    setAuthored(null)
+    setPublishErr(null)
+    if (targetToolName) requestAnimationFrame(() => descRef.current?.focus())
+  }, [targetToolName])
 
   // Prefill from a build-lane route (only when the signal changes, so manual
   // edits are never clobbered by a re-render).
@@ -271,7 +280,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
     if (!d || !buildEntitled) return
     setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null)
     try {
-      const res = await onAuthor(d)
+      const res = await onAuthor(d, targetToolName)
       setAuthored(res)
     } catch (e) {
       // Expected "not-an-alarm" rejections surface as calm gates, never red:
@@ -327,6 +336,17 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
+      {targetToolName && (
+        <div className="customization-state" role="status">
+          <span className="dot square" aria-hidden="true" />
+          <div>
+            <label className="field-label" htmlFor="author-target">Tool to revise</label>
+            <input id="author-target" value={targetToolName} readOnly />
+            <p>The target is locked, so this repair updates that tool instead of creating another.</p>
+          </div>
+          <button type="button" className="chip-act" onClick={onCancelRevision} disabled={busy}>Cancel revision</button>
+        </div>
+      )}
       {(!buildEntitled || buildGate)
         ? <BuildGate />
         : quotaGate
@@ -340,9 +360,10 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       <label className="field-label" htmlFor="author-desc">What should the tool do?</label>
       <textarea
         id="author-desc"
+        ref={descRef}
         value={desc}
         onChange={(e) => setDesc(e.target.value)}
-        placeholder="e.g. count panels within 24in of the roof edge"
+        placeholder={targetToolName ? 'Describe the repair to make to this tool' : 'e.g. count panels within 24in of the roof edge'}
         rows={3}
         disabled={busy}
       />
@@ -352,7 +373,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
         ))}
       </div>
       <button className="btn primary" disabled={busy || !desc.trim() || !buildEntitled} onClick={submit}>
-        {busy ? 'Authoring…' : 'Generate tool'}
+        {busy ? 'Authoring…' : targetToolName ? 'Generate revision' : 'Generate tool'}
       </button>
       {busy && (
         <div className="authoring">
