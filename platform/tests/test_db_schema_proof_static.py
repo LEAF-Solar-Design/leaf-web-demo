@@ -547,6 +547,37 @@ def test_catalog_contract_pins_trigger_enable_modes(enabled, rejected):
 
 
 @pytest.mark.parametrize(
+    ("enabled", "rejected"),
+    [("O", False), ("A", False), ("D", True), ("R", True)],
+)
+def test_author_quota_attempt_trigger_is_required_and_enabled(enabled, rejected):
+    environ = {"LEAF_AUTHOR_QUOTA_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name = "author_quota_attempts_immutable"
+    row = next(item for item in rows["triggers"] if item["tgname"] == name)
+    row["enabled"] = enabled
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert (f"{name}:disabled" in errors["invalid_triggers"]) is rejected
+
+
+def test_author_quota_attempt_trigger_cannot_be_missing_at_startup():
+    environ = {"LEAF_AUTHOR_QUOTA_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    name = "author_quota_attempts_immutable"
+    rows["triggers"] = [
+        row for row in rows["triggers"] if row["tgname"] != name
+    ]
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert errors["invalid_triggers"] == [f"{name}:missing-or-wrong-relation"]
+
+
+@pytest.mark.parametrize(
     ("field", "value", "message"),
     [
         ("missing_migrations", ["0007_missing.sql"], "missing migrations"),

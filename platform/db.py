@@ -176,6 +176,10 @@ _AUTHORITY_REQUIRED_COLUMNS = {
     },
     "author_quota": {
         "author_quota_counters": {"namespace", "counter_key", "value", "updated_at"},
+        "author_quota_attempts": {
+            "tenant_id", "attempt_key", "counter_key", "quota_day", "quota_tier",
+            "quota_limit", "accepted", "used", "created_at",
+        },
     },
     "drawing": {
         "drawing_authority_cutover": {
@@ -389,6 +393,8 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "author_quota": {
         "author_quota_counters_pkey": _catalog_contract(
             "author_quota_counters", "PRIMARY KEY (namespace, counter_key)"),
+        "author_quota_attempts_pkey": _catalog_contract(
+            "author_quota_attempts", "PRIMARY KEY (tenant_id, attempt_key)"),
     },
     "drawing": {
         "drawing_authority_cutover_pkey": _catalog_contract(
@@ -580,6 +586,8 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "author_quota": {
         "idx_author_quota_counters_updated": _catalog_contract(
             "author_quota_counters", "(updated_at)"),
+        "idx_author_quota_attempts_counter": _catalog_contract(
+            "author_quota_attempts", "(counter_key)"),
     },
     "drawing": {
         "drawing_store_versions_ready_idx": _catalog_contract(
@@ -632,6 +640,11 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
             "broker_admission_resolution_audit", "BEFORE DELETE OR UPDATE",
             "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
+    },
+    "author_quota": {
+        "author_quota_attempts_immutable": _catalog_contract(
+            "author_quota_attempts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     },
 }
 
