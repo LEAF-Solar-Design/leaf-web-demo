@@ -6,6 +6,7 @@ const panel = await readFile(new URL('src/components/AuthorPanel.jsx', root), 'u
 const app = await readFile(new URL('src/App.jsx', root), 'utf8')
 const toolCast = await readFile(new URL('src/site/ToolCast.jsx', root), 'utf8')
 const authorController = await readFile(new URL('src/controllers/useAuthorStageController.js', root), 'utf8')
+const authorPointer = await readFile(new URL('src/authorStagePointer.js', root), 'utf8')
 
 function assert(ok, message) {
   if (!ok) throw new Error(message)
@@ -23,6 +24,6 @@ assert(panel.includes('Request publication') && panel.includes('Check approval &
 assert(!panel.includes('Tool authored'), 'live staged panel must not claim legacy authoring success')
 assert(app.includes('useAuthorStageController') && app.includes('publishStagedAuthor'), 'app must separate staging from publishing')
 assert(toolCast.includes('useAuthorStageController') && toolCast.includes('publishStagedAuthor'), 'unified surface must separate staging from publishing')
-assert(authorController.includes('leaf.inflightAuthor.v1'), 'author staging must use its own durable pointer')
+assert(authorController.includes('authorPointerValid') && authorPointer.includes('leaf.inflightAuthor.v1'), 'author staging must use its own scoped durable pointer')
 
 console.log('customization web checks passed')

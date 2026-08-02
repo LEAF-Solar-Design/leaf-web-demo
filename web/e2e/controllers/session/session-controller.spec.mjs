@@ -33,13 +33,15 @@ test('session controller latches expiry, clears the token, and needs explicit ac
 
 test('sign out paints required state before ending the external session', async () => {
   let release
+  const removed = []
   const ended = new Promise((resolve) => { release = resolve })
   const controller = createSessionController({
-    storage: { removeItem() {} },
+    storage: { removeItem(key) { removed.push(key) } },
     endSession: () => ended,
   })
   const pending = controller.actions.signOut()
   expect(controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'signed_out' })
+  expect(removed).toContain('leaf.inflightAuthor.v1')
   release()
   await pending
 })
