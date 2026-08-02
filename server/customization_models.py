@@ -69,6 +69,8 @@ class ChangeSet:
     approver_subject: Optional[str]
     created_at: str
     updated_at: str
+    change_kind: str = "create"
+    target_tool_name: Optional[str] = None
 
 
 @dataclass(frozen=True)

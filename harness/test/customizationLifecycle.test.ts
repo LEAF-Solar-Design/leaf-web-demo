@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import type {
   CustomizationCoordination,
+  AgentRunner,
   HarnessPorts,
   StagedCustomizationReceipt,
   TenantMutationFence,
@@ -98,6 +100,78 @@ async function setupFenced() {
 }
 
 describe("customizationLifecycle", () => {
+  it("revises exactly the explicitly bound authored tool without adding a catalog entry", async () => {
+    const tenantRepo = new FakeTenantRepoProvider(FIXTURE);
+    const coordination = new TestCustomizationCoordination();
+    const agent: AgentRunner = {
+      async run(input) {
+        const submitted = input.toolset.submitTool({
+          name: "count-by-layer",
+          description: "Counts every model-space entity per layer with corrected logic.",
+          engine_op: "count_by_layer",
+          params: { type: "object", properties: {}, required: [] },
+          returns: { type: "object" },
+          capabilities: ["drawing.read"],
+          source: "def run(intake, params):\n    return ({'counts': {}, 'revised': True}, None)\n",
+          session: "revision-test",
+        });
+        return {
+          tool: submitted.tool, code: submitted.code, preview: "revised",
+          files: submitted.files, sourceReceipt: submitted.receipt,
+        };
+      },
+    };
+    const loop = new AuthorLoop({
+      oauth: new FakeOAuthGrantProvider(), tenantRepo,
+      broker: new FakeBrokerApsClient(), agentRunner: agent,
+      customizationCoordination: coordination,
+    });
+    const bare = await tenantRepo.bare(TENANT);
+    const seed = await tenantRepo.checkout(TENANT);
+    const existing = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"]))
+      .tools[0] as Record<string, unknown>;
+    mkdirSync(join(seed.dir, "tools", "count-by-layer"), { recursive: true });
+    writeFileSync(
+      join(seed.dir, "tools", "count-by-layer", "tool.py"),
+      "def run(intake, params):\n    return ({'counts': {}}, None)\n",
+    );
+    writeFileSync(
+      join(seed.dir, "tools", "count-by-layer", "tool.json"),
+      JSON.stringify({ ...existing, entry: "tool.py" }, null, 2) + "\n",
+    );
+    git(seed.dir, ["add", "."]);
+    git(seed.dir, [
+      "-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai",
+      "commit", "-m", "seed authored package",
+    ]);
+    git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+
+    const staged = await loop.stage(TENANT, "fix count-by-layer", {
+      ...request(CHANGE_A, base), targetToolName: "count-by-layer",
+    });
+    const registry = JSON.parse(git(bare.dir, [
+      "show", `${staged.receipt.staged_commit}:registry.json`,
+    ])) as { tools: Array<{ name: string; description: string }> };
+
+    expect(registry.tools).toHaveLength(1);
+    expect(registry.tools[0]?.name).toBe("count-by-layer");
+    expect(registry.tools[0]?.description).toContain("corrected logic");
+    expect((registry.tools[0] as { version?: string })?.version).toBe("1.0.1");
+    expect(git(bare.dir, [
+      "show", `${staged.receipt.staged_commit}:tools/count-by-layer/tool.py`,
+    ])).toContain("'revised': True");
+  });
+
+  it("rejects a generated name that differs from the durable revision target", async () => {
+    const { bare, loop } = await setup();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    await expect(loop.stage(TENANT, "count entities per layer", {
+      ...request(CHANGE_A, base), targetToolName: "count-by-layer",
+    })).rejects.toThrow("keep the bound target name");
+    expect(git(bare.dir, ["rev-parse", `refs/leaf/changes/${CHANGE_A}`])).toBe(base);
+  });
+
   it("does not advance the reserved change ref after the tenant writer lease is lost", async () => {
     const { agent, bare, loop, tenantRepo } = await setupFenced();
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);

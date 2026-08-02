@@ -979,6 +979,7 @@ export class ConverseLoop {
         if (!description) return err("author_tool requires args.description");
         const normalizedDescription = description.replace(/\s+/g, " ");
         const mode = args.mode === "one_off" ? "one_off" : "build";
+        const targetToolName = String(args.target_tool_name ?? "").trim() || undefined;
         const idempotencyKey = `author:${createHash("sha256")
           .update(JSON.stringify({
             action: "author_tool",
@@ -986,6 +987,7 @@ export class ConverseLoop {
             session_id: ctx.session.session_id,
             description: normalizedDescription,
             ...(mode === "one_off" ? { mode } : {}),
+            ...(targetToolName ? { target_tool_name: targetToolName } : {}),
           }))
           .digest("hex")}`;
         const authored = await appRun.authorTool(
@@ -997,6 +999,7 @@ export class ConverseLoop {
             sessionId: ctx.authoritySessionId,
             turnId: ctx.authorityTurnId,
           },
+          targetToolName,
         );
         return ok(JSON.stringify(authored));
       }

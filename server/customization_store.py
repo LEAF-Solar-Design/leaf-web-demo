@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   workspace_contract_digest TEXT NOT NULL,
   author_subject TEXT NOT NULL,
   approver_subject TEXT,
+  change_kind TEXT NOT NULL DEFAULT 'create' CHECK (change_kind IN ('create', 'revise')),
+  target_tool_name TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   UNIQUE (tenant_id, idempotency_key)
@@ -180,6 +182,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 try:
                     self._migrate_confirmation_bindings(conn)
                     self._migrate_publication_requests(conn)
+                    self._migrate_change_bindings(conn)
                 except Exception:
                     conn.rollback()
                     raise
@@ -245,6 +248,22 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "ADD COLUMN reason_code TEXT"
             )
 
+    @staticmethod
+    def _migrate_change_bindings(conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(customization_change_sets)")
+        }
+        if "change_kind" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_change_sets ADD COLUMN "
+                "change_kind TEXT NOT NULL DEFAULT 'create'"
+            )
+        if "target_tool_name" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_change_sets ADD COLUMN target_tool_name TEXT"
+            )
+
     ensure_started = initialize
 
     @contextmanager
@@ -281,6 +300,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         workspace_contract_digest: str,
         author_subject: str,
         change_set_id: Optional[str] = None,
+        change_kind: str = "create",
+        target_tool_name: Optional[str] = None,
     ) -> ChangeSet:
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
         idempotency_key = require_bounded(idempotency_key, "idempotency_key", 200)
@@ -293,6 +314,15 @@ class SQLiteCustomizationStore(CustomizationRepository):
         )
         author_subject = require_bounded(author_subject, "author_subject", 300)
         change_set_id = require_uuid(change_set_id or str(uuid4()))
+        if change_kind not in {"create", "revise"}:
+            raise ValueError("change_kind must be create or revise")
+        if change_kind == "create":
+            if target_tool_name is not None:
+                raise ValueError("create change cannot bind a target tool")
+        else:
+            target_tool_name = require_bounded(
+                target_tool_name or "", "target_tool_name", 64
+            )
         with self._transaction() as conn:
             existing = conn.execute(
                 "SELECT * FROM customization_change_sets WHERE tenant_id = ? AND idempotency_key = ?",
@@ -305,6 +335,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.desired_platform_release == desired_platform_release
                     and row.workspace_contract_digest == workspace_contract_digest
                     and row.author_subject == author_subject
+                    and row.change_kind == change_kind
+                    and row.target_tool_name == target_tool_name
                 )
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
@@ -316,6 +348,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
                 (change_set_id, tenant_id, idempotency_key, ChangeState.CREATED.value,
                  base_commit, desired_platform_release, workspace_contract_digest, author_subject),
+            )
+            conn.execute(
+                "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ? "
+                "WHERE change_set_id = ?",
+                (change_kind, target_tool_name, change_set_id),
             )
             row = self._find_change_set(conn, tenant_id, change_set_id)
             self._append_audit(conn, row, None, ChangeState.CREATED, idempotency_key)
@@ -1022,6 +1059,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             workspace_contract_digest=row["workspace_contract_digest"],
             author_subject=row["author_subject"], approver_subject=row["approver_subject"],
             created_at=row["created_at"], updated_at=row["updated_at"],
+            change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
         )
 
     @staticmethod

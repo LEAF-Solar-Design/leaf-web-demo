@@ -63,6 +63,7 @@ DEFAULT_AUTHOR_TIMEOUT_S = 120.0
 class AuthorRequest(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
     mode: Literal["build", "one_off"] = "build"
+    target_tool_name: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class StageRequest(AuthorRequest):
@@ -621,6 +622,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
+            **({"target_tool_name": req.target_tool_name}
+               if req.target_tool_name else {}),
         )
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
@@ -648,6 +651,8 @@ def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, A
     try:
         return CustomizationService.configured().stage(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
+            **({"target_tool_name": req.target_tool_name}
+               if req.target_tool_name else {}),
         )
     # Same cap as /api/author: both routes reach the harness through stage(),
     # which is where the charge lives, so neither can bypass it via the other.

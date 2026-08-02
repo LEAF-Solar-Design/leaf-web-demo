@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
@@ -48,6 +49,7 @@ export interface StageCustomizationRequest {
   platformRelease: string;
   workspaceContractDigest: string;
   idempotencyKey: string;
+  targetToolName?: string;
 }
 
 export interface StageCustomizationResponse extends Partial<AuthorResponse> {
@@ -139,11 +141,45 @@ export class AuthorLoop {
   }
 
   /** Build the exactly-three-tool toolset the author session is granted. */
-  private toolsetFor(repoDir: string, tenantId: string): AuthorToolset {
+  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string): AuthorToolset {
     let previousReceipt: ToolSourceReceipt | undefined;
     return {
       fsTenantRepo: new FsTenantRepo(repoDir),
       submitTool: (proposal) => {
+        if (targetToolName && !previousReceipt) {
+          if (proposal.name !== targetToolName) {
+            throw new Error("tool revision must keep the bound target name");
+          }
+          const existing = findTool(repoDir, targetToolName);
+          if (!existing || existing.provenance?.author !== "agent") {
+            throw new Error("tool revision target is not an existing authored tool");
+          }
+          if (existing.kind !== "script" || existing.entry !== `tools/${targetToolName}/tool.py`) {
+            throw new Error("tool revision target has an unsupported package identity");
+          }
+          for (const key of ["engine_op", "capabilities", "params", "returns"] as const) {
+            if (!isDeepStrictEqual(proposal[key], existing[key])) {
+              throw new Error(`tool revision cannot change ${key}`);
+            }
+          }
+          const entry = `tools/${targetToolName}/tool.py`;
+          const manifest = `tools/${targetToolName}/tool.json`;
+          const sourceBytes = readFileSync(join(repoDir, entry));
+          const manifestBytes = readFileSync(join(repoDir, manifest));
+          const packageManifest = JSON.parse(manifestBytes.toString("utf8")) as ToolPackage;
+          if (!isDeepStrictEqual(packageManifest, { ...existing, entry: "tool.py" })) {
+            throw new Error("tool revision target manifest does not match its registry entry");
+          }
+          previousReceipt = {
+            contract: "leaf.tool-source.v1",
+            source_sha256: createHash("sha256").update(sourceBytes).digest("hex"),
+            manifest_sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+            source_bytes: sourceBytes.byteLength,
+            manifest_bytes: manifestBytes.byteLength,
+            entry,
+            manifest,
+          };
+        }
         const submitted = submitToolProposal(repoDir, proposal, new Date(), previousReceipt);
         previousReceipt = submitted.receipt;
         return submitted;
@@ -247,7 +283,12 @@ export class AuthorLoop {
    * Shared authoring core (used by both build and one-off): spawn ONE design-time
    * session, get the authored tool package, then re-validate with the oracle.
    */
-  private async authorInRepo(tenantId: string, description: string, repoDir: string) {
+  private async authorInRepo(
+    tenantId: string,
+    description: string,
+    repoDir: string,
+    targetToolName?: string,
+  ) {
     // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
     // lease router as conversation turns, while retaining legacy single-grant
     // providers that expose only getGrant().
@@ -258,7 +299,7 @@ export class AuthorLoop {
     let run: AgentRunResult | undefined;
     let failure: unknown;
     try {
-      const toolset = this.toolsetFor(repoDir, tenantId);
+      const toolset = this.toolsetFor(repoDir, tenantId, targetToolName);
       run = await this.ports.agentRunner.run({
         description,
         systemPrompt: AUTHOR_SYSTEM_PROMPT,
@@ -395,9 +436,19 @@ export class AuthorLoop {
           await coordination.recordStaged(receipt);
           return { receipt };
         }
-        const run = await this.authorInRepo(tenantId, description, change.dir);
+        if (request.targetToolName) {
+          const target = findTool(change.dir, request.targetToolName);
+          if (!target || target.provenance?.author !== "agent") {
+            throw new AuthorLoopError("tool revision target is not an existing authored tool", 422);
+          }
+        }
+        const run = await this.authorInRepo(
+          tenantId, description, change.dir, request.targetToolName,
+        );
         const { stagedCommit, catalogDigest } = await runFenced(() => {
-          registerTool(change.dir, run.tool);
+          registerTool(change.dir, run.tool, {
+            replaceExisting: request.targetToolName !== undefined,
+          });
           const stagedCommit = changes.stageCommit(change, `stage tool: ${run.tool.name}`);
           const catalogDigest = createHash("sha256")
             .update(readFileSync(join(change.dir, REGISTRY_FILE)))
