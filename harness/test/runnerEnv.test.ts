@@ -13,11 +13,24 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildScrubbedEnv } from "../src/ports/impl/agentSdkRunner.js";
+import { buildScrubbedEnv, resolveAuthorTimeoutMs } from "../src/ports/impl/agentSdkRunner.js";
 import type { AgentGrant } from "../src/ports/index.js";
 
 const FAKE_API_KEY = "sk-ant-api03-FAKE-not-a-real-key-abc123";
 const FAKE_OAUTH = "sk-ant-oat01-FAKE-not-a-real-token-def456";
+
+describe("resolveAuthorTimeoutMs", () => {
+  it("uses a five-minute default shared with the app wait budget", () => {
+    expect(resolveAuthorTimeoutMs(undefined, {})).toBe(300_000);
+  });
+
+  it("accepts a bounded operator value and rejects unsafe values", () => {
+    expect(resolveAuthorTimeoutMs(undefined, { LEAF_AUTHOR_TIMEOUT_S: "240" })).toBe(240_000);
+    expect(resolveAuthorTimeoutMs(undefined, { LEAF_AUTHOR_TIMEOUT_S: "invalid" })).toBe(300_000);
+    expect(resolveAuthorTimeoutMs(30_000, { LEAF_AUTHOR_TIMEOUT_S: "240" })).toBe(30_000);
+    expect(resolveAuthorTimeoutMs(1_000, { LEAF_AUTHOR_TIMEOUT_S: "240" })).toBe(240_000);
+  });
+});
 
 /** A base env pre-polluted with EVERY ambient Anthropic credential, to prove they scrub. */
 function pollutedBase(): NodeJS.ProcessEnv {

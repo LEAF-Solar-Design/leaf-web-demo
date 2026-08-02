@@ -154,11 +154,11 @@ def _harness_config() -> tuple[str, str]:
 def _harness_stage_timeout_s() -> float:
     """Wait beyond the harness budget so a client retry cannot race its lease."""
     try:
-        author_budget = float(os.environ.get("LEAF_AUTHOR_TIMEOUT_S", "120"))
+        author_budget = float(os.environ.get("LEAF_AUTHOR_TIMEOUT_S", "300"))
     except ValueError:
-        author_budget = 120.0
+        author_budget = 300.0
     if not 5 <= author_budget <= 900:
-        author_budget = 120.0
+        author_budget = 300.0
     fallback = author_budget + 15.0
     try:
         configured = float(os.environ.get(

@@ -125,6 +125,8 @@ export interface AgentSdkRunnerOptions {
   maxTurns?: number;
   /** Spend cap: abort past this many total tokens (contract: ~500k). */
   maxTotalTokens?: number;
+  /** Wall-clock cap for one author session. Defaults to LEAF_AUTHOR_TIMEOUT_S. */
+  maxWallTimeMs?: number;
 }
 
 export interface AuthorBrokerTestState {
@@ -324,6 +326,19 @@ export function resolveAuthorModel(
   return explicit ?? env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
 }
 
+export function resolveAuthorTimeoutMs(
+  explicit: number | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (explicit !== undefined && Number.isFinite(explicit) && explicit >= 5_000 && explicit <= 900_000) {
+    return explicit;
+  }
+  const seconds = Number(env.LEAF_AUTHOR_TIMEOUT_S ?? "300");
+  return Number.isFinite(seconds) && seconds >= 5 && seconds <= 900
+    ? seconds * 1_000
+    : 300_000;
+}
+
 export class AgentSdkRunner implements AgentRunner {
   /** Per-turn usage from the most recent run() (self-metered). */
   usageLog: TurnUsage[] = [];
@@ -337,6 +352,7 @@ export class AgentSdkRunner implements AgentRunner {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
+    const maxWallTimeMs = resolveAuthorTimeoutMs(this.opts.maxWallTimeMs);
     this.usageLog = [];
     this.lastRun = null;
     this.lastRateLimit = null;
@@ -459,6 +475,11 @@ export class AgentSdkRunner implements AgentRunner {
     // 4) One design-time session restricted to EXACTLY the three author tools,
     //    plus (when configured) the READ-ONLY registry consultation pair.
     const abort = new AbortController();
+    let wallClockExpired = false;
+    const wallClockTimer = setTimeout(() => {
+      wallClockExpired = true;
+      abort.abort();
+    }, maxWallTimeMs);
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
     const allowed = new Set(allowedNames);
@@ -500,52 +521,59 @@ export class AgentSdkRunner implements AgentRunner {
     let rateLimitHit = false;
     let rateResetsAtS: number | null = null;
     let retryDelayMs: number | null = null;
-    for await (const raw of q) {
-      const msg = raw as Record<string, unknown>;
-      if (msg.type === "rate_limit_event") {
-        const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
-        if (typeof info.resetsAt === "number") {
-          rateResetsAtS = info.resetsAt > 1e12 ? info.resetsAt / 1000 : info.resetsAt;
+    let loopError: unknown = null;
+    try {
+      for await (const raw of q) {
+        const msg = raw as Record<string, unknown>;
+        if (msg.type === "rate_limit_event") {
+          const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
+          if (typeof info.resetsAt === "number") {
+            rateResetsAtS = info.resetsAt > 1e12 ? info.resetsAt / 1000 : info.resetsAt;
+          }
+        } else if (msg.type === "system" && msg.subtype === "api_retry") {
+          if (typeof msg.retry_delay_ms === "number") retryDelayMs = msg.retry_delay_ms;
         }
-      } else if (msg.type === "system" && msg.subtype === "api_retry") {
-        if (typeof msg.retry_delay_ms === "number") retryDelayMs = msg.retry_delay_ms;
-      }
-      if (msg.type === "assistant") {
-        turn += 1;
-        const message = (msg.message ?? {}) as Record<string, unknown>;
-        const u = (message.usage ?? {}) as Record<string, number>;
-        const rec: TurnUsage = {
-          turn,
-          model: typeof message.model === "string" ? message.model : undefined,
-          input_tokens: u.input_tokens ?? 0,
-          output_tokens: u.output_tokens ?? 0,
-          cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
-          cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
-        };
-        this.usageLog.push(rec);
-        cumulative += rec.input_tokens + rec.output_tokens + rec.cache_creation_input_tokens;
-        const err = msg.error;
-        if (typeof err === "string" && ["authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)) {
-          authFailure = err;
-          abort.abort();
-          break;
-        }
+        if (msg.type === "assistant") {
+          turn += 1;
+          const message = (msg.message ?? {}) as Record<string, unknown>;
+          const u = (message.usage ?? {}) as Record<string, number>;
+          const rec: TurnUsage = {
+            turn,
+            model: typeof message.model === "string" ? message.model : undefined,
+            input_tokens: u.input_tokens ?? 0,
+            output_tokens: u.output_tokens ?? 0,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+          };
+          this.usageLog.push(rec);
+          cumulative += rec.input_tokens + rec.output_tokens + rec.cache_creation_input_tokens;
+          const err = msg.error;
+          if (typeof err === "string" && ["authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)) {
+            authFailure = err;
+            abort.abort();
+            break;
+          }
         // B3 (ADDITIVE): "rate_limit" joined SDKAssistantMessageError in SDK
         // 0.3.214 — treat it as terminal too (previously it fell through as a
         // generic session failure). Existing kinds above are untouched.
-        if (err === "rate_limit") {
-          rateLimitHit = true;
-          abort.abort();
-          break;
+          if (err === "rate_limit") {
+            rateLimitHit = true;
+            abort.abort();
+            break;
+          }
+          if (turn > maxTurns || cumulative > maxTotalTokens) {
+            capHit = `Agent SDK spend cap exceeded (turns=${turn} > ${maxTurns} or cost-tokens=${cumulative} > ${maxTotalTokens})`;
+            abort.abort();
+            break;
+          }
+        } else if (msg.type === "result") {
+          result = msg;
         }
-        if (turn > maxTurns || cumulative > maxTotalTokens) {
-          capHit = `Agent SDK spend cap exceeded (turns=${turn} > ${maxTurns} or cost-tokens=${cumulative} > ${maxTotalTokens})`;
-          abort.abort();
-          break;
-        }
-      } else if (msg.type === "result") {
-        result = msg;
       }
+    } catch (error) {
+      loopError = error;
+    } finally {
+      clearTimeout(wallClockTimer);
     }
 
     // 6) Summarize usage (authoritative totals from the result message when present).
@@ -585,6 +613,10 @@ export class AgentSdkRunner implements AgentRunner {
     };
 
     // 6b) Surface a terminal auth / spend-cap failure (usage is now captured above).
+    if (wallClockExpired) {
+      throw new Error(`Agent SDK author session exceeded the ${Math.round(maxWallTimeMs / 1000)}s wall-clock limit.`);
+    }
+    if (loopError) throw loopError;
     if (authFailure) throw new Error(`Agent SDK auth failure: ${authFailure}`);
     if (capHit) throw new Error(capHit);
     // B3 (ADDITIVE): rate-limit terminal, with the retry-after horizon exposed on

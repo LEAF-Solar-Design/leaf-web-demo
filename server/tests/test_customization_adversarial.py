@@ -41,6 +41,12 @@ def test_harness_stage_timeout_stays_beyond_author_budget(monkeypatch):
     assert _harness_stage_timeout_s() == 135
 
 
+def test_harness_stage_timeout_uses_five_minute_default(monkeypatch):
+    monkeypatch.delenv("LEAF_AUTHOR_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S", raising=False)
+    assert _harness_stage_timeout_s() == 315
+
+
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, check=True, text=True,
