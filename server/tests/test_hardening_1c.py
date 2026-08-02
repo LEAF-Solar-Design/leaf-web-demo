@@ -254,3 +254,111 @@ def test_f7_uses_constant_time_compare(monkeypatch, tmp_path):
     assert c.get("/api/ops/tenants",
                  headers={"X-Ops-Secret": "cmp-secret"}).status_code == 200
     assert seen.get("called") is True
+
+
+# =========================================================================== #
+# ops kill-switch READ must fail SAFE, never "all clear"
+#
+# _disabled_set() feeds the Disabled/Active column of the ops drawer. It reads
+# the broker's /broker/health, and used to trust ANY parseable JSON body:
+# FastAPI's own 500 (`{"detail": ...}`) parsed fine, `tenants_disabled` was
+# absent, `or []` produced an EMPTY kill list, and the function RETURNED — so
+# the authoritative store fallback never ran. During a broker fault the drawer
+# confidently showed every kill-switched tenant as "Active", which is the exact
+# moment an operator is looking at it. A degraded read must fall through.
+# =========================================================================== #
+class _FakeResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def _disabled_set_with(monkeypatch, tmp_path, status_code, payload):
+    """Run _disabled_set() in LEGACY mode with one killed tenant on disk and a
+    broker health reply we control. Returns what the ops column would show."""
+    import routers.ops as ops  # noqa: PLC0415
+
+    tenants_file = tmp_path / "broker_tenants.json"
+    tenants_file.write_text(json.dumps({"t-killed": {"disabled": True}}), encoding="utf-8")
+    monkeypatch.setenv("BROKER_TENANTS", str(tenants_file))
+    monkeypatch.setenv("BROKER_URL", _dead_broker_url())
+    monkeypatch.delenv("LEAF_BROKER_STORE", raising=False)  # legacy authority
+    monkeypatch.setattr(ops.requests, "get",
+                        lambda *a, **k: _FakeResp(status_code, payload))
+    return ops._disabled_set()
+
+
+def test_broker_health_500_falls_through_to_the_authority(monkeypatch, tmp_path):
+    # THE regression: a JSON-bodied 500 must NOT read as "nobody is disabled".
+    got = _disabled_set_with(monkeypatch, tmp_path, 500,
+                             {"detail": "Internal Server Error"})
+    assert got == {"t-killed"}
+
+
+def test_broker_health_200_without_the_field_falls_through(monkeypatch, tmp_path):
+    # A 200 that simply does not carry tenants_disabled cannot settle the
+    # question either — an absent key is not an empty kill list.
+    got = _disabled_set_with(monkeypatch, tmp_path, 200, {"ok": True})
+    assert got == {"t-killed"}
+
+
+def test_broker_health_200_with_the_field_is_authoritative(monkeypatch, tmp_path):
+    # The healthy path is unchanged: a real 200 list wins over the on-disk file.
+    got = _disabled_set_with(monkeypatch, tmp_path, 200,
+                             {"tenants_disabled": ["t-from-broker"]})
+    assert got == {"t-from-broker"}
+
+
+def test_broker_health_200_empty_list_is_honoured(monkeypatch, tmp_path):
+    # An explicit empty list IS an answer ("nothing is killed") and must be kept
+    # distinct from the absent-key case above.
+    got = _disabled_set_with(monkeypatch, tmp_path, 200, {"tenants_disabled": []})
+    assert got == set()
+
+
+# =========================================================================== #
+# LEAF_AUTH_LIVE has exactly ONE reader
+#
+# platform_link's startup assertion accepted {1,true,yes,on} while
+# deps.auth_live() accepted only the exact "1". `LEAF_AUTH_LIVE=true` therefore
+# satisfied the boot check and left every runtime gate OFF: a green app serving
+# unauthenticated, with the ops surface open (no LEAF_OPS_SECRET) rather than
+# fail-closed 503. Both sides now go through deps.auth_live().
+# =========================================================================== #
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", "yes", "on", " 1 "])
+def test_auth_live_accepts_every_blessed_spelling(monkeypatch, value):
+    import deps  # noqa: PLC0415
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", value)
+    assert deps.auth_live() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+def test_auth_live_stays_off_for_off_spellings(monkeypatch, value):
+    import deps  # noqa: PLC0415
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", value)
+    assert deps.auth_live() is False
+
+
+def test_auth_live_default_is_off(monkeypatch):
+    import deps  # noqa: PLC0415
+
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    assert deps.auth_live() is False
+
+
+def test_ops_surface_fails_closed_for_a_non_1_live_spelling(monkeypatch, tmp_path):
+    """The payoff: with LEAF_AUTH_LIVE=true and NO secret configured, the ops
+    surface must refuse (503), not serve every tenant's spend to anyone."""
+    _empty_ledger_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "true")
+    monkeypatch.delenv("LEAF_OPS_SECRET", raising=False)
+
+    c = _ops_client()
+    assert c.get("/api/ops/tenants").status_code == 503

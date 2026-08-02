@@ -25,7 +25,9 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const [acting, setActing] = useState(null)         // tenant_id with an action in flight
   const [accountControls, setAccountControls] = useState(null)
   const [accountLoading, setAccountLoading] = useState(false)
-  const [accountForbidden, setAccountForbidden] = useState(false)
+  // null when authorized; otherwise the denying status (401 signed out, 403 not
+  // the owner). Both are "you may not manage this", never a red failure.
+  const [accountDenied, setAccountDenied] = useState(null)
   const [accountErr, setAccountErr] = useState(null)
   const [accountConfirming, setAccountConfirming] = useState(false)
   const [accountActing, setAccountActing] = useState(false)
@@ -43,11 +45,15 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   }, [])
 
   const loadAccountControls = useCallback(async () => {
-    setAccountLoading(true); setAccountErr(null); setAccountForbidden(false); setAccountConfirming(false)
+    setAccountLoading(true); setAccountErr(null); setAccountDenied(null); setAccountConfirming(false)
     try {
       setAccountControls(await getAccountControls())
     } catch (e) {
-      if (e && e.status === 403) { setAccountForbidden(true); setAccountControls(null) }
+      // 401 (no bearer) and 403 (bearer, not the owner) are both "not yours to
+      // manage". The drawer opens on ?ops=1 whether or not anyone is signed in,
+      // so 401 is the COMMON case; leaving it to the error branch printed the
+      // raw "GET /api/admin/account-controls -> 401" at an operator.
+      if (e && (e.status === 401 || e.status === 403)) { setAccountDenied(e.status); setAccountControls(null) }
       else { setAccountErr(String(e.message || e)); setAccountControls(null) }
     } finally {
       setAccountLoading(false)
@@ -128,7 +134,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       setAccountControls(updated)
       setAccountConfirming(false)
     } catch (e) {
-      if (e && e.status === 403) setAccountForbidden(true)
+      if (e && (e.status === 401 || e.status === 403)) setAccountDenied(e.status)
       else if (e && e.status === 409) {
         setAccountConfirming(false)
         setAccountErr('Account controls changed elsewhere. Refresh before trying again.')
@@ -161,13 +167,17 @@ export default function OpsDrawer({ onDismiss, exiting }) {
           {accountLoading && !accountControls && (
             <div className="skeleton-row" aria-label="Loading account controls" />
           )}
-          {accountForbidden && (
-            <div className="ops-note">Account owner required to manage tool publication approval.</div>
+          {accountDenied && (
+            <div className="ops-note">
+              {accountDenied === 401
+                ? 'Sign in as the account owner to manage tool publication approval.'
+                : 'Account owner required to manage tool publication approval.'}
+            </div>
           )}
-          {accountErr && !accountForbidden && (
+          {accountErr && !accountDenied && (
             <div className="field-err" role="alert"><span className="dot red" />{accountErr}</div>
           )}
-          {accountControls && !accountForbidden && (
+          {accountControls && !accountDenied && (
             <div className="ops-control-row">
               <div className="ops-control-main">
                 <span className="ops-control-label">Require independent approval before publishing authored tools</span>
@@ -203,7 +213,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
               )}
             </div>
           )}
-          {(accountErr || accountForbidden) && (
+          {(accountErr || accountDenied) && (
             <button className="chip-act" onClick={loadAccountControls} disabled={accountLoading}>
               {accountLoading ? 'Refreshing…' : 'Refresh account controls'}
             </button>
