@@ -233,6 +233,46 @@ def test_created_admission_crash_replay_resumes_with_one_charge(
     assert list(author_quota._MEMORY_STATE.values()) == [1]
 
 
+def test_created_crash_replay_uses_original_day_tier_and_limit(store, monkeypatch):
+    service, tenant = _admission_service(store, monkeypatch)
+    policy = {"day": "2026-07-30", "limit": 1, "tier": "hosted_pro"}
+    monkeypatch.setattr(
+        customization_service.entitlements, "resolve_tier",
+        lambda _tenant: policy["tier"],
+    )
+    monkeypatch.setattr(
+        author_quota, "usage_policy",
+        lambda: SimpleNamespace(
+            daily_author_quota=lambda: policy["limit"],
+            author_quota_day=lambda _now=None: policy["day"],
+        ),
+    )
+    real_enforce = author_quota.enforce
+    crashed = {"done": False}
+
+    def charge_then_crash(*args, **kwargs):
+        result = real_enforce(*args, **kwargs)
+        if not crashed["done"]:
+            crashed["done"] = True
+            raise RuntimeError("crash after durable quota decision")
+        return result
+
+    monkeypatch.setattr(author_quota, "enforce", charge_then_crash)
+    with pytest.raises(RuntimeError):
+        service.enqueue_stage(
+            tenant=tenant, description=DESCRIPTION, mode="build",
+            idempotency_key="request-rollover",
+        )
+
+    policy.update(day="2026-07-31", limit=0, tier="demo")
+    result = service.enqueue_stage(
+        tenant=tenant, description=DESCRIPTION, mode="build",
+        idempotency_key="request-rollover",
+    )
+    assert result["status"] == "queued"
+    assert author_quota._MEMORY_STATE == {"2026-07-30:tenant-a": 1}
+
+
 def test_claim_is_fenced_and_expired_claim_is_recoverable(store, monkeypatch):
     queued(store)
     clock = [1000.0]
