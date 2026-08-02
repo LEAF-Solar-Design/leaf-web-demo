@@ -29,39 +29,47 @@
  * LIFETIME is deliberately out of scope for this module as it stands, after
  * five review rounds each found a fresh defect in it:
  *
- *   1. Cancelling or timing out a call rejects the pending promise but does not
- *      promptly close the upstream socket. The transport dials with its own
- *      TRANSPORT-wide controller (client/streamableHttp.js), so the abandoned
- *      POST or SSE body survives until this proxy's client is closed. Scope
- *      matters and two earlier drafts of this note got it wrong: it is one
- *      controller per transport, not one per process, so the blast radius is
- *      this tenant's connection, not the whole harness.
- *   2. RETRACTED — the "unbounded SSE reconnection" this note used to claim does
- *      not reproduce. The claim came from reading `_scheduleReconnection`
- *      (client/streamableHttp.js:138-154), where `attemptCount` defaults to 0
- *      and increments only on failure, and inferring that accept-then-drop
- *      cycles reset the counter forever. Plausible, and wrong.
+ *   1. FIXED HERE — cancelling or timing out a call now closes the upstream
+ *      socket promptly. The transport dials with its own TRANSPORT-wide
+ *      controller (client/streamableHttp.js), so aborting a request used to
+ *      reject the promise and leave the socket alive (measured: rejection at
+ *      149ms, socket alive 250ms later). The call's deadline now rides
+ *      AsyncLocalStorage into guardedFetch, which composes it into every fetch
+ *      the call makes; see the socket regression test.
+ *   2. SSE RECONNECTION IS TWO-SIDED, and both a claim and its retraction got
+ *      it wrong by measuring only half. MEASURED, both halves:
  *
- *      MEASURED against an upstream that accepts every stream and destroys it
- *      immediately: a tools/call whose stream drops REJECTS IN ~180ms with no
- *      reconnect at all, and the connection-level GET stream sat at ONE request
- *      over three idle seconds rather than climbing. There is no loop to bound
- *      and no resource lever here. See the reconnect test.
+ *      - UNPRIMED (no SSE event id ever arrived): a dropped call stream
+ *        REJECTS in ~180ms with no reconnect at all, and the connection-level
+ *        GET stream sits at one request over three idle seconds. No loop.
+ *      - PRIMED (any event carrying `id:` arrived before the drop): the stream
+ *        is resumable, and `_scheduleReconnection` (client/streamableHttp.js)
+ *        then loops forever on an upstream that accepts and drops —
+ *        `attemptCount` resets to 0 on every ACCEPTED dial, so `maxRetries: 2`
+ *        never converges. Measured at one dial per second (the initial delay,
+ *        which never grows because it never "fails") until the proxy closes.
  *
- *      Four drafts of this note were wrong in four different ways before the
- *      experiment settled it — process-wide vs transport-wide scope, "each
- *      retry starts a fresh clock", maxRetries as a total, and finally the
- *      whole premise. Every one of those came from reading the SDK rather than
- *      running it. A limitation asserted from code-reading is a hypothesis.
+ *      So the original "unbounded reconnection" note was right FOR PRIMED
+ *      STREAMS, and the retraction that replaced it was overbroad — its
+ *      fixture sent headers with no event id, which never arms resumption.
+ *      Round 1 of this PR's review caught that. The bound is now explicit:
+ *      call-stream resumption inherits the CALL deadline via
+ *      AsyncLocalStorage, and every stream dial spends from a per-proxy
+ *      STREAM_GET_BUDGET. A budget refusal is a FAILURE, which increments the
+ *      SDK's retry counter — turning accept-then-drop back into something
+ *      `maxRetries` terminates. Both are regression-tested.
+ *
+ *      Five drafts of this note were wrong in five different ways — scope,
+ *      clocks, maxRetries semantics, the premise, and then the retraction
+ *      itself. The lesson compounds: a limitation asserted from code-reading
+ *      is a hypothesis, and so is one asserted from a single experiment that
+ *      exercised only one path.
  *   3. Upstream progress notifications are not relayed downstream, so a long
  *      tool call gives the model no intermediate feedback.
  *
  * None of these are SSRF holes: redirects stay closed and the DNS re-check
  * still runs on every request, which is what this module exists for. They are
- * resource-lifetime and ergonomics problems. The work is preserved on
- * `lane/mcp-proxy-deadlines`, where it can be designed against the SDK's actual
- * behaviour instead of patched a round at a time. Do not describe this module
- * as bounding tenant connection lifetime until that lands.
+ * resource-lifetime and ergonomics problems.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -111,13 +119,35 @@ const UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
  * AsyncLocalStorage is the only way to get the call's signal down to
  * guardedFetch, which does hold the socket.
  *
- * NOT justified by SSE reconnection, though an earlier draft of this comment
- * claimed it was. That claim came from reading `_scheduleReconnection` rather
- * than running it, and the experiment refuted it: a tools/call whose stream
- * drops rejects in ~180ms without reconnecting at all. The mechanism is right;
- * the reason given for it was not.
+ * SSE reconnection justifies it TOO, for the primed half only — an earlier
+ * draft claimed reconnection wholesale, its retraction denied it wholesale,
+ * and the measured truth is split: an UNPRIMED call stream that drops rejects
+ * in ~180ms without reconnecting, but a PRIMED one (an event id arrived) is
+ * resumable and re-dials — and those re-dials run inside the call's context,
+ * so this signal is what stops them at the call's own deadline.
  */
 const activeCallDeadline = new AsyncLocalStorage<AbortSignal>();
+
+/**
+ * How many SSE stream dials (HTTP GETs) one proxy instance may spend, total.
+ *
+ * WHY A LIFETIME CAP AND NOT A RATE. A primed accept-then-drop upstream defeats
+ * `maxRetries` structurally — every ACCEPTED dial resets the SDK's attempt
+ * counter — so any bound that refills hands the tenant a slower version of the
+ * same forever-loop. A cap does not refill. The budget only meters METHOD:GET
+ * (the standalone notification stream and stream resumption); tool calls are
+ * POSTs and never touch it.
+ *
+ * The number is generous for what the GET stream is FOR here: this proxy
+ * forwards tool listing and calls only, does not relay upstream notifications
+ * (header, limitation 3), and a proxy instance lives for one mount, not
+ * forever. One initial dial plus seven blip-recoveries is a healthy
+ * connection's whole story; a tenant server that flaps more than that has
+ * degraded itself, which is the posture this module already takes for a server
+ * that is down. A refused dial throws, the SDK counts a FAILURE, and
+ * `maxRetries` finally gets to do its job.
+ */
+const STREAM_GET_BUDGET = 8;
 
 export type ProxiedMcpServer = { name: string; instance: McpServer; close: () => Promise<void> };
 
@@ -144,9 +174,24 @@ export type ProxiedMcpServer = { name: string; instance: McpServer; close: () =>
  * needs an undici Dispatcher with a custom `connect.lookup`, which keeps the
  * URL intact while choosing the address — the named follow-up on this PR.
  */
-export function guardedFetch(originalHost: string): typeof fetch {
+export function guardedFetch(
+  originalHost: string,
+  // Shared mutable counter, one per proxy instance — see STREAM_GET_BUDGET.
+  // Optional so the redirect/DNS tests (and any caller that makes no SSE
+  // streams) keep their existing shape.
+  streamBudget?: { remaining: number },
+): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
+    // Spend the stream budget BEFORE the DNS re-check: a dial we are refusing
+    // anyway should not cost a lookup. GET is precise here — this transport
+    // uses GET only to open or resume an SSE stream; messages are POSTs and
+    // session teardown is DELETE, and neither is metered.
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (streamBudget && method === "GET") {
+      if (streamBudget.remaining <= 0) throw new Error("mcp_upstream_stream_budget_exhausted");
+      streamBudget.remaining -= 1;
+    }
     // An IP literal was already validated and cannot change under us; only a
     // NAME needs re-checking.
     if (!isIP(originalHost)) {
@@ -181,10 +226,13 @@ export async function proxyTenantMcpServer(
   // Internal, NOT read from `config`: a tenant must not choose how long we hold
   // a connection for them. Exists so the deadline is testable in milliseconds.
   requestTimeoutMs: number = UPSTREAM_REQUEST_TIMEOUT_MS,
+  // Internal, same rule and same reason: testable without sitting through
+  // eight one-second reconnect delays.
+  streamGetBudget: number = STREAM_GET_BUDGET,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
-    fetch: guardedFetch(url.hostname),
+    fetch: guardedFetch(url.hostname, { remaining: streamGetBudget }),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},
   });
 
