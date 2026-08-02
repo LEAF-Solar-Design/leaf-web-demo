@@ -128,7 +128,7 @@ export default function useAuthorStageController({
   const stage = useCallback((description, targetToolName = null) => {
     if (!enabled) return Promise.resolve(null)
     const current = readInflightAuthor(storageRef.current)
-    if (authorPointerValid(current, accountScope) && !current.terminal_staged) {
+    if (authorPointerValid(current, accountScope)) {
       return runPointer(current, { reconnecting: true })
     }
     if (current) clearInflightAuthor(null, storageRef.current)
