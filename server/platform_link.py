@@ -184,9 +184,11 @@ def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     validate_canonical_upload_authority()
     if postgres_required():
         # Lazy: deps imports platform_link lazily too, so this cannot cycle.
-        # deps.auth_live() is the ONE reader of LEAF_AUTH_LIVE — this assertion
-        # used to keep its own permissive copy of the spelling set, which is how
-        # `LEAF_AUTH_LIVE=true` passed here and disabled auth everywhere else.
+        # deps.auth_live() is THE canonical LEAF_AUTH_LIVE parser (broker and
+        # checkout_capability delegate to it; platform/deps.py mirrors it under
+        # a drift guard) — this assertion used to keep its own permissive copy
+        # of the spelling set, which is how `LEAF_AUTH_LIVE=true` passed here
+        # and disabled auth everywhere else.
         import deps as _deps  # noqa: PLC0415
 
         if not _deps.auth_live():

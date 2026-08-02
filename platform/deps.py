@@ -32,11 +32,21 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_AUTH_FILE = _PROJECT_ROOT / "server" / "auth.py"
 
 
+# Spellings of LEAF_AUTH_LIVE that mean "authentication is ON". MUST stay
+# byte-identical to server/deps.py `_AUTH_LIVE_ON` (a name-collision minefield —
+# ``import deps`` here could resolve to this very module or server/deps.py
+# depending on sys.path, so the set is mirrored instead of imported; a drift
+# guard in server/tests/test_hardening_1c.py compares the two). An exact-"1"
+# copy here once meant `LEAF_AUTH_LIVE=true` secured the server while this
+# tenant boundary kept trusting the caller-supplied ``X-Org-Id`` header.
+_AUTH_LIVE_ON = frozenset({"1", "true", "yes", "on"})
+
+
 def auth_live() -> bool:
     """``LEAF_AUTH_LIVE`` gate (the SAME env the server reads). Read at call time
     so a single process can be toggled in tests and subprocess env overrides
     apply."""
-    return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+    return os.environ.get("LEAF_AUTH_LIVE", "0").strip().lower() in _AUTH_LIVE_ON
 
 
 def _server_auth():

@@ -362,3 +362,82 @@ def test_ops_surface_fails_closed_for_a_non_1_live_spelling(monkeypatch, tmp_pat
 
     c = _ops_client()
     assert c.get("/api/ops/tenants").status_code == 503
+
+
+# =========================================================================== #
+# every executable LEAF_AUTH_LIVE reader agrees with the canonical parser
+#
+# Normalizing ONLY deps.auth_live() would have re-created the original bug one
+# layer down: `LEAF_AUTH_LIVE=true` secures the server while broker,
+# checkout_capability, and the platform tenant boundary (exact-"1" copies)
+# stay in demo posture — platform reads/writes trusting caller-supplied
+# X-Org-Id, broker calls allowed with no secret, QA hooks honored. Split
+# authentication postures are exactly what a single parser exists to prevent.
+# =========================================================================== #
+_LIVE_SPELLINGS = ["1", "true", "TRUE", "yes", "on", " 1 ",
+                   "0", "false", "no", "off", ""]
+
+
+@pytest.mark.parametrize("value", _LIVE_SPELLINGS)
+def test_broker_and_checkout_agree_with_the_canonical_parser(monkeypatch, value):
+    import broker  # noqa: PLC0415
+    import checkout_capability  # noqa: PLC0415
+    import deps  # noqa: PLC0415
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", value)
+    expected = deps.auth_live()
+    assert broker._auth_live() is expected
+    assert checkout_capability._auth_live_posture() is expected
+
+
+def _load_platform_deps():
+    """Load platform/deps.py by explicit file path.
+
+    ``platform`` collides with the stdlib module and ``deps`` with server/deps,
+    so a bare import is a name minefield — the same reason platform/deps.py
+    itself file-path-loads server/auth.py. Cached under a unique name.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    cached = sys.modules.get("leaf_platform_deps_driftguard")
+    if cached is not None:
+        return cached
+    path = SERVER_DIR.parent / "platform" / "deps.py"
+    spec = importlib.util.spec_from_file_location("leaf_platform_deps_driftguard", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules["leaf_platform_deps_driftguard"] = mod
+    return mod
+
+
+def test_platform_boundary_mirrors_the_canonical_spelling_set():
+    """platform/deps.py mirrors _AUTH_LIVE_ON instead of importing it (name
+    minefield above). This drift guard fails the moment the two sets diverge."""
+    import deps  # noqa: PLC0415
+
+    assert _load_platform_deps()._AUTH_LIVE_ON == deps._AUTH_LIVE_ON
+
+
+@pytest.mark.parametrize("value", _LIVE_SPELLINGS)
+def test_platform_auth_live_agrees_with_the_canonical_parser(monkeypatch, value):
+    import deps  # noqa: PLC0415
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", value)
+    assert _load_platform_deps().auth_live() is deps.auth_live()
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "on", "TRUE"])
+def test_platform_org_boundary_ignores_header_under_normalized_live(monkeypatch, value):
+    """Route-level payoff: under a normalized live spelling the platform tenant
+    boundary must NOT trust caller-supplied X-Org-Id — no token means 401,
+    never the header's org (the F6 dev seam stays closed)."""
+    import uuid  # noqa: PLC0415
+
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    pdeps = _load_platform_deps()
+    monkeypatch.setenv("LEAF_AUTH_LIVE", value)
+    with pytest.raises(HTTPException) as exc:
+        pdeps.get_org_id(x_org_id=str(uuid.uuid4()), authorization=None)
+    assert exc.value.status_code == 401
