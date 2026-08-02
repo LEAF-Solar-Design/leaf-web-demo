@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS author_quota_attempts (
 CREATE INDEX IF NOT EXISTS idx_author_quota_attempts_counter
   ON author_quota_attempts (counter_key);
 
-DROP TRIGGER IF EXISTS author_quota_attempts_immutable ON author_quota_attempts;
 CREATE TRIGGER author_quota_attempts_immutable
   BEFORE UPDATE OR DELETE ON author_quota_attempts
   FOR EACH ROW EXECUTE FUNCTION leaf_reject_ledger_mutation();
