@@ -25,9 +25,9 @@
  * nothing else. It is a network boundary, not a policy layer; the policy lives
  * in ConverseLoop's deny rules and the app gate, exactly where it did before.
  *
- * LIMITATIONS, stated because they are real and NOT fixed here. Connection
- * LIFETIME is deliberately out of scope for this module as it stands, after
- * five review rounds each found a fresh defect in it:
+ * CONNECTION LIFETIME, where five review rounds each found a fresh defect.
+ * Items 1 and 2 below are FIXED IN THIS MODULE and regression-tested; item 3
+ * is a real limitation that is NOT fixed here:
  *
  *   1. FIXED HERE — cancelling or timing out a call now closes the upstream
  *      socket promptly. The transport dials with its own TRANSPORT-wide
@@ -180,6 +180,11 @@ export function guardedFetch(
   // Optional so the redirect/DNS tests (and any caller that makes no SSE
   // streams) keep their existing shape.
   streamBudget?: { remaining: number },
+  // Test probe: fires on every metered GET ATTEMPT, including dials the budget
+  // refuses. A refused dial never reaches the server, so a fixture counting
+  // accepted requests cannot distinguish "the SDK stopped dialling" from "the
+  // SDK dials forever and the budget refuses forever" — this counter can.
+  onStreamGetAttempt?: () => void,
 ): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
@@ -188,6 +193,8 @@ export function guardedFetch(
     // uses GET only to open or resume an SSE stream; messages are POSTs and
     // session teardown is DELETE, and neither is metered.
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    // The probe observes the ATTEMPT, before the budget can refuse it.
+    if (method === "GET") onStreamGetAttempt?.();
     if (streamBudget && method === "GET") {
       if (streamBudget.remaining <= 0) throw new Error("mcp_upstream_stream_budget_exhausted");
       streamBudget.remaining -= 1;
@@ -229,10 +236,15 @@ export async function proxyTenantMcpServer(
   // Internal, same rule and same reason: testable without sitting through
   // eight one-second reconnect delays.
   streamGetBudget: number = STREAM_GET_BUDGET,
+  // Internal test probe, forwarded to guardedFetch: sees every stream GET
+  // ATTEMPT, including dials the budget refuses locally — the only way a test
+  // can prove the SDK's reconnect loop actually terminated rather than being
+  // silently refused forever.
+  onStreamGetAttempt?: () => void,
 ): Promise<ProxiedMcpServer | null> {
   const url = new URL(config.url);
   const transport = new StreamableHTTPClientTransport(url, {
-    fetch: guardedFetch(url.hostname, { remaining: streamGetBudget }),
+    fetch: guardedFetch(url.hostname, { remaining: streamGetBudget }, onStreamGetAttempt),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},
   });
 
