@@ -649,8 +649,10 @@ describe("proxyTenantMcpServer end to end", () => {
     const tailLocal = dialAttempts;
     // The probe must have seen refusals the server never did, or it is not
     // measuring the local side at all and the tail assertion below proves
-    // nothing new.
-    expect(tailLocal).toBeGreaterThan(accepted);
+    // nothing new. Compared against the SAME-MOMENT server snapshot, not the
+    // earlier `accepted` one — a delayed accepted GET between the snapshots
+    // could otherwise satisfy this without any refusal (review NIT).
+    expect(tailLocal).toBeGreaterThan(tailServer);
     // An idle tail then sees NO further dials on EITHER side of the budget:
     // server-side accepts (the old, weaker claim) AND local attempts — the
     // part that proves the SDK's retry loop terminated at maxRetries instead
