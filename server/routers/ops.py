@@ -186,12 +186,26 @@ def _disabled_set() -> Set[str]:
     synchronously before acking the disable, so the next health read sees it); a
     Cache-Control: no-cache header defeats any intermediary cache. If the broker
     is unreachable, PostgreSQL mode reads the shared store and legacy mode reads
-    broker_tenants.json. Never crosses authorities."""
+    broker_tenants.json. Never crosses authorities.
+
+    The health read is trusted ONLY on a 200 carrying a real `tenants_disabled`
+    LIST. A connection error was already handled, but a broker that ANSWERS badly
+    was not: FastAPI's own 500 body (`{"detail": ...}`) parses as JSON, so
+    `data.get("tenants_disabled") or []` turned a broker fault into the confident
+    claim "no tenant is disabled" AND returned before the authoritative store
+    fallback below could run. The ops drawer then renders every kill-switched
+    tenant as Active during the exact incident an operator opens it for. A
+    degraded read must fall through to the authority, never answer 'all clear'."""
     try:
         resp = requests.get(f"{broker_client.broker_url()}/broker/health", timeout=3,
                             headers={"Cache-Control": "no-cache"})
-        data = resp.json()
-        return {str(t) for t in (data.get("tenants_disabled") or [])}
+        if resp.status_code == 200:
+            data = resp.json()
+            listed = data.get("tenants_disabled") if isinstance(data, dict) else None
+            # An absent key is NOT an empty kill list — it means this reply does not
+            # carry the field, so it cannot settle the question.
+            if isinstance(listed, list):
+                return {str(t) for t in listed}
     except Exception:  # noqa: BLE001
         pass
     if _broker_store_mode() == "postgres":

@@ -1,7 +1,14 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
-async function install(page, { secret = 'fixture-secret', conflictOnAccountPut = false } = {}) {
+// `deniedAccountStatus` is the status the account-controls route returns to an
+// unauthorized caller. The server sends 401 when there is NO bearer at all
+// (deps.require_tenant) and 403 when a bearer is present but is not the account
+// owner (_require_account_owner). The drawer opens on ?ops=1 regardless of
+// sign-in, so 401 is the status a real operator hits first.
+async function install(page, {
+  secret = 'fixture-secret', conflictOnAccountPut = false, deniedAccountStatus = 403,
+} = {}) {
   const state = makeCatProofState()
   const evidence = {
     list: 0, mutations: [], opsHeaders: [], nonOpsSecrets: [],
@@ -20,7 +27,11 @@ async function install(page, { secret = 'fixture-secret', conflictOnAccountPut =
       if (requestSecret) evidence.accountOpsSecrets.push(requestSecret)
       if (request.method() === 'GET') evidence.accountReads += 1
       if (!authorized) {
-        await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ detail: 'account admin required' }) })
+        await route.fulfill({
+          status: deniedAccountStatus,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'account admin required' }),
+        })
         return
       }
       if (request.method() === 'PUT') {
@@ -138,6 +149,21 @@ test('ops role denial is calm and the flag is the only entry', async ({ page }) 
   await unflagged.goto('/try')
   await expect(unflagged.getByRole('dialog', { name: 'Internal ops' })).toHaveCount(0)
   expect(evidence.list).toBe(0)
+})
+
+// Regression: signed out, the live server answers account-controls with 401, not
+// 403. The drawer only recognised 403, so ?ops=1 while signed out printed the raw
+// "GET /api/admin/account-controls -> 401" in a red alert at the operator. Both
+// statuses mean "not yours to manage" and must read as a calm note.
+test('a signed-out account-controls denial (401) is calm, not a red error', async ({ page }) => {
+  const evidence = await install(page, { deniedAccountStatus: 401 })
+  await page.goto('/try?ops=1')
+  const ops = page.getByRole('dialog', { name: 'Internal ops' })
+  await expect(ops.getByText(/Sign in as the account owner/)).toBeVisible()
+  await expect(ops.getByRole('alert')).toHaveCount(0)
+  await expect(ops).not.toContainText('account-controls ->')
+  await expect(ops.getByRole('button', { name: /require independent approval/ })).toHaveCount(0)
+  expect(evidence.accountWrites).toEqual([])
 })
 
 test('account-control revision conflict asks for a refresh and preserves the displayed state', async ({ page }) => {

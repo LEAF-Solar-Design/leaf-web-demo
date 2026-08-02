@@ -760,9 +760,14 @@ def _broker_secret() -> Optional[str]:
 
 
 def _auth_live() -> bool:
-    """Live/public mode — read at call time so one process can be toggled (mirrors
-    deps.auth_live_enabled)."""
-    return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+    """Live/public mode — read at call time so one process can be toggled.
+
+    Delegates to deps.auth_live(), THE canonical LEAF_AUTH_LIVE parser: a private
+    exact-"1" copy here once meant `LEAF_AUTH_LIVE=true` turned server auth on
+    while leaving this broker gate in demo posture (split authentication)."""
+    import deps  # lazy: avoid import cycle at module load
+
+    return deps.auth_live()
 
 
 def _qa_hooks_enabled() -> bool:

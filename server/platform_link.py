@@ -182,13 +182,18 @@ def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     if not postgres_startup_required():
         return None
     validate_canonical_upload_authority()
-    if (
-        postgres_required()
-        and os.environ.get("LEAF_AUTH_LIVE", "").strip().lower()
-        not in {"1", "true", "yes", "on"}
-    ):
-        raise RuntimeError(
-            "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_AUTH_LIVE=1")
+    if postgres_required():
+        # Lazy: deps imports platform_link lazily too, so this cannot cycle.
+        # deps.auth_live() is THE canonical LEAF_AUTH_LIVE parser (broker and
+        # checkout_capability delegate to it; platform/deps.py mirrors it under
+        # a drift guard) — this assertion used to keep its own permissive copy
+        # of the spelling set, which is how `LEAF_AUTH_LIVE=true` passed here
+        # and disabled auth everywhere else.
+        import deps as _deps  # noqa: PLC0415
+
+        if not _deps.auth_live():
+            raise RuntimeError(
+                "LEAF_PLATFORM_POSTGRES_REQUIRED requires LEAF_AUTH_LIVE=1")
     if not os.environ.get("DATABASE_URL", "").strip():
         raise RuntimeError(
             "LEAF_PLATFORM_POSTGRES_REQUIRED requires DATABASE_URL in the environment")

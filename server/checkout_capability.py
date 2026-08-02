@@ -66,7 +66,6 @@ _FIELD_SEP = "\x1f"  # ASCII unit separator: cannot occur in any bound component
 
 _SECRET_ENV = "LEAF_CHECKOUT_CAP_SECRET"
 _RUNTIME_ENV = "LEAF_RUNTIME_ENV"
-_AUTH_LIVE_ENV = "LEAF_AUTH_LIVE"
 _MIN_PRODUCTION_SECRET_BYTES = 32
 
 _EPHEMERAL_SECRET: Optional[str] = None
@@ -96,7 +95,12 @@ def _production_posture() -> bool:
 
 
 def _auth_live_posture() -> bool:
-    return os.environ.get(_AUTH_LIVE_ENV, "0") == "1"
+    # Delegates to deps.auth_live(), THE canonical LEAF_AUTH_LIVE parser, so a
+    # spelling like "true" cannot secure the server while leaving this module
+    # in demo posture (split authentication).
+    import deps  # lazy: avoid import cycle at module load
+
+    return deps.auth_live()
 
 
 def _secret() -> str:

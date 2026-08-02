@@ -410,10 +410,19 @@ class TenantContext(str):
         return obj
 
 
+# Spellings of LEAF_AUTH_LIVE that mean "authentication is ON". THE canonical
+# set: platform_link.py's startup assertion already blessed 1/true/yes/on while
+# this gate accepted only the exact "1", so `LEAF_AUTH_LIVE=true` passed the
+# boot check and then left EVERY runtime auth gate off — a green app serving
+# unauthenticated, with the ops surface open (no secret configured) instead of
+# fail-closed 503. Both sides now read through auth_live() so they cannot drift.
+_AUTH_LIVE_ON = frozenset({"1", "true", "yes", "on"})
+
+
 def auth_live() -> bool:
     """LEAF_AUTH_LIVE gate. Read at call time so a single process can be toggled
     in tests and subprocess env overrides apply."""
-    return os.environ.get("LEAF_AUTH_LIVE", "0") == "1"
+    return os.environ.get("LEAF_AUTH_LIVE", "0").strip().lower() in _AUTH_LIVE_ON
 
 
 def resolve_active_platform_tenant_authority(subject: Optional[str]) -> tuple[str, str]:
