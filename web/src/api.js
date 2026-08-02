@@ -951,9 +951,113 @@ function requestId() {
   return `leaf-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+const AUTHOR_PENDING = new Set(['accepted', 'submitted', 'queued', 'pending', 'running', 'authoring'])
+const AUTHOR_COMPLETE = new Set(['staged', 'complete', 'completed', 'succeeded'])
+const AUTHOR_FAILED = new Set(['failed', 'error'])
+
+function authorPollUrl(pollUrl, changeSetId) {
+  if (!pollUrl) return null
+  try {
+    const origin = globalThis.location?.origin || 'http://localhost'
+    const base = new URL(API_BASE || '/', origin)
+    const resolved = new URL(pollUrl, base)
+    if (resolved.origin !== base.origin) throw new TypeError('cross-origin author poll URL')
+    const expectedPath = `/api/author/stages/${encodeURIComponent(changeSetId || '')}`
+    if (resolved.pathname !== expectedPath || resolved.search || resolved.hash) {
+      throw new TypeError('non-canonical author poll URL')
+    }
+    return resolved.toString()
+  } catch {
+    const error = new Error('The authoring request returned an invalid status address.')
+    error.authorTerminal = true
+    throw error
+  }
+}
+
+function authorPollSleep(delay, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delay)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function authorRetryDelay(value) {
+  const delay = Number(value)
+  return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
+}
+
+function authorStageResult(body) {
+  if (body?.result?.receipt) return body.result
+  if (body?.receipt && body?.result && typeof body.result === 'object') {
+    return { ...body.result, receipt: body.receipt }
+  }
+  if (body?.staged?.receipt) return body.staged
+  if (body?.receipt) return body
+  return null
+}
+
+async function pollAuthorStage(accepted, opts = {}) {
+  const acceptedId = opts.changeSetId || accepted?.change_set_id
+  const pollUrl = authorPollUrl(opts.pollUrl || accepted?.poll_url, acceptedId)
+  if (!pollUrl) throw new Error('The authoring request did not include a poll URL.')
+  let delay = authorRetryDelay(opts.retryAfterMs || accepted?.retry_after_ms)
+  const started = Date.now()
+  while (Date.now() - started < 20 * 60 * 1000) {
+    if (opts.signal?.aborted) throw opts.signal.reason || new DOMException('Aborted', 'AbortError')
+    await authorPollSleep(delay, opts.signal)
+    const res = await apiFetch(pollUrl, {
+      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+      signal: opts.signal,
+    }, pollUrl)
+    const body = await res.json().catch(() => null)
+    if (!res.ok) throw customizationError('GET', pollUrl, res.status, body)
+    const status = String(body?.status || '').toLowerCase()
+    if (body?.change_set_id !== acceptedId) {
+      const error = new Error('The authoring status did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
+    opts.onStatus?.({
+      status: status || 'running',
+      progress: body?.progress || body?.message || status || 'authoring',
+      change_set_id: body?.change_set_id || accepted?.change_set_id || null,
+    })
+    const staged = authorStageResult(body)
+    if (staged && staged?.receipt?.change_set_id !== acceptedId) {
+      const error = new Error('The staged receipt did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
+    if (staged && (AUTHOR_COMPLETE.has(status) || !status)) return staged
+    if (AUTHOR_FAILED.has(status)) {
+      const error = customizationError('GET', pollUrl, 500, body)
+      error.authorTerminal = true
+      throw error
+    }
+    if (!AUTHOR_PENDING.has(status) && !AUTHOR_COMPLETE.has(status)) {
+      const error = new Error('The authoring status response was not recognized. The staged tool was not published.')
+      throw error
+    }
+    if (AUTHOR_COMPLETE.has(status)) {
+      const error = new Error('Authoring completed without a staged tool receipt.')
+      error.authorTerminal = true
+      throw error
+    }
+    delay = authorRetryDelay(body?.retry_after_ms || delay)
+  }
+  throw new Error('Authoring is still running. Resume this request to keep checking it.')
+}
+
 // R5: stage only. The server resolves base and policy fields, while this client
 // carries the public contract request and never treats staging as publication.
-export async function stageAuthorTool(mock, description, targetToolName = null) {
+export async function stageAuthorTool(mock, description, targetToolName = null, opts = {}) {
   if (mock) {
     await nap(700)
     const authored = authorMock(description)
@@ -974,6 +1078,13 @@ export async function stageAuthorTool(mock, description, targetToolName = null) 
       validation: { status: 'demo' },
     }
   }
+  if (opts.pollUrl) {
+    return pollAuthorStage({
+      poll_url: opts.pollUrl,
+      change_set_id: opts.changeSetId,
+      retry_after_ms: opts.retryAfterMs,
+    }, opts)
+  }
   const path = '/api/author/stage'
   const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
@@ -981,12 +1092,30 @@ export async function stageAuthorTool(mock, description, targetToolName = null) 
     body: JSON.stringify({
       description,
       mode: 'build',
-      idempotency_key: requestId(),
+      idempotency_key: opts.idempotencyKey || requestId(),
       ...(targetToolName ? { target_tool_name: targetToolName } : {}),
     }),
+    signal: opts.signal,
   }, path)
   const body = await res.json().catch(() => null)
-  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  if (!res.ok) {
+    const error = customizationError('POST', path, res.status, body)
+    error.authorTerminal = res.status >= 400 && res.status < 500 && ![401, 408].includes(res.status)
+    throw error
+  }
+  if (res.status === 202) {
+    if (!body?.poll_url || !body?.change_set_id) {
+      const error = new Error('The accepted authoring request did not include its durable status address.')
+      throw error
+    }
+    opts.onAccepted?.(body)
+    opts.onStatus?.({
+      status: body.status || 'accepted',
+      progress: 'queued',
+      change_set_id: body.change_set_id,
+    })
+    return pollAuthorStage(body, opts)
+  }
   return body
 }
 

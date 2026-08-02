@@ -20,6 +20,7 @@ import os
 import json
 import re
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict
@@ -34,6 +35,7 @@ import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
 from customization_service import CustomizationService
+import customization_stage_worker
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
     agent,
@@ -84,6 +86,9 @@ def _cors_origins() -> list[str]:
 
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 
+_customization_worker_stop: threading.Event | None = None
+_customization_worker_thread: threading.Thread | None = None
+
 
 @app.on_event("startup")
 def initialize_customization_store() -> None:
@@ -96,6 +101,30 @@ def initialize_customization_store() -> None:
     if not deps.auth_live():
         raise RuntimeError("customization requires live authentication")
     CustomizationService.configured()
+    if os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKER_DISABLED", "0") == "1":
+        return
+    global _customization_worker_stop, _customization_worker_thread
+    if _customization_worker_thread is not None and _customization_worker_thread.is_alive():
+        return
+    _customization_worker_stop = threading.Event()
+    _customization_worker_thread = threading.Thread(
+        target=customization_stage_worker.serve,
+        kwargs={"stop_event": _customization_worker_stop},
+        name="customization-stage-worker",
+        daemon=True,
+    )
+    _customization_worker_thread.start()
+
+
+@app.on_event("shutdown")
+def stop_customization_stage_worker() -> None:
+    global _customization_worker_stop, _customization_worker_thread
+    if _customization_worker_stop is not None:
+        _customization_worker_stop.set()
+    if _customization_worker_thread is not None:
+        _customization_worker_thread.join(timeout=2.0)
+    _customization_worker_stop = None
+    _customization_worker_thread = None
 
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
 # disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.

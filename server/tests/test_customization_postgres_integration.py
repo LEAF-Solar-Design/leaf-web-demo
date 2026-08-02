@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +262,91 @@ def stage(store, change, prefix: str):
         change_set_id=change.change_set_id,
         expected_version=staging.version,
         idempotency_key=f"{prefix}-staged",
+        staged_commit=STAGED,
+        catalog_digest=DIGEST,
+        platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE,
+    )
+
+
+def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
+    description = "postgres async race"
+    change, created = store.reserve_stage(
+        tenant_id="pg-stage-race", idempotency_key="pg-stage-race",
+        base_commit=BASE, desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        change_kind="create", target_tool_name=None,
+        request_description=description,
+        request_fingerprint=__import__("hashlib").sha256(
+            description.encode()
+        ).hexdigest(),
+    )
+    assert created
+    store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        expected_state=ChangeState.CREATED, idempotency_key="pg-stage-race-queued",
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(
+            lambda owner: store.claim_stage(owner=owner, lease_seconds=30),
+            ("pg-worker-a", "pg-worker-b"),
+        ))
+    assert sum(claim is not None for claim in claims) == 1
+
+
+def test_postgres_stale_worker_cannot_commit_after_lease_reclaim(store) -> None:
+    description = "postgres stale worker fence"
+    change, created = store.reserve_stage(
+        tenant_id="pg-stage-fence", idempotency_key="pg-stage-fence",
+        base_commit=BASE, desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        change_kind="create", target_tool_name=None,
+        request_description=description,
+        request_fingerprint=__import__("hashlib").sha256(
+            description.encode()
+        ).hexdigest(),
+    )
+    assert created
+    store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        expected_state=ChangeState.CREATED, idempotency_key="pg-stage-fence-queued",
+    )
+    first = store.claim_stage(owner="pg-worker-a", lease_seconds=0.01)
+    assert first is not None
+    time.sleep(0.03)
+    second = store.claim_stage(owner="pg-worker-b", lease_seconds=30)
+    assert second is not None
+    assert second.change_set_id == first.change_set_id
+    assert second.stage_attempt == first.stage_attempt + 1
+
+    with pytest.raises(ChangeSetConflictError, match="generation"):
+        store.record_staged(
+            tenant_id=first.tenant_id,
+            change_set_id=first.change_set_id,
+            expected_version=first.version,
+            idempotency_key="pg-stage-fence-stale-success",
+            staged_commit=STAGED,
+            catalog_digest=DIGEST,
+            platform_release="platform@sha256:abc",
+            workspace_contract_digest=WORKSPACE,
+            stage_lease_owner="pg-worker-a",
+            stage_attempt=first.stage_attempt,
+        )
+    durable = store.get_change_set(
+        tenant_id=second.tenant_id, change_set_id=second.change_set_id
+    )
+    assert durable.state is ChangeState.STAGING
+    assert durable.stage_lease_owner == "pg-worker-b"
+    assert durable.stage_attempt == second.stage_attempt
+
+    # A callback is authoritative and may complete the current generation.
+    store.record_staged(
+        tenant_id=second.tenant_id,
+        change_set_id=second.change_set_id,
+        expected_version=second.version,
+        idempotency_key="pg-stage-fence-callback",
         staged_commit=STAGED,
         catalog_digest=DIGEST,
         platform_release="platform@sha256:abc",

@@ -4,6 +4,9 @@ const root = new URL('../', import.meta.url)
 const api = await readFile(new URL('src/api.js', root), 'utf8')
 const panel = await readFile(new URL('src/components/AuthorPanel.jsx', root), 'utf8')
 const app = await readFile(new URL('src/App.jsx', root), 'utf8')
+const toolCast = await readFile(new URL('src/site/ToolCast.jsx', root), 'utf8')
+const authorController = await readFile(new URL('src/controllers/useAuthorStageController.js', root), 'utf8')
+const authorPointer = await readFile(new URL('src/authorStagePointer.js', root), 'utf8')
 
 function assert(ok, message) {
   if (!ok) throw new Error(message)
@@ -19,6 +22,8 @@ assert(panel.includes('Awaiting independent approval. It remains staged and is n
 assert(panel.includes('Publication was denied. The staged tool was not published.'), 'denied state must be calm and explicit')
 assert(panel.includes('Request publication') && panel.includes('Check approval & resume') && panel.includes('Stage again'), 'publication lifecycle actions must be explicit')
 assert(!panel.includes('Tool authored'), 'live staged panel must not claim legacy authoring success')
-assert(app.includes('stageAuthorTool') && app.includes('publishStagedAuthor'), 'app must separate staging from publishing')
+assert(app.includes('useAuthorStageController') && app.includes('publishStagedAuthor'), 'app must separate staging from publishing')
+assert(toolCast.includes('useAuthorStageController') && toolCast.includes('publishStagedAuthor'), 'unified surface must separate staging from publishing')
+assert(authorController.includes('authorPointerValid') && authorPointer.includes('leaf.inflightAuthor.v1'), 'author staging must use its own scoped durable pointer')
 
 console.log('customization web checks passed')

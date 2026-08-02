@@ -5,7 +5,7 @@
       "0001", "0002", "0003", "0004", "0005", "0006", "0007",
       "0008", "0009", "0010", "0011", "0012", "0013", "0014",
       "0015", "0016", "0017", "0018", "0019", "0020", "0021",
-      "0022", "0023", "0024", "0025"
+      "0022", "0023", "0024", "0025", "0026", "0027"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands and current live staging and production selector values are not present in this repository."
@@ -175,7 +175,7 @@
       "selectors": [
         {"name": "LEAF_AUTHOR_QUOTA_STORE", "allowed_modes": ["memory", "postgres"], "repository_default": "memory"}
       ],
-      "postgres_tables": ["author_quota_counters"],
+      "postgres_tables": ["author_quota_counters", "author_quota_attempts"],
       "legacy_source": ["process-memory daily counters"],
       "backfill": {"command": null, "status": "not_applicable_to_memory", "note": "Memory counters have no durable source to import; the cutover day starts from zero for every tenant."},
       "parity": {"command": "python -m pytest -q server/tests/test_author_quota.py", "status": "contract_tests_only", "note": "Tests cover the admission gate and the atomic counter contract, not a live cutover day."},

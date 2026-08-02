@@ -10,6 +10,9 @@ from customization_postgres_store import _postgres_sql
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ASYNC_MIGRATION = (
+    ROOT / "platform" / "migrations" / "0026_customization_async_stage.sql"
+).read_text(encoding="utf-8")
 MIGRATION = (
     ROOT / "platform" / "migrations" / "0020_customization_authority.sql"
 ).read_text(encoding="utf-8")
@@ -54,6 +57,17 @@ def test_postgres_store_initialization_is_validation_only() -> None:
     assert "information_schema.tables" in source
     assert "CREATE TABLE" not in source
     assert "apply_migration" not in source
+
+
+def test_async_stage_migration_owns_durable_request_and_fenced_lease() -> None:
+    for column in (
+        "request_description", "request_fingerprint", "stage_attempt",
+        "stage_lease_owner", "stage_lease_expires_at", "stage_heartbeat_at",
+        "stage_next_attempt_at", "stage_error_code", "stage_error_retryable",
+        "stage_phase", "stage_started_at", "stage_finished_at",
+    ):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in ASYNC_MIGRATION
+    assert "customization_stage_claim_idx" in ASYNC_MIGRATION
 
 
 def test_migration_owns_every_reconciliation_table() -> None:

@@ -224,7 +224,7 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -248,6 +248,27 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
     setPublishErr(null)
     if (targetToolName) requestAnimationFrame(() => descRef.current?.focus())
   }, [targetToolName])
+
+  useEffect(() => {
+    if (stageActivity?.result) {
+      setAuthored(stageActivity.result)
+      setErr(null)
+    }
+  }, [stageActivity?.result])
+
+  useEffect(() => {
+    const e = stageActivity?.error
+    if (!e) {
+      if (stageActivity?.active) setErr(null)
+      return
+    }
+    if (stageActivity?.resumable) setErr(String(e.message || e))
+    else if (e.entitlementRequired) setBuildGate(true)
+    else if (e.grantRequired) setGrantGate(true)
+    else if (e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
+    else if (isServiceDown(e)) setSvcGate(true)
+    else setErr(String(e.message || e))
+  }, [stageActivity?.error, stageActivity?.resumable])
 
   // Prefill from a build-lane route (only when the signal changes, so manual
   // edits are never clobbered by a re-render).
@@ -326,12 +347,15 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
     return () => document.removeEventListener('keydown', onKey)
   })
 
-  const secs = Math.floor(elapsedMs / 1000)
   const prov = authored ? readProvenance(authored) : null
   const provLine = authored ? authoredProvLine(authored) : null
   const publicationStatus = authored?.publication_status || null
   const publicationPending = publicationStatus === 'awaiting_approval'
   const publicationDenied = publicationStatus === 'denied'
+  const busyNow = busy || !!stageActivity?.active
+  const authorLocked = busyNow || publishing || !!stageActivity?.pointer
+  const shownElapsedMs = stageActivity?.active ? stageActivity.elapsedMs : elapsedMs
+  const shownSecs = Math.floor(shownElapsedMs / 1000)
 
   return (
     <div className="author-panel author-inner">
@@ -344,7 +368,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             <input id="author-target" value={targetToolName} readOnly />
             <p>The target is locked, so this repair updates that tool instead of creating another.</p>
           </div>
-          <button type="button" className="chip-act" onClick={onCancelRevision} disabled={busy}>Cancel revision</button>
+          <button type="button" className="chip-act" onClick={onCancelRevision} disabled={authorLocked}>Cancel revision</button>
         </div>
       )}
       {(!buildEntitled || buildGate)
@@ -365,26 +389,28 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
         onChange={(e) => setDesc(e.target.value)}
         placeholder={targetToolName ? 'Describe the repair to make to this tool' : 'e.g. count panels within 24in of the roof edge'}
         rows={3}
-        disabled={busy}
+        disabled={authorLocked}
       />
       <div className="examples">
         {EXAMPLES.map((ex) => (
-          <button key={ex} className="chip" onClick={() => setDesc(ex)} disabled={busy}>{ex}</button>
+          <button key={ex} className="chip" onClick={() => setDesc(ex)} disabled={authorLocked}>{ex}</button>
         ))}
       </div>
-      <button className="btn primary" disabled={busy || !desc.trim() || !buildEntitled} onClick={submit}>
-        {busy ? 'Authoring…' : targetToolName ? 'Generate revision' : 'Generate tool'}
+      <button className="btn primary" disabled={authorLocked || !desc.trim() || !buildEntitled} onClick={submit}>
+        {busyNow ? 'Authoring…' : targetToolName ? 'Generate revision' : 'Generate tool'}
       </button>
-      {busy && (
+      {busyNow && (
         <div className="authoring">
-          Authoring with the agent · {secs}s
-          <span className="dim"> · real authoring takes ~1–2 min · safe to wait</span>
+          {stageActivity?.phase === 'reconnecting' ? 'Reconnecting to authoring' : 'Authoring with the agent'} · {shownSecs}s
+          <span className="dim"> · {stageActivity?.progress || 'safe to wait or reload'}</span>
         </div>
       )}
       {err && (
         <div className="inline-error">
           <span>Couldn’t author the tool — {err}</span>
-          <button className="chip-act" onClick={submit}>Retry <span className="key">R</span></button>
+          <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
+            {stageActivity?.resumable ? 'Resume authoring' : <>Retry <span className="key">R</span></>}
+          </button>
           <span className="err-note">Your description is preserved.</span>
         </div>
       )}
@@ -431,9 +457,9 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           )}
           <pre className="code"><code>{authored.code}</code></pre>
           {!authored.published ? (
-            <button className="chip-act" onClick={publicationDenied ? submit : publish} disabled={publishing || busy}>
+            <button className="chip-act" onClick={publicationDenied ? submit : publish} disabled={publishing || busyNow}>
               {publicationDenied
-                ? (busy ? 'Authoring…' : 'Stage again')
+                ? (busyNow ? 'Authoring…' : 'Stage again')
                 : publishing
                   ? (publicationPending ? 'Checking…' : 'Publishing…')
                   : publicationPending

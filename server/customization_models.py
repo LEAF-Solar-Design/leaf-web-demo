@@ -71,6 +71,18 @@ class ChangeSet:
     updated_at: str
     change_kind: str = "create"
     target_tool_name: Optional[str] = None
+    request_description: Optional[str] = None
+    request_fingerprint: Optional[str] = None
+    stage_attempt: int = 0
+    stage_lease_owner: Optional[str] = None
+    stage_lease_expires_at: Optional[int] = None
+    stage_heartbeat_at: Optional[int] = None
+    stage_next_attempt_at: int = 0
+    stage_error_code: Optional[str] = None
+    stage_error_retryable: bool = False
+    stage_phase: str = "queued"
+    stage_started_at: Optional[str] = None
+    stage_finished_at: Optional[str] = None
 
 
 @dataclass(frozen=True)

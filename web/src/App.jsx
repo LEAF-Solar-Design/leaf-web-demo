@@ -37,7 +37,7 @@ import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
   config, getSession, getTools, getCapabilities, runTool, runToolAsync,
-  getJob, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
+  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject,
 } from './api.js'
@@ -50,6 +50,7 @@ import { THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills } from './co
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
 import useJobController from './controllers/useJobController.js'
+import useAuthorStageController from './controllers/useAuthorStageController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
@@ -255,6 +256,7 @@ export default function App() {
   const drawingErrorRef = useRef(null)
   const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
+  const authorPendingRef = useRef(false)
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
   const barInputRef = useRef(null)      // ⌘K focuses the command bar input
 
@@ -444,7 +446,7 @@ export default function App() {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     },
     openAuthor: (text) => {
-      setAuthorTargetTool(null)
+      if (!authorPendingRef.current) setAuthorTargetTool(null)
       setAuthorSeed(text)
       setAuthorSignal((value) => value + 1)
       setAuthorOpen(true)
@@ -778,6 +780,18 @@ export default function App() {
     onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
   })
   drawingErrorRef.current = setRunErr
+
+  const authorStage = useAuthorStageController({ mock })
+  authorPendingRef.current = !!authorStage.pointer
+
+  useEffect(() => {
+    const pending = authorStage.pointer
+    if (!pending) return
+    setAuthorTargetTool(pending.target_tool_name || null)
+    setAuthorSeed(pending.description || '')
+    setAuthorSignal((value) => value + 1)
+    setAuthorOpen(true)
+  }, [authorStage.pointer?.idempotency_key])
 
   // Tab-close survivability: on load in live mode, if a durable in-flight job
   // pointer exists, re-attach. Terminal already -> render its envelope; still
@@ -1269,11 +1283,11 @@ export default function App() {
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
   const onAuthor = useCallback(async (description, targetToolName = null) => {
     // R5 only stages bytes. It must not place a tool in the runnable catalog.
-    return stageAuthorTool(mock, description, targetToolName)
-  }, [mock])
+    return authorStage.stage(description, targetToolName)
+  }, [authorStage.stage])
 
   const onReviseAuthoredTool = useCallback((tool) => {
-    if (!tool?.name) return
+    if (!tool?.name || authorPendingRef.current) return
     setAuthorTargetTool(tool.name)
     setAuthorSeed('')
     setAuthorSignal((value) => value + 1)
@@ -1282,6 +1296,7 @@ export default function App() {
   }, [])
 
   const onCancelAuthorRevision = useCallback(() => {
+    if (authorPendingRef.current) return
     setAuthorTargetTool(null)
     setAuthorSeed('')
     setAuthorSignal((value) => value + 1)
@@ -1308,12 +1323,13 @@ export default function App() {
             },
           },
         })
+        authorStage.completePublication()
       }
       return { ...res, tool }
     } finally {
       setTourLanded(true)
     }
-  }, [mock, loadCatalog, showToast, upsertTool])
+  }, [authorStage.completePublication, mock, loadCatalog, showToast, upsertTool])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
   // the just-authored tool so the user confirms before it runs (paid actions
@@ -1465,7 +1481,7 @@ export default function App() {
   }, [catalogActions, running])
 
   const onOpenAuthor = useCallback(() => {
-    setAuthorTargetTool(null)
+    if (!authorPendingRef.current) setAuthorTargetTool(null)
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
   }, [])
@@ -1989,6 +2005,8 @@ export default function App() {
             seedAutoSubmit={tourOn}
             targetToolName={authorTargetTool}
             onCancelRevision={onCancelAuthorRevision}
+            stageActivity={authorStage}
+            onResumeAuthor={authorStage.resume}
             notLinked={claudeNotLinked}
             onLinkClaude={() => setClaudeOpen(true)}
             buildEntitled={canBuild}

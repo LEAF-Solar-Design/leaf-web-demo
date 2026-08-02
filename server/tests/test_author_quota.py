@@ -227,6 +227,47 @@ def test_charge_counts_per_tenant_per_day():
     assert author_quota.charge("tenant-a", "2026-07-31", 2) == (True, 1)
 
 
+def test_memory_charge_replays_an_admission_without_double_counting():
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 2, idempotency_key="change-b"
+    ) == (True, 2)
+
+
+def test_memory_charge_replays_a_refusal_without_changing_the_counter():
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-a"
+    ) == (True, 1)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-b"
+    ) == (False, 1)
+
+
+def test_memory_attempt_identity_is_tenant_scoped_and_policy_immutable():
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-a",
+        tier="hosted_pro",
+    ) == (True, 1)
+    # The same attempt keeps its admitted outcome after midnight and after a
+    # tier or limit change. It does not consume the new day's counter.
+    assert author_quota.charge(
+        "tenant-a", "2026-07-31", 0, idempotency_key="change-a", tier="demo"
+    ) == (True, 1)
+    assert "2026-07-31:tenant-a" not in author_quota._MEMORY_STATE
+    # Another tenant may use the same caller key without inheriting the result.
+    assert author_quota.charge(
+        "tenant-b", "2026-07-31", 0, idempotency_key="change-a", tier="demo"
+    ) == (False, 0)
+    assert author_quota.charge(
+        "tenant-a", "2026-07-30", 1, idempotency_key="change-b"
+    ) == (False, 1)
+
+
 def test_counter_key_carries_day_and_tenant():
     assert author_quota.counter_key("tenant-a", "2026-07-30") == "2026-07-30:tenant-a"
 
@@ -283,6 +324,71 @@ def test_migration_matches_the_shared_counter_contract():
         assert column in sql
     assert "PRIMARY KEY (namespace, counter_key)" in sql
 
+    admission_sql = (PROJECT_ROOT / "platform" / "migrations" /
+                     "0027_author_quota_idempotency.sql").read_text(
+                         encoding="utf-8"
+                     )
+    assert f"CREATE TABLE IF NOT EXISTS {author_quota.ATTEMPT_TABLE}" in admission_sql
+    for column in (
+        "tenant_id", "attempt_key", "counter_key", "quota_day", "quota_tier",
+        "quota_limit", "accepted", "used",
+    ):
+        assert column in admission_sql
+    assert "PRIMARY KEY (tenant_id, attempt_key)" in admission_sql
+    assert "author_quota_attempts_immutable" in admission_sql
+    assert "BEFORE UPDATE OR DELETE" in admission_sql
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_postgres_replay_returns_stored_policy_without_recharging(
+    monkeypatch, accepted
+):
+    stored = {
+        "tenant_id": "tenant-a", "attempt_key": "change-a",
+        "counter_key": "2026-07-30:tenant-a", "quota_day": "2026-07-30",
+        "quota_tier": "hosted_pro", "quota_limit": 1,
+        "accepted": accepted, "used": 1,
+    }
+    calls = []
+
+    class Cursor:
+        def fetchone(self):
+            return stored
+
+    class Connection:
+        def execute(self, sql, params):
+            calls.append((sql, params))
+            if "pg_advisory_xact_lock" in sql:
+                return Cursor()
+            if "FROM author_quota_attempts" in sql:
+                return Cursor()
+            raise AssertionError("stored replay must not touch the aggregate counter")
+
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **_kwargs):
+            return operation(Connection())
+
+    monkeypatch.setattr(
+        author_quota, "_load_platform_counters", lambda: (Database(), object)
+    )
+    monkeypatch.setattr(
+        author_quota, "_postgres_counter",
+        lambda: SimpleNamespace(
+            consume_in_transaction=lambda *_args, **_kwargs: (
+                _ for _ in ()
+            ).throw(AssertionError("counter must not charge"))
+        ),
+    )
+    decision = author_quota._postgres_charge(
+        "tenant-a", "2026-08-01", "demo", 99, "change-a"
+    )
+    assert (decision.accepted, decision.day, decision.tier, decision.limit) == (
+        accepted, "2026-07-30", "hosted_pro", 1,
+    )
+    query_params = [params for sql, params in calls if "FROM author_quota_attempts" in sql]
+    assert query_params == [{"tenant_id": "tenant-a", "attempt_key": "change-a"}]
+
 
 def test_retention_window_is_bounded(monkeypatch):
     assert author_quota.retention_days() == 8
@@ -316,6 +422,43 @@ def test_enforce_raises_with_the_facts_the_envelope_reports(monkeypatch, allow_m
         author_quota.enforce("tenant-a", "hosted_starter")
     assert (caught.value.tier, caught.value.limit, caught.value.used) == (
         "hosted_starter", 2, 2)
+
+
+def test_enforce_admitted_replay_survives_midnight_and_policy_change(
+    monkeypatch, allow_memory
+):
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    assert author_quota.enforce(
+        "tenant-a", "hosted_pro", now_ts=1785369599.0,
+        idempotency_key="change-a",
+    ) is None
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "0")
+    assert author_quota.enforce(
+        "tenant-a", "demo", now_ts=1785369600.0,
+        idempotency_key="change-a",
+    ) is None
+    assert "2026-07-30:tenant-a" not in author_quota._MEMORY_STATE
+
+
+def test_enforce_refused_replay_keeps_original_day_tier_and_limit(
+    monkeypatch, allow_memory
+):
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "0")
+    with pytest.raises(author_quota.AuthorQuotaExceeded) as first:
+        author_quota.enforce(
+            "tenant-a", "demo", now_ts=1785283200.0,
+            idempotency_key="change-a",
+        )
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "100")
+    with pytest.raises(author_quota.AuthorQuotaExceeded) as replay:
+        author_quota.enforce(
+            "tenant-a", "hosted_pro", now_ts=1785369600.0,
+            idempotency_key="change-a",
+        )
+    assert (replay.value.day, replay.value.tier, replay.value.limit,
+            replay.value.used) == (
+        first.value.day, "demo", 0, 0,
+    )
 
 
 def test_enforce_fails_closed_when_the_policy_module_is_missing(monkeypatch, allow_memory):

@@ -66,7 +66,7 @@ describe("Agent SDK author contract", () => {
       completeRequiredBrokerTest(TOOL, run, undefined, source),
     ).resolves.toBeNull();
     expect(run).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledWith(TOOL, {}, source);
+    expect(run).toHaveBeenCalledWith(TOOL, {}, source, undefined);
   });
 
   it("derives a bounded valid fallback input from required params", async () => {
@@ -96,6 +96,7 @@ describe("Agent SDK author contract", () => {
     expect(run).toHaveBeenCalledWith(
       parameterized,
       { width: 2, label: "sample", options: { centered: true } },
+      undefined,
       undefined,
     );
   });

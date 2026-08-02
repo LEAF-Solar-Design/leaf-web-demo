@@ -53,6 +53,7 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
   }
 
   const signOut = async () => {
+    try { storage?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
     requireAuth('signout')
     await endSession?.()
   }

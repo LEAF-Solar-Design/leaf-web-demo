@@ -30,6 +30,7 @@ import importlib.util
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -39,6 +40,7 @@ PROJECT_ROOT = SERVER_DIR.parent
 
 # The authority-owned table bound to the shared counter primitive (migration 0023).
 COUNTER_TABLE = "author_quota_counters"
+ATTEMPT_TABLE = "author_quota_attempts"
 # One namespace for this authority; the day and tenant live in the counter key.
 COUNTER_NAMESPACE = "author_daily"
 
@@ -48,6 +50,19 @@ _USAGE_POLICY: Any = None
 _MEMORY_LOCK = threading.Lock()
 # {counter_key: value} — reset implicitly, since a new UTC day is a new key.
 _MEMORY_STATE: dict[str, int] = {}
+_MEMORY_ATTEMPTS: dict[tuple[str, str], "AttemptDecision"] = {}
+
+
+@dataclass(frozen=True)
+class AttemptDecision:
+    tenant_id: str
+    attempt_key: str | None
+    counter_key: str
+    day: str
+    tier: str
+    limit: int
+    accepted: bool
+    used: int
 
 
 class AuthorQuotaStoreError(RuntimeError):
@@ -146,7 +161,7 @@ def _postgres_counter():
 
 
 def _cleanup_old_counters(conn) -> None:
-    """Delete at most 100 expired rows, as the guest cap authority does."""
+    """Delete a bounded batch of expired aggregate counter rows."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days())
     conn.execute(
         f"""
@@ -163,7 +178,46 @@ def _cleanup_old_counters(conn) -> None:
     )
 
 
-def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
+def _decision_from_row(row) -> AttemptDecision:
+    return AttemptDecision(
+        tenant_id=str(row["tenant_id"]),
+        attempt_key=str(row["attempt_key"]),
+        counter_key=str(row["counter_key"]),
+        day=str(row["quota_day"]),
+        tier=str(row["quota_tier"]),
+        limit=int(row["quota_limit"]),
+        accepted=bool(row["accepted"]),
+        used=int(row["used"]),
+    )
+
+
+def _postgres_lookup(tenant_id: str, attempt_key: str) -> AttemptDecision | None:
+    try:
+        db, _counter_type = _load_platform_counters()
+
+        def lookup(conn):
+            row = conn.execute(
+                "SELECT tenant_id, attempt_key, counter_key, quota_day, quota_tier, "
+                "quota_limit, accepted, used FROM author_quota_attempts "
+                "WHERE tenant_id = %(tenant_id)s AND attempt_key = %(attempt_key)s",
+                {"tenant_id": tenant_id, "attempt_key": attempt_key},
+            ).fetchone()
+            return None if row is None else _decision_from_row(row)
+
+        return db.run_transaction(lookup, isolation="read committed", max_attempts=3)
+    except AuthorQuotaStoreError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise AuthorQuotaStoreError(
+            f"author quota counter unavailable: {type(exc).__name__}"
+        ) from exc
+
+
+def _postgres_charge(
+    tenant_id: str, day: str, tier: str, limit: int,
+    attempt_key: str | None = None,
+) -> AttemptDecision:
+    key = counter_key(tenant_id, day)
     # Package loading and counter construction are INSIDE the wrapper: an import
     # or initialization failure is a store outage like any other, and must become
     # the opaque 503 refusal rather than escaping as a raw 500.
@@ -172,12 +226,45 @@ def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
         counter = _postgres_counter()
 
         def consume(conn):
+            if attempt_key is not None:
+                # Serialize exact concurrent replays before either transaction
+                # reads or charges. A hash collision only adds contention.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%(key)s, 0))",
+                    {"key": f"{len(tenant_id)}:{tenant_id}{attempt_key}"},
+                )
+                prior = conn.execute(
+                    "SELECT tenant_id, attempt_key, counter_key, quota_day, "
+                    "quota_tier, quota_limit, accepted, used "
+                    f"FROM {ATTEMPT_TABLE} WHERE tenant_id = %(tenant_id)s "
+                    "AND attempt_key = %(attempt_key)s",
+                    {"tenant_id": tenant_id, "attempt_key": attempt_key},
+                ).fetchone()
+                if prior is not None:
+                    return _decision_from_row(prior)
             result = counter.consume_in_transaction(
                 conn, namespace=COUNTER_NAMESPACE, key=key, limit=limit,
             )
+            decision = AttemptDecision(
+                tenant_id=tenant_id, attempt_key=attempt_key, counter_key=key,
+                day=day, tier=tier, limit=limit,
+                accepted=bool(result.accepted), used=int(result.value),
+            )
+            if attempt_key is not None:
+                conn.execute(
+                    f"INSERT INTO {ATTEMPT_TABLE} "
+                    "(tenant_id, attempt_key, counter_key, quota_day, quota_tier, "
+                    "quota_limit, accepted, used) VALUES (%(tenant_id)s, "
+                    "%(attempt_key)s, %(counter_key)s, %(day)s, %(tier)s, "
+                    "%(limit)s, %(accepted)s, %(used)s)",
+                    {"tenant_id": tenant_id, "attempt_key": attempt_key,
+                     "counter_key": key, "day": day, "tier": tier,
+                     "limit": limit, "accepted": decision.accepted,
+                     "used": decision.used},
+                )
             if result.accepted:
                 _cleanup_old_counters(conn)
-            return result
+            return decision
 
         result = db.run_transaction(consume, isolation="serializable", max_attempts=3)
     except AuthorQuotaStoreError:
@@ -186,20 +273,63 @@ def _postgres_charge(key: str, limit: int) -> Tuple[bool, int]:
         # Type only: a database error message can carry a connection string.
         raise AuthorQuotaStoreError(
             f"author quota counter unavailable: {type(exc).__name__}") from exc
-    return bool(result.accepted), int(result.value)
+    return result
 
 
-def _memory_charge(key: str, limit: int) -> Tuple[bool, int]:
+def _memory_charge(
+    tenant_id: str, day: str, tier: str, limit: int,
+    attempt_key: str | None = None,
+) -> AttemptDecision:
+    key = counter_key(tenant_id, day)
     with _MEMORY_LOCK:
+        identity = (tenant_id, attempt_key) if attempt_key is not None else None
+        if identity is not None and identity in _MEMORY_ATTEMPTS:
+            return _MEMORY_ATTEMPTS[identity]
         used = _MEMORY_STATE.get(key, 0)
-        if used + 1 > limit:
-            return False, used
-        _MEMORY_STATE[key] = used + 1
-        return True, used + 1
+        accepted = used + 1 <= limit
+        if accepted:
+            used += 1
+            _MEMORY_STATE[key] = used
+        decision = AttemptDecision(
+            tenant_id=tenant_id, attempt_key=attempt_key, counter_key=key,
+            day=day, tier=tier, limit=limit, accepted=accepted, used=used,
+        )
+        if identity is not None:
+            _MEMORY_ATTEMPTS[identity] = decision
+        return decision
+
+
+def lookup_attempt(tenant_id: str, attempt_key: str, *,
+                   require_durable: bool = False) -> AttemptDecision | None:
+    if require_durable and store_mode() != "postgres":
+        raise AuthorQuotaStoreError(
+            "durable author quota replay requires LEAF_AUTHOR_QUOTA_STORE=postgres"
+        )
+    if store_mode() == "postgres":
+        return _postgres_lookup(tenant_id, attempt_key)
+    with _MEMORY_LOCK:
+        return _MEMORY_ATTEMPTS.get((tenant_id, attempt_key))
+
+
+def _charge_decision(tenant_id: str, day: str, tier: str, limit: int, *,
+                     require_durable: bool = False,
+                     idempotency_key: str | None = None) -> AttemptDecision:
+    if require_durable and store_mode() != "postgres":
+        raise AuthorQuotaStoreError(
+            "LEAF_DAILY_AUTHOR_QUOTA is configured but LEAF_AUTHOR_QUOTA_STORE is "
+            "not 'postgres'; a per-process counter is not a cap across replicas "
+            "or restarts"
+        )
+    if store_mode() == "postgres":
+        return _postgres_charge(tenant_id, day, tier, limit, idempotency_key)
+    return _memory_charge(tenant_id, day, tier, limit, idempotency_key)
 
 
 def charge(tenant_id: str, day: str, limit: int, *,
-           require_durable: bool = False) -> Tuple[bool, int]:
+           require_durable: bool = False,
+           idempotency_key: str | None = None,
+           tier: str = "unknown",
+           return_decision: bool = False) -> Tuple[bool, int] | AttemptDecision:
     """Charge one authoring attempt against ``limit`` for ``tenant_id`` on ``day``.
 
     Returns ``(accepted, value)``. On acceptance ``value`` is the count INCLUDING
@@ -214,15 +344,13 @@ def charge(tenant_id: str, day: str, limit: int, *,
     against memory in such a deployment reads as enforced while bounding almost
     nothing, so it fails loudly at the first attempt instead.
     """
-    if require_durable and store_mode() != "postgres":
-        raise AuthorQuotaStoreError(
-            "LEAF_DAILY_AUTHOR_QUOTA is configured but LEAF_AUTHOR_QUOTA_STORE is "
-            "not 'postgres'; a per-process counter is not a cap across replicas "
-            "or restarts")
-    key = counter_key(tenant_id, day)
-    if store_mode() == "postgres":
-        return _postgres_charge(key, limit)
-    return _memory_charge(key, limit)
+    decision = _charge_decision(
+        tenant_id, day, tier, limit, require_durable=require_durable,
+        idempotency_key=idempotency_key,
+    )
+    if return_decision:
+        return decision
+    return decision.accepted, decision.used
 
 
 def durability_required() -> bool:
@@ -258,7 +386,10 @@ def usage_policy():
     return _USAGE_POLICY
 
 
-def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> None:
+def enforce(
+    tenant_id: str, tier: str, *, now_ts: Optional[float] = None,
+    idempotency_key: str | None = None,
+) -> None:
     """Charge one authoring attempt, or refuse. Returns ``None`` to PROCEED.
 
     Call this at the LAST point before authoring spends money, so a request
@@ -267,6 +398,16 @@ def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> Non
     of attempts for the UTC day, or ``AuthorQuotaStoreError`` when a configured
     quota cannot be evaluated — never silently unmetered.
     """
+    durable = durability_required()
+    if idempotency_key is not None:
+        prior = lookup_attempt(tenant_id, idempotency_key)
+        if prior is not None:
+            if not prior.accepted:
+                raise AuthorQuotaExceeded(
+                    prior.tier, prior.limit, prior.used, prior.day
+                )
+            return
+
     usage = usage_policy()
     if usage is None:
         # The policy module did not load. Intent is still readable without it:
@@ -279,11 +420,15 @@ def enforce(tenant_id: str, tier: str, *, now_ts: Optional[float] = None) -> Non
     if limit is None:
         return  # no quota configured -> prior behavior, no store touched
     day = usage.author_quota_day(now_ts)
-    accepted, used = charge(
-        tenant_id, day, limit, require_durable=durability_required(),
+    decision = charge(
+        tenant_id, day, limit, require_durable=durable,
+        idempotency_key=idempotency_key, tier=tier, return_decision=True,
     )
-    if not accepted:
-        raise AuthorQuotaExceeded(tier, limit, used, day)
+    assert isinstance(decision, AttemptDecision)
+    if not decision.accepted:
+        raise AuthorQuotaExceeded(
+            decision.tier, decision.limit, decision.used, decision.day
+        )
 
 
 def reset_usage_policy() -> None:
@@ -296,6 +441,7 @@ def reset_memory_state() -> None:
     """Clear the in-process counter (tests only)."""
     with _MEMORY_LOCK:
         _MEMORY_STATE.clear()
+        _MEMORY_ATTEMPTS.clear()
 
 
 def reset_postgres_counter() -> None:

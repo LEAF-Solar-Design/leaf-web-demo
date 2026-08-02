@@ -17,6 +17,7 @@ const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
 const AUDIENCE = import.meta.env.VITE_AUTH0_AUDIENCE || ''
 const JWT_KEY = 'leaf.jwt'
+const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
 
 // True only when all three public SPA config values are baked into the build.
 export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
@@ -89,7 +90,10 @@ export function isSignedIn() {
 // Clear the local token and (best-effort) end the Auth0 session, returning to
 // the app origin -- which comes back up in the calm signed-out gate.
 export async function logout() {
-  try { localStorage.removeItem(JWT_KEY) } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(JWT_KEY)
+    localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
+  } catch { /* ignore */ }
   const c = await client()
   if (c) {
     try { await c.logout({ logoutParams: { returnTo: window.location.origin } }); return } catch { /* fall through */ }

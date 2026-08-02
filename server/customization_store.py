@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,18 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   approver_subject TEXT,
   change_kind TEXT NOT NULL DEFAULT 'create' CHECK (change_kind IN ('create', 'revise')),
   target_tool_name TEXT,
+  request_description TEXT,
+  request_fingerprint TEXT,
+  stage_attempt INTEGER NOT NULL DEFAULT 0,
+  stage_lease_owner TEXT,
+  stage_lease_expires_at INTEGER,
+  stage_heartbeat_at INTEGER,
+  stage_next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  stage_error_code TEXT,
+  stage_error_retryable INTEGER NOT NULL DEFAULT 0 CHECK (stage_error_retryable IN (0, 1)),
+  stage_phase TEXT NOT NULL DEFAULT 'queued',
+  stage_started_at TEXT,
+  stage_finished_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   UNIQUE (tenant_id, idempotency_key)
@@ -183,6 +196,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     self._migrate_confirmation_bindings(conn)
                     self._migrate_publication_requests(conn)
                     self._migrate_change_bindings(conn)
+                    self._migrate_stage_jobs(conn)
                 except Exception:
                     conn.rollback()
                     raise
@@ -264,6 +278,37 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "ALTER TABLE customization_change_sets ADD COLUMN target_tool_name TEXT"
             )
 
+    @staticmethod
+    def _migrate_stage_jobs(conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(customization_change_sets)")
+        }
+        definitions = {
+            "request_description": "TEXT",
+            "request_fingerprint": "TEXT",
+            "stage_attempt": "INTEGER NOT NULL DEFAULT 0",
+            "stage_lease_owner": "TEXT",
+            "stage_lease_expires_at": "INTEGER",
+            "stage_heartbeat_at": "INTEGER",
+            "stage_next_attempt_at": "INTEGER NOT NULL DEFAULT 0",
+            "stage_error_code": "TEXT",
+            "stage_error_retryable": "INTEGER NOT NULL DEFAULT 0",
+            "stage_phase": "TEXT NOT NULL DEFAULT 'queued'",
+            "stage_started_at": "TEXT",
+            "stage_finished_at": "TEXT",
+        }
+        for name, definition in definitions.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE customization_change_sets ADD COLUMN {name} {definition}"
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS customization_stage_claim_idx "
+            "ON customization_change_sets "
+            "(state, stage_next_attempt_at, stage_lease_expires_at)"
+        )
+
     ensure_started = initialize
 
     @contextmanager
@@ -303,6 +348,48 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
     ) -> ChangeSet:
+        row, _ = self._reserve_change_set(
+            tenant_id=tenant_id, idempotency_key=idempotency_key,
+            base_commit=base_commit,
+            desired_platform_release=desired_platform_release,
+            workspace_contract_digest=workspace_contract_digest,
+            author_subject=author_subject, change_set_id=change_set_id,
+            change_kind=change_kind, target_tool_name=target_tool_name,
+            request_description=None, request_fingerprint=None,
+        )
+        return row
+
+    def reserve_stage(
+        self, *, request_description: str, request_fingerprint: str,
+        **kwargs: object,
+    ) -> tuple[ChangeSet, bool]:
+        request_description = require_bounded(
+            request_description, "request_description", 8000
+        )
+        request_fingerprint = require_sha(
+            request_fingerprint, 64, "request_fingerprint"
+        )
+        return self._reserve_change_set(
+            request_description=request_description,
+            request_fingerprint=request_fingerprint,
+            **kwargs,
+        )
+
+    def _reserve_change_set(
+        self,
+        *,
+        tenant_id: str,
+        idempotency_key: str,
+        base_commit: str,
+        desired_platform_release: str,
+        workspace_contract_digest: str,
+        author_subject: str,
+        change_set_id: Optional[str] = None,
+        change_kind: str = "create",
+        target_tool_name: Optional[str] = None,
+        request_description: Optional[str],
+        request_fingerprint: Optional[str],
+    ) -> tuple[ChangeSet, bool]:
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
         idempotency_key = require_bounded(idempotency_key, "idempotency_key", 200)
         base_commit = require_sha(base_commit, 40, "base_commit")
@@ -337,17 +424,21 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.author_subject == author_subject
                     and row.change_kind == change_kind
                     and row.target_tool_name == target_tool_name
+                    and row.request_fingerprint == request_fingerprint
+                    and row.request_description == request_description
                 )
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
-                return row
+                return row, False
             conn.execute(
                 "INSERT INTO customization_change_sets "
                 "(change_set_id, tenant_id, idempotency_key, state, version, base_commit, "
-                "desired_platform_release, workspace_contract_digest, author_subject) "
-                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
+                "desired_platform_release, workspace_contract_digest, author_subject, "
+                "request_description, request_fingerprint) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
                 (change_set_id, tenant_id, idempotency_key, ChangeState.CREATED.value,
-                 base_commit, desired_platform_release, workspace_contract_digest, author_subject),
+                 base_commit, desired_platform_release, workspace_contract_digest,
+                 author_subject, request_description, request_fingerprint),
             )
             conn.execute(
                 "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ? "
@@ -356,7 +447,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             )
             row = self._find_change_set(conn, tenant_id, change_set_id)
             self._append_audit(conn, row, None, ChangeState.CREATED, idempotency_key)
-            return row
+            return row, True
 
     def get_change_set(self, *, tenant_id: str, change_set_id: str) -> ChangeSet:
         self.initialize()
@@ -376,6 +467,120 @@ class SQLiteCustomizationStore(CustomizationRepository):
             if row is None:
                 raise ChangeSetNotFoundError("change set was not found")
             return self._change_set(row)
+
+    def claim_stage(
+        self, *, owner: str, lease_seconds: float = 30.0
+    ) -> ChangeSet | None:
+        owner = require_bounded(owner, "owner", 300)
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        now_ms = int(time.time() * 1000)
+        expires_ms = now_ms + int(lease_seconds * 1000)
+        with self._transaction() as conn:
+            candidate = conn.execute(
+                "SELECT tenant_id, change_set_id FROM customization_change_sets "
+                "WHERE state = ? AND stage_next_attempt_at <= ? "
+                "AND (stage_lease_owner IS NULL OR stage_lease_expires_at <= ?) "
+                "ORDER BY created_at, change_set_id LIMIT 1",
+                (ChangeState.STAGING.value, now_ms, now_ms),
+            ).fetchone()
+            if candidate is None:
+                return None
+            updated = conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = ?, "
+                "stage_lease_expires_at = ?, stage_heartbeat_at = ?, "
+                "stage_attempt = stage_attempt + 1, stage_phase = 'authoring', "
+                "stage_error_code = NULL, stage_error_retryable = ?, "
+                "stage_started_at = COALESCE(stage_started_at, "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ? AND state = ? "
+                "AND (stage_lease_owner IS NULL OR stage_lease_expires_at <= ?)",
+                (owner, expires_ms, now_ms, False, candidate["tenant_id"],
+                 candidate["change_set_id"], ChangeState.STAGING.value, now_ms),
+            )
+            if updated.rowcount != 1:
+                return None
+            return self._find_change_set(
+                conn, candidate["tenant_id"], candidate["change_set_id"]
+            )
+
+    def heartbeat_stage(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+        lease_seconds: float = 30.0,
+    ) -> bool:
+        now_ms = int(time.time() * 1000)
+        expires_ms = now_ms + int(lease_seconds * 1000)
+        with self._transaction() as conn:
+            result = conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_expires_at = ?, "
+                "stage_heartbeat_at = ?, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ? AND state = ? "
+                "AND stage_lease_owner = ? AND stage_lease_expires_at > ?",
+                (expires_ms, now_ms, tenant_id, change_set_id,
+                 ChangeState.STAGING.value, owner, now_ms),
+            )
+            return result.rowcount == 1
+
+    def complete_stage_claim(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+    ) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_phase = 'staged', "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ? AND state = ? "
+                "AND stage_lease_owner = ?",
+                (tenant_id, change_set_id, ChangeState.STAGED.value, owner),
+            )
+            return result.rowcount == 1
+
+    def defer_stage_claim(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+        reason_code: str, delay_seconds: float,
+    ) -> bool:
+        reason_code = require_bounded(reason_code, "reason_code", 200)
+        next_ms = int((time.time() + max(delay_seconds, 0.0)) * 1000)
+        with self._transaction() as conn:
+            result = conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_next_attempt_at = ?, "
+                "stage_error_code = ?, stage_error_retryable = ?, "
+                "stage_phase = 'queued', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ? AND state = ? "
+                "AND stage_lease_owner = ?",
+                (next_ms, reason_code, True, tenant_id, change_set_id,
+                 ChangeState.STAGING.value, owner),
+            )
+            return result.rowcount == 1
+
+    def fail_stage_claim(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+        reason_code: str, retryable: bool,
+    ) -> ChangeSet | None:
+        reason_code = require_bounded(reason_code, "reason_code", 200)
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.state is not ChangeState.STAGING or row.stage_lease_owner != owner:
+                return None
+            failed = self._transition_row(
+                conn, row, ChangeState.FAILED, row.version,
+                f"stage-failed:{row.idempotency_key}:{row.stage_attempt}",
+                expected_state=ChangeState.STAGING, reason_code=reason_code,
+            )
+            conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_error_code = ?, "
+                "stage_error_retryable = ?, stage_phase = 'failed', "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (reason_code, bool(retryable), tenant_id, change_set_id),
+            )
+            return self._find_change_set(conn, tenant_id, change_set_id)
 
     def transition(
         self,
@@ -411,6 +616,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         catalog_digest: str,
         platform_release: str,
         workspace_contract_digest: str,
+        stage_lease_owner: Optional[str] = None,
+        stage_attempt: Optional[int] = None,
     ) -> ChangeSet:
         staged_commit = require_sha(staged_commit, 40, "staged_commit")
         catalog_digest = require_sha(catalog_digest, 64, "catalog_digest")
@@ -420,14 +627,30 @@ class SQLiteCustomizationStore(CustomizationRepository):
         )
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
+            if stage_lease_owner is not None:
+                now_ms = int(time.time() * 1000)
+                if (row.stage_lease_owner != stage_lease_owner
+                        or row.stage_attempt != stage_attempt
+                        or (row.stage_lease_expires_at or 0) <= now_ms):
+                    raise ChangeSetConflictError(
+                        "stage worker lease generation is no longer authoritative"
+                    )
             if row.workspace_contract_digest != workspace_contract_digest:
                 raise ChangeSetConflictError("workspace contract digest does not match the reserved change set")
             if row.desired_platform_release != platform_release:
                 raise ChangeSetConflictError("platform release does not match the reserved change set")
-            return self._transition_row(
+            self._transition_row(
                 conn, row, ChangeState.STAGED, expected_version, idempotency_key,
                 staged_commit=staged_commit, catalog_digest=catalog_digest,
             )
+            conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_phase = 'staged', "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            )
+            return self._find_change_set(conn, tenant_id, change_set_id)
 
     def publish(
         self,
@@ -1060,6 +1283,18 @@ class SQLiteCustomizationStore(CustomizationRepository):
             author_subject=row["author_subject"], approver_subject=row["approver_subject"],
             created_at=row["created_at"], updated_at=row["updated_at"],
             change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
+            request_description=row["request_description"],
+            request_fingerprint=row["request_fingerprint"],
+            stage_attempt=row["stage_attempt"],
+            stage_lease_owner=row["stage_lease_owner"],
+            stage_lease_expires_at=row["stage_lease_expires_at"],
+            stage_heartbeat_at=row["stage_heartbeat_at"],
+            stage_next_attempt_at=row["stage_next_attempt_at"],
+            stage_error_code=row["stage_error_code"],
+            stage_error_retryable=bool(row["stage_error_retryable"]),
+            stage_phase=row["stage_phase"],
+            stage_started_at=row["stage_started_at"],
+            stage_finished_at=row["stage_finished_at"],
         )
 
     @staticmethod

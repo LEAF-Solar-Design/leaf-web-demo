@@ -47,8 +47,11 @@ import { scrubSecrets } from "./envScrub.js";
 // exhaustive). Kept local so the gate never typechecks against their .d.ts.
 // --------------------------------------------------------------------------- //
 type CallToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+export interface AuthorSdkQuery extends AsyncIterable<unknown> {
+  close(): void;
+}
 interface SdkModule {
-  query(args: { prompt: string; options: Record<string, unknown> }): AsyncIterable<unknown>;
+  query(args: { prompt: string; options: Record<string, unknown> }): AuthorSdkQuery;
   createSdkMcpServer(opts: Record<string, unknown>): unknown;
   tool(
     name: string,
@@ -127,7 +130,11 @@ export interface AgentSdkRunnerOptions {
   maxTotalTokens?: number;
   /** Wall-clock cap for one author session. Defaults to LEAF_AUTHOR_TIMEOUT_S. */
   maxWallTimeMs?: number;
+  /** Bounded reasoning effort for authoring. Defaults to LEAF_AUTHOR_EFFORT, then low. */
+  effort?: AuthorEffort;
 }
+
+export type AuthorEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AuthorBrokerTestState {
   attempted: boolean;
@@ -339,6 +346,86 @@ export function resolveAuthorTimeoutMs(
     : 300_000;
 }
 
+export function resolveAuthorEffort(
+  explicit: AuthorEffort | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): AuthorEffort | undefined {
+  if (explicit) return explicit;
+  const configured = env.LEAF_AUTHOR_EFFORT;
+  return configured === "low" || configured === "medium" || configured === "high" ||
+    configured === "xhigh" || configured === "max"
+    ? configured
+    : undefined;
+}
+
+export async function runAuthorQueryWithDeadline(
+  query: AuthorSdkQuery,
+  abort: AbortController,
+  timeoutMs: number,
+  drain: () => Promise<void>,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeoutError = () => new Error(
+    `Agent SDK author session exceeded the ${Math.round(timeoutMs / 1000)}s wall-clock limit.`,
+  );
+  timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      query.close();
+    } catch {
+      // The typed timeout below remains authoritative even if SDK cleanup fails.
+    }
+    abort.abort();
+  }, timeoutMs);
+  try {
+    await drain();
+  } catch (error) {
+    if (timedOut) throw timeoutError();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    try {
+      query.close();
+    } catch {
+      // Cleanup cannot replace the author result or its bounded failure.
+    }
+  }
+  if (timedOut) throw timeoutError();
+}
+
+export async function runWithinRemainingAuthorDeadline<T>(
+  abort: AbortController,
+  startedAtMs: number,
+  timeoutMs: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const remainingMs = Math.max(0, startedAtMs + timeoutMs - Date.now());
+  if (remainingMs === 0) {
+    abort.abort();
+    throw new Error(`Agent SDK author session exceeded the ${Math.round(timeoutMs / 1000)}s wall-clock limit.`);
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort.abort();
+  }, remainingMs);
+  try {
+    const result = await operation();
+    if (timedOut) {
+      throw new Error(`Agent SDK author session exceeded the ${Math.round(timeoutMs / 1000)}s wall-clock limit.`);
+    }
+    return result;
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`Agent SDK author session exceeded the ${Math.round(timeoutMs / 1000)}s wall-clock limit.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class AgentSdkRunner implements AgentRunner {
   /** Per-turn usage from the most recent run() (self-metered). */
   usageLog: TurnUsage[] = [];
@@ -350,9 +437,11 @@ export class AgentSdkRunner implements AgentRunner {
   constructor(private readonly opts: AgentSdkRunnerOptions = {}) {}
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    const authorStartedAt = Date.now();
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     const maxWallTimeMs = resolveAuthorTimeoutMs(this.opts.maxWallTimeMs);
+    const effort = resolveAuthorEffort(this.opts.effort);
     this.usageLog = [];
     this.lastRun = null;
     this.lastRateLimit = null;
@@ -453,6 +542,7 @@ export class AgentSdkRunner implements AgentRunner {
             candidate,
             params,
             candidateSubmission?.code,
+            abort.signal,
           );
           candidateTest = brokerTestState(env);
           const accepted = acceptBrokerTestResult(env);
@@ -475,11 +565,6 @@ export class AgentSdkRunner implements AgentRunner {
     // 4) One design-time session restricted to EXACTLY the three author tools,
     //    plus (when configured) the READ-ONLY registry consultation pair.
     const abort = new AbortController();
-    let wallClockExpired = false;
-    const wallClockTimer = setTimeout(() => {
-      wallClockExpired = true;
-      abort.abort();
-    }, maxWallTimeMs);
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
     const allowed = new Set(allowedNames);
@@ -488,6 +573,7 @@ export class AgentSdkRunner implements AgentRunner {
       options: {
         env: childEnv,
         model: resolveAuthorModel(this.opts.model),
+        ...(effort ? { effort } : {}),
         maxTurns,
         settingSources: [],
         permissionMode: "default",
@@ -511,6 +597,7 @@ export class AgentSdkRunner implements AgentRunner {
     //    normal multi-turn cached session does not trip a false "500k" ceiling; it
     //    is still recorded per turn for full transparency.
     let turn = 0;
+    const usageLog: TurnUsage[] = [];
     let cumulative = 0;
     let result: Record<string, unknown> | null = null;
     let authFailure: string | null = null;
@@ -523,7 +610,8 @@ export class AgentSdkRunner implements AgentRunner {
     let retryDelayMs: number | null = null;
     let loopError: unknown = null;
     try {
-      for await (const raw of q) {
+      await runAuthorQueryWithDeadline(q, abort, maxWallTimeMs, async () => {
+        for await (const raw of q) {
         const msg = raw as Record<string, unknown>;
         if (msg.type === "rate_limit_event") {
           const info = (msg.rate_limit_info ?? {}) as Record<string, unknown>;
@@ -545,7 +633,7 @@ export class AgentSdkRunner implements AgentRunner {
             cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
             cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
           };
-          this.usageLog.push(rec);
+          usageLog.push(rec);
           cumulative += rec.input_tokens + rec.output_tokens + rec.cache_creation_input_tokens;
           const err = msg.error;
           if (typeof err === "string" && ["authentication_failed", "oauth_org_not_allowed", "billing_error"].includes(err)) {
@@ -569,16 +657,18 @@ export class AgentSdkRunner implements AgentRunner {
         } else if (msg.type === "result") {
           result = msg;
         }
-      }
+        }
+      });
     } catch (error) {
       loopError = error;
-    } finally {
-      clearTimeout(wallClockTimer);
     }
 
     // 6) Summarize usage (authoritative totals from the result message when present).
-    const rUsage = (result?.usage ?? {}) as Record<string, number>;
-    const summed = this.usageLog.reduce(
+    // The drain callback mutates this binding, which TypeScript cannot prove
+    // across the async function boundary.
+    const finalResult = result as Record<string, unknown> | null;
+    const rUsage = (finalResult?.usage ?? {}) as Record<string, number>;
+    const summed = usageLog.reduce(
       (acc, r) => {
         acc.input_tokens += r.input_tokens;
         acc.output_tokens += r.output_tokens;
@@ -594,28 +684,26 @@ export class AgentSdkRunner implements AgentRunner {
       cache_creation_input_tokens: rUsage.cache_creation_input_tokens ?? summed.cache_creation_input_tokens,
       cache_read_input_tokens: rUsage.cache_read_input_tokens ?? summed.cache_read_input_tokens,
     };
-    const modelUsage = (result?.modelUsage ?? {}) as Record<string, unknown>;
+    const modelUsage = (finalResult?.modelUsage ?? {}) as Record<string, unknown>;
     const models = Object.keys(modelUsage).length
       ? Object.keys(modelUsage)
-      : [...new Set(this.usageLog.map((r) => r.model).filter((m): m is string => !!m))];
+      : [...new Set(usageLog.map((r) => r.model).filter((m): m is string => !!m))];
+    this.usageLog = usageLog;
     this.lastRun = {
-      turns: typeof result?.num_turns === "number" ? (result.num_turns as number) : turn,
+      turns: typeof finalResult?.num_turns === "number" ? (finalResult.num_turns as number) : turn,
       usage_totals: {
         ...totals,
         total_tokens:
           totals.input_tokens + totals.output_tokens + totals.cache_creation_input_tokens + totals.cache_read_input_tokens,
       },
-      total_cost_usd: typeof result?.total_cost_usd === "number" ? (result.total_cost_usd as number) : null,
+      total_cost_usd: typeof finalResult?.total_cost_usd === "number" ? (finalResult.total_cost_usd as number) : null,
       models,
-      session_id: typeof result?.session_id === "string" ? (result.session_id as string) : null,
-      per_turn: this.usageLog,
-      result_subtype: typeof result?.subtype === "string" ? (result.subtype as string) : null,
+      session_id: typeof finalResult?.session_id === "string" ? (finalResult.session_id as string) : null,
+      per_turn: usageLog,
+      result_subtype: typeof finalResult?.subtype === "string" ? (finalResult.subtype as string) : null,
     };
 
     // 6b) Surface a terminal auth / spend-cap failure (usage is now captured above).
-    if (wallClockExpired) {
-      throw new Error(`Agent SDK author session exceeded the ${Math.round(maxWallTimeMs / 1000)}s wall-clock limit.`);
-    }
     if (loopError) throw loopError;
     if (authFailure) throw new Error(`Agent SDK auth failure: ${authFailure}`);
     if (capHit) throw new Error(capHit);
@@ -642,13 +730,19 @@ export class AgentSdkRunner implements AgentRunner {
         `author session ended without a validated tool (result subtype=${this.lastRun.result_subtype ?? "n/a"}, turns=${turn}).`,
       );
     }
-    const candidateExecutionReceipt = await completeRequiredBrokerTest(
-      candidate,
-      input.toolset.apsTestRun,
-      candidateTest,
-      finalSubmission.code,
-    );
     const finalPkg: ToolPackage = candidate;
+    const candidateExecutionReceipt = await runWithinRemainingAuthorDeadline(
+      abort,
+      authorStartedAt,
+      maxWallTimeMs,
+      () => completeRequiredBrokerTest(
+        finalPkg,
+        input.toolset.apsTestRun,
+        candidateTest,
+        finalSubmission.code,
+        abort.signal,
+      ),
+    );
     const diagnostics = validateToolPackage(finalPkg);
     if (diagnostics.length > 0) {
       throw new Error(`authored tool failed re-validation: ${diagnostics.join("; ")}`);
@@ -680,10 +774,16 @@ export async function completeRequiredBrokerTest(
   apsTestRun: AgentRunInput["toolset"]["apsTestRun"],
   state: AuthorBrokerTestState = emptyBrokerTestState(),
   testSource?: string,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionReceipt | null> {
   const finalState = state.attempted
     ? state
-    : brokerTestState(await apsTestRun(candidate, sampleBrokerTestParams(candidate.params), testSource));
+    : brokerTestState(await apsTestRun(
+        candidate,
+        sampleBrokerTestParams(candidate.params),
+        testSource,
+        signal,
+      ));
   if (!finalState.ok) {
     throw new Error(
       `authored tool failed required broker test${finalState.errorCode ? ` (${finalState.errorCode})` : ""}: ${finalState.failureReason ?? "broker test was not accepted"}.`,
