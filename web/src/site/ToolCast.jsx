@@ -12,7 +12,6 @@ import {
   nlPrompt,
   openProject,
   runToolAsync,
-  stageAuthorTool,
   publishStagedAuthor,
   recordToEnvelope,
   restoreDrawingVersion,
@@ -43,6 +42,7 @@ import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvi
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import useJobController from '../controllers/useJobController.js'
+import useAuthorStageController from '../controllers/useAuthorStageController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
@@ -239,6 +239,7 @@ export default function ToolCast({
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
   const [authorSeed, setAuthorSeed] = useState('')
   const [authorSeedSignal, setAuthorSeedSignal] = useState(0)
+  const [authorTargetTool, setAuthorTargetTool] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false)
   const [workspaceBootstrapRequired, setWorkspaceBootstrapRequired] = useState(false)
   const [sessionRetry, setSessionRetry] = useState(0)
@@ -260,6 +261,7 @@ export default function ToolCast({
   const demoTurnSeqRef = useRef(0)
   const catalogDecisionRef = useRef(null)
   const openedCatalogKeyRef = useRef('')
+  const authorPendingRef = useRef(false)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
     const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -284,6 +286,7 @@ export default function ToolCast({
     },
     onAuthRequired: () => requireAuth('catalog'),
     openAuthor: (text) => {
+      if (!authorPendingRef.current) setAuthorTargetTool(null)
       setAuthorSeed(text || '')
       setAuthorSeedSignal((current) => current + 1)
       setLeftView('author')
@@ -483,6 +486,21 @@ export default function ToolCast({
     onAuthRequired: (required) => { if (required) requireAuth('jobs') },
     formatError: () => 'The panel run did not produce a readable result.',
   })
+
+  const authorStage = useAuthorStageController({
+    mock: PUBLIC_DEMO,
+    enabled: sessionReady,
+  })
+  authorPendingRef.current = !!authorStage.pointer
+
+  useEffect(() => {
+    const pending = authorStage.pointer
+    if (!pending || !sessionReady) return
+    setAuthorTargetTool(pending.target_tool_name || null)
+    setAuthorSeed(pending.description || '')
+    setAuthorSeedSignal((current) => current + 1)
+    setLeftView('author')
+  }, [authorStage.pointer?.idempotency_key, sessionReady])
 
   useEffect(() => {
     onResultOverlayChange?.(drawing.overlayStale ? null : (jobResult?.overlay || null))
@@ -754,10 +772,25 @@ export default function ToolCast({
     if (project) setLeftView('workspace')
   }, [sessionReady, workspace])
 
-  const authorTool = useCallback((description) => {
+  const authorTool = useCallback((description, targetToolName = null) => {
     if (!sessionReady) return undefined
-    return stageAuthorTool(PUBLIC_DEMO, description)
-  }, [sessionReady])
+    return authorStage.stage(description, targetToolName)
+  }, [authorStage.stage, sessionReady])
+
+  const reviseAuthoredTool = useCallback((tool) => {
+    if (!tool?.name || authorStage.pointer) return
+    setAuthorTargetTool(tool.name)
+    setAuthorSeed('')
+    setAuthorSeedSignal((current) => current + 1)
+    setLeftView('author')
+  }, [authorStage.pointer])
+
+  const cancelAuthorRevision = useCallback(() => {
+    if (authorStage.pointer) return
+    setAuthorTargetTool(null)
+    setAuthorSeed('')
+    setAuthorSeedSignal((current) => current + 1)
+  }, [authorStage.pointer])
 
   const publishAuthoredTool = useCallback(async (staged) => {
     if (!sessionReady) return undefined
@@ -1106,6 +1139,7 @@ export default function ToolCast({
               selectedTool={selectedCatalogTool}
               onRequestRun={requestCatalogRun}
               onOpenTool={setSelectedCatalogTool}
+              onReviseTool={reviseAuthoredTool}
               onRetryTools={catalog.actions.retryTools}
               writeEntitled={writeEntitled}
               writeLocked={writeLocked}
@@ -1134,6 +1168,10 @@ export default function ToolCast({
               buildEntitled={platform.isEntitled('build')}
               seed={authorSeed}
               seedSignal={authorSeedSignal}
+              targetToolName={authorTargetTool}
+              onCancelRevision={cancelAuthorRevision}
+              stageActivity={authorStage}
+              onResumeAuthor={authorStage.resume}
             />
           )}
           {(error || jobError) && <div className="tc-operator-error" role="alert"><span className="dot red" />{error || jobError}</div>}

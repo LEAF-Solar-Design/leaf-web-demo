@@ -13,6 +13,7 @@ export default function CapabilityCatalog({
   selectedTool,
   onRequestRun,
   onOpenTool,
+  onReviseTool,
   writeLocked,
   writeEntitled,
 }) {
@@ -85,6 +86,9 @@ export default function CapabilityCatalog({
                   selectedTool={selectedTool}
                   onRequestRun={onRequestRun}
                   onOpenTool={onOpenTool}
+                  onReviseTool={family.family_id === 'custom-authored' || family.family_id === 'custom'
+                    ? onReviseTool
+                    : undefined}
                   writeLocked={writeLocked}
                   writeEntitled={writeEntitled}
                 />
