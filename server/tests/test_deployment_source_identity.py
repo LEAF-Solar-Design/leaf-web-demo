@@ -133,6 +133,45 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
     } <= set(manifest["required"]["secrets"])
 
 
+def test_app_manifest_requires_the_broker_store_authority():
+    """The app reads LEAF_BROKER_STORE from its OWN process env.
+
+    The app serves /api/ops/* and /api/usage itself and never proxies them to
+    the broker, so the broker carrying the variable does nothing for them. All
+    three readers default to "legacy" when it is absent:
+
+      routers/ops_metrics.py::_requires_postgres  -> 503 on the whole ops
+        read-API.
+      routers/usage.py::_aggregate_usage          -> BILLING-VISIBLE. Legacy
+        mode aggregates broker_ledger.jsonl, which is per-container while the
+        broker writes runs to PostgreSQL, so tenant-facing today/total usage and
+        the quota `remaining` come from an authority nothing writes any more.
+      routers/ops.py::_disabled_set               -> disabled-tenant lookups
+        fall back to the legacy broker_tenants.json file.
+
+    The manifest declared it for the broker but not the app, so by the declared
+    contract it was broker-only while app-served code depended on it. Production
+    ran that way after the PostgreSQL cutover and answered 503 on
+    /api/ops/metrics under a valid ops secret. Pin it here so a deploy cannot
+    call the app "correct" while it is in legacy mode.
+    """
+    app_required = set(
+        json.loads(
+            (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+        )["required"]["environment"]
+    )
+    broker_required = set(
+        json.loads(
+            (ROOT / "deploy" / "required-config.broker.json").read_text(
+                encoding="utf-8"
+            )
+        )["required"]["environment"]
+    )
+
+    assert "LEAF_BROKER_STORE" in app_required
+    assert "LEAF_BROKER_STORE" in broker_required
+
+
 def test_baseline_manifests_exclude_later_authored_activation_config():
     manifests = {
         service: json.loads(
