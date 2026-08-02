@@ -620,7 +620,14 @@ describe("proxyTenantMcpServer end to end", () => {
     // Budget of TWO dials (internal test knob, same rule as requestTimeoutMs):
     // the initial stream GET spends one, the first reconnect spends the other,
     // and the next dial is refused — a FAILURE the SDK's counter finally sees.
-    const proxied = await proxyTenantMcpServer({ name: "primer", url: upstream.url }, () => {}, 60_000, 2);
+    //
+    // `dialAttempts` counts LOCAL attempts via the guardedFetch probe. `hits`
+    // only counts requests the server ACCEPTED, and a refused dial never leaves
+    // the process — so `hits` alone cannot distinguish "the SDK stopped
+    // dialling" from "the SDK dials forever and the budget refuses forever".
+    let dialAttempts = 0;
+    const proxied = await proxyTenantMcpServer(
+      { name: "primer", url: upstream.url }, () => {}, 60_000, 2, () => { dialAttempts += 1; });
     expect(proxied).not.toBeNull();
 
     // Unbounded, this climbs at ~1 GET/s FOREVER: each accepted dial resets
@@ -633,11 +640,24 @@ describe("proxyTenantMcpServer end to end", () => {
     // one tick of the real loop — fails this.
     expect(accepted).toBeLessThanOrEqual(2);
 
-    // And the loop must be DEAD, not merely slowed: after the refusals burn
-    // maxRetries out, an idle tail sees NO further dials.
-    const tailStart = hits.filter((hit) => hit.startsWith("GET")).length;
+    // And the loop must be DEAD, not merely slowed. A budget refusal is a
+    // LOCAL failure the SDK retries on a growing delay (~1s, then ~1.5s)
+    // before maxRetries fires, so the last refused dial lands around t≈3.6s —
+    // let that ladder burn out before snapshotting the tail.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    const tailServer = hits.filter((hit) => hit.startsWith("GET")).length;
+    const tailLocal = dialAttempts;
+    // The probe must have seen refusals the server never did, or it is not
+    // measuring the local side at all and the tail assertion below proves
+    // nothing new.
+    expect(tailLocal).toBeGreaterThan(accepted);
+    // An idle tail then sees NO further dials on EITHER side of the budget:
+    // server-side accepts (the old, weaker claim) AND local attempts — the
+    // part that proves the SDK's retry loop terminated at maxRetries instead
+    // of dialling forever into a refusal.
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    expect(hits.filter((hit) => hit.startsWith("GET")).length).toBe(tailStart);
+    expect(hits.filter((hit) => hit.startsWith("GET")).length).toBe(tailServer);
+    expect(dialAttempts).toBe(tailLocal);
 
     await proxied!.close();
   }, 30_000);
