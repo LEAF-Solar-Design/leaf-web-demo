@@ -13,7 +13,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildScrubbedEnv, resolveAuthorTimeoutMs } from "../src/ports/impl/agentSdkRunner.js";
+import {
+  buildScrubbedEnv,
+  resolveAuthorEffort,
+  resolveAuthorTimeoutMs,
+  runAuthorQueryWithDeadline,
+  runWithinRemainingAuthorDeadline,
+} from "../src/ports/impl/agentSdkRunner.js";
+import type { AuthorSdkQuery } from "../src/ports/impl/agentSdkRunner.js";
 import type { AgentGrant } from "../src/ports/index.js";
 
 const FAKE_API_KEY = "sk-ant-api03-FAKE-not-a-real-key-abc123";
@@ -29,6 +36,108 @@ describe("resolveAuthorTimeoutMs", () => {
     expect(resolveAuthorTimeoutMs(undefined, { LEAF_AUTHOR_TIMEOUT_S: "invalid" })).toBe(300_000);
     expect(resolveAuthorTimeoutMs(30_000, { LEAF_AUTHOR_TIMEOUT_S: "240" })).toBe(30_000);
     expect(resolveAuthorTimeoutMs(1_000, { LEAF_AUTHOR_TIMEOUT_S: "240" })).toBe(240_000);
+  });
+});
+
+describe("author session bounds", () => {
+  it("preserves the SDK default effort and accepts only supported overrides", () => {
+    expect(resolveAuthorEffort(undefined, {})).toBeUndefined();
+    expect(resolveAuthorEffort(undefined, { LEAF_AUTHOR_EFFORT: "medium" })).toBe("medium");
+    expect(resolveAuthorEffort("high", { LEAF_AUTHOR_EFFORT: "low" })).toBe("high");
+    expect(resolveAuthorEffort(undefined, { LEAF_AUTHOR_EFFORT: "unbounded" })).toBeUndefined();
+  });
+
+  it("force-closes a query whose pending pull ignores the abort signal", async () => {
+    let closed = 0;
+    let rejectPull: ((error: Error) => void) | undefined;
+    const query = {
+      close() {
+        closed += 1;
+        rejectPull?.(new Error("closed"));
+      },
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<unknown>>((_resolve, reject) => {
+            rejectPull = reject;
+          }),
+        };
+      },
+    } as AuthorSdkQuery;
+    const abort = new AbortController();
+
+    await expect(
+      runAuthorQueryWithDeadline(query, abort, 10, async () => {
+        for await (const _message of query) {
+          // The fake pending pull never yields.
+        }
+      }),
+    ).rejects.toThrow("exceeded the 0s wall-clock limit");
+
+    expect(abort.signal.aborted).toBe(true);
+    expect(closed).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not let a close failure replace the bounded timeout", async () => {
+    let rejectOnAbort: ((error: Error) => void) | undefined;
+    const abort = new AbortController();
+    abort.signal.addEventListener("abort", () => rejectOnAbort?.(new Error("aborted")), { once: true });
+    const query = {
+      close() {
+        throw new Error("cleanup failed");
+      },
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<unknown>>((_resolve, reject) => {
+            rejectOnAbort = reject;
+          }),
+        };
+      },
+    } as AuthorSdkQuery;
+
+    await expect(
+      runAuthorQueryWithDeadline(query, abort, 10, async () => {
+        for await (const _message of query) {
+          // The fake pending pull never yields.
+        }
+      }),
+    ).rejects.toThrow("Agent SDK author session exceeded");
+  });
+
+  it("waits for an in-process tool handler to settle through propagated cancellation", async () => {
+    const abort = new AbortController();
+    const query = {
+      close() {
+        // Closing the SDK process cannot cancel an in-process JavaScript handler.
+      },
+      async *[Symbol.asyncIterator]() {
+        // No messages are needed for this lifecycle test.
+      },
+    } as AuthorSdkQuery;
+    const startedAt = Date.now();
+    const run = runAuthorQueryWithDeadline(query, abort, 10, async () => {
+      await new Promise<void>((resolve) => {
+        abort.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    });
+
+    await expect(run).rejects.toThrow("Agent SDK author session exceeded");
+    expect(abort.signal.aborted).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+  });
+
+  it("keeps the same wall-clock deadline active through the fallback broker test", async () => {
+    const abort = new AbortController();
+    const startedAt = Date.now();
+    await expect(
+      runWithinRemainingAuthorDeadline(abort, startedAt, 10, async () => {
+        await new Promise<void>((resolve) => {
+          abort.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new Error("broker aborted");
+      }),
+    ).rejects.toThrow("Agent SDK author session exceeded");
+    expect(abort.signal.aborted).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(250);
   });
 });
 

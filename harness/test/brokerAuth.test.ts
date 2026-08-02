@@ -124,4 +124,39 @@ describe("harness broker caller authentication", () => {
 
     expect(body.ledger_event_key).toBe("author-stage:fixed-key");
   });
+
+  it("cancels a pending broker test when the author deadline aborts", async () => {
+    const authorAbort = new AbortController();
+    const client = new BrokerApsClientHttp({
+      timeoutMs: 60_000,
+      fetchImpl: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("broker request aborted")), { once: true });
+      }),
+    });
+    const startedAt = Date.now();
+    const pending = client.runTool({
+      tenantId: "tenant",
+      tool: {
+        name: "read",
+        version: "1",
+        description: "read",
+        kind: "script",
+        engine_op: "read",
+        params: { type: "object" },
+        returns: { type: "object" },
+        capabilities: ["drawing.read"],
+        provenance: { author: "agent", created: "2026-07-23T00:00:00Z" },
+      },
+      params: {},
+      dwg: "drawing",
+      apsLive: false,
+      signal: authorAbort.signal,
+    });
+
+    authorAbort.abort();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.error?.error_code).toBe("BROKER_UNREACHABLE");
+    expect(Date.now() - startedAt).toBeLessThan(250);
+  });
 });

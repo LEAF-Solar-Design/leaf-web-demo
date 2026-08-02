@@ -48,6 +48,9 @@ export class BrokerApsClientHttp implements BrokerApsClient {
       ...(req.testSource === undefined ? {} : { test_source: req.testSource }),
     };
     const ctrl = new AbortController();
+    const abortFromCaller = () => ctrl.abort(req.signal?.reason);
+    if (req.signal?.aborted) abortFromCaller();
+    else req.signal?.addEventListener("abort", abortFromCaller, { once: true });
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     try {
       const res = await this.doFetch(`${this.baseUrl}/broker/run`, {
@@ -80,6 +83,7 @@ export class BrokerApsClientHttp implements BrokerApsClient {
       };
     } finally {
       clearTimeout(timer);
+      req.signal?.removeEventListener("abort", abortFromCaller);
     }
   }
 }

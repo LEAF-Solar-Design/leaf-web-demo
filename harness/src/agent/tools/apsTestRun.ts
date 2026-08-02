@@ -16,8 +16,9 @@ export function makeApsTestRun(
   tool: ToolPackage,
   params?: Record<string, unknown>,
   testSource?: string,
+  signal?: AbortSignal,
 ) => Promise<ResultEnvelope> {
-  return (tool, params = {}, testSource) => {
+  return (tool, params = {}, testSource, signal) => {
     const capabilities = Array.isArray(tool.capabilities) ? tool.capabilities : [];
     const safeParams = capabilities.includes("drawing.write")
       ? {
@@ -33,6 +34,7 @@ export function makeApsTestRun(
       dwg,
       apsLive: false,
       ...(testSource === undefined ? {} : { testSource }),
+      ...(signal === undefined ? {} : { signal }),
     });
   };
 }

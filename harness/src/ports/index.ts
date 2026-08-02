@@ -350,6 +350,8 @@ export interface BrokerRunRequest {
    * sandbox. Ordinary registered-tool runs omit it and keep file resolution.
    */
   testSource?: string;
+  /** Caller-owned cancellation. Never serialized onto the broker wire. */
+  signal?: AbortSignal;
 }
 
 export interface BrokerApsClient {
@@ -407,6 +409,7 @@ export interface AuthorToolset {
     tool: ToolPackage,
     params?: Record<string, unknown>,
     testSource?: string,
+    signal?: AbortSignal,
   ) => Promise<ResultEnvelope>;
 }
 
