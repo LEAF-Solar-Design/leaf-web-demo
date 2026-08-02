@@ -616,6 +616,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         catalog_digest: str,
         platform_release: str,
         workspace_contract_digest: str,
+        stage_lease_owner: Optional[str] = None,
+        stage_attempt: Optional[int] = None,
     ) -> ChangeSet:
         staged_commit = require_sha(staged_commit, 40, "staged_commit")
         catalog_digest = require_sha(catalog_digest, 64, "catalog_digest")
@@ -625,6 +627,14 @@ class SQLiteCustomizationStore(CustomizationRepository):
         )
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
+            if stage_lease_owner is not None:
+                now_ms = int(time.time() * 1000)
+                if (row.stage_lease_owner != stage_lease_owner
+                        or row.stage_attempt != stage_attempt
+                        or (row.stage_lease_expires_at or 0) <= now_ms):
+                    raise ChangeSetConflictError(
+                        "stage worker lease generation is no longer authoritative"
+                    )
             if row.workspace_contract_digest != workspace_contract_digest:
                 raise ChangeSetConflictError("workspace contract digest does not match the reserved change set")
             if row.desired_platform_release != platform_release:

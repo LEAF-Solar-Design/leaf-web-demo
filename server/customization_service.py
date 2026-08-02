@@ -615,7 +615,7 @@ class CustomizationService:
             bare = _ensure_bare_repo(tenant_id)
             base = _git(bare, "rev-parse", "refs/heads/main")
         fingerprint = hashlib.sha256(description.encode("utf-8")).hexdigest()
-        change, created = self.store.reserve_stage(
+        change, _created = self.store.reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
             base_commit=base, desired_platform_release=release.release_id,
             workspace_contract_digest=release.workspace_contract_sha256,
@@ -624,10 +624,13 @@ class CustomizationService:
             target_tool_name=target_tool_name, request_description=description,
             request_fingerprint=fingerprint,
         )
-        if created:
+        if change.state is ChangeState.CREATED:
             try:
-                author_quota.enforce(tenant_id, tier)
-            except Exception:
+                author_quota.enforce(
+                    tenant_id, tier, idempotency_key=change.change_set_id
+                )
+            except (author_quota.AuthorQuotaExceeded,
+                    author_quota.AuthorQuotaStoreError):
                 self.store.transition(
                     tenant_id=tenant_id, change_set_id=change.change_set_id,
                     next_state=ChangeState.FAILED,
@@ -651,6 +654,22 @@ class CustomizationService:
             raise CustomizationServiceError("stage_not_available")
         return self._execute_staging(change, change.request_description)
 
+    def dispatch_stage(self, change: ChangeSet) -> Mapping[str, Any]:
+        if change.state is not ChangeState.STAGING or not change.request_description:
+            raise CustomizationServiceError("stage_not_available")
+        return self._harness_stage(
+            change.tenant_id, change.request_description, change
+        )
+
+    def reconcile_stage_worker(
+        self, change: ChangeSet, body: Mapping[str, Any], *,
+        lease_owner: str, lease_attempt: int,
+    ) -> dict[str, Any]:
+        return self._reconcile_staging(
+            change, body, lease_owner=lease_owner,
+            lease_attempt=lease_attempt,
+        )
+
     def _execute_staging(
         self, change: ChangeSet, description: str
     ) -> dict[str, Any]:
@@ -659,7 +678,9 @@ class CustomizationService:
         return self._reconcile_staging(change, body)
 
     def _reconcile_staging(
-        self, change: ChangeSet, body: Mapping[str, Any]
+        self, change: ChangeSet, body: Mapping[str, Any], *,
+        lease_owner: str | None = None,
+        lease_attempt: int | None = None,
     ) -> dict[str, Any]:
         tenant_id = change.tenant_id
         idempotency_key = change.idempotency_key
@@ -699,6 +720,8 @@ class CustomizationService:
                 idempotency_key=f"staged:{idempotency_key}", staged_commit=receipt["staged_commit"],
                 catalog_digest=receipt["catalog_digest"], platform_release=receipt["platform_release"],
                 workspace_contract_digest=receipt["workspace_contract_digest"],
+                stage_lease_owner=lease_owner,
+                stage_attempt=lease_attempt,
             )
         elif change.state is not ChangeState.STAGED:
             raise CustomizationServiceError("stage_not_available")

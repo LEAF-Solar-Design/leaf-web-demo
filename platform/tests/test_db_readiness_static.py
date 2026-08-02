@@ -54,6 +54,7 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (24, "ops_read_ts_index"),
                 (25, "customization_revision_binding"),
                 (26, "customization_async_stage"),
+                (27, "author_quota_idempotency"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
