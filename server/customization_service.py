@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -148,6 +149,26 @@ def _harness_config() -> tuple[str, str]:
     so the two can never diverge on what "configured" means."""
     return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
             os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
+def _harness_stage_timeout_s() -> float:
+    """Wait beyond the harness budget so a client retry cannot race its lease."""
+    try:
+        author_budget = float(os.environ.get("LEAF_AUTHOR_TIMEOUT_S", "120"))
+    except ValueError:
+        author_budget = 120.0
+    if not 5 <= author_budget <= 900:
+        author_budget = 120.0
+    fallback = author_budget + 15.0
+    try:
+        configured = float(os.environ.get(
+            "LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S", str(fallback)
+        ))
+    except ValueError:
+        return fallback
+    if configured <= author_budget or configured > author_budget + 300:
+        return fallback
+    return configured
 
 
 def _harness_misconfigured() -> bool:
@@ -484,12 +505,20 @@ class CustomizationService:
             raise CustomizationServiceError("platform_release_ambiguous", 503)
         return next(iter(policy.releases.values()))
 
-    def stage(self, *, tenant: Any, description: str, mode: str, idempotency_key: str) -> dict[str, Any]:
+    def stage(
+        self, *, tenant: Any, description: str, mode: str,
+        idempotency_key: str, target_tool_name: str | None = None,
+    ) -> dict[str, Any]:
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
         if mode != "build" or not isinstance(description, str) or not description.strip():
             raise CustomizationServiceError("invalid_stage_request", 422)
+        if target_tool_name is not None:
+            if (not isinstance(target_tool_name, str)
+                    or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", target_tool_name)
+                    or len(target_tool_name) > 64):
+                raise CustomizationServiceError("invalid_stage_request", 422)
         binding = _binding(tenant)
         tier = entitlements.resolve_tier(tenant)
         if not entitlements.entitlements_for(tier).get("build", False):
@@ -512,6 +541,8 @@ class CustomizationService:
             desired_platform_release=release.release_id,
             workspace_contract_digest=release.workspace_contract_sha256,
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
+            change_kind="revise" if target_tool_name else "create",
+            target_tool_name=target_tool_name,
         )
         if change.state is ChangeState.CREATED:
             change = self.store.transition(
@@ -590,12 +621,14 @@ class CustomizationService:
         try:
             import requests
             response = requests.post(
-                f"{url}/author/stage", timeout=120,
+                f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
                 headers={"X-Harness-Secret": secret},
                 json={"tenant_id": tenant_id, "description": description, "changeSetId": change.change_set_id,
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
-                      "idempotencyKey": change.idempotency_key},
+                      "idempotencyKey": change.idempotency_key,
+                      **({"targetToolName": change.target_tool_name}
+                         if change.target_tool_name else {})},
             )
             response.raise_for_status()
             body = response.json()
@@ -688,19 +721,53 @@ class CustomizationService:
         }
         if len(base_by_name) != len(base_tools) or len(staged_by_name) != len(tools):
             raise CustomizationServiceError("invalid_staged_catalog", 422)
-        if any(staged_by_name.get(name) != item for name, item in base_by_name.items()):
-            raise CustomizationServiceError("existing_catalog_entry_changed", 403)
         added = [item for name, item in staged_by_name.items() if name not in base_by_name]
-        if len(added) != 1:
+        removed = [name for name in base_by_name if name not in staged_by_name]
+        modified = [
+            name for name, item in base_by_name.items()
+            if name in staged_by_name and staged_by_name[name] != item
+        ]
+        if change.change_kind == "create":
+            if modified:
+                raise CustomizationServiceError("existing_catalog_entry_changed", 403)
+            if len(added) != 1 or removed:
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            staged_tool = added[0]
+        elif change.change_kind == "revise":
+            target = change.target_tool_name
+            if added or removed or modified != [target]:
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            base_tool = base_by_name.get(target)
+            staged_tool = staged_by_name.get(target)
+            if not isinstance(base_tool, dict) or not isinstance(staged_tool, dict):
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            for key in ("name", "entry", "kind", "engine_op", "capabilities", "params", "returns"):
+                if staged_tool.get(key) != base_tool.get(key):
+                    raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
+            base_version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(base_tool.get("version", "")))
+            staged_version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(staged_tool.get("version", "")))
+            if (not base_version or not staged_version
+                    or staged_version.groups()[:2] != base_version.groups()[:2]
+                    or int(staged_version.group(3)) != int(base_version.group(3)) + 1):
+                raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
+            entry_path = base_tool.get("entry")
+            if not isinstance(entry_path, str):
+                raise CustomizationServiceError("invalid_staged_tool_entry", 422)
+            allowed = {
+                "registry.json", entry_path,
+                f"tools/{target}/tool.json",
+            }
+            if set(changed) != allowed:
+                raise CustomizationServiceError("invalid_staged_paths", 422)
+        else:
             raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
-        added_tool = added[0]
-        entry = added_tool.get("entry")
+        entry = staged_tool.get("entry")
         if (not isinstance(entry, str) or not entry.startswith("tools/")
                 or entry not in changed):
             raise CustomizationServiceError("invalid_staged_tool_entry", 422)
         if body is not None:
             tool = body.get("tool")
-            if not isinstance(tool, Mapping) or dict(tool) != added_tool:
+            if not isinstance(tool, Mapping) or dict(tool) != staged_tool:
                 raise CustomizationServiceError("invalid_staged_tool", 422)
 
     def confirm(self, *, tenant_id: str, change_set_id: str) -> dict[str, Any]:

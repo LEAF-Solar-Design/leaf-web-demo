@@ -39,12 +39,26 @@ export function findTool(repoDir: string, name: string): ToolPackage | undefined
  * "build" never silently produces two entries with the same name (the acceptance
  * gate asserts EXACTLY one new entry).
  */
-export function registerTool(repoDir: string, tool: ToolPackage): Registry {
+export function registerTool(
+  repoDir: string,
+  tool: ToolPackage,
+  options: { replaceExisting?: boolean } = {},
+): Registry {
   const registry = readRegistry(repoDir);
-  if (registry.tools.some((t) => t.name === tool.name)) {
+  const matches = registry.tools
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => candidate.name === tool.name);
+  if (matches.length > 1) {
+    throw new Error(`registerTool: multiple tools named ${JSON.stringify(tool.name)} already exist`);
+  }
+  if (matches.length === 1 && !options.replaceExisting) {
     throw new Error(`registerTool: a tool named ${JSON.stringify(tool.name)} already exists`);
   }
-  registry.tools.push(tool);
+  if (matches.length === 1) {
+    registry.tools[matches[0]!.index] = tool;
+  } else {
+    registry.tools.push(tool);
+  }
   const path = join(repoDir, REGISTRY_FILE);
   writeFileSync(path, JSON.stringify(registry, null, 2) + "\n", "utf8");
   return registry;

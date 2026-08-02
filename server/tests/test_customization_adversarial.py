@@ -20,6 +20,7 @@ from customization_service import (
     CustomizationService,
     CustomizationServiceError,
     _exclusive_materialize,
+    _harness_stage_timeout_s,
     _materialize_worktree,
     effective_catalog_dir,
 )
@@ -28,6 +29,16 @@ from customization_store import SQLiteCustomizationStore
 
 RELEASE = "leaf-platform-2026.07.23"
 WORKSPACE = "fc5fdcb63704127f1c70a430632699e878f79bcea4d7fecdc60782fc210e6865"
+
+
+def test_harness_stage_timeout_stays_beyond_author_budget(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_TIMEOUT_S", "120")
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S", raising=False)
+    assert _harness_stage_timeout_s() == 135
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S", "121")
+    assert _harness_stage_timeout_s() == 121
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S", "120")
+    assert _harness_stage_timeout_s() == 135
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -45,6 +56,7 @@ def repository(tmp_path: Path, tenant_id: str = "tenant-a"):
     git(source, "config", "user.email", "test@example.com")
     base_tool = {
         "name": "base-tool",
+        "version": "1.0.0",
         "entry": "tools/base-tool/tool.py",
     }
     (source / "tools" / "base-tool").mkdir(parents=True)
@@ -99,6 +111,43 @@ def staged_change(source: Path, bare_base: Path, base: str, base_tool: dict):
     return change, tool
 
 
+def staged_revision(source: Path, bare_base: Path, base: str, base_tool: dict):
+    revised = {
+        **base_tool,
+        "version": "1.0.1",
+        "description": "Revised implementation",
+        "provenance": {"author": "agent", "created": "2026-01-01T00:00:00Z"},
+    }
+    (source / "tools" / "base-tool" / "tool.py").write_text(
+        "def run(): return 3\n", encoding="utf-8"
+    )
+    (source / "tools" / "base-tool" / "tool.json").write_text(
+        json.dumps({**revised, "entry": "tool.py"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (source / "registry.json").write_text(
+        json.dumps({"tools": [revised]}, indent=2) + "\n", encoding="utf-8"
+    )
+    git(source, "add", ".")
+    git(source, "commit", "-m", "revise")
+    staged = git(source, "rev-parse", "HEAD")
+    git(source, "push", str(bare_base / "tenant-a.git"), f"{staged}:refs/leaf/changes/revise")
+    registry = subprocess.run(
+        ["git", "show", f"{staged}:registry.json"],
+        cwd=bare_base / "tenant-a.git", check=True, stdout=subprocess.PIPE,
+    ).stdout
+    return ChangeSet(
+        change_set_id="22222222-2222-4222-8222-222222222222",
+        tenant_id="tenant-a", idempotency_key="revise", state=ChangeState.STAGED,
+        version=2, base_commit=base, staged_commit=staged,
+        catalog_digest=hashlib.sha256(registry).hexdigest(),
+        desired_platform_release=RELEASE, workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|author", approver_subject=None,
+        created_at="", updated_at="", change_kind="revise",
+        target_tool_name="base-tool",
+    ), revised
+
+
 def test_policy_accepts_one_trusted_tool_delta_and_rejects_frozen_path(
     tmp_path, monkeypatch
 ):
@@ -117,6 +166,29 @@ def test_policy_accepts_one_trusted_tool_delta_and_rejects_frozen_path(
     )
     with pytest.raises(CustomizationServiceError, match="frozen_path_changed"):
         CustomizationService._verify_stage_policy(attacked_change)
+
+
+def test_policy_accepts_one_bound_in_place_revision(tmp_path, monkeypatch):
+    source, bare_base, base, base_tool = repository(tmp_path)
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(bare_base))
+    change, revised = staged_revision(source, bare_base, base, base_tool)
+
+    CustomizationService._verify_stage_policy(change, {"tool": revised})
+
+
+def test_revision_policy_rejects_add_or_rename(tmp_path, monkeypatch):
+    source, bare_base, base, base_tool = repository(tmp_path)
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(bare_base))
+    added_change, added_tool = staged_change(source, bare_base, base, base_tool)
+    revision_binding = ChangeSet(**{
+        **added_change.__dict__, "change_kind": "revise",
+        "target_tool_name": "base-tool",
+    })
+
+    with pytest.raises(CustomizationServiceError, match="invalid_staged_catalog_delta"):
+        CustomizationService._verify_stage_policy(
+            revision_binding, {"tool": added_tool}
+        )
 
 
 def test_git_symlink_is_rejected_without_creating_an_os_symlink(tmp_path, monkeypatch):

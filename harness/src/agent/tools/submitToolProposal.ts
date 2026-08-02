@@ -36,6 +36,7 @@ import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ENGINE_OP = /^[a-z][a-z0-9_]{0,63}$/;
 const RUN_FUNCTION = /(?:^|\n)[ \t]*def[ \t]+run[ \t]*\([ \t]*intake[ \t]*,[ \t]*params[ \t]*\)[ \t]*:/;
+const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
 export const MAX_TOOL_SOURCE_BYTES = 512 * 1024;
 
 function sha256(bytes: Buffer | string): string {
@@ -160,7 +161,11 @@ export function submitToolProposal(
   }
 
   const registry = readRegistry(root);
-  if (registry.tools.some((tool) => tool.name === proposal.name)) {
+  const registered = registry.tools.filter((tool) => tool.name === proposal.name);
+  if (registered.length > 1) {
+    throw new Error(`tool proposal rejected: multiple ${JSON.stringify(proposal.name)} entries exist`);
+  }
+  if (registered.length === 1 && !previous) {
     throw new Error(`tool proposal rejected: ${JSON.stringify(proposal.name)} already exists`);
   }
 
@@ -176,9 +181,17 @@ export function submitToolProposal(
   const created = existsSync(targetDir)
     ? assertReplaceable(targetDir, previous!, entry, manifestPath, modified)
     : modified;
+  let version = "1.0.0";
+  if (registered.length === 1) {
+    const match = SEMVER.exec(registered[0]!.version);
+    if (!match || Number(match[3]) >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("tool proposal rejected: revision target has an unsupported version");
+    }
+    version = `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+  }
   const tool: ToolPackage = {
     name: proposal.name,
-    version: "1.0.0",
+    version,
     description: proposal.description,
     kind: "script",
     engine_op: proposal.engine_op,

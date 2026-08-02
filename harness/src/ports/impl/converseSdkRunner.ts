@@ -253,6 +253,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       author_tool: {
         description: z.string(),
         mode: z.enum(["build", "one_off"]).optional(),
+        target_tool_name: z.string().optional(),
         confirmation_id: z.string().optional(),
       },
       request_publication: { change_set_id: z.string() },
