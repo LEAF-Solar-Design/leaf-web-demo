@@ -433,6 +433,128 @@ describe("proxyTenantMcpServer end to end", () => {
     await proxied!.close();
   });
 
+  it("fails fast when the upstream drops a call stream, and does not loop", async () => {
+    // THE ATTACK THE PER-FETCH DESIGN COULD NOT STOP. When the SDK's SSE stream
+    // drops it reconnects, and a per-fetch AbortSignal.timeout gives each
+    // reconnect a fresh clock. The tenant also controls the retry counter:
+    // `_scheduleReconnection` defaults `attemptCount = 0` and only increments on
+    // FAILURE, so accept-then-drop cycles never converge. Together those made
+    // the call outlive any per-fetch bound.
+    //
+    // The fix is one deadline per CALL, carried through AsyncLocalStorage so
+    // every fetch that call makes — original POST, reconnects, DELETE — sees
+    // the SAME signal, still counting down from when the call began.
+    const budgetMs = 800;
+    const hits: string[] = [];
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        hits.push(`${req.method}:${message.method ?? "-"}`);
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "flap", version: "1.0.0" },
+          }));
+        }
+        if (message.method === "tools/call" || req.method === "GET") {
+          // Accept the stream, then drop it. Repeat forever. Headers alone are
+          // enough — the SDK treats the stream as open once they arrive, so no
+          // SSE frame is needed to make it reconnect on the drop.
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+          setTimeout(() => res.destroy(), budgetMs / 8);
+          return;
+        }
+        res.writeHead(202).end();
+      });
+    });
+
+    const proxied = await proxyTenantMcpServer(
+      { name: "flap", url: upstream.url }, () => {}, budgetMs);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    const started = Date.now();
+    await expect(downstream.callTool(
+      { name: "x", arguments: {} }, undefined, { timeout: budgetMs * 30 },
+    )).rejects.toThrow();
+    const elapsed = Date.now() - started;
+
+    // The call dies on the drop rather than being retried into a long stall.
+    // Well under the budget, so it is the drop ending it and not our deadline.
+    expect(elapsed).toBeLessThan(budgetMs * 0.6);
+    expect(hits.filter((hit) => hit.endsWith("tools/call"))).toHaveLength(1);
+
+    // Then sit IDLE. This fixture never sends an SSE event id, so the stream
+    // is NOT resumable and the SDK must not re-dial it at all — that is the
+    // unprimed half of the two-sided behaviour the module header documents.
+    // STRICT ZERO over 3.5s: round 1 of this PR's review caught the previous
+    // version (≤1 extra GET over 2s) as wide enough for a real 1-per-second
+    // loop to pass. The PRIMED half — where the loop is real — has its own
+    // test below.
+    const getsAfterCall = hits.filter((hit) => hit.startsWith("GET")).length;
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    const getsAfterIdle = hits.filter((hit) => hit.startsWith("GET")).length;
+    expect(getsAfterIdle - getsAfterCall).toBe(0);
+
+    await downstream.close();
+    await proxied!.close();
+  }, 60_000);
+
+  it("closes the upstream socket when the call deadline expires", async () => {
+    // THE REAL DEFECT, and the only reason this module reaches into
+    // AsyncLocalStorage. Aborting an SDK request rejects the pending promise
+    // but the transport dials with its OWN controller, so the abandoned socket
+    // survived the rejection — measured in review as a call rejecting at 149ms
+    // with its socket still alive 250ms later. A tenant that stops answering
+    // could accumulate sockets for the life of the proxy.
+    //
+    // Rejecting is not the property. The socket closing is.
+    const budgetMs = 400;
+    let callSocket: import("node:net").Socket | undefined;
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "silent", version: "1.0.0" },
+          }));
+        }
+        // Hold the call open and never answer.
+        if (message.method === "tools/call") { callSocket = req.socket; return; }
+        res.writeHead(202).end();
+      });
+    });
+
+    const proxied = await proxyTenantMcpServer(
+      { name: "silent", url: upstream.url }, () => {}, budgetMs);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await proxied!.instance.server.connect(serverSide);
+    const downstream = new Client({ name: "downstream", version: "1.0.0" });
+    await downstream.connect(clientSide);
+
+    await expect(downstream.callTool(
+      { name: "forever", arguments: {} }, undefined, { timeout: budgetMs * 25 },
+    )).rejects.toThrow();
+
+    // Checked BEFORE closing anything: closing the proxy would reclaim the
+    // socket anyway and prove nothing about the deadline.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(callSocket).toBeDefined();
+    expect(callSocket!.destroyed).toBe(true);
+
+    await downstream.close();
+    await proxied!.close();
+  }, 30_000);
+
   it("returns null instead of throwing when the upstream is unreachable", async () => {
     const dead = await listen((_req, res) => { res.destroy(); });
     const diagnostics: string[] = [];
@@ -451,4 +573,72 @@ describe("proxyTenantMcpServer end to end", () => {
     expect(diagnostics.join(" ")).not.toContain(dead.url);
     expect(diagnostics.join(" ")).not.toContain(secret);
   });
+
+  it("bounds the reconnect loop a PRIMED stream arms — the case the retraction missed", async () => {
+    // ROUND 1 OF THIS PR (BLOCKER): the "does not loop" test above sends
+    // HEADERS ONLY, and the SDK only arms resumption once an SSE event carrying
+    // an `id:` has arrived. So that test measured the non-resumable path — and
+    // the retraction it pinned was overbroad. PRIME the stream with an event id
+    // before dropping it and `_scheduleReconnection` runs exactly the
+    // accept-then-drop cycle the original note described: each ACCEPTED
+    // reconnect resets `attemptCount`, so `maxRetries: 2` never converges.
+    // Reproduced with a raw SDK client before fixing: GETs re-dialling every
+    // ~1s (the initial delay, never growing because it never "fails"), each
+    // carrying last-event-id — resumption, armed by the priming alone.
+    //
+    // The bound: guardedFetch spends stream GETs from a per-proxy budget. A
+    // refused dial is a FAILURE, which increments the SDK's retry counter —
+    // turning accept-then-drop back into something maxRetries terminates.
+    const rpc = (id: unknown, result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
+    const hits: string[] = [];
+    const upstream = await listen((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const message = JSON.parse(body || "{}");
+        hits.push(`${req.method}:${message.method ?? "-"}`);
+        if (message.method === "initialize") {
+          return res.writeHead(200, { "content-type": "application/json" }).end(rpc(message.id, {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "primer", version: "1.0.0" },
+          }));
+        }
+        if (req.method === "GET") {
+          // THE PRIMING IS THE POINT. An event with an id makes the stream
+          // resumable; destroying it right after is what arms the reconnect
+          // cycle a headers-only fixture never reaches.
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+          res.write(`id: ${hits.length}\ndata: \n\n`);
+          setTimeout(() => res.destroy(), 40);
+          return;
+        }
+        res.writeHead(202).end();
+      });
+    });
+
+    // Budget of TWO dials (internal test knob, same rule as requestTimeoutMs):
+    // the initial stream GET spends one, the first reconnect spends the other,
+    // and the next dial is refused — a FAILURE the SDK's counter finally sees.
+    const proxied = await proxyTenantMcpServer({ name: "primer", url: upstream.url }, () => {}, 60_000, 2);
+    expect(proxied).not.toBeNull();
+
+    // Unbounded, this climbs at ~1 GET/s FOREVER: each accepted dial resets
+    // `attemptCount`, so the delay never grows and maxRetries never fires
+    // (measured before the fix: 3 GETs in 3s of idle, still climbing; the
+    // pre-fix version of this very assertion fails on exactly that).
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    const accepted = hits.filter((hit) => hit.startsWith("GET")).length;
+    // EXACT, not a tolerance: the budget is 2, so a third accepted dial —
+    // one tick of the real loop — fails this.
+    expect(accepted).toBeLessThanOrEqual(2);
+
+    // And the loop must be DEAD, not merely slowed: after the refusals burn
+    // maxRetries out, an idle tail sees NO further dials.
+    const tailStart = hits.filter((hit) => hit.startsWith("GET")).length;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(hits.filter((hit) => hit.startsWith("GET")).length).toBe(tailStart);
+
+    await proxied!.close();
+  }, 30_000);
 });
