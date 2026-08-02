@@ -31,11 +31,16 @@
 
 export const HOLDER_STORAGE_KEY = 'leaf.checkout_holder'
 export const HOLDER_CHANNEL_NAME = 'leaf.checkout_holder_claim'
+export const CHECKOUT_RELOAD_HANDOFF_KEY = 'leaf.checkout_reload_handoff'
+export const CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS = 30_000
 
 // Last-resort id for when there is no usable storage at all (SSR, or a browser
 // with storage disabled). Module-level so repeated calls in one runtime agree
 // rather than minting a new holder on every render.
 let memoryHolderId = null
+let runtimeReloadHandoff = undefined
+let runtimeReloadHandoffScope = null
+const runtimeAuthorityLocks = new Map()
 
 function defaultStorage() {
   return typeof sessionStorage !== 'undefined' ? sessionStorage : null
@@ -50,6 +55,173 @@ function defaultChannel() {
   }
 }
 
+// A checkout capability is deliberately not kept in normal browser storage.
+// A reload is the one lifecycle edge where memory-only authority would strand
+// its still-live one-hour lease. The outgoing page therefore writes a short,
+// one-use handoff during beforeunload. The receiving runtime must NOT use this
+// capability directly. App.jsx first acquires an origin-wide exclusive Web Lock
+// for this holder and drawing. If sessionStorage cloning gives two runtimes the
+// handoff, the browser serializes them and only the lock owner may install it.
+export function stageCheckoutReloadHandoff({
+  capability,
+  holder,
+  drawingId,
+  storage = defaultStorage(),
+  now = () => Date.now(),
+} = {}) {
+  if (!storage || typeof capability !== 'string' || !capability ||
+      typeof holder !== 'string' || !holder ||
+      typeof drawingId !== 'string' || !drawingId) return false
+  try {
+    storage.setItem(CHECKOUT_RELOAD_HANDOFF_KEY, JSON.stringify({
+      v: 1,
+      capability,
+      holder,
+      drawing_id: drawingId,
+      created_at_ms: now(),
+    }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function consumeCheckoutReloadHandoff({
+  holder,
+  drawingId,
+  storage = defaultStorage(),
+  now = () => Date.now(),
+  maxAgeMs = CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS,
+} = {}) {
+  if (!storage) return null
+  let raw = null
+  try {
+    raw = storage.getItem(CHECKOUT_RELOAD_HANDOFF_KEY)
+    // Consume before parsing or validating. A corrupt, mismatched, or replayed
+    // handoff must never remain available to a later runtime.
+    storage.removeItem(CHECKOUT_RELOAD_HANDOFF_KEY)
+  } catch {
+    return null
+  }
+  if (!raw) return null
+  try {
+    const handoff = JSON.parse(raw)
+    const age = now() - Number(handoff?.created_at_ms)
+    if (handoff?.v !== 1 || handoff.holder !== holder ||
+        handoff.drawing_id !== drawingId ||
+        typeof handoff.capability !== 'string' || !handoff.capability ||
+        !Number.isFinite(age) || age < 0 || age > maxAgeMs) return null
+    return {
+      capability: handoff.capability,
+      holder,
+      drawingId,
+      createdAtMs: Number(handoff.created_at_ms),
+    }
+  } catch {
+    return null
+  }
+}
+
+// React may render a component speculatively and discard that render. Keep the
+// destructive, one-use storage consume behind a module-runtime cache so every
+// render for the same scope receives the same provisional handoff. The cache
+// dies with the JavaScript runtime and never becomes durable authority.
+export function bootstrapCheckoutReloadHandoff({
+  holder,
+  drawingId,
+  storage = defaultStorage(),
+  now = () => Date.now(),
+  navigationType = null,
+} = {}) {
+  const navType = navigationType || (() => {
+    try { return performance.getEntriesByType('navigation')?.[0]?.type || 'navigate' } catch { return 'navigate' }
+  })()
+  const scope = `${String(holder || '')}\u0000${String(drawingId || '')}\u0000${navType}`
+  if (runtimeReloadHandoff !== undefined && runtimeReloadHandoffScope === scope) {
+    return runtimeReloadHandoff
+  }
+  runtimeReloadHandoffScope = scope
+  const consumed = consumeCheckoutReloadHandoff({ holder, drawingId, storage, now })
+  // A duplicated/new tab reports "navigate", not "reload". Its cloned storage
+  // must never transfer checkout authority, even if it copied a valid handoff.
+  runtimeReloadHandoff = navType === 'reload' ? consumed : null
+  return runtimeReloadHandoff
+}
+
+function defaultLockManager() {
+  return typeof navigator !== 'undefined' ? navigator.locks : null
+}
+
+export function checkoutAuthorityLockName({ holder, drawingId } = {}) {
+  return `leaf.checkout.authority:${String(holder || '')}:${String(drawingId || '')}`
+}
+
+// Start an exclusive, runtime-lifetime lock without awaiting its release. The
+// returned controller is active only when Web Locks exist; callers fail closed
+// otherwise. A queued duplicate receives authority only after the prior runtime
+// releases or unloads, so two tabs never install the same capability together.
+export function holdCheckoutReloadAuthority({
+  handoff,
+  locks = defaultLockManager(),
+  onAcquired = null,
+  onError = null,
+  now = () => Date.now(),
+  maxAgeMs = CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS,
+} = {}) {
+  if (!handoff?.capability || !handoff?.holder || !handoff?.drawingId ||
+      !locks || typeof locks.request !== 'function') {
+    return { active: false, stop() {}, acquired: Promise.resolve(false), done: Promise.resolve() }
+  }
+  const lockName = checkoutAuthorityLockName(handoff)
+  const existing = runtimeAuthorityLocks.get(lockName)
+  if (existing) return existing
+  let release = null
+  let stopped = false
+  let settleAcquired = null
+  const acquired = new Promise((resolve) => { settleAcquired = resolve })
+  let requestResult = null
+  try {
+    requestResult = locks.request(
+    lockName,
+    { mode: 'exclusive' },
+    async () => {
+      if (stopped) { settleAcquired(false); return }
+      if (Number.isFinite(handoff.createdAtMs)) {
+        const age = now() - handoff.createdAtMs
+        if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) {
+          settleAcquired(false)
+          if (typeof onError === 'function') onError(new Error('checkout reload handoff expired while waiting'))
+          return
+        }
+      }
+      if (typeof onAcquired === 'function') onAcquired(handoff)
+      settleAcquired(true)
+      await new Promise((resolve) => { release = resolve })
+    })
+  } catch (error) {
+    settleAcquired(false)
+    if (typeof onError === 'function') onError(error)
+    return { active: false, stop() {}, acquired, done: Promise.resolve() }
+  }
+  const done = Promise.resolve(requestResult).catch((error) => {
+    settleAcquired(false)
+    if (!stopped && typeof onError === 'function') onError(error)
+  })
+  const controller = {
+    active: true,
+    acquired,
+    done,
+    stop() {
+      stopped = true
+      settleAcquired(false)
+      release?.()
+      if (runtimeAuthorityLocks.get(lockName) === controller) runtimeAuthorityLocks.delete(lockName)
+    },
+  }
+  runtimeAuthorityLocks.set(lockName, controller)
+  return controller
+}
+
 // A holder id that cannot collide with a tenant/org string by construction:
 // prefixed, and random per session. Mirrors the `globalThis.crypto?.randomUUID`
 // idiom already used for run-intent session ids in App.jsx.
@@ -59,6 +231,15 @@ export function mintHolderId() {
   // No crypto (old browser / odd runtime): still unique enough for a per-tab id.
   const rand = () => Math.random().toString(36).slice(2, 10)
   return `sess-${rand()}${rand()}-${Date.now().toString(36)}`
+}
+
+export function remintSessionHolderId(storage = defaultStorage()) {
+  const next = mintHolderId()
+  memoryHolderId = next
+  if (storage) {
+    try { storage.setItem(HOLDER_STORAGE_KEY, next) } catch { /* keep in memory */ }
+  }
+  return next
 }
 
 function memoryHolder() {

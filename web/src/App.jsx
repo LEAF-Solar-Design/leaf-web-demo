@@ -27,6 +27,8 @@ import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import {
   getSessionHolderId, claimHolderId, lockState,
+  stageCheckoutReloadHandoff, bootstrapCheckoutReloadHandoff,
+  holdCheckoutReloadAuthority, remintSessionHolderId,
 } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
@@ -217,9 +219,22 @@ export default function App() {
   const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
   const [checkoutUnknown, setCheckoutUnknown] = useState(true)
   const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
+  const initialHolderRef = useRef(null)
+  if (!initialHolderRef.current) initialHolderRef.current = getSessionHolderId()
+  const reloadHandoffRef = useRef(undefined)
+  if (reloadHandoffRef.current === undefined) {
+    reloadHandoffRef.current = bootstrapCheckoutReloadHandoff({
+      holder: initialHolderRef.current,
+      drawingId: REQUESTED_DRAWING_ID,
+    })
+  }
   // The server returns this bearer proof once when the session takes the lock.
-  // Keep it outside rendered state and never persist it.
+  // Keep it outside rendered state. The only storage edge is the one-use,
+  // short-lived beforeunload handoff consumed above.
   const capabilityRef = useRef(null)
+  const holderClaimRef = useRef(null)
+  const reloadAuthorityRef = useRef(null)
+  const [, bumpCheckoutAuthority] = useState(0)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -522,9 +537,13 @@ export default function App() {
   // --- single-writer checkout (item 3) ---
   // The holder is a per-session display identity, never the tenant. A copied tab
   // initially inherits sessionStorage, so the claim channel remints the duplicate.
-  const [ownHolder, setOwnHolder] = useState(() => getSessionHolderId())
+  const [ownHolder, setOwnHolder] = useState(initialHolderRef.current)
   useEffect(() => {
+    // A reload handoff is only provisional authority. The Web Lock below
+    // arbitrates any cloned copies before this runtime joins the holder channel.
+    if (reloadHandoffRef.current) return undefined
     const claim = claimHolderId({ id: ownHolder, onRemint: setOwnHolder })
+    holderClaimRef.current = claim
     return () => claim.stop()
     // Claim once per runtime. A remint must not restart the claim loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -546,6 +565,27 @@ export default function App() {
   const heldByUs = lock.heldByUs
   const staleHeldCheckout = lock.stale ? lock.otherHeld : null
   const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
+
+  useEffect(() => {
+    const stageReloadHandoff = () => {
+      const provisional = reloadHandoffRef.current
+      const capability = capabilityRef.current || provisional?.capability
+      const drawingId = resolveCheckoutDrawingId({
+        drawingState,
+        requestedDrawingId: REQUESTED_DRAWING_ID,
+      })
+      if (capability && drawingId) {
+        holderClaimRef.current?.stop()
+        stageCheckoutReloadHandoff({
+          capability,
+          holder: provisional?.holder || ownHolder,
+          drawingId: provisional?.drawingId || drawingId,
+        })
+      }
+    }
+    window.addEventListener('beforeunload', stageReloadHandoff)
+    return () => window.removeEventListener('beforeunload', stageReloadHandoff)
+  }, [drawingState, ownHolder])
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -673,6 +713,46 @@ export default function App() {
 
   useEffect(() => { loadCheckout() }, [loadCheckout])
 
+  // Install a reload handoff only while this runtime owns the origin-wide,
+  // exclusive authority lock. Reload releases the old runtime's lock and wakes
+  // this one. Duplicated tabs queue, so they cannot write concurrently.
+  useEffect(() => {
+    const handoff = reloadHandoffRef.current
+    if (mock || !handoff) return undefined
+    const authority = holdCheckoutReloadAuthority({
+      handoff,
+      onAcquired: (owned) => {
+        capabilityRef.current = owned.capability
+        reloadHandoffRef.current = null
+        holderClaimRef.current = claimHolderId({
+          id: owned.holder,
+          onRemint: setOwnHolder,
+          now: () => 0,
+        })
+        bumpCheckoutAuthority((version) => version + 1)
+        loadCheckout()
+      },
+      onError: () => {
+        capabilityRef.current = null
+        reloadHandoffRef.current = null
+        setOwnHolder(remintSessionHolderId())
+        bumpCheckoutAuthority((version) => version + 1)
+        loadCheckout()
+      },
+    })
+    reloadAuthorityRef.current = authority
+    if (!authority.active) {
+      capabilityRef.current = null
+      reloadHandoffRef.current = null
+      setOwnHolder(remintSessionHolderId())
+      bumpCheckoutAuthority((version) => version + 1)
+    }
+    // The module runtime owns the lock. React StrictMode cleanup must not release
+    // checkout authority between its setup probes; explicit Release calls stop it.
+    return undefined
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Take / Release the single-writer checkout (3B). Both refetch /versions after
   // the call so the chip reflects the real lock (source of truth), and both stay
   // calm on failure — a 409 (someone else took it) / 403 (not the holder) just
@@ -687,12 +767,34 @@ export default function App() {
     try {
       const result = await takeCheckout(did, ownHolder, undefined, capabilityRef.current)
       if (result?.acquired && result.checkout_capability) {
-        capabilityRef.current = result.checkout_capability
+        reloadAuthorityRef.current?.stop()
+        const authority = holdCheckoutReloadAuthority({
+          handoff: {
+            capability: result.checkout_capability,
+            holder: ownHolder,
+            drawingId: did,
+          },
+          onAcquired: (owned) => {
+            capabilityRef.current = owned.capability
+            bumpCheckoutAuthority((version) => version + 1)
+          },
+        })
+        reloadAuthorityRef.current = authority
+        if (!authority.active || !(await authority.acquired)) {
+          capabilityRef.current = null
+          try { await releaseCheckout(did, result.checkout_capability) } catch { /* fail closed */ }
+        }
       } else if (!result?.acquired) {
         capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
       }
     } catch (error) {
-      if (error?.status === 403 || error?.status === 409) capabilityRef.current = null
+      if (error?.status === 403 || error?.status === 409) {
+        capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
+      }
     }
     finally {
       await loadCheckout()
@@ -710,6 +812,8 @@ export default function App() {
     try {
       await releaseCheckout(did, capabilityRef.current)
       capabilityRef.current = null
+      reloadAuthorityRef.current?.stop()
+      reloadAuthorityRef.current = null
     } catch (error) {
       if (error?.status === 403 || error?.status === 409) capabilityRef.current = null
     }

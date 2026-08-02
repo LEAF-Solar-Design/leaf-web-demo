@@ -9,7 +9,9 @@
 // Run: node scripts/check_checkout_identity.mjs   (from web/)
 import {
   getSessionHolderId, claimHolderId, isLegacyHolder, lockState,
-  HOLDER_STORAGE_KEY,
+  HOLDER_STORAGE_KEY, CHECKOUT_RELOAD_HANDOFF_KEY,
+  stageCheckoutReloadHandoff, consumeCheckoutReloadHandoff,
+  bootstrapCheckoutReloadHandoff, holdCheckoutReloadAuthority, remintSessionHolderId,
 } from '../src/checkoutIdentity.js'
 
 let failures = 0
@@ -80,6 +82,131 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
     if (!clean) break
   }
   if (clean) pass(`(c) holder id is independent of any tenant/org string (${TENANTS.length} representatives, 200 mints)`)
+}
+
+// --- reload handoff: exact, short-lived, one-use, and absent on duplication ---
+{
+  const storage = makeStorage()
+  const holder = 'sess-reload-owner'
+  const drawingId = 'rooftop_demo'
+  const capability = 'lco1.secret-proof'
+  if (!stageCheckoutReloadHandoff({
+    capability, holder, drawingId, storage, now: () => 10_000,
+  })) fail('(c1) could not stage a valid reload handoff')
+
+  const restored = consumeCheckoutReloadHandoff({
+    holder, drawingId, storage, now: () => 10_050,
+  })
+  if (restored?.capability !== capability) fail('(c1) exact reload did not recover its capability')
+  else if (storage.getItem(CHECKOUT_RELOAD_HANDOFF_KEY) !== null) fail('(c1) consumed handoff remained in storage')
+  else if (consumeCheckoutReloadHandoff({ holder, drawingId, storage, now: () => 10_060 }) !== null) {
+    fail('(c1) reload handoff could be replayed')
+  } else pass('(c1) exact reload recovers the capability once, then deletes it')
+
+  for (const [label, candidateHolder, candidateDrawing, age] of [
+    ['wrong holder', 'sess-other', drawingId, 10],
+    ['wrong drawing', holder, 'other-drawing', 10],
+    ['stale', holder, drawingId, 31_000],
+    ['future timestamp', holder, drawingId, -1],
+  ]) {
+    const rejected = makeStorage()
+    stageCheckoutReloadHandoff({ capability, holder, drawingId, storage: rejected, now: () => 20_000 })
+    const got = consumeCheckoutReloadHandoff({
+      holder: candidateHolder, drawingId: candidateDrawing, storage: rejected,
+      now: () => 20_000 + age,
+    })
+    if (got !== null) fail(`(c1) ${label} handoff was accepted`)
+    if (rejected.getItem(CHECKOUT_RELOAD_HANDOFF_KEY) !== null) fail(`(c1) ${label} handoff was not deleted`)
+  }
+  pass('(c1) mismatched, stale, and future handoffs fail closed and are deleted')
+
+  // Duplicating a live tab copies ordinary sessionStorage, but no handoff exists
+  // until beforeunload. This pin guards against writing the bearer capability at
+  // normal acquire time, which would give a duplicate tab authority.
+  const liveTab = makeStorage({ [HOLDER_STORAGE_KEY]: holder })
+  const duplicate = makeStorage({ [HOLDER_STORAGE_KEY]: liveTab.getItem(HOLDER_STORAGE_KEY) })
+  if (duplicate.getItem(CHECKOUT_RELOAD_HANDOFF_KEY) !== null) fail('(c1) duplicate inherited a checkout capability')
+  else pass('(c1) a duplicated live tab has no checkout capability to inherit')
+
+  const remintedStorage = makeStorage({ [HOLDER_STORAGE_KEY]: holder })
+  const reminted = remintSessionHolderId(remintedStorage)
+  if (reminted === holder || remintedStorage.getItem(HOLDER_STORAGE_KEY) !== reminted) {
+    fail('(c1) a failed handoff redemption did not replace the copied holder id')
+  } else pass('(c1) a failed handoff redemption remints and persists a distinct holder id')
+
+  // Bootstrap consumption must survive React's speculative/double render. The
+  // first call deletes storage, while every later call in this runtime returns
+  // the same provisional value from memory.
+  const runtimeHolder = 'sess-strict-render'
+  const runtimeDrawing = 'strict-render-drawing'
+  const runtimeStorage = makeStorage()
+  stageCheckoutReloadHandoff({
+    capability, holder: runtimeHolder, drawingId: runtimeDrawing,
+    storage: runtimeStorage, now: () => 30_000,
+  })
+  const bootstrapA = bootstrapCheckoutReloadHandoff({
+    holder: runtimeHolder, drawingId: runtimeDrawing,
+    storage: runtimeStorage, now: () => 30_010, navigationType: 'reload',
+  })
+  const bootstrapB = bootstrapCheckoutReloadHandoff({
+    holder: runtimeHolder, drawingId: runtimeDrawing,
+    storage: runtimeStorage, now: () => 30_020, navigationType: 'reload',
+  })
+  if (bootstrapA?.capability !== capability || bootstrapB !== bootstrapA) {
+    fail('(c1) speculative render did not reuse the consumed runtime handoff')
+  } else if (runtimeStorage.getItem(CHECKOUT_RELOAD_HANDOFF_KEY) !== null) {
+    fail('(c1) runtime bootstrap left the consumed handoff in storage')
+  } else pass('(c1) speculative renders reuse one in-memory bootstrap after storage deletion')
+
+  const duplicatedStorage = makeStorage()
+  stageCheckoutReloadHandoff({
+    capability, holder: 'sess-duplicate-nav', drawingId: 'duplicate-nav-drawing',
+    storage: duplicatedStorage, now: () => 40_000,
+  })
+  const duplicateBootstrap = bootstrapCheckoutReloadHandoff({
+    holder: 'sess-duplicate-nav', drawingId: 'duplicate-nav-drawing',
+    storage: duplicatedStorage, now: () => 40_010, navigationType: 'navigate',
+  })
+  if (duplicateBootstrap !== null) fail('(c1) a non-reload navigation restored copied authority')
+  else pass('(c1) only a real reload may restore checkout authority')
+
+  const waiters = []
+  let held = false
+  const fakeLocks = {
+    request(_name, _options, callback) {
+      return new Promise((resolve) => {
+        const enter = async () => {
+          held = true
+          await callback({ name: _name })
+          held = false
+          resolve()
+          waiters.shift()?.()
+        }
+        if (held) waiters.push(enter)
+        else enter()
+      })
+    },
+  }
+  const acquired = []
+  const handoff = {
+    capability, holder: runtimeHolder, drawingId: runtimeDrawing, createdAtMs: 50_000,
+  }
+  const lockA = holdCheckoutReloadAuthority({
+    handoff, locks: fakeLocks, now: () => 50_010, onAcquired: () => acquired.push('A'),
+  })
+  const lockB = holdCheckoutReloadAuthority({
+    handoff, locks: fakeLocks, now: () => 50_010, onAcquired: () => acquired.push('B'),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  if (lockB !== lockA || JSON.stringify(acquired) !== JSON.stringify(['A'])) {
+    fail(`(c1) runtime did not keep one authority lock across repeated setup -> ${JSON.stringify(acquired)}`)
+  } else pass('(c1) runtime lock survives repeated React setup without a release gap')
+  lockA.stop()
+  await Promise.all([lockA.done, lockB.done])
+
+  const unsupported = holdCheckoutReloadAuthority({ handoff, locks: null })
+  if (unsupported.active) fail('(c1) missing Web Locks did not fail closed')
+  else pass('(c1) missing Web Locks fails closed')
 }
 
 // --- robustness: no storage, and a hostile storage, must not throw ------------
@@ -362,6 +489,23 @@ async function runTabs(ages, seedId) {
 
   if (!/claimHolderId\(/.test(app)) fail('App.jsx never calls claimHolderId, so duplicate tabs go undetected')
   else pass('App.jsx starts the holder claim')
+
+  if (!/bootstrapCheckoutReloadHandoff\(/.test(app) || !/stageCheckoutReloadHandoff\(/.test(app)) {
+    fail('App.jsx does not wire the one-use checkout reload handoff')
+  } else if (!/addEventListener\(['"]beforeunload['"]/.test(app)) {
+    fail('App.jsx does not stage checkout authority only at the reload lifecycle edge')
+  } else pass('App.jsx wires a one-use checkout capability handoff at beforeunload')
+
+  const identitySource = await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8')
+  if (!/runtimeReloadHandoff[\s\S]*bootstrapCheckoutReloadHandoff/.test(identitySource)) {
+    fail('reload handoff consumption is not cached across speculative React renders')
+  } else pass('reload handoff consumption is cached for the whole JavaScript runtime')
+
+  if (!/holdCheckoutReloadAuthority\(/.test(app)) {
+    fail('App.jsx installs a reload handoff without an exclusive Web Lock')
+  } else if (/useRef\(reloadHandoffRef\.current\?\.capability/.test(app)) {
+    fail('App.jsx installs the provisional handoff capability before lock ownership')
+  } else pass('App.jsx installs reload authority only inside an exclusive Web Lock')
 
   // CAPTURE the initial value instead of testing whether `useState(true)` appears
   // anywhere. The loose form matched an unrelated `tourLanded` hook, so flipping
