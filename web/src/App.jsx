@@ -782,7 +782,7 @@ export default function App() {
   drawingErrorRef.current = setRunErr
 
   const authorStage = useAuthorStageController({ mock })
-  authorPendingRef.current = !!authorStage.pointer
+  authorPendingRef.current = !!authorStage.pointer && !authorStage.pointer.terminal_staged
 
   useEffect(() => {
     const pending = authorStage.pointer
@@ -1306,6 +1306,7 @@ export default function App() {
       const res = await publishStagedAuthor(mock, staged)
       const tool = res.tool || staged.tool
       if (res.published) {
+        authorStage.completePublication()
         upsertTool(tool)
         // Re-group the catalog so the new tool lands in "Custom authored tools"
         // (visible re-fetch of the grouped capabilities).
@@ -1327,7 +1328,7 @@ export default function App() {
     } finally {
       setTourLanded(true)
     }
-  }, [mock, loadCatalog, showToast, upsertTool])
+  }, [authorStage.completePublication, mock, loadCatalog, showToast, upsertTool])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
   // the just-authored tool so the user confirms before it runs (paid actions

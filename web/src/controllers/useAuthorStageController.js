@@ -1,45 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { stageAuthorTool as defaultStageAuthorTool } from '../api.js'
+import { config, stageAuthorTool as defaultStageAuthorTool } from '../api.js'
+import {
+  AUTHOR_POINTER_TTL_MS,
+  authorAccountScope,
+  authorPointerValid,
+  clearInflightAuthor,
+  readInflightAuthor,
+  saveInflightAuthor,
+} from '../authorStagePointer.js'
 
-export const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
-
-function browserStorage() {
-  try { return window.localStorage } catch { return null }
-}
-
-export function readInflightAuthor(storage = browserStorage()) {
-  try {
-    const pointer = JSON.parse(storage?.getItem(INFLIGHT_AUTHOR_KEY) || 'null')
-    if (!pointer || typeof pointer !== 'object') return null
-    if (typeof pointer.idempotency_key !== 'string' || !pointer.idempotency_key) return null
-    if (typeof pointer.description !== 'string' || !pointer.description.trim()) return null
-    if (pointer.target_tool_name != null && typeof pointer.target_tool_name !== 'string') return null
-    if (!Number.isFinite(Number(pointer.created_at))) return null
-    if (pointer.poll_url != null && typeof pointer.poll_url !== 'string') return null
-    return pointer
-  } catch {
-    return null
-  }
-}
-
-export function saveInflightAuthor(pointer, storage = browserStorage()) {
-  try { storage?.setItem(INFLIGHT_AUTHOR_KEY, JSON.stringify(pointer)) } catch { /* best effort */ }
-  return pointer
-}
-
-export function clearInflightAuthor(idempotencyKey = null, storage = browserStorage()) {
-  try {
-    if (idempotencyKey) {
-      const current = readInflightAuthor(storage)
-      if (current?.idempotency_key !== idempotencyKey) return false
-    }
-    storage?.removeItem(INFLIGHT_AUTHOR_KEY)
-    return true
-  } catch {
-    return false
-  }
-}
+export { INFLIGHT_AUTHOR_KEY, clearInflightAuthor, readInflightAuthor } from '../authorStagePointer.js'
 
 function requestId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
@@ -50,6 +21,12 @@ function isActivePhase(phase) {
   return ['submitting', 'accepted', 'submitted', 'queued', 'pending', 'running', 'authoring', 'reconnecting'].includes(phase)
 }
 
+function stagedHandoff(staged) {
+  if (!staged) return null
+  const keys = ['receipt', 'tool', 'preview', 'code', 'source', 'static_scan', 'validation', 'diff_summary', 'diff', 'telemetry', 'fallback']
+  return Object.fromEntries(keys.filter((key) => staged[key] !== undefined).map((key) => [key, staged[key]]))
+}
+
 export default function useAuthorStageController({
   mock = false,
   enabled = true,
@@ -57,7 +34,11 @@ export default function useAuthorStageController({
   stageAuthorTool = defaultStageAuthorTool,
 } = {}) {
   const storageRef = useRef(storage)
-  const [pointer, setPointer] = useState(() => mock ? null : readInflightAuthor(storage))
+  const accountScope = authorAccountScope(config.tenant, storage)
+  const initialPointer = mock ? null : readInflightAuthor(storage)
+  const validInitialPointer = authorPointerValid(initialPointer, accountScope) ? initialPointer : null
+  if (initialPointer && !validInitialPointer) clearInflightAuthor(null, storage)
+  const [pointer, setPointer] = useState(validInitialPointer)
   const [phase, setPhase] = useState(pointer ? 'reconnecting' : 'idle')
   const [progress, setProgress] = useState(pointer ? 'restoring authoring request' : null)
   const [elapsedMs, setElapsedMs] = useState(pointer ? Math.max(0, Date.now() - pointer.created_at) : 0)
@@ -85,6 +66,12 @@ export default function useAuthorStageController({
     setPhase(reconnecting ? 'reconnecting' : 'submitting')
     setProgress(reconnecting ? 'restoring authoring request' : 'submitting authoring request')
     try {
+      if (initial.terminal_staged && initial.staged_result) {
+        setPhase('succeeded')
+        setProgress('staged for review')
+        setResult(initial.staged_result)
+        return initial.staged_result
+      }
       const staged = await stageAuthorTool(
         mock,
         initial.description,
@@ -116,8 +103,8 @@ export default function useAuthorStageController({
         const mismatch = new Error(`The staged revision did not match ${initial.target_tool_name}. It was not made publishable.`)
         throw mismatch
       }
-      clearInflightAuthor(initial.idempotency_key, storageRef.current)
-      setPointer(null)
+      const terminalPointer = { ...initial, terminal_staged: true, staged_result: stagedHandoff(staged) }
+      persist(terminalPointer)
       setPhase('succeeded')
       setProgress('staged for review')
       setResult(staged)
@@ -141,7 +128,10 @@ export default function useAuthorStageController({
   const stage = useCallback((description, targetToolName = null) => {
     if (!enabled) return Promise.resolve(null)
     const current = readInflightAuthor(storageRef.current)
-    if (current) return runPointer(current, { reconnecting: true })
+    if (authorPointerValid(current, accountScope) && !current.terminal_staged) {
+      return runPointer(current, { reconnecting: true })
+    }
+    if (current) clearInflightAuthor(null, storageRef.current)
     resumedRef.current = true
     const next = {
       idempotency_key: requestId(),
@@ -151,17 +141,26 @@ export default function useAuthorStageController({
       poll_url: null,
       retry_after_ms: null,
       created_at: Date.now(),
+      expires_at: Date.now() + AUTHOR_POINTER_TTL_MS,
+      account_scope: accountScope,
     }
     if (!mock) persist(next)
     else setPointer(next)
     return runPointer(next)
-  }, [enabled, mock, persist, runPointer])
+  }, [accountScope, enabled, mock, persist, runPointer])
 
   const resume = useCallback(() => {
     if (!enabled) return Promise.resolve(null)
-    const current = pointer || readInflightAuthor(storageRef.current)
+    const saved = pointer || readInflightAuthor(storageRef.current)
+    const current = authorPointerValid(saved, accountScope) ? saved : null
+    if (saved && !current) clearInflightAuthor(null, storageRef.current)
     return current ? runPointer(current, { reconnecting: true }) : Promise.resolve(null)
-  }, [enabled, pointer, runPointer])
+  }, [accountScope, enabled, pointer, runPointer])
+
+  const completePublication = useCallback(() => {
+    if (pointer) clearInflightAuthor(pointer.idempotency_key, storageRef.current)
+    setPointer(null)
+  }, [pointer])
 
   useEffect(() => {
     if (!enabled || mock || !pointer || resumedRef.current) return
@@ -196,5 +195,6 @@ export default function useAuthorStageController({
     resumable: phase === 'interrupted' && !!pointer,
     stage,
     resume,
-  }), [active, elapsedMs, error, phase, pointer, progress, result, resume, stage])
+    completePublication,
+  }), [active, completePublication, elapsedMs, error, phase, pointer, progress, result, resume, stage])
 }

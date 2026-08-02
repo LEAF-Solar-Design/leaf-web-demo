@@ -955,13 +955,17 @@ const AUTHOR_PENDING = new Set(['accepted', 'submitted', 'queued', 'pending', 'r
 const AUTHOR_COMPLETE = new Set(['staged', 'complete', 'completed', 'succeeded'])
 const AUTHOR_FAILED = new Set(['failed', 'error'])
 
-function authorPollUrl(pollUrl) {
+function authorPollUrl(pollUrl, changeSetId) {
   if (!pollUrl) return null
   try {
     const origin = globalThis.location?.origin || 'http://localhost'
     const base = new URL(API_BASE || '/', origin)
     const resolved = new URL(pollUrl, base)
     if (resolved.origin !== base.origin) throw new TypeError('cross-origin author poll URL')
+    const expectedPath = `/api/author/stages/${encodeURIComponent(changeSetId || '')}`
+    if (resolved.pathname !== expectedPath || resolved.search || resolved.hash) {
+      throw new TypeError('non-canonical author poll URL')
+    }
     return resolved.toString()
   } catch {
     const error = new Error('The authoring request returned an invalid status address.')
@@ -1000,7 +1004,8 @@ function authorStageResult(body) {
 }
 
 async function pollAuthorStage(accepted, opts = {}) {
-  const pollUrl = authorPollUrl(opts.pollUrl || accepted?.poll_url)
+  const acceptedId = opts.changeSetId || accepted?.change_set_id
+  const pollUrl = authorPollUrl(opts.pollUrl || accepted?.poll_url, acceptedId)
   if (!pollUrl) throw new Error('The authoring request did not include a poll URL.')
   let delay = authorRetryDelay(opts.retryAfterMs || accepted?.retry_after_ms)
   const started = Date.now()
@@ -1014,12 +1019,22 @@ async function pollAuthorStage(accepted, opts = {}) {
     const body = await res.json().catch(() => null)
     if (!res.ok) throw customizationError('GET', pollUrl, res.status, body)
     const status = String(body?.status || '').toLowerCase()
+    if (body?.change_set_id !== acceptedId) {
+      const error = new Error('The authoring status did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
     opts.onStatus?.({
       status: status || 'running',
       progress: body?.progress || body?.message || status || 'authoring',
       change_set_id: body?.change_set_id || accepted?.change_set_id || null,
     })
     const staged = authorStageResult(body)
+    if (staged && staged?.receipt?.change_set_id !== acceptedId) {
+      const error = new Error('The staged receipt did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
     if (staged && (AUTHOR_COMPLETE.has(status) || !status)) return staged
     if (AUTHOR_FAILED.has(status)) {
       const error = customizationError('GET', pollUrl, 500, body)
@@ -1080,6 +1095,7 @@ export async function stageAuthorTool(mock, description, targetToolName = null, 
       idempotency_key: opts.idempotencyKey || requestId(),
       ...(targetToolName ? { target_tool_name: targetToolName } : {}),
     }),
+    signal: opts.signal,
   }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) {
