@@ -4,6 +4,7 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 test('revises an exact custom tool without changing normal create', async ({ page }) => {
   const proofState = makeCatProofState()
   proofState.authorPublished = true
+  proofState.independentApproved = true
   const stageBodies = []
 
   await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
@@ -46,6 +47,8 @@ test('revises an exact custom tool without changing normal create', async ({ pag
   await page.getByLabel('What should the tool do?').fill('repair the geometry so every polyline has area')
   await page.getByRole('button', { name: 'Generate revision' }).click()
   await expect(page.locator('.authored')).toBeVisible()
+  await page.getByRole('button', { name: 'Request publication' }).click()
+  await expect(page.getByRole('button', { name: 'Run it now' })).toBeVisible()
 
   expect(stageBodies).toHaveLength(1)
   expect(stageBodies[0]).toMatchObject({

@@ -782,7 +782,7 @@ export default function App() {
   drawingErrorRef.current = setRunErr
 
   const authorStage = useAuthorStageController({ mock })
-  authorPendingRef.current = !!authorStage.pointer && !authorStage.pointer.terminal_staged
+  authorPendingRef.current = !!authorStage.pointer
 
   useEffect(() => {
     const pending = authorStage.pointer
@@ -1296,6 +1296,7 @@ export default function App() {
   }, [])
 
   const onCancelAuthorRevision = useCallback(() => {
+    if (authorPendingRef.current) return
     setAuthorTargetTool(null)
     setAuthorSeed('')
     setAuthorSignal((value) => value + 1)
@@ -1306,7 +1307,6 @@ export default function App() {
       const res = await publishStagedAuthor(mock, staged)
       const tool = res.tool || staged.tool
       if (res.published) {
-        authorStage.completePublication()
         upsertTool(tool)
         // Re-group the catalog so the new tool lands in "Custom authored tools"
         // (visible re-fetch of the grouped capabilities).
@@ -1323,6 +1323,7 @@ export default function App() {
             },
           },
         })
+        authorStage.completePublication()
       }
       return { ...res, tool }
     } finally {

@@ -491,7 +491,7 @@ export default function ToolCast({
     mock: PUBLIC_DEMO,
     enabled: sessionReady,
   })
-  authorPendingRef.current = !!authorStage.pointer && !authorStage.pointer.terminal_staged
+  authorPendingRef.current = !!authorStage.pointer
 
   useEffect(() => {
     const pending = authorStage.pointer
@@ -778,7 +778,7 @@ export default function ToolCast({
   }, [authorStage.stage, sessionReady])
 
   const reviseAuthoredTool = useCallback((tool) => {
-    if (!tool?.name || (authorStage.pointer && !authorStage.pointer.terminal_staged)) return
+    if (!tool?.name || authorStage.pointer) return
     setAuthorTargetTool(tool.name)
     setAuthorSeed('')
     setAuthorSeedSignal((current) => current + 1)
@@ -786,7 +786,7 @@ export default function ToolCast({
   }, [authorStage.pointer])
 
   const cancelAuthorRevision = useCallback(() => {
-    if (authorStage.pointer && !authorStage.pointer.terminal_staged) return
+    if (authorStage.pointer) return
     setAuthorTargetTool(null)
     setAuthorSeed('')
     setAuthorSeedSignal((current) => current + 1)
@@ -797,11 +797,11 @@ export default function ToolCast({
     const published = await publishStagedAuthor(PUBLIC_DEMO, staged)
     const tool = published.tool || staged.tool
     if (published.published) {
-      authorStage.completePublication()
       catalog.actions.upsertTool(tool)
       await catalog.actions.loadCatalog()
       const message = `Tool published, ${tool.name}`
       showToast({ text: message, action: { label: 'View', onClick: () => setLeftView('author') } })
+      authorStage.completePublication()
     }
     return { ...published, tool }
   }, [authorStage.completePublication, catalog.actions, sessionReady, showToast])

@@ -8,13 +8,15 @@ const SURFACES = [
 
 for (const surface of SURFACES) {
   test(`${surface.name} resumes one exact authored revision after reload`, async ({ page }) => {
-    test.setTimeout(60_000)
+    test.setTimeout(90_000)
     const proofState = makeCatProofState()
     proofState.authorPublished = true
     const submissions = []
     const publicationBodies = []
     let pollReads = 0
     let mayComplete = false
+    let releasePublication
+    const publicationBarrier = new Promise((resolve) => { releasePublication = resolve })
 
     await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
     await page.route('http://leaf-proof.invalid/api/**', async (route) => {
@@ -47,6 +49,7 @@ for (const surface of SURFACES) {
       }
       if (url.pathname === '/api/author/publication-requests' && request.method() === 'POST') {
         publicationBodies.push(body)
+        if (publicationBodies.length === 1) await publicationBarrier
       }
 
       if (url.pathname === '/api/author/stages/async-change-0001' && request.method() === 'GET') {
@@ -150,14 +153,42 @@ for (const surface of SURFACES) {
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
 
     await page.reload()
-    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 15_000 })
-    await page.getByRole('button', { name: 'Request publication' }).click()
+    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 30_000 })
+    const terminalPointer = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
+    expect(terminalPointer).toMatchObject({
+      idempotency_key: submissions[0].idempotency_key,
+      change_set_id: 'async-change-0001',
+      terminal_staged: true,
+    })
+    const generateRevision = page.getByRole('button', { name: 'Generate revision' })
+    const cancelRevision = page.getByRole('button', { name: 'Cancel revision' })
+    await expect(generateRevision).toBeDisabled()
+    await expect(cancelRevision).toBeDisabled()
+    await generateRevision.evaluate((button) => button.click())
+    await page.waitForTimeout(100)
+    expect(submissions).toHaveLength(1)
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')).idempotency_key)).toBe(terminalPointer.idempotency_key)
+
+    const publicationRequest = page.getByRole('button', { name: 'Request publication' }).click()
+    await expect.poll(() => publicationBodies.length).toBe(1)
+    await expect(generateRevision).toBeDisabled()
+    await expect(cancelRevision).toBeDisabled()
+    await generateRevision.evaluate((button) => button.click())
+    expect(submissions).toHaveLength(1)
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')).idempotency_key)).toBe(terminalPointer.idempotency_key)
+    releasePublication()
+    await publicationRequest
     await expect(page.getByText(/Awaiting independent approval/)).toBeVisible()
     expect(publicationBodies[0]).toEqual({ change_set_id: 'async-change-0001' })
     proofState.independentApproved = true
     await page.getByRole('button', { name: 'Check approval & resume' }).click()
     await expect(page.getByRole('button', { name: 'Run it now' })).toBeVisible()
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
+    await expect(cancelRevision).toBeEnabled()
+    await cancelRevision.click()
+    await expect(page.getByLabel('What should the tool do?')).toBeEnabled()
+    await page.getByLabel('What should the tool do?').fill('author another tool after publication')
+    await expect(page.getByRole('button', { name: 'Generate tool' })).toBeEnabled()
 
     if (await catalogTab.count()) await catalogTab.click()
     const endFamily = page.getByRole('button', { name: /Custom authored tools/ })

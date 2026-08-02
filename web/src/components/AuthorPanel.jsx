@@ -353,7 +353,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const publicationPending = publicationStatus === 'awaiting_approval'
   const publicationDenied = publicationStatus === 'denied'
   const busyNow = busy || !!stageActivity?.active
-  const authorLocked = busyNow || (!!stageActivity?.pointer && !stageActivity.pointer.terminal_staged)
+  const authorLocked = busyNow || publishing || !!stageActivity?.pointer
   const shownElapsedMs = stageActivity?.active ? stageActivity.elapsedMs : elapsedMs
   const shownSecs = Math.floor(shownElapsedMs / 1000)
 
