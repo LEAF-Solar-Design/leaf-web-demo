@@ -741,6 +741,7 @@ export interface AppRunClient {
     /** App-owned session/turn that authenticated this turn. The app resolves the
      * author from its own record of that turn; the harness asserts no identity. */
     authority?: { sessionId?: string; turnId?: string },
+    targetToolName?: string,
   ): Promise<Record<string, unknown>>;
   /** Request or resume publication of one durable staged change set. */
   requestPublication(

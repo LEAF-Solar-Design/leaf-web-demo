@@ -76,6 +76,27 @@ def test_create_is_idempotent_and_replay_with_new_intent_is_rejected(store):
         )
 
 
+def test_revision_binding_is_durable_and_part_of_idempotency(store):
+    revised = store.create_change_set(
+        tenant_id="tenant-a", idempotency_key="revise-1", base_commit=BASE,
+        desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        change_kind="revise", target_tool_name="drape-onto-spheres",
+    )
+    loaded = store.get_change_set(
+        tenant_id="tenant-a", change_set_id=revised.change_set_id
+    )
+    assert (loaded.change_kind, loaded.target_tool_name) == (
+        "revise", "drape-onto-spheres"
+    )
+    with pytest.raises(IdempotencyReplayError):
+        store.create_change_set(
+            tenant_id="tenant-a", idempotency_key="revise-1", base_commit=BASE,
+            desired_platform_release="platform@sha256:abc",
+            workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        )
+
+
 def test_illegal_transition_is_rejected_without_state_change(store):
     change = create(store)
     with pytest.raises(InvalidTransitionError):

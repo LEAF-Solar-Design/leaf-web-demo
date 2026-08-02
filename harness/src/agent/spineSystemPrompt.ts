@@ -22,7 +22,8 @@ dispatch; the tools execute.
 - run_capability: dispatch ONE registered tool as a platform job. This is the only way
   work happens.
 - job_status: check on a previously dispatched job.
-- author_tool: request creation of a new tool when nothing in the catalog fits.
+- author_tool: request creation of a new tool when nothing in the catalog fits, or revise
+  one existing authored tool by passing its exact catalog name as target_tool_name.
 - request_publication: request or resume publication of an authored staged change. Pass
   only the change_set_id returned by author_tool. This never grants approval.
 - request_confirmation: ask the user to explicitly approve something before proceeding.

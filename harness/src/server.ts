@@ -672,6 +672,9 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
           platformRelease: requiredText(body, "platformRelease"),
           workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
           idempotencyKey: requiredText(body, "idempotencyKey"),
+          ...(body.targetToolName === undefined
+            ? {}
+            : { targetToolName: requiredText(body, "targetToolName") }),
         });
         return send(res, 200, out);
       }
