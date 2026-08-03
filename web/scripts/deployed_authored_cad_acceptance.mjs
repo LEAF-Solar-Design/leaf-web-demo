@@ -1022,12 +1022,18 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: 120_000 })
 
+    // /try's version history is a TAB in the Operations rail (a region), not
+    // /app's modal dialog: this block previously targeted /app's VersionHistory
+    // component ('History' button, dialog, vh-row-v1, 'Close version history'),
+    // none of which this surface renders — a repo-wide string sweep hid it
+    // because those literals do exist, on the other surface.
+    // See web/src/site/ToolCast.jsx:1205 (tab) and :1322-1344 (panel + rows).
     const previewMutationCount = mutatingApiRequests.length
-    await page.getByRole('button', { name: 'History', exact: true }).click()
-    const history = page.getByRole('dialog', { name: 'Version history' })
+    await page.getByRole('tab', { name: /^Versions/ }).click()
+    const history = page.getByRole('region', { name: 'Version history' })
     await history.waitFor({ state: 'visible' })
-    await history.getByTestId('vh-row-v1').getByRole('button').first().click()
-    await history.getByText(/Viewing v1.*read-only preview/).waitFor({ state: 'visible' })
+    await history.getByTestId('try-version-v1').getByRole('button').first().click()
+    await history.getByText(/Viewing v1 read-only/).waitFor({ state: 'visible' })
     if (!await runButton.isDisabled()) {
       throw new AcceptanceError('read_only_preview', 'a write remained enabled in version preview')
     }
@@ -1035,7 +1041,9 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       throw new AcceptanceError('read_only_preview', 'version preview changed the drawing head')
     }
     await history.getByRole('button', { name: 'Back to head', exact: true }).click()
-    await history.getByRole('button', { name: 'Close version history' }).click()
+    // No close control exists on this panel — leaving the tab selected is the
+    // surface's own resting state; the mutation-count assertion below is what
+    // actually proves the preview stayed read-only.
     if (mutatingApiRequests.length !== previewMutationCount) {
       throw new AcceptanceError('read_only_preview', 'version preview sent a mutating API request')
     }
