@@ -24,12 +24,6 @@ const RUN_ID = /^[a-z0-9][a-z0-9-]{5,49}$/
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 const REQUIRED_SERVICES = ['app', 'broker', 'canonical-worker', 'harness', 'web']
-// The curated PUBLIC demo drawing. It is a fixed artifact bundled in the image
-// (server deps.load_cached_intake), shared identically across all tenants — the
-// same "shared curated read-only drawing" the preflight opens under both
-// tenants. Reading it is a HIT (it exists) and discloses no tenant-private data,
-// so it is the trusted public reference for the isolation proof below.
-const PUBLIC_DEMO_DRAWING = 'rooftop_demo'
 const PRODUCTION_HOSTS = new Set([
   'api.leafdesign.ai',
   'platform.leafdesign.ai',
