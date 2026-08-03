@@ -19,6 +19,7 @@ import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
+import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
@@ -103,6 +104,13 @@ const demoDegraded = new URLSearchParams(window.location.search).get('demo') ===
 // `?ops=1` reveals the INTERNAL ops drawer (tenant kill-switch surface). Absent
 // by default — the tenant-facing app never shows it.
 const opsFlag = new URLSearchParams(window.location.search).get('ops') === '1'
+
+// `?customize=1` reveals the R7 admin self-edit drawer. Like ?ops=1 it is
+// absent by default and never reachable from a public demo build; unlike ops
+// the mount ALSO requires the policy read to carry platform_customize: true
+// (strict — see platformCustomizeEntitled), so non-admins never see it even
+// with the flag.
+const customizeFlag = new URLSearchParams(window.location.search).get('customize') === '1'
 
 // `?demo=locked` is a DEV-only hook that injects a synthetic single-writer
 // checkout (held by another session) so the checkout chip + write-Run
@@ -238,6 +246,7 @@ export default function App() {
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
+  const [customizeDismissed, setCustomizeDismissed] = useState(false)
 
   // --- NT2 toast (one slot — newest replaces) + DT2 details drawer ---
   const [toast, setToast] = useState(null)   // {id, text, action?}
@@ -436,6 +445,12 @@ export default function App() {
     return e[key] !== false
   }, [entitlements])
   const canRunWrite = entOf('run_write')
+  // Platform self-edit is the ONE capability that never falls back permissive:
+  // entOf treats unknown as allowed (demo parity), but an admin-only lane must
+  // read as absent unless the policy read explicitly grants it. Strict `=== true`
+  // keeps the drawer unreachable in mock and on tiers below admin even with
+  // ?customize=1 in the URL (the server enforces the same gate regardless).
+  const platformCustomizeEntitled = entitlements?.entitlements?.platform_customize === true
   // Build routes through the SHARED helper (platformTrustModel) so every
   // surface — this legacy /app shell and ToolCast's /try — applies the same
   // entitlement-AND-availability rule: a tier may hold `build` while the R5
@@ -1969,6 +1984,7 @@ export default function App() {
   // The internal ops / tenant kill-switch drawer must never be reachable from a
   // public demo build — `?ops=1` is a no-op in mock.
   const opsExit = useExit(opsFlag && !mock && !opsDismissed)
+  const customizeExit = useExit(customizeFlag && !mock && !customizeDismissed && platformCustomizeEntitled)
 
   return (
     <div className="app">
@@ -2573,6 +2589,8 @@ export default function App() {
       </footer>
 
       {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}
+
+      {customizeExit.shown && <CustomizePanel onDismiss={() => setCustomizeDismissed(true)} exiting={customizeExit.exiting} />}
 
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}

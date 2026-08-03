@@ -817,6 +817,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "audit", "--audit-level=high"], None),
         Suite("web-customization-check", "web customization static check", "script", WEB,
               [_npm(), "run", "check:customization"], None),
+        Suite("web-customize-panel-check", "R7 self-edit panel boundary check", "script", WEB,
+              [_npm(), "run", "check:customize-panel"], None),
         Suite("web-staging-fixes-check", "web staging fix regression checks", "script", WEB,
               [_npm(), "run", "check:staging-fixes"], None),
         # Named separately as well as inside check:staging-fixes, so a failure

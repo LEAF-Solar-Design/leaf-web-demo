@@ -401,6 +401,32 @@ export async function updateAccountControls(toolPublicationApprovalRequired, exp
   return res.json()
 }
 
+// --- Platform self-edit (R7 admin lane) ----------------------------------
+// Admin-tier only, enforced server-side (verified admin claim + subject
+// allowlist + internal-tenant rollout flag); these calls carry only the
+// signed-in user's bearer like every other /api call. The co-sign
+// approve/deny routes authenticate with an independent secret and therefore
+// deliberately have NO client here.
+export async function proposePlatformChange(title, edits) {
+  return http('/api/platform/customize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, edits }),
+  })
+}
+
+export async function getPlatformChange(changeId) {
+  return http(`/api/platform/customize/${encodeURIComponent(changeId)}`)
+}
+
+export async function landPlatformChange(changeId, commitSha) {
+  return http(`/api/platform/customize/${encodeURIComponent(changeId)}/land`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commit_sha: commitSha }),
+  })
+}
+
 // --- Per-tenant spend / quota meter (thin ledger-backed read) -----------
 // GET /api/usage -> {tenant_id, today:{runs, usd_est}, total:{runs, usd_est},
 //   cap:{usd_cap, remaining, enabled}, updated_at} (§10-enveloped). LIVE only —
