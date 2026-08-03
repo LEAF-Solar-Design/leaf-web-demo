@@ -823,10 +823,66 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     )
     await page.getByRole('button', { name: 'Generate tool', exact: true }).click()
     const stageResponse = await stageResponsePromise
-    if (stageResponse.status() !== 200) {
-      throw new AcceptanceError('author_stage', `authoring returned HTTP ${stageResponse.status()}`)
+    const stageStatus = stageResponse.status()
+    if (stageStatus !== 200 && stageStatus !== 202) {
+      throw new AcceptanceError('author_stage', `authoring returned HTTP ${stageStatus}`)
     }
-    const stagedBody = await stageResponse.json()
+    let stagedBody = await stageResponse.json()
+    if (stageStatus === 202) {
+      // leaf.customization-stage-job.v1 (#400): staging is now a DURABLE JOB —
+      // POST answers 202 {change_set_id, poll_url} and the surface itself
+      // polls GET /api/author/stages/{change_set_id} (web/src/api.js
+      // pollAuthorStage) until a terminal status. #400 changed the server and
+      // the surface but not this driver, so the first post-#400 execute died
+      // here with "authoring returned HTTP 202". Wait for the surface's own
+      // terminal poll response and use its staged result exactly as the sync
+      // 200 body was used.
+      const acceptedId = stagedBody?.change_set_id
+      if (!acceptedId) {
+        throw new AcceptanceError('author_stage', 'accepted authoring job carried no change_set_id')
+      }
+      const pollPath = `${config.apiUrl}/api/author/stages/${encodeURIComponent(acceptedId)}`
+      const terminalStatuses = new Set(['staged', 'complete', 'completed', 'succeeded'])
+      const failedStatuses = new Set(['failed', 'error'])
+      // EXACT mirror of web/src/api.js authorStageResult (all four cases, in
+      // order): the live server returns top-level `receipt` + `result: {tool}`
+      // (customization_service.py:765), which must graft to
+      // {...result, receipt} — returning the whole envelope loses `.tool` and
+      // the validator would reject every successful async stage.
+      const stagedFrom = (body) => {
+        if (body?.result?.receipt) return body.result
+        if (body?.receipt && body?.result && typeof body.result === 'object') {
+          return { ...body.result, receipt: body.receipt }
+        }
+        if (body?.staged?.receipt) return body.staged
+        if (body?.receipt) return body
+        return null
+      }
+      const pollResponse = await page.waitForResponse(
+        async (response) => {
+          if (response.url() !== pollPath || response.request().method() !== 'GET') return false
+          try {
+            const body = await response.json()
+            const status = String(body?.status || '').toLowerCase()
+            if (failedStatuses.has(status)) return true // surfaced as a failure below
+            return !!stagedFrom(body) && (terminalStatuses.has(status) || !status)
+          } catch { return false }
+        },
+        { timeout: AUTHOR_TIMEOUT_MS },
+      )
+      const pollBody = await pollResponse.json()
+      const pollStatus = String(pollBody?.status || '').toLowerCase()
+      if (failedStatuses.has(pollStatus)) {
+        throw new AcceptanceError('author_stage', `authoring job failed: ${pollBody?.message || pollStatus}`)
+      }
+      stagedBody = stagedFrom(pollBody)
+      if (stagedBody && !stagedBody.receipt && pollBody?.receipt) {
+        stagedBody = { ...stagedBody, receipt: pollBody.receipt }
+      }
+      if (!stagedBody) {
+        throw new AcceptanceError('author_stage', 'authoring job reached terminal status without a staged result')
+      }
+    }
     const staged = validateStagedAuthorResponse(stagedBody, tenant)
     const stageRequest = stageResponse.request().postDataJSON()
     if (stageRequest?.description !== tenant.request) {
