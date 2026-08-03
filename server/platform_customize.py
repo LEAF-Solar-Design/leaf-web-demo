@@ -240,6 +240,24 @@ def _validated_repo_path(raw: Any) -> str:
         raise PlatformCustomizeError("edit_path_invalid", 422, f"traversal: {raw!r}")
     if any(seg == ".git" or seg.lower() == ".git" for seg in segments):
         raise PlatformCustomizeError("edit_path_invalid", 422, f"git_dir: {raw!r}")
+    # Win32 STRIPS trailing dots and spaces from every path component, so
+    # `server./agent_gate.py` and `server /agent_gate.py` name the same file as
+    # `server/agent_gate.py` on a Windows checkout while spelling differently
+    # here — and a different spelling is a different classification. That is a
+    # co-sign bypass: the alias reports fundamental_paths=[] and the change
+    # goes APPROVED instead of AWAITING_COSIGN (sol-critic PR #417 round 3).
+    # No legitimate path in this repo ends a component in a dot or a space
+    # (git cannot even check such a name out on Windows), so REJECT rather
+    # than normalize: rejecting cannot be replayed into an accepted alias.
+    if any(seg != seg.rstrip(". ") for seg in segments):
+        raise PlatformCustomizeError("edit_path_invalid", 422, f"win32_alias: {raw!r}")
+    # A path is only a control if a human can READ it on the approval chip.
+    # C0/C1 controls (a newline collapses a row) and Unicode bidi/format marks
+    # (RLO reorders what the eye sees) let one path render as another, which
+    # turns the chip back into blind approval by a different route. No repo
+    # path contains them (sol-critic PR #417 round 3).
+    if any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in raw):
+        raise PlatformCustomizeError("edit_path_invalid", 422, "control_char")
     return raw
 
 
@@ -296,14 +314,22 @@ def _load_fundamental_patterns() -> Optional[list[str]]:
 
 
 def _fold(path: str) -> str:
-    """Case-fold + NFC for CLASSIFICATION ONLY (never for writing).
+    """Case-fold + NFC + Win32 component canonicalization, for CLASSIFICATION
+    ONLY (never for writing).
 
     Windows and macOS checkouts resolve ``Server/entitlements.py`` to the same
     file as ``server/entitlements.py``, so a case-variant spelling must
-    classify as the protected path, not slip past it. Folding can only WIDEN
-    the fundamental set — the fail-closed direction.
+    classify as the protected path, not slip past it. Win32 additionally
+    strips trailing dots and spaces from each component, making
+    ``server./entitlements.py`` another alias of the same file — so those are
+    stripped here too. Folding can only WIDEN the fundamental set — the
+    fail-closed direction — which is why this stays a second barrier behind
+    ``_validated_repo_path``'s outright rejection of such aliases: a caller
+    that ever reaches classification without validation still classifies the
+    protected path correctly.
     """
-    return unicodedata.normalize("NFC", path).casefold()
+    folded = unicodedata.normalize("NFC", path).casefold()
+    return "/".join(seg.rstrip(". ") or seg for seg in folded.split("/"))
 
 
 def _matches(pattern: str, path: str) -> bool:

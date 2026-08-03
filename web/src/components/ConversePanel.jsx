@@ -36,16 +36,38 @@ import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.j
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
   if (entries.length === 0) return null
-  // Objects and arrays must NEVER reach String() here: it renders the useless
-  // "[object Object]", which on a platform self-edit chip hid the very paths
-  // the approver needed to see (sol-critic PR #417).
+  // Objects must never reach String(): it renders the useless "[object
+  // Object]", which on a platform self-edit chip hid the very paths the
+  // approver needed to see (sol-critic PR #417 round 1). Everything else keeps
+  // String()'s EXACT previous rendering — an array still lists its elements
+  // and null still reads "null". Summarizing them (a count, a blank) would
+  // conceal the parameters of every existing proposal chip, which is the same
+  // blind-approval defect wearing different clothes (round 3).
   const val = (v) => {
-    if (v == null) return ''
-    if (Array.isArray(v)) return `${v.length}`
-    if (typeof v === 'object') return JSON.stringify(v)
+    if (Array.isArray(v)) return v.map(val).join(',')
+    if (v !== null && typeof v === 'object') return JSON.stringify(v)
     return String(v)
   }
   return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${val(v)}`).join(' · ')
+}
+
+// A path is only a control if it renders as EXACTLY what the server holds.
+// React escapes HTML, but it happily prints a newline (which collapses a row)
+// or a bidi override (which reorders what the eye reads), so one path can be
+// made to look like another. The lane rejects both at propose time; this is
+// the second barrier, for a record written before that check existed
+// (sol-critic PR #417 round 3).
+function displayPath(raw) {
+  let out = ''
+  for (const ch of String(raw ?? '')) {
+    const c = ch.codePointAt(0)
+    const unsafe =
+      c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x061c ||
+      c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) ||
+      (c >= 0x2066 && c <= 0x2069)
+    out += unsafe ? '\\u' + c.toString(16).padStart(4, '0').toUpperCase() : ch
+  }
+  return out
 }
 
 // A platform self-edit chip states, in one calm line, exactly what would be
@@ -85,7 +107,7 @@ function CustomizeChipBody({ payload }) {
         <span className="customize-edit-list">
           {edits.map((e, i) => (
             <span key={`${e.path}-${i}`} className="customize-edit">
-              <code>{e.path}</code>
+              <code dir="ltr">{displayPath(e.path)}</code>
               <span className="dim">
                 {' '}{e.action === 'delete' ? 'delete' : `write${
                   typeof e.bytes === 'number' ? ` ${e.bytes} bytes` : ''}`}

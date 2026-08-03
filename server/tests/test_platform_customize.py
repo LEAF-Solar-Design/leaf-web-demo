@@ -168,6 +168,42 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_win32_trailing_dot_alias_cannot_dodge_the_cosign_manifest(lane_env):
+    """Win32 strips trailing dots and spaces from every path component, so
+    `server./auth.py` names the protected file on a Windows checkout while
+    spelling differently here. Classified naively it returns no fundamental
+    paths and the change goes straight to APPROVED — landing a change to the
+    auth spine with no independent co-sign (sol-critic PR #417 round 3).
+
+    Two barriers, both asserted: propose REFUSES the alias outright, and the
+    classifier still widens it to the protected path if it ever reaches
+    classification unvalidated.
+    """
+    for alias in ["server./auth.py", "server /auth.py", "server/auth.py.",
+                  "harness./src/x.ts"]:
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _propose(edits=[{"path": alias, "content": "AUTH = 2\n"}])
+        assert exc.value.code == "edit_path_invalid", alias
+
+    assert lane.classify_fundamental(["server./auth.py"]) == ["server./auth.py"]
+    assert lane.classify_fundamental(["Server. /auth.py"]) == ["Server. /auth.py"]
+    # A legitimate path is untouched by the canonicalization.
+    assert lane.classify_fundamental(["docs/note.md"]) == []
+
+
+def test_propose_rejects_control_and_bidi_characters_in_paths(lane_env):
+    """A path is only a control if a human can READ it on the approval chip.
+    A newline collapses a row and a bidi override reorders what the eye sees,
+    so either can make one path render as another (sol-critic PR #417 r3)."""
+    for bad in ["a\nb.py",              # C0: collapses a chip row
+                "web/\u202Esj.py",       # RLO: reverses what is displayed
+                "docs/no\u200Ete.md",    # LRM: invisible, splits a name
+                "docs/no\u0000te.md"]:   # NUL
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _propose(edits=[{"path": bad, "content": "x"}])
+        assert exc.value.code == "edit_path_invalid", repr(bad)
+
+
 def test_absent_manifest_makes_everything_fundamental(lane_env, monkeypatch):
     monkeypatch.setenv("LEAF_PLATFORM_FUNDAMENTAL_PATHS_FILE",
                        str(lane_env["tmp"] / "nope.json"))
