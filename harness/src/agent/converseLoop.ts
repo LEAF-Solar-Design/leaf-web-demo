@@ -642,6 +642,39 @@ export class ConverseLoop {
           // id — the approvable path the executor's awaiting_approval branch
           // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
+        case "customize_platform": {
+          const op =
+            args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
+          if (op === "status") {
+            // A status read has no side effect; the read rung records it
+            // without proposing a chip.
+            return { action: "read_platform_state", args: { what: "customize_status" } };
+          }
+          const confirmation =
+            typeof args.confirmation_id === "string"
+              ? { confirmation_id: args.confirmation_id }
+              : {};
+          if (op === "land") {
+            return {
+              action: "customize_platform",
+              args: {
+                op: "land",
+                change_id: String(args.change_id ?? ""),
+                commit_sha: String(args.commit_sha ?? ""),
+                ...confirmation,
+              },
+            };
+          }
+          return {
+            action: "customize_platform",
+            args: {
+              op: "propose",
+              title: String(args.title ?? ""),
+              edits: sanitizeCustomizeEdits(args.edits),
+              ...confirmation,
+            },
+          };
+        }
       }
     };
 
@@ -715,7 +748,8 @@ export class ConverseLoop {
           // run_capability uses the normalized gate args, including the resolved
           // drawing. Raw SDK args may omit the default drawing, which would make
           // the mirror disagree with the app gate's args hash on replay.
-          const confirmationArgs = tool === "run_capability" ? consult.args : args;
+          const confirmationArgs =
+            tool === "run_capability" || tool === "customize_platform" ? consult.args : args;
           await store.putConfirmation(
             mkConfirmation(confirmationId, tool, confirmationArgs, kind),
           );
@@ -738,10 +772,19 @@ export class ConverseLoop {
               JSON.stringify({ proposed: true, confirmation_id: confirmationId, tool: target, params }),
             );
           } else {
+            // A platform self-edit chip must let the approver see WHAT they are
+            // approving. Raw args render as "[object Object]" and hide the
+            // paths — the one fact that catches an injected edit to a file the
+            // user never mentioned (sol-critic PR #417 round 1, blocking).
+            // Server-truth, bounded, and never the raw file bytes.
+            const payload =
+              tool === "customize_platform"
+                ? customizeChipPayload(consult.args)
+                : args;
             await emit("confirmation_required", {
               confirmation_id: confirmationId,
               kind,
-              payload: args,
+              payload,
             });
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
@@ -1016,6 +1059,37 @@ export class ConverseLoop {
         return ok(JSON.stringify(publication));
       }
 
+      case "customize_platform": {
+        const op = args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
+        const authority = {
+          sessionId: ctx.authoritySessionId,
+          turnId: ctx.authorityTurnId,
+        };
+        if (op === "status") {
+          const changeId = String(args.change_id ?? "").trim();
+          if (!changeId) return err("customize_platform status requires args.change_id");
+          return ok(JSON.stringify(await appRun.customizeStatus(tenantId, changeId)));
+        }
+        if (op === "land") {
+          const changeId = String(args.change_id ?? "").trim();
+          const commitSha = String(args.commit_sha ?? "").trim();
+          if (!changeId || !commitSha) {
+            return err("customize_platform land requires args.change_id and args.commit_sha");
+          }
+          return ok(
+            JSON.stringify(await appRun.customizeLand(tenantId, changeId, commitSha, authority)),
+          );
+        }
+        const title = String(args.title ?? "").trim();
+        const edits = sanitizeCustomizeEdits(args.edits);
+        if (!title || edits.length === 0) {
+          return err("customize_platform propose requires args.title and a non-empty args.edits");
+        }
+        return ok(
+          JSON.stringify(await appRun.customizePropose(tenantId, title, edits, authority)),
+        );
+      }
+
       case "request_confirmation": {
         const kind = String(args.kind ?? "confirm");
         const confirmationId =
@@ -1171,7 +1245,79 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
+    case "customize_platform":
+      return `op=${String(args.op ?? "propose")}${args.confirmation_id ? " (confirmed)" : ""}`;
   }
+}
+
+/**
+ * The APPROVAL-CHIP projection of a platform self-edit: EVERY path, what
+ * happens to it, and how many bytes — the facts an approver needs to notice a
+ * file they never asked about. Bounded only in CONTENT: paths and sizes, never
+ * the file bytes (a chip is not a diff viewer, and raw content would blow the
+ * event row).
+ *
+ * The path list is NOT bounded below the server's own ceiling. A display cap
+ * lower than `platform_customize.MAX_EDITS` reopens the blind-approval hole it
+ * exists to close: 20 benign edits followed by one for `web/src/auth.js` (which
+ * no co-sign manifest covers) would approve a path the operator never saw
+ * (sol-critic PR #417 round 2, blocking). The cap below therefore EQUALS that
+ * server ceiling — every proposal the API will accept is shown in full — and
+ * `customizeChipPayload.test` fails if the two drift apart.
+ */
+export function customizeChipPayload(args: Record<string, unknown>): Record<string, unknown> {
+  const op = String(args.op ?? "propose");
+  if (op === "land") {
+    return {
+      op,
+      change_id: String(args.change_id ?? ""),
+      commit_sha: String(args.commit_sha ?? ""),
+    };
+  }
+  const edits = Array.isArray(args.edits) ? args.edits : [];
+  const shown = edits.slice(0, CUSTOMIZE_CHIP_MAX_EDITS).map((raw) => {
+    const e = (raw ?? {}) as Record<string, unknown>;
+    const del = e.delete === true;
+    return {
+      path: String(e.path ?? ""),
+      action: del ? "delete" : "write",
+      ...(del ? {} : { bytes: typeof e.content === "string" ? e.content.length : 0 }),
+    };
+  });
+  return {
+    op,
+    title: String(args.title ?? ""),
+    edit_count: edits.length,
+    edits: shown,
+    // Unreachable through the API (the server refuses more than MAX_EDITS), so
+    // if it ever fires the chip is INCOMPLETE and must say so loudly rather
+    // than quietly count what it hid — the UI renders this as a refusal
+    // banner, never as "+N more".
+    ...(edits.length > shown.length ? { edits_undisplayed: edits.length - shown.length } : {}),
+  };
+}
+
+/** MUST equal server/platform_customize.py MAX_EDITS (pinned by test). */
+export const CUSTOMIZE_CHIP_MAX_EDITS = 200;
+
+/** Shape model-supplied edits to EXACTLY the catalog/API item shape. */
+function sanitizeCustomizeEdits(
+  raw: unknown,
+): Array<{ path: string; content?: string; delete?: boolean }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ path: string; content?: string; delete?: boolean }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const path = String(r.path ?? "").trim();
+    if (!path) continue;
+    out.push({
+      path,
+      ...(typeof r.content === "string" ? { content: r.content } : {}),
+      ...(r.delete === true ? { delete: true } : {}),
+    });
+  }
+  return out;
 }
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {

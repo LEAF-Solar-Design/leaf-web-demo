@@ -924,6 +924,92 @@ describe("ConverseLoop — remaining spine tools", () => {
     }));
   });
 
+  it("customize_platform proposes through the app back-edge only after approval", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(
+      loop,
+      s,
+      'CUSTOMIZE:lightmode PARAMS:{"edits":[{"path":"console/App.jsx","content":"x"}]}',
+    );
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+    expect(appRun.customizeCalls).toHaveLength(0);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.customizeCalls).toEqual([
+      {
+        op: "propose",
+        tenantId: "demo-tenant",
+        title: "lightmode",
+        edits: [{ path: "console/App.jsx", content: "x" }],
+      },
+    ]);
+    expect(gate.checks).toContainEqual(
+      expect.objectContaining({
+        action: "customize_platform",
+        args: expect.objectContaining({ op: "propose", confirmation_id: cid }),
+        decision: "allow",
+      }),
+    );
+  });
+
+  it("customize_platform chip carries every edit path so approval is informed", async () => {
+    const { loop, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(
+      loop,
+      s,
+      'CUSTOMIZE:lightmode PARAMS:{"edits":[{"path":"console/App.jsx","content":"abc"},' +
+        '{"path":"web/src/auth.js","content":"evil"},{"path":"old.css","delete":true}]}',
+    );
+    const events = await store.eventsAfter(s.session_id, 0);
+    const chip = ofType(events, "confirmation_required")[0]!.data;
+    expect(chip.kind).toBe("customize_platform");
+    const payload = chip.payload as Record<string, unknown>;
+    // The exploit this pins: an edit to a file the user never mentioned must be
+    // VISIBLE on the chip, not hidden inside a stringified object.
+    expect(payload).toMatchObject({ op: "propose", title: "lightmode", edit_count: 3 });
+    expect(payload.edits).toEqual([
+      { path: "console/App.jsx", action: "write", bytes: 3 },
+      { path: "web/src/auth.js", action: "write", bytes: 4 },
+      { path: "old.css", action: "delete" },
+    ]);
+    // Never the raw file bytes.
+    expect(JSON.stringify(payload)).not.toContain("evil");
+  });
+
+  it("customize_platform land takes its own fresh approval and names the exact commit", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const sha = "a".repeat(40);
+    await sendText(loop, s, `CUSTOMIZE_LAND:chg-1 PARAMS:{"commit_sha":"${sha}"}`);
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+    expect(appRun.customizeCalls).toHaveLength(0);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.customizeCalls).toEqual([
+      { op: "land", tenantId: "demo-tenant", changeId: "chg-1", commitSha: sha },
+    ]);
+  });
+
   it("request_publication sends only the durable change-set id", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

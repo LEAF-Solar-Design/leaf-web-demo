@@ -121,7 +121,7 @@
       "policy": "always-confirm",
       "tenant_tightenable": false,
       "dispatch": {"kind": "app_api", "routes": ["POST /api/platform/customize", "GET /api/platform/customize/*", "POST /api/platform/customize/*/land"]},
-      "args_schema": {"type": "object", "properties": {"title": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "delete": {"type": "boolean"}}, "required": ["path"], "additionalProperties": false}}, "change_id": {"type": "string"}, "confirmation_id": {"type": "string"}}, "additionalProperties": false},
+      "args_schema": {"type": "object", "properties": {"op": {"type": "string", "enum": ["propose", "land"]}, "title": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "delete": {"type": "boolean"}}, "required": ["path"], "additionalProperties": false}}, "change_id": {"type": "string"}, "commit_sha": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["op"], "additionalProperties": false},
       "rate_limit_category": "high",
       "timeout_s": 600,
       "audit_extra": ["title", "change_id"]

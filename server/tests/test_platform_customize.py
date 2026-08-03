@@ -168,6 +168,69 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_win32_trailing_dot_alias_cannot_dodge_the_cosign_manifest(lane_env):
+    """Win32 strips trailing dots and spaces from every path component, so
+    `server./auth.py` names the protected file on a Windows checkout while
+    spelling differently here. Classified naively it returns no fundamental
+    paths and the change goes straight to APPROVED — landing a change to the
+    auth spine with no independent co-sign (sol-critic PR #417 round 3).
+
+    Two barriers, both asserted: propose REFUSES the alias outright, and the
+    classifier still widens it to the protected path if it ever reaches
+    classification unvalidated.
+    """
+    for alias in ["server./auth.py", "server /auth.py", "server/auth.py.",
+                  "harness./src/x.ts"]:
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _propose(edits=[{"path": alias, "content": "AUTH = 2\n"}])
+        assert exc.value.code == "edit_path_invalid", alias
+
+    assert lane.classify_fundamental(["server./auth.py"]) == ["server./auth.py"]
+    assert lane.classify_fundamental(["Server. /auth.py"]) == ["Server. /auth.py"]
+    # A legitimate path is untouched by the canonicalization.
+    assert lane.classify_fundamental(["docs/note.md"]) == []
+
+
+def test_propose_rejects_every_unreadable_or_confusable_path(lane_env):
+    """A path is only a control if a human can READ it on the approval chip
+    AND tell two paths apart. Denylisting loses: controls collapse a row,
+    bidi marks reorder what the eye sees, zero-width and filler characters
+    are invisible, and homoglyphs read as the wrong file — each denied
+    class leaves the next (sol-critic PR #417 rounds 3-4). The allowlist
+    closes all of them at once."""
+    for bad in ["a\nb.py",              # C0: collapses a chip row
+                "docs/no\u0000te.md",    # NUL
+                "web/\u202Esj.py",       # RLO: reverses what is displayed
+                "docs/no\u200Ete.md",    # LRM
+                "docs/no\u200Bte.md",    # ZWSP: invisible
+                "docs/no\uFEFFte.md",    # BOM: invisible
+                "docs/no\u00ADte.md",    # soft hyphen: invisible
+                "docs/no\u034Fte.md",    # combining grapheme joiner (Mn)
+                "docs/no\u3164te.md",    # Hangul filler (Lo): invisible
+                "docs/n\u043Ete.md",     # Cyrillic o: homoglyph
+                "docs/note md",          # space is not in the charset
+                ]:
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _propose(edits=[{"path": bad, "content": "x"}])
+        assert exc.value.code == "edit_path_invalid", repr(bad)
+
+
+def test_every_tracked_repo_path_passes_the_charset(lane_env):
+    """The allowlist is only safe because nothing real falls outside it.
+    Pin that against the actual repository rather than trusting the claim:
+    a future file whose name needs a wider charset fails HERE, next to the
+    rule, instead of being refused at propose time in production."""
+    import subprocess
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=str(repo_root),
+                         check=True, stdout=subprocess.PIPE)
+    paths = [p for p in out.stdout.decode("utf-8").split("\0") if p]
+    assert len(paths) > 100, "git ls-files returned an implausible tree"
+    offenders = [p for p in paths
+                 if lane._PATH_ALLOWED_RE.fullmatch(p) is None]
+    assert offenders == [], offenders
+
+
 def test_absent_manifest_makes_everything_fundamental(lane_env, monkeypatch):
     monkeypatch.setenv("LEAF_PLATFORM_FUNDAMENTAL_PATHS_FILE",
                        str(lane_env["tmp"] / "nope.json"))

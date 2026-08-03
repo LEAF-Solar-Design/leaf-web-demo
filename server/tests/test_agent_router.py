@@ -148,11 +148,23 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("GET", "/api/capabilities") is True
     assert deps._dispatch_backedge_route("GET", "/api/tools") is True
     assert deps._dispatch_backedge_route("GET", "/api/drawings/demo/versions") is True
+    # R7 spine mount (2026-08-03 contract revision): propose, status, land.
+    assert deps._dispatch_backedge_route("POST", "/api/platform/customize") is True
+    assert deps._dispatch_backedge_route("GET", "/api/platform/customize/chg-1") is True
+    assert deps._dispatch_backedge_route("POST", "/api/platform/customize/chg-1/land") is True
     # NOT back-edge: the SSE stream, the jobs list, and everything else
     assert deps._dispatch_backedge_route("GET", "/api/jobs/job-123/stream") is False
     assert deps._dispatch_backedge_route("GET", "/api/jobs") is False
     assert deps._dispatch_backedge_route("GET", "/api/entitlements") is False
     assert deps._dispatch_backedge_route("DELETE", "/api/sessions/x") is False
+    # The co-sign surface must NEVER be back-edge reachable (the harness never
+    # holds co-sign authority), and malformed customize paths stay off it.
+    assert deps._dispatch_backedge_route("POST", "/internal/platform-customize/cosign") is False
+    assert deps._dispatch_backedge_route("POST", "/internal/platform-customize/deny") is False
+    assert deps._dispatch_backedge_route("POST", "/api/platform/customize/a/b/land") is False
+    assert deps._dispatch_backedge_route("POST", "/api/platform/customize//land") is False
+    assert deps._dispatch_backedge_route("GET", "/api/platform/customize/a/b") is False
+    assert deps._dispatch_backedge_route("GET", "/api/platform/customize/") is False
 
 
 def test_corrupt_primary_tier_source_never_falls_back_to_a_stale_env_map(tmp_path, monkeypatch):

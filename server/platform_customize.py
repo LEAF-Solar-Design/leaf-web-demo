@@ -51,6 +51,10 @@ BRANCH_PREFIX = "refs/heads/admin-customize/"
 _CHANGE_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+# The complete character set an edit path may use. Verified against every one
+# of the repo's tracked files (984 at 2026-08-03): zero fall outside it.
+_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@-]+")
+
 MAX_EDITS = 200
 MAX_EDIT_BYTES = 1_000_000  # per file
 MAX_TITLE = 200
@@ -240,6 +244,28 @@ def _validated_repo_path(raw: Any) -> str:
         raise PlatformCustomizeError("edit_path_invalid", 422, f"traversal: {raw!r}")
     if any(seg == ".git" or seg.lower() == ".git" for seg in segments):
         raise PlatformCustomizeError("edit_path_invalid", 422, f"git_dir: {raw!r}")
+    # Win32 STRIPS trailing dots and spaces from every path component, so
+    # `server./agent_gate.py` and `server /agent_gate.py` name the same file as
+    # `server/agent_gate.py` on a Windows checkout while spelling differently
+    # here — and a different spelling is a different classification. That is a
+    # co-sign bypass: the alias reports fundamental_paths=[] and the change
+    # goes APPROVED instead of AWAITING_COSIGN (sol-critic PR #417 round 3).
+    # No legitimate path in this repo ends a component in a dot or a space
+    # (git cannot even check such a name out on Windows), so REJECT rather
+    # than normalize: rejecting cannot be replayed into an accepted alias.
+    if any(seg != seg.rstrip(". ") for seg in segments):
+        raise PlatformCustomizeError("edit_path_invalid", 422, f"win32_alias: {raw!r}")
+    # A path is only a control if a human can READ it on the approval chip, and
+    # can tell two different paths apart. Denylisting the ways to break that
+    # loses: controls collapse a row, bidi marks reorder what the eye sees,
+    # zero-width and filler characters (U+200B, U+FEFF, U+00AD, U+034F Mn,
+    # U+3164 Lo) are invisible, and homoglyphs read as the wrong file — and
+    # they span half the Unicode category table, so each denied class leaves
+    # the next (sol-critic PR #417 rounds 3-4). ALLOWLIST instead: every one
+    # of this repo's 984 tracked paths uses only these characters, so nothing
+    # legitimate is refused and every confusable spelling is.
+    if _PATH_ALLOWED_RE.fullmatch(raw) is None:
+        raise PlatformCustomizeError("edit_path_invalid", 422, "charset")
     return raw
 
 
@@ -296,14 +322,22 @@ def _load_fundamental_patterns() -> Optional[list[str]]:
 
 
 def _fold(path: str) -> str:
-    """Case-fold + NFC for CLASSIFICATION ONLY (never for writing).
+    """Case-fold + NFC + Win32 component canonicalization, for CLASSIFICATION
+    ONLY (never for writing).
 
     Windows and macOS checkouts resolve ``Server/entitlements.py`` to the same
     file as ``server/entitlements.py``, so a case-variant spelling must
-    classify as the protected path, not slip past it. Folding can only WIDEN
-    the fundamental set — the fail-closed direction.
+    classify as the protected path, not slip past it. Win32 additionally
+    strips trailing dots and spaces from each component, making
+    ``server./entitlements.py`` another alias of the same file — so those are
+    stripped here too. Folding can only WIDEN the fundamental set — the
+    fail-closed direction — which is why this stays a second barrier behind
+    ``_validated_repo_path``'s outright rejection of such aliases: a caller
+    that ever reaches classification without validation still classifies the
+    protected path correctly.
     """
-    return unicodedata.normalize("NFC", path).casefold()
+    folded = unicodedata.normalize("NFC", path).casefold()
+    return "/".join(seg.rstrip(". ") or seg for seg in folded.split("/"))
 
 
 def _matches(pattern: str, path: str) -> bool:

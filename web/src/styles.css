@@ -1609,6 +1609,28 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-size: 12px;
 }
 .converse-confirm { align-self: stretch; } /* the strip-decision confirm card spans the log */
+/* Platform self-edit chip: one line per file so the paths are readable at a
+   glance — they are what tells an approver a file they never asked about is
+   in the change. */
+.customize-edit-list { display: block; margin: 4px 0 2px; }
+/* A clipped or reordered path is an unseen path, so nothing here may hide
+   characters: wrap anywhere rather than overflow, and isolate each path from
+   the surrounding text direction. */
+.customize-edit {
+  display: block; font-size: 11px; line-height: 1.5;
+  overflow-wrap: anywhere; word-break: break-all; white-space: normal;
+  max-width: 100%; overflow: visible;
+}
+.customize-edit code {
+  font-family: var(--mono, ui-monospace, monospace);
+  unicode-bidi: isolate; direction: ltr;
+}
+/* Only shown when the chip could not list every changed path — an incomplete
+   chip cannot be judged, so it reads as a refusal, not an overflow count. */
+.customize-incomplete {
+  display: block; margin-top: 4px; font-size: 11px; font-weight: 600;
+  color: var(--danger, #b3261e);
+}
 .converse-pending {
   display: grid;
   gap: 6px;

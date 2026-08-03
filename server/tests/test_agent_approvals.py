@@ -262,12 +262,48 @@ def test_list_pending_approvals_returns_only_callers_live_rows(client):
         "capability": "drawing.write",
         "rationale": "adds a home-run",
         "kind": "proposed_run",
+        "payload": {"preview": "ok"},
         "decided": False,
         "approved": None,
         "resume_required": False,
         "created_at": session_store.get_approval(first["confirmation_id"])["created_at"],
         "expires_at": session_store.get_approval(first["confirmation_id"])["expires_at"],
     }]
+
+
+def test_pending_approval_carries_the_payload_that_makes_it_judgeable(client):
+    """A reloaded chip must show WHAT it approves. Dropping `payload` left a
+    platform self-edit rendering as a generic "Run requested tool" line with
+    no paths — an approval the operator could not judge (sol-critic #417)."""
+    _counter[0] += 1
+    n = _counter[0]
+    tenant_id = "tenant-customize-api"
+    sess = session_store.get_or_create_session(tenant_id, f"drawing-cust-{n}")
+    payload = {
+        "op": "propose",
+        "title": "lightmode",
+        "edit_count": 2,
+        "edits": [
+            {"path": "console/App.jsx", "action": "write", "bytes": 3},
+            {"path": "web/src/auth.js", "action": "write", "bytes": 4},
+        ],
+    }
+    session_store.create_approval(
+        f"confirm-cust-{n}", sess["session_id"], tenant_id, f"turn-cust-{n}",
+        tool=None, params=None, capability=None, rationale=None,
+        kind="customize_platform", payload=payload, ttl_s=300,
+    )
+
+    r = client.get(
+        f"/api/agent/approvals/pending?session_id={sess['session_id']}",
+        headers=_h(tenant_id),
+    )
+    assert r.status_code == 200, r.text
+    approval = r.json()["approvals"][0]
+    assert approval["kind"] == "customize_platform"
+    assert approval["payload"] == payload
+    paths = [e["path"] for e in approval["payload"]["edits"]]
+    assert "web/src/auth.js" in paths
 
 
 def test_list_pending_approvals_recovers_same_actor_decided_unconsumed(client):

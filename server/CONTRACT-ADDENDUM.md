@@ -1202,8 +1202,16 @@ That back edge is a new authenticated surface:
   deliberately — the back edge has no browser fallback to protect).
 - **Allowlist**: the secret is accepted **only** on `POST /api/run`,
   `GET /api/jobs/{id}`, `GET /api/capabilities` (`server/routers/capabilities.py:19`),
-  `GET /api/tools` (`server/routers/tools.py:21`), `GET /api/drawings/*`, and
-  `POST /internal/agent/gate`. Every other route ignores the header entirely.
+  `GET /api/tools` (`server/routers/tools.py:21`), `GET /api/drawings/*`,
+  `POST /internal/agent/gate`, and — the R7 spine mount (2026-08-03, this
+  revision) — `POST /api/platform/customize`,
+  `GET /api/platform/customize/{change_id}`, and
+  `POST /api/platform/customize/{change_id}/land`. The R7 routes keep every
+  server-side admission unchanged (admin-tier `platform_customize`
+  entitlement, R7 rollout listing, branch-only writes, exact-commit land ack);
+  the `/internal/platform-customize/*` co-sign routes remain OFF this
+  allowlist — the harness never holds co-sign authority. Every other route
+  ignores the header entirely.
   Note: today's GET surface under `/api/drawings/*` is `…/intake`
   (`server/routers/drawings.py:46`) and `…/versions` (:104); checkout state rides the
   versions response (`_checkout_view`, :78–85). The allowlist means that read subset.

@@ -499,11 +499,21 @@ def require_matching_platform_tenant_claim(
 def _dispatch_backedge_route(method: str, path: str) -> bool:
     """Return whether this exact method and path is a harness back-edge."""
     if method == "POST":
-        return path in (
+        if path in (
             "/api/run",
             "/api/author",
             "/api/author/publication-requests",
-        )
+            "/api/platform/customize",
+        ):
+            return True
+        # R7 spine mount: land is per-change (one path segment, no deeper).
+        # The /internal/platform-customize/* co-sign routes are DELIBERATELY
+        # absent — the harness must never hold co-sign authority
+        # (server/routers/platform_customize.py module docstring).
+        if path.startswith("/api/platform/customize/") and path.endswith("/land"):
+            change_id = path[len("/api/platform/customize/"):-len("/land")]
+            return bool(change_id) and "/" not in change_id
+        return False
     if method != "GET":
         return False
     if path in ("/api/capabilities", "/api/tools"):
@@ -513,6 +523,10 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
     if path.startswith("/api/jobs/"):
         rest = path[len("/api/jobs/"):]
         return bool(rest) and "/" not in rest  # the job read only, not /stream etc.
+    if path.startswith("/api/platform/customize/"):
+        # R7 spine mount: the per-change status read only (one segment).
+        rest = path[len("/api/platform/customize/"):]
+        return bool(rest) and "/" not in rest
     return False
 
 

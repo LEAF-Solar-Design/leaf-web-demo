@@ -144,6 +144,54 @@ export class HttpAppRunClient implements AppRunClient {
     );
   }
 
+  async customizePropose(
+    tenantId: string,
+    title: string,
+    edits: Array<{ path: string; content?: string; delete?: boolean }>,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "POST",
+      "/api/platform/customize",
+      { title, edits },
+      {
+        ...(authority?.sessionId
+          ? { "x-authority-session-id": authority.sessionId }
+          : {}),
+        ...(authority?.turnId ? { "x-authority-turn-id": authority.turnId } : {}),
+      },
+    );
+  }
+
+  async customizeStatus(tenantId: string, changeId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "GET",
+      `/api/platform/customize/${encodeURIComponent(changeId)}`,
+    );
+  }
+
+  async customizeLand(
+    tenantId: string,
+    changeId: string,
+    commitSha: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "POST",
+      `/api/platform/customize/${encodeURIComponent(changeId)}/land`,
+      { commit_sha: commitSha },
+      {
+        ...(authority?.sessionId
+          ? { "x-authority-session-id": authority.sessionId }
+          : {}),
+        ...(authority?.turnId ? { "x-authority-turn-id": authority.turnId } : {}),
+      },
+    );
+  }
+
   /**
    * POST /api/run → 202 {job_id, status}. With `wait`, then POLL GET /api/jobs/{id}
    * up to waitTimeoutS (default 15s) so a fast read returns its result inline. The

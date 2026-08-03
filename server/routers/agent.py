@@ -174,6 +174,12 @@ def _pending_projection(approval: Dict[str, Any]) -> Dict[str, Any]:
         "capability": approval["capability"],
         "rationale": approval["rationale"],
         "kind": approval["kind"],
+        # The confirmation payload IS the informed-decision content for every
+        # non-run_capability chip (a platform self-edit's paths, a question's
+        # kind). Omitting it made a reloaded chip read "Run requested tool"
+        # with nothing to judge (sol-critic PR #417 round 1, blocking). The
+        # harness already bounds what it puts here; this only stops dropping it.
+        "payload": approval.get("payload"),
         "decided": approval["decided"],
         "approved": approval["approved"],
         "resume_required": bool(approval["decided"] and not approval["consumed"]),

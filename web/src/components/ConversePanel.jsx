@@ -36,7 +36,102 @@ import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.j
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
   if (entries.length === 0) return null
-  return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${String(v)}`).join(' · ')
+  // Objects must never reach String(): it renders the useless "[object
+  // Object]", which on a platform self-edit chip hid the very paths the
+  // approver needed to see (sol-critic PR #417 round 1). Everything else keeps
+  // String()'s EXACT previous rendering — an array still lists its elements
+  // and null still reads "null". Summarizing them (a count, a blank) would
+  // conceal the parameters of every existing proposal chip, which is the same
+  // blind-approval defect wearing different clothes (round 3).
+  const val = (v) => {
+    // Array#join renders null and undefined as EMPTY, and this must keep
+    // rendering every existing chip byte-identically: only a genuine object,
+    // which used to read "[object Object]", may change.
+    if (Array.isArray(v)) return v.map((e) => (e == null ? '' : val(e))).join(',')
+    if (v !== null && typeof v === 'object') return JSON.stringify(v)
+    return String(v)
+  }
+  return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${val(v)}`).join(' · ')
+}
+
+// A path is only a control if it renders as EXACTLY what the server holds.
+// React escapes HTML, but it happily prints a newline (which collapses a row)
+// or a bidi override (which reorders what the eye reads), so one path can be
+// made to look like another. The lane rejects both at propose time; this is
+// the second barrier, for a record written before that check existed
+// (sol-critic PR #417 round 3).
+function displayPath(raw) {
+  let out = ''
+  for (const ch of String(raw ?? '')) {
+    // Allowlist, not denylist: the invisible and confusable characters that
+    // make one path read as another span half the Unicode table, so each
+    // denied class leaves the next. Every tracked path in this repo uses only
+    // these characters, so nothing legitimate is ever escaped.
+    out += /[A-Za-z0-9._/+@-]/.test(ch)
+      ? ch
+      : '\\u' + ch.codePointAt(0).toString(16).padStart(4, '0').toUpperCase()
+  }
+  return out
+}
+
+// A platform self-edit chip states, in one calm line, exactly what would be
+// written: the op, the title, and EVERY path with its action and size. The
+// paths are the control — an edit to a file the user never mentioned is the
+// signal that catches an injected proposal.
+function customizeChipLines(payload) {
+  const p = payload || {}
+  if (p.op === 'land') {
+    return {
+      head: 'Land platform change',
+      detail: `${shortId(p.change_id)} · commit ${shortId(p.commit_sha)}`,
+      edits: [],
+      undisplayed: 0,
+    }
+  }
+  const edits = Array.isArray(p.edits) ? p.edits : []
+  const count = Number.isInteger(p.edit_count) ? p.edit_count : edits.length
+  return {
+    head: 'Edit the platform itself',
+    detail: `${p.title || 'untitled'} · ${count} file${count === 1 ? '' : 's'}`,
+    edits,
+    // Every path the server would accept is displayed, so this is 0 in
+    // practice. Non-zero means the chip is INCOMPLETE: say do-not-approve
+    // rather than showing a count that reads like a harmless overflow.
+    undisplayed: Number(p.edits_undisplayed) || 0,
+  }
+}
+
+function CustomizeChipBody({ payload }) {
+  const { head, detail, edits, undisplayed } = customizeChipLines(payload)
+  return (
+    <>
+      <span className="route-title">{head}</span>
+      <span className="dim"> · {detail}</span>
+      {edits.length > 0 && (
+        <span className="customize-edit-list">
+          {edits.map((e, i) => (
+            <span key={`${e.path}-${i}`} className="customize-edit">
+              <code dir="ltr">{displayPath(e.path)}</code>
+              <span className="dim">
+                {' '}{e.action === 'delete' ? 'delete' : `write${
+                  typeof e.bytes === 'number' ? ` ${e.bytes} bytes` : ''}`}
+              </span>
+            </span>
+          ))}
+        </span>
+      )}
+      {undisplayed > 0 && (
+        <span className="customize-incomplete">
+          {undisplayed} more file{undisplayed === 1 ? '' : 's'} would change and are NOT
+          listed here. Do not approve this — deny it and ask for a smaller change.
+        </span>
+      )}
+      <span className="dim">
+        {' — '}this changes the code of the product itself. Landing pushes a review
+        branch; nothing goes live until it is reviewed, merged and deployed.
+      </span>
+    </>
+  )
 }
 
 const shortId = (s) => String(s || '').slice(0, 8)
@@ -469,10 +564,18 @@ export default function ConversePanel({
       <div key={approval.confirmation_id} className="strip-decision converse-confirm">
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
+          {approval.kind === 'customize_platform' ? (
+            // A reloaded self-edit chip must carry the SAME facts the live one
+            // did; the generic "Run requested tool" line judged nothing.
+            <CustomizeChipBody payload={approval.payload} />
+          ) : (
+          <>
           Run <span className="route-tool">{approval.tool || 'requested tool'}</span>
           {approval.capability && <>{' '}<span className={`cap ${isWrite ? 'write' : 'read'}`}>{approval.capability}</span></>}
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim"> · {approval.rationale || 'waiting for your decision'}</span>
+          </>
+          )}
         </span>
         {resumeRequired ? (
           <button
@@ -606,11 +709,15 @@ export default function ConversePanel({
                 </span>
               </>
             ) : (
+              item.confirmKind === 'customize_platform' ? (
+                <CustomizeChipBody payload={item.payload} />
+              ) : (
               <>
                 <span className="route-title">{item.confirmKind || 'Confirmation'}</span>
-                {item.payload && <span className="dim"> · {paramsSummary(item.payload) || String(item.payload)}</span>}
+                {item.payload && <span className="dim"> · {paramsSummary(item.payload) || ''}</span>}
                 <span className="dim"> — the assistant is asking before it proceeds.</span>
               </>
+              )
             )}
           </span>
           {settled ? (
