@@ -379,7 +379,11 @@ possibly empty) is minted by the Post-Login Action as the union of:
    one staff identity, in step with the §11.2 admin-tier override.
 
 Names are trimmed/lowercased, validated against `^[a-z0-9][a-z0-9_-]{0,62}$`,
-deduped, sorted, capped at 16. The M2M Action mints the same claim from
+deduped, sorted, capped at 16. The cap reserves a slot for the leaf_admin-implied
+`platform_admin`: the implication in (3) is contract, so other roles sorting
+ahead of it can never displace it past the cap (the last kept role is dropped
+instead). An *explicit* `platform_admin` without `leaf_admin` gets no
+reservation — it is subject to the plain cap like any other role. The M2M Action mints the same claim from
 optional comma-separated `leaf_roles` client metadata, with `platform_admin`
 **forbidden for machine clients** (a staff identity requires a human login,
 the same posture that keeps `admin` out of the M2M tier set).
