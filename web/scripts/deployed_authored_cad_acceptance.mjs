@@ -349,29 +349,54 @@ export async function provisionAcceptanceDrawing(
   if (!(sourceBytes instanceof Uint8Array) || sourceBytes.byteLength === 0) {
     throw new AcceptanceError(check, 'the tracked acceptance DWG is empty')
   }
-  const form = new FormData()
-  form.append('file', new Blob([sourceBytes]), `acceptance-${config.runId}-${tenant.label}.dwg`)
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  // Bounded retry on TRANSPORT failure only. The workflow is a single ~90-min
+  // attempt, and a transient `fetch failed` on this one POST (observed once in
+  // a local run) otherwise sinks the whole run before any browser work. A
+  // non-2xx HTTP status is NOT retried here — it is inspected below as a real
+  // receipt. Each attempt gets its own AbortController so a prior timeout
+  // cannot abort a later try.
+  const UPLOAD_ATTEMPTS = 3
   let upload
-  try {
-    const response = await fetchImpl(new URL('/api/drawings/upload', `${config.apiUrl}/`), {
-      method: 'POST',
-      redirect: 'error',
-      credentials: 'omit',
-      signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${tenant.jwt}`,
-      },
-      body: form,
-    })
-    upload = { status: response.status, body: await parseJsonResponse(response, check) }
-  } catch (error) {
-    if (error instanceof AcceptanceError) throw error
-    throw new AcceptanceError(check, `DWG upload failed: ${error?.name || 'Error'}`)
-  } finally {
-    clearTimeout(timer)
+  let lastTransportError
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt += 1) {
+    const form = new FormData()
+    form.append('file', new Blob([sourceBytes]), `acceptance-${config.runId}-${tenant.label}.dwg`)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    try {
+      const response = await fetchImpl(new URL('/api/drawings/upload', `${config.apiUrl}/`), {
+        method: 'POST',
+        redirect: 'error',
+        credentials: 'omit',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${tenant.jwt}`,
+        },
+        body: form,
+      })
+      upload = { status: response.status, body: await parseJsonResponse(response, check) }
+      lastTransportError = undefined
+      break
+    } catch (error) {
+      if (error instanceof AcceptanceError) throw error
+      lastTransportError = error
+      if (attempt < UPLOAD_ATTEMPTS) {
+        console.log(JSON.stringify({
+          ok: true, check: 'upload_retry', tenant: tenant.label, attempt,
+          error: error?.name || 'Error',
+        }))
+        await waitImpl(pollMs)
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  if (!upload) {
+    throw new AcceptanceError(
+      check,
+      `DWG upload failed after ${UPLOAD_ATTEMPTS} attempts: ${lastTransportError?.name || 'Error'}`,
+    )
   }
   if (upload.status !== 202
       || !UUID.test(upload.body?.drawing_id || '')

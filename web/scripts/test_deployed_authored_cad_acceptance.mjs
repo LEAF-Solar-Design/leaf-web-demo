@@ -427,6 +427,76 @@ describe('deployed authored CAD acceptance checks', () => {
     ])
   })
 
+  it('retries a transient transport failure on the DWG upload, then succeeds', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const drawingId = '11111111-1111-4111-8111-111111111111'
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        if (uploadAttempts < 3) {
+          const err = new TypeError('fetch failed')
+          throw err
+        }
+        return response(202, { drawing_id: drawingId, tenant_id: tenant.id, status: 'extracting' })
+      }
+      return response(200, { drawing_id: drawingId, tenant_id: tenant.id, status: 'ready' })
+    }
+    assert.equal(
+      await provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {}, maxPolls: 2 },
+      ),
+      drawingId,
+    )
+    assert.equal(uploadAttempts, 3)
+  })
+
+  it('gives up the DWG upload after the bounded transport-retry budget', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        throw new TypeError('fetch failed')
+      }
+      return response(200, {})
+    }
+    await assert.rejects(
+      () => provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {} },
+      ),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'live_dwg_A'
+        && /after 3 attempts/.test(error.message),
+    )
+    assert.equal(uploadAttempts, 3)
+  })
+
+  it('does not retry a real non-2xx upload receipt', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        return response(403, { error: { message: 'forbidden' } })
+      }
+      return response(200, {})
+    }
+    await assert.rejects(
+      () => provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {} },
+      ),
+      /invalid HTTP 403 receipt/,
+    )
+    assert.equal(uploadAttempts, 1)
+  })
+
   it('provisions tenant DWGs sequentially for the single-slot APS pool', async () => {
     const config = validateConfig(environment(), true)
     const calls = []
