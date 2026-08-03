@@ -521,7 +521,8 @@ class CustomizationService:
                 raise CustomizationServiceError("invalid_stage_request", 422)
         binding = _binding(tenant)
         tier = entitlements.resolve_tier(tenant)
-        if not entitlements.entitlements_for(tier).get("build", False):
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
             raise CustomizationServiceError("builder_entitlement_missing", 403)
         self._authority().authorize_stage(
             binding=binding,
@@ -593,7 +594,8 @@ class CustomizationService:
             raise CustomizationServiceError("invalid_stage_request", 422)
         binding = _binding(tenant)
         tier = entitlements.resolve_tier(tenant)
-        if not entitlements.entitlements_for(tier).get("build", False):
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
             raise CustomizationServiceError("builder_entitlement_missing", 403)
         self._authority().authorize_stage(
             binding=binding,

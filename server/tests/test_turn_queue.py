@@ -377,7 +377,7 @@ def test_entitlement_revoked_during_wait_drops_the_prompt(monkeypatch):
     assert turn_runner.try_enqueue_turn("tenant-q", sid, text="revoked")[0] == "queued"
 
     monkeypatch.setattr(turn_runner.entitlements, "entitlements_for",
-                        lambda tier: {"converse": False})
+                        lambda tier, *_roles: {"converse": False})
     assert turn_runner.request_cancel("tenant-q", sid, "orphan-h3") == "cancelled"
 
     events = session_store.recent_events(sid, 100)
@@ -434,7 +434,7 @@ def test_entitlement_evaluator_crash_neither_raises_nor_leaks_the_claim(monkeypa
     assert session_store.try_begin_turn(sid, "orphan-d2", 300)
     assert turn_runner.try_enqueue_turn("tenant-q", sid, text="crash-eval")[0] == "queued"
 
-    def _boom(tier):
+    def _boom(tier, *_roles):
         raise RuntimeError("evaluator crashed")
     monkeypatch.setattr(turn_runner.entitlements, "entitlements_for", _boom)
 

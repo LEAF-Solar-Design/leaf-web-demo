@@ -57,8 +57,9 @@ def get_entitlements(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     "demo" (full access). This is a READ of policy — the actual enforcement lives in the
     /api/run and /api/author execution chains and cannot be bypassed via this endpoint."""
     tier = entitlements.resolve_tier(tenant)
+    roles, elevated = entitlements.resolve_roles(tenant)
     try:
-        view = entitlements.entitlements_view(tier)
+        view = entitlements.entitlements_view(tier, roles, elevated)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("run_read", tier)
     # Rollout AVAILABILITY, distinct from entitlement POLICY: a tier may hold

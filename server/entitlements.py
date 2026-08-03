@@ -219,7 +219,23 @@ def resolve_tier(tenant: Any) -> str:
     return tier if tier.strip() else RESTRICTED_TIER
 
 
-def entitlements_for(tier: str) -> Dict[str, bool]:
+def resolve_roles(tenant: Any) -> tuple:
+    """(roles, elevated) for a principal — the role-side twin of resolve_tier.
+
+    Roles ride the verified `https://leafdesign.ai/roles` claim onto
+    `TenantContext.roles` (deps.require_tenant); `elevated` is stamped there
+    from the LEAF_PLATFORM_ADMIN_SUBJECTS allowlist. A plain-str (auth-OFF)
+    tenant, a guest, and every back-edge identity carry neither attribute and
+    resolve to `((), False)` — no roles, never elevated. Values are
+    re-normalized here so a caller can also hand in raw snapshot data (the
+    queued-turn payload) without pre-cleaning it."""
+    import roles as _roles  # lazy: roles.py imports this module's primitives
+
+    names = _roles.normalize_role_names(getattr(tenant, "roles", ()))
+    return names, getattr(tenant, "elevated", False) is True
+
+
+def entitlements_for(tier: str, roles: tuple = (), elevated: bool = False) -> Dict[str, bool]:
     """Resolve the {run_read, run_write, build} booleans for a tier — FAIL CLOSED.
 
     Unknown/absent tier -> the most-restrictive ("restricted") entry, NOT "demo"
@@ -230,7 +246,12 @@ def entitlements_for(tier: str) -> Dict[str, bool]:
     partial policy entry can never accidentally hand out a capability the operator did
     not explicitly enable, and a per-key value that is not a real boolean denies:
     `bool("false")` is True, so coercing would grant the capability the operator was
-    withholding."""
+    withholding.
+
+    `roles`/`elevated` (contract/AUTH.md §11.5) overlay the tier baseline
+    ADDITIVELY — see server/roles.py. With the defaults the result is
+    byte-identical to the historical tier-only resolution, so a caller that has
+    no verified role context (back-edge, broker, guest) simply omits them."""
     policy = load_policy()
     # Membership, not `or`: an entry of `{}` is an operator saying "this tier gets
     # NOTHING", and a truthiness chain would fall through it to `restricted`, which
@@ -253,6 +274,9 @@ def entitlements_for(tier: str) -> Dict[str, bool]:
             # rest of the tier working; the operator sees it as a 403 on that
             # surface. Raising here would 500 every request on one bad key.
             resolved[cap] = False
+    if roles:
+        import roles as _roles  # lazy: roles.py imports this module's primitives
+        resolved = _roles.apply_role_grants(resolved, roles, elevated)
     return resolved
 
 
@@ -326,6 +350,14 @@ def entitlement_denied_response(required: str, tier: str) -> JSONResponse:
     return JSONResponse(status_code=403, content=body)
 
 
-def entitlements_view(tier: str) -> Dict[str, Any]:
-    """The GET /api/entitlements payload (pre-envelope): {tier, entitlements, source}."""
-    return {"tier": tier, "entitlements": entitlements_for(tier), "source": "policy"}
+def entitlements_view(tier: str, roles: tuple = (), elevated: bool = False) -> Dict[str, Any]:
+    """The GET /api/entitlements payload (pre-envelope):
+    {tier, roles, entitlements, source} — `entitlements` is the EFFECTIVE map
+    (tier baseline + role overlay), `roles` the verified role names it used,
+    so the UI renders exactly what enforcement will do. Additive fields only."""
+    return {
+        "tier": tier,
+        "roles": list(roles),
+        "entitlements": entitlements_for(tier, roles, elevated),
+        "source": "policy",
+    }

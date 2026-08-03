@@ -196,8 +196,9 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     # Enforced FIRST — before the harness delegation or the templater — so a plan without
     # Build cannot author tools via either path. Off-auth/demo tier grants build.
     tier = entitlements.resolve_tier(tenant)
+    roles, elevated = entitlements.resolve_roles(tenant)
     try:
-        allowed = entitlements.entitlements_for(tier).get("build", False)
+        allowed = entitlements.entitlements_for(tier, roles, elevated).get("build", False)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("build", tier)
     if not allowed:
@@ -557,7 +558,8 @@ def _legacy_quota_denied(tenant: Any) -> JSONResponse | None:
     # budget. An unreadable policy charges anyway: on the money side the safe
     # direction is to count.
     try:
-        if not entitlements.entitlements_for(tier).get("build", False):
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
             return None
     except entitlements.EntitlementsError:
         pass

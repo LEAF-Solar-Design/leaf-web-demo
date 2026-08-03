@@ -141,7 +141,10 @@ def test_valid_token_accepted():
     payload = auth.verify_platform_token(bearer(mint()))
     assert payload[NS + "tenant_id"] == "org_acme_solar"
     claims = auth.extract_tenant_claims(payload)
-    assert claims == {"tenant_id": "org_acme_solar", "org_id": "org_acme_solar", "tier": "hosted_pro"}
+    # `roles` is RAW here (None when the token predates the roles claim);
+    # normalization happens at the deps seam (contract/AUTH.md §11.5).
+    assert claims == {"tenant_id": "org_acme_solar", "org_id": "org_acme_solar",
+                      "tier": "hosted_pro", "roles": None}
 
 
 def test_tampered_signature_rejected():
@@ -280,6 +283,7 @@ def test_post_login_action_prefers_the_root_platform_tenant_id():
         "tenant_id": PLATFORM_TENANT_ID,
         "org_id": "website_org_cuid",
         "tier": "hosted_pro",
+        "roles": [],
     }
 
 

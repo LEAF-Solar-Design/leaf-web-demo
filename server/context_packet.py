@@ -218,10 +218,11 @@ def build_packet(tenant_id: Any, drawing_id: str,
     entries = _catalog_entries(tools)
 
     tier = entitlements.resolve_tier(tenant_id)
+    roles, elevated = entitlements.resolve_roles(tenant_id)
     packet: Dict[str, Any] = {
         "catalog": _capped_catalog(entries, CATALOG_CAP),
         "catalog_hash": _catalog_hash(tools),
-        "entitlements": entitlements.entitlements_for(tier),
+        "entitlements": entitlements.entitlements_for(tier, roles, elevated),
         "active_jobs": _active_jobs(str(tenant_id)),
         "grant": _grant_status(str(tenant_id)),
         "classifier_hint": classifier_hint if classifier_hint else None,

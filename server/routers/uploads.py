@@ -180,7 +180,8 @@ def _upload_drawing(
 
     # ENTITLEMENT GATE (§17 pattern): the tier must grant `upload`.
     tier = "guest" if tenant_kind == "guest" else entitlements.resolve_tier(tenant)
-    if not entitlements.entitlements_for(tier).get("upload", False):
+    roles, elevated = ((), False) if tenant_kind == "guest" else entitlements.resolve_roles(tenant)
+    if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
         return entitlements.entitlement_denied_response("upload", tier)
 
     # Size cap. Two layers: (1) the declared Content-Length is rejected up

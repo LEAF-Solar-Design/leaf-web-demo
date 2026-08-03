@@ -396,9 +396,10 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # chain — before job submission, on BOTH the async and ?wait=1 paths — so it cannot be
     # bypassed by the UI. Off-auth/demo tier grants everything (friction-free).
     tier = entitlements.resolve_tier(tenant_id)
+    roles, elevated = entitlements.resolve_roles(tenant_id)
     required = entitlements.tool_required_capability(tool)
     try:
-        allowed = entitlements.entitlements_for(tier).get(required, False)
+        allowed = entitlements.entitlements_for(tier, roles, elevated).get(required, False)
     except entitlements.EntitlementsError:
         # Present-but-untrustworthy policy file: refuse with the structured
         # 503, never an unstructured 500 (and never an allow).
@@ -698,8 +699,9 @@ def platform_capabilities(
     health = jobs.platform_link.canonical_worker_health(AUTOFILL_TOOL)
     now = datetime.now(timezone.utc)
     tier = entitlements.resolve_tier(tenant)
+    roles, elevated = entitlements.resolve_roles(tenant)
     try:
-        policy = entitlements.entitlements_for(tier)
+        policy = entitlements.entitlements_for(tier, roles, elevated)
     except entitlements.EntitlementsError:
         # An unreadable policy grants nothing; the projection reports
         # not-entitled while the write path answers with the structured 503.

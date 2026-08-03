@@ -105,7 +105,7 @@ def test_exact_service_replay_never_recharges_or_requeues(store, monkeypatch):
     )
     monkeypatch.setattr(
         customization_service.entitlements, "entitlements_for",
-        lambda _tier: {"build": True},
+        lambda _tier, *_roles: {"build": True},
     )
     monkeypatch.setattr(
         service, "_authority",
@@ -160,7 +160,7 @@ def _admission_service(store, monkeypatch):
     )
     monkeypatch.setattr(
         customization_service.entitlements, "entitlements_for",
-        lambda _tier: {"build": True},
+        lambda _tier, *_roles: {"build": True},
     )
     monkeypatch.setattr(
         service, "_authority",

@@ -106,8 +106,13 @@ def _gate(tenant: Any) -> tuple[str, str] | JSONResponse:
     if not is_valid_tenant_id(tenant_id):
         return _error(lane.PlatformCustomizeError("tenant_identity_invalid", 403))
     tier = entitlements.resolve_tier(tenant)
+    # Role path (§11.5): platform_customize can also arrive via a role's
+    # elevated_grants (platform_admin + the LEAF_PLATFORM_ADMIN_SUBJECTS
+    # allowlist) — the same two-factor posture as the admin tier elevation.
+    # The R7 rollout gate and the always-confirm approval below are unchanged.
+    roles, elevated = entitlements.resolve_roles(tenant)
     try:
-        caps = entitlements.entitlements_for(tier)
+        caps = entitlements.entitlements_for(tier, roles, elevated)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("platform_customize", tier)
     if caps.get("platform_customize") is not True:
