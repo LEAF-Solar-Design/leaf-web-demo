@@ -145,6 +145,10 @@ function deriveClaims(event) {
  * Normalized (trim/lowercase), validated against ROLE_NAME_PATTERN, deduped,
  * sorted, capped at MAX_ROLES. Unreadable input contributes nothing — roles
  * only ever ADD capability server-side, so dropping is always the safe answer.
+ * The one exception to "dropping is safe": the leaf_admin-implied
+ * platform_admin role is CONTRACT (leaf_admin implies platform_admin,
+ * AUTH.md §11.5), so the cap reserves a slot for it — it can never be
+ * displaced by other roles sorting ahead of it.
  * @param {object} event Auth0 post-login event.
  * @returns {string[]} sorted role names (possibly empty).
  */
@@ -152,10 +156,11 @@ function deriveRoles(event) {
   const user = (event && event.user) || {};
   const appMetadata = user.app_metadata || {};
   const authz = (event && event.authorization) || {};
+  const adminImplied = appMetadata.leaf_admin === true;
   const candidates = []
     .concat(Array.isArray(authz.roles) ? authz.roles : [])
     .concat(Array.isArray(appMetadata.leaf_roles) ? appMetadata.leaf_roles : []);
-  if (appMetadata.leaf_admin === true) {
+  if (adminImplied) {
     candidates.push(PLATFORM_ADMIN_ROLE);
   }
   const seen = new Set();
@@ -164,7 +169,17 @@ function deriveRoles(event) {
     const token = item.trim().toLowerCase();
     if (ROLE_NAME_PATTERN.test(token)) seen.add(token);
   }
-  return Array.from(seen).sort().slice(0, MAX_ROLES);
+  const sorted = Array.from(seen).sort();
+  const capped = sorted.slice(0, MAX_ROLES);
+  // Reserved slot for the implied role: when leaf_admin is set and enough
+  // other roles sort ahead of platform_admin to push it past the cap, drop
+  // the LAST kept role instead. platform_admin sorted after every kept role
+  // here, so appending preserves sort order.
+  if (adminImplied && capped.indexOf(PLATFORM_ADMIN_ROLE) === -1) {
+    capped.length = MAX_ROLES - 1;
+    capped.push(PLATFORM_ADMIN_ROLE);
+  }
+  return capped;
 }
 
 /**

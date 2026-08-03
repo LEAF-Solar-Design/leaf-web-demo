@@ -90,8 +90,9 @@ Editing the Action files on disk changes nothing live. Re-paste/redeploy:
 2. Actions → the credentials-exchange action ←
    `server/auth0-actions/credentials-exchange-add-tenant-claim.js` → Deploy.
 3. Verify locally first: `node post-login-add-tenant-claim.js` (dry-run
-   cases) and `node credentials-exchange-add-tenant-claim.test.js` (must
-   print PASSED).
+   cases), `node post-login-add-tenant-claim.test.js`, and
+   `node credentials-exchange-add-tenant-claim.test.js` (both must print
+   "tests passed").
 
 Tokens minted before the redeploy simply lack the roles claim → no roles →
 tier baseline (safe).
