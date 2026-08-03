@@ -55,11 +55,22 @@ def test_normalize_caps_at_max_roles():
 
 # ------------------------------ policy loading ----------------------------- #
 
-def test_absent_file_uses_hardcoded_defaults(monkeypatch, tmp_path):
-    monkeypatch.setenv("LEAF_ROLES_FILE", str(tmp_path / "nope.json"))
+def test_missing_shipped_file_without_override_uses_defaults(monkeypatch, tmp_path):
+    monkeypatch.delenv("LEAF_ROLES_FILE", raising=False)
+    monkeypatch.setattr(roles, "_DEFAULT_FILE", tmp_path / "nope.json")
     policy = roles.load_role_policy()
     assert roles.PLATFORM_ADMIN_ROLE in policy
     assert policy[roles.PLATFORM_ADMIN_ROLE]["elevated_grants"] == {"platform_customize": True}
+
+
+def test_missing_explicit_override_grants_nothing(monkeypatch, tmp_path):
+    """An operator who POINTED at an override (an emergency revocation, say)
+    must never be silently restored to the permissive shipped defaults because
+    the override's mount vanished (sol-critic round 1, MAJOR 3)."""
+    monkeypatch.setenv("LEAF_ROLES_FILE", str(tmp_path / "vanished.json"))
+    assert roles.load_role_policy() == {}
+    base = entitlements.entitlements_for("restricted")
+    assert entitlements.entitlements_for("restricted", ("platform_admin",), True) == base
 
 
 def test_unreadable_file_grants_nothing(monkeypatch, tmp_path):
@@ -99,6 +110,34 @@ def test_unknown_capability_keys_and_unparseable_values_grant_nothing(monkeypatc
     # become_root: unknown key ignored; solve: null unparseable -> nothing;
     # run_write: explicit false -> not a grant; build "yes"/converse true -> granted.
     assert g == {"build": True, "converse": True}
+
+
+def test_plain_grants_cannot_carry_elevated_only_capabilities(monkeypatch, tmp_path):
+    """The BLOCKER from sol-critic round 1: no override file may confer
+    platform_customize through ordinary grants — the elevated-only set is
+    enforced STRUCTURALLY at load, not just pinned in the shipped file."""
+    f = tmp_path / "roles.json"
+    f.write_text(json.dumps({
+        "sneaky": {"grants": {"platform_customize": True, "build": True}},
+    }), encoding="utf-8")
+    monkeypatch.setenv("LEAF_ROLES_FILE", str(f))
+    for elevated in (False, True):
+        g = roles.role_grants(("sneaky",), elevated)
+        assert g == {"build": True}, (
+            "platform_customize must be inert in plain grants (elevated="
+            f"{elevated}); got {g}")
+
+
+def test_pathological_json_grants_nothing_and_never_raises(monkeypatch, tmp_path):
+    """json.loads failures are not all JSONDecodeError: the int-conversion
+    limit raises bare ValueError (sol-critic round 1, MAJOR 2). Any decode
+    failure must resolve to no grants on the request path, never a 500."""
+    f = tmp_path / "roles.json"
+    f.write_text('{"r": ' + "9" * 5000 + "}", encoding="utf-8")
+    monkeypatch.setenv("LEAF_ROLES_FILE", str(f))
+    assert roles.load_role_policy() == {}
+    base = entitlements.entitlements_for("restricted")
+    assert entitlements.entitlements_for("restricted", ("platform_admin",), True) == base
 
 
 # ------------------------------ overlay laws ------------------------------- #
@@ -197,7 +236,8 @@ def test_roles_json_mirror_parity(monkeypatch, tmp_path):
     entitlements.json mirror discipline, role edition)."""
     monkeypatch.setenv("LEAF_ROLES_FILE", str(SERVER_DIR / "roles.json"))
     from_file = roles.load_role_policy()
-    monkeypatch.setenv("LEAF_ROLES_FILE", str(tmp_path / "absent.json"))
+    monkeypatch.delenv("LEAF_ROLES_FILE", raising=False)
+    monkeypatch.setattr(roles, "_DEFAULT_FILE", tmp_path / "absent.json")
     from_defaults = roles.load_role_policy()
     assert from_file == from_defaults
 

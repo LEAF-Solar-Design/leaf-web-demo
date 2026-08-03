@@ -396,10 +396,12 @@ overlay never 503s a request.
 A role entry may carry `elevated_grants`: capabilities applying only when the
 verified subject is ALSO on the server-owned `LEAF_PLATFORM_ADMIN_SUBJECTS`
 allowlist — the W14 two-factor rule generalized. **`platform_customize` must
-only ever appear under `elevated_grants`** (freeze-gated), so the role path to
-platform self-edit keeps both independent operator factors, and the R7
-rollout + always-confirm approval gates (docs/ADMIN-SELF-EDIT-LANE.md) apply
-unchanged.
+only ever appear under `elevated_grants`** — freeze-gated in the shipped file
+AND enforced structurally at load time (`roles.py ELEVATED_ONLY_CAPABILITIES`:
+a plain-grants entry naming it is dropped, in any policy file, so no override
+can bypass the second factor). The role path to platform self-edit keeps both
+independent operator factors, and the R7 rollout + always-confirm approval
+gates (docs/ADMIN-SELF-EDIT-LANE.md) apply unchanged.
 
 FROZEN by `tests/test_auth_vocab_freeze.py`: the claim spelling, the
 `platform_admin` semantics (staff-everything; never plan-derived; M2M-

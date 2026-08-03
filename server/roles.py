@@ -62,6 +62,13 @@ MAX_ROLES = 16
 # analogue of the `admin` tier). Pinned by the freeze gate.
 PLATFORM_ADMIN_ROLE = "platform_admin"
 
+# Capabilities that may ONLY ever be conferred through `elevated_grants` —
+# STRUCTURALLY, not just in the shipped file: a plain-grants entry carrying one
+# of these is dropped at load time, so no override file (LEAF_ROLES_FILE) can
+# hand out R7 self-edit without the allowlist second factor (sol-critic
+# round 1, BLOCKER 1). Growing this set is a §11 promotion-ritual change.
+ELEVATED_ONLY_CAPABILITIES = frozenset({"platform_customize"})
+
 _DEFAULT_FILE = Path(__file__).resolve().parent / "roles.json"
 
 # Fail-safe defaults — used verbatim when roles.json is ABSENT (operator never
@@ -103,21 +110,23 @@ def normalize_role_names(value: Any) -> Tuple[str, ...]:
     return tuple(sorted(names)[:MAX_ROLES])
 
 
-def _policy_file() -> Path:
-    """The active role policy file (env override wins). Read at call time."""
-    return Path(os.environ.get("LEAF_ROLES_FILE") or _DEFAULT_FILE)
-
-
-def _clean_grant_block(raw: Any) -> Dict[str, bool]:
+def _clean_grant_block(raw: Any, *, allow_elevated_only: bool = False) -> Dict[str, bool]:
     """One grants/elevated_grants mapping, reduced to the True grants it
     legibly carries. Non-dict block, unknown capability keys, and unparseable
     values all contribute nothing (additive policy: unreadable == ungranted).
     Explicit False entries are dropped too — False is the universal default,
-    so only True survives, which is what makes the overlay additive-only."""
+    so only True survives, which is what makes the overlay additive-only.
+
+    ELEVATED_ONLY_CAPABILITIES are honored only when `allow_elevated_only` is
+    True (the elevated_grants block): a plain-grants entry naming one is
+    dropped here, structurally, so no policy file can confer them without the
+    allowlist second factor."""
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, bool] = {}
     for cap in CAPABILITIES:
+        if cap in ELEVATED_ONLY_CAPABILITIES and not allow_elevated_only:
+            continue
         try:
             if security_flag(raw.get(cap, MISSING), field=f"roles.{cap}", default=False):
                 out[cap] = True
@@ -129,23 +138,32 @@ def _clean_grant_block(raw: Any) -> Dict[str, bool]:
 def load_role_policy() -> Dict[str, Dict[str, Dict[str, bool]]]:
     """The role -> {grants, elevated_grants} map, fail-closed additively.
 
-    ABSENT file -> the shipped defaults (operator never wrote a policy).
-    Present-but-unreadable file or entry -> NO grants from the unreadable part
-    (never an exception to the request path: the overlay only ever adds, so
-    "could not read" safely resolves to "adds nothing"). Keys beginning with
-    `_` are docs, same as entitlements.json.
+    ABSENT shipped file, no override configured -> the hardcoded defaults
+    (operator never wrote a policy; mirrors entitlements.json). An EXPLICITLY
+    CONFIGURED override (LEAF_ROLES_FILE) that is missing or unreadable ->
+    NO grants: the operator pointed at a specific policy — an emergency
+    revocation, say — and silently restoring the permissive shipped defaults
+    because its mount vanished would defeat exactly that act (sol-critic
+    round 1, MAJOR 3). Present-but-unreadable content — bad JSON, absurd
+    numeric literals, pathological nesting — likewise grants nothing and
+    never raises onto a request path (MAJOR 2: json.loads failures are not
+    all JSONDecodeError; the int-conversion limit raises bare ValueError).
+    Keys beginning with `_` are docs, same as entitlements.json.
     """
-    path = _policy_file()
+    override = os.environ.get("LEAF_ROLES_FILE")
+    path = Path(override) if override else _DEFAULT_FILE
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        if override:
+            return {}
         raw = _HARDCODED_ROLE_DEFAULTS
     except (OSError, UnicodeDecodeError, ValueError):
         return {}
     else:
         try:
             raw = json.loads(text)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # JSONDecodeError ⊂ ValueError
             return {}
     if not isinstance(raw, dict):
         return {}
@@ -158,7 +176,8 @@ def load_role_policy() -> Dict[str, Dict[str, Dict[str, bool]]]:
             continue
         policy[key] = {
             "grants": _clean_grant_block(entry.get("grants")),
-            "elevated_grants": _clean_grant_block(entry.get("elevated_grants")),
+            "elevated_grants": _clean_grant_block(entry.get("elevated_grants"),
+                                                  allow_elevated_only=True),
         }
     return policy
 

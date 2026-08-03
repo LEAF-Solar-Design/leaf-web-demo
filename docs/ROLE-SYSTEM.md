@@ -63,9 +63,12 @@ file byte-for-byte (update both in the same PR — `tests/test_roles.py` +
 
 Deployment note: `roles.json` ships in the image, so a policy change is an
 ordinary PR → staging → production deploy. For an out-of-band emergency
-override point `LEAF_ROLES_FILE` at an alternate file (same schema); an
-unreadable override file fails closed to NO role grants (tier baseline
-stands).
+override point `LEAF_ROLES_FILE` at an alternate file (same schema); a
+MISSING or unreadable override file fails closed to NO role grants (tier
+baseline stands) — pointing at an override is an operator act, and a
+vanished mount must never silently restore the shipped defaults. The
+elevated-only rule is structural: `platform_customize` in a plain `grants`
+block is dropped at load time, in any policy file.
 
 ## Add a new role
 

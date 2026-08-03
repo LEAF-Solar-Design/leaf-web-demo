@@ -388,6 +388,53 @@ def test_entitlement_revoked_during_wait_drops_the_prompt(monkeypatch):
     assert turn_runner.queued_prompt(sid) is None
 
 
+def test_kicker_passes_role_snapshot_into_the_promoted_start(monkeypatch):
+    """sol-critic round 1, finding 4: the kicker re-checks the queued payload's
+    role snapshot but then must also HAND it to start_turn — the promoted turn
+    holds only the flattened tenant string, whose live resolution would erase
+    a role-only principal's converse authority mid-promotion."""
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://127.0.0.1:9")
+    sess = _new_session()
+    sid = sess["session_id"]
+
+    class _RolePrincipal(str):
+        pass
+    principal = _RolePrincipal("tenant-q")
+    principal.tier = "restricted"
+    principal.subject = "auth0|role-only"
+    principal.roles = ("converse_granter",)
+    principal.elevated = False
+
+    # Entitlements that grant converse ONLY through the role — the tier alone
+    # would drop the prompt at kick time, so a green start proves both the
+    # payload snapshot and the pass-through.
+    monkeypatch.setattr(
+        turn_runner.entitlements, "entitlements_for",
+        lambda tier, roles=(), elevated=False:
+            {"converse": "converse_granter" in tuple(roles)})
+
+    assert session_store.try_begin_turn(sid, "orphan-r1", 300)
+    assert turn_runner.try_enqueue_turn(principal, sid, text="role-only")[0] == "queued"
+
+    captured = {}
+
+    def _fake_start(tenant_id, session_id, **kwargs):
+        captured["tenant_id"] = tenant_id
+        captured.update(kwargs)
+        return "turn-fake"
+
+    monkeypatch.setattr(turn_runner, "start_turn", _fake_start)
+    session_store.end_turn(sid, "orphan-r1")
+    turn_runner._kick_queued(sid)
+
+    ok = _wait_until(lambda: "tenant_id" in captured)
+    assert ok, "the kick never promoted the role-only prompt (dropped at re-check?)"
+    assert captured["entitlement_roles"] == ("converse_granter",)
+    assert captured["entitlement_elevated"] is False
+    assert captured["tier"] == "restricted"
+    assert turn_runner.queued_prompt(sid) is None
+
+
 def test_direct_turns_sync_rejection_kicks_the_parked_prompt(monkeypatch):
     """Review round 2, finding 1: a DIRECT turn that wins the CAS and then
     rejects synchronously (401/429/conn-refused/no-URL) releases the CAS

@@ -214,6 +214,9 @@ def test_platform_customize_is_elevated_only_across_role_policy_and_mirror():
         assert plain == set(), "platform_customize must never be a plain role grant"
         assert elevated == {FROZEN_PLATFORM_ADMIN}
     assert roles_mod.PLATFORM_ADMIN_ROLE == FROZEN_PLATFORM_ADMIN
+    # And structurally: the loader itself refuses elevated-only capabilities
+    # in plain grants, for ANY policy file, not just the shipped one.
+    assert roles_mod.ELEVATED_ONLY_CAPABILITIES == frozenset({"platform_customize"})
 
 
 def test_roles_mirror_matches_json_policy_exactly():

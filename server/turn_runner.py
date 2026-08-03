@@ -548,7 +548,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                images: Optional[List[Dict[str, str]]] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
-               queued_id: Optional[str] = None) -> str:
+               queued_id: Optional[str] = None,
+               entitlement_roles: Optional[tuple] = None,
+               entitlement_elevated: Optional[bool] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -564,9 +566,18 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         subject = getattr(tenant_id, "subject", None)
     # For the terminal-time policy auto-confirm (same posture as the queue
     # kicker's enqueue-time snapshot): resolve while the principal object is
-    # still in hand, before it is flattened to a plain string.
+    # still in hand, before it is flattened to a plain string. An explicit
+    # snapshot (additive keywords) wins, exactly like `tier` above — the queue
+    # kicker holds only the flattened string, whose live resolution would
+    # erase a role-only principal's authority mid-promotion (sol-critic
+    # round 1, finding 4).
     entitlement_tier = entitlements.resolve_tier(tenant_id)
-    entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
+    if entitlement_roles is None:
+        entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
+    else:
+        import roles as _roles_mod  # noqa: PLC0415 — same lazy seam as entitlements
+        entitlement_roles = _roles_mod.normalize_role_names(entitlement_roles)
+        entitlement_elevated = entitlement_elevated is True
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -1165,7 +1176,11 @@ def _kick_queued(session_id: str) -> None:
                            model=payload["model"],
                            tier=payload["tier"],
                            subject=payload["subject"],
-                           queued_id=payload["queued_id"])
+                           queued_id=payload["queued_id"],
+                           entitlement_roles=tuple(
+                               payload.get("entitlement_roles") or ()),
+                           entitlement_elevated=payload.get(
+                               "entitlement_elevated") is True)
                 _release(keep=False)
                 return
             except TurnBusy:
