@@ -23,6 +23,7 @@ import {
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
+  scrubbedDetail,
   takeEditingCheckout,
   validateConfig,
   validateStagedAuthorResponse,
@@ -426,6 +427,76 @@ describe('deployed authored CAD acceptance checks', () => {
     ])
   })
 
+  it('retries a transient transport failure on the DWG upload, then succeeds', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const drawingId = '11111111-1111-4111-8111-111111111111'
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        if (uploadAttempts < 3) {
+          const err = new TypeError('fetch failed')
+          throw err
+        }
+        return response(202, { drawing_id: drawingId, tenant_id: tenant.id, status: 'extracting' })
+      }
+      return response(200, { drawing_id: drawingId, tenant_id: tenant.id, status: 'ready' })
+    }
+    assert.equal(
+      await provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {}, maxPolls: 2 },
+      ),
+      drawingId,
+    )
+    assert.equal(uploadAttempts, 3)
+  })
+
+  it('gives up the DWG upload after the bounded transport-retry budget', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        throw new TypeError('fetch failed')
+      }
+      return response(200, {})
+    }
+    await assert.rejects(
+      () => provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {} },
+      ),
+      (error) => error instanceof AcceptanceError
+        && error.check === 'live_dwg_A'
+        && /after 3 attempts/.test(error.message),
+    )
+    assert.equal(uploadAttempts, 3)
+  })
+
+  it('does not retry a real non-2xx upload receipt', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    let uploadAttempts = 0
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === '/api/drawings/upload') {
+        uploadAttempts += 1
+        return response(403, { error: { message: 'forbidden' } })
+      }
+      return response(200, {})
+    }
+    await assert.rejects(
+      () => provisionAcceptanceDrawing(
+        config, tenant, new Uint8Array([1, 2, 3]),
+        { fetchImpl, waitImpl: async () => {} },
+      ),
+      /invalid HTTP 403 receipt/,
+    )
+    assert.equal(uploadAttempts, 1)
+  })
+
   it('provisions tenant DWGs sequentially for the single-slot APS pool', async () => {
     const config = validateConfig(environment(), true)
     const calls = []
@@ -521,34 +592,168 @@ describe('deployed authored CAD acceptance checks', () => {
     )
   })
 
-  it('accepts only 403 or 404 for forged cross-tenant drawing reads', async () => {
+  it('accepts only denial or a non-disclosing fallback for forged cross-tenant drawing reads', async () => {
     const config = validateConfig(environment(), true)
     const ownA = { tenant: 'a', shape: 'cat' }
     const ownB = { tenant: 'b', shape: 'fox' }
-    const fetchImpl = async (url, options) => {
-      const drawing = new URL(url).pathname.split('/').at(-2)
-      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      return ownDrawing ? response(200, { intake: tokenA ? ownA : ownB }) : response(404, {})
-    }
     const browser = [
       { label: 'A', executed: true },
       { label: 'B', executed: true },
     ]
-    assert.deepEqual(
-      await proveExecutedDrawingIsolation(config, browser, fetchImpl),
-      { status: 'denied', distinct_result_hashes: true },
-    )
+    // The caller's bootstrapped public demo seat — what the tenant-scoped store
+    // serves for ANY non-owned id (write_loop.ensure_demo_drawing seeds every
+    // first-seen id per-tenant from the cached demo).
+    const SEAT = { curated: 'demo_seat', public: true }
+    // What the leg returns when no leak is client-observable: adversarial
+    // (transformed) confidentiality is explicitly deferred to the receipt's
+    // external audit evidence rather than claimed.
+    const CONTAINED = {
+      status: 'no_client_observable_disclosure',
+      distinct_result_hashes: true,
+      adversarial_confidentiality: 'requires_external_audit',
+    }
+    // Classify the requested drawing id: the caller's own acceptance drawing,
+    // the OTHER tenant's real acceptance drawing, or any other non-owned id
+    // (which is what the leg's clean random-id control requests).
+    const classify = (drawing, tokenA) => {
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      if (ownDrawing) return 'own'
+      if (drawing.endsWith('-a') || drawing.endsWith('-b')) return 'other'
+      return 'miss'
+    }
 
-    const sanitizedButPermissive = async (url, options) => {
+    // Denial: every non-owned read is 404.
+    const denied = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      return response(200, { intake: ownDrawing ? (tokenA ? ownA : ownB) : { redacted: true } })
+      return classify(drawing, tokenA) === 'own'
+        ? response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+        : response(404, {})
+    }
+    assert.deepEqual(
+      await proveExecutedDrawingIsolation(config, browser, denied),
+      { ...CONTAINED, status: 'denied' },
+    )
+
+    // The /try surface's real posture: EVERY non-owned read (the other's real
+    // id and the random control alike) returns the caller's own bootstrapped
+    // seat. Identity echoes the caller, cross == control, and neither equals a
+    // private drawing — containment.
+    const callerOwnFallback = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
+    }
+    assert.deepEqual(
+      await proveExecutedDrawingIsolation(config, browser, callerOwnFallback),
+      CONTAINED,
+    )
+
+    // Accidental regression — the signature this leg exists to catch: non-owned
+    // reads serve the other tenant's UNTRANSFORMED private intake (sol-critic
+    // round 3's unpartitioned global miss-fallback). cross == control, but the
+    // bytes equal the other tenant's real drawing — rejected by the own-hash
+    // guard.
+    const exactLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: callerId })
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, sanitizedButPermissive),
-      /cross-tenant drawing read returned HTTP 200/,
+      () => proveExecutedDrawingIsolation(config, browser, exactLeak),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Id-keyed leak (sol-critic round 1's augmented copy): only the other
+    // tenant's REAL id leaks (here transformed, so the own-hash guard alone
+    // would miss it); a random miss returns the safe seat. cross != control —
+    // rejected by the control-equality guard.
+    const idKeyedLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: { ...(tokenA ? ownB : ownA), leaked_from_other_tenant: true }, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, idKeyedLeak),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Header-driven leak (sol-critic round 2): the leak is keyed on the forged
+    // X-Tenant-Id header, not the id. The clean control carries no forged
+    // header, so cross != control — rejected.
+    const headerDrivenLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      const forgedTid = options.headers['X-Tenant-Id']
+      if (forgedTid) return response(200, { intake: forgedTid === 'acceptance-b' ? ownB : ownA, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, headerDrivenLeak),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took)
+    // is a bypass, rejected even when the body is the safe seat.
+    const forgedIdentityHonored = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: SEAT, tenant_id: options.headers['X-Tenant-Id'] })
+      return response(200, { intake: SEAT, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, forgedIdentityHonored),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Suspicious id-dependence: the other's real id gets a 200 while a random
+    // miss 404s. The clean control must succeed for containment to stand.
+    const inconsistentFallback = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: SEAT, tenant_id: callerId })
+      return response(404, {})
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, inconsistentFallback),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // SCOPE BOUNDARY (sol-critic round 4, accepted): a server that leaks a
+    // TRANSFORMED copy of the other tenant's drawing identically for every
+    // non-owned probe is indistinguishable, from the client, from a safe
+    // bootstrapped fallback — the client has no independent channel to the
+    // other tenant's private bytes. The leg therefore does NOT claim to catch
+    // it: it returns the containment result whose adversarial_confidentiality
+    // field defers that proof to the receipt's external audit evidence. This
+    // test codifies the boundary so a future edit cannot silently widen the
+    // claim without revisiting it.
+    const uniformTransformedLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      return response(200, { intake: { ...(tokenA ? ownB : ownA), transformed: true }, tenant_id: callerId })
+    }
+    assert.deepEqual(
+      await proveExecutedDrawingIsolation(config, browser, uniformTransformedLeak),
+      CONTAINED,
     )
   })
 
@@ -643,14 +848,132 @@ describe('deployed authored CAD acceptance checks', () => {
     )
     assert.equal(acceptedRuns, 4)
 
-    const permissive = async (url) => {
+    // A 202 whose job COMPLETES means the stale write LANDED — the exact danger
+    // this leg guards. It must be rejected.
+    const landingReplay = async (url) => {
       const path = new URL(url).pathname
       if (path.endsWith('/versions')) return response(200, { head: 2 })
-      return response(202, { job_id: 'unexpected' })
+      if (path === '/api/run') return response(202, { job_id: 'landed-job' })
+      if (path.startsWith('/api/jobs/')) return response(200, { status: 'complete', result: { ok: true } })
+      return response(500, {})
     }
     await assert.rejects(
-      () => provePinnedWriteRejections(config, browser, permissive),
-      /unexpected HTTP 202/,
+      () => provePinnedWriteRejections(config, browser, landingReplay),
+      /did not fail on the stale drawing-head pin/,
+    )
+  })
+
+  it('accepts the live async stale-head rejection: 202 then a failed job', async () => {
+    // The plain M2M catalog run does not carry expected_drawing_head, so the
+    // synchronous head pin (jobs.py:501) is skipped and the WORKER rejects the
+    // stale head — 202 at submit, then the job fails with "stale drawing head".
+    // This is the real ee150b8 behavior; the sync-409 shape is the
+    // conversational path.
+    const config = validateConfig(environment(), true)
+    const browser = config.tenants.map((tenant) => ({
+      label: tenant.label,
+      executed: true,
+      _run_request: {
+        tool: `${tenant.label.toLowerCase()}_tool`,
+        dwg: tenant.drawingId,
+        dwg_version: 1,
+        catalog_digest: `sha256:${'a'.repeat(64)}`,
+      },
+    }))
+    let jobPolls = 0
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname.startsWith('/api/jobs/')) {
+        jobPolls += 1
+        return response(200, {
+          status: 'failed',
+          error: { error_code: 'BAD_PARAMS', message: 'drawing/mutation unavailable: stale drawing head: expected 1, current 2' },
+        })
+      }
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
+          return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again' } })
+        }
+        return response(202, { job_id: `replay-${body.tool}` })
+      }
+      return response(500, {})
+    }
+    assert.deepEqual(
+      await provePinnedWriteRejections(config, browser, fetchImpl),
+      {
+        status: 'denied_without_mutation',
+        stale_head: true,
+        stale_catalog: true,
+        replayed_exact_request: true,
+        expired_approval: 'requires_external_evidence',
+      },
+    )
+    assert.equal(jobPolls, 2) // one replay job per tenant, each failed on first poll
+
+    // A 202 whose replay job COMPLETES (stale write landed) is rejected even on
+    // the async path.
+    const asyncLanding = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname.startsWith('/api/jobs/')) return response(200, { status: 'complete', result: { ok: true } })
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
+          return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed' } })
+        }
+        return response(202, { job_id: 'landed' })
+      }
+      return response(500, {})
+    }
+    await assert.rejects(
+      () => provePinnedWriteRejections(config, browser, asyncLanding),
+      /did not fail on the stale drawing-head pin/,
+    )
+  })
+
+  it('detects a landed version even when head is unchanged', async () => {
+    // sol-critic PR #412 round 1: a stale write could land as a new immutable
+    // version that bumps `latest` and grows `versions` WITHOUT moving `head`.
+    // Both replays report the expected rejection wording, yet a version lands.
+    // A head-only after-check would miss it; the full version signature must not.
+    const config = validateConfig(environment(), true)
+    const browser = config.tenants.map((tenant) => ({
+      label: tenant.label,
+      executed: true,
+      _run_request: {
+        tool: `${tenant.label.toLowerCase()}_tool`,
+        dwg: tenant.drawingId,
+        dwg_version: 1,
+        catalog_digest: `sha256:${'a'.repeat(64)}`,
+      },
+    }))
+    const versionsReads = new Map()
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) {
+        const key = parsed.pathname
+        const n = (versionsReads.get(key) || 0) + 1
+        versionsReads.set(key, n)
+        // First read per drawing is `before` (latest 2), second is `after`
+        // (latest 3 — a version landed despite the "rejection").
+        return n === 1
+          ? response(200, { head: 2, latest: 2, versions: [{ v: 1 }, { v: 2 }] })
+          : response(200, { head: 2, latest: 3, versions: [{ v: 1 }, { v: 2 }, { v: 3 }] })
+      }
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        const message = body.catalog_digest === `sha256:${'0'.repeat(64)}`
+          ? 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again'
+          : 'drawing head changed after approval; refresh drawing state and confirm again'
+        return response(409, { error: { error_code: 'BAD_PARAMS', message } })
+      }
+      return response(500, {})
+    }
+    await assert.rejects(
+      () => provePinnedWriteRejections(config, browser, fetchImpl),
+      /changed the drawing version state/,
     )
   })
 
@@ -823,6 +1146,66 @@ describe('deployed authored CAD acceptance checks', () => {
         && sculptureMount > focus3d
         && scopedCanvas > sculptureMount,
     )
+  })
+
+  it('leaves focus view and reopens the Execution tab before Undo/Redo', () => {
+    // Focus 3D applies `.tc-focus-hidden` (display:none) to both rails, and
+    // Undo/Redo render only inside the Execution tab — so after the orbit
+    // proof the driver must click focus-3d a second time and reselect the
+    // Execution tab before touching either chip. Run 30806698693 starved on
+    // exactly this: the orbit passed, then Undo waited 30s against a hidden
+    // rail.
+    const source = readFileSync(fileURLToPath(
+      new URL('./deployed_authored_cad_acceptance.mjs', import.meta.url),
+    ), 'utf8')
+    const poseCheck = source.indexOf('requireCameraMotion(beforeCameraPose, afterCameraPose)')
+    const focusExit = source.indexOf("getByTestId('focus-3d').click()", poseCheck)
+    const executionTab = source.indexOf(
+      "getByRole('tab', { name: 'Execution', exact: true })",
+      focusExit,
+    )
+    const undoClick = source.indexOf(
+      "getByRole('button', { name: 'Undo', exact: true })",
+      executionTab,
+    )
+    // Undo is asynchronous: the driver must prove the undone head landed
+    // (Version 1) before clicking Redo — a one-shot isEnabled() read raced
+    // drawing.versionBusy and failed a live execute.
+    const undoneHead = source.indexOf("hasText: 'Version 1'", undoClick)
+    const redoClick = source.indexOf(
+      "getByRole('button', { name: 'Redo', exact: true })",
+      undoneHead,
+    )
+    assert.ok(
+      poseCheck >= 0
+        && focusExit > poseCheck
+        && executionTab > focusExit
+        && undoClick > executionTab
+        && undoneHead > undoClick
+        && redoClick > undoneHead,
+    )
+  })
+
+  it('names the starving step and a scrubbed detail in the failure line', async () => {
+    const errors = []
+    console.error = (value) => errors.push(value)
+    const result = await main(
+      ['--receipt', 'must-not-exist.json'],
+      environment({ LEAF_ACCEPTANCE_ENVIRONMENT: 'production' }),
+    )
+    assert.equal(result, 1)
+    const failure = JSON.parse(errors[0])
+    assert.equal(typeof failure.step, 'string')
+    assert.equal(typeof failure.detail, 'string')
+    assert.ok(failure.detail.includes('staging'))
+  })
+
+  it('scrubs token-shaped material from the failure detail', () => {
+    const jwtish = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY2NlcHRhbmNlIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ'
+    const detail = scrubbedDetail(new Error(`waiting for locator with ${jwtish} embedded`))
+    assert.ok(!detail.includes(jwtish))
+    assert.ok(detail.includes('[token]'))
+    assert.ok(scrubbedDetail(new Error('x'.repeat(2000))).length <= 700)
   })
 
   it('counts mutating API requests on both allowed browser origins', () => {

@@ -12,7 +12,7 @@
  * version, orbit, undo, and redo. No mode can target a production hostname.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -53,6 +53,34 @@ export class AcceptanceError extends Error {
     this.check = check
     this.details = details
   }
+}
+
+// Step tracking. The driver's only failure output is one JSON line, and run
+// 30806698693 proved a bare {"error":"TimeoutError"} costs a full release
+// train to localize: the workflow log could not say WHICH locator starved.
+// Each leg marks itself as it starts; the failure line then carries the last
+// step plus a scrubbed error detail.
+let currentStep = 'configuration'
+export function step(name, tenantLabel = undefined) {
+  currentStep = tenantLabel ? `${name}_${tenantLabel}` : name
+  console.log(JSON.stringify({
+    ok: true,
+    check: 'step',
+    step: name,
+    ...(tenantLabel ? { tenant: tenantLabel } : {}),
+  }))
+}
+
+// Playwright error messages embed locator text, ARIA names, and page URLs —
+// never request headers — but scrub anything token-shaped before it can reach
+// a log line, and cap the length so a pathological message cannot flood the
+// workflow log.
+export function scrubbedDetail(error) {
+  return String(error?.message || '')
+    .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[token]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 700)
 }
 
 function required(env, name) {
@@ -321,29 +349,54 @@ export async function provisionAcceptanceDrawing(
   if (!(sourceBytes instanceof Uint8Array) || sourceBytes.byteLength === 0) {
     throw new AcceptanceError(check, 'the tracked acceptance DWG is empty')
   }
-  const form = new FormData()
-  form.append('file', new Blob([sourceBytes]), `acceptance-${config.runId}-${tenant.label}.dwg`)
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  // Bounded retry on TRANSPORT failure only. The workflow is a single ~90-min
+  // attempt, and a transient `fetch failed` on this one POST (observed once in
+  // a local run) otherwise sinks the whole run before any browser work. A
+  // non-2xx HTTP status is NOT retried here — it is inspected below as a real
+  // receipt. Each attempt gets its own AbortController so a prior timeout
+  // cannot abort a later try.
+  const UPLOAD_ATTEMPTS = 3
   let upload
-  try {
-    const response = await fetchImpl(new URL('/api/drawings/upload', `${config.apiUrl}/`), {
-      method: 'POST',
-      redirect: 'error',
-      credentials: 'omit',
-      signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${tenant.jwt}`,
-      },
-      body: form,
-    })
-    upload = { status: response.status, body: await parseJsonResponse(response, check) }
-  } catch (error) {
-    if (error instanceof AcceptanceError) throw error
-    throw new AcceptanceError(check, `DWG upload failed: ${error?.name || 'Error'}`)
-  } finally {
-    clearTimeout(timer)
+  let lastTransportError
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt += 1) {
+    const form = new FormData()
+    form.append('file', new Blob([sourceBytes]), `acceptance-${config.runId}-${tenant.label}.dwg`)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    try {
+      const response = await fetchImpl(new URL('/api/drawings/upload', `${config.apiUrl}/`), {
+        method: 'POST',
+        redirect: 'error',
+        credentials: 'omit',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${tenant.jwt}`,
+        },
+        body: form,
+      })
+      upload = { status: response.status, body: await parseJsonResponse(response, check) }
+      lastTransportError = undefined
+      break
+    } catch (error) {
+      if (error instanceof AcceptanceError) throw error
+      lastTransportError = error
+      if (attempt < UPLOAD_ATTEMPTS) {
+        console.log(JSON.stringify({
+          ok: true, check: 'upload_retry', tenant: tenant.label, attempt,
+          error: error?.name || 'Error',
+        }))
+        await waitImpl(pollMs)
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  if (!upload) {
+    throw new AcceptanceError(
+      check,
+      `DWG upload failed after ${UPLOAD_ATTEMPTS} attempts: ${lastTransportError?.name || 'Error'}`,
+    )
   }
   if (upload.status !== 202
       || !UUID.test(upload.body?.drawing_id || '')
@@ -411,6 +464,33 @@ export async function waitForTerminalJob(
     await waitImpl(pollMs)
   }
   throw new AcceptanceError('authored_job', 'the authored write job did not finish before the acceptance deadline')
+}
+
+// Like waitForTerminalJob, but RETURNS the terminal body for either outcome
+// (complete or failed). The stale-head replay leg needs to inspect a job that
+// is EXPECTED to fail, so it must not treat `failed` as a thrown error.
+export async function waitForJobOutcome(
+  config,
+  tenant,
+  jobId,
+  { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
+) {
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    const observed = await requestJson(
+      config,
+      tenant,
+      `/api/jobs/${encodeURIComponent(jobId)}`,
+      { fetchImpl },
+    )
+    if (observed.status !== 200) {
+      throw new AcceptanceError('authored_job', `job status returned HTTP ${observed.status}`)
+    }
+    if (observed.body?.status === 'failed' || observed.body?.status === 'complete') {
+      return observed.body
+    }
+    await waitImpl(pollMs)
+  }
+  throw new AcceptanceError('authored_job', 'the replay job did not reach a terminal state before the acceptance deadline')
 }
 
 export function evaluateReadiness(body, expectedRevision) {
@@ -755,6 +835,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         mutatingApiRequests.push(`${request.method()} ${url.pathname}`)
       }
     })
+    step('browser_open', tenant.label)
     await page.goto('/try', { waitUntil: 'domcontentloaded', timeout: 120_000 })
     const operatorPhase = page.getByTestId('operator-phase')
     try {
@@ -817,7 +898,9 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     if (!execute) return result
 
+    step('checkout', tenant.label)
     await takeEditingCheckout(page, config.apiUrl, tenant.drawingId)
+    step('author_surface', tenant.label)
     const authorRequest = await openTryAuthorSurface(page)
     await authorRequest.fill(tenant.request)
     const stageResponsePromise = page.waitForResponse(
@@ -903,9 +986,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // AuthorPanel's staged copy is "Staged and ready to publish…" (the
     // "awaiting approval" wording the driver waited 25 minutes for no longer
     // exists anywhere in web/src). Match the staged state, not one sentence.
+    step('staged_copy', tenant.label)
     await page.getByText(/Staged and ready to publish/, { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
+    step('publication_approval', tenant.label)
     const otherTenant = config.tenants.find((candidate) => candidate.id !== tenant.id)
     const independentApproval = await approveIsolatedStagedPublication(
       config,
@@ -916,6 +1001,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // Publication moved to the request/approval endpoint (api.js:1158) and the
     // button reads "Request publication"; the old /api/author/register +
     // "Publish tool" pair no longer exists in the surface.
+    step('request_publication', tenant.label)
     const publishResponsePromise = page.waitForResponse(
       (response) => response.url() === `${config.apiUrl}/api/author/publication-requests`
         && response.request().method() === 'POST',
@@ -929,6 +1015,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         `publication returned HTTP ${publishResponse.status()}`,
       )
     }
+    step('run_published_tool', tenant.label)
     await page.getByRole('button', { name: 'Run it now', exact: true })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
     await page.getByRole('button', { name: 'Run it now', exact: true }).click()
@@ -970,6 +1057,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     if (typeof jobId !== 'string' || !jobId) {
       throw new AcceptanceError('exact_write', 'the accepted write did not return a job id')
     }
+    step('authored_job', tenant.label)
     const job = await waitForTerminalJob(config, tenant, jobId)
     const newVersion = job?.result?.result?.new_version
     if (job?.result?.ok !== true
@@ -977,8 +1065,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         || newVersion?.version !== 2) {
       throw new AcceptanceError('authored_job', 'the completed authored write did not create exact version 2')
     }
+    step('version_head', tenant.label)
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
+    step('camera_proof', tenant.label)
     await openDrawingView(page)
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
@@ -1011,13 +1101,31 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}`,
     )
     requireCameraMotion(beforeCameraPose, afterCameraPose)
+    // Focus 3D hid both rails and the command bar (`.tc-focus-hidden` is
+    // `display: none !important`, landing.css:147), so every rail control is
+    // invisible until focus view is left — the same testid now reads
+    // "Show controls" and restores the rails. Run 30806698693 died here: the
+    // orbit succeeded, then the Undo click starved against a hidden rail.
+    step('focus_exit', tenant.label)
+    await page.getByTestId('focus-3d').click()
+    // Undo/Redo are Execution-tab chips (ToolCast.jsx:1233-1234); the View
+    // tab this leg selected does not render them.
+    const executionTab = page.getByRole('tab', { name: 'Execution', exact: true })
+    await executionTab.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    await executionTab.click()
+    step('undo_redo', tenant.label)
     const undo = page.getByRole('button', { name: 'Undo', exact: true })
     await undo.click()
+    // Undo is asynchronous: the Redo chip stays disabled while
+    // drawing.versionBusy holds and flips enabled only once the undone head
+    // lands (ToolCast.jsx:1234). A one-shot isEnabled() read raced that and
+    // failed local run local-95aa027f-001. Prove the undo landed (head back
+    // on Version 1), then click Redo — the click auto-waits for enablement,
+    // so a never-enabled Redo still fails loudly.
+    await page.getByTestId('version-head').filter({ hasText: 'Version 1' })
+      .waitFor({ state: 'visible', timeout: 120_000 })
     const redo = page.getByRole('button', { name: 'Redo', exact: true })
-    await redo.waitFor({ state: 'visible' })
-    if (!await redo.isEnabled()) {
-      throw new AcceptanceError('browser_execute', 'redo was not enabled after undo')
-    }
+    await redo.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
     await redo.click()
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: 120_000 })
@@ -1028,6 +1136,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // none of which this surface renders — a repo-wide string sweep hid it
     // because those literals do exist, on the other surface.
     // See web/src/site/ToolCast.jsx:1205 (tab) and :1322-1344 (panel + rows).
+    step('version_preview', tenant.label)
     const previewMutationCount = mutatingApiRequests.length
     await page.getByRole('tab', { name: /^Versions/ }).click()
     const history = page.getByRole('region', { name: 'Version history' })
@@ -1143,6 +1252,23 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
       'the two distinct acceptance requests produced indistinguishable drawings',
     )
   }
+  // The real isolation invariant is CONFIDENTIALITY: one tenant must never
+  // receive another tenant's drawing. A 403/404 satisfies that, but so does the
+  // /try surface's actual posture — `GET /api/drawings/{id}/intake` derives the
+  // tenant from the JWT (server/routers/drawings.py:112, require_active_tenant,
+  // so the forged X-Tenant-Id header is ignored) and `intake_view` MISSES the
+  // caller's store for a drawing they do not own, falling back to the caller's
+  // OWN seat with HTTP 200. Confirmed live at ee150b8: tenant A reading tenant
+  // B's real drawing id returns A's own seat (echoed tenant_id = A, head 1),
+  // byte-identical to A reading a random UUID and never equal to B's own
+  // intake. A blanket 403/404 assertion mistook that non-disclosing fallback
+  // for a leak. Assert the invariant that matters: a non-denied read must not
+  // disclose the other tenant's drawing.
+  const forged = (other) => ({
+    fetchImpl,
+    extraHeaders: { 'X-Tenant-Id': other.id, 'X-Org-Id': other.id },
+  })
+  let contained = false
   for (const [tenant, other] of [
     [a, b],
     [b, a],
@@ -1151,23 +1277,74 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
       config,
       tenant,
       `/api/drawings/${encodeURIComponent(other.drawingId)}/intake`,
-      {
-        fetchImpl,
-        extraHeaders: {
-          'X-Tenant-Id': other.id,
-          'X-Org-Id': other.id,
-        },
-      },
+      forged(other),
     )
-    if (![403, 404].includes(cross.status)) {
+    if ([403, 404].includes(cross.status)) continue
+    if (cross.status !== 200) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
         `cross-tenant drawing read returned HTTP ${cross.status}`,
         { status: cross.status },
       )
     }
+    // SCOPE — what this leg can and cannot prove. The real isolation guarantee
+    // is SERVER-SIDE: GET /api/drawings/{id}/intake derives the tenant from the
+    // JWT (server/routers/drawings.py, require_active_tenant — the forged
+    // X-Tenant-Id is ignored) and intake_view is tenant-scoped; a non-owned id
+    // MISSES the caller's store and is bootstrapped per-tenant from the cached
+    // demo (write_loop.ensure_demo_drawing — "any first-seen id"), so the caller
+    // reaches only its OWN rows, never the other tenant's. A client cannot prove
+    // that server-side scoping against an adversarial server that returns a
+    // transformed copy of the other tenant's data identically for every probe —
+    // no client-side equality check can, since the client has no independent
+    // channel to the other tenant's private bytes. That adversarial-complete
+    // confidentiality is DEFERRED, by the acceptance's own design, to the
+    // receipt's external_evidence ("durable audit-row inspection"), exactly as
+    // restart persistence and expired-approval are.
+    //
+    // What IS proven here, and is sufficient to catch an ACCIDENTAL isolation
+    // regression (the realistic failure — a bug that serves the wrong tenant's
+    // drawing, untransformed): (a) the echoed identity is the caller's, so a
+    // forged X-Tenant-Id did not take; (b) the cross read equals a CLEAN
+    // random-id control (caller JWT, no forged header), so the response depends
+    // on neither the other tenant's specific drawing id nor the forged header;
+    // and (c) the cross read is not byte-equal to EITHER tenant's actual private
+    // acceptance drawing (own[0]/own[1]) — in particular not the other tenant's
+    // real intake. Verified live at ee150b8: the forged cross read, a clean
+    // random-id read, and the caller's own demo base all return the caller's own
+    // bootstrapped demo seat, distinct from either tenant's head-2 drawing.
+    const control = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${randomUUID()}/intake`,
+      { fetchImpl },
+    )
+    const crossHash = sha256(JSON.stringify(cross.body?.intake ?? null))
+    const controlHash = sha256(JSON.stringify(control.body?.intake ?? null))
+    if (
+      control.status !== 200 ||
+      cross.body?.tenant_id !== tenant.id ||
+      control.body?.tenant_id !== tenant.id ||
+      // Independent of the other tenant's specific id and of the forged header.
+      crossHash !== controlHash ||
+      // Not either tenant's actual private acceptance drawing — in particular
+      // not the other tenant's real intake (the accidental-regression signature).
+      crossHash === own[0] ||
+      crossHash === own[1]
+    ) {
+      throw new AcceptanceError(
+        `cross_tenant_drawing_${tenant.label}`,
+        "a cross-tenant drawing read disclosed the other tenant's drawing",
+        { status: cross.status },
+      )
+    }
+    contained = true
   }
-  return { status: 'denied', distinct_result_hashes: true }
+  return {
+    status: contained ? 'no_client_observable_disclosure' : 'denied',
+    distinct_result_hashes: true,
+    adversarial_confidentiality: 'requires_external_audit',
+  }
 }
 
 function requireDenied(result, check) {
@@ -1259,18 +1436,59 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
     if (head !== 2) {
       throw new AcceptanceError(`write_rejection_head_${tenant.label}`, 'expected drawing head 2')
     }
+    // Signature the WHOLE version state, not just `head`. A stale write could
+    // land as a new immutable version that bumps `latest` and grows `versions`
+    // WITHOUT moving `head` (sol-critic PR #412 round 1); a head-only check
+    // would miss that landing. Capture head + latest + the sorted version set
+    // now and require every part unchanged after the rejected replays.
+    const versionSignature = (body) => JSON.stringify({
+      head: body?.head ?? null,
+      latest: body?.latest ?? null,
+      versions: (body?.versions || []).map((entry) => entry?.v).sort((x, y) => x - y),
+    })
+    const beforeSignature = versionSignature(before.body)
 
+    // The exact approved write, replayed after the head moved to 2, must be
+    // REJECTED without landing — but for a plain catalog run the rejection is
+    // ASYNCHRONOUS. The synchronous head pin (server/routers/jobs.py:501,
+    // "drawing head changed after approval") only fires when the request
+    // carries `expected_drawing_head`, which the browser sends only on the
+    // conversational exact-pin path (LEAF_EXACT_WRITE_PINS_REQUIRED=1 or a
+    // backedge tenant — neither true for these M2M acceptance tenants). So the
+    // submit returns 202 and the WORKER rejects the stale head, failing the job
+    // ("stale drawing head: expected 1, current 2"). Confirmed live at ee150b8.
+    // Accept either shape; the load-bearing proof is the unchanged head asserted
+    // below. A 202 that COMPLETED would be a real stale-write landing and is
+    // rejected here.
     const staleHeadReplay = await requestJson(
       config,
       tenant,
       '/api/run',
       { method: 'POST', body: original, extraHeaders: replayHeaders, fetchImpl },
     )
-    expectStatus(staleHeadReplay, [409], `stale_head_replay_${tenant.label}`)
-    if (!/drawing head changed after approval/i.test(staleHeadReplay.body?.error?.message || '')) {
+    const staleHeadPattern = /drawing head changed after approval|stale drawing head/i
+    if (staleHeadReplay.status === 409) {
+      if (!staleHeadPattern.test(staleHeadReplay.body?.error?.message || '')) {
+        throw new AcceptanceError(
+          `stale_head_replay_${tenant.label}`,
+          'the synchronous rejection was not the stale drawing-head pin',
+        )
+      }
+    } else if (staleHeadReplay.status === 202 && staleHeadReplay.body?.job_id) {
+      const outcome = await waitForJobOutcome(
+        config, tenant, staleHeadReplay.body.job_id, { fetchImpl },
+      )
+      if (outcome.status !== 'failed' || !staleHeadPattern.test(outcome.error?.message || '')) {
+        throw new AcceptanceError(
+          `stale_head_replay_${tenant.label}`,
+          'the accepted replay job did not fail on the stale drawing-head pin',
+        )
+      }
+    } else {
       throw new AcceptanceError(
         `stale_head_replay_${tenant.label}`,
-        'the exact replay was not rejected by the stale drawing-head pin',
+        `the exact replay returned unexpected HTTP ${staleHeadReplay.status}`,
+        { status: staleHeadReplay.status },
       )
     }
 
@@ -1300,8 +1518,11 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
       { fetchImpl },
     )
     expectStatus(after, [200], `write_rejection_head_${tenant.label}`)
-    if (after.body?.head !== head) {
-      throw new AcceptanceError('write_rejection', 'a rejected write changed the drawing head')
+    if (versionSignature(after.body) !== beforeSignature) {
+      throw new AcceptanceError(
+        'write_rejection',
+        'a rejected write changed the drawing version state (head, latest, or version set)',
+      )
     }
   }
   return {
@@ -1403,8 +1624,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     }
     const config = validateConfig(env, args.execute)
     const startedAt = new Date().toISOString()
+    step('api_preflight')
     const api = await runApiPreflight(config)
     if (args.execute) {
+      step('provision_drawings')
       const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../data/rooftop_demo.dwg')
       const sourceBytes = readFileSync(sourcePath)
       const drawingIds = await provisionAcceptanceDrawings(config, sourceBytes)
@@ -1415,8 +1638,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       api.live_dwg_inputs = { status: 'ready', count: drawingIds.length }
     }
     const browser = await runBrowserAcceptance(config, args.execute)
+    step('drawing_isolation')
     api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
+    step('authority_isolation')
     api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)
+    step('pinned_write_rejections')
     api.pinned_write_rejections = await provePinnedWriteRejections(config, browser)
     const stoppedAt = new Date().toISOString()
     const receipt = buildReceipt(
@@ -1451,6 +1677,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       check: error instanceof AcceptanceError ? error.check : 'unexpected',
       error: error?.name || 'Error',
       message: error instanceof AcceptanceError ? error.message : 'acceptance driver failed',
+      step: currentStep,
+      detail: scrubbedDetail(error),
     }
     console.error(JSON.stringify(safe))
     return 1
