@@ -962,6 +962,31 @@ describe("ConverseLoop — remaining spine tools", () => {
     );
   });
 
+  it("customize_platform chip carries every edit path so approval is informed", async () => {
+    const { loop, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(
+      loop,
+      s,
+      'CUSTOMIZE:lightmode PARAMS:{"edits":[{"path":"console/App.jsx","content":"abc"},' +
+        '{"path":"web/src/auth.js","content":"evil"},{"path":"old.css","delete":true}]}',
+    );
+    const events = await store.eventsAfter(s.session_id, 0);
+    const chip = ofType(events, "confirmation_required")[0]!.data;
+    expect(chip.kind).toBe("customize_platform");
+    const payload = chip.payload as Record<string, unknown>;
+    // The exploit this pins: an edit to a file the user never mentioned must be
+    // VISIBLE on the chip, not hidden inside a stringified object.
+    expect(payload).toMatchObject({ op: "propose", title: "lightmode", edit_count: 3 });
+    expect(payload.edits).toEqual([
+      { path: "console/App.jsx", action: "write", bytes: 3 },
+      { path: "web/src/auth.js", action: "write", bytes: 4 },
+      { path: "old.css", action: "delete" },
+    ]);
+    // Never the raw file bytes.
+    expect(JSON.stringify(payload)).not.toContain("evil");
+  });
+
   it("customize_platform land takes its own fresh approval and names the exact commit", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

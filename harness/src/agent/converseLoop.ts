@@ -748,7 +748,8 @@ export class ConverseLoop {
           // run_capability uses the normalized gate args, including the resolved
           // drawing. Raw SDK args may omit the default drawing, which would make
           // the mirror disagree with the app gate's args hash on replay.
-          const confirmationArgs = tool === "run_capability" ? consult.args : args;
+          const confirmationArgs =
+            tool === "run_capability" || tool === "customize_platform" ? consult.args : args;
           await store.putConfirmation(
             mkConfirmation(confirmationId, tool, confirmationArgs, kind),
           );
@@ -771,10 +772,19 @@ export class ConverseLoop {
               JSON.stringify({ proposed: true, confirmation_id: confirmationId, tool: target, params }),
             );
           } else {
+            // A platform self-edit chip must let the approver see WHAT they are
+            // approving. Raw args render as "[object Object]" and hide the
+            // paths — the one fact that catches an injected edit to a file the
+            // user never mentioned (sol-critic PR #417 round 1, blocking).
+            // Server-truth, bounded, and never the raw file bytes.
+            const payload =
+              tool === "customize_platform"
+                ? customizeChipPayload(consult.args)
+                : args;
             await emit("confirmation_required", {
               confirmation_id: confirmationId,
               kind,
-              payload: args,
+              payload,
             });
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
@@ -1239,6 +1249,44 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `op=${String(args.op ?? "propose")}${args.confirmation_id ? " (confirmed)" : ""}`;
   }
 }
+
+/**
+ * The APPROVAL-CHIP projection of a platform self-edit: every path, what
+ * happens to it, and how many bytes — the facts an approver needs to notice a
+ * file they never asked about. Bounded on purpose: paths and sizes, never the
+ * file bytes (a chip is not a diff viewer, and raw content would blow the
+ * event row). `edit_count` stays exact even when the list is truncated, so a
+ * long edit set can never hide entries behind a short display.
+ */
+export function customizeChipPayload(args: Record<string, unknown>): Record<string, unknown> {
+  const op = String(args.op ?? "propose");
+  if (op === "land") {
+    return {
+      op,
+      change_id: String(args.change_id ?? ""),
+      commit_sha: String(args.commit_sha ?? ""),
+    };
+  }
+  const edits = Array.isArray(args.edits) ? args.edits : [];
+  const shown = edits.slice(0, CUSTOMIZE_CHIP_MAX_EDITS).map((raw) => {
+    const e = (raw ?? {}) as Record<string, unknown>;
+    const del = e.delete === true;
+    return {
+      path: String(e.path ?? ""),
+      action: del ? "delete" : "write",
+      ...(del ? {} : { bytes: typeof e.content === "string" ? e.content.length : 0 }),
+    };
+  });
+  return {
+    op,
+    title: String(args.title ?? ""),
+    edit_count: edits.length,
+    edits: shown,
+    ...(edits.length > shown.length ? { edits_truncated: edits.length - shown.length } : {}),
+  };
+}
+
+const CUSTOMIZE_CHIP_MAX_EDITS = 20;
 
 /** Shape model-supplied edits to EXACTLY the catalog/API item shape. */
 function sanitizeCustomizeEdits(

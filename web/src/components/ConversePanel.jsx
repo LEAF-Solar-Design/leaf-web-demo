@@ -36,7 +36,68 @@ import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.j
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
   if (entries.length === 0) return null
-  return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${String(v)}`).join(' · ')
+  // Objects and arrays must NEVER reach String() here: it renders the useless
+  // "[object Object]", which on a platform self-edit chip hid the very paths
+  // the approver needed to see (sol-critic PR #417).
+  const val = (v) => {
+    if (v == null) return ''
+    if (Array.isArray(v)) return `${v.length}`
+    if (typeof v === 'object') return JSON.stringify(v)
+    return String(v)
+  }
+  return entries.map(([k, v]) => `${k.replace(/_/g, ' ')} ${val(v)}`).join(' · ')
+}
+
+// A platform self-edit chip states, in one calm line, exactly what would be
+// written: the op, the title, and EVERY path with its action and size. The
+// paths are the control — an edit to a file the user never mentioned is the
+// signal that catches an injected proposal.
+function customizeChipLines(payload) {
+  const p = payload || {}
+  if (p.op === 'land') {
+    return {
+      head: 'Land platform change',
+      detail: `${shortId(p.change_id)} · commit ${shortId(p.commit_sha)}`,
+      edits: [],
+      truncated: 0,
+    }
+  }
+  const edits = Array.isArray(p.edits) ? p.edits : []
+  const count = Number.isInteger(p.edit_count) ? p.edit_count : edits.length
+  return {
+    head: 'Edit the platform itself',
+    detail: `${p.title || 'untitled'} · ${count} file${count === 1 ? '' : 's'}`,
+    edits,
+    truncated: Number(p.edits_truncated) || 0,
+  }
+}
+
+function CustomizeChipBody({ payload }) {
+  const { head, detail, edits, truncated } = customizeChipLines(payload)
+  return (
+    <>
+      <span className="route-title">{head}</span>
+      <span className="dim"> · {detail}</span>
+      {edits.length > 0 && (
+        <span className="customize-edit-list">
+          {edits.map((e, i) => (
+            <span key={`${e.path}-${i}`} className="customize-edit">
+              <code>{e.path}</code>
+              <span className="dim">
+                {' '}{e.action === 'delete' ? 'delete' : `write${
+                  typeof e.bytes === 'number' ? ` ${e.bytes} bytes` : ''}`}
+              </span>
+            </span>
+          ))}
+          {truncated > 0 && <span className="dim">+{truncated} more</span>}
+        </span>
+      )}
+      <span className="dim">
+        {' — '}this changes the code of the product itself. Landing pushes a review
+        branch; nothing goes live until it is reviewed, merged and deployed.
+      </span>
+    </>
+  )
 }
 
 const shortId = (s) => String(s || '').slice(0, 8)
@@ -469,10 +530,18 @@ export default function ConversePanel({
       <div key={approval.confirmation_id} className="strip-decision converse-confirm">
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
+          {approval.kind === 'customize_platform' ? (
+            // A reloaded self-edit chip must carry the SAME facts the live one
+            // did; the generic "Run requested tool" line judged nothing.
+            <CustomizeChipBody payload={approval.payload} />
+          ) : (
+          <>
           Run <span className="route-tool">{approval.tool || 'requested tool'}</span>
           {approval.capability && <>{' '}<span className={`cap ${isWrite ? 'write' : 'read'}`}>{approval.capability}</span></>}
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim"> · {approval.rationale || 'waiting for your decision'}</span>
+          </>
+          )}
         </span>
         {resumeRequired ? (
           <button
@@ -606,11 +675,15 @@ export default function ConversePanel({
                 </span>
               </>
             ) : (
+              item.confirmKind === 'customize_platform' ? (
+                <CustomizeChipBody payload={item.payload} />
+              ) : (
               <>
                 <span className="route-title">{item.confirmKind || 'Confirmation'}</span>
-                {item.payload && <span className="dim"> · {paramsSummary(item.payload) || String(item.payload)}</span>}
+                {item.payload && <span className="dim"> · {paramsSummary(item.payload) || ''}</span>}
                 <span className="dim"> — the assistant is asking before it proceeds.</span>
               </>
+              )
             )}
           </span>
           {settled ? (
