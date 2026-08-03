@@ -1289,19 +1289,24 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
     }
     // A 200 is acceptable ONLY if it disclosed nothing about the other tenant's
     // drawing. Proving that by "the hash is not exactly the other tenant's own
-    // intake" is too weak — a partial, reordered, or augmented copy of that
-    // intake would slip through (sol-critic PR #412 round 1). Prove independence
-    // POSITIVELY instead: read a guaranteed-nonexistent random id as the SAME
-    // caller with the SAME forged headers. If the read of the other tenant's
-    // real drawing is byte-identical to that control, the response cannot encode
-    // the other tenant's drawing — it is the caller's own fallback seat that any
-    // unknown id yields. Also require the echoed identity to be the caller's, so
-    // a forged X-Tenant-Id that took is caught even if the bodies matched.
+    // intake" is too weak — a partial/reordered/augmented copy slips through
+    // (sol-critic PR #412 round 1). Prove independence POSITIVELY against a CLEAN
+    // reference: the caller reading a guaranteed-nonexistent random id with its
+    // OWN JWT and NO forged headers. That read carries no other-tenant reference
+    // of any kind (no forged X-Tenant-Id, no other-tenant drawing id), so it can
+    // only be the caller's own fallback seat. Requiring the forged cross-read to
+    // be byte-identical to it proves the cross read leaked neither the other
+    // tenant's drawing (drawing-id independence) NOR anything through the forged
+    // header (header independence) — a header-driven leak would make the forged
+    // cross read differ from this clean control (sol-critic PR #412 round 2).
+    // Verified live at ee150b8: both reads return the caller's own seat with
+    // identical intake hashes. Also require the echoed identity to be the
+    // caller's on both.
     const control = await requestJson(
       config,
       tenant,
       `/api/drawings/${randomUUID()}/intake`,
-      forged(other),
+      { fetchImpl },
     )
     const crossHash = sha256(JSON.stringify(cross.body?.intake ?? null))
     const controlHash = sha256(JSON.stringify(control.body?.intake ?? null))

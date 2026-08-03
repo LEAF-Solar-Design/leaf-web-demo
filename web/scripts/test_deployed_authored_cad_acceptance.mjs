@@ -602,7 +602,8 @@ describe('deployed authored CAD acceptance checks', () => {
     ]
     // Classify the requested drawing id: the caller's own acceptance drawing,
     // the OTHER tenant's real acceptance drawing, or a random control id (the
-    // positive-control read the leg issues to prove independence).
+    // positive-control read the leg issues to prove independence). NOTE: the
+    // control read is CLEAN — the caller's JWT with NO forged X-Tenant-Id.
     const classify = (drawing, tokenA) => {
       const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
       if (ownDrawing) return 'own'
@@ -694,6 +695,32 @@ describe('deployed authored CAD acceptance checks', () => {
     }
     await assert.rejects(
       () => proveExecutedDrawingIsolation(config, browser, idDependentResponse),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Header-driven leak (sol-critic PR #412 round 2): the leak is keyed on the
+    // forged X-Tenant-Id header, NOT the drawing id — any request carrying a
+    // forged header gets that tenant's data while echoing the caller's own JWT
+    // id. A control that also forged the header would match and pass; the CLEAN
+    // control (no forged header) returns the caller's own seat, so the forged
+    // cross read differs and is rejected.
+    const headerDrivenLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') {
+        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      }
+      const forgedTid = options.headers['X-Tenant-Id']
+      if (forgedTid) {
+        // Serve the forged tenant's data, echo the caller's JWT id.
+        return response(200, { intake: forgedTid === 'acceptance-b' ? ownB : ownA, tenant_id: callerId })
+      }
+      // Clean read (no forged header) → caller's own seat.
+      return response(200, { intake: { seat: callerId }, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, headerDrivenLeak),
       /disclosed the other tenant's drawing/,
     )
   })
