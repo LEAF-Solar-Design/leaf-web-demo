@@ -541,15 +541,56 @@ describe('deployed authored CAD acceptance checks', () => {
       { status: 'denied', distinct_result_hashes: true },
     )
 
-    const sanitizedButPermissive = async (url, options) => {
+    // A 200 that discloses the OTHER tenant's own intake is a real leak and
+    // must be rejected.
+    const leakingCrossRead = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
       const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      return response(200, { intake: ownDrawing ? (tokenA ? ownA : ownB) : { redacted: true } })
+      if (ownDrawing) {
+        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+      }
+      // Cross read hands back the OTHER tenant's real intake — a disclosure.
+      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, sanitizedButPermissive),
-      /cross-tenant drawing read returned HTTP 200/,
+      () => proveExecutedDrawingIsolation(config, browser, leakingCrossRead),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took)
+    // is a bypass and must be rejected even when no drawing body leaks.
+    const forgedIdentityHonored = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      if (ownDrawing) {
+        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+      }
+      return response(200, { intake: { fallback: true }, tenant_id: options.headers['X-Tenant-Id'] })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, forgedIdentityHonored),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // The /try surface's real posture: a non-owned read returns the CALLER's
+    // own fallback seat with HTTP 200 (caller's tenant_id, not the other
+    // tenant's data). This is containment, not a leak — accept it.
+    const callerOwnFallback = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (ownDrawing) {
+        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      }
+      // Server ignores forged X-Tenant-Id, serves the caller's own seat.
+      return response(200, { intake: { seat: callerId }, tenant_id: callerId })
+    }
+    assert.deepEqual(
+      await proveExecutedDrawingIsolation(config, browser, callerOwnFallback),
+      { status: 'contained_without_disclosure', distinct_result_hashes: true },
     )
   })
 
@@ -846,11 +887,21 @@ describe('deployed authored CAD acceptance checks', () => {
       "getByRole('button', { name: 'Undo', exact: true })",
       executionTab,
     )
+    // Undo is asynchronous: the driver must prove the undone head landed
+    // (Version 1) before clicking Redo — a one-shot isEnabled() read raced
+    // drawing.versionBusy and failed a live execute.
+    const undoneHead = source.indexOf("hasText: 'Version 1'", undoClick)
+    const redoClick = source.indexOf(
+      "getByRole('button', { name: 'Redo', exact: true })",
+      undoneHead,
+    )
     assert.ok(
       poseCheck >= 0
         && focusExit > poseCheck
         && executionTab > focusExit
-        && undoClick > executionTab,
+        && undoClick > executionTab
+        && undoneHead > undoClick
+        && redoClick > undoneHead,
     )
   })
 

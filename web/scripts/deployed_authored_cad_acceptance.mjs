@@ -1064,11 +1064,16 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     step('undo_redo', tenant.label)
     const undo = page.getByRole('button', { name: 'Undo', exact: true })
     await undo.click()
+    // Undo is asynchronous: the Redo chip stays disabled while
+    // drawing.versionBusy holds and flips enabled only once the undone head
+    // lands (ToolCast.jsx:1234). A one-shot isEnabled() read raced that and
+    // failed local run local-95aa027f-001. Prove the undo landed (head back
+    // on Version 1), then click Redo — the click auto-waits for enablement,
+    // so a never-enabled Redo still fails loudly.
+    await page.getByTestId('version-head').filter({ hasText: 'Version 1' })
+      .waitFor({ state: 'visible', timeout: 120_000 })
     const redo = page.getByRole('button', { name: 'Redo', exact: true })
-    await redo.waitFor({ state: 'visible' })
-    if (!await redo.isEnabled()) {
-      throw new AcceptanceError('browser_execute', 'redo was not enabled after undo')
-    }
+    await redo.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
     await redo.click()
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: 120_000 })
@@ -1195,9 +1200,22 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
       'the two distinct acceptance requests produced indistinguishable drawings',
     )
   }
-  for (const [tenant, other] of [
-    [a, b],
-    [b, a],
+  // The real isolation invariant is CONFIDENTIALITY: one tenant must never
+  // receive another tenant's drawing. A 403/404 satisfies that, but so does the
+  // /try surface's actual posture — `GET /api/drawings/{id}/intake` derives the
+  // tenant from the JWT (server/routers/drawings.py:112, require_active_tenant,
+  // so the forged X-Tenant-Id header is ignored) and `intake_view` MISSES the
+  // caller's store for a drawing they do not own, falling back to the caller's
+  // OWN seat with HTTP 200. Confirmed live at ee150b8: tenant A reading tenant
+  // B's real drawing id returns A's own seat (echoed tenant_id = A, head 1),
+  // byte-identical to A reading a random UUID and never equal to B's own
+  // intake. A blanket 403/404 assertion mistook that non-disclosing fallback
+  // for a leak. Assert the invariant that matters: a non-denied read must not
+  // disclose the other tenant's drawing.
+  let contained = false
+  for (const [tenant, other, otherOwnHash] of [
+    [a, b, own[1]],
+    [b, a, own[0]],
   ]) {
     const cross = await requestJson(
       config,
@@ -1211,15 +1229,32 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         },
       },
     )
-    if (![403, 404].includes(cross.status)) {
+    if ([403, 404].includes(cross.status)) continue
+    if (cross.status !== 200) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
         `cross-tenant drawing read returned HTTP ${cross.status}`,
         { status: cross.status },
       )
     }
+    // A 200 is acceptable only if it disclosed NONE of the other tenant's
+    // drawing: the surface must have served the caller's own fallback seat, so
+    // the echoed identity is the caller's (proving the forged X-Tenant-Id did
+    // not take) and the returned intake is not the other tenant's own intake.
+    const crossIntakeHash = sha256(JSON.stringify(cross.body?.intake ?? null))
+    if (cross.body?.tenant_id !== tenant.id || crossIntakeHash === otherOwnHash) {
+      throw new AcceptanceError(
+        `cross_tenant_drawing_${tenant.label}`,
+        "a cross-tenant drawing read disclosed the other tenant's drawing",
+        { status: cross.status },
+      )
+    }
+    contained = true
   }
-  return { status: 'denied', distinct_result_hashes: true }
+  return {
+    status: contained ? 'contained_without_disclosure' : 'denied',
+    distinct_result_hashes: true,
+  }
 }
 
 function requireDenied(result, check) {
