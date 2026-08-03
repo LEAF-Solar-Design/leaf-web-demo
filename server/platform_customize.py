@@ -51,6 +51,10 @@ BRANCH_PREFIX = "refs/heads/admin-customize/"
 _CHANGE_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+# The complete character set an edit path may use. Verified against every one
+# of the repo's tracked files (984 at 2026-08-03): zero fall outside it.
+_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@-]+")
+
 MAX_EDITS = 200
 MAX_EDIT_BYTES = 1_000_000  # per file
 MAX_TITLE = 200
@@ -251,13 +255,17 @@ def _validated_repo_path(raw: Any) -> str:
     # than normalize: rejecting cannot be replayed into an accepted alias.
     if any(seg != seg.rstrip(". ") for seg in segments):
         raise PlatformCustomizeError("edit_path_invalid", 422, f"win32_alias: {raw!r}")
-    # A path is only a control if a human can READ it on the approval chip.
-    # C0/C1 controls (a newline collapses a row) and Unicode bidi/format marks
-    # (RLO reorders what the eye sees) let one path render as another, which
-    # turns the chip back into blind approval by a different route. No repo
-    # path contains them (sol-critic PR #417 round 3).
-    if any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in raw):
-        raise PlatformCustomizeError("edit_path_invalid", 422, "control_char")
+    # A path is only a control if a human can READ it on the approval chip, and
+    # can tell two different paths apart. Denylisting the ways to break that
+    # loses: controls collapse a row, bidi marks reorder what the eye sees,
+    # zero-width and filler characters (U+200B, U+FEFF, U+00AD, U+034F Mn,
+    # U+3164 Lo) are invisible, and homoglyphs read as the wrong file — and
+    # they span half the Unicode category table, so each denied class leaves
+    # the next (sol-critic PR #417 rounds 3-4). ALLOWLIST instead: every one
+    # of this repo's 984 tracked paths uses only these characters, so nothing
+    # legitimate is refused and every confusable spelling is.
+    if _PATH_ALLOWED_RE.fullmatch(raw) is None:
+        raise PlatformCustomizeError("edit_path_invalid", 422, "charset")
     return raw
 
 

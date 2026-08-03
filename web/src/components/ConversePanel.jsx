@@ -44,7 +44,10 @@ function paramsSummary(params) {
   // conceal the parameters of every existing proposal chip, which is the same
   // blind-approval defect wearing different clothes (round 3).
   const val = (v) => {
-    if (Array.isArray(v)) return v.map(val).join(',')
+    // Array#join renders null and undefined as EMPTY, and this must keep
+    // rendering every existing chip byte-identically: only a genuine object,
+    // which used to read "[object Object]", may change.
+    if (Array.isArray(v)) return v.map((e) => (e == null ? '' : val(e))).join(',')
     if (v !== null && typeof v === 'object') return JSON.stringify(v)
     return String(v)
   }
@@ -60,12 +63,13 @@ function paramsSummary(params) {
 function displayPath(raw) {
   let out = ''
   for (const ch of String(raw ?? '')) {
-    const c = ch.codePointAt(0)
-    const unsafe =
-      c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x061c ||
-      c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) ||
-      (c >= 0x2066 && c <= 0x2069)
-    out += unsafe ? '\\u' + c.toString(16).padStart(4, '0').toUpperCase() : ch
+    // Allowlist, not denylist: the invisible and confusable characters that
+    // make one path read as another span half the Unicode table, so each
+    // denied class leaves the next. Every tracked path in this repo uses only
+    // these characters, so nothing legitimate is ever escaped.
+    out += /[A-Za-z0-9._/+@-]/.test(ch)
+      ? ch
+      : '\\u' + ch.codePointAt(0).toString(16).padStart(4, '0').toUpperCase()
   }
   return out
 }
