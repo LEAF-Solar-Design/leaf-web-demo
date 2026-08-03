@@ -441,6 +441,33 @@ export async function waitForTerminalJob(
   throw new AcceptanceError('authored_job', 'the authored write job did not finish before the acceptance deadline')
 }
 
+// Like waitForTerminalJob, but RETURNS the terminal body for either outcome
+// (complete or failed). The stale-head replay leg needs to inspect a job that
+// is EXPECTED to fail, so it must not treat `failed` as a thrown error.
+export async function waitForJobOutcome(
+  config,
+  tenant,
+  jobId,
+  { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
+) {
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    const observed = await requestJson(
+      config,
+      tenant,
+      `/api/jobs/${encodeURIComponent(jobId)}`,
+      { fetchImpl },
+    )
+    if (observed.status !== 200) {
+      throw new AcceptanceError('authored_job', `job status returned HTTP ${observed.status}`)
+    }
+    if (observed.body?.status === 'failed' || observed.body?.status === 'complete') {
+      return observed.body
+    }
+    await waitImpl(pollMs)
+  }
+  throw new AcceptanceError('authored_job', 'the replay job did not reach a terminal state before the acceptance deadline')
+}
+
 export function evaluateReadiness(body, expectedRevision) {
   if (
     body?.ok !== true ||
@@ -1347,17 +1374,47 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
       throw new AcceptanceError(`write_rejection_head_${tenant.label}`, 'expected drawing head 2')
     }
 
+    // The exact approved write, replayed after the head moved to 2, must be
+    // REJECTED without landing — but for a plain catalog run the rejection is
+    // ASYNCHRONOUS. The synchronous head pin (server/routers/jobs.py:501,
+    // "drawing head changed after approval") only fires when the request
+    // carries `expected_drawing_head`, which the browser sends only on the
+    // conversational exact-pin path (LEAF_EXACT_WRITE_PINS_REQUIRED=1 or a
+    // backedge tenant — neither true for these M2M acceptance tenants). So the
+    // submit returns 202 and the WORKER rejects the stale head, failing the job
+    // ("stale drawing head: expected 1, current 2"). Confirmed live at ee150b8.
+    // Accept either shape; the load-bearing proof is the unchanged head asserted
+    // below. A 202 that COMPLETED would be a real stale-write landing and is
+    // rejected here.
     const staleHeadReplay = await requestJson(
       config,
       tenant,
       '/api/run',
       { method: 'POST', body: original, extraHeaders: replayHeaders, fetchImpl },
     )
-    expectStatus(staleHeadReplay, [409], `stale_head_replay_${tenant.label}`)
-    if (!/drawing head changed after approval/i.test(staleHeadReplay.body?.error?.message || '')) {
+    const staleHeadPattern = /drawing head changed after approval|stale drawing head/i
+    if (staleHeadReplay.status === 409) {
+      if (!staleHeadPattern.test(staleHeadReplay.body?.error?.message || '')) {
+        throw new AcceptanceError(
+          `stale_head_replay_${tenant.label}`,
+          'the synchronous rejection was not the stale drawing-head pin',
+        )
+      }
+    } else if (staleHeadReplay.status === 202 && staleHeadReplay.body?.job_id) {
+      const outcome = await waitForJobOutcome(
+        config, tenant, staleHeadReplay.body.job_id, { fetchImpl },
+      )
+      if (outcome.status !== 'failed' || !staleHeadPattern.test(outcome.error?.message || '')) {
+        throw new AcceptanceError(
+          `stale_head_replay_${tenant.label}`,
+          'the accepted replay job did not fail on the stale drawing-head pin',
+        )
+      }
+    } else {
       throw new AcceptanceError(
         `stale_head_replay_${tenant.label}`,
-        'the exact replay was not rejected by the stale drawing-head pin',
+        `the exact replay returned unexpected HTTP ${staleHeadReplay.status}`,
+        { status: staleHeadReplay.status },
       )
     }
 

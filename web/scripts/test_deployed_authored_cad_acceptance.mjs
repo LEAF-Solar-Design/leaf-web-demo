@@ -685,14 +685,88 @@ describe('deployed authored CAD acceptance checks', () => {
     )
     assert.equal(acceptedRuns, 4)
 
-    const permissive = async (url) => {
+    // A 202 whose job COMPLETES means the stale write LANDED — the exact danger
+    // this leg guards. It must be rejected.
+    const landingReplay = async (url) => {
       const path = new URL(url).pathname
       if (path.endsWith('/versions')) return response(200, { head: 2 })
-      return response(202, { job_id: 'unexpected' })
+      if (path === '/api/run') return response(202, { job_id: 'landed-job' })
+      if (path.startsWith('/api/jobs/')) return response(200, { status: 'complete', result: { ok: true } })
+      return response(500, {})
     }
     await assert.rejects(
-      () => provePinnedWriteRejections(config, browser, permissive),
-      /unexpected HTTP 202/,
+      () => provePinnedWriteRejections(config, browser, landingReplay),
+      /did not fail on the stale drawing-head pin/,
+    )
+  })
+
+  it('accepts the live async stale-head rejection: 202 then a failed job', async () => {
+    // The plain M2M catalog run does not carry expected_drawing_head, so the
+    // synchronous head pin (jobs.py:501) is skipped and the WORKER rejects the
+    // stale head — 202 at submit, then the job fails with "stale drawing head".
+    // This is the real ee150b8 behavior; the sync-409 shape is the
+    // conversational path.
+    const config = validateConfig(environment(), true)
+    const browser = config.tenants.map((tenant) => ({
+      label: tenant.label,
+      executed: true,
+      _run_request: {
+        tool: `${tenant.label.toLowerCase()}_tool`,
+        dwg: tenant.drawingId,
+        dwg_version: 1,
+        catalog_digest: `sha256:${'a'.repeat(64)}`,
+      },
+    }))
+    let jobPolls = 0
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname.startsWith('/api/jobs/')) {
+        jobPolls += 1
+        return response(200, {
+          status: 'failed',
+          error: { error_code: 'BAD_PARAMS', message: 'drawing/mutation unavailable: stale drawing head: expected 1, current 2' },
+        })
+      }
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
+          return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again' } })
+        }
+        return response(202, { job_id: `replay-${body.tool}` })
+      }
+      return response(500, {})
+    }
+    assert.deepEqual(
+      await provePinnedWriteRejections(config, browser, fetchImpl),
+      {
+        status: 'denied_without_mutation',
+        stale_head: true,
+        stale_catalog: true,
+        replayed_exact_request: true,
+        expired_approval: 'requires_external_evidence',
+      },
+    )
+    assert.equal(jobPolls, 2) // one replay job per tenant, each failed on first poll
+
+    // A 202 whose replay job COMPLETES (stale write landed) is rejected even on
+    // the async path.
+    const asyncLanding = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) return response(200, { head: 2 })
+      if (parsed.pathname.startsWith('/api/jobs/')) return response(200, { status: 'complete', result: { ok: true } })
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
+          return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed' } })
+        }
+        return response(202, { job_id: 'landed' })
+      }
+      return response(500, {})
+    }
+    await assert.rejects(
+      () => provePinnedWriteRejections(config, browser, asyncLanding),
+      /did not fail on the stale drawing-head pin/,
     )
   })
 
