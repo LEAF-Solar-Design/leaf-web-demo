@@ -1027,31 +1027,76 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // component ('History' button, dialog, vh-row-v1, 'Close version history'),
     // none of which this surface renders — a repo-wide string sweep hid it
     // because those literals do exist, on the other surface.
-    // See web/src/site/ToolCast.jsx:1205 (tab) and :1322-1344 (panel + rows).
+    // See ToolCast.jsx's `workspace-tab-*` rail and its `tc-version-panel`
+    // region (line numbers drift; the symbols do not).
     const previewMutationCount = mutatingApiRequests.length
     await page.getByRole('tab', { name: /^Versions/ }).click()
     const history = page.getByRole('region', { name: 'Version history' })
     await history.waitFor({ state: 'visible' })
     await history.getByTestId('try-version-v1').getByRole('button').first().click()
     await history.getByText(/Viewing v1 read-only/).waitFor({ state: 'visible' })
-    // NOTE — a deliberate assertion CHANGE, not a silent drop. The old check
-    // (`runButton.isDisabled()`) tested /app's contract: there, previewing a
-    // version disables writes. On /try, `drawing.previewing` gates ONLY the
-    // preview note and the active-row highlight (ToolCast.jsx:1328-1347);
-    // `writeLocked` is `checkout.writeLocked || drawing.mutationsBlocked`
-    // (:532) and preview contributes to neither. The locator was also stale by
-    // this point (RoutePanel's transient confirm chip unmounts 180 ms after
-    // dismissal). So the check could never have passed, and passing it would
-    // have proven nothing about read-only-ness.
-    // What IS proven below, and is what read-only actually means here: the
-    // drawing head never moved, and the preview issued no mutating request.
+    // Read-only means four things here, and each one is asserted below:
+    //   1. the surface SAYS writes are paused and names the way back to head;
+    //   2. a real write control is actually DISABLED while previewing;
+    //   3. returning to head LIFTS the lock (a preview lock that never
+    //      released would strand the surface read-only for the whole session);
+    //   4. the head never moved and no mutating request was sent.
+    //
+    // (2) is the assertion PR #409 had to delete. It was written as
+    // `runButton.isDisabled()` against RoutePanel's confirm chip — wrong twice:
+    // the surface had no preview lock at all (ToolCast's `writeLocked` folded
+    // only `checkout.writeLocked || drawing.mutationsBlocked`), and the chip
+    // had already unmounted 180 ms after the run consumed the route, so the
+    // locator was stale. `writeLocked` now includes `previewLocked`, and the
+    // catalog card below is a write control that PERSISTS.
+    await page.getByTestId('try-preview-write-lock').waitFor({ state: 'visible' })
     if (!await page.getByTestId('version-head').innerText().then((text) => text.includes('Version 2'))) {
       throw new AcceptanceError('read_only_preview', 'version preview changed the drawing head')
     }
+
+    const openAuthoredToolCard = async () => {
+      await page.getByRole('tab', { name: /^Catalog/ }).click()
+      // Families render collapsed by default (createCatalogController's
+      // loadCatalog), so open them all rather than guessing the authored tool's
+      // family label, which the server supplies. Each click removes one from
+      // the set. A flat-fallback catalog has no families and skips the loop.
+      const collapsed = page.locator('.catalog-family.collapsed > button.catalog-family-head')
+      for (let guard = 0; guard < 25 && await collapsed.count() > 0; guard += 1) {
+        await collapsed.first().click()
+      }
+      // The card's expanded body is where the run control lives. Opening it is
+      // idempotent on purpose: switching the RIGHT rail to Versions does not
+      // unmount the LEFT catalog rail, so the card may still be open from the
+      // previous check, and clicking its head again would COLLAPSE it.
+      const card = page.locator('.tool-card').filter({ hasText: staged.toolName })
+      await card.waitFor({ state: 'visible', timeout: 30_000 })
+      const openCard = page.locator('.tool-card.open').filter({ hasText: staged.toolName })
+      if (await openCard.count() === 0) await card.locator('button.tool-head').click()
+      const run = card.getByRole('button', { name: 'Review & run', exact: true })
+      await run.waitFor({ state: 'visible', timeout: 30_000 })
+      return run
+    }
+
+    const lockedRun = await openAuthoredToolCard()
+    if (!await lockedRun.isDisabled()) {
+      throw new AcceptanceError(
+        'read_only_preview',
+        'the authored drawing.write tool stayed runnable while previewing an older version',
+      )
+    }
+
+    await page.getByRole('tab', { name: /^Versions/ }).click()
     await history.getByRole('button', { name: 'Back to head', exact: true }).click()
     // No close control exists on this panel — leaving the tab selected is the
-    // surface's own resting state; the mutation-count assertion below is what
-    // actually proves the preview stayed read-only.
+    // surface's own resting state.
+    await page.getByTestId('try-preview-write-lock').waitFor({ state: 'hidden' })
+    const releasedRun = await openAuthoredToolCard()
+    if (await releasedRun.isDisabled()) {
+      throw new AcceptanceError(
+        'read_only_preview',
+        'returning to head did not lift the preview write lock',
+      )
+    }
     if (mutatingApiRequests.length !== previewMutationCount) {
       throw new AcceptanceError('read_only_preview', 'version preview sent a mutating API request')
     }

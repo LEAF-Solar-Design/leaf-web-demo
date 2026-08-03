@@ -529,7 +529,30 @@ export default function ToolCast({
     drawingId: drawing.drawingState?.drawing_id || null,
     holder: checkoutHolder,
   })
-  const writeLocked = checkout.writeLocked || drawing.mutationsBlocked
+  // Previewing an older version is a READ-ONLY view: the stage and the version
+  // panel show v{n} while the head sits elsewhere, so a write tool would commit
+  // against a drawing the operator is not looking at. /app's VersionHistory has
+  // always locked writes during preview; /try's port carried the preview NOTE
+  // and the active-row highlight but not the lock, so the acceptance driver had
+  // to drop its read-only assertion (PR #409).
+  // `previewing` is non-null only for a NON-head version — previewVersion()
+  // clears it on its `isHead` branch (useDrawingVersionController.js) — so
+  // "Back to head" is what releases this lock.
+  const previewLocked = drawing.previewing != null
+  const writeLocked = checkout.writeLocked || drawing.mutationsBlocked || previewLocked
+  // Why writes are paused, in the surface's own voice. Ordered most- to
+  // least-specific; preview sits last because it is the one the operator can
+  // clear themselves, and an unreadable head or another session's checkout is
+  // the more actionable thing to say when both are true.
+  const writeLockNote = !writeLocked
+    ? null
+    : drawing.mutationsBlocked
+      ? 'the committed drawing head is unreadable; editing is locked until it is readable or you recover a historical version.'
+      : checkout.lockedByOther?.holder
+        ? `editing is locked by ${checkout.lockedByOther.holder}; this write tool is paused.`
+        : previewLocked
+          ? `you are viewing v${drawing.previewing.version} read-only — choose “Back to head” in Version history to edit again.`
+          : 'editing is paused while Leaf checks the drawing lock.'
   const takeCheckout = useCallback((...args) => {
     if (!sessionReady) return undefined
     return checkout.actions.take(...args)
@@ -605,6 +628,8 @@ export default function ToolCast({
         ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version.'
         : checkout.lockedByOther?.holder
         ? `Editing is locked by ${checkout.lockedByOther.holder}. Read tools still run.`
+        : previewLocked
+        ? `Editing is paused while you view v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again. Read tools still run.`
         : 'Editing is paused while Leaf checks the drawing lock. Read tools still run.')
       return undefined
     }
@@ -625,7 +650,7 @@ export default function ToolCast({
     runIntentStateRef.current = staged.state
     const { refreshedTool: _refreshedTool, ...publicDecision } = decision
     return { ...publicDecision, params: staged.intent.params, runIntent: staged.intent }
-  }, [catalogRunContext, checkout.lockedByOther, drawing.mutationsBlocked, tools, writeLocked])
+  }, [catalogRunContext, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, previewLocked, tools, writeLocked])
   catalogDecisionRef.current = armCatalogDecision
 
   const requestCatalogRun = useCallback((tool, params) => {
@@ -652,6 +677,8 @@ export default function ToolCast({
         ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version. The write did not run.'
         : checkout.lockedByOther?.holder
         ? `Editing is locked by ${checkout.lockedByOther.holder}. The write did not run.`
+        : previewLocked
+        ? `Editing is paused while you view v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again. The write did not run.`
         : 'Editing is paused while Leaf checks the drawing lock. The write did not run.')
       catalog.actions.dismissRoute()
       return
@@ -711,7 +738,7 @@ export default function ToolCast({
     catalog.actions.dismissRoute()
     if (!PUBLIC_DEMO && workspace.openProjectId) workspace.rehydrate()
     if (!PUBLIC_DEMO) checkout.actions.refresh()
-  }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.shown, jobRunning, runTrackedJob, workspace, writeLocked])
+  }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, drawing.shown, jobRunning, previewLocked, runTrackedJob, workspace, writeLocked])
 
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
     const drawingId = drawing.drawingState?.drawing_id
@@ -1144,6 +1171,7 @@ export default function ToolCast({
               onRetryTools={catalog.actions.retryTools}
               writeEntitled={writeEntitled}
               writeLocked={writeLocked}
+              writeLockNote={writeLockNote}
             />
           )}
           {leftView === 'workspace' && (
@@ -1326,10 +1354,21 @@ export default function ToolCast({
               <button type="button" onClick={drawing.actions.loadHistory}>Refresh</button>
             </div>
             {drawing.previewing && (
-              <div className="tc-preview-note">
-                Viewing v{drawing.previewing.version} read-only
-                <button type="button" onClick={drawing.actions.backToHead}>Back to head</button>
-              </div>
+              <>
+                <div className="tc-preview-note">
+                  Viewing v{drawing.previewing.version} read-only
+                  <button type="button" onClick={drawing.actions.backToHead}>Back to head</button>
+                </div>
+                {/* The lock is real (writeLocked, :532) — say so here, where the
+                    operator already is and where the control that lifts it sits.
+                    A SIBLING, not a child: .tc-preview-note is a two-item
+                    space-between flex row, and a third child would spread across
+                    it. Keeping the note's DOM intact also keeps the acceptance
+                    driver's `getByText(/Viewing v1 read-only/)` a single match. */}
+                <div className="tc-preview-lock" role="status" data-testid="try-preview-write-lock">
+                  Editing is paused until you return to head.
+                </div>
+              </>
             )}
             {drawing.historyLoading && <div className="tc-panel-note">Loading versions</div>}
             {drawing.historyError && <div className="tc-panel-error">{drawing.historyError}</div>}
@@ -1502,6 +1541,7 @@ export default function ToolCast({
             running={busy || jobRunning}
             writeEntitled={writeEntitled}
             writeLocked={writeLocked}
+            writeLockNote={writeLockNote}
             onConfirmIntent={runCatalogTool}
             onPickAlternative={catalog.actions.pickAlternative}
             onOpenAuthor={() => setLeftView('author')}
