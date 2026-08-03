@@ -59,7 +59,7 @@ function customizeChipLines(payload) {
       head: 'Land platform change',
       detail: `${shortId(p.change_id)} · commit ${shortId(p.commit_sha)}`,
       edits: [],
-      truncated: 0,
+      undisplayed: 0,
     }
   }
   const edits = Array.isArray(p.edits) ? p.edits : []
@@ -68,12 +68,15 @@ function customizeChipLines(payload) {
     head: 'Edit the platform itself',
     detail: `${p.title || 'untitled'} · ${count} file${count === 1 ? '' : 's'}`,
     edits,
-    truncated: Number(p.edits_truncated) || 0,
+    // Every path the server would accept is displayed, so this is 0 in
+    // practice. Non-zero means the chip is INCOMPLETE: say do-not-approve
+    // rather than showing a count that reads like a harmless overflow.
+    undisplayed: Number(p.edits_undisplayed) || 0,
   }
 }
 
 function CustomizeChipBody({ payload }) {
-  const { head, detail, edits, truncated } = customizeChipLines(payload)
+  const { head, detail, edits, undisplayed } = customizeChipLines(payload)
   return (
     <>
       <span className="route-title">{head}</span>
@@ -89,7 +92,12 @@ function CustomizeChipBody({ payload }) {
               </span>
             </span>
           ))}
-          {truncated > 0 && <span className="dim">+{truncated} more</span>}
+        </span>
+      )}
+      {undisplayed > 0 && (
+        <span className="customize-incomplete">
+          {undisplayed} more file{undisplayed === 1 ? '' : 's'} would change and are NOT
+          listed here. Do not approve this — deny it and ask for a smaller change.
         </span>
       )}
       <span className="dim">

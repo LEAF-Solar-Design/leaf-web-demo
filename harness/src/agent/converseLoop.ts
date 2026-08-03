@@ -1251,12 +1251,19 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
 }
 
 /**
- * The APPROVAL-CHIP projection of a platform self-edit: every path, what
+ * The APPROVAL-CHIP projection of a platform self-edit: EVERY path, what
  * happens to it, and how many bytes — the facts an approver needs to notice a
- * file they never asked about. Bounded on purpose: paths and sizes, never the
- * file bytes (a chip is not a diff viewer, and raw content would blow the
- * event row). `edit_count` stays exact even when the list is truncated, so a
- * long edit set can never hide entries behind a short display.
+ * file they never asked about. Bounded only in CONTENT: paths and sizes, never
+ * the file bytes (a chip is not a diff viewer, and raw content would blow the
+ * event row).
+ *
+ * The path list is NOT bounded below the server's own ceiling. A display cap
+ * lower than `platform_customize.MAX_EDITS` reopens the blind-approval hole it
+ * exists to close: 20 benign edits followed by one for `web/src/auth.js` (which
+ * no co-sign manifest covers) would approve a path the operator never saw
+ * (sol-critic PR #417 round 2, blocking). The cap below therefore EQUALS that
+ * server ceiling — every proposal the API will accept is shown in full — and
+ * `customizeChipPayload.test` fails if the two drift apart.
  */
 export function customizeChipPayload(args: Record<string, unknown>): Record<string, unknown> {
   const op = String(args.op ?? "propose");
@@ -1282,11 +1289,16 @@ export function customizeChipPayload(args: Record<string, unknown>): Record<stri
     title: String(args.title ?? ""),
     edit_count: edits.length,
     edits: shown,
-    ...(edits.length > shown.length ? { edits_truncated: edits.length - shown.length } : {}),
+    // Unreachable through the API (the server refuses more than MAX_EDITS), so
+    // if it ever fires the chip is INCOMPLETE and must say so loudly rather
+    // than quietly count what it hid — the UI renders this as a refusal
+    // banner, never as "+N more".
+    ...(edits.length > shown.length ? { edits_undisplayed: edits.length - shown.length } : {}),
   };
 }
 
-const CUSTOMIZE_CHIP_MAX_EDITS = 20;
+/** MUST equal server/platform_customize.py MAX_EDITS (pinned by test). */
+export const CUSTOMIZE_CHIP_MAX_EDITS = 200;
 
 /** Shape model-supplied edits to EXACTLY the catalog/API item shape. */
 function sanitizeCustomizeEdits(
