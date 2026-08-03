@@ -2590,7 +2590,7 @@ export default function App() {
 
       {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}
 
-      {customizeExit.shown && <CustomizePanel onDismiss={() => setCustomizeDismissed(true)} exiting={customizeExit.exiting} />}
+      {customizeExit.shown && <CustomizePanel tenant={tenant} onDismiss={() => setCustomizeDismissed(true)} exiting={customizeExit.exiting} />}
 
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}

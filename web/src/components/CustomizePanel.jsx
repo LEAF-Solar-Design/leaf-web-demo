@@ -11,10 +11,17 @@ import './popovers.css'
 // enter the browser, so awaiting_cosign renders as a calm hold, not a button.
 // `exiting`: App holds the mount through the 180 ms M1 exit fade (useExit).
 
-const RECENT_KEY = 'leaf.customize.recent'
+const RECENT_BASE_KEY = 'leaf.customize.recent'
 const MAX_RECENT = 8
+// Mirror of the server's lane.MAX_EDITS (routers/platform_customize.py caps the
+// propose body at 200 edits): the composer must not build a request the
+// contract will refuse.
+const MAX_EDITS = 200
+const CHANGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const REASON_COPY = {
+  policy_unavailable: 'The entitlements policy is unavailable right now. Try again shortly.',
+  edit_path_invalid: 'A path is not allowed. Paths are repo-relative with forward slashes; no leading slash, no "..", no ".git".',
   platform_customize_auth_required: 'Live authentication is required on this environment.',
   tenant_identity_invalid: 'The signed-in tenant identity is not valid here.',
   platform_customize_disabled: 'The self-edit lane is dark on this environment.',
@@ -35,27 +42,37 @@ const REASON_COPY = {
 }
 
 function describeError(e) {
-  if (e?.body?.entitlement_required) return 'Admin tier required for platform self-edit.'
+  // The entitlement_required marker rides BOTH the 403 denial and the 503
+  // policy-unavailable envelope; only the 403 means "you lack the tier".
+  if (e?.body?.entitlement_required && e.status === 403) return 'Admin tier required for platform self-edit.'
   const reason = e?.body?.reason_code
   if (reason && REASON_COPY[reason]) return REASON_COPY[reason]
   return String(e?.message || e)
 }
 
-function readRecent() {
+// Recent ids are scoped per tenant so a multi-workspace admin never sees one
+// workspace's change ids from another (the server record itself is
+// tenant-scoped regardless; this is display hygiene, not authority).
+function recentKey(tenant) {
+  return `${RECENT_BASE_KEY}.${tenant || 'default'}`
+}
+
+function readRecent(tenant) {
   try {
-    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
-    return Array.isArray(raw) ? raw.filter((r) => r && r.change_id) : []
+    const raw = JSON.parse(localStorage.getItem(recentKey(tenant)) || '[]')
+    if (!Array.isArray(raw)) return []
+    return raw.filter((r) => r && typeof r.change_id === 'string' && CHANGE_ID_RE.test(r.change_id))
   } catch { return [] }
 }
 
-function rememberRecent(record) {
+function rememberRecent(tenant, record) {
   try {
-    const next = [{ change_id: record.change_id, title: record.title }]
-      .concat(readRecent().filter((r) => r.change_id !== record.change_id))
+    const next = [{ change_id: record.change_id, title: String(record.title || '') }]
+      .concat(readRecent(tenant).filter((r) => r.change_id !== record.change_id))
       .slice(0, MAX_RECENT)
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+    localStorage.setItem(recentKey(tenant), JSON.stringify(next))
     return next
-  } catch { return readRecent() }
+  } catch { return readRecent(tenant) }
 }
 
 // State chips reuse the app's status-dot grammar: a hold is amber (quota),
@@ -69,7 +86,7 @@ const STATE_LABEL = {
 
 const EMPTY_EDIT = { path: '', content: '', delete: false }
 
-export default function CustomizePanel({ onDismiss, exiting }) {
+export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const drawerRef = useRef(null)
   const closeRef = useRef(null)
   const restoreRef = useRef(null)
@@ -78,7 +95,7 @@ export default function CustomizePanel({ onDismiss, exiting }) {
   const [submitting, setSubmitting] = useState(false)
   const [record, setRecord] = useState(null)
   const [err, setErr] = useState(null)
-  const [recent, setRecent] = useState(readRecent)
+  const [recent, setRecent] = useState(() => readRecent(tenant))
   const [refreshing, setRefreshing] = useState(false)
   const [landConfirming, setLandConfirming] = useState(false)
   const [landing, setLanding] = useState(false)
@@ -146,13 +163,13 @@ export default function CustomizePanel({ onDismiss, exiting }) {
         : { path: e.path, content: e.content }))
       const created = await proposePlatformChange(title.trim(), body)
       setRecord(created)
-      setRecent(rememberRecent(created))
+      setRecent(rememberRecent(tenant, created))
     } catch (e) {
       setErr(describeError(e))
     } finally {
       setSubmitting(false)
     }
-  }, [title, edits])
+  }, [title, edits, tenant])
 
   const refresh = useCallback(async (changeId) => {
     const id = changeId || record?.change_id
@@ -253,8 +270,12 @@ export default function CustomizePanel({ onDismiss, exiting }) {
           ))}
 
           <div className="cst-actions">
-            <button className="chip-neutral" onClick={() => setEdits((prev) => [...prev, { ...EMPTY_EDIT }])}>
-              Add another edit
+            <button
+              className="chip-neutral"
+              onClick={() => setEdits((prev) => (prev.length >= MAX_EDITS ? prev : [...prev, { ...EMPTY_EDIT }]))}
+              disabled={edits.length >= MAX_EDITS}
+            >
+              {edits.length >= MAX_EDITS ? `At the ${MAX_EDITS}-edit limit` : 'Add another edit'}
             </button>
             <button className="chip-act" onClick={propose} disabled={submitting}>
               {submitting ? 'Proposing…' : 'Propose'}

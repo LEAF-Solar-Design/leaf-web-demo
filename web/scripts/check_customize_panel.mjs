@@ -41,6 +41,19 @@ assert(app.includes("entitlements?.entitlements?.platform_customize === true"), 
 assert(app.includes("get('customize') === '1'"), 'panel must stay behind the ?customize=1 flag')
 assert(app.includes('customizeFlag && !mock && !customizeDismissed && platformCustomizeEntitled'), 'panel mount must require flag AND live mode AND strict entitlement')
 
+// Guard strings alone cannot prove the mount is gated: a SECOND unconditional
+// <CustomizePanel /> would keep every assert above green. Pin the mount count
+// to exactly one, require that one to sit behind customizeExit.shown, and pin
+// the component to App.jsx as its only consumer.
+const mountSites = app.match(/<CustomizePanel\b/g) || []
+assert(mountSites.length === 1, `App.jsx must mount CustomizePanel exactly once (found ${mountSites.length})`)
+assert(/\{customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must be behind customizeExit.shown')
+for (const file of await walk(srcDir)) {
+  if (file.endsWith('App.jsx') || file.endsWith('CustomizePanel.jsx')) continue
+  const text = await readFile(file, 'utf8')
+  assert(!text.includes('CustomizePanel'), `CustomizePanel must have no consumer besides App.jsx: ${file}`)
+}
+
 // Landing ack: the exact recorded commit, never a re-read of the mutable ref.
 assert(panel.includes('landPlatformChange(record.change_id, record.commit_sha)'), 'land must acknowledge the recorded commit sha')
 
