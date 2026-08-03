@@ -31,6 +31,7 @@ if str(SERVER_DIR) not in sys.path:
 import auth  # noqa: E402
 import billing_tiers as bt  # noqa: E402
 import entitlements as ents  # noqa: E402
+import roles as roles_mod  # noqa: E402
 
 # ------------------------- THE FROZEN SETS (§11) --------------------------- #
 FROZEN_NS = "https://leafdesign.ai/"
@@ -146,3 +147,94 @@ def test_platform_lane_fallback_literal_is_restricted():
     # `platform` (see platform/tests/conftest.py).
     text = (REPO_ROOT / "platform" / "entitlements.py").read_text(encoding="utf-8")
     assert 'return "restricted"' in text
+
+
+# ------------------------- §11.5 role-overlay freeze ----------------------- #
+# The role NAME SET is deliberately operator-extensible (roles.json). What IS
+# frozen: the claim spelling, the platform_admin semantics, the additive-only
+# capability key set inside grants, and the two-factor elevated_grants law.
+
+FROZEN_ROLES_CLAIM = "https://leafdesign.ai/roles"
+FROZEN_PLATFORM_ADMIN = "platform_admin"
+
+
+def test_roles_claim_minted_under_frozen_namespace_by_both_actions():
+    post_login = (SERVER_DIR / "auth0-actions" /
+                  "post-login-add-tenant-claim.js").read_text(encoding="utf-8")
+    m2m = (SERVER_DIR / "auth0-actions" /
+           "credentials-exchange-add-tenant-claim.js").read_text(encoding="utf-8")
+    for text in (post_login, m2m):
+        assert "setCustomClaim(CLAIM_NS + 'roles'" in text, (
+            "both Actions must mint the roles claim under the frozen namespace")
+    assert FROZEN_ROLES_CLAIM == FROZEN_NS + "roles"
+
+
+def test_leaf_admin_implies_platform_admin_role_in_action():
+    # One operator flag, one staff identity: the tier override and the role
+    # must stay in step in the hand-pasted Action. Text pins.
+    text = (SERVER_DIR / "auth0-actions" /
+            "post-login-add-tenant-claim.js").read_text(encoding="utf-8")
+    assert "const PLATFORM_ADMIN_ROLE = 'platform_admin';" in text
+    assert "candidates.push(PLATFORM_ADMIN_ROLE);" in text
+
+
+def test_m2m_action_forbids_platform_admin():
+    # A staff identity requires a human login — the same posture that keeps
+    # `admin` out of the M2M VALID_TIERS keeps platform_admin out of M2M roles.
+    text = (SERVER_DIR / "auth0-actions" /
+            "credentials-exchange-add-tenant-claim.js").read_text(encoding="utf-8")
+    assert "M2M_FORBIDDEN_ROLES = new Set(['platform_admin'])" in text
+
+
+def test_role_grants_use_the_frozen_capability_vocabulary_only():
+    policy = json.loads((SERVER_DIR / "roles.json").read_text(encoding="utf-8"))
+    for name, entry in policy.items():
+        if name.startswith("_"):
+            continue
+        for block in ("grants", "elevated_grants"):
+            keys = set(entry.get(block) or {})
+            assert keys <= FROZEN_CAPABILITIES, (
+                f"role {name}.{block} carries non-frozen capability keys: "
+                f"{keys - FROZEN_CAPABILITIES}")
+
+
+def test_platform_customize_is_elevated_only_across_role_policy_and_mirror():
+    """The role-layer twin of test_admin_is_the_only_platform_customize_tier:
+    NO role grants platform_customize as a plain grant, and platform_admin is
+    the only shipped role granting it at all (via elevated_grants) — in the
+    JSON file and the hardcoded mirror alike."""
+    policy = json.loads((SERVER_DIR / "roles.json").read_text(encoding="utf-8"))
+    sources = [{k: v for k, v in policy.items() if not k.startswith("_")},
+               roles_mod._HARDCODED_ROLE_DEFAULTS]
+    for src in sources:
+        plain = {name for name, entry in src.items()
+                 if (entry.get("grants") or {}).get("platform_customize") is True}
+        elevated = {name for name, entry in src.items()
+                    if (entry.get("elevated_grants") or {}).get("platform_customize") is True}
+        assert plain == set(), "platform_customize must never be a plain role grant"
+        assert elevated == {FROZEN_PLATFORM_ADMIN}
+    assert roles_mod.PLATFORM_ADMIN_ROLE == FROZEN_PLATFORM_ADMIN
+    # And structurally: the loader itself refuses elevated-only capabilities
+    # in plain grants, for ANY policy file, not just the shipped one.
+    assert roles_mod.ELEVATED_ONLY_CAPABILITIES == frozenset({"platform_customize"})
+
+
+def test_roles_mirror_matches_json_policy_exactly():
+    policy = json.loads((SERVER_DIR / "roles.json").read_text(encoding="utf-8"))
+    policy = {k: v for k, v in policy.items() if not k.startswith("_")}
+    assert roles_mod._HARDCODED_ROLE_DEFAULTS == policy, (
+        "roles.py _HARDCODED_ROLE_DEFAULTS must mirror roles.json byte-for-byte"
+        " — enforcement must be identical with or without the file"
+    )
+
+
+def test_role_name_rule_and_cap_agree_across_layers():
+    # Python <-> both hand-pasted Actions: same shape rule, same cap.
+    rule = "^[a-z0-9][a-z0-9_-]{0,62}$"
+    assert roles_mod.ROLE_NAME_RE.pattern == rule
+    for js in ("post-login-add-tenant-claim.js",
+               "credentials-exchange-add-tenant-claim.js"):
+        text = (SERVER_DIR / "auth0-actions" / js).read_text(encoding="utf-8")
+        assert "/^[a-z0-9][a-z0-9_-]{0,62}$/" in text, f"{js}: role shape rule drift"
+        assert "const MAX_ROLES = 16;" in text, f"{js}: MAX_ROLES drift"
+    assert roles_mod.MAX_ROLES == 16

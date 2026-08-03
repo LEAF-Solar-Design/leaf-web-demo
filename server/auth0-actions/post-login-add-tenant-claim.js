@@ -87,6 +87,12 @@ const DEFAULT_TIER = 'hosted_starter';
 // subscription_status values that force tier='restricted' regardless of plan.
 const LAPSED_STATUSES = new Set(['canceled', 'unpaid', 'incomplete_expired']);
 
+// Role names (contract/AUTH.md §11.5) — same canonical shape rule as tenant
+// ids; MUST match server/roles.py ROLE_NAME_RE / MAX_ROLES.
+const ROLE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const MAX_ROLES = 16;
+const PLATFORM_ADMIN_ROLE = 'platform_admin';
+
 /**
  * Pure claim derivation — unit-testable, shared by the Action and the dry-run.
  * @param {object} event Auth0 post-login event.
@@ -124,7 +130,41 @@ function deriveClaims(event) {
     tier = 'admin';
   }
 
-  return { tenant_id: tenantId, org_id: orgId, tier: tier };
+  return { tenant_id: tenantId, org_id: orgId, tier: tier, roles: deriveRoles(event) };
+}
+
+/**
+ * Role claim derivation (contract/AUTH.md §11.5). Union of:
+ *   1. Auth0-native role assignments (event.authorization.roles — the
+ *      dashboard's User Management -> Roles UI, the preferred operator path);
+ *   2. the root-level app_metadata.leaf_roles array (API-writable sibling of
+ *      leaf_platform_tenant_id, so leaf_website subscription PATCHes that
+ *      replace app_metadata.leaf can never mint or erase a role);
+ *   3. leaf_admin === true implies platform_admin (one operator flag, one
+ *      staff identity — the tier override above and this role stay in step).
+ * Normalized (trim/lowercase), validated against ROLE_NAME_PATTERN, deduped,
+ * sorted, capped at MAX_ROLES. Unreadable input contributes nothing — roles
+ * only ever ADD capability server-side, so dropping is always the safe answer.
+ * @param {object} event Auth0 post-login event.
+ * @returns {string[]} sorted role names (possibly empty).
+ */
+function deriveRoles(event) {
+  const user = (event && event.user) || {};
+  const appMetadata = user.app_metadata || {};
+  const authz = (event && event.authorization) || {};
+  const candidates = []
+    .concat(Array.isArray(authz.roles) ? authz.roles : [])
+    .concat(Array.isArray(appMetadata.leaf_roles) ? appMetadata.leaf_roles : []);
+  if (appMetadata.leaf_admin === true) {
+    candidates.push(PLATFORM_ADMIN_ROLE);
+  }
+  const seen = new Set();
+  for (const item of candidates) {
+    if (typeof item !== 'string') continue;
+    const token = item.trim().toLowerCase();
+    if (ROLE_NAME_PATTERN.test(token)) seen.add(token);
+  }
+  return Array.from(seen).sort().slice(0, MAX_ROLES);
 }
 
 /**
@@ -140,10 +180,14 @@ exports.onExecutePostLogin = async (event, api) => {
   api.accessToken.setCustomClaim(CLAIM_NS + 'tenant_id', claims.tenant_id);
   api.accessToken.setCustomClaim(CLAIM_NS + 'org_id', claims.org_id);
   api.accessToken.setCustomClaim(CLAIM_NS + 'tier', claims.tier);
+  // Always set (possibly []) so a token's role state is explicit, never
+  // ambiguous-absent. The server treats absent and [] identically (no roles).
+  api.accessToken.setCustomClaim(CLAIM_NS + 'roles', claims.roles);
   // (ID-token mirror is optional; the server verifies the ACCESS token.)
 };
 
 exports.deriveClaims = deriveClaims;
+exports.deriveRoles = deriveRoles;
 exports.CLAIM_NS = CLAIM_NS;
 exports.PLAN_TIER = PLAN_TIER;
 
@@ -176,6 +220,15 @@ if (require.main === module) {
       event: { user: { app_metadata: { leaf_admin: true, leaf_platform_tenant_id: 'admin-tenant-1', leaf: { plan: 'pro', subscription_active: false } } } } },
     { name: 'leaf_admin="yes" (not strict true) -> mints nothing special',
       event: { user: { app_metadata: { leaf_admin: 'yes', leaf: { organization_id: 'org_x', plan: 'pro' } } } } },
+    { name: 'Auth0-native role + app_metadata role -> merged, normalized, sorted',
+      event: { authorization: { roles: ['Platform_Admin', 'ignored bad name!'] },
+               user: { app_metadata: { leaf_roles: ['org_admin', 'platform_admin'],
+                                       leaf: { organization_id: 'org_r', plan: 'pro' } } } } },
+    { name: 'leaf_admin=true implies platform_admin role (and admin tier)',
+      event: { user: { app_metadata: { leaf_admin: true, leaf: { plan: 'free' } } ,
+                       user_id: 'auth0|staff1' } } },
+    { name: 'leaf_roles not an array -> no roles minted',
+      event: { user: { user_id: 'auth0|solo9', app_metadata: { leaf_roles: 'platform_admin', leaf: { plan: 'pro' } } } } },
   ];
   for (const s of samples) {
     const c = deriveClaims(s.event);
@@ -183,6 +236,7 @@ if (require.main === module) {
     out[CLAIM_NS + 'tenant_id'] = c.tenant_id;
     out[CLAIM_NS + 'org_id'] = c.org_id;
     out[CLAIM_NS + 'tier'] = c.tier;
+    out[CLAIM_NS + 'roles'] = c.roles;
     console.log('CASE:', s.name);
     console.log(JSON.stringify(out, null, 2));
   }

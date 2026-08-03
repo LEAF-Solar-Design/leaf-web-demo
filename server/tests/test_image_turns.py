@@ -59,7 +59,7 @@ def _post(client, session_id, body):
 
 def test_bad_images_are_400_before_entitlement(client, monkeypatch):
     session_id = _session(client)
-    monkeypatch.setattr(entitlements, "entitlements_for", lambda tier: (_ for _ in ()).throw(AssertionError("entitlement reached")))
+    monkeypatch.setattr(entitlements, "entitlements_for", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("entitlement reached")))
     for body in (
         {"images": [_image()] * 4},
         {"images": [_image(base64.b64encode(_PNG + b"x" * (1024 * 1024)).decode())]},

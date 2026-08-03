@@ -930,7 +930,7 @@ def test_stage_callback_completed_response_preserves_validated_tool_or_retries_r
     monkeypatch.setattr(
         customization_service.entitlements,
         "entitlements_for",
-        lambda tier: {"build": True},
+        lambda tier, *_roles: {"build": True},
     )
     monkeypatch.setattr(customization_service, "_bare_repo", lambda tenant: Path("."))
     monkeypatch.setattr(customization_service, "_git", lambda *args: BASE)

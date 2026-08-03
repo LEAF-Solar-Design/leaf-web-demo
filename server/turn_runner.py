@@ -548,7 +548,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                images: Optional[List[Dict[str, str]]] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
-               queued_id: Optional[str] = None) -> str:
+               queued_id: Optional[str] = None,
+               entitlement_roles: Optional[tuple] = None,
+               entitlement_elevated: Optional[bool] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -564,8 +566,18 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         subject = getattr(tenant_id, "subject", None)
     # For the terminal-time policy auto-confirm (same posture as the queue
     # kicker's enqueue-time snapshot): resolve while the principal object is
-    # still in hand, before it is flattened to a plain string.
+    # still in hand, before it is flattened to a plain string. An explicit
+    # snapshot (additive keywords) wins, exactly like `tier` above — the queue
+    # kicker holds only the flattened string, whose live resolution would
+    # erase a role-only principal's authority mid-promotion (sol-critic
+    # round 1, finding 4).
     entitlement_tier = entitlements.resolve_tier(tenant_id)
+    if entitlement_roles is None:
+        entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
+    else:
+        import roles as _roles_mod  # noqa: PLC0415 — same lazy seam as entitlements
+        entitlement_roles = _roles_mod.normalize_role_names(entitlement_roles)
+        entitlement_elevated = entitlement_elevated is True
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -657,7 +669,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # snapshots this start_turn already took. Re-entrancy is bounded the
         # same way as the kick: a nested attempt on a cid that is mid-flight
         # sees its transient consumed/claimed state and stands down.
-        _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
+        _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier,
+                            entitlement_roles, entitlement_elevated)
         _kick_queued(session_id)
 
     def _rejected(*args: Any, **kwargs: Any) -> TurnRejected:
@@ -854,7 +867,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         raise _rejected(502, ErrorCode.BROKER_UNREACHABLE, msg)
 
     _spawn_relay(tenant_id, session_id, turn_id, resp, max_s,
-                 tier=tier, entitlement_tier=entitlement_tier)
+                 tier=tier, entitlement_tier=entitlement_tier,
+                 entitlement_roles=entitlement_roles,
+                 entitlement_elevated=entitlement_elevated)
     return turn_id
 
 
@@ -931,6 +946,7 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     # with entitlements the tenant may not hold.
     tier = getattr(tenant_id, "tier", None)
     entitlement_tier = entitlements.resolve_tier(tenant_id)
+    entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
@@ -966,7 +982,8 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     # This path has no relay, so no _finalize_terminal will run for the turn —
     # BOTH follow-ups run here or a parked policy decision / queued prompt
     # waits forever (review rounds 3 and 9).
-    _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier)
+    _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier,
+                        entitlement_roles, entitlement_elevated)
     _kick_queued(session_id)
     return "cancelled"
 
@@ -1007,8 +1024,12 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     # The entitlement tier is snapshotted too, so the KICKER can re-run the
     # router's converse-entitlement check at start time (review round 1,
     # finding 4): a revocation landing during the wait must gate the queued
-    # start exactly as it would gate a direct request.
+    # start exactly as it would gate a direct request. Roles/elevation (§11.5)
+    # ride the same snapshot: the IDENTITY is pinned at enqueue, the POLICY
+    # (entitlements.json + roles.json) is re-read at kick time, so a roles.json
+    # revocation during the wait gates the start too.
     entitlement_tier = entitlements.resolve_tier(tenant_id)
+    entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     tenant_id = str(tenant_id)
     queued_id = str(uuid.uuid4())
     payload = {
@@ -1017,6 +1038,8 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
         "tier": tier,
         "subject": subject,
         "entitlement_tier": entitlement_tier,
+        "entitlement_roles": list(entitlement_roles),
+        "entitlement_elevated": entitlement_elevated,
         "text": text,
         "classifier_hint": classifier_hint,
         "model": model,
@@ -1061,7 +1084,9 @@ def drain_session_followups(tenant_id: Any, session_id: str) -> None:
     """
     tier = getattr(tenant_id, "tier", None)
     entitlement_tier = entitlements.resolve_tier(tenant_id)
-    _auto_confirm_reads(str(tenant_id), session_id, {}, tier, entitlement_tier)
+    entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
+    _auto_confirm_reads(str(tenant_id), session_id, {}, tier, entitlement_tier,
+                        entitlement_roles, entitlement_elevated)
     _kick_queued(session_id)
 
 
@@ -1124,7 +1149,10 @@ def _kick_queued(session_id: str) -> None:
             # round 2, finding 2). An unevaluable policy is a NO either way.
             try:
                 allowed = entitlements.entitlements_for(
-                    payload["entitlement_tier"]).get("converse", False)
+                    payload["entitlement_tier"],
+                    tuple(payload.get("entitlement_roles") or ()),
+                    payload.get("entitlement_elevated") is True,
+                ).get("converse", False)
             except Exception:  # noqa: BLE001
                 allowed = False
             if not allowed:
@@ -1148,7 +1176,11 @@ def _kick_queued(session_id: str) -> None:
                            model=payload["model"],
                            tier=payload["tier"],
                            subject=payload["subject"],
-                           queued_id=payload["queued_id"])
+                           queued_id=payload["queued_id"],
+                           entitlement_roles=tuple(
+                               payload.get("entitlement_roles") or ()),
+                           entitlement_elevated=payload.get(
+                               "entitlement_elevated") is True)
                 _release(keep=False)
                 return
             except TurnBusy:
@@ -1204,7 +1236,9 @@ def _kick_queued(session_id: str) -> None:
 def _auto_confirm_reads(tenant_id: str, session_id: str,
                         proposals: Dict[str, Dict[str, Any]],
                         tier: Optional[str],
-                        entitlement_tier: Optional[str]) -> None:
+                        entitlement_tier: Optional[str],
+                        entitlement_roles: tuple = (),
+                        entitlement_elevated: bool = False) -> None:
     """Policy auto-approval: under `auto_approve_reads`, decide and confirm the
     turn's FIRST `drawing.read` proposal at its terminal. NEVER raises - it
     runs on relay threads whose cleanup must complete.
@@ -1236,7 +1270,8 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             allowed = (
                 session_policy.get_policy(session_id, tenant_id) == "auto_approve_reads"
                 and entitlements.entitlements_for(
-                    entitlement_tier).get("converse", False))
+                    entitlement_tier, entitlement_roles,
+                    entitlement_elevated).get("converse", False))
         except Exception:  # noqa: BLE001
             allowed = False
         if not allowed:
@@ -1531,7 +1566,9 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
 def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  resp: "requests.Response", max_s: float,
                  tier: Optional[str] = None,
-                 entitlement_tier: Optional[str] = None) -> None:
+                 entitlement_tier: Optional[str] = None,
+                 entitlement_roles: tuple = (),
+                 entitlement_elevated: bool = False) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -1627,7 +1664,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
         # user is already in); if it starts a confirm turn, the queue kicker
         # below sees busy and parks correctly. Both never raise.
         _auto_confirm_reads(tenant_id, session_id, proposals,
-                            tier, entitlement_tier)
+                            tier, entitlement_tier,
+                            entitlement_roles, entitlement_elevated)
         # The session is free — hand it to the queued prompt, if one is
         # waiting. Runs on the terminalizing thread (drain, watchdog, or a
         # cancel); _kick_queued never raises, and start_turn's blocking span

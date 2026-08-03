@@ -510,7 +510,7 @@ def test_real_run_route_uses_active_turn_authority_not_stale_broker_tier(
 
     monkeypatch.setattr(deps, "auth_live", lambda: True)
     monkeypatch.setattr(deps, "find_tool", lambda name, tenant: tool)
-    def entitlements_for(tier):
+    def entitlements_for(tier, *_roles):
         seen["tier"] = tier
         return {"run_write": True}
 
@@ -601,7 +601,7 @@ def test_real_resolved_backedge_write_without_exact_pins_submits_no_job(
     monkeypatch.setattr(deps, "find_tool", lambda *_args: tool)
     monkeypatch.setattr(
         jobs_router.entitlements, "entitlements_for",
-        lambda _tier: {"run_write": True},
+        lambda _tier, *_roles: {"run_write": True},
     )
     monkeypatch.setattr(
         jobs_router.entitlements, "tool_required_capability",

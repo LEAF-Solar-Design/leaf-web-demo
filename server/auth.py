@@ -151,11 +151,16 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"invalid token: {exc}")
 
 
-def extract_tenant_claims(payload: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    """Read the namespaced tenant/org/tier claims from a *verified* payload.
+def extract_tenant_claims(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Read the namespaced tenant/org/tier/roles claims from a *verified* payload.
 
     A verified token that lacks the tenant claim is AUTHENTICATED BUT HAS NO
     WORKSPACE -> HTTP 403 (distinct from the 401 of an unauthenticated request).
+
+    `roles` is returned RAW (whatever the Action minted, or None when absent):
+    normalization/validation is roles.normalize_role_names' job at the deps
+    seam — an unreadable roles claim degrades to no roles, never to a 4xx,
+    because roles only ever ADD capability (contract/AUTH.md §11.5).
     """
     ns = claim_ns()
     tenant_id = payload.get(ns + "tenant_id")
@@ -169,4 +174,5 @@ def extract_tenant_claims(payload: Dict[str, Any]) -> Dict[str, Optional[str]]:
         "tenant_id": tenant_id,
         "org_id": payload.get(ns + "org_id"),
         "tier": payload.get(ns + "tier"),
+        "roles": payload.get(ns + "roles"),
     }

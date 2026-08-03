@@ -43,6 +43,7 @@ assert.deepEqual(
     tenant_id: 'org_leaf_demo',
     org_id: 'org_leaf_demo',
     tier: 'restricted',
+    roles: [],
   }
 );
 
@@ -57,6 +58,7 @@ assert.deepEqual(
     tenant_id: 'org_leaf_demo',
     org_id: 'org_leaf_demo',
     tier: 'hosted_pro',
+    roles: [],
   }
 );
 
@@ -70,14 +72,36 @@ assert.deepEqual(
     tenant_id: 'org_leaf_demo',
     org_id: 'org_leaf_demo',
     tier: 'restricted',
+    roles: [],
   }
 );
+
+// Roles (§11.5): comma-separated leaf_roles, normalized + sorted; bad names
+// dropped; platform_admin FORBIDDEN for machine clients (like the admin tier).
+assert.deepEqual(
+  action.deriveClaims(event({
+    leaf_tenant_id: 'org_leaf_demo',
+    leaf_tenant_audience: audience,
+    leaf_tier: 'hosted_pro',
+    leaf_roles: ' Org_Admin , platform_admin, bad name!, org_member ',
+  })),
+  {
+    tenant_id: 'org_leaf_demo',
+    org_id: 'org_leaf_demo',
+    tier: 'hosted_pro',
+    roles: ['org_admin', 'org_member'],
+  }
+);
+assert.deepEqual(action.deriveRoles({}), []);
+assert.deepEqual(action.deriveRoles({ leaf_roles: 'platform_admin' }), []);
+assert.deepEqual(action.deriveRoles({ leaf_roles: 42 }), []);
 
 const stamped = {};
 action.onExecuteCredentialsExchange(
   event({
     leaf_tenant_id: 'org_leaf_demo',
     leaf_tenant_audience: audience,
+    leaf_roles: 'org_admin',
   }),
   { accessToken: { setCustomClaim: (key, value) => { stamped[key] = value; } } }
 ).then(() => {
@@ -85,6 +109,7 @@ action.onExecuteCredentialsExchange(
     'https://leafdesign.ai/tenant_id': 'org_leaf_demo',
     'https://leafdesign.ai/org_id': 'org_leaf_demo',
     'https://leafdesign.ai/tier': 'restricted',
+    'https://leafdesign.ai/roles': ['org_admin'],
   });
   console.log('credentials-exchange tenant claim tests passed');
 });

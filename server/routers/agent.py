@@ -121,6 +121,12 @@ def internal_gate(req: GateRequest,
             deps.TenantContext(req.tenant_id, tier=turn_tier))
     else:
         tier = entitlements.resolve_tier(deps.backedge_tenant(req.tenant_id))
+    # DELIBERATE §11.5 v1 boundary: this back-edge resolves from the DB turn
+    # record, which snapshots (tier, subject) only — role names do not ride it
+    # yet, so mid-turn gate checks here are tier-only. Staff admins are
+    # unaffected (their whole authority rides tier="admin"). Extending the
+    # turn record with roles is scheduled with the org-role preset phase; do
+    # not "fix" this by trusting a wire-asserted role list.
     try:
         tier_caps = entitlements.entitlements_for(tier)
     except entitlements.EntitlementsError:

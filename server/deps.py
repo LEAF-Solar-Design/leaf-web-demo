@@ -386,18 +386,28 @@ class TenantContext(str):
     tier: Optional[str]
     workspace: Optional[str]
     subject: Optional[str]
+    roles: tuple
+    elevated: bool
 
     def __new__(cls, tenant_id: str, org_id: Optional[str] = None,
                 tier: Optional[str] = None, workspace: Optional[str] = None,
                 subject: Optional[str] = None,
                 backedge: bool = False,
-                authority_resolved: bool = False) -> "TenantContext":
+                authority_resolved: bool = False,
+                roles: tuple = (),
+                elevated: bool = False) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
         obj.tier = tier
         obj.workspace = workspace
         obj.subject = subject
+        # Verified role names from the `.../roles` claim (§11.5) + whether the
+        # subject passed the LEAF_PLATFORM_ADMIN_SUBJECTS second factor. Only
+        # the live JWT path stamps these; guests and back-edge identities stay
+        # `(), False` — roles never ride an unverified channel.
+        obj.roles = tuple(roles or ())
+        obj.elevated = elevated is True
         # True ONLY for a verified dispatch-secret back edge. Origin must be
         # marked, never inferred from a missing subject: a JWT that carries no
         # `sub` also resolves to subject=None, and inferring would let such a
@@ -748,6 +758,15 @@ def require_tenant(
     require_matching_platform_tenant_claim(claims, platform_tenant_id)
     platform_tier = admin_elevated_tier(claims.get("tier"), subject, platform_tier)
     ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
+    # Role overlay identity (§11.5): the VERIFIED roles claim, normalized
+    # fail-closed (unreadable -> no roles), plus the same server-owned
+    # allowlist membership the admin tier elevation uses as its second factor.
+    # `elevated` alone grants nothing — elevated_grants apply only to roles
+    # the verified claim actually carries (roles.role_grants).
+    import roles as roles_mod  # noqa: PLC0415 — lazy, live path only
+    role_names = roles_mod.normalize_role_names(claims.get("roles"))
+    elevated = bool(isinstance(subject, str) and subject.strip()
+                    and subject in admin_subjects())
     return TenantContext(
         platform_tenant_id,
         org_id=platform_tenant_id,
@@ -755,6 +774,8 @@ def require_tenant(
         workspace=ws.workspace_dir if ws is not None else None,
         subject=subject,
         authority_resolved=True,
+        roles=role_names,
+        elevated=elevated,
     )
 
 
@@ -816,6 +837,11 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
         workspace=ws.workspace_dir if ws is not None else None,
         subject=tenant.subject,
         authority_resolved=True,
+        # Roles/elevation are SUBJECT-level identity (§11.5) — an account move
+        # changes the workspace binding, not who the person is. Carried over
+        # verbatim; both were verified when the original context was built.
+        roles=getattr(tenant, "roles", ()),
+        elevated=getattr(tenant, "elevated", False),
     )
 
 

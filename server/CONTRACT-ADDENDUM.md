@@ -819,6 +819,14 @@ Session: `wave5-backend`, 2026-07-18. Two enterprise-lane pieces. Verified offli
 BYTE-IDENTICAL when the new knobs are unset (grants default to `oauth`; off-auth tier is
 `demo` = full access).
 
+> **§17 role-overlay extension (2026-08-03, contract/AUTH.md §11.5):** every
+> §17 capability check now resolves `entitlements_for(tier, roles, elevated)` —
+> the tier baseline OR'd with the verified identity's role grants
+> (`server/roles.py` + operator-tunable `server/roles.json`, additive-only,
+> fail-closed to no-grants). `GET /api/entitlements` additively reports the
+> `roles` it used. Callers with no verified role context (back-edge, broker,
+> guest, off-auth) omit the new arguments and are byte-identical to before.
+
 ### A. BYO API key as a grant kind (the enterprise auth lane)
 
 The Agent-SDK grant is either an OAuth per-user "sign in with Claude" token (web lane,

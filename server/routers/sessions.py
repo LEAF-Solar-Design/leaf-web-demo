@@ -703,8 +703,9 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # 3. entitlement gate (§17): mirrors routers/author.py:76-78 — the tenant's
     # tier must grant the `converse` capability. Off-auth/demo grants everything.
     tier = entitlements.resolve_tier(tenant)
+    roles, elevated = entitlements.resolve_roles(tenant)
     try:
-        allowed = entitlements.entitlements_for(tier).get("converse", False)
+        allowed = entitlements.entitlements_for(tier, roles, elevated).get("converse", False)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("converse", tier)
     if not allowed:

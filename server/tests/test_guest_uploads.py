@@ -119,7 +119,7 @@ def test_live_account_upload_status_uses_active_binding_not_stale_claims(
         tenancy, "get_store", lambda: SimpleNamespace(
             resolve_workspace=lambda tenant_id: None))
     monkeypatch.setattr(
-        entitlements, "entitlements_for", lambda tier: {"upload": True})
+        entitlements, "entitlements_for", lambda tier, *_roles: {"upload": True})
 
     upload = _upload(client, headers={"Authorization": "Bearer verified"})
     assert upload.status_code == 202, upload.text
@@ -194,7 +194,7 @@ def test_live_account_intake_uses_active_binding_not_stale_claims(
         tenancy, "get_store", lambda: SimpleNamespace(
             resolve_workspace=lambda tenant_id: None))
     monkeypatch.setattr(
-        entitlements, "entitlements_for", lambda tier: {"upload": True})
+        entitlements, "entitlements_for", lambda tier, *_roles: {"upload": True})
 
     upload = _upload(client, headers={"Authorization": "Bearer verified"})
     assert upload.status_code == 202, upload.text

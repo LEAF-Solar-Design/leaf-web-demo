@@ -506,7 +506,7 @@ def test_an_unreadable_entitlement_policy_denies_every_capability(monkeypatch):
 
     import entitlements
 
-    def boom(_tier):
+    def boom(_tier, *_roles):
         raise entitlements.EntitlementsError("policy unreadable")
 
     monkeypatch.setattr(entitlements, "entitlements_for", boom)

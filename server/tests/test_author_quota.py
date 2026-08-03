@@ -736,12 +736,12 @@ def test_legacy_build_denied_tenant_never_burns_a_slot(monkeypatch, legacy_autho
     first would let it drain the budget on requests that reach no harness."""
     monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
     monkeypatch.setattr(author_router.entitlements, "entitlements_for",
-                        lambda _tier: {"build": False})
+                        lambda _tier, *_roles: {"build": False})
     for _ in range(5):
         assert legacy_author.call() == {"source": "template"}  # stub; real one 403s
 
     monkeypatch.setattr(author_router.entitlements, "entitlements_for",
-                        lambda _tier: {"build": True})
+                        lambda _tier, *_roles: {"build": True})
     assert legacy_author.call() == {"source": "template"}
     assert legacy_author.call().status_code == 429
 
@@ -750,7 +750,7 @@ def test_legacy_unreadable_entitlement_policy_still_charges(monkeypatch, legacy_
     """On the money side the safe direction is to count."""
     monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
 
-    def unreadable(_tier):
+    def unreadable(_tier, *_roles):
         raise author_router.entitlements.EntitlementsError("policy unreadable")
 
     monkeypatch.setattr(author_router.entitlements, "entitlements_for", unreadable)
@@ -767,7 +767,7 @@ def test_legacy_unresolvable_tier_still_produces_the_quota_envelope(
     monkeypatch.setattr(author_router.entitlements, "resolve_tier",
                         lambda _t: (_ for _ in ()).throw(RuntimeError("outage")))
     monkeypatch.setattr(author_router.entitlements, "entitlements_for",
-                        lambda _tier: {"build": True})
+                        lambda _tier, *_roles: {"build": True})
     response = legacy_author.call()
     assert response.status_code == 429
     assert json.loads(response.body)["tier"] == "unknown"

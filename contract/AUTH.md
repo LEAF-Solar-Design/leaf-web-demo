@@ -40,13 +40,14 @@ or reference any Claude token.
 
 Auth0 custom claims must be **namespaced** (Auth0 silently drops non-namespaced
 custom claims on tokens). The Post-Login Action
-(`server/auth0-actions/post-login-add-tenant-claim.js`) stamps three claims onto
+(`server/auth0-actions/post-login-add-tenant-claim.js`) stamps four claims onto
 the **access token**:
 
 ```
 https://leafdesign.ai/tenant_id   (string, required)  e.g. "org_acme_solar"
 https://leafdesign.ai/org_id      (string | null)      e.g. "org_acme_solar"
 https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable subset: "restricted" | "self_hosted" | "hosted_starter" | "hosted_pro" | "admin"
+https://leafdesign.ai/roles       (string[], may be []) §11.5 role overlay, e.g. ["platform_admin"]
 ```
 
 Namespace prefix is configurable via `LEAF_TENANT_CLAIM_NS` (default
@@ -361,3 +362,59 @@ per-tier boolean values stay operator-tunable; the KEY SET is what is frozen).
 canonicalized in `server/billing_tiers.py` and parity-gated against the
 hand-pasted Action copy (`server/tests/test_billing_tiers.py`). See
 `contract/BILLING.md` for the subscription → tier design.
+
+**11.5 Role overlay (added 2026-08-03 per the §11 promotion ritual):**
+
+The tier answers *what the workspace's plan bought* (billing dimension, one
+value). Roles answer *what this identity may additionally do* (identity
+dimension, a set). The `https://leafdesign.ai/roles` claim (string array,
+possibly empty) is minted by the Post-Login Action as the union of:
+
+1. **Auth0-native role assignments** (`event.authorization.roles`) — the
+   dashboard's User Management → Roles UI, the preferred operator path;
+2. the root-level **`app_metadata.leaf_roles`** array (sibling of
+   `leaf_platform_tenant_id`, so leaf_website subscription PATCHes replacing
+   `app_metadata.leaf` can neither mint nor erase a role);
+3. **`leaf_admin === true` implies `platform_admin`** — one operator flag,
+   one staff identity, in step with the §11.2 admin-tier override.
+
+Names are trimmed/lowercased, validated against `^[a-z0-9][a-z0-9_-]{0,62}$`,
+deduped, sorted, capped at 16. The M2M Action mints the same claim from
+optional comma-separated `leaf_roles` client metadata, with `platform_admin`
+**forbidden for machine clients** (a staff identity requires a human login,
+the same posture that keeps `admin` out of the M2M tier set).
+
+Server side, `server/roles.py` + the operator-tunable `server/roles.json`
+(override: `LEAF_ROLES_FILE`; hardcoded mirror + freeze gate, same discipline
+as `entitlements.json`) resolve the roles a verified identity holds into an
+**ADDITIVE-ONLY overlay** on the tier entitlements: a role can only turn a
+§11.3 capability ON, never off — denial stays the tier policy's job. The
+fail-closed direction is therefore inverted from the tier file: anything
+unreadable (file, entry, key, value, claim) simply grants nothing; the role
+overlay never 503s a request.
+
+A role entry may carry `elevated_grants`: capabilities applying only when the
+verified subject is ALSO on the server-owned `LEAF_PLATFORM_ADMIN_SUBJECTS`
+allowlist — the W14 two-factor rule generalized. **`platform_customize` must
+only ever appear under `elevated_grants`** — freeze-gated in the shipped file
+AND enforced structurally at load time (`roles.py ELEVATED_ONLY_CAPABILITIES`:
+a plain-grants entry naming it is dropped, in any policy file, so no override
+can bypass the second factor). The role path to platform self-edit keeps both
+independent operator factors, and the R7 rollout + always-confirm approval
+gates (docs/ADMIN-SELF-EDIT-LANE.md) apply unchanged.
+
+FROZEN by `tests/test_auth_vocab_freeze.py`: the claim spelling, the
+`platform_admin` semantics (staff-everything; never plan-derived; M2M-
+forbidden; the only role carrying `platform_customize`, elevated-only), the
+name rule + cap, and the capability KEY vocabulary inside grants (§11.3). The
+role NAME SET is deliberately operator-extensible: add an entry to
+`roles.json` and mint the matching claim; unknown names in a token are inert.
+`org_admin` / `org_member` are RESERVED empty presets pending the
+org-configuration phase.
+
+**v1 depth boundary:** the harness back-edge (`routers/agent.py`) resolves
+authority from the DB turn record, which snapshots (tier, subject) only —
+mid-turn gate re-checks are tier-only for now. Staff admins are unaffected
+(their authority rides `tier="admin"`). Extending the turn record with roles
+is scheduled with the org-role preset phase. The queued-turn payload DOES
+snapshot roles/elevation, so enqueue→kick entitlement re-checks honor roles.
