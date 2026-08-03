@@ -108,7 +108,11 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   // The tenant echo arrives asynchronously after mount (App learns it from
   // /api/session), so re-read the tenant-scoped bucket whenever it changes;
   // otherwise the panel would keep showing (and writing) the default bucket.
-  useEffect(() => { setRecent(readRecent(tenant)) }, [tenant])
+  // The ref carries the LATEST tenant into async completions: a proposal that
+  // started before the echo landed must record into the bucket that is
+  // current when its response arrives, not the one its closure captured.
+  const tenantRef = useRef(tenant)
+  useEffect(() => { tenantRef.current = tenant; setRecent(readRecent(tenant)) }, [tenant])
   const [refreshing, setRefreshing] = useState(false)
   const [landConfirming, setLandConfirming] = useState(false)
   const [landing, setLanding] = useState(false)
@@ -176,13 +180,13 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
         : { path: e.path, content: e.content }))
       const created = await proposePlatformChange(title.trim(), body)
       setRecord(created)
-      setRecent(rememberRecent(tenant, created))
+      setRecent(rememberRecent(tenantRef.current, created))
     } catch (e) {
       setErr(describeError(e))
     } finally {
       setSubmitting(false)
     }
-  }, [title, edits, tenant])
+  }, [title, edits])
 
   const refresh = useCallback(async (changeId) => {
     const id = changeId || record?.change_id
