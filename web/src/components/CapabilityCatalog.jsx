@@ -15,6 +15,7 @@ export default function CapabilityCatalog({
   onOpenTool,
   onReviseTool,
   writeLocked,
+  writeLockNote = null,
   writeEntitled,
 }) {
   const families = catalog?.families || []
@@ -45,6 +46,7 @@ export default function CapabilityCatalog({
             onRequestRun={onRequestRun}
             onOpenTool={onOpenTool}
             writeLocked={writeLocked}
+            writeLockNote={writeLockNote}
             writeEntitled={writeEntitled}
           />
         </div>
@@ -90,6 +92,7 @@ export default function CapabilityCatalog({
                     ? onReviseTool
                     : undefined}
                   writeLocked={writeLocked}
+                  writeLockNote={writeLockNote}
                   writeEntitled={writeEntitled}
                 />
               </div>

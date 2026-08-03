@@ -28,6 +28,9 @@ function paramsSummary(params) {
 
 export default function RoutePanel({
   route: liveRoute, tools, running, writeLocked, writeEntitled = true,
+  // Why the write is paused, supplied by the surface that owns the lock. /app
+  // passes nothing and keeps the original checkout-only sentence below.
+  writeLockNote = null,
   onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
   // M1 exit: on dismissal (Esc / typing / a run consuming the decision) the
@@ -168,7 +171,7 @@ export default function RoutePanel({
           <span className="dim">
             {' — '}
             {locked
-              ? 'editing is locked by another session; this write tool is paused.'
+              ? (writeLockNote || 'editing is locked by another session; this write tool is paused.')
               : entBlocked
                 ? 'your plan doesn’t include editing tools.'
                 : isWrite

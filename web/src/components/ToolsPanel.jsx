@@ -135,7 +135,7 @@ function provenanceLine(t) {
 
 // `retryKey` (App's R ladder): the R keycap renders only while this row is the
 // ladder's active rung — a shown cap is never inert, never double-firing.
-export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onRetry, retryKey, subtitle, writeLocked, writeEntitled = true }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -216,6 +216,14 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                   )}
                   {entBlocked && !locked && (
                     <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>
+                  )}
+                  {/* A disabled run chip with no reason is the gap this closes.
+                      The note is written mid-sentence for RoutePanel, so lift
+                      the first letter for this standalone line. */}
+                  {locked && writeLockNote && (
+                    <p className="lock-note">
+                      {writeLockNote.charAt(0).toUpperCase() + writeLockNote.slice(1)}
+                    </p>
                   )}
                 </div>
               )}
