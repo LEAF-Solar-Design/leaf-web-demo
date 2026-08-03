@@ -441,9 +441,11 @@ def test_role_only_principal_survives_the_full_promotion_chain(monkeypatch, turn
     start_turn, so it pins only the kicker handoff. This exercises the REAL
     chain — enqueue while busy → kick → start_turn → _spawn_relay → terminal
     auto-confirm — with nothing stubbed but the entitlement policy (a spy that
-    grants converse ONLY through the role, so tier alone drops the prompt at
-    the kick re-check and again at the terminal gate: losing the roles at any
-    checkpoint kills the chain there instead of finishing green).
+    grants converse ONLY through the role AND elevation together, so tier
+    alone drops the prompt at the kick re-check and again at the terminal
+    gate: losing the roles OR the elevated flag at any checkpoint kills the
+    chain there instead of finishing green — elevated must be pinned True
+    because False is also every fall-back default, sol-critic #416 round 1).
 
     The spy also records every (tier, roles, elevated) triple the policy is
     consulted with, which pins the OTHER half of the snapshot: resolving the
@@ -464,20 +466,20 @@ def test_role_only_principal_survives_the_full_promotion_chain(monkeypatch, turn
     principal.tier = "restricted"
     principal.subject = "auth0|role-only-e2e"
     principal.roles = ("converse_granter",)
-    principal.elevated = False
+    principal.elevated = True
 
     calls = []
 
     def _spy(tier, roles=(), elevated=False):
         calls.append((tier, tuple(roles), elevated))
-        return {"converse": "converse_granter" in tuple(roles)}
+        return {"converse": "converse_granter" in tuple(roles) and elevated is True}
 
     monkeypatch.setattr(turn_runner.entitlements, "entitlements_for", _spy)
     # auto_approve_reads is what makes the terminal auto-confirm consult the
     # entitlement policy at all — that consultation is checkpoint 4's probe.
     session_policy.set_policy(sid, "tenant-q", "auto_approve_reads")
 
-    snapshot = ("restricted", ("converse_granter",), False)
+    snapshot = ("restricted", ("converse_granter",), True)
 
     # 1. enqueue while busy: the payload snapshots the principal's authority,
     #    and enqueueing consults no policy at all.
@@ -487,7 +489,7 @@ def test_role_only_principal_survives_the_full_promotion_chain(monkeypatch, turn
         payload = dict(turn_runner._queued[sid])
     assert payload["entitlement_tier"] == "restricted"
     assert payload["entitlement_roles"] == ["converse_granter"]
-    assert payload["entitlement_elevated"] is False
+    assert payload["entitlement_elevated"] is True
     assert calls == []
 
     # 2. kick (orphan cancel path, cancelling AS the principal — the cancel
