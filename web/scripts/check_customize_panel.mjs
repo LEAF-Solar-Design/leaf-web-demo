@@ -48,8 +48,13 @@ assert(app.includes('customizeFlag && !mock && !customizeDismissed && platformCu
 const mountSites = app.match(/<CustomizePanel\b/g) || []
 assert(mountSites.length === 1, `App.jsx must mount CustomizePanel exactly once (found ${mountSites.length})`)
 assert(/\{customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must be behind customizeExit.shown')
+// Exact-path allowlist, not endsWith: "OtherApp.jsx" must NOT be exempt.
+const allowedConsumers = new Set([
+  join(srcDir, 'App.jsx'),
+  join(srcDir, 'components', 'CustomizePanel.jsx'),
+])
 for (const file of await walk(srcDir)) {
-  if (file.endsWith('App.jsx') || file.endsWith('CustomizePanel.jsx')) continue
+  if (allowedConsumers.has(file)) continue
   const text = await readFile(file, 'utf8')
   assert(!text.includes('CustomizePanel'), `CustomizePanel must have no consumer besides App.jsx: ${file}`)
 }

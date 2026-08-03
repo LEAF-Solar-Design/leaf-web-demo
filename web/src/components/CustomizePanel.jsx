@@ -43,8 +43,13 @@ const REASON_COPY = {
 
 function describeError(e) {
   // The entitlement_required marker rides BOTH the 403 denial and the 503
-  // policy-unavailable envelope; only the 403 means "you lack the tier".
-  if (e?.body?.entitlement_required && e.status === 403) return 'Admin tier required for platform self-edit.'
+  // policy-unavailable envelope (which carries NO reason_code): 403 means
+  // "you lack the tier", anything else with the marker is the fail-closed
+  // policy outage and must read as retryable, not as missing access.
+  if (e?.body?.entitlement_required) {
+    if (e.status === 403) return 'Admin tier required for platform self-edit.'
+    return REASON_COPY.policy_unavailable
+  }
   const reason = e?.body?.reason_code
   if (reason && REASON_COPY[reason]) return REASON_COPY[reason]
   return String(e?.message || e)
@@ -61,7 +66,11 @@ function readRecent(tenant) {
   try {
     const raw = JSON.parse(localStorage.getItem(recentKey(tenant)) || '[]')
     if (!Array.isArray(raw)) return []
-    return raw.filter((r) => r && typeof r.change_id === 'string' && CHANGE_ID_RE.test(r.change_id))
+    // Coerce on READ, not just write: stored rows are untrusted (any code on
+    // the origin can write them), so a non-string title must not reach React.
+    return raw
+      .filter((r) => r && typeof r.change_id === 'string' && CHANGE_ID_RE.test(r.change_id))
+      .map((r) => ({ change_id: r.change_id, title: typeof r.title === 'string' ? r.title : '' }))
   } catch { return [] }
 }
 
@@ -96,6 +105,10 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const [record, setRecord] = useState(null)
   const [err, setErr] = useState(null)
   const [recent, setRecent] = useState(() => readRecent(tenant))
+  // The tenant echo arrives asynchronously after mount (App learns it from
+  // /api/session), so re-read the tenant-scoped bucket whenever it changes;
+  // otherwise the panel would keep showing (and writing) the default bucket.
+  useEffect(() => { setRecent(readRecent(tenant)) }, [tenant])
   const [refreshing, setRefreshing] = useState(false)
   const [landConfirming, setLandConfirming] = useState(false)
   const [landing, setLanding] = useState(false)
