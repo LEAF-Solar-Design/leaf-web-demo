@@ -798,7 +798,10 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes('.route('))
     assert.ok(!source.includes('leaf-proof.invalid/api/**'))
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
-    assert.ok(source.includes("getByText(/Viewing v1.*read-only preview/)"))
+    // /try's preview copy is "Viewing v1 read-only" (ToolCast.jsx:1330); the
+    // "…read-only preview" wording belongs to /app's VersionHistory, which
+    // this driver never opens.
+    assert.ok(source.includes("getByText(/Viewing v1 read-only/)"))
     assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
     assert.ok(!source.includes("waitUntil: 'networkidle'"))
     assert.equal(source.match(/waitUntil: 'domcontentloaded'/g)?.length, 2)
