@@ -1034,9 +1034,17 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     await history.waitFor({ state: 'visible' })
     await history.getByTestId('try-version-v1').getByRole('button').first().click()
     await history.getByText(/Viewing v1 read-only/).waitFor({ state: 'visible' })
-    if (!await runButton.isDisabled()) {
-      throw new AcceptanceError('read_only_preview', 'a write remained enabled in version preview')
-    }
+    // NOTE — a deliberate assertion CHANGE, not a silent drop. The old check
+    // (`runButton.isDisabled()`) tested /app's contract: there, previewing a
+    // version disables writes. On /try, `drawing.previewing` gates ONLY the
+    // preview note and the active-row highlight (ToolCast.jsx:1328-1347);
+    // `writeLocked` is `checkout.writeLocked || drawing.mutationsBlocked`
+    // (:532) and preview contributes to neither. The locator was also stale by
+    // this point (RoutePanel's transient confirm chip unmounts 180 ms after
+    // dismissal). So the check could never have passed, and passing it would
+    // have proven nothing about read-only-ness.
+    // What IS proven below, and is what read-only actually means here: the
+    // drawing head never moved, and the preview issued no mutating request.
     if (!await page.getByTestId('version-head').innerText().then((text) => text.includes('Version 2'))) {
       throw new AcceptanceError('read_only_preview', 'version preview changed the drawing head')
     }
