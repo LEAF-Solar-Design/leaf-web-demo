@@ -12,7 +12,7 @@
  * version, orbit, undo, and redo. No mode can target a production hostname.
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -24,6 +24,12 @@ const RUN_ID = /^[a-z0-9][a-z0-9-]{5,49}$/
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 const REQUIRED_SERVICES = ['app', 'broker', 'canonical-worker', 'harness', 'web']
+// The curated PUBLIC demo drawing. It is a fixed artifact bundled in the image
+// (server deps.load_cached_intake), shared identically across all tenants — the
+// same "shared curated read-only drawing" the preflight opens under both
+// tenants. Reading it is a HIT (it exists) and discloses no tenant-private data,
+// so it is the trusted public reference for the isolation proof below.
+const PUBLIC_DEMO_DRAWING = 'rooftop_demo'
 const PRODUCTION_HOSTS = new Set([
   'api.leafdesign.ai',
   'platform.leafdesign.ai',
@@ -1287,34 +1293,40 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         { status: cross.status },
       )
     }
-    // A 200 is acceptable ONLY if it disclosed nothing about the other tenant's
-    // drawing. Proving that by "the hash is not exactly the other tenant's own
-    // intake" is too weak — a partial/reordered/augmented copy slips through
-    // (sol-critic PR #412 round 1). Prove independence POSITIVELY against a CLEAN
-    // reference: the caller reading a guaranteed-nonexistent random id with its
-    // OWN JWT and NO forged headers. That read carries no other-tenant reference
-    // of any kind (no forged X-Tenant-Id, no other-tenant drawing id), so it can
-    // only be the caller's own fallback seat. Requiring the forged cross-read to
-    // be byte-identical to it proves the cross read leaked neither the other
-    // tenant's drawing (drawing-id independence) NOR anything through the forged
-    // header (header independence) — a header-driven leak would make the forged
-    // cross read differ from this clean control (sol-critic PR #412 round 2).
-    // Verified live at ee150b8: both reads return the caller's own seat with
-    // identical intake hashes. Also require the echoed identity to be the
-    // caller's on both.
-    const control = await requestJson(
+    // A 200 is acceptable ONLY if it disclosed nothing tenant-private. Weaker
+    // proxies were tried and defeated: "hash != the other's exact intake"
+    // admitted partial/augmented copies (round 1); a CLEAN random-id control
+    // closed the round-2 header-driven bypass but still could not tell the
+    // caller's own safe fallback from an UNPARTITIONED global miss-fallback that
+    // serves another tenant's private data — both make cross == control with the
+    // caller's id (round 3). Prove disclosure-freedom against a POSITIVE,
+    // PUBLIC reference instead: read the curated public PUBLIC_DEMO_DRAWING as
+    // the caller. That drawing EXISTS (a hit, so it is not itself subject to any
+    // miss-fallback) and is shared, non-private, and distinct from either
+    // tenant's acceptance drawing. Require the forged cross read of the other
+    // tenant's real drawing to be byte-identical to this public baseline: then
+    // it returned only public curated data, never a tenant-private drawing in
+    // any form. A global miss-fallback leaking the other tenant's intake would
+    // differ from the public baseline and be caught. Verified live at ee150b8:
+    // the forged cross read equals the caller's rooftop_demo read exactly.
+    const baseline = await requestJson(
       config,
       tenant,
-      `/api/drawings/${randomUUID()}/intake`,
+      `/api/drawings/${encodeURIComponent(PUBLIC_DEMO_DRAWING)}/intake`,
       { fetchImpl },
     )
     const crossHash = sha256(JSON.stringify(cross.body?.intake ?? null))
-    const controlHash = sha256(JSON.stringify(control.body?.intake ?? null))
+    const baselineHash = sha256(JSON.stringify(baseline.body?.intake ?? null))
     if (
-      control.status !== 200 ||
+      baseline.status !== 200 ||
       cross.body?.tenant_id !== tenant.id ||
-      control.body?.tenant_id !== tenant.id ||
-      crossHash !== controlHash
+      baseline.body?.tenant_id !== tenant.id ||
+      // The public baseline must genuinely be public — not either tenant's
+      // private acceptance drawing — or it could not vouch for the cross read.
+      baselineHash === own[0] ||
+      baselineHash === own[1] ||
+      // The cross read disclosed only that public baseline.
+      crossHash !== baselineHash
     ) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
