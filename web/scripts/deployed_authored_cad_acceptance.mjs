@@ -900,7 +900,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         `tenant ${tenant.label} staged a change set for a different request`,
       )
     }
-    await page.getByText('Staged and awaiting approval.', { exact: false })
+    // AuthorPanel's staged copy is "Staged and ready to publish…" (the
+    // "awaiting approval" wording the driver waited 25 minutes for no longer
+    // exists anywhere in web/src). Match the staged state, not one sentence.
+    await page.getByText(/Staged and ready to publish/, { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
     const otherTenant = config.tenants.find((candidate) => candidate.id !== tenant.id)
@@ -910,12 +913,15 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       otherTenant,
       staged.changeSetId,
     )
+    // Publication moved to the request/approval endpoint (api.js:1158) and the
+    // button reads "Request publication"; the old /api/author/register +
+    // "Publish tool" pair no longer exists in the surface.
     const publishResponsePromise = page.waitForResponse(
-      (response) => response.url() === `${config.apiUrl}/api/author/register`
+      (response) => response.url() === `${config.apiUrl}/api/author/publication-requests`
         && response.request().method() === 'POST',
       { timeout: AUTHOR_TIMEOUT_MS },
     )
-    await page.getByRole('button', { name: 'Publish tool', exact: true }).click()
+    await page.getByRole('button', { name: 'Request publication', exact: true }).click()
     const publishResponse = await publishResponsePromise
     if (publishResponse.status() !== 200) {
       throw new AcceptanceError(
