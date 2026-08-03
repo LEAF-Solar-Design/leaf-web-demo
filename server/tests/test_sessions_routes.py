@@ -100,8 +100,14 @@ _counter = [0]
 
 
 def _new_drawing() -> str:
+    # "-routes-" namespaces this module's minted ids. Full-suite runs share one
+    # SESSIONS_DB across modules (tests/conftest.py wins the setdefault race),
+    # and approvals.confirmation_id is globally UNIQUE — an un-namespaced
+    # "confirm-{n}" collided with test_agent_approvals.py's counter and failed
+    # the first _seed_approval caller here with sqlite3.IntegrityError. Same
+    # convention as confirm-router-/confirm-consume-/confirm-q-.
     _counter[0] += 1
-    return f"drawing-{_counter[0]}"
+    return f"drawing-routes-{_counter[0]}"
 
 
 def _seed_session(tenant_id: str = "tenant-a") -> Dict[str, Any]:
@@ -112,11 +118,11 @@ def _seed_approval(session_id: str, tenant_id: str, *, ttl_s: float = 300,
                     tool: str = "write_home_run", params: Optional[Dict[str, Any]] = None,
                     capability: str = "drawing.write") -> str:
     _counter[0] += 1
-    confirmation_id = f"confirm-{_counter[0]}"
+    confirmation_id = f"confirm-routes-{_counter[0]}"
     session = session_store.get_session(session_id)
     assert session is not None
     session_store.create_approval(
-        confirmation_id, session_id, tenant_id, turn_id=f"turn-{_counter[0]}",
+        confirmation_id, session_id, tenant_id, turn_id=f"turn-routes-{_counter[0]}",
         tool=tool, params=params if params is not None else {"length_ft": 12},
         capability=capability, rationale="adds a home-run", kind="proposed_run",
         payload={"preview": "ok", "dwg": session["drawing_id"]}, ttl_s=ttl_s,

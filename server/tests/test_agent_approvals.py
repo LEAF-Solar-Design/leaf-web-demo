@@ -105,9 +105,13 @@ def _seed_approval(tenant_id: str = "tenant-a", ttl_s: float = 300,
     turn_id, confirmation_id, tenant_id}."""
     _counter[0] += 1
     n = _counter[0]
-    sess = session_store.get_or_create_session(tenant_id, f"drawing-{n}")
-    turn_id = f"turn-{n}"
-    confirmation_id = f"confirm-{n}"
+    # "-appr-" namespaces this module's minted ids: full-suite runs share one
+    # SESSIONS_DB (tests/conftest.py's setdefault wins for every module), and
+    # approvals.confirmation_id is globally UNIQUE, so bare "confirm-{n}"
+    # counters collide across modules (this one bit test_sessions_routes.py).
+    sess = session_store.get_or_create_session(tenant_id, f"drawing-appr-{n}")
+    turn_id = f"turn-appr-{n}"
+    confirmation_id = f"confirm-appr-{n}"
     session_store.create_approval(
         confirmation_id, sess["session_id"], tenant_id, turn_id,
         tool=tool, params={"length_ft": 12}, capability="drawing.write",
