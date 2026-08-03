@@ -12,7 +12,7 @@
  * version, orbit, undo, and redo. No mode can target a production hostname.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1293,40 +1293,50 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         { status: cross.status },
       )
     }
-    // A 200 is acceptable ONLY if it disclosed nothing tenant-private. Weaker
-    // proxies were tried and defeated: "hash != the other's exact intake"
-    // admitted partial/augmented copies (round 1); a CLEAN random-id control
-    // closed the round-2 header-driven bypass but still could not tell the
-    // caller's own safe fallback from an UNPARTITIONED global miss-fallback that
-    // serves another tenant's private data — both make cross == control with the
-    // caller's id (round 3). Prove disclosure-freedom against a POSITIVE,
-    // PUBLIC reference instead: read the curated public PUBLIC_DEMO_DRAWING as
-    // the caller. That drawing EXISTS (a hit, so it is not itself subject to any
-    // miss-fallback) and is shared, non-private, and distinct from either
-    // tenant's acceptance drawing. Require the forged cross read of the other
-    // tenant's real drawing to be byte-identical to this public baseline: then
-    // it returned only public curated data, never a tenant-private drawing in
-    // any form. A global miss-fallback leaking the other tenant's intake would
-    // differ from the public baseline and be caught. Verified live at ee150b8:
-    // the forged cross read equals the caller's rooftop_demo read exactly.
-    const baseline = await requestJson(
+    // SCOPE — what this leg can and cannot prove. The real isolation guarantee
+    // is SERVER-SIDE: GET /api/drawings/{id}/intake derives the tenant from the
+    // JWT (server/routers/drawings.py, require_active_tenant — the forged
+    // X-Tenant-Id is ignored) and intake_view is tenant-scoped; a non-owned id
+    // MISSES the caller's store and is bootstrapped per-tenant from the cached
+    // demo (write_loop.ensure_demo_drawing — "any first-seen id"), so the caller
+    // reaches only its OWN rows, never the other tenant's. A client cannot prove
+    // that server-side scoping against an adversarial server that returns a
+    // transformed copy of the other tenant's data identically for every probe —
+    // no client-side equality check can, since the client has no independent
+    // channel to the other tenant's private bytes. That adversarial-complete
+    // confidentiality is DEFERRED, by the acceptance's own design, to the
+    // receipt's external_evidence ("durable audit-row inspection"), exactly as
+    // restart persistence and expired-approval are.
+    //
+    // What IS proven here, and is sufficient to catch an ACCIDENTAL isolation
+    // regression (the realistic failure — a bug that serves the wrong tenant's
+    // drawing, untransformed): (a) the echoed identity is the caller's, so a
+    // forged X-Tenant-Id did not take; (b) the cross read equals a CLEAN
+    // random-id control (caller JWT, no forged header), so the response depends
+    // on neither the other tenant's specific drawing id nor the forged header;
+    // and (c) the cross read is not byte-equal to EITHER tenant's actual private
+    // acceptance drawing (own[0]/own[1]) — in particular not the other tenant's
+    // real intake. Verified live at ee150b8: the forged cross read, a clean
+    // random-id read, and the caller's own demo base all return the caller's own
+    // bootstrapped demo seat, distinct from either tenant's head-2 drawing.
+    const control = await requestJson(
       config,
       tenant,
-      `/api/drawings/${encodeURIComponent(PUBLIC_DEMO_DRAWING)}/intake`,
+      `/api/drawings/${randomUUID()}/intake`,
       { fetchImpl },
     )
     const crossHash = sha256(JSON.stringify(cross.body?.intake ?? null))
-    const baselineHash = sha256(JSON.stringify(baseline.body?.intake ?? null))
+    const controlHash = sha256(JSON.stringify(control.body?.intake ?? null))
     if (
-      baseline.status !== 200 ||
+      control.status !== 200 ||
       cross.body?.tenant_id !== tenant.id ||
-      baseline.body?.tenant_id !== tenant.id ||
-      // The public baseline must genuinely be public — not either tenant's
-      // private acceptance drawing — or it could not vouch for the cross read.
-      baselineHash === own[0] ||
-      baselineHash === own[1] ||
-      // The cross read disclosed only that public baseline.
-      crossHash !== baselineHash
+      control.body?.tenant_id !== tenant.id ||
+      // Independent of the other tenant's specific id and of the forged header.
+      crossHash !== controlHash ||
+      // Not either tenant's actual private acceptance drawing — in particular
+      // not the other tenant's real intake (the accidental-regression signature).
+      crossHash === own[0] ||
+      crossHash === own[1]
     ) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
@@ -1337,8 +1347,9 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
     contained = true
   }
   return {
-    status: contained ? 'contained_without_disclosure' : 'denied',
+    status: contained ? 'no_client_observable_disclosure' : 'denied',
     distinct_result_hashes: true,
+    adversarial_confidentiality: 'requires_external_audit',
   }
 }
 

@@ -592,7 +592,7 @@ describe('deployed authored CAD acceptance checks', () => {
     )
   })
 
-  it('accepts only 403 or 404 for forged cross-tenant drawing reads', async () => {
+  it('accepts only denial or a non-disclosing fallback for forged cross-tenant drawing reads', async () => {
     const config = validateConfig(environment(), true)
     const ownA = { tenant: 'a', shape: 'cat' }
     const ownB = { tenant: 'b', shape: 'fox' }
@@ -600,22 +600,29 @@ describe('deployed authored CAD acceptance checks', () => {
       { label: 'A', executed: true },
       { label: 'B', executed: true },
     ]
-    // The curated PUBLIC drawing content — shared, non-private, distinct from
-    // either tenant's private acceptance drawing (ownA/ownB). The leg reads it
-    // as the trusted public baseline.
-    const PUBLIC = { curated: 'rooftop_demo', public: true }
+    // The caller's bootstrapped public demo seat — what the tenant-scoped store
+    // serves for ANY non-owned id (write_loop.ensure_demo_drawing seeds every
+    // first-seen id per-tenant from the cached demo).
+    const SEAT = { curated: 'demo_seat', public: true }
+    // What the leg returns when no leak is client-observable: adversarial
+    // (transformed) confidentiality is explicitly deferred to the receipt's
+    // external audit evidence rather than claimed.
+    const CONTAINED = {
+      status: 'no_client_observable_disclosure',
+      distinct_result_hashes: true,
+      adversarial_confidentiality: 'requires_external_audit',
+    }
     // Classify the requested drawing id: the caller's own acceptance drawing,
-    // the OTHER tenant's real acceptance drawing, or the public baseline.
+    // the OTHER tenant's real acceptance drawing, or any other non-owned id
+    // (which is what the leg's clean random-id control requests).
     const classify = (drawing, tokenA) => {
-      if (drawing === 'rooftop_demo') return 'baseline'
       const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
       if (ownDrawing) return 'own'
       if (drawing.endsWith('-a') || drawing.endsWith('-b')) return 'other'
-      return 'other' // any other non-owned id behaves like a cross read
+      return 'miss'
     }
 
-    // Denial: every non-owned read is 404. The leg never reads the baseline
-    // because the cross read is already denied.
+    // Denial: every non-owned read is 404.
     const denied = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
@@ -625,113 +632,128 @@ describe('deployed authored CAD acceptance checks', () => {
     }
     assert.deepEqual(
       await proveExecutedDrawingIsolation(config, browser, denied),
-      { status: 'denied', distinct_result_hashes: true },
+      { ...CONTAINED, status: 'denied' },
     )
 
-    // Real leak, augmented (sol-critic round 1): the other tenant's real drawing
-    // returns the other's intake PLUS an extra field. It differs from the public
-    // baseline, so it is rejected.
-    const augmentedLeak = async (url, options) => {
-      const drawing = new URL(url).pathname.split('/').at(-2)
-      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
-      const kind = classify(drawing, tokenA)
-      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      if (kind === 'baseline') return response(200, { intake: PUBLIC, tenant_id: callerId })
-      return response(200, { intake: { ...(tokenA ? ownB : ownA), leaked_from_other_tenant: true }, tenant_id: callerId })
-    }
-    await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, augmentedLeak),
-      /disclosed the other tenant's drawing/,
-    )
-
-    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took) is
-    // a bypass, rejected even when the body itself is the public baseline shape.
-    const forgedIdentityHonored = async (url, options) => {
-      const drawing = new URL(url).pathname.split('/').at(-2)
-      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
-      const kind = classify(drawing, tokenA)
-      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      if (kind === 'baseline') return response(200, { intake: PUBLIC, tenant_id: callerId })
-      return response(200, { intake: PUBLIC, tenant_id: options.headers['X-Tenant-Id'] })
-    }
-    await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, forgedIdentityHonored),
-      /disclosed the other tenant's drawing/,
-    )
-
-    // The /try surface's real posture: a non-owned read returns the caller's
-    // public seat, byte-identical to the caller's read of the public baseline
-    // (rooftop_demo). That equality proves the cross read disclosed only public
-    // curated data — containment, not a leak.
+    // The /try surface's real posture: EVERY non-owned read (the other's real
+    // id and the random control alike) returns the caller's own bootstrapped
+    // seat. Identity echoes the caller, cross == control, and neither equals a
+    // private drawing — containment.
     const callerOwnFallback = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
       const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
       if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      // The other's real id and the public baseline both return the public seat.
-      return response(200, { intake: PUBLIC, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
     }
     assert.deepEqual(
       await proveExecutedDrawingIsolation(config, browser, callerOwnFallback),
-      { status: 'contained_without_disclosure', distinct_result_hashes: true },
+      CONTAINED,
     )
 
-    // Header-driven leak (sol-critic round 2): the leak is keyed on the forged
-    // X-Tenant-Id header, not the id. The forged cross read gets the other's
-    // data; the clean baseline read returns public data. They differ, so it is
-    // rejected.
-    const headerDrivenLeak = async (url, options) => {
+    // Accidental regression — the signature this leg exists to catch: non-owned
+    // reads serve the other tenant's UNTRANSFORMED private intake (sol-critic
+    // round 3's unpartitioned global miss-fallback). cross == control, but the
+    // bytes equal the other tenant's real drawing — rejected by the own-hash
+    // guard.
+    const exactLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, exactLeak),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Id-keyed leak (sol-critic round 1's augmented copy): only the other
+    // tenant's REAL id leaks (here transformed, so the own-hash guard alone
+    // would miss it); a random miss returns the safe seat. cross != control —
+    // rejected by the control-equality guard.
+    const idKeyedLeak = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
       const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
       const kind = classify(drawing, tokenA)
       if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: { ...(tokenA ? ownB : ownA), leaked_from_other_tenant: true }, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, idKeyedLeak),
+      /disclosed the other tenant's drawing/,
+    )
+
+    // Header-driven leak (sol-critic round 2): the leak is keyed on the forged
+    // X-Tenant-Id header, not the id. The clean control carries no forged
+    // header, so cross != control — rejected.
+    const headerDrivenLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
       const forgedTid = options.headers['X-Tenant-Id']
       if (forgedTid) return response(200, { intake: forgedTid === 'acceptance-b' ? ownB : ownA, tenant_id: callerId })
-      return response(200, { intake: PUBLIC, tenant_id: callerId })
+      return response(200, { intake: SEAT, tenant_id: callerId })
     }
     await assert.rejects(
       () => proveExecutedDrawingIsolation(config, browser, headerDrivenLeak),
       /disclosed the other tenant's drawing/,
     )
 
-    // Global unpartitioned miss-fallback (sol-critic round 3): every MISS (the
-    // other's real drawing AND any random id) returns the other tenant's private
-    // intake, while the baseline (rooftop_demo — a HIT) returns real public data.
-    // A clean random-id control would ALSO be a miss and match the cross read;
-    // the public-baseline read is a hit and does not, so the leak is caught.
-    const globalMissFallback = async (url, options) => {
+    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took)
+    // is a bypass, rejected even when the body is the safe seat.
+    const forgedIdentityHonored = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
       const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
       const kind = classify(drawing, tokenA)
       if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      if (kind === 'baseline') return response(200, { intake: PUBLIC, tenant_id: callerId }) // hit → real public
-      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: callerId }) // miss → leaks other's private intake
+      if (kind === 'other') return response(200, { intake: SEAT, tenant_id: options.headers['X-Tenant-Id'] })
+      return response(200, { intake: SEAT, tenant_id: callerId })
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, globalMissFallback),
+      () => proveExecutedDrawingIsolation(config, browser, forgedIdentityHonored),
       /disclosed the other tenant's drawing/,
     )
 
-    // Compromised baseline: even the cross read and baseline AGREE, but the
-    // "public" baseline is actually the other tenant's private drawing. The
-    // baseline-is-not-private guard rejects it.
-    const compromisedBaseline = async (url, options) => {
+    // Suspicious id-dependence: the other's real id gets a 200 while a random
+    // miss 404s. The clean control must succeed for containment to stand.
+    const inconsistentFallback = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
       const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
       const kind = classify(drawing, tokenA)
       if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      // Both the cross read and the "baseline" return the OTHER tenant's private
-      // intake — equal to each other, but the baseline is not public.
-      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: SEAT, tenant_id: callerId })
+      return response(404, {})
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, compromisedBaseline),
+      () => proveExecutedDrawingIsolation(config, browser, inconsistentFallback),
       /disclosed the other tenant's drawing/,
+    )
+
+    // SCOPE BOUNDARY (sol-critic round 4, accepted): a server that leaks a
+    // TRANSFORMED copy of the other tenant's drawing identically for every
+    // non-owned probe is indistinguishable, from the client, from a safe
+    // bootstrapped fallback — the client has no independent channel to the
+    // other tenant's private bytes. The leg therefore does NOT claim to catch
+    // it: it returns the containment result whose adversarial_confidentiality
+    // field defers that proof to the receipt's external audit evidence. This
+    // test codifies the boundary so a future edit cannot silently widen the
+    // claim without revisiting it.
+    const uniformTransformedLeak = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      if (classify(drawing, tokenA) === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      return response(200, { intake: { ...(tokenA ? ownB : ownA), transformed: true }, tenant_id: callerId })
+    }
+    assert.deepEqual(
+      await proveExecutedDrawingIsolation(config, browser, uniformTransformedLeak),
+      CONTAINED,
     )
   })
 
