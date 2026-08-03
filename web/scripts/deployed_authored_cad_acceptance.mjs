@@ -32,7 +32,11 @@ const PRODUCTION_HOSTS = new Set([
   'platform.leafautomation.ai',
 ])
 const DEFAULT_TIMEOUT_MS = 30_000
-const AUTHOR_TIMEOUT_MS = 10 * 60_000
+// 25 min, not 10: a REAL staging authoring turn exceeded 12 minutes and was
+// still healthy (execute accept-eb3317b-1c13326d-005 died on this budget at
+// 06:56Z while its stage job completed to `staged` minutes later — run
+// 30791130113). Two tenants at this ceiling still fit the workflow's job cap.
+const AUTHOR_TIMEOUT_MS = 25 * 60_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const EXTERNAL_EVIDENCE_REQUIRED = [
   'expired approval rejection (no staging clock-control seam)',
@@ -841,6 +845,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       if (!acceptedId) {
         throw new AcceptanceError('author_stage', 'accepted authoring job carried no change_set_id')
       }
+      // Progress marker: the driver was previously SILENT from launch to its
+      // terminal line, which made the budget timeout undiagnosable from the
+      // workflow log alone.
+      console.log(JSON.stringify({ ok: true, check: 'author_stage_accepted', tenant: tenant.label, change_set_id: acceptedId }))
       const pollPath = `${config.apiUrl}/api/author/stages/${encodeURIComponent(acceptedId)}`
       const terminalStatuses = new Set(['staged', 'complete', 'completed', 'succeeded'])
       const failedStatuses = new Set(['failed', 'error'])
@@ -882,6 +890,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       if (!stagedBody) {
         throw new AcceptanceError('author_stage', 'authoring job reached terminal status without a staged result')
       }
+      console.log(JSON.stringify({ ok: true, check: 'author_stage_staged', tenant: tenant.label, change_set_id: acceptedId }))
     }
     const staged = validateStagedAuthorResponse(stagedBody, tenant)
     const stageRequest = stageResponse.request().postDataJSON()
