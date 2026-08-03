@@ -549,6 +549,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
                queued_id: Optional[str] = None,
+               entitlement_tier: Optional[str] = None,
                entitlement_roles: Optional[tuple] = None,
                entitlement_elevated: Optional[bool] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
@@ -570,8 +571,12 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     # snapshot (additive keywords) wins, exactly like `tier` above — the queue
     # kicker holds only the flattened string, whose live resolution would
     # erase a role-only principal's authority mid-promotion (sol-critic
-    # round 1, finding 4).
-    entitlement_tier = entitlements.resolve_tier(tenant_id)
+    # round 1, finding 4). The TIER half of that snapshot must ride too:
+    # resolving the flattened string falls OPEN to the "demo" tier, so a
+    # promoted restricted-tier turn's terminal auto-confirm would consult
+    # demo-tier entitlements instead of the principal's own.
+    if entitlement_tier is None:
+        entitlement_tier = entitlements.resolve_tier(tenant_id)
     if entitlement_roles is None:
         entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     else:
@@ -1177,6 +1182,7 @@ def _kick_queued(session_id: str) -> None:
                            tier=payload["tier"],
                            subject=payload["subject"],
                            queued_id=payload["queued_id"],
+                           entitlement_tier=payload.get("entitlement_tier"),
                            entitlement_roles=tuple(
                                payload.get("entitlement_roles") or ()),
                            entitlement_elevated=payload.get(

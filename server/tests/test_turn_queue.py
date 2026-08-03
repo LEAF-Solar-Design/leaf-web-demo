@@ -56,6 +56,7 @@ os.environ.setdefault("LEAF_AUTH_LIVE", "0")
 import deps  # noqa: E402
 import entitlements  # noqa: E402
 import requests  # noqa: E402
+import session_policy  # noqa: E402
 import session_store  # noqa: E402
 import turn_runner  # noqa: E402
 from envelopes import ErrorCode  # noqa: E402
@@ -433,6 +434,107 @@ def test_kicker_passes_role_snapshot_into_the_promoted_start(monkeypatch):
     assert captured["entitlement_elevated"] is False
     assert captured["tier"] == "restricted"
     assert turn_runner.queued_prompt(sid) is None
+
+
+def test_role_only_principal_survives_the_full_promotion_chain(monkeypatch, turn_stub):
+    """sol-critic round 2 (PR #414, MINOR): the pass-through test above stubs
+    start_turn, so it pins only the kicker handoff. This exercises the REAL
+    chain — enqueue while busy → kick → start_turn → _spawn_relay → terminal
+    auto-confirm — with nothing stubbed but the entitlement policy (a spy that
+    grants converse ONLY through the role AND elevation together, so tier
+    alone drops the prompt at the kick re-check and again at the terminal
+    gate: losing the roles OR the elevated flag at any checkpoint kills the
+    chain there instead of finishing green — elevated must be pinned True
+    because False is also every fall-back default, sol-critic #416 round 1).
+
+    The spy also records every (tier, roles, elevated) triple the policy is
+    consulted with, which pins the OTHER half of the snapshot: resolving the
+    kicker's flattened string falls open to the "demo" tier, so without the
+    entitlement_tier pass-through the terminal auto-confirm consulted
+    demo-tier entitlements for a restricted-tier principal's promoted turn.
+    """
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    sess = _new_session()
+    sid = sess["session_id"]
+
+    class _RolePrincipal(str):
+        pass
+    principal = _RolePrincipal("tenant-q")
+    principal.tier = "restricted"
+    principal.subject = "auth0|role-only-e2e"
+    principal.roles = ("converse_granter",)
+    principal.elevated = True
+
+    calls = []
+
+    def _spy(tier, roles=(), elevated=False):
+        calls.append((tier, tuple(roles), elevated))
+        return {"converse": "converse_granter" in tuple(roles) and elevated is True}
+
+    monkeypatch.setattr(turn_runner.entitlements, "entitlements_for", _spy)
+    # auto_approve_reads is what makes the terminal auto-confirm consult the
+    # entitlement policy at all — that consultation is checkpoint 4's probe.
+    session_policy.set_policy(sid, "tenant-q", "auto_approve_reads")
+
+    snapshot = ("restricted", ("converse_granter",), True)
+
+    # 1. enqueue while busy: the payload snapshots the principal's authority,
+    #    and enqueueing consults no policy at all.
+    assert session_store.try_begin_turn(sid, "orphan-e2e", 300)
+    assert turn_runner.try_enqueue_turn(principal, sid, text="role-only e2e")[0] == "queued"
+    with turn_runner._queued_lock:
+        payload = dict(turn_runner._queued[sid])
+    assert payload["entitlement_tier"] == "restricted"
+    assert payload["entitlement_roles"] == ["converse_granter"]
+    assert payload["entitlement_elevated"] is True
+    assert calls == []
+
+    # 2. kick (orphan cancel path, cancelling AS the principal — the cancel
+    #    runs its own follow-ups under the canceller's identity) → REAL
+    #    start_turn against the stub harness.
+    assert turn_runner.request_cancel(principal, sid, "orphan-e2e") == "cancelled"
+    ok = _wait_until(
+        lambda: any(e["type"] == "turn_started" and e["data"].get("text") == "role-only e2e"
+                    for e in session_store.recent_events(sid, 100)))
+    assert ok, (f"role-only prompt never started — its authority was lost "
+                f"before the kick re-check; events: {_types(sid)}, calls: {calls}")
+    assert not any(e["type"] == "turn_queue_dropped"
+                   for e in session_store.recent_events(sid, 100)), (
+        "the kick re-check dropped a prompt whose role grants converse")
+
+    # 3. relay: the promoted prompt reached the harness wire and its scripted
+    #    turn_complete terminalizes the turn.
+    started = [e for e in session_store.recent_events(sid, 100)
+               if e["type"] == "turn_started" and e["data"].get("text") == "role-only e2e"]
+    turn_id = started[0]["turn_id"]
+    assert _wait_until(
+        lambda: any(e["type"] == "turn_complete" and e["turn_id"] == turn_id
+                    for e in session_store.recent_events(sid, 100))), (
+        f"the promoted turn never terminalized; events: {_types(sid)}")
+    assert stub.BODIES and "role-only e2e" in json.dumps(stub.BODIES), (
+        "the promoted prompt never reached the harness wire")
+
+    # 4. terminal auto-confirm: consulted with the SAME snapshot — tier and
+    #    roles both — not a re-resolution of the flattened tenant string
+    #    (which would say ("demo", (), False)). Three consultations total:
+    #    the cancel's own follow-up pass, the kick re-check, and the promoted
+    #    turn's terminal auto-confirm — and EVERY one carries the principal's
+    #    full authority. The last is the terminal's, by _finalize_terminal's
+    #    documented order (auto-confirm first, then the queue kick).
+    assert _wait_until(lambda: len(calls) >= 3), (
+        f"the terminal auto-confirm never consulted the entitlement policy: {calls}")
+    assert calls[-1] == snapshot, (
+        f"the terminal auto-confirm ran against a different identity: {calls[-1]}")
+    assert all(c == snapshot for c in calls), (
+        f"a checkpoint consulted the policy with degraded authority: {calls}")
+
+    assert _wait_until(lambda: turn_runner.queued_prompt(sid) is None)
+    assert _wait_until(
+        lambda: session_store.get_session(sid)["active_turn_id"] is None)
+    assert sum(1 for t in _types(sid) if t == "turn_started") == 1
 
 
 def test_direct_turns_sync_rejection_kicks_the_parked_prompt(monkeypatch):
