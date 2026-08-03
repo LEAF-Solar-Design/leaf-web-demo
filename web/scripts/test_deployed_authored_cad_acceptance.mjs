@@ -23,6 +23,7 @@ import {
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
+  scrubbedDetail,
   takeEditingCheckout,
   validateConfig,
   validateStagedAuthorResponse,
@@ -823,6 +824,56 @@ describe('deployed authored CAD acceptance checks', () => {
         && sculptureMount > focus3d
         && scopedCanvas > sculptureMount,
     )
+  })
+
+  it('leaves focus view and reopens the Execution tab before Undo/Redo', () => {
+    // Focus 3D applies `.tc-focus-hidden` (display:none) to both rails, and
+    // Undo/Redo render only inside the Execution tab — so after the orbit
+    // proof the driver must click focus-3d a second time and reselect the
+    // Execution tab before touching either chip. Run 30806698693 starved on
+    // exactly this: the orbit passed, then Undo waited 30s against a hidden
+    // rail.
+    const source = readFileSync(fileURLToPath(
+      new URL('./deployed_authored_cad_acceptance.mjs', import.meta.url),
+    ), 'utf8')
+    const poseCheck = source.indexOf('requireCameraMotion(beforeCameraPose, afterCameraPose)')
+    const focusExit = source.indexOf("getByTestId('focus-3d').click()", poseCheck)
+    const executionTab = source.indexOf(
+      "getByRole('tab', { name: 'Execution', exact: true })",
+      focusExit,
+    )
+    const undoClick = source.indexOf(
+      "getByRole('button', { name: 'Undo', exact: true })",
+      executionTab,
+    )
+    assert.ok(
+      poseCheck >= 0
+        && focusExit > poseCheck
+        && executionTab > focusExit
+        && undoClick > executionTab,
+    )
+  })
+
+  it('names the starving step and a scrubbed detail in the failure line', async () => {
+    const errors = []
+    console.error = (value) => errors.push(value)
+    const result = await main(
+      ['--receipt', 'must-not-exist.json'],
+      environment({ LEAF_ACCEPTANCE_ENVIRONMENT: 'production' }),
+    )
+    assert.equal(result, 1)
+    const failure = JSON.parse(errors[0])
+    assert.equal(typeof failure.step, 'string')
+    assert.equal(typeof failure.detail, 'string')
+    assert.ok(failure.detail.includes('staging'))
+  })
+
+  it('scrubs token-shaped material from the failure detail', () => {
+    const jwtish = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY2NlcHRhbmNlIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ'
+    const detail = scrubbedDetail(new Error(`waiting for locator with ${jwtish} embedded`))
+    assert.ok(!detail.includes(jwtish))
+    assert.ok(detail.includes('[token]'))
+    assert.ok(scrubbedDetail(new Error('x'.repeat(2000))).length <= 700)
   })
 
   it('counts mutating API requests on both allowed browser origins', () => {

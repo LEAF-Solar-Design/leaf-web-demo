@@ -55,6 +55,34 @@ export class AcceptanceError extends Error {
   }
 }
 
+// Step tracking. The driver's only failure output is one JSON line, and run
+// 30806698693 proved a bare {"error":"TimeoutError"} costs a full release
+// train to localize: the workflow log could not say WHICH locator starved.
+// Each leg marks itself as it starts; the failure line then carries the last
+// step plus a scrubbed error detail.
+let currentStep = 'configuration'
+export function step(name, tenantLabel = undefined) {
+  currentStep = tenantLabel ? `${name}_${tenantLabel}` : name
+  console.log(JSON.stringify({
+    ok: true,
+    check: 'step',
+    step: name,
+    ...(tenantLabel ? { tenant: tenantLabel } : {}),
+  }))
+}
+
+// Playwright error messages embed locator text, ARIA names, and page URLs —
+// never request headers — but scrub anything token-shaped before it can reach
+// a log line, and cap the length so a pathological message cannot flood the
+// workflow log.
+export function scrubbedDetail(error) {
+  return String(error?.message || '')
+    .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[token]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 700)
+}
+
 function required(env, name) {
   const value = String(env[name] || '').trim()
   if (!value) throw new AcceptanceError('configuration', `${name} is required`)
@@ -755,6 +783,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         mutatingApiRequests.push(`${request.method()} ${url.pathname}`)
       }
     })
+    step('browser_open', tenant.label)
     await page.goto('/try', { waitUntil: 'domcontentloaded', timeout: 120_000 })
     const operatorPhase = page.getByTestId('operator-phase')
     try {
@@ -817,7 +846,9 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     if (!execute) return result
 
+    step('checkout', tenant.label)
     await takeEditingCheckout(page, config.apiUrl, tenant.drawingId)
+    step('author_surface', tenant.label)
     const authorRequest = await openTryAuthorSurface(page)
     await authorRequest.fill(tenant.request)
     const stageResponsePromise = page.waitForResponse(
@@ -903,9 +934,11 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // AuthorPanel's staged copy is "Staged and ready to publish…" (the
     // "awaiting approval" wording the driver waited 25 minutes for no longer
     // exists anywhere in web/src). Match the staged state, not one sentence.
+    step('staged_copy', tenant.label)
     await page.getByText(/Staged and ready to publish/, { exact: false })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
 
+    step('publication_approval', tenant.label)
     const otherTenant = config.tenants.find((candidate) => candidate.id !== tenant.id)
     const independentApproval = await approveIsolatedStagedPublication(
       config,
@@ -916,6 +949,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // Publication moved to the request/approval endpoint (api.js:1158) and the
     // button reads "Request publication"; the old /api/author/register +
     // "Publish tool" pair no longer exists in the surface.
+    step('request_publication', tenant.label)
     const publishResponsePromise = page.waitForResponse(
       (response) => response.url() === `${config.apiUrl}/api/author/publication-requests`
         && response.request().method() === 'POST',
@@ -929,6 +963,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         `publication returned HTTP ${publishResponse.status()}`,
       )
     }
+    step('run_published_tool', tenant.label)
     await page.getByRole('button', { name: 'Run it now', exact: true })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
     await page.getByRole('button', { name: 'Run it now', exact: true }).click()
@@ -970,6 +1005,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     if (typeof jobId !== 'string' || !jobId) {
       throw new AcceptanceError('exact_write', 'the accepted write did not return a job id')
     }
+    step('authored_job', tenant.label)
     const job = await waitForTerminalJob(config, tenant, jobId)
     const newVersion = job?.result?.result?.new_version
     if (job?.result?.ok !== true
@@ -977,8 +1013,10 @@ async function runBrowserTenant(config, tenant, browser, execute) {
         || newVersion?.version !== 2) {
       throw new AcceptanceError('authored_job', 'the completed authored write did not create exact version 2')
     }
+    step('version_head', tenant.label)
     await page.getByTestId('version-head').filter({ hasText: 'Version 2' })
       .waitFor({ state: 'visible', timeout: AUTHOR_TIMEOUT_MS })
+    step('camera_proof', tenant.label)
     await openDrawingView(page)
     const camera = page.getByTestId('camera-controls')
     await camera.waitFor({ state: 'visible', timeout: 120_000 })
@@ -1011,6 +1049,19 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       `${mount.dataset.cameraPosition}|${mount.dataset.cameraTarget}`,
     )
     requireCameraMotion(beforeCameraPose, afterCameraPose)
+    // Focus 3D hid both rails and the command bar (`.tc-focus-hidden` is
+    // `display: none !important`, landing.css:147), so every rail control is
+    // invisible until focus view is left — the same testid now reads
+    // "Show controls" and restores the rails. Run 30806698693 died here: the
+    // orbit succeeded, then the Undo click starved against a hidden rail.
+    step('focus_exit', tenant.label)
+    await page.getByTestId('focus-3d').click()
+    // Undo/Redo are Execution-tab chips (ToolCast.jsx:1233-1234); the View
+    // tab this leg selected does not render them.
+    const executionTab = page.getByRole('tab', { name: 'Execution', exact: true })
+    await executionTab.waitFor({ state: 'visible', timeout: DEFAULT_TIMEOUT_MS })
+    await executionTab.click()
+    step('undo_redo', tenant.label)
     const undo = page.getByRole('button', { name: 'Undo', exact: true })
     await undo.click()
     const redo = page.getByRole('button', { name: 'Redo', exact: true })
@@ -1028,6 +1079,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     // none of which this surface renders — a repo-wide string sweep hid it
     // because those literals do exist, on the other surface.
     // See web/src/site/ToolCast.jsx:1205 (tab) and :1322-1344 (panel + rows).
+    step('version_preview', tenant.label)
     const previewMutationCount = mutatingApiRequests.length
     await page.getByRole('tab', { name: /^Versions/ }).click()
     const history = page.getByRole('region', { name: 'Version history' })
@@ -1403,8 +1455,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     }
     const config = validateConfig(env, args.execute)
     const startedAt = new Date().toISOString()
+    step('api_preflight')
     const api = await runApiPreflight(config)
     if (args.execute) {
+      step('provision_drawings')
       const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../data/rooftop_demo.dwg')
       const sourceBytes = readFileSync(sourcePath)
       const drawingIds = await provisionAcceptanceDrawings(config, sourceBytes)
@@ -1415,8 +1469,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       api.live_dwg_inputs = { status: 'ready', count: drawingIds.length }
     }
     const browser = await runBrowserAcceptance(config, args.execute)
+    step('drawing_isolation')
     api.executed_drawing_isolation = await proveExecutedDrawingIsolation(config, browser)
+    step('authority_isolation')
     api.executed_authority_isolation = await proveExecutedAuthorityIsolation(config, browser)
+    step('pinned_write_rejections')
     api.pinned_write_rejections = await provePinnedWriteRejections(config, browser)
     const stoppedAt = new Date().toISOString()
     const receipt = buildReceipt(
@@ -1451,6 +1508,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       check: error instanceof AcceptanceError ? error.check : 'unexpected',
       error: error?.name || 'Error',
       message: error instanceof AcceptanceError ? error.message : 'acceptance driver failed',
+      step: currentStep,
+      detail: scrubbedDetail(error),
     }
     console.error(JSON.stringify(safe))
     return 1
