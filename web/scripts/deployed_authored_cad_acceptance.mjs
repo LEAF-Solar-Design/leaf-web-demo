@@ -12,7 +12,7 @@
  * version, orbit, undo, and redo. No mode can target a production hostname.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1264,22 +1264,20 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
   // intake. A blanket 403/404 assertion mistook that non-disclosing fallback
   // for a leak. Assert the invariant that matters: a non-denied read must not
   // disclose the other tenant's drawing.
+  const forged = (other) => ({
+    fetchImpl,
+    extraHeaders: { 'X-Tenant-Id': other.id, 'X-Org-Id': other.id },
+  })
   let contained = false
-  for (const [tenant, other, otherOwnHash] of [
-    [a, b, own[1]],
-    [b, a, own[0]],
+  for (const [tenant, other] of [
+    [a, b],
+    [b, a],
   ]) {
     const cross = await requestJson(
       config,
       tenant,
       `/api/drawings/${encodeURIComponent(other.drawingId)}/intake`,
-      {
-        fetchImpl,
-        extraHeaders: {
-          'X-Tenant-Id': other.id,
-          'X-Org-Id': other.id,
-        },
-      },
+      forged(other),
     )
     if ([403, 404].includes(cross.status)) continue
     if (cross.status !== 200) {
@@ -1289,12 +1287,30 @@ export async function proveExecutedDrawingIsolation(config, browserResults, fetc
         { status: cross.status },
       )
     }
-    // A 200 is acceptable only if it disclosed NONE of the other tenant's
-    // drawing: the surface must have served the caller's own fallback seat, so
-    // the echoed identity is the caller's (proving the forged X-Tenant-Id did
-    // not take) and the returned intake is not the other tenant's own intake.
-    const crossIntakeHash = sha256(JSON.stringify(cross.body?.intake ?? null))
-    if (cross.body?.tenant_id !== tenant.id || crossIntakeHash === otherOwnHash) {
+    // A 200 is acceptable ONLY if it disclosed nothing about the other tenant's
+    // drawing. Proving that by "the hash is not exactly the other tenant's own
+    // intake" is too weak — a partial, reordered, or augmented copy of that
+    // intake would slip through (sol-critic PR #412 round 1). Prove independence
+    // POSITIVELY instead: read a guaranteed-nonexistent random id as the SAME
+    // caller with the SAME forged headers. If the read of the other tenant's
+    // real drawing is byte-identical to that control, the response cannot encode
+    // the other tenant's drawing — it is the caller's own fallback seat that any
+    // unknown id yields. Also require the echoed identity to be the caller's, so
+    // a forged X-Tenant-Id that took is caught even if the bodies matched.
+    const control = await requestJson(
+      config,
+      tenant,
+      `/api/drawings/${randomUUID()}/intake`,
+      forged(other),
+    )
+    const crossHash = sha256(JSON.stringify(cross.body?.intake ?? null))
+    const controlHash = sha256(JSON.stringify(control.body?.intake ?? null))
+    if (
+      control.status !== 200 ||
+      cross.body?.tenant_id !== tenant.id ||
+      control.body?.tenant_id !== tenant.id ||
+      crossHash !== controlHash
+    ) {
       throw new AcceptanceError(
         `cross_tenant_drawing_${tenant.label}`,
         "a cross-tenant drawing read disclosed the other tenant's drawing",
@@ -1398,6 +1414,17 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
     if (head !== 2) {
       throw new AcceptanceError(`write_rejection_head_${tenant.label}`, 'expected drawing head 2')
     }
+    // Signature the WHOLE version state, not just `head`. A stale write could
+    // land as a new immutable version that bumps `latest` and grows `versions`
+    // WITHOUT moving `head` (sol-critic PR #412 round 1); a head-only check
+    // would miss that landing. Capture head + latest + the sorted version set
+    // now and require every part unchanged after the rejected replays.
+    const versionSignature = (body) => JSON.stringify({
+      head: body?.head ?? null,
+      latest: body?.latest ?? null,
+      versions: (body?.versions || []).map((entry) => entry?.v).sort((x, y) => x - y),
+    })
+    const beforeSignature = versionSignature(before.body)
 
     // The exact approved write, replayed after the head moved to 2, must be
     // REJECTED without landing — but for a plain catalog run the rejection is
@@ -1469,8 +1496,11 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
       { fetchImpl },
     )
     expectStatus(after, [200], `write_rejection_head_${tenant.label}`)
-    if (after.body?.head !== head) {
-      throw new AcceptanceError('write_rejection', 'a rejected write changed the drawing head')
+    if (versionSignature(after.body) !== beforeSignature) {
+      throw new AcceptanceError(
+        'write_rejection',
+        'a rejected write changed the drawing version state (head, latest, or version set)',
+      )
     }
   }
   return {

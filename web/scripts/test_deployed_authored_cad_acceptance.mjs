@@ -596,71 +596,105 @@ describe('deployed authored CAD acceptance checks', () => {
     const config = validateConfig(environment(), true)
     const ownA = { tenant: 'a', shape: 'cat' }
     const ownB = { tenant: 'b', shape: 'fox' }
-    const fetchImpl = async (url, options) => {
-      const drawing = new URL(url).pathname.split('/').at(-2)
-      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      return ownDrawing ? response(200, { intake: tokenA ? ownA : ownB }) : response(404, {})
-    }
     const browser = [
       { label: 'A', executed: true },
       { label: 'B', executed: true },
     ]
+    // Classify the requested drawing id: the caller's own acceptance drawing,
+    // the OTHER tenant's real acceptance drawing, or a random control id (the
+    // positive-control read the leg issues to prove independence).
+    const classify = (drawing, tokenA) => {
+      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
+      if (ownDrawing) return 'own'
+      if (drawing.endsWith('-a') || drawing.endsWith('-b')) return 'other'
+      return 'control'
+    }
+
+    // Denial: every non-owned read is 404. The leg never issues a control read
+    // because the cross read is already denied.
+    const denied = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      return classify(drawing, tokenA) === 'own'
+        ? response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+        : response(404, {})
+    }
     assert.deepEqual(
-      await proveExecutedDrawingIsolation(config, browser, fetchImpl),
+      await proveExecutedDrawingIsolation(config, browser, denied),
       { status: 'denied', distinct_result_hashes: true },
     )
 
-    // A 200 that discloses the OTHER tenant's own intake is a real leak and
-    // must be rejected.
-    const leakingCrossRead = async (url, options) => {
+    // Real leak, augmented: the other tenant's real drawing returns the other's
+    // intake PLUS an extra field, while a random control id returns the caller's
+    // own fallback. The old "hash != the other's exact intake" check admitted
+    // this; the control comparison rejects it (sol-critic PR #412 round 1).
+    const augmentedLeak = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      if (ownDrawing) {
-        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') {
+        return response(200, { intake: { ...(tokenA ? ownB : ownA), leaked_from_other_tenant: true }, tenant_id: callerId })
       }
-      // Cross read hands back the OTHER tenant's real intake — a disclosure.
-      return response(200, { intake: tokenA ? ownB : ownA, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
+      return response(200, { intake: { seat: callerId }, tenant_id: callerId })
     }
     await assert.rejects(
-      () => proveExecutedDrawingIsolation(config, browser, leakingCrossRead),
+      () => proveExecutedDrawingIsolation(config, browser, augmentedLeak),
       /disclosed the other tenant's drawing/,
     )
 
-    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took)
-    // is a bypass and must be rejected even when no drawing body leaks.
+    // A 200 that echoes the OTHER tenant's identity (forged X-Tenant-Id took) is
+    // a bypass, rejected even when the body itself is a generic fallback.
     const forgedIdentityHonored = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
-      if (ownDrawing) {
-        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: tokenA ? 'acceptance-a' : 'acceptance-b' })
-      }
-      return response(200, { intake: { fallback: true }, tenant_id: options.headers['X-Tenant-Id'] })
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: { fallback: true }, tenant_id: options.headers['X-Tenant-Id'] })
+      return response(200, { intake: { fallback: true }, tenant_id: callerId })
     }
     await assert.rejects(
       () => proveExecutedDrawingIsolation(config, browser, forgedIdentityHonored),
       /disclosed the other tenant's drawing/,
     )
 
-    // The /try surface's real posture: a non-owned read returns the CALLER's
-    // own fallback seat with HTTP 200 (caller's tenant_id, not the other
-    // tenant's data). This is containment, not a leak — accept it.
+    // The /try surface's real posture: a non-owned read returns the CALLER's own
+    // fallback seat (caller's tenant_id), IDENTICAL for the other's real drawing
+    // and for a random control id. That equality proves the response cannot
+    // encode the other tenant's drawing — containment, not a leak.
     const callerOwnFallback = async (url, options) => {
       const drawing = new URL(url).pathname.split('/').at(-2)
       const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
-      const ownDrawing = (drawing.endsWith('-a') && tokenA) || (drawing.endsWith('-b') && !tokenA)
       const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
-      if (ownDrawing) {
-        return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
-      }
-      // Server ignores forged X-Tenant-Id, serves the caller's own seat.
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      // Both the other's real id and any random control id yield the same seat.
       return response(200, { intake: { seat: callerId }, tenant_id: callerId })
     }
     assert.deepEqual(
       await proveExecutedDrawingIsolation(config, browser, callerOwnFallback),
       { status: 'contained_without_disclosure', distinct_result_hashes: true },
+    )
+
+    // Subtle leak: the other's real drawing returns the caller's fallback shape
+    // BUT a random control returns something different — i.e. the response DOES
+    // depend on whether the id is the other tenant's. The equality-to-control
+    // check catches this even though tenant_id is the caller's and the body is
+    // not literally the other's intake.
+    const idDependentResponse = async (url, options) => {
+      const drawing = new URL(url).pathname.split('/').at(-2)
+      const tokenA = options.headers.Authorization === `Bearer ${TOKEN_A}`
+      const callerId = tokenA ? 'acceptance-a' : 'acceptance-b'
+      const kind = classify(drawing, tokenA)
+      if (kind === 'own') return response(200, { intake: tokenA ? ownA : ownB, tenant_id: callerId })
+      if (kind === 'other') return response(200, { intake: { seat: callerId, other_exists: true }, tenant_id: callerId })
+      return response(200, { intake: { seat: callerId }, tenant_id: callerId })
+    }
+    await assert.rejects(
+      () => proveExecutedDrawingIsolation(config, browser, idDependentResponse),
+      /disclosed the other tenant's drawing/,
     )
   })
 
@@ -837,6 +871,50 @@ describe('deployed authored CAD acceptance checks', () => {
     await assert.rejects(
       () => provePinnedWriteRejections(config, browser, asyncLanding),
       /did not fail on the stale drawing-head pin/,
+    )
+  })
+
+  it('detects a landed version even when head is unchanged', async () => {
+    // sol-critic PR #412 round 1: a stale write could land as a new immutable
+    // version that bumps `latest` and grows `versions` WITHOUT moving `head`.
+    // Both replays report the expected rejection wording, yet a version lands.
+    // A head-only after-check would miss it; the full version signature must not.
+    const config = validateConfig(environment(), true)
+    const browser = config.tenants.map((tenant) => ({
+      label: tenant.label,
+      executed: true,
+      _run_request: {
+        tool: `${tenant.label.toLowerCase()}_tool`,
+        dwg: tenant.drawingId,
+        dwg_version: 1,
+        catalog_digest: `sha256:${'a'.repeat(64)}`,
+      },
+    }))
+    const versionsReads = new Map()
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/versions')) {
+        const key = parsed.pathname
+        const n = (versionsReads.get(key) || 0) + 1
+        versionsReads.set(key, n)
+        // First read per drawing is `before` (latest 2), second is `after`
+        // (latest 3 — a version landed despite the "rejection").
+        return n === 1
+          ? response(200, { head: 2, latest: 2, versions: [{ v: 1 }, { v: 2 }] })
+          : response(200, { head: 2, latest: 3, versions: [{ v: 1 }, { v: 2 }, { v: 3 }] })
+      }
+      if (parsed.pathname === '/api/run') {
+        const body = JSON.parse(options.body)
+        const message = body.catalog_digest === `sha256:${'0'.repeat(64)}`
+          ? 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again'
+          : 'drawing head changed after approval; refresh drawing state and confirm again'
+        return response(409, { error: { error_code: 'BAD_PARAMS', message } })
+      }
+      return response(500, {})
+    }
+    await assert.rejects(
+      () => provePinnedWriteRejections(config, browser, fetchImpl),
+      /changed the drawing version state/,
     )
   })
 
