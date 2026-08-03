@@ -503,6 +503,7 @@ export const SPINE_TOOL_NAMES = [
   "author_tool",
   "request_publication",
   "request_confirmation",
+  "customize_platform",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -755,6 +756,25 @@ export interface AppRunClient {
   submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse>;
   /** GET /api/jobs/{id} — section-7 job row. */
   getJob(tenantId: string, jobId: string): Promise<Record<string, unknown>>;
+  /** POST /api/platform/customize — R7 self-edit propose (gate-approved only).
+   * Branch-only: the server writes refs/heads/admin-customize/<id>, never a
+   * protected ref, and re-runs its own admission chain on this call. */
+  customizePropose(
+    tenantId: string,
+    title: string,
+    edits: Array<{ path: string; content?: string; delete?: boolean }>,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>>;
+  /** GET /api/platform/customize/{change_id} — tenant-scoped status view. */
+  customizeStatus(tenantId: string, changeId: string): Promise<Record<string, unknown>>;
+  /** POST /api/platform/customize/{change_id}/land — needs the exact commit sha
+   * (the lane's own fresh per-invocation ack, independent of the gate chip). */
+  customizeLand(
+    tenantId: string,
+    changeId: string,
+    commitSha: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>>;
 }
 
 // --------------------------------------------------------------------------- //

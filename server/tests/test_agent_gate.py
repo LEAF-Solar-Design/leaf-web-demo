@@ -102,16 +102,31 @@ def test_customize_platform_denied_without_platform_customize_capability():
     gate is what keeps every non-admin tier out."""
     caps = dict(FULL_CAPS)
     caps["platform_customize"] = False  # every shipped tier except `admin`
-    res = _gate("customize_platform", {"title": "x"}, caps=caps)
+    res = _gate("customize_platform", {"op": "propose", "title": "x"}, caps=caps)
     assert res["decision"] == "deny"
     assert "platform_customize" in res["reason"]
 
 
 def test_customize_platform_always_confirms_for_admin_caps():
-    res = _gate("customize_platform", {"title": "x"})
+    res = _gate("customize_platform", {"op": "propose", "title": "x"})
     assert res["decision"] == "awaiting_approval"
     assert res["policy"] == "always-confirm"
     assert res["confirmation_id"]
+
+
+def test_customize_platform_requires_op():
+    """The spine mount added a required `op` discriminator; an op-less call is
+    malformed and must deny at args validation, before any approval is minted."""
+    res = _gate("customize_platform", {"title": "x"})
+    assert res["decision"] == "deny"
+    assert res["reason"].startswith("invalid_args")
+
+
+def test_customize_platform_land_args_validate():
+    res = _gate("customize_platform",
+                {"op": "land", "change_id": "chg-1", "commit_sha": "a" * 40})
+    assert res["decision"] == "awaiting_approval"
+    assert res["policy"] == "always-confirm"
 
 
 def test_invalid_args_deny_names_gate():

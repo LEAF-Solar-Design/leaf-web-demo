@@ -105,6 +105,7 @@ interface ZodModule {
   z: {
     string(): Z;
     number(): Z;
+    boolean(): Z;
     unknown(): Z;
     enum(v: string[]): Z;
     record(inner: Z): Z;
@@ -162,6 +163,8 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Request or resume publication of a durable staged change. Args {change_set_id}. This does not grant approval and never accepts a receipt or confirmation.",
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
+  customize_platform:
+    "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land', ...}. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
 };
 
 export interface ConverseSdkRunnerOptions {
@@ -258,6 +261,22 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       },
       request_publication: { change_set_id: z.string() },
       request_confirmation: { kind: z.string(), payload: z.record(z.unknown()).optional() },
+      customize_platform: {
+        op: z.enum(["propose", "status", "land"]),
+        title: z.string().optional(),
+        edits: z
+          .array(
+            z.object({
+              path: z.string(),
+              content: z.string().optional(),
+              delete: z.boolean().optional(),
+            }),
+          )
+          .optional(),
+        change_id: z.string().optional(),
+        commit_sha: z.string().optional(),
+        confirmation_id: z.string().optional(),
+      },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>
       sdk.tool(name, TOOL_DESCRIPTIONS[name], schemas[name], async (args) =>

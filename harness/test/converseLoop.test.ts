@@ -924,6 +924,67 @@ describe("ConverseLoop — remaining spine tools", () => {
     }));
   });
 
+  it("customize_platform proposes through the app back-edge only after approval", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(
+      loop,
+      s,
+      'CUSTOMIZE:lightmode PARAMS:{"edits":[{"path":"console/App.jsx","content":"x"}]}',
+    );
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+    expect(appRun.customizeCalls).toHaveLength(0);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.customizeCalls).toEqual([
+      {
+        op: "propose",
+        tenantId: "demo-tenant",
+        title: "lightmode",
+        edits: [{ path: "console/App.jsx", content: "x" }],
+      },
+    ]);
+    expect(gate.checks).toContainEqual(
+      expect.objectContaining({
+        action: "customize_platform",
+        args: expect.objectContaining({ op: "propose", confirmation_id: cid }),
+        decision: "allow",
+      }),
+    );
+  });
+
+  it("customize_platform land takes its own fresh approval and names the exact commit", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const sha = "a".repeat(40);
+    await sendText(loop, s, `CUSTOMIZE_LAND:chg-1 PARAMS:{"commit_sha":"${sha}"}`);
+    const pending = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(pending, "confirmation_required")[0]!.data.confirmation_id);
+    expect(appRun.customizeCalls).toHaveLength(0);
+
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(appRun.customizeCalls).toEqual([
+      { op: "land", tenantId: "demo-tenant", changeId: "chg-1", commitSha: sha },
+    ]);
+  });
+
   it("request_publication sends only the durable change-set id", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

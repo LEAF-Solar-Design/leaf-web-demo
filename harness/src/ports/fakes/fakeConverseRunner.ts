@@ -15,6 +15,8 @@
  *   AUTHOR:<description>        -> author_tool {description, mode:"build"}
  *   PUBLISH:<change_set_id>     -> request_publication {change_set_id}
  *   CONFIRM_REQ:<kind>          -> request_confirmation {kind, payload:{}}
+ *   CUSTOMIZE:<title> [PARAMS:{edits:[...]}]      -> customize_platform {op:"propose", ...}
+ *   CUSTOMIZE_LAND:<change_id> [PARAMS:{commit_sha}] -> customize_platform {op:"land", ...}
  *   FORBIDDEN_TOOL              -> attempts a non-spine tool via canUseTool
  *   FAIL:<stop_reason>          -> terminal failure (quota/rate-limit drills)
  *   SLOW                        -> hold the turn open on `slowGate` (turn-lock tests)
@@ -89,7 +91,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
       }
     } else {
       const directive =
-        /(RUN|SEARCH|STATE|JOB|AUTHOR|AUTHOR_ONCE|PUBLISH|CONFIRM_REQ):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
+        /(RUN|SEARCH|STATE|JOB|AUTHOR|AUTHOR_ONCE|PUBLISH|CONFIRM_REQ|CUSTOMIZE|CUSTOMIZE_LAND):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
       if (tail.includes("FORBIDDEN_TOOL")) {
         const verdict = await input.canUseTool("mcp__other__shell", {});
         yield say(
@@ -112,6 +114,14 @@ export class FakeConverseRunner implements SpineConverseRunner {
           AUTHOR_ONCE: ["author_tool", { description: value, mode: "one_off" }],
           PUBLISH: ["request_publication", { change_set_id: value }],
           CONFIRM_REQ: ["request_confirmation", { kind: value, payload: {} }],
+          CUSTOMIZE: [
+            "customize_platform",
+            { op: "propose", title: value, ...params },
+          ],
+          CUSTOMIZE_LAND: [
+            "customize_platform",
+            { op: "land", change_id: value, ...params },
+          ],
         };
         const [toolName, args] = argsByKind[kind!]!;
         yield* this.invoke(input, toolName, args);

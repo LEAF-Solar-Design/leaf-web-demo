@@ -642,6 +642,39 @@ export class ConverseLoop {
           // id — the approvable path the executor's awaiting_approval branch
           // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
+        case "customize_platform": {
+          const op =
+            args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
+          if (op === "status") {
+            // A status read has no side effect; the read rung records it
+            // without proposing a chip.
+            return { action: "read_platform_state", args: { what: "customize_status" } };
+          }
+          const confirmation =
+            typeof args.confirmation_id === "string"
+              ? { confirmation_id: args.confirmation_id }
+              : {};
+          if (op === "land") {
+            return {
+              action: "customize_platform",
+              args: {
+                op: "land",
+                change_id: String(args.change_id ?? ""),
+                commit_sha: String(args.commit_sha ?? ""),
+                ...confirmation,
+              },
+            };
+          }
+          return {
+            action: "customize_platform",
+            args: {
+              op: "propose",
+              title: String(args.title ?? ""),
+              edits: sanitizeCustomizeEdits(args.edits),
+              ...confirmation,
+            },
+          };
+        }
       }
     };
 
@@ -1016,6 +1049,37 @@ export class ConverseLoop {
         return ok(JSON.stringify(publication));
       }
 
+      case "customize_platform": {
+        const op = args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
+        const authority = {
+          sessionId: ctx.authoritySessionId,
+          turnId: ctx.authorityTurnId,
+        };
+        if (op === "status") {
+          const changeId = String(args.change_id ?? "").trim();
+          if (!changeId) return err("customize_platform status requires args.change_id");
+          return ok(JSON.stringify(await appRun.customizeStatus(tenantId, changeId)));
+        }
+        if (op === "land") {
+          const changeId = String(args.change_id ?? "").trim();
+          const commitSha = String(args.commit_sha ?? "").trim();
+          if (!changeId || !commitSha) {
+            return err("customize_platform land requires args.change_id and args.commit_sha");
+          }
+          return ok(
+            JSON.stringify(await appRun.customizeLand(tenantId, changeId, commitSha, authority)),
+          );
+        }
+        const title = String(args.title ?? "").trim();
+        const edits = sanitizeCustomizeEdits(args.edits);
+        if (!title || edits.length === 0) {
+          return err("customize_platform propose requires args.title and a non-empty args.edits");
+        }
+        return ok(
+          JSON.stringify(await appRun.customizePropose(tenantId, title, edits, authority)),
+        );
+      }
+
       case "request_confirmation": {
         const kind = String(args.kind ?? "confirm");
         const confirmationId =
@@ -1171,7 +1235,29 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
+    case "customize_platform":
+      return `op=${String(args.op ?? "propose")}${args.confirmation_id ? " (confirmed)" : ""}`;
   }
+}
+
+/** Shape model-supplied edits to EXACTLY the catalog/API item shape. */
+function sanitizeCustomizeEdits(
+  raw: unknown,
+): Array<{ path: string; content?: string; delete?: boolean }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ path: string; content?: string; delete?: boolean }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const path = String(r.path ?? "").trim();
+    if (!path) continue;
+    out.push({
+      path,
+      ...(typeof r.content === "string" ? { content: r.content } : {}),
+      ...(r.delete === true ? { delete: true } : {}),
+    });
+  }
+  return out;
 }
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {

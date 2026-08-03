@@ -162,4 +162,47 @@ export class FakeAppRunClient implements AppRunClient {
     this.publicationCalls.push({ tenantId, changeSetId });
     return { change_set_id: changeSetId, status: "awaiting_approval" };
   }
+
+  /** R7 self-edit calls, recorded verbatim for assertions. */
+  customizeCalls: Array<{
+    op: "propose" | "status" | "land";
+    tenantId: string;
+    title?: string;
+    edits?: Array<{ path: string; content?: string; delete?: boolean }>;
+    changeId?: string;
+    commitSha?: string;
+  }> = [];
+
+  async customizePropose(
+    tenantId: string,
+    title: string,
+    edits: Array<{ path: string; content?: string; delete?: boolean }>,
+    _authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizePropose");
+    this.customizeCalls.push({ op: "propose", tenantId, title, edits });
+    return {
+      change_id: "chg-fake-1",
+      state: "Approved",
+      commit_sha: "f".repeat(40),
+      branch: "admin-customize/chg-fake-1",
+    };
+  }
+
+  async customizeStatus(tenantId: string, changeId: string): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizeStatus");
+    this.customizeCalls.push({ op: "status", tenantId, changeId });
+    return { change_id: changeId, state: "Approved", commit_sha: "f".repeat(40) };
+  }
+
+  async customizeLand(
+    tenantId: string,
+    changeId: string,
+    commitSha: string,
+    _authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizeLand");
+    this.customizeCalls.push({ op: "land", tenantId, changeId, commitSha });
+    return { change_id: changeId, state: "Landed", branch: `admin-customize/${changeId}` };
+  }
 }

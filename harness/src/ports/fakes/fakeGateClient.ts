@@ -40,6 +40,7 @@ const KNOWN_ACTIONS = new Set([
   "request_publication",
   "register_tool",
   "request_confirmation",
+  "customize_platform",
 ]);
 
 export interface RecordedGateCheck {
@@ -130,7 +131,8 @@ export class FakeGateClient implements GateClient {
       action === "run_read_tool" ||
       action === "run_write_tool" ||
       action === "submit_live_solve" ||
-      action === "author_tool"
+      action === "author_tool" ||
+      action === "customize_platform"
     ) {
       const target = String(args.tool ?? "");
       const targetDenial = this.denials.get(target);
@@ -139,7 +141,13 @@ export class FakeGateClient implements GateClient {
       }
       if (action !== "run_read_tool") {
         const rung =
-          action === "submit_live_solve" ? "R4" : action === "author_tool" ? "R5" : "R3";
+          action === "submit_live_solve"
+            ? "R4"
+            : action === "author_tool"
+              ? "R5"
+              : action === "customize_platform"
+                ? "R7"
+                : "R3";
         const cid = typeof args.confirmation_id === "string" ? args.confirmation_id : null;
         if (cid) {
           const denial = this.consume(cid, action, args, ctx);
