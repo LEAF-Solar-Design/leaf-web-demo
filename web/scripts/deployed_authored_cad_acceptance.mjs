@@ -844,8 +844,20 @@ async function runBrowserTenant(config, tenant, browser, execute) {
       const pollPath = `${config.apiUrl}/api/author/stages/${encodeURIComponent(acceptedId)}`
       const terminalStatuses = new Set(['staged', 'complete', 'completed', 'succeeded'])
       const failedStatuses = new Set(['failed', 'error'])
-      const stagedFrom = (body) => (body?.result?.receipt ? body.result
-        : (body?.staged?.receipt ? body.staged : (body?.receipt ? body : null)))
+      // EXACT mirror of web/src/api.js authorStageResult (all four cases, in
+      // order): the live server returns top-level `receipt` + `result: {tool}`
+      // (customization_service.py:765), which must graft to
+      // {...result, receipt} — returning the whole envelope loses `.tool` and
+      // the validator would reject every successful async stage.
+      const stagedFrom = (body) => {
+        if (body?.result?.receipt) return body.result
+        if (body?.receipt && body?.result && typeof body.result === 'object') {
+          return { ...body.result, receipt: body.receipt }
+        }
+        if (body?.staged?.receipt) return body.staged
+        if (body?.receipt) return body
+        return null
+      }
       const pollResponse = await page.waitForResponse(
         async (response) => {
           if (response.url() !== pollPath || response.request().method() !== 'GET') return false
