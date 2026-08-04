@@ -42,6 +42,12 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   const readSeqRef = useRef(0)
   const genRef = useRef(0)
   const sessionRef = useRef(sessionId)
+  // `enabled` is read through a ref, not the closure, because a decision that
+  // resolves AFTER the surface went to mock mode still runs its refresh — it
+  // captured a live-mode callback and takes the post-disable generation, so
+  // neither the generation nor the session fence stops it, and tenant styling
+  // lands on the mock surface (sol-critic PR #439 round 6).
+  const enabledRef = useRef(enabled)
   const inFlightGenRef = useRef(null)
   const againRef = useRef(false)
 
@@ -57,6 +63,7 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   }, [sessionId])
 
   const runRead = useCallback(async () => {
+    if (!enabledRef.current) return false
     // Bound to the session THIS closure reads, not to whatever generation is
     // current when it happens to run: a callback captured on session A (a
     // decide() started before a switch) would otherwise stamp itself with B's
@@ -68,6 +75,7 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     // fetchOverlay never throws: a theme read is not worth breaking the app,
     // and an empty result leaves the committed defaults exactly as they are.
     const next = await fetchOverlay(sessionId)
+    if (!enabledRef.current) return false               // disabled mid-flight
     if (sessionId !== sessionRef.current) return false  // switched mid-flight
     if (gen !== genRef.current) return false      // the session moved on
     if (seq !== readSeqRef.current) return false  // a newer read superseded us
@@ -105,6 +113,7 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   }, [runRead])
 
   useEffect(() => {
+    enabledRef.current = enabled
     if (!enabled) {
       // Disabling (live -> mock) must FENCE reads already in flight and drop
       // what is applied. The rewrite of this read path lost the original

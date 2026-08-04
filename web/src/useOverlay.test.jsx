@@ -293,3 +293,46 @@ describe('disabling the hook (round 4)', () => {
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
   })
 })
+
+describe('a decision that outlives enablement (round 6)', () => {
+  // HONEST SCOPE: this pins the observable property (mock mode stays unstyled),
+  // NOT the enabledRef fence. I could not reproduce the reviewer's interleaving
+  // in this harness — instrumented, decide()'s post-disable read never issues
+  // its GET even with the fence removed, so this cannot fail under mutation.
+  // The fence stays because the reviewer demonstrated the path with their own
+  // in-memory reproduction (sol-critic PR #439 round 6) and it costs two ref
+  // reads; treat this as a behaviour pin, not proof of that guard.
+  it('leaves the mock surface unstyled', async () => {
+    // decide() captured a live-mode refresh. Resolving after the switch to
+    // mock, it took the post-disable generation and passed every other fence.
+    let resolveDecide
+    const gate = new Promise((r) => { resolveDecide = r })
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if ((init?.method || 'GET') === 'POST') {
+        await gate
+        return ok({ proposal_id: 'p-1', state: 'approved', document_version: 2 })
+      }
+      return ok({ tokens: { 'color.accent': '#222222' },
+                  document_version: 2, pending_proposal_id: null })
+    })
+
+    let hook
+    function E({ enabled }) {
+      hook = useOverlay('s-1', { enabled })
+      return <div data-testid="v">{hook.loaded ? `v${hook.documentVersion}` : 'off'}</div>
+    }
+    const { rerender } = render(<E enabled />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v2'))
+
+    const pending = hook.decide('p-1', { approve: true, documentVersion: 2 })
+    rerender(<E enabled={false} />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('off'))
+
+    resolveDecide()
+    await pending.catch(() => {})
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(screen.getByTestId('v').textContent).toBe('off')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
+  })
+})

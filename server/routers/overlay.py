@@ -64,27 +64,18 @@ def _fail(code: str, message: str, status: int) -> JSONResponse:
 
 
 def _store():
-    """The platform store, imported by FILE PATH, not by name.
+    """The platform overlay store, through platform_link's package alias.
 
     `from platform import overlay_store` loses to the STDLIB platform module
-    whenever site-packages precedes the repo root on sys.path — which is
-    exactly the container layout, where it 500'd every request. Laziness only
-    moved the failure; it never dodged it. Loading the package from its known
-    location beside server/ cannot be shadowed by anything.
+    whenever site-packages precedes the repo root on sys.path — exactly the
+    container layout, where it 500'd every request (found by a live staging
+    chat turn, #440). Loading by FILE LOCATION is the fix, and platform_link
+    already does it under `leaf_platform`; going through it keeps ONE alias in
+    the process. Registering a second one here loaded the package twice — two
+    `db` modules and two connection pools (sol-critic PR #439 round 6).
     """
-    import sys
-    from pathlib import Path
-    if "leaf_platform_pkg" not in sys.modules:
-        import importlib.util
-        pkg_dir = Path(__file__).resolve().parents[2] / "platform"
-        spec = importlib.util.spec_from_file_location(
-            "leaf_platform_pkg", pkg_dir / "__init__.py",
-            submodule_search_locations=[str(pkg_dir)])
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["leaf_platform_pkg"] = mod
-        spec.loader.exec_module(mod)
-    import importlib
-    return importlib.import_module("leaf_platform_pkg.overlay_store")
+    import platform_link  # noqa: PLC0415
+    return platform_link.overlay_store()
 
 
 class ProposeBody(BaseModel):
