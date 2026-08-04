@@ -249,3 +249,47 @@ describe('a decision that outlives its session (round 3)', () => {
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#0b0b0b')
   })
 })
+
+describe('disabling the hook (round 4)', () => {
+  function D({ enabled }) {
+    const o = useOverlay('s-1', { enabled })
+    return <div data-testid="v">{o.loaded ? `v${o.documentVersion}` : 'off'}</div>
+  }
+
+  it('takes an APPLIED overlay off the screen when disabled', async () => {
+    // The clearing half: the overlay was already painted, and switching to
+    // mock mode must remove it rather than leave tenant styling behind.
+    globalThis.fetch = vi.fn(async () => ok(
+      { tokens: { 'color.accent': '#0c0c0c' },
+        document_version: 3, pending_proposal_id: null }))
+
+    const { rerender } = render(<D enabled />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v3'))
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#0c0c0c')
+
+    rerender(<D enabled={false} />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('off'))
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
+  })
+
+  it('fences a read still IN FLIGHT when disabled', async () => {
+    // The fencing half: a live-mode response landing after the switch would
+    // paint tenant styling onto the mock surface.
+    let resolveRead
+    const gate = new Promise((r) => { resolveRead = r })
+    globalThis.fetch = vi.fn(async () => {
+      await gate
+      return ok({ tokens: { 'color.accent': '#0d0d0d' },
+                  document_version: 4, pending_proposal_id: null })
+    })
+
+    const { rerender } = render(<D enabled />)
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
+    rerender(<D enabled={false} />)
+    resolveRead()
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(screen.getByTestId('v').textContent).toBe('off')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
+  })
+})

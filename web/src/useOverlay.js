@@ -105,9 +105,25 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   }, [runRead])
 
   useEffect(() => {
-    if (!enabled) return undefined
+    if (!enabled) {
+      // Disabling (live -> mock) must FENCE reads already in flight and drop
+      // what is applied. The rewrite of this read path lost the original
+      // `alive` cleanup, so a live-mode response could land after the switch
+      // and paint tenant styling onto the mock surface (sol-critic PR #439
+      // round 4). Bumping the generation is the fence; clearing state is what
+      // takes the overlay off the screen (the apply effect's cleanup runs on
+      // loaded going false).
+      genRef.current += 1
+      againRef.current = false
+      inFlightGenRef.current = null
+      setState(EMPTY)
+      setLoaded(false)
+      return undefined
+    }
     void refresh()
-    return undefined
+    // Unmount, or any change to this effect's inputs, invalidates whatever is
+    // in flight — the same fence by the same mechanism.
+    return () => { genRef.current += 1 }
   }, [enabled, refresh])
 
   // Applying is its own effect so a re-read swaps the overlay through the same
