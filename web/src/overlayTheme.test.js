@@ -102,6 +102,44 @@ describe('the token map is closed', () => {
   })
 })
 
+describe('the panel foreground is independently seeded', () => {
+  // The server validates color.panel.fg on its own, against PLATFORM_DEFAULTS.
+  // If the stylesheet left panel text to INHERIT --foreground, a proposal that
+  // recoloured only the canvas would clear the server's panel contrast pair
+  // (measured against its white default) while panels rendered the overlaid
+  // canvas text on the panel background — 1.19:1 against a 4.5:1 floor
+  // (sol-critic PR #439 round 8).
+  const css = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8')
+
+  it('seeds --panel-fg to the SAME value the server defaults it to', () => {
+    const registry = readFileSync(
+      resolve(process.cwd(), '../server/overlay_registry.py'), 'utf8')
+    const block = registry.slice(registry.indexOf('PLATFORM_DEFAULTS'),
+                                 registry.indexOf('def defaults('))
+    const serverPanelFg = /"color\.panel\.fg":\s*"(#[0-9a-fA-F]{6})"/.exec(block)
+    expect(serverPanelFg).not.toBeNull()
+    const seeded = /--panel-fg:\s*(#[0-9a-fA-F]{6})/.exec(css)
+    expect(seeded).not.toBeNull()
+    expect(seeded[1].toLowerCase()).toBe(serverPanelFg[1].toLowerCase())
+  })
+
+  it('never leaves panel text to inherit', () => {
+    // `var(--panel-fg, inherit)` was the original shape and is exactly the bug.
+    expect(css.includes('var(--panel-fg, inherit)')).toBe(false)
+  })
+
+  it('paints panel text wherever it paints the panel background', () => {
+    // A background rule without the matching colour rule is a domain gap: the
+    // fg token would govern less than the bg token, which is what let a valid
+    // pair render white-on-white.
+    const rules = css.split('}')
+    const gaps = rules.filter((rule) =>
+      /background:\s*var\(--card-grad\)|background:\s*var\(--card\)/.test(rule)
+      && !/color:\s*var\(--panel-fg\)/.test(rule))
+    expect(gaps).toEqual([])
+  })
+})
+
 describe('applying and undoing', () => {
   it('sets the properties on the root', () => {
     applyOverlay({ 'color.accent': '#101010' })
