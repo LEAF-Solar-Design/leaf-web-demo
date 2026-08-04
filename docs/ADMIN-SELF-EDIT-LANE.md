@@ -99,6 +99,21 @@ Pull-requests write only (never Contents), so the push credential and the
 PR credential revoke independently — emergency containment now names two
 tokens to revoke instead of one.
 
+**Review observation (issue #422 Phase 2):** on status reads of a landed,
+PR-carrying record, the platform OBSERVES the standing gate — the
+`sol-critic-review` commit status at the PR's current head (the fleet
+reviewer posts every round's verdict since 2026-08-04: pending on dispatch,
+success on PASS, failure on RED, error on no-verdict) — and caches it on the
+record as `review: {state, pr_state, head_sha, description}` (60s cache;
+observation stops once the PR is merged or closed). Read-only by contract:
+the platform never runs, simulates, or gates anything on the review. A fix
+round pushed to the PR moves the head, and the observation honestly reports
+that new head as unreviewed until its own round posts. Requires the same PAT
+to ALSO carry **Commit statuses: read** — edit the existing fine-grained
+token's permissions in place (the token value is unchanged, so no secret
+rotation); until then `review.state` reads `unknown`, which is the honest
+degraded mode, never an error.
+
 ## Co-sign on fundamental paths
 
 Changes touching **auth, billing, or the agent spine** (manifest:
@@ -151,10 +166,12 @@ Enable (per admin account, staging first):
    credential helper — URLs carrying userinfo are refused) and
    `LEAF_PLATFORM_CUSTOMIZE_STATE_DIR` on durable storage.
    `LEAF_CUSTOMIZATION_APPROVAL_SECRET` is already deployed in both envs.
-   Optional PR auto-open (#422 Phase 1): `LEAF_PLATFORM_PR_OPEN=1`,
-   `LEAF_PLATFORM_PR_REPO=<owner/repo>`, `LEAF_PLATFORM_PR_TOKEN=<fine-grained
-   PAT, Pull-requests write ONLY — a separate token from the Contents push
-   PAT, so each revokes independently>`.
+   Optional PR auto-open + review observation (#422 Phases 1-2):
+   `LEAF_PLATFORM_PR_OPEN=1`, `LEAF_PLATFORM_PR_REPO=<owner/repo>`,
+   `LEAF_PLATFORM_PR_TOKEN=<fine-grained PAT with exactly two permissions:
+   Pull-requests read+write AND Commit-statuses read — never Contents; it
+   stays a separate token from the Contents push PAT so each revokes
+   independently>`.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
    404 `platform_customize_disabled`.

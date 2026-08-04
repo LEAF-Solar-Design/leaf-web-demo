@@ -14,33 +14,120 @@
       "required_capability": "converse",
       "policy": "always-confirm",
       "tenant_tightenable": false,
-      "dispatch": {"kind": "app_api", "routes": []},
-      "args_schema": {"type": "object", "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}, "confirmation_id": {"type": "string"}}, "required": ["kind"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": []
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "low",
       "timeout_s": 30,
-      "audit_extra": ["kind"]
+      "audit_extra": [
+        "kind"
+      ]
     },
     "read_platform_state": {
       "description": "Read platform state: catalog, usage, jobs, versions, own audit (R1).",
       "rung": 1,
       "required_capability": "converse",
       "policy": "auto",
-      "dispatch": {"kind": "app_api", "routes": ["GET /api/capabilities", "GET /api/usage", "GET /api/jobs", "GET /api/drawings/*", "GET /api/agent/audit"]},
-      "args_schema": {"type": "object", "properties": {"what": {"type": "string"}}, "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "GET /api/capabilities",
+          "GET /api/usage",
+          "GET /api/jobs",
+          "GET /api/drawings/*",
+          "GET /api/agent/audit"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "what": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "rate_limit_category": "low",
       "timeout_s": 30,
-      "audit_extra": ["what"]
+      "audit_extra": [
+        "what"
+      ]
     },
     "run_read_tool": {
       "description": "Dispatch a registered drawing.read tool via POST /api/run (R2).",
       "rung": 2,
       "required_capability": "run_read",
       "policy": "auto",
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
-      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "catalog_digest": {"type": "string"}, "drawing_version": {"type": "integer"}, "expected_drawing_head": {"type": "integer"}, "catalog_commit": {"type": "string"}, "effective_catalog_digest": {"type": "string"}, "tool_manifest_sha256": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/run"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "dwg": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "drawing_version": {
+            "type": "integer"
+          },
+          "expected_drawing_head": {
+            "type": "integer"
+          },
+          "catalog_commit": {
+            "type": "string"
+          },
+          "effective_catalog_digest": {
+            "type": "string"
+          },
+          "tool_manifest_sha256": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "medium",
       "timeout_s": 60,
-      "audit_extra": ["tool", "dwg"]
+      "audit_extra": [
+        "tool",
+        "dwg"
+      ]
     },
     "run_write_tool": {
       "description": "Dispatch a registered drawing.write tool via POST /api/run (R3; creates vN+1, undoable). Every execution requires a fresh approval.",
@@ -48,11 +135,57 @@
       "required_capability": "run_write",
       "policy": "always-confirm",
       "tenant_tightenable": false,
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
-      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "catalog_digest": {"type": "string"}, "drawing_version": {"type": "integer"}, "expected_drawing_head": {"type": "integer"}, "catalog_commit": {"type": "string"}, "effective_catalog_digest": {"type": "string"}, "tool_manifest_sha256": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/run"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "dwg": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "drawing_version": {
+            "type": "integer"
+          },
+          "expected_drawing_head": {
+            "type": "integer"
+          },
+          "catalog_commit": {
+            "type": "string"
+          },
+          "effective_catalog_digest": {
+            "type": "string"
+          },
+          "tool_manifest_sha256": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "medium",
       "timeout_s": 120,
-      "audit_extra": ["tool", "dwg"],
+      "audit_extra": [
+        "tool",
+        "dwg"
+      ],
       "cost_class": "write"
     },
     "submit_live_solve": {
@@ -60,11 +193,57 @@
       "rung": 4,
       "required_capability": "run_write",
       "policy": "confirm-once",
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
-      "args_schema": {"type": "object", "properties": {"tool": {"type": "string"}, "params": {"type": "object"}, "dwg": {"type": "string"}, "catalog_digest": {"type": "string"}, "drawing_version": {"type": "integer"}, "expected_drawing_head": {"type": "integer"}, "catalog_commit": {"type": "string"}, "effective_catalog_digest": {"type": "string"}, "tool_manifest_sha256": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["tool"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/run"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "dwg": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "drawing_version": {
+            "type": "integer"
+          },
+          "expected_drawing_head": {
+            "type": "integer"
+          },
+          "catalog_commit": {
+            "type": "string"
+          },
+          "effective_catalog_digest": {
+            "type": "string"
+          },
+          "tool_manifest_sha256": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "high",
       "timeout_s": 600,
-      "audit_extra": ["tool", "dwg"],
+      "audit_extra": [
+        "tool",
+        "dwg"
+      ],
       "cost_class": "aps_usd"
     },
     "undo_drawing_version": {
@@ -73,19 +252,65 @@
       "required_capability": "run_write",
       "policy": "auto",
       "enabled": false,
-      "dispatch": {"kind": "app_api", "routes": []},
-      "args_schema": {"type": "object", "properties": {"dwg": {"type": "string"}, "to_version": {"type": "integer"}}, "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": []
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "dwg": {
+            "type": "string"
+          },
+          "to_version": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
       "rate_limit_category": "medium",
       "timeout_s": 30,
-      "audit_extra": ["dwg", "to_version"]
+      "audit_extra": [
+        "dwg",
+        "to_version"
+      ]
     },
     "author_tool": {
       "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6).",
       "rung": 5,
       "required_capability": "build",
       "policy": "confirm-once",
-      "dispatch": {"kind": "harness", "routes": ["POST /author"]},
-      "args_schema": {"type": "object", "properties": {"description": {"type": "string"}, "mode": {"type": "string", "enum": ["build", "one_off"]}, "target_tool_name": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["description"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "harness",
+        "routes": [
+          "POST /author"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "build",
+              "one_off"
+            ]
+          },
+          "target_tool_name": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "description"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "high",
       "timeout_s": 600,
       "audit_extra": []
@@ -96,11 +321,29 @@
       "required_capability": "deploy",
       "policy": "auto",
       "tenant_tightenable": false,
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/author/publication-requests"]},
-      "args_schema": {"type": "object", "properties": {"change_set_id": {"type": "string"}}, "required": ["change_set_id"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/author/publication-requests"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "change_set_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "change_set_id"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "high",
       "timeout_s": 120,
-      "audit_extra": ["change_set_id"]
+      "audit_extra": [
+        "change_set_id"
+      ]
     },
     "register_tool": {
       "description": "Register/deploy an authored tool into the runnable catalog (R6; highest-leverage injection target).",
@@ -108,11 +351,53 @@
       "required_capability": "deploy",
       "policy": "always-confirm",
       "tenant_tightenable": false,
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/author/register"]},
-      "args_schema": {"type": "object", "properties": {"change_set_id": {"type": "string"}, "staged_commit": {"type": "string"}, "catalog_digest": {"type": "string"}, "platform_release": {"type": "string"}, "workspace_contract_digest": {"type": "string"}, "confirmation_id": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["change_set_id", "staged_commit", "catalog_digest", "platform_release", "workspace_contract_digest", "idempotency_key"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/author/register"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "change_set_id": {
+            "type": "string"
+          },
+          "staged_commit": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "platform_release": {
+            "type": "string"
+          },
+          "workspace_contract_digest": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "change_set_id",
+          "staged_commit",
+          "catalog_digest",
+          "platform_release",
+          "workspace_contract_digest",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "high",
       "timeout_s": 120,
-      "audit_extra": ["change_set_id", "catalog_digest"]
+      "audit_extra": [
+        "change_set_id",
+        "catalog_digest"
+      ]
     },
     "customize_platform": {
       "description": "Platform self-edit (R7, W14 admin lane): propose a BRANCH-ONLY change to the platform repo itself, then land it into the standing branch->PR->review->merge->staging-canary->prod pipeline. Reachable only by the operator-granted `admin` tier (the sole platform_customize grant), only when LEAF_CUSTOMIZATION_R7_MODE=internal lists the tenant, and every invocation takes a fresh approval. Fundamental paths (auth, billing, agent spine) additionally require the out-of-band co-sign secret before landing (docs/ADMIN-SELF-EDIT-LANE.md).",
@@ -120,11 +405,107 @@
       "required_capability": "platform_customize",
       "policy": "always-confirm",
       "tenant_tightenable": false,
-      "dispatch": {"kind": "app_api", "routes": ["POST /api/platform/customize", "GET /api/platform/customize/*", "POST /api/platform/customize/*/land"]},
-      "args_schema": {"type": "object", "properties": {"op": {"type": "string", "enum": ["propose", "land"]}, "title": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "delete": {"type": "boolean"}}, "required": ["path"], "additionalProperties": false}}, "change_id": {"type": "string"}, "commit_sha": {"type": "string"}, "confirmation_id": {"type": "string"}}, "required": ["op"], "additionalProperties": false},
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/platform/customize",
+          "GET /api/platform/customize/*",
+          "POST /api/platform/customize/*/land"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "propose",
+              "land"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "delete": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "change_id": {
+            "type": "string"
+          },
+          "commit_sha": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "additionalProperties": false
+      },
       "rate_limit_category": "high",
       "timeout_s": 600,
-      "audit_extra": ["title", "change_id"]
+      "audit_extra": [
+        "title",
+        "change_id"
+      ]
+    },
+    "propose_overlay": {
+      "description": "T1 runtime overlay: open a PENDING colour/copy preview for THIS session (server/overlay_propose.py). Writes one session-scoped row, changes nothing another user can see, and expires by lease. Deliberately `auto`: the proposal is the cheap half, and the irreversible half is the operator tap that applies it to the tenant, which carries its own CAS witness and audit row. Requiring a confirmation here would buy nothing and cost the immediacy the tier exists for.",
+      "rung": 2,
+      "required_capability": "converse",
+      "policy": "auto",
+      "tenant_tightenable": true,
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/overlay/proposals"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "object",
+            "description": "token id -> requested value, e.g. {\"color.canvas.bg\": \"#ffffff\"}. Validated against the closed registry; unknown ids are refused.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_text": {
+            "type": "string",
+            "description": "the user's own words, echoed on the operator card"
+          }
+        },
+        "required": [
+          "tokens"
+        ],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "medium",
+      "timeout_s": 20,
+      "audit_extra": [
+        "request_text"
+      ]
     }
   },
   "tier_overrides": {}

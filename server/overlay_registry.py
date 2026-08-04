@@ -113,6 +113,35 @@ CONTRAST_PAIRS: Tuple[Tuple[str, str], ...] = (
 #: WCAG AA for normal text. Below this, a warning can be hidden in plain sight.
 MIN_CONTRAST = 4.5
 
+#: The committed platform defaults, matching the shipped dark-emerald theme.
+#:
+#: These live here rather than being read from CSS because `validate_overlay`
+#: REQUIRES a concrete value for the side of a contrast pair a proposal does
+#: not touch. Without them, a change that darkens only the foreground has
+#: nothing to be checked against and the composed contrast rule silently does
+#: nothing, which is the failure the rule exists to prevent.
+#:
+#: They are the fallback, not the source of truth for rendering: the web app
+#: still ships its own CSS defaults, and an overlay only ever OVERRIDES them.
+#: If the two drift the contrast check is computed against a slightly stale
+#: baseline, which is a warning that is too strict or too lax by a little, not
+#: a wrong colour on screen.
+PLATFORM_DEFAULTS: Dict[str, str] = {
+    "color.canvas.bg": "#0b1210",
+    "color.canvas.fg": "#e8f2ee",
+    "color.panel.bg": "#111c19",
+    "color.panel.fg": "#dfeae6",
+    "color.accent": "#1f7a5a",
+    "color.accent.fg": "#ffffff",
+    "color.border": "#22322d",
+}
+
+
+def defaults() -> Dict[str, str]:
+    """A copy of the committed defaults, so a caller cannot mutate the module
+    constant and change what every later contrast check is measured against."""
+    return dict(PLATFORM_DEFAULTS)
+
 
 # --------------------------------------------------------------------------- #
 # Colour grammar — full-input parse, one canonical output

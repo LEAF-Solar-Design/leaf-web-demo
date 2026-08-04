@@ -304,6 +304,11 @@ export default function ConversePanel({
       // to turnOf() would mint an empty synthetic turn per event (an `_N` key)
       // and render a blank bubble. They are transcript-only records.
       if (type === 'turn_queued' || type === 'turn_queue_dropped') continue
+      // T1 overlay lifecycle events likewise carry NO turn_id and are not
+      // chat content — useOverlay owns them. Falling through would mint the
+      // same blank synthetic bubble the queue events used to.
+      if (type === 'overlay_proposed' || type === 'overlay_decided'
+          || type === 'overlay_revoked') continue
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
           t.started = true
