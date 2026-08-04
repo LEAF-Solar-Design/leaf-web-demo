@@ -272,19 +272,21 @@ export default function App() {
   // index so exit can say where; setTourStep stamps `tour_step` onto every
   // organic event while the tour is active (design: tour beats ride the REAL
   // handlers, so organic events carry the step instead of tour.* duplicates).
+  // The started emit requires the tour to actually RENDER (mock && tourOn:
+  // a ?demo=tour deep link in live mode shows no tour and counts nothing,
+  // review #428 round-1 blocker 3); step 0 is emitted as reached so per-step
+  // dropout starts at the first step.
   const tourStepRef = useRef(0)
   const tourStartedRef = useRef(false)
   useEffect(() => {
-    if (tourOn && !tourStartedRef.current) {
-      // Only the deep-link entry can be true at mount; the button entry emits
-      // in its own onClick below.
+    if (tourOn && mock && !tourStartedRef.current) {
       tourStartedRef.current = true
       tourStepRef.current = 0
       setTourStep(TOUR_STEPS[0]?.id)
       track('tour.started', { entry: 'deeplink' })
+      track('tour.step_reached', { step_id: TOUR_STEPS[0]?.id })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [tourOn, mock])
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
   const { converse } = useWorkspaceControllers()
@@ -1135,10 +1137,14 @@ export default function App() {
 
   const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
   const tourDispatchRef = useRef(false) // P2: true only while a tour beat's dispatch is in flight
-  // P2: render-mirrored snapshot for the Esc-interrupt emit (refs, not effect
-  // deps — elapsed ticks every 200ms).
+  // P2: committed snapshot for the Esc-interrupt emit. Assigned in an effect
+  // (post-commit), not during render, so an abandoned concurrent render can
+  // never tear a wrong tool/elapsed pair into the handler; kept out of the
+  // Esc listener's deps because elapsed ticks every 200ms.
   const interruptSnapshotRef = useRef({ tool: null, elapsedMs: null })
-  interruptSnapshotRef.current = { tool: selectedTool?.name || null, elapsedMs: runElapsedMs }
+  useEffect(() => {
+    interruptSnapshotRef.current = { tool: selectedTool?.name || null, elapsedMs: runElapsedMs }
+  })
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -1379,7 +1385,7 @@ export default function App() {
       toolSnapshot = createCatalogToolSnapshot(currentTool)
     } catch {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
-      dismissRoute()
+      dismissRoute({ outcome: 'invalidated' })
       setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
       return
     }
@@ -1393,7 +1399,7 @@ export default function App() {
     })
     runIntentStateRef.current = confirmed.state
     if (!confirmed.ok) {
-      dismissRoute()
+      dismissRoute({ outcome: 'invalidated' })
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
       return
     }
@@ -1705,7 +1711,8 @@ export default function App() {
     setTourLanded(false)
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    dismissRoute()
+    // A leftover route at a tour beat's start was superseded, not user-dismissed.
+    dismissRoute({ outcome: 'invalidated' })
     for (let i = 1; i <= text.length; i += 1) {
       if (cannedSeq.current !== seq) return
       onPromptChange(text.slice(0, i))
@@ -2266,6 +2273,7 @@ export default function App() {
               tourStepRef.current = 0
               setTourStep(TOUR_STEPS[0]?.id)
               track('tour.started', { entry: 'button' })
+              track('tour.step_reached', { step_id: TOUR_STEPS[0]?.id })
               setTourLanded(true); setTourOn(true)
             }}
           >

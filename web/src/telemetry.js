@@ -151,6 +151,13 @@ export function track(name, props = {}, eventType = 'custom_event') {
   } catch { /* telemetry never breaks the product */ }
 }
 
+/** Immediate flush for events that must land before an imminent navigation
+ * (the post-auth reload): post() uses keepalive fetch WITH identity headers,
+ * which survives the unload where the pagehide beacon cannot carry auth. */
+export function flushNow() {
+  try { flush() } catch { /* telemetry never breaks the product */ }
+}
+
 /** Auto-capture for user-visible errors at the two transport seams
  * (api.js http(), converse.js tagged()); capped per session. */
 export function trackErrorShown(props = {}) {

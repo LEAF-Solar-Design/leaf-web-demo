@@ -13,7 +13,7 @@
 // (the calm demo gate). Proven end-to-end against the already-allowed
 // http://localhost:8080 callback.
 
-import { track } from './telemetry.js'
+import { track, flushNow } from './telemetry.js'
 
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
@@ -25,12 +25,21 @@ const AUTH_SEEN_KEY = 'leaf.auth.completed_before'
 // P2 wave C-2: both outcomes of the redirect callback. The failure branch was
 // invisible before (silently swallowed into the signed-out gate); this makes
 // it a countable activation-funnel loss. first_time is a browser-local guess
-// (this browser has never completed sign-in), honest to its label. The page
-// often reloads right after; the tracker's pagehide beacon carries the event.
+// (this browser has never completed sign-in), honest to its label.
+// Delivery (review #428 round-1 blocker 1): the page reloads right after and
+// the pagehide beacon carries no auth header, so this flushes IMMEDIATELY via
+// keepalive fetch (success: the just-stored bearer rides along) and the event
+// is pre-auth allowlisted at the ingest door (failure has no bearer at all).
+// Once per page load: a dev StrictMode double-invoke must not double-count
+// (the second SDK callback fails on the consumed code).
+let authCompletedEmitted = false
 function trackAuthCompleted(ok) {
+  if (authCompletedEmitted) return
+  authCompletedEmitted = true
   let firstTime = true
   try { firstTime = !localStorage.getItem(AUTH_SEEN_KEY) } catch { /* unknown stays true-ish; acceptable */ }
   track('auth.completed', { ok, first_time: firstTime })
+  flushNow()
   if (ok) {
     try { localStorage.setItem(AUTH_SEEN_KEY, '1') } catch { /* storage unavailable */ }
   }

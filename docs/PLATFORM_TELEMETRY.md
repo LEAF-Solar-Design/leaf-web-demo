@@ -135,7 +135,7 @@ C-2 (this change):
 | Event | Choke point | Labels |
 |---|---|---|
 | `gate.choice` | SignedOutGate's two buttons (pre-auth allowlisted) | choice (demo/sign_in) |
-| `auth.completed` | `auth.handleRedirectCallback`, BOTH branches (the failure branch was invisible before); pagehide beacon survives the post-auth reload | ok, first_time (browser-local: this browser never completed sign-in) |
+| `auth.completed` | `auth.handleRedirectCallback`, BOTH branches (the failure branch was invisible before); flushed immediately via keepalive fetch ahead of the post-auth reload, and pre-auth allowlisted because the failure branch never has a bearer | ok, first_time (browser-local: this browser never completed sign-in) |
 | `route.outcome` | the controller's own route-clearing transitions (no caller can double-count): run started (accepted/invalidated by tool match), typed over (invalidated), explicit dismiss, alternative picked | outcome (accepted/alternative_picked/dismissed/invalidated), tool |
 | `run.confirmed` | `App.onConfirmCatalogRun`, the one armed-intent-to-run path | tool, source + ms_since_shown (from the confirm_shown record; omitted, never guessed, if it names another tool) |
 | `run.wall_hit` | `api.runToolAsync` at the exact branches the UI classifies (403 entitlement, 429 daily quota, quota_exceeded pass-through = 402 spend cap) | wall_kind (entitlement/daily_quota/spend_cap), tool, tier when present |
@@ -147,9 +147,10 @@ C-2 (this change):
 | `degraded.shown` | DegradedBanner mount | source (workspace/toolcast), never the free-text reason |
 | `drawing.version_navigated` | undo/redo success, History open, preview click | action (undo/redo/history/preview) |
 
-Only the pre-auth trio (`gate.choice`, `site.demo_viewed`, `tour.started`)
-is accepted anonymously at the ingest door; every other client event
-identifies like any API call (stub tenant off-auth, verified identity on).
+Only the pre-auth allowlist (`gate.choice`, `site.demo_viewed`,
+`tour.started`, `auth.completed`) is accepted anonymously at the ingest
+door; every other client event identifies like any API call (stub tenant
+off-auth, verified identity on).
 Labels are additive within schema_version 1, so early rows stay queryable.
 Fields named by the design but not yet stamped (e.g. `user_email`,
 `aps_live`, `wrote_version`) arrive additively with later waves.

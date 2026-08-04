@@ -41,6 +41,7 @@ import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
+import { track, setTourStep } from '../telemetry.js'
 import useJobController from '../controllers/useJobController.js'
 import useAuthorStageController from '../controllers/useAuthorStageController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
@@ -306,8 +307,21 @@ export default function ToolCast({
     setPhase(drawingEvent.event === 'undo' ? 'undone' : 'complete')
   }, [drawingEvent])
 
+  // P2 wave C-2: the /try?demo=tour walkthrough is its OWN tour surface
+  // (review #428 round-1 blocker 3) and reports the same tour funnel as the
+  // app tour: started once per activation, step 0 as reached, tour_step
+  // context on every organic event while active.
+  const tourStartedRef = useRef(false)
   useEffect(() => {
-    if (LIVE_TOUR_REQUESTED && platformSession.status === 'active') setTourOn(true)
+    if (LIVE_TOUR_REQUESTED && platformSession.status === 'active') {
+      if (!tourStartedRef.current) {
+        tourStartedRef.current = true
+        setTourStep(UNIFIED_TOUR_STEPS[0]?.id)
+        track('tour.started', { entry: 'deeplink' })
+        track('tour.step_reached', { step_id: UNIFIED_TOUR_STEPS[0]?.id })
+      }
+      setTourOn(true)
+    }
   }, [platformSession.status])
 
   useEffect(() => {
@@ -1000,6 +1014,8 @@ export default function ToolCast({
   const moveTour = useCallback((next) => {
     setTourIndex(next)
     const step = UNIFIED_TOUR_STEPS[next]
+    setTourStep(step?.id)
+    track('tour.step_reached', { step_id: step?.id })
     if (step?.id === 'approval') setLeftView('operator')
     if (step?.id === 'versions') {
       setRightView('versions')
@@ -1012,9 +1028,14 @@ export default function ToolCast({
   }, [drawing.actions, platform.actions])
 
   const exitTour = useCallback(() => {
+    track('tour.exited', {
+      at_step: UNIFIED_TOUR_STEPS[tourIndex]?.id,
+      completed: tourIndex >= UNIFIED_TOUR_STEPS.length - 1,
+    })
+    setTourStep(null)
     tourSeqRef.current += 1
     setTourOn(false)
-  }, [])
+  }, [tourIndex])
 
   const undo = useCallback(async () => {
     if (!sessionReady || busy || jobRunning || !canUndo) return
@@ -1069,7 +1090,16 @@ export default function ToolCast({
         )}
         <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
         {LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour(window.location.search) && (
-          <button type="button" className="tc-back" onClick={() => { setTourIndex(0); setTourOn(true) }}>Restart walk</button>
+          <button
+            type="button"
+            className="tc-back"
+            onClick={() => {
+              setTourStep(UNIFIED_TOUR_STEPS[0]?.id)
+              track('tour.started', { entry: 'button' })
+              track('tour.step_reached', { step_id: UNIFIED_TOUR_STEPS[0]?.id })
+              setTourIndex(0); setTourOn(true)
+            }}
+          >Restart walk</button>
         )}
         <span className="key">Esc</span>
       </div>
