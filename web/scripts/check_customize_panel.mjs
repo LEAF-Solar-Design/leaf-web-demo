@@ -16,6 +16,16 @@ function assert(ok, message) {
 assert(api.includes("'/api/platform/customize'"), 'self-edit client must use the canonical propose route')
 assert(api.includes('/api/platform/customize/${'), 'self-edit client must use the status/land routes by change id')
 
+// Every POSTing client must declare JSON: fetch defaults a string body to
+// text/plain and FastAPI rejects it before the route runs (sol-critic PR #437
+// round 1, finding 2 — the merge call shipped without the header).
+for (const fn of ['proposePlatformChange', 'landPlatformChange', 'mergePlatformChange']) {
+  const start = api.indexOf(`export async function ${fn}`)
+  assert(start !== -1, `${fn} must exist`)
+  const bodyEnd = api.indexOf('}\n', api.indexOf('body:', start))
+  assert(api.slice(start, bodyEnd).includes("'Content-Type': 'application/json'"), `${fn} must send Content-Type: application/json`)
+}
+
 // The co-sign approval authority must NEVER enter the browser: no client for
 // the secret-authenticated internal routes, no approval-secret header, in ANY
 // web source file (not just the two we know about today).
@@ -62,9 +72,17 @@ for (const file of await walk(srcDir)) {
 // Landing ack: the exact recorded commit, never a re-read of the mutable ref.
 assert(panel.includes('landPlatformChange(record.change_id, record.commit_sha)'), 'land must acknowledge the recorded commit sha')
 
+// Merge ack (#422 Phase 3): same exact-commit discipline as land, and the
+// button may only be OFFERED on a passed review with the PR still open —
+// the server re-verifies, but the drawer must not invite a doomed approval.
+assert(panel.includes('mergePlatformChange(record.change_id, record.commit_sha)'), 'merge must acknowledge the recorded commit sha')
+assert(panel.includes("record.review?.state === 'passed' && record.review?.pr_state === 'open'"), 'the merge affordance must be gated on a passed review and an open PR')
+assert((panel.match(/mergePlatformChange\(/g) || []).length === 1, 'exactly one merge call site')
+
 // Calm-copy pins for the hold and handoff states.
 assert(panel.includes('Awaiting co-sign'), 'awaiting_cosign must render as a calm hold')
 assert(panel.includes('co-sign authority never enters the browser'), 'the drawer must state the co-sign boundary')
-assert(panel.includes('nothing merges or deploys from here'), 'the drawer must state the branch-only boundary')
+assert(panel.includes('merging needs your fresh approval of the exact commit'), 'the drawer must state the merge-approval boundary')
+assert(panel.includes('nothing deploys from here'), 'the drawer must state the no-deploy boundary')
 
 console.log('customize panel web checks passed')
