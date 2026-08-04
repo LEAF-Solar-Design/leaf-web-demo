@@ -171,6 +171,13 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
     lived in and require it to raise. That cannot be an incomplete description
     of the environment, because it is not a description — it is the condition.
     """
+    # Import the module under test FIRST. Importing it can itself mutate import
+    # state, so probing before this would leave a window in which the probe
+    # raises, the router import registers sys.modules["platform.overlay_store"]
+    # or attaches the attribute, and the pre-fix _store() then succeeds anyway.
+    # Probe immediately before the call so check and use see the same state.
+    from routers import overlay as overlay_router
+
     try:
         from platform import overlay_store as _pre_fix_import  # noqa: F401
     except ImportError:
@@ -182,8 +189,6 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
             "the pre-fix implementation would pass this test and the test "
             "cannot observe the defect it guards. Run from server/ with a "
             "sys.modules that has no 'platform' package entry.")
-
-    from routers import overlay as overlay_router
 
     store = overlay_router._store()
     # Origin, not truthiness: a module that resolved to the wrong package would
