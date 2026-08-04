@@ -1,5 +1,6 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+import { track } from './telemetry.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -1095,6 +1096,8 @@ export default function App() {
     return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
   }, [selectedHandle])
 
+  const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
+  const tourDispatchRef = useRef(false) // P2: true only while a tour beat's dispatch is in flight
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -1139,16 +1142,35 @@ export default function App() {
       params: staged.intent.params,
       runIntent: staged.intent,
     }
+    // P2: confirm-to-run conversion top. `source` comes from the decision's
+    // own construction site (catalog/tour stamp source; slash decisions
+    // carry slash:true; the NL route is 'prompt'). A tour beat's FIRST arm
+    // comes through the dispatch route, which knows nothing of the tour, so
+    // the in-flight flag reattributes it; the tour's catalog re-arm is then
+    // the de-duped duplicate (review #427 round-2 warn 5 + round-3 warn 1).
+    const emitKey = `${catalogTool.name}`
+    const nowTs = Date.now()
+    const last = confirmEmitRef.current
+    if (!(last && last.key === emitKey && nowTs - last.ts < 2000)) {
+      confirmEmitRef.current = { key: emitKey, ts: nowTs }
+      track('run.confirm_shown', {
+        tool: catalogTool.name,
+        is_write: isWrite,
+        source: decision.source
+          || (tourDispatchRef.current ? 'tour' : decision.slash ? 'slash' : 'prompt'),
+      })
+    }
     return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
-  const onRequestCatalogRun = useCallback((tool, params, rationale = null) => {
+  const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
     if (!tool) return
     return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
       rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
+      source, // P2: run.confirm_shown attribution (catalog by default, tour from the tour beat)
     })
   }, [commitCatalogDecision])
 
@@ -1630,13 +1652,21 @@ export default function App() {
     if (cannedSeq.current !== seq) return
     let r = null
     try {
-      r = await onDispatch(text)
+      // The dispatch route arms the decision itself; the flag makes that arm
+      // (the one that actually emits) say 'tour' instead of 'prompt'.
+      tourDispatchRef.current = true
+      try {
+        r = await onDispatch(text)
+      } finally {
+        tourDispatchRef.current = false
+      }
       if (cannedSeq.current !== seq) return
       if (r && r.lane === 'run' && step?.action === 'run') {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
         if (toolObj && !isWrite) {
-          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.')
+          onRequestCatalogRun(toolObj, r.params || {},
+            'Guided tour selection. Confirm before it runs.', 'tour')
         }
       }
     } finally {

@@ -94,5 +94,9 @@ export function alternativeDecision(previous, name) {
     alternatives: (previous?.alternatives || []).filter((item) => item.tool !== name),
     stub: previous?.stub,
     stubReason: previous?.stubReason,
+    // Provenance survives the pick: an alternative from a slash route is
+    // still slash-originated (P2 run.confirm_shown attribution).
+    slash: previous?.slash,
+    source: previous?.source,
   }
 }

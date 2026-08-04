@@ -5,6 +5,7 @@ import {
   runnableCatalogTools,
   slashDecision,
 } from './catalogRouting.js'
+import { track } from '../../telemetry.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
 
@@ -141,6 +142,15 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const dispatch = async (override) => {
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    // P2 funnel top: THE active dispatch path (the legacy App.jsx inline
+    // handler is disabled). text_len only, never text. slash vs typed only:
+    // a string override is NOT a reliable canned signal (ToolCast passes
+    // typed text as a string); tour attribution arrives with wave C-2's
+    // tour_step envelope property.
+    track('prompt.submitted', {
+      input_kind: text.startsWith('/') ? 'slash' : 'typed',
+      text_len: text.length,
+    })
     adapters.dismissDecision?.()
 
     const slash = slashDecision(text, state.tools)

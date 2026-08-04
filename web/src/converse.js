@@ -10,6 +10,7 @@
 // entirely in VITE_MOCK; see App.jsx onDispatch).
 
 import { config, authHeaders, noteUnauthorized } from './api.js'
+import { trackErrorShown, trackStreamDown } from './telemetry.js'
 
 const API_BASE = config.apiBase
 const TENANT = config.tenant
@@ -38,6 +39,14 @@ function tagged(res, body, fallback) {
   e.body = body
   e.errorCode = (body && body.error && body.error.error_code) || null
   e.degraded = !!(body && body.degraded_mode)
+  // P2 auto-capture: the agent-wire seam every user-visible chat error
+  // crosses (the api.js http() seam covers the rest).
+  trackErrorShown({
+    http_status: res.status,
+    error_code: e.errorCode || undefined,
+    endpoint_class: '/api/sessions',
+    ui_class: 'agent',
+  })
   return e
 }
 
@@ -301,6 +310,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       es = null
       if (closed) return
       if (handlers.onStreamDown) handlers.onStreamDown()
+      trackStreamDown(1)  // P2: streaming reliability as users feel it (capped 10/session)
       reconnectTimer = setTimeout(openEs, retryMs)
       retryMs = Math.min(retryMs * 2, 10000)
     }
