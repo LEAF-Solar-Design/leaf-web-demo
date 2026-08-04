@@ -224,7 +224,7 @@ export class ConverseLoop {
     const intent = hasConfirm ? null : await this.synthesizeIntent(input.text);
 
     const userMessage = this.buildTurnPrompt(input, resolvedConfirmation, input.contextPacket, intent);
-    const done = this.runTurn(session, turnId, input, userMessage, resolvedConfirmation);
+    const done = this.runTurn(session, turnId, input, userMessage, resolvedConfirmation, intent);
     return { turnId, done };
   }
 
@@ -360,7 +360,6 @@ export class ConverseLoop {
         ? ""
         : `\n\n=== INTENT SIGNAL (advisory; a fast classifier's read, not an order) ===\n` +
           `target: ${intent.target}\n` +
-          (intent.rationale ? `why: ${intent.rationale}\n` : "") +
           `If this disagrees with the message itself, trust the message.`;
     return `${header}${signal}\n\n=== USER MESSAGE ===\n${input.text ?? ""}`;
   }
@@ -375,6 +374,7 @@ export class ConverseLoop {
     input: ConverseMessageInput,
     userMessage: string,
     confirmation: ConfirmationRecord | null,
+    intent: TurnIntent | null = null,
   ): Promise<void> {
     const { store } = this.ports;
     const sessionId = session.session_id;
@@ -449,12 +449,16 @@ export class ConverseLoop {
         ...(session.sdk_session_id ? { resumeSdkSessionId: session.sdk_session_id } : {}),
         ...(session.sdk_session_id
           ? {
+              // Carries `intent` for the same reason the first build does: a
+              // stale SDK session must not silently drop the classification
+              // and reintroduce the surface confusion this feature fixes.
               resumeFallbackUserMessage: this.buildTurnPrompt(
                 input,
                 confirmation,
                 input.priorMessages?.length
                   ? { ...input.contextPacket, prior_messages: input.priorMessages }
                   : input.contextPacket,
+                intent,
               ),
             }
           : {}),

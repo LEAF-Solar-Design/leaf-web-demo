@@ -186,9 +186,13 @@ export interface GrantSettlement {
 export type TurnIntentTarget = "product" | "drawing" | "unclear";
 
 export interface TurnIntent {
+  /**
+   * The ONLY field. Deliberately a closed vocabulary: an earlier draft carried
+   * a model-written `rationale` that was interpolated into the spine's prompt,
+   * which is both a prompt-injection channel (a newline forges a second block)
+   * and a credential-return channel. Nothing attacker-influenced crosses here.
+   */
   target: TurnIntentTarget;
-  /** Short reason, for the operator-visible signal. Never a credential. */
-  rationale: string;
 }
 
 /**
