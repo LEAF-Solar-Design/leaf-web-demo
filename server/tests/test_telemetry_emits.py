@@ -208,6 +208,14 @@ def test_pg_ready_finalize_emits_after_commit(monkeypatch, captured):
         def run_transaction(self, op, isolation=None):
             order.append("commit")
 
+    def order_recording_emit(name, **kw):
+        if name == "drawing.extraction_finished":
+            order.append("emit")
+        captured.append({"name": name, **kw})
+        return True
+
+    monkeypatch.setattr(telemetry_sink, "emit", order_recording_emit)
+
     class _Backend:
         def put_if_absent_or_verify(self, k, d):
             pass
@@ -234,4 +242,7 @@ def test_pg_ready_finalize_emits_after_commit(monkeypatch, captured):
     emits = [c for c in captured if c["name"] == "drawing.extraction_finished"]
     assert len(emits) == 1
     assert emits[0]["labels"]["ok"] is True
-    assert order[0] == "commit"  # emit could only follow the commit
+    # The full sequence, not just the first element (review #426 round-3
+    # carried warn): the emit follows the serializable commit, and the legacy
+    # sentinel write follows the emit.
+    assert order == ["commit", "emit", "sentinel"]
