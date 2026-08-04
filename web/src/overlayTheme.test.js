@@ -119,6 +119,16 @@ describe('the vocabulary contains nothing this surface cannot render', () => {
     expect(css).not.toContain('--panel-fg')
   })
 
+  it('leaves the rendered cascade untouched — the diff is comments only', () => {
+    // I claimed this once from a TRUNCATED diff and was wrong: round 8's edit
+    // had silently removed `color: var(--foreground)` from the form-control
+    // rule, and form controls do NOT inherit body text colour (the browser
+    // supplies an initial colour), so entered text could render dark on the
+    // dark panel (sol-critic PR #439 round 10). Pin the declaration itself.
+    expect(css).toMatch(
+      /\.param input, \.param textarea, \.author-panel textarea, \.ca-field input \{[^}]*color: var\(--foreground\)/)
+  })
+
   it('validates canvas text against the PANEL background too', () => {
     // Because panels inherit canvas text, the pair the user sees is
     // (canvas.fg, panel.bg) — the gate must measure that, not a phantom.

@@ -678,7 +678,8 @@ footer .warn-txt { color: var(--status-warning); }
    + ring + soft halo (the pane's one halo). Scoped to real fields only — the
    composer keeps its SB3 well ring, never this one. */
 .param input, .param textarea, .author-panel textarea, .ca-field input {
-  background: var(--card-grad); border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; font-size: 13px; font-family: var(--sans);
+  background: var(--card-grad); border: 1px solid var(--border); border-radius: 7px;
+  color: var(--foreground); padding: 7px 9px; font-size: 13px; font-family: var(--sans);
 }
 .param input, .ca-field input { height: 34px; }
 .param input:focus, .param textarea:focus, .author-panel textarea:focus, .ca-field input:focus {
