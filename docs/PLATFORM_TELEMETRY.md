@@ -161,3 +161,28 @@ After deploy: send one canary event and read it back from
 `leaf_platform_events_*`; then break the SA credential in staging and
 confirm every product path still answers 2xx while only the sink's stderr
 drop line changes.
+
+Both checks EXECUTED on staging 2026-08-04, all binary results green:
+
+- Canary read-back: POST /api/telemetry answered 202 and the row landed in
+  `leaf_platform_events_20260804` (event gate.choice, environment staging,
+  labels readable via JSON_VALUE).
+- Broken-SA drill (key-disable at the GCP end, no AWS or config change).
+  Paths tested through the broken window: POST /api/telemetry answered 202,
+  GET /api/health answered 200, and unauthenticated GET /api/session and
+  GET /api/tools answered 401 identically before, during, and after (the
+  standing LEAF_AUTH_LIVE=1 posture, not a drill effect). On those served
+  responses nothing changed; the two observable effects were exactly the
+  designed ones: the sink's stderr line
+  `[leaf-telemetry] flush dropped N event(s): RefreshError: invalid_grant`
+  and the dropped events' verified absence from BigQuery. After
+  `gcloud iam service-accounts keys enable`, the very next flush recovered
+  without a restart.
+- Fuse caveat for future drills: disabling the SA key does NOT break a
+  running sink immediately. The google-auth client holds a cached access
+  token for up to an hour, and inserts keep succeeding until the next token
+  refresh (observed live: three post-disable events still landed). Rolling
+  the service surfaces the break on the replacement task's first flushed
+  batch, since a fresh process must mint a fresh token (old tasks may keep
+  their cached token until the rollout drains them); the roll also shows
+  that task launch does not depend on GCP credential validity.
