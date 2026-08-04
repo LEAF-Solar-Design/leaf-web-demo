@@ -203,3 +203,13 @@ def test_publish_refuses_a_store_that_does_not_report_its_seq():
     with pytest.raises(st.StreamContractError):
         st.publish(_revoked(), append_event=lambda *a: None,
                    broadcast=lambda e: None)
+
+
+def test_a_revoke_cannot_smuggle_values_through_token_ids():
+    """The review passed colour and copy as "ids" and both were emitted. The
+    module's one privacy claim is that a revoke carries ids and never values."""
+    for smuggled in (["#ffffff"], ["attacker copy"], ["Color.Canvas.Bg"],
+                     ["color"], ["color..bg"], ["<script>"]):
+        with pytest.raises(st.StreamContractError):
+            _revoked(tokens=smuggled)
+    assert _revoked(tokens=["color.canvas.bg"])["data"]["token_ids"]

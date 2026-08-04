@@ -140,3 +140,33 @@ describe('failure and empty states', () => {
     expect(container.firstChild).toBeNull()
   })
 })
+
+describe('style sinks', () => {
+  it('never puts a non-canonical colour into a style sink', () => {
+    // THE review finding: `url(...)` reached style.background, so the
+    // OPERATOR's browser issued the attacker's request while they were
+    // deciding whether to approve it.
+    const { container } = render(
+      <OverlayDecisionCard
+        proposal={{ ...PROPOSAL, tokens: { 'color.canvas.bg': 'url(https://attacker.example/track)' } }}
+        documentVersion={1}
+        onDecide={vi.fn()}
+      />,
+    )
+    expect(container.querySelector('.overlay-swatch')).toBeNull()
+    expect(container.innerHTML).not.toContain('attacker.example/track"')
+    // Still SHOWN, as text, so the operator can see what was requested.
+    expect(container.textContent).toContain('url(https://attacker.example/track)')
+  })
+
+  it('still renders a swatch for a canonical colour', () => {
+    const { container } = render(
+      <OverlayDecisionCard
+        proposal={{ ...PROPOSAL, tokens: { 'color.canvas.bg': '#abcdef' } }}
+        documentVersion={1}
+        onDecide={vi.fn()}
+      />,
+    )
+    expect(container.querySelector('.overlay-swatch')).toBeTruthy()
+  })
+})

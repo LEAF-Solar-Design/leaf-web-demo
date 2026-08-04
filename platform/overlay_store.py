@@ -29,6 +29,7 @@ before they ever reach this module; the columns store the canonical form.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import db  # noqa: F401  (package-relative, matches store.py's idiom)
@@ -116,6 +117,49 @@ def effective_tokens(tenant_id: str, session_id: Optional[str] = None) -> Dict[s
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
+#: A token id, e.g. `color.canvas.bg`. Mirrors overlay_stream._TOKEN_ID.
+_TOKEN_ID = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$")
+
+#: Substrings that let a value escape a CSS custom property or a copy slot.
+#: A denylist is a weak instrument, which is exactly why it is NOT the only
+#: guard: overlay_registry does allowlist validation upstream, and the card
+#: refuses to put anything but a canonical #rrggbb into a style sink. This is
+#: the storage boundary's own check, so an unvalidated caller cannot persist a
+#: hostile value at all.
+_UNSAFE_IN_VALUE = ("url(", "expression(", "var(", "/*", "*/", "\\", ";",
+                    "{", "}", "<", ">", "@import", "\5c")
+
+
+def _reject_unvalidated(tokens: Mapping[str, str]) -> None:
+    """Refuse anything that is not already canonical.
+
+    A review reached this function with
+    `{"color.canvas.bg": "url(https://attacker.example/track)"}` and it was
+    stored verbatim, then rendered into the operator's browser as a background
+    — which issued the request. Validation upstream is the primary guard; this
+    makes the STORE itself impossible to use wrongly, because a boundary that
+    trusts its caller is only as safe as every caller ever added.
+    """
+    if not tokens:
+        raise OverlayStoreError("empty_proposal", 400, "no tokens")
+    for tid, value in tokens.items():
+        if not _TOKEN_ID.match(str(tid)):
+            raise OverlayStoreError("bad_token_id", 400, str(tid)[:80])
+        v = str(value)
+        if len(v) > 400:
+            raise OverlayStoreError("token_value_too_long", 400, str(tid))
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
+            raise OverlayStoreError("control_char_in_value", 400, str(tid))
+        low = v.lower()
+        for bad in _UNSAFE_IN_VALUE:
+            if bad in low:
+                raise OverlayStoreError("unsafe_token_value", 400,
+                                        f"{tid}: {bad!r}")
+        if str(tid).startswith("color.") and not re.match(
+                r"^#[0-9a-fA-F]{6}$", v):
+            raise OverlayStoreError("bad_color_value", 400, str(tid))
+
+
 def create_proposal(
     *, proposal_id: str, tenant_id: str, session_id: str,
     tokens: Mapping[str, str], lease_s: int,
@@ -123,6 +167,7 @@ def create_proposal(
     """Insert revision 0. The partial unique index means a session with a live
     pending preview cannot open a second one — two pending overlays would make
     "what the user is looking at" ambiguous and leave revoke guessing."""
+    _reject_unvalidated(tokens)
     with db.connection() as conn, conn.cursor() as cur:
         try:
             cur.execute(
@@ -195,6 +240,26 @@ def _audit(cur: Any, *, proposal: Mapping[str, Any], from_state: str,
          "d": json.dumps(detail or {})})
 
 
+def _document_on(cur: Any, tenant_id: str) -> Dict[str, Any]:
+    """Read the tenant document on an ALREADY-HELD cursor.
+
+    Calling the module-level `document()` from inside a `with db.connection()`
+    block requests a SECOND connection while the first is still held. A review
+    found that with a five-connection pool, five concurrent approval retries
+    each hold one connection, four wait on the proposal anchor, and the holder
+    then asks for a sixth — so nothing can progress until the pool times out.
+    A read that reuses the caller's cursor cannot deadlock the pool.
+    """
+    cur.execute(
+        "SELECT tenant_id, version, tokens, updated_at, updated_by "
+        "FROM overlay_documents WHERE tenant_id = %(t)s", {"t": tenant_id})
+    row = _row_to_dict(cur.fetchone())
+    if row is None:
+        return {"tenant_id": tenant_id, "version": 0, "tokens": {},
+                "updated_at": None, "updated_by": None}
+    return row
+
+
 def _lock_latest(cur: Any, proposal_id: str) -> Optional[Dict[str, Any]]:
     """Serialize deciders on one proposal, then read the revision that is
     CURRENT once the lock is held.
@@ -262,7 +327,7 @@ def approve(
         if current["state"] != "pending":
             same_key = (current.get("decision_key") or "") == decision_key
             if same_key and current["state"] == "approved":
-                doc = document(current["tenant_id"])
+                doc = _document_on(cur, current["tenant_id"])
                 return current, doc          # idempotent retry
             raise OverlayStoreError(
                 "already_decided", 409, f"state={current['state']}")
@@ -307,11 +372,22 @@ def approve(
 
 
 def deny(*, proposal_id: str, actor: str, decision_key: str,
-         reason: str = "") -> Dict[str, Any]:
-    """Deny. Changes no tenant state, so no CAS — but it MUST be a recorded,
-    authenticated transition, because `pending_for_session` stops returning the
-    overlay the instant this lands. That is what pulls a rejected preview off
-    the requester's screen without depending on a push event arriving."""
+         expected_version: int, reason: str = "") -> Dict[str, Any]:
+    """Deny. Recorded and authenticated, because `pending_for_session` stops
+    returning the overlay the instant this lands — that is what pulls a
+    rejected preview off the requester's screen without depending on a push
+    event arriving.
+
+    `expected_version` is REQUIRED even though a denial mutates no tenant
+    state. A review found that without it a card rendered against document
+    version 1 could still record its denial after the tenant had moved to
+    version 2, so the operator's "no" was cast against a screen that no longer
+    described reality. Approve refused that and deny accepted it, which is the
+    worst possible split: the safe-looking button was the unguarded one.
+
+    Deny does not CAS, because it writes nothing to the document. It compares,
+    and refuses a mismatch.
+    """
     with db.connection() as conn, conn.cursor() as cur:
         current = _lock_latest(cur, proposal_id)
         if current is None:
@@ -322,6 +398,13 @@ def deny(*, proposal_id: str, actor: str, decision_key: str,
                 return current               # idempotent retry
             raise OverlayStoreError(
                 "already_decided", 409, f"state={current['state']}")
+
+        seen = _document_on(cur, current["tenant_id"])["version"]
+        if int(seen) != int(expected_version):
+            raise OverlayStoreError(
+                "version_conflict", 409,
+                f"card={expected_version} but tenant is at {seen}")
+
         denied = _insert_revision(
             cur, current, state="denied", decided_by=actor,
             decision_key=decision_key, reason=reason or "denied")
@@ -370,19 +453,27 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
         if current["state"] == "reverted":
             if (current.get("decision_key") or "") == decision_key:
-                return current, document(current["tenant_id"])
+                return current, _document_on(cur, current["tenant_id"])
             raise OverlayStoreError("already_decided", 409, "reverted")
         if current["state"] != "approved":
             raise OverlayStoreError("not_revertible", 409, current["state"])
 
-        keys = list((current["tokens"] or {}).keys())
+        # Remove ONLY the keys still holding the value THIS proposal applied.
+        # Removing every key it named would delete a value a LATER approval
+        # set: approve A (bg=#111), approve B (bg=#222), revert A, and a blind
+        # `tokens - keys` drops B's #222 entirely. The operator reverting A
+        # would have silently undone B's decision.
+        mine = json.dumps(dict(current["tokens"] or {}))
         cur.execute(
-            "UPDATE overlay_documents "
-            "SET tokens = tokens - %(keys)s::text[], version = version + 1, "
-            "    updated_at = NOW(), updated_by = %(by)s "
-            "WHERE tenant_id = %(t)s AND version = %(ver)s "
+            "UPDATE overlay_documents d "
+            "SET tokens = d.tokens - ("
+            "      SELECT COALESCE(array_agg(t.k), ARRAY[]::text[]) "
+            "      FROM jsonb_each_text(%(mine)s::jsonb) AS t(k, v) "
+            "      WHERE d.tokens ->> t.k IS NOT DISTINCT FROM t.v), "
+            "    version = version + 1, updated_at = NOW(), updated_by = %(by)s "
+            "WHERE d.tenant_id = %(t)s AND d.version = %(ver)s "
             "RETURNING tenant_id, version, tokens, updated_at, updated_by",
-            {"keys": keys, "by": actor, "t": current["tenant_id"],
+            {"mine": mine, "by": actor, "t": current["tenant_id"],
              "ver": int(expected_version)})
         doc = _row_to_dict(cur.fetchone())
         if doc is None:
@@ -394,6 +485,6 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
             reason="reverted")
         _audit(cur, proposal=current, from_state="approved",
                to_state="reverted", actor=actor, decision_key=decision_key,
-               detail={"removed_token_count": len(keys)})
+               detail={"removed_token_count": len(current["tokens"] or {})})
         conn.commit()
     return reverted, doc

@@ -534,3 +534,53 @@ def test_supersession_never_rewrites_decision_content(conn, tenant):
     assert old["state"] == "pending", "the original decision content was rewritten"
     assert old["tokens"] == {"color.canvas.bg": "#abcdef"}
     assert old["superseded_at"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# Review majors — the revert clobber, against real jsonb
+# --------------------------------------------------------------------------- #
+def _revert_scoped(conn, tenant, mine_json, expected_version, actor="op"):
+    """overlay_store.revert()'s conditional removal, verbatim."""
+    return conn.execute(
+        "UPDATE overlay_documents d "
+        "SET tokens = d.tokens - ("
+        "      SELECT COALESCE(array_agg(t.k), ARRAY[]::text[]) "
+        "      FROM jsonb_each_text(%(mine)s::jsonb) AS t(k, v) "
+        "      WHERE d.tokens ->> t.k IS NOT DISTINCT FROM t.v), "
+        "    version = version + 1, updated_at = NOW(), updated_by = %(by)s "
+        "WHERE d.tenant_id = %(t)s AND d.version = %(ver)s "
+        "RETURNING version, tokens",
+        {"mine": mine_json, "by": actor, "t": tenant,
+         "ver": expected_version}).fetchone()
+
+
+def test_reverting_does_not_undo_a_later_approvals_value(conn, tenant):
+    """THE major. Approve A (bg=#111111), approve B (bg=#222222), revert A.
+    The blind `tokens - keys` deleted the key outright, so the operator
+    reverting A silently undid B's decision."""
+    _seed_doc(conn, tenant, version=2, tokens='{"color.canvas.bg": "#222222"}')
+    row = _revert_scoped(conn, tenant, '{"color.canvas.bg": "#111111"}', 2)
+    conn.commit()
+    assert row["tokens"] == {"color.canvas.bg": "#222222"}, (
+        "revert deleted a value a LATER approval set")
+
+
+def test_reverting_still_removes_a_key_it_does_own(conn, tenant):
+    """The scoping must not make revert a no-op — it still has to work."""
+    _seed_doc(conn, tenant, version=1,
+              tokens='{"color.canvas.bg": "#111111", "copy.home.title": "Hi"}')
+    row = _revert_scoped(conn, tenant, '{"color.canvas.bg": "#111111"}', 1)
+    conn.commit()
+    assert row["tokens"] == {"copy.home.title": "Hi"}
+
+
+def test_reverting_a_partially_superseded_set_removes_only_the_untouched(conn, tenant):
+    """A proposal that set two tokens where a later approval changed one:
+    remove the one still ours, leave the one that moved on."""
+    _seed_doc(conn, tenant, version=3,
+              tokens='{"color.canvas.bg": "#999999", "copy.home.title": "Mine"}')
+    row = _revert_scoped(
+        conn, tenant,
+        '{"color.canvas.bg": "#111111", "copy.home.title": "Mine"}', 3)
+    conn.commit()
+    assert row["tokens"] == {"color.canvas.bg": "#999999"}

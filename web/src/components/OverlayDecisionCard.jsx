@@ -53,6 +53,18 @@ function visibleCopy(value) {
 
 const isColorToken = (id) => String(id).startsWith('color.')
 
+/** A canonical colour, and nothing else, may reach a style sink.
+ *
+ *  A review found the swatch assigned any token value straight to
+ *  `style.background`, so `url(https://attacker.example/track)` in a chat
+ *  request made the OPERATOR's browser issue that request while they were
+ *  deciding whether to approve it. The server should never have accepted the
+ *  value, and now does not — but the card must not be the thing relying on
+ *  that. Anything not shaped like #rrggbb renders as text only, with no
+ *  swatch. */
+const CANONICAL_COLOR = /^#[0-9a-f]{6}$/i
+const isRenderableColor = (v) => CANONICAL_COLOR.test(String(v ?? ''))
+
 export default function OverlayDecisionCard({
   proposal,            // {proposal_id, tokens, requested_by, request_text}
   documentVersion,     // CAS witness the server will check
@@ -103,7 +115,7 @@ export default function OverlayDecisionCard({
         {entries.map(([id, value]) => (
           <li key={id} className="overlay-token">
             <span className="overlay-token-label">{labels[id] || id}</span>
-            {isColorToken(id) ? (
+            {isColorToken(id) && isRenderableColor(value) ? (
               <>
                 {/* Swatch AND literal: a swatch alone hides a low-contrast pair. */}
                 <span

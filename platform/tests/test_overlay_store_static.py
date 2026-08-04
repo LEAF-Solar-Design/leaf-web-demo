@@ -208,8 +208,39 @@ def test_the_only_sql_fstring_interpolates_a_constant():
     assert "%s" not in src.split("_PROPOSAL_COLS = (")[1].split(")")[0]
 
 
-def test_revert_removes_its_own_keys_rather_than_restoring_a_snapshot():
+def test_revert_removes_only_keys_still_holding_its_own_value():
     """A snapshot restore would silently roll back tokens a LATER approval
-    changed."""
+    changed — but so did the first fix for it.
+
+    `tokens - keys` removed every key the proposal named, regardless of who
+    last wrote them. Approve A (bg=#111), approve B (bg=#222), revert A, and
+    B's value was deleted outright: the operator reverting A silently undid
+    B's decision. The removal is now conditional on the stored value still
+    being the one this proposal applied.
+    """
     src = _store()
-    assert "tokens - %(keys)s::text[]" in src
+    assert "tokens - %(keys)s::text[]" not in src, "the unconditional delete is back"
+    assert "IS NOT DISTINCT FROM" in src
+    assert "jsonb_each_text" in src
+
+
+def test_deny_requires_the_same_cas_witness_approve_does():
+    """A denial recorded against a version the operator was no longer looking
+    at. The safe-looking button must not be the unguarded one."""
+    src = _store()
+    segment = src.split("def deny(", 1)[1].split("\ndef ", 1)[0]
+    assert "expected_version" in src.split("def deny(", 1)[1].split(")", 1)[0]
+    assert "version_conflict" in segment
+
+
+def test_no_transaction_reaches_for_a_second_connection():
+    """`document()` opens its own connection. Called from inside a
+    `with db.connection()` block it can exhaust the pool: holders wait on the
+    proposal anchor while the lock holder asks for one more connection than the
+    pool has. Reads inside a transaction must reuse the caller's cursor.
+    """
+    src = _store()
+    for fn in ("def approve(", "def deny(", "def revert("):
+        segment = src.split(fn, 1)[1].split("\ndef ", 1)[0]
+        assert "document(current[" not in segment, (
+            f"{fn} calls the connection-opening document() inside a transaction")

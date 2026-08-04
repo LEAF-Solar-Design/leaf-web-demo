@@ -809,6 +809,14 @@ def build_suites() -> List[Suite]:
                   ("test/harnessSchema.pg.test.ts", 1),
                   ("test/pgSessionStore.contract.test.ts", 5),
               )),
+        # --- web unit (cwd=web) --- #
+        # The web workspace had NO unit runner until the T1 overlay card; its
+        # only specs were Playwright e2e, which this gate runs separately. A
+        # review found the 14 card tests executing nowhere in CI, so the
+        # operator-facing decision surface -- both controls, untrusted text,
+        # style sinks -- was unverified on every PR.
+        Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
+              [_npm(), "run", "test:unit"], 14),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

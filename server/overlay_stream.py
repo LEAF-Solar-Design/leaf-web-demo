@@ -38,6 +38,7 @@ operator withdrew. Its guarantees:
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 # --------------------------------------------------------------------------- #
@@ -72,14 +73,30 @@ class StreamContractError(ValueError):
 # --------------------------------------------------------------------------- #
 # Envelope construction
 # --------------------------------------------------------------------------- #
+#: A token id, e.g. `color.canvas.bg`. Dotted lowercase segments only.
+_TOKEN_ID = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$")
+
+
 def _token_ids(tokens: Iterable[str]) -> list:
-    """Sorted, de-duplicated token ids.
+    """Sorted, de-duplicated, GRAMMAR-CHECKED token ids.
+
+    The grammar check is not decoration. This module's whole claim is that a
+    revoke carries ids and never values, and a review broke that by passing
+    `["#ffffff", "attacker copy"]` — both sailed through and were emitted under
+    `token_ids`, putting tenant colour and copy into an event the client logs
+    and the audit path reads. An id is a fixed vocabulary word; anything that
+    is not shaped like one is a value that has escaped its lane.
 
     Sorted because two events describing the same change must compare equal in
     tests and in logs; an ordering that follows dict insertion would make a
     replayed event look different from the original one for no reason.
     """
-    return sorted({str(t) for t in tokens})
+    ids = sorted({str(t) for t in tokens})
+    bad = [t for t in ids if not _TOKEN_ID.match(t)]
+    if bad:
+        raise StreamContractError(
+            f"not token ids: {bad!r} — a revoke carries ids, never values")
+    return ids
 
 
 def _base(session_id: str, seq: int, type_: str, data: Mapping[str, Any]) -> Dict[str, Any]:

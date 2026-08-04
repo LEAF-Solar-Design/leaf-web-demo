@@ -22,6 +22,9 @@ on:
       - 'platform/mutation_fence.py'
       - 'platform/tests/conftest.py'
       - 'platform/tests/test_db_readiness_static.py'
+      - 'platform/overlay_store.py'
+      - 'platform/tests/test_overlay_store_postgres.py'
+      - 'platform/tests/test_overlay_store_static.py'
       - 'platform/tests/test_drawing_import.py'
       - 'platform/tests/test_schema_status_postgres_authority.py'
       - 'scripts/reconcile_customization_authority.py'
@@ -88,6 +91,10 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test
       PG_CUSTOMIZATION_TEST_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test
+      # The T1 overlay live suite SKIPS when this is unset. A review found
+      # every one of its concurrency tests silently skipping in CI, so the
+      # CAS and locking guarantees were unverified on the gate.
+      OVERLAY_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
 
     steps:
@@ -126,6 +133,25 @@ jobs:
         run: >-
           python -m pytest --import-mode=importlib -q
           ../platform/tests/test_schema_status_postgres_authority.py
+
+      - name: Run T1 overlay store PostgreSQL suite
+        working-directory: platform
+        run: |
+          python -m pytest -q tests/test_overlay_store_static.py
+          # -p no:randomly keeps the concurrency tests deterministic.
+          python -m pytest -q tests/test_overlay_store_postgres.py \n            -W error::pytest.PytestUnraisableExceptionWarning
+
+      - name: Assert the overlay live suite did NOT skip
+        working-directory: platform
+        run: |
+          # A skipped concurrency suite reports green and proves nothing.
+          # This is the check the review's finding actually needs.
+          out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs)
+          echo "$out" | tail -5
+          if echo "$out" | grep -qi 'skipped'; then
+            echo 'FAIL: overlay live tests skipped — OVERLAY_PG_URL not reaching pytest'
+            exit 1
+          fi
 
       - name: Run PostgreSQL authority and race tests
         working-directory: server

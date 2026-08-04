@@ -299,11 +299,35 @@ def test_s18_sse_vocabulary_frozen():
 
 
 def _web_stream_event_types() -> set:
-    """The event names web/src/converse.js registers SSE listeners for."""
+    """The event names web/src/converse.js registers SSE listeners for.
+
+    Comments are stripped FIRST. A review found the naive extraction read a
+    commented-out entry as live: turning `'overlay_revoked'` into
+    `// 'overlay_revoked'` left the test passing while the browser silently
+    dropped every revoke. A gate that reads dead code is worse than no gate,
+    because it reports safety it is not checking.
+    """
     source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
     block = source[source.index("export const STREAM_EVENT_TYPES"):]
     block = block[:block.index("]")]
+    block = _re.sub(r"/\*.*?\*/", "", block, flags=_re.S)   # block comments
+    block = _re.sub(r"//[^\n]*", "", block)                  # line comments
     return set(_re.findall(r"'([a-z_]+)'", block))
+
+
+def test_the_subscription_gate_cannot_be_fooled_by_a_comment():
+    """The gate's own failure mode, pinned. If commenting an entry out stopped
+    failing the gate, the gate would certify a browser that drops the event."""
+    live = _web_stream_event_types()
+    assert "overlay_revoked" in live
+
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[:block.index("]")]
+    commented = block.replace("'overlay_revoked'", "// 'overlay_revoked'")
+    commented = _re.sub(r"//[^\n]*", "", commented)
+    assert "overlay_revoked" not in set(_re.findall(r"'([a-z_]+)'", commented)), (
+        "a commented-out listener still reads as live — the gate is decorative")
 
 
 def test_web_client_subscribes_to_every_emittable_event():
