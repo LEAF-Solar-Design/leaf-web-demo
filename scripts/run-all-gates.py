@@ -762,10 +762,34 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 98 collected either way, measured on this
-        # tree 2026-07-28. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 98 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 96.
+        # invariant to DB presence: 104 collected either way, measured on this
+        # tree 2026-08-04. The floor below is the EXECUTED count on a host with
+        # no DATABASE_URL -- 104 collected minus the 2 DB-gated skips named in
+        # allowed_skip_reasons = 102.
+        # The floor was 96 (98 collected, 2 skips) measured 2026-07-28, and two
+        # merges since then added 6 collected tests without moving it:
+        #   +1  test_db_primitives_static.py, 18 -> 19, in 2eb279f
+        #       "perf(db): release idle PostgreSQL connections (#256)" --
+        #       test_reset_pool_closes_and_clears_the_shared_pool, a new
+        #       dependency-free function covering db.reset_pool().
+        #   +5  test_db_schema_proof_static.py, 37 -> 42, in fadf874
+        #       "fix(platform): prove quota attempt migration (#401)" --
+        #       test_author_quota_attempt_trigger_cannot_be_missing_at_startup
+        #       plus test_author_quota_attempt_trigger_is_required_and_enabled
+        #       parametrized over the 4 pg_trigger tgenabled states (O/A/D/R),
+        #       each asserting a distinct accept/reject outcome.
+        # Both are real added coverage, not duplicates or a re-parametrisation
+        # of existing cases, so the floor rises to match rather than the tests
+        # being pruned. Neither merge was caught, because executed ABOVE the
+        # floor is only an "(executed-count drift)" note: this suite has been
+        # PASSing on main the whole time. The visible "EXP 96 GOT 104" line is
+        # that note, not the failure -- a red platform-static on a branch is a
+        # real test failure, so read the FAILED lines before touching this
+        # number.
+        # 102, not 104: the scoreboard's GOT column is passed+failed+skipped,
+        # while the floor is compared against executed = GOT - skipped. On a
+        # host WITH a DB the 2 gated tests run and executed is 104, so 104
+        # would red-fail every hermetic CI run at executed 102.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -773,7 +797,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 96,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 102,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

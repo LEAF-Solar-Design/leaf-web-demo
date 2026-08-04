@@ -47,7 +47,13 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     static = suites["platform-static"]
-    assert static.expected == 96
+    # Mirrors the floor in run-all-gates.py, so BOTH must move together when
+    # platform/tests/*_static.py gains a test. They did not: the floor sat at
+    # 96 (measured 2026-07-28) while #256 added 1 test and #401 added 5, and
+    # nothing failed, because executed ABOVE a floor is only a drift note.
+    # This assertion is the pin that makes the stale floor visible, so raise
+    # it only alongside a re-measured run-all-gates.py floor.
+    assert static.expected == 102
     assert any(
         str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
         for arg in static.argv
