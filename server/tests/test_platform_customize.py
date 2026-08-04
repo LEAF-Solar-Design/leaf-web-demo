@@ -1416,6 +1416,45 @@ def test_merge_recovers_a_delivery_to_marker_crash(pushable, monkeypatch):
     assert not [c for c in calls if c[0] == "PUT"]  # recovery never re-PUTs
 
 
+def test_recovery_refuses_a_merge_into_the_wrong_base(pushable, monkeypatch):
+    """Round 2, finding 1: merged at OUR head but into a retargeted base (or
+    a foreign repo) is an incident, never a recovery — refuse, claim no
+    marker, leave the record LANDED and visible."""
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    for base in ({"ref": "release", "repo": {"full_name": "o/r"}},
+                 {"ref": "main", "repo": {"full_name": "evil/fork"}}):
+        _fake_github(monkeypatch, {
+            ("GET", "/repos/o/r/pulls/5"): (200, {
+                "state": "closed", "merged": True, "head": {"sha": head},
+                "base": base, "merge_commit_sha": "e" * 40}),
+            ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+                {"context": "sol-critic-review", "state": "success"}]}),
+        })
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _merge(view)
+        assert exc.value.code == "merge_base_retargeted", base
+        assert lane._read_marker(view["change_id"], "merged") is None, base
+        assert lane.load_record(view["change_id"])["state"] == "landed", base
+
+
+def test_missing_base_repo_fails_closed(pushable, monkeypatch):
+    """Round 2, finding 2: an open, passed PR whose base carries no
+    repository binding must refuse — absence is not a match."""
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "open", "merged": False, "head": {"sha": head},
+            "base": {"ref": "main"}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "success"}]}),
+    })
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_base_retargeted"
+
+
 def test_merge_refuses_a_pr_merged_at_a_foreign_head(pushable, monkeypatch):
     _merge_env(monkeypatch)
     view, head = _landed_with_pr(monkeypatch)

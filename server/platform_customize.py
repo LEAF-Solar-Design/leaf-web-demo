@@ -1173,14 +1173,37 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
     # must never ride a 59-second-old projection.
     review = _fetch_review(record)
 
-    # Delivery-to-marker crash recovery (sol-critic PR #437 round 1, finding
-    # 3): if a previous merge() crashed AFTER GitHub merged but BEFORE the
-    # marker was claimed, the record says LANDED while the PR is merged — and
-    # every later attempt would wedge on merge_pr_not_open. The PR being
-    # merged AT EXACTLY THE RECORDED COMMIT is proof our delivery completed,
-    # so complete the transition honestly. A PR merged at any OTHER head is
-    # not ours to claim and falls through to the refusals below.
+    # The merge-target binding gates EVERY path out of this function that can
+    # answer "merged" (sol-critic PR #437 round 2, finding 1: recovery must
+    # not bypass it) and it FAILS CLOSED on missing/malformed bindings (round
+    # 2, finding 2: an empty base_repo must refuse, not slide past a truthy
+    # check). GitHub's sha pin protects the head only; the base is where the
+    # bytes actually land.
+    expected_base = str(record.get("base_ref") or base_ref())
+    if expected_base.startswith("refs/heads/"):
+        expected_base = expected_base[len("refs/heads/"):]
+    base_bound = (
+        review.get("base_ref") == expected_base
+        and isinstance(review.get("base_repo"), str)
+        and review.get("base_repo", "").lower() == slug.lower()
+    )
+
+    # Delivery-to-marker crash recovery (round 1, finding 3): a previous
+    # merge() crashed AFTER GitHub merged but BEFORE the marker was claimed —
+    # the record says LANDED while the PR is merged, and every later attempt
+    # would wedge on merge_pr_not_open. The PR being merged AT EXACTLY the
+    # recorded commit INTO the bound base is proof our delivery completed;
+    # complete the transition and say so honestly (recovered: true = this is
+    # an external observation, not this invocation's enforcement). Merged at
+    # our head but at the WRONG base is an incident, never a recovery: refuse
+    # loudly, claim nothing, leave the record visible as LANDED.
     if review.get("pr_state") == "merged" and review.get("head_sha") == commit_sha:
+        if not base_bound:
+            raise PlatformCustomizeError(
+                "merge_base_retargeted", 409,
+                f"externally merged at our head into "
+                f"base={review.get('base_ref')}@{review.get('base_repo')} "
+                f"expected={expected_base}@{slug}")
         _claim_marker(change_id, "merged", {
             "commit_sha": commit_sha,
             "merge_commit_sha": review.get("merge_commit_sha"),
@@ -1206,21 +1229,11 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
         raise PlatformCustomizeError(
             "merge_head_moved", 409,
             f"head={review.get('head_sha')} recorded={commit_sha}")
-    # Retarget refusal (finding 1): the merge lands on the PR's CURRENT base,
-    # so the base must still be the branch the proposal named, in the
-    # configured repository. GitHub's sha pin protects the head only.
-    expected_base = str(record.get("base_ref") or base_ref())
-    if expected_base.startswith("refs/heads/"):
-        expected_base = expected_base[len("refs/heads/"):]
-    if review.get("base_ref") != expected_base:
+    if not base_bound:
         raise PlatformCustomizeError(
             "merge_base_retargeted", 409,
-            f"base={review.get('base_ref')} expected={expected_base}")
-    if review.get("base_repo") and \
-            str(review.get("base_repo")).lower() != slug.lower():
-        raise PlatformCustomizeError(
-            "merge_base_retargeted", 409,
-            f"base_repo={review.get('base_repo')} expected={slug}")
+            f"base={review.get('base_ref')}@{review.get('base_repo')} "
+            f"expected={expected_base}@{slug}")
     merge_token = os.environ.get("LEAF_PLATFORM_MERGE_TOKEN", "").strip()
     if not merge_token:
         raise PlatformCustomizeError("merge_config_missing", 503,
