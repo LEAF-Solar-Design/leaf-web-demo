@@ -168,6 +168,53 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_rename_detection_cannot_hide_a_deletion(lane_env):
+    """sol-critic PR #423 round 4. `git diff --name-only` applies rename
+    detection, which collapses a delete+add into the DESTINATION alone. So an
+    approved addition carrying the same bytes as an existing fundamental file
+    could mask that file's deletion: git reports only the addition, the
+    path-set check passes, and the deletion lands with no co-sign.
+
+    Here the addition is byte-identical to server/auth.py, which the manifest
+    marks fundamental. The requested set is the addition ONLY; the delete is
+    the smuggled part."""
+    repo = lane_env["repo"]
+    auth_bytes = (repo / "server" / "auth.py").read_text(encoding="utf-8")
+
+    # Requesting the copy alone is legitimate and must succeed: nothing is
+    # being deleted, so there is no hidden fundamental change.
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="copy auth bytes",
+        edits=[{"path": "docs/copy.md", "content": auth_bytes}])
+    assert view["state"] == "approved"
+
+    # The guard that makes the smuggling case detectable: the diff must report
+    # BOTH sides of a rename, never just the destination.
+    both = _git(repo, "diff", "--no-renames", "--name-only",
+                view["base_sha"], view["commit_sha"]).split()
+    assert both == ["docs/copy.md"]
+    assert set(view["paths"]) == set(both)
+
+
+def test_an_existing_executable_keeps_its_mode(lane_env):
+    """A flat 100644 requirement would REFUSE a legitimate edit to a file that
+    is already executable. The rule is the base tree's mode for an existing
+    path (sol-critic PR #423 round 4 usability finding)."""
+    repo = lane_env["repo"]
+    script = repo / "tool.sh"
+    script.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "update-index", "--chmod=+x", "tool.sh")
+    _git(repo, "commit", "-m", "add executable")
+
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="edit the script",
+        edits=[{"path": "tool.sh", "content": "#!/bin/sh\necho two\n"}])
+    assert view["state"] == "approved"
+    entry = _git(repo, "ls-tree", view["commit_sha"], "--", "tool.sh")
+    assert entry.split()[0] == "100755"
+
+
 def test_a_content_filter_cannot_change_the_approved_bytes(lane_env):
     """sol-critic PR #423 round 2: path equality is NOT content equality. With
     core.autocrlf=true a requested CRLF body commits as LF, so a path-only

@@ -520,8 +520,14 @@ def propose(*, tenant_id: str, subject: str, title: str,
         # against the exact requested bytes. Fail closed, before any durable
         # record, marker, or lane ref exists.
         committed = {
+            # --no-renames is LOAD-BEARING: rename detection collapses a
+            # delete+add into the destination alone, so a hidden deletion of a
+            # fundamental path could ride along beside an approved addition
+            # with identical bytes and never appear here — landing a
+            # fundamental deletion with no co-sign (sol-critic PR #423 r4).
             line for line in _git_wt(
-                git_dir, worktree, "diff", "--name-only", base_sha, commit_sha,
+                git_dir, worktree, "diff", "--no-renames", "--name-only",
+                base_sha, commit_sha,
             ).split("\n") if line.strip()
         }
         requested = {e["path"] for e in normalized}
@@ -559,10 +565,20 @@ def propose(*, tenant_id: str, subject: str, title: str,
                 raise PlatformCustomizeError(
                     "edits_not_committed", 422, f"unreadable_tree_entry: {path}")
             mode, obj_type, oid = meta[0], meta[1], meta[2]
-            if mode != "100644" or obj_type != "blob":
+            # A plain file, and the SAME kind of plain file it already was.
+            # Symlink (120000) and gitlink (160000) are never a proposal's
+            # output. An existing executable must keep 100755 — requiring a
+            # flat 100644 would refuse a legitimate edit to it (sol-critic
+            # PR #423 r4); a NEW file must be 100644.
+            base_entry = _git_wt(
+                git_dir, worktree, "ls-tree", base_sha, "--", path).strip()
+            base_mode = (base_entry.partition("\t")[0].split() or [""])[0]
+            want_mode = base_mode if base_mode in {"100644", "100755"} else "100644"
+            if mode != want_mode or obj_type != "blob":
                 raise PlatformCustomizeError(
                     "edits_not_committed", 422,
-                    f"unexpected tree entry {mode} {obj_type}: {path}")
+                    f"unexpected tree entry {mode} {obj_type} "
+                    f"(expected {want_mode} blob): {path}")
             # expected_blobs was captured BEFORE `git add`, so a clean filter
             # cannot make the oracle agree with its own rewrite.
             want = expected_blobs.get(path, "")
