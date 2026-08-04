@@ -312,6 +312,21 @@ def _web_stream_event_types() -> set:
     block = block[:block.index("]")]
     block = _re.sub(r"/\*.*?\*/", "", block, flags=_re.S)   # block comments
     block = _re.sub(r"//[^\n]*", "", block)                  # line comments
+
+    # The list must be PURE string literals. Round 2 escaped the comment
+    # stripper with `'overlay_revoked' + '//typo'`: JavaScript registers the
+    # concatenated name `overlay_revoked//typo`, but stripping removed the tail
+    # and extraction still reported a clean `overlay_revoked`. So after
+    # removing the literals themselves, only list punctuation may remain — a
+    # `+`, a template literal, an identifier or a spread leaves residue and
+    # fails HERE rather than being quietly mis-read.
+    residue = _re.sub(r"'[^'\n]*'", "", block)
+    residue = residue[residue.index("[") + 1:] if "[" in residue else residue
+    leftover = _re.sub(r"[\s,]", "", residue)
+    assert leftover == "", (
+        "STREAM_EVENT_TYPES is not a plain list of string literals "
+        f"({leftover!r}) — the gate cannot verify a computed subscription list")
+
     return set(_re.findall(r"'([a-z_]+)'", block))
 
 
@@ -328,6 +343,28 @@ def test_the_subscription_gate_cannot_be_fooled_by_a_comment():
     commented = _re.sub(r"//[^\n]*", "", commented)
     assert "overlay_revoked" not in set(_re.findall(r"'([a-z_]+)'", commented)), (
         "a commented-out listener still reads as live — the gate is decorative")
+
+
+def test_the_gate_refuses_a_computed_subscription_list():
+    """Round 2's escape from the comment stripper.
+
+    `'overlay_revoked' + '//typo'` makes JavaScript register the CONCATENATED
+    name `overlay_revoked//typo`, which the browser then has no listener for —
+    while a comment-stripping parse deleted the tail and reported a clean
+    `overlay_revoked`. The gate would have certified a subscription that does
+    not exist. It now refuses any list that is not plain literals.
+    """
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[:block.index("]")]
+    sneaky = block.replace("'overlay_revoked'", "'overlay_revoked' + '//typo'")
+
+    sneaky = _re.sub(r"//[^\n]*", "", sneaky)
+    residue = _re.sub(r"'[^'\n]*'", "", sneaky)
+    residue = residue[residue.index("[") + 1:]
+    assert _re.sub(r"[\s,]", "", residue) != "", (
+        "a concatenated event name left no residue — the gate would certify a "
+        "subscription the browser never makes")
 
 
 def test_web_client_subscribes_to_every_emittable_event():

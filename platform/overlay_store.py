@@ -130,6 +130,16 @@ _UNSAFE_IN_VALUE = ("url(", "expression(", "var(", "/*", "*/", "\\", ";",
                     "{", "}", "<", ">", "@import", "\5c")
 
 
+#: Bidi controls, zero-width and other invisible code points. Mirrors the
+#: registry's rule so the two cannot disagree about what is deceptive.
+_INVISIBLE = frozenset(
+    [0x00AD, 0x034F, 0x061C, 0x2060, 0x3164, 0xFEFF]
+    + list(range(0x200B, 0x2010))   # ZWSP..RLM
+    + list(range(0x202A, 0x202F))   # bidi embedding/override
+    + list(range(0x2066, 0x206A))   # bidi isolates
+)
+
+
 def _reject_unvalidated(tokens: Mapping[str, str]) -> None:
     """Refuse anything that is not already canonical.
 
@@ -150,6 +160,12 @@ def _reject_unvalidated(tokens: Mapping[str, str]) -> None:
             raise OverlayStoreError("token_value_too_long", 400, str(tid))
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
             raise OverlayStoreError("control_char_in_value", 400, str(tid))
+        # Bidi and invisible characters. The registry rejects these upstream
+        # and the store did not, so `"Save‮eleteD"` could be persisted:
+        # copy that reads as one thing and renders as another. A boundary that
+        # is weaker than its own validator is not a boundary.
+        if any(ord(ch) in _INVISIBLE for ch in v):
+            raise OverlayStoreError("deceptive_char_in_value", 400, str(tid))
         low = v.lower()
         for bad in _UNSAFE_IN_VALUE:
             if bad in low:
@@ -169,6 +185,27 @@ def create_proposal(
     "what the user is looking at" ambiguous and leave revoke guessing."""
     _reject_unvalidated(tokens)
     with db.connection() as conn, conn.cursor() as cur:
+        # Retire any LAPSED pending proposal for this session before inserting.
+        #
+        # The partial unique index cannot express "and not expired" — a index
+        # predicate may not call NOW(). So an expired-but-unswept row still
+        # occupies the session's one pending slot, and the next proposal fails
+        # with pending_proposal_exists even though the preview correctly shows
+        # nothing. The user sees the feature simply stop working, forever, with
+        # no way to clear it. Retiring in THIS transaction means the slot is
+        # free by the time the insert runs, without depending on a sweeper.
+        #
+        # It stamps `superseded_at` ONLY and does not rewrite `state`. Setting
+        # state='expired' here would have been a decision-content rewrite, and
+        # the append-only invariant is worth more than the tidier-looking row:
+        # the lease already makes this proposal expired to every reader, and
+        # the stamp is what actually frees the index slot.
+        cur.execute(
+            "UPDATE overlay_proposals SET superseded_at = NOW() "
+            "WHERE tenant_id = %(t)s AND session_id = %(s)s "
+            "  AND state = 'pending' AND superseded_at IS NULL "
+            "  AND lease_expires_at <= NOW()",
+            {"t": tenant_id, "s": session_id})
         try:
             cur.execute(
                 "INSERT INTO overlay_proposals "
@@ -399,7 +436,14 @@ def deny(*, proposal_id: str, actor: str, decision_key: str,
             raise OverlayStoreError(
                 "already_decided", 409, f"state={current['state']}")
 
-        seen = _document_on(cur, current["tenant_id"])["version"]
+        # FOR UPDATE, not a bare read. Without the lock another approval can
+        # move the document between this comparison and the commit, so the
+        # stale denial the check exists to refuse still lands.
+        cur.execute(
+            "SELECT version FROM overlay_documents WHERE tenant_id = %(t)s "
+            "FOR UPDATE", {"t": current["tenant_id"]})
+        row = _row_to_dict(cur.fetchone())
+        seen = 0 if row is None else row["version"]
         if int(seen) != int(expected_version):
             raise OverlayStoreError(
                 "version_conflict", 409,
@@ -437,6 +481,18 @@ def sweep_expired(limit: int = 100) -> List[Dict[str, Any]]:
             swept.append(expired)
         conn.commit()
     return swept
+
+
+def _removed_count(current: Mapping[str, Any], doc: Mapping[str, Any]) -> int:
+    """How many keys the revert ACTUALLY removed.
+
+    Reporting the proposal's token count instead was wrong once removal became
+    conditional: a proposal whose value a later approval overwrote removes
+    nothing, and an audit claiming it removed one is a false record of a
+    runtime mutation.
+    """
+    after = dict(doc.get("tokens") or {})
+    return sum(1 for k in (current.get("tokens") or {}) if k not in after)
 
 
 def revert(*, proposal_id: str, actor: str, decision_key: str,
@@ -485,6 +541,6 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
             reason="reverted")
         _audit(cur, proposal=current, from_state="approved",
                to_state="reverted", actor=actor, decision_key=decision_key,
-               detail={"removed_token_count": len(current["tokens"] or {})})
+               detail={"removed_token_count": _removed_count(current, doc)})
         conn.commit()
     return reverted, doc

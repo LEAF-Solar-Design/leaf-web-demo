@@ -139,6 +139,19 @@ def new_proposal(
     )
 
 
+def _require_actor(actor: Any) -> str:
+    """Every runtime mutation must be attributable.
+
+    This lived inline in `decide()` and NOT in `revert()`, so a review reverted
+    an approved overlay with `actor=""` and got an audit event crediting
+    nobody. Two copies of a rule is how one of them goes missing; there is now
+    one, and both callers use it.
+    """
+    if not isinstance(actor, str) or not actor.strip():
+        raise OverlayDecisionError("actor_required", 422)
+    return actor
+
+
 def _require_key(decision_key: Any) -> str:
     if not isinstance(decision_key, str) or len(decision_key) < 8:
         raise OverlayDecisionError(
@@ -193,8 +206,7 @@ def decide(
     """
     now = time.time() if now is None else now
     key = _require_key(decision_key)
-    if not isinstance(actor, str) or not actor.strip():
-        raise OverlayDecisionError("actor_required", 422)
+    _require_actor(actor)
 
     wanted = APPROVED if approve else DENIED
 
@@ -247,6 +259,7 @@ def revert(
     """Undo an APPROVED overlay. Only approved records revert — reverting a
     denied or expired one would imply it had been live."""
     now = time.time() if now is None else now
+    _require_actor(actor)
     key = _require_key(decision_key)
     if proposal.state == REVERTED:
         return _settled_replay(proposal, key, REVERTED)

@@ -584,3 +584,91 @@ def test_reverting_a_partially_superseded_set_removes_only_the_untouched(conn, t
         '{"color.canvas.bg": "#111111", "copy.home.title": "Mine"}', 3)
     conn.commit()
     assert row["tokens"] == {"color.canvas.bg": "#999999"}
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 findings — expiry lockout and the deny race
+# --------------------------------------------------------------------------- #
+def _retire_lapsed(conn, tenant, session):
+    """create_proposal's pre-insert retire, verbatim."""
+    conn.execute(
+        "UPDATE overlay_proposals SET superseded_at = NOW() "
+        "WHERE tenant_id = %(t)s AND session_id = %(s)s "
+        "  AND state = 'pending' AND superseded_at IS NULL "
+        "  AND lease_expires_at <= NOW()",
+        {"t": tenant, "s": session})
+
+
+def test_an_expired_proposal_does_not_lock_the_session_out(conn, tenant):
+    """Round 2 major. A partial index predicate cannot call NOW(), so a lapsed
+    pending row kept occupying the session's one slot: the preview correctly
+    showed nothing while every new proposal failed, permanently."""
+    session = str(uuid.uuid4())
+    _new_proposal(conn, tenant, session_id=session, lease="-1 minute")
+
+    _retire_lapsed(conn, tenant, session)
+    _new_proposal(conn, tenant, session_id=session)   # must not raise
+    conn.commit()
+
+
+def test_the_lockout_returns_without_the_retire(conn, tenant):
+    """Pin the mechanism. If this stops failing, the index predicate changed
+    and the retire may be removable."""
+    session = str(uuid.uuid4())
+    _new_proposal(conn, tenant, session_id=session, lease="-1 minute")
+    with pytest.raises(pg_errors.UniqueViolation):
+        _new_proposal(conn, tenant, session_id=session)
+    conn.rollback()
+
+
+def test_the_retire_does_not_touch_a_LIVE_pending_proposal(conn, tenant):
+    """The retire must free only LAPSED slots. Clearing a live one would let a
+    session hold two previews, which is the ambiguity the index exists for."""
+    session = str(uuid.uuid4())
+    _new_proposal(conn, tenant, session_id=session, lease="1 hour")
+    _retire_lapsed(conn, tenant, session)
+    with pytest.raises(pg_errors.UniqueViolation):
+        _new_proposal(conn, tenant, session_id=session)
+    conn.rollback()
+
+
+def test_deny_locks_the_document_it_compares_against(schema, tenant):
+    """Round 2 major. deny() read the version without locking, so an approval
+    could move the document between the comparison and the commit and the
+    stale denial the check exists to refuse would still land."""
+    with _connect(schema, autocommit=True) as c:
+        c.execute("INSERT INTO overlay_documents (tenant_id, version, tokens) "
+                  "VALUES (%s, 1, '{}'::jsonb) ON CONFLICT (tenant_id) DO NOTHING",
+                  (tenant,))
+
+    denier = _connect(schema)
+    denier.execute("SELECT version FROM overlay_documents WHERE tenant_id = %s "
+                   "FOR UPDATE", (tenant,))
+
+    blocked, seen = threading.Event(), {}
+
+    def approver():
+        c = _connect(schema)
+        try:
+            blocked.set()
+            c.execute("UPDATE overlay_documents SET version = version + 1 "
+                      "WHERE tenant_id = %s AND version = 1", (tenant,))
+            seen["rows"] = c.cursor().rowcount if False else 1
+            c.commit()
+        except Exception as exc:            # noqa: BLE001
+            seen["error"] = type(exc).__name__
+        finally:
+            c.close()
+
+    t = threading.Thread(target=approver)
+    t.start()
+    blocked.wait(timeout=5)
+    time.sleep(0.4)
+
+    # While the denier holds the lock the approver CANNOT have committed.
+    still = denier.execute("SELECT version FROM overlay_documents "
+                           "WHERE tenant_id = %s", (tenant,)).fetchone()
+    assert still["version"] == 1, "the approver moved the document mid-denial"
+    denier.rollback()
+    denier.close()
+    t.join(timeout=20)

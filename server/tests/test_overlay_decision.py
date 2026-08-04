@@ -239,3 +239,16 @@ def test_actor_is_required():
             od.decide(_pending(), approve=True, actor=bad, decision_key=KEY,
                       tenant_version=1, current_tenant_version=1, now=T0)
         assert exc.value.code == "actor_required"
+
+
+def test_revert_requires_an_actor_exactly_as_decide_does():
+    """A review reverted with actor="" and got an audit event crediting
+    nobody. The rule lived in decide() only, so one copy went missing; it is
+    now a single helper both paths call."""
+    approved, _ = od.decide(_pending(), approve=True, actor="op",
+                            decision_key=KEY, tenant_version=1,
+                            current_tenant_version=1, now=T0 + 1)
+    for blank in ("", "   ", None, 7):
+        with pytest.raises(od.OverlayDecisionError) as e:
+            od.revert(approved, actor=blank, decision_key=KEY2, now=T0 + 5)
+        assert e.value.code == "actor_required"
