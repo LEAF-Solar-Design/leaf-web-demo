@@ -13,6 +13,9 @@ and returns a receipt naming the standing pipeline the branch must ride —
 branch -> PR -> sol-critic review gate -> merge -> ECS staging canary -> prod,
 rollback = previous ECS task-definition revision (docs/ADMIN-SELF-EDIT-LANE.md).
 The lane never merges, never touches ECS, and never bypasses the PR gate.
+When configured (``LEAF_PLATFORM_PR_OPEN`` + a PR-scoped token), landing also
+opens the pull request automatically — best-effort and recorded, never
+load-bearing (leaf-web-demo#422 Phase 1); the review/merge gates are unchanged.
 
 FUNDAMENTAL PATHS (auth, billing, agent spine — see
 ``platform_fundamental_paths.json``) require the out-of-band co-sign before the
@@ -132,6 +135,22 @@ def push_remote() -> str:
 def _redact(text: str) -> str:
     """Scrub URL userinfo out of anything destined for operator detail/logs."""
     return _USERINFO_RE.sub("://[redacted]@", text)
+
+
+def pr_open_enabled() -> bool:
+    """Phase 1 of the operator-gated follow-through (leaf-web-demo#422):
+    after a successful push, open the pull request automatically. OFF by
+    default; the lane still never merges, reviews, or deploys."""
+    return os.environ.get("LEAF_PLATFORM_PR_OPEN", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _github_api_root() -> str:
+    return (os.environ.get("LEAF_PLATFORM_GITHUB_API", "").strip()
+            or "https://api.github.com")
 
 
 def fundamental_file() -> Path:
@@ -851,6 +870,165 @@ def propose_and_land(*, tenant_id: str, subject: str, title: str,
                 ack_commit_sha=str(view["commit_sha"]))
 
 
+# --------------------------------------------------------------------------- #
+# PR auto-open on land (issue #422 Phase 1) — best-effort, NEVER load-bearing.
+# The lane's write authority is unchanged: branch-only pushes with the
+# Contents-scoped token. Opening the PR uses a SEPARATE, PR-scoped token so
+# each capability revokes independently. Every failure here is recorded on the
+# change record and the land still succeeds; the idempotent land replay (same
+# exact-commit ack) is the retry path.
+# --------------------------------------------------------------------------- #
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _github_request(method: str, path: str, *, token: str,
+                    payload: Optional[dict[str, Any]] = None,
+                    timeout: int = 15) -> tuple[int, Any]:
+    """One GitHub API call. Returns (status, parsed-json-or-None).
+
+    The token travels ONLY in the Authorization header — never in the URL, so
+    it can never reach ``_redact``-scrubbed detail via argv/stderr the way a
+    userinfo URL could. HTTP errors return their status rather than raising so
+    the caller can decide; transport errors raise and the caller records a
+    generic code.
+    """
+    import urllib.error
+    import urllib.request
+
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        _github_api_root() + path, data=body, method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "leaf-platform-customize",
+            **({"Content-Type": "application/json"} if body else {}),
+        })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:  # non-2xx still carries a body
+        raw = exc.read()
+        status = exc.code
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = None
+    return status, data
+
+
+def _pr_body(record: Mapping[str, Any]) -> str:
+    fundamental = list(record.get("fundamental_paths") or [])
+    cosign = record.get("cosign") or {}
+    lines = [
+        f"Opened automatically by the R7 self-edit lane on Land "
+        f"(leaf-web-demo#422 Phase 1).",
+        "",
+        f"- Change-Id: `{record.get('change_id')}`",
+        f"- Commit: `{record.get('commit_sha')}`",
+        f"- Proposed-By-Subject: `{record.get('author_subject')}`",
+        f"- Paths: " + ", ".join(f"`{p}`" for p in (record.get("paths") or [])),
+    ]
+    if fundamental:
+        lines.append(
+            f"- Fundamental paths ({len(fundamental)}): co-signed by "
+            f"`{cosign.get('approver_subject', 'UNKNOWN')}` at "
+            f"{cosign.get('at', 'UNKNOWN')}")
+    lines += [
+        "",
+        "The lane pushes branches only — this PR rides the standing review "
+        "pipeline (sol-critic gate) like every other change; merging stays "
+        "gated there.",
+    ]
+    return "\n".join(lines)
+
+
+def _pr_view(data: Mapping[str, Any], *, reused: bool) -> Optional[dict[str, Any]]:
+    """Validate the fields we persist — a misconfigured API root must not be
+    able to plant arbitrary junk (or a javascript: URL) in the record the
+    drawer renders as a link."""
+    number, url = data.get("number"), data.get("html_url")
+    if not isinstance(number, int) or not isinstance(url, str) \
+            or not url.startswith("https://"):
+        return None
+    return {"number": number, "url": url, "reused": reused, "at": _now()}
+
+
+def _pr_settled(pr: Any) -> bool:
+    return isinstance(pr, dict) and isinstance(pr.get("number"), int)
+
+
+def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Open (or find) the PR for the landed branch. NEVER raises.
+
+    Reuse-first, then create, then one re-read on 422 (GitHub answers 422 for
+    "A pull request already exists" when two landers race). Config gaps and
+    API failures come back as recorded error codes; operator detail goes to
+    the log, redacted and bounded.
+    """
+    at = _now()
+    slug = os.environ.get("LEAF_PLATFORM_PR_REPO", "").strip()
+    token = os.environ.get("LEAF_PLATFORM_PR_TOKEN", "").strip()
+    if not slug or not token:
+        return {"error": "pr_config_missing", "at": at}
+    if not _REPO_SLUG_RE.fullmatch(slug):
+        return {"error": "pr_repo_invalid", "at": at}
+    branch_ref = str(record.get("branch_ref", ""))
+    try:
+        _assert_branch_only(branch_ref)
+    except PlatformCustomizeError:
+        return {"error": "pr_branch_invalid", "at": at}
+    branch = branch_ref[len("refs/heads/"):]
+    owner = slug.split("/", 1)[0]
+    base = base_ref()
+    base = base[len("refs/heads/"):] if base.startswith("refs/heads/") else base
+    from urllib.parse import quote
+
+    list_path = (f"/repos/{slug}/pulls?state=open"
+                 f"&head={quote(f'{owner}:{branch}', safe='')}"
+                 f"&base={quote(base, safe='')}")
+    try:
+        status, data = _github_request("GET", list_path, token=token)
+        if status == 200 and isinstance(data, list):
+            for item in data:
+                if isinstance(item, Mapping):
+                    view = _pr_view(item, reused=True)
+                    if view:
+                        return view
+        status, data = _github_request("POST", f"/repos/{slug}/pulls", token=token, payload={
+            "title": f"admin-customize: {record.get('title')}",
+            "head": branch,
+            "base": base,
+            "body": _pr_body(record),
+        })
+        if status == 201 and isinstance(data, Mapping):
+            view = _pr_view(data, reused=False)
+            if view:
+                return view
+        if status == 422:
+            # a racing lander (or a previous half-failure) already opened it
+            status2, data2 = _github_request("GET", list_path, token=token)
+            if status2 == 200 and isinstance(data2, list):
+                for item in data2:
+                    if isinstance(item, Mapping):
+                        view = _pr_view(item, reused=True)
+                        if view:
+                            return view
+        _LOG.warning("platform_customize: PR open answered %s for change %s",
+                     status, record.get("change_id"))
+        return {"error": f"pr_open_http_{int(status)}", "at": at}
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        _LOG.warning("platform_customize: PR open failed for change %s: %s",
+                     record.get("change_id"),
+                     _redact(f"{type(exc).__name__}: {exc}")[:200])
+        return {"error": "pr_open_failed", "at": at}
+
+
 def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:
     """Hand the approved change to the standing pipeline (optionally pushing).
 
@@ -875,6 +1053,15 @@ def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, An
     if not isinstance(ack_commit_sha, str) or ack_commit_sha != commit_sha:
         raise PlatformCustomizeError("land_ack_mismatch", 409)
     if record.get("state") == LANDED:
+        # Idempotent replay doubles as the PR-open RETRY path: the push
+        # happened but the PR is missing or errored (crash between marker and
+        # record write, transient API failure, config landed later). The ack
+        # equality above already re-bound this invocation to the exact bytes.
+        if (pr_open_enabled() and isinstance(record.get("push"), dict)
+                and record["push"].get("pushed")
+                and not _pr_settled(record.get("pr"))):
+            record["pr"] = _open_pull_request(record)
+            _write_record(record)
         return public_view(record)
     if record.get("state") != APPROVED:
         code = ("cosign_required" if record.get("state") == AWAITING_COSIGN
@@ -917,6 +1104,11 @@ def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, An
     record["push"] = {"pushed": pushed, "remote": push_remote() if pushed else None,
                       "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     record["state"] = LANDED
+    # Best-effort, after the marker: a PR-open failure is recorded, never
+    # load-bearing (issue #422 Phase 1). Requires a real push — with push off
+    # there is nothing on the remote to open a PR from.
+    record["pr"] = (_open_pull_request(record)
+                    if pushed and pr_open_enabled() else None)
     _write_record(record)
     return public_view(record)
 
@@ -945,6 +1137,7 @@ def public_view(record: Mapping[str, Any]) -> dict[str, Any]:
         "fundamental_paths": list(record.get("fundamental_paths") or []),
         "cosign": record.get("cosign"),
         "push": record.get("push"),
+        "pr": record.get("pr"),
         "landing_path": {
             "pipeline": ["branch", "pull-request", "sol-critic review gate",
                          "merge", "ECS staging canary", "production"],

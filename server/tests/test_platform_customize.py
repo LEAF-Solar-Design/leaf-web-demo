@@ -724,7 +724,186 @@ def test_git_error_detail_redacts_userinfo():
 
 
 # --------------------------------------------------------------------------- #
-# 4. route gate (admin tier + R7 internal allowlist)
+# 4. PR auto-open on land (issue #422 Phase 1) — best-effort, never load-bearing
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def pushable(lane_env, tmp_path, monkeypatch):
+    """lane_env + a bare remote with push enabled (PR open needs a real push)."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    _git(lane_env["repo"], "remote", "add", "origin", str(remote))
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_PUSH", "1")
+    return lane_env
+
+
+def _land(view):
+    return lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                     ack_commit_sha=view["commit_sha"])
+
+
+def _fake_github(monkeypatch, responses, calls=None):
+    """Replace the one HTTP seam. `responses` maps (method, path-prefix) to
+    (status, data); `calls` collects (method, path, payload) for assertions."""
+    def fake(method, path, *, token, payload=None, timeout=15):
+        if calls is not None:
+            calls.append((method, path, payload))
+        for (m, prefix), reply in responses.items():
+            if method == m and path.startswith(prefix):
+                return reply if not callable(reply) else reply()
+        raise AssertionError(f"unexpected github call: {method} {path}")
+    monkeypatch.setattr(lane, "_github_request", fake)
+
+
+def test_pr_open_off_by_default_records_nothing(pushable):
+    landed = _land(_propose())
+    assert landed["push"]["pushed"] is True
+    assert landed["pr"] is None
+
+
+def test_pr_open_without_push_records_nothing(lane_env, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    landed = _land(_propose())
+    assert landed["push"]["pushed"] is False
+    assert landed["pr"] is None
+
+
+def test_pr_config_missing_fails_open(pushable, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    landed = _land(_propose())
+    assert landed["state"] == "landed"
+    assert landed["pr"]["error"] == "pr_config_missing"
+
+
+def test_pr_opened_and_recorded(pushable, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "LEAF-Solar-Design/leaf-web-demo")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "pr-scoped-token")
+    calls = []
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/LEAF-Solar-Design/leaf-web-demo/pulls?"): (200, []),
+        ("POST", "/repos/LEAF-Solar-Design/leaf-web-demo/pulls"): (
+            201, {"number": 431, "html_url":
+                  "https://github.com/LEAF-Solar-Design/leaf-web-demo/pull/431"}),
+    }, calls)
+    view = _propose()
+    landed = _land(view)
+    assert landed["state"] == "landed"
+    assert landed["pr"] == {"number": 431, "reused": False,
+                            "url": "https://github.com/LEAF-Solar-Design/leaf-web-demo/pull/431",
+                            "at": landed["pr"]["at"]}
+    method, path, payload = calls[-1]
+    assert (method, payload["head"], payload["base"]) == ("POST", view["branch"], "main")
+    assert payload["title"] == f"admin-customize: {view['title']}"
+    assert view["commit_sha"] in payload["body"]
+    assert view["change_id"] in payload["body"]
+
+
+def test_pr_open_reuses_existing_open_pr(pushable, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, [{
+            "number": 7, "html_url": "https://github.com/o/r/pull/7"}]),
+    })
+    landed = _land(_propose())
+    assert landed["pr"] == {"number": 7, "reused": True,
+                            "url": "https://github.com/o/r/pull/7",
+                            "at": landed["pr"]["at"]}
+
+
+def test_pr_open_failure_never_breaks_land_and_never_leaks_token(
+        pushable, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "sekrit-token-bytes")
+    def boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(lane, "_github_request", boom)
+    view = _propose()
+    landed = _land(view)
+    assert landed["state"] == "landed"
+    assert landed["pr"]["error"] == "pr_open_failed"
+    # the durable record never carries the token, in any field
+    raw = json.dumps(lane.load_record(view["change_id"]))
+    assert "sekrit-token-bytes" not in raw
+
+
+def test_pr_open_http_error_is_recorded_with_status(pushable, monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (403, {"message": "denied"}),
+    })
+    landed = _land(_propose())
+    assert landed["state"] == "landed"
+    assert landed["pr"]["error"] == "pr_open_http_403"
+
+
+def test_pr_open_422_race_settles_by_rereading(pushable, monkeypatch):
+    """Two landers race: the POST answers 422 'already exists'; the re-read
+    finds the winner's PR and records it as reused."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    gets = iter([(200, []), (200, [{"number": 9,
+                                    "html_url": "https://github.com/o/r/pull/9"}])])
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): lambda: next(gets),
+        ("POST", "/repos/o/r/pulls"): (422, {"message": "already exists"}),
+    })
+    landed = _land(_propose())
+    assert landed["pr"] == {"number": 9, "reused": True,
+                            "url": "https://github.com/o/r/pull/9",
+                            "at": landed["pr"]["at"]}
+
+
+def test_landed_replay_retries_a_failed_pr_open(pushable, monkeypatch):
+    """The idempotent replay (same exact-commit ack) is the retry path: a
+    transient failure at land time must not be a dead end."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    def boom(*a, **k):
+        raise OSError("transient")
+    monkeypatch.setattr(lane, "_github_request", boom)
+    view = _propose()
+    first = _land(view)
+    assert first["pr"]["error"] == "pr_open_failed"
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": 12, "html_url": "https://github.com/o/r/pull/12"}),
+    })
+    again = _land(view)
+    assert again["state"] == "landed"
+    assert again["pr"]["number"] == 12
+    # settled: a further replay does not call the API again
+    monkeypatch.setattr(lane, "_github_request", boom)
+    settled = _land(view)
+    assert settled["pr"]["number"] == 12
+
+
+def test_pr_view_refuses_junk_from_the_api(pushable, monkeypatch):
+    """A misconfigured API root cannot plant a non-https URL (or junk types)
+    into the record the drawer renders as a link."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": "12", "html_url": "javascript:alert(1)"}),
+    })
+    landed = _land(_propose())
+    assert landed["pr"]["error"] == "pr_open_http_201"
+
+
+# --------------------------------------------------------------------------- #
+# 5. route gate (admin tier + R7 internal allowlist)
 # --------------------------------------------------------------------------- #
 def _admitted(tenant, monkeypatch, *, auth=True):
     from routers import platform_customize as router_mod
