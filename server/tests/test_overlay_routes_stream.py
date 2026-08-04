@@ -150,3 +150,40 @@ def test_a_blank_actor_never_reaches_the_store(store, session):
         x_actor="   ", tenant=TENANT)
     assert res.status_code == 400
     assert store.decided is None
+
+
+# --------------------------------------------------------------------------- #
+# Revoke
+# --------------------------------------------------------------------------- #
+def test_a_revoke_announces_overlay_revoked_with_ids_never_values(store, session):
+    store.reverted = None
+
+    def revert(**kw):
+        store.reverted = kw
+        return ({"proposal_id": kw["proposal_id"], "state": "reverted",
+                 "session_id": store.session_id,
+                 "tokens": {"color.border": "#123456"}},
+                {"version": 5, "tokens": {}})
+    store.revert = revert
+
+    out = overlay_router.revoke_overlay(
+        overlay_router.RevokeBody(proposal_id="p-1", decision_key="k1234567",
+                                  document_version=4),
+        x_actor="op@example.com", tenant=TENANT)
+    assert out["state"] == "reverted"
+    assert store.reverted["expected_version"] == 4
+
+    evs = [e for e in _events(session) if e["type"] == "overlay_revoked"]
+    assert len(evs) == 1, "THE event the stream contract exists for never fired"
+    assert evs[0]["data"]["token_ids"] == ["color.border"]
+    assert evs[0]["data"]["reason"] == "operator_reverted"
+    assert "#123456" not in repr(evs[0]["data"]), "a token VALUE leaked into the event"
+    assert evs[0]["seq"] >= 1
+
+
+def test_a_blank_actor_cannot_revoke(store, session):
+    res = overlay_router.revoke_overlay(
+        overlay_router.RevokeBody(proposal_id="p-1", decision_key="k1234567",
+                                  document_version=4),
+        x_actor="", tenant=TENANT)
+    assert res.status_code == 400

@@ -191,6 +191,71 @@ def decide_overlay(body: DecideBody,
     }
 
 
+class RevokeBody(BaseModel):
+    proposal_id: str
+    decision_key: str = Field(..., min_length=8)
+    document_version: int
+
+
+@router.post("/api/overlay/revocations")
+def revoke_overlay(body: RevokeBody,
+                   x_actor: Optional[str] = Header(default=None, alias="X-Actor"),
+                   tenant=Depends(deps.require_tenant)) -> Any:
+    """Withdraw an APPROVED overlay. The operator's undo.
+
+    Same discipline as deciding, for the same reasons: an actor (a runtime
+    mutation must be attributable), a decision_key (a retry returns the
+    original outcome, a replay is refused), and the CAS witness (withdrawing
+    against a version the operator never saw is the deny() defect again).
+
+    The announce is the one the whole stream contract was built around:
+    overlay_revoked is the event a user must never miss, because missing it
+    leaves a withdrawn theme on screen. It carries token IDS and the new
+    document version, never values — the client re-reads rather than patching,
+    so a missed event costs latency, not correctness.
+    """
+    actor = (x_actor or "").strip()
+    if not actor:
+        return _fail("actor_required", "X-Actor is required to revoke", 400)
+
+    store = _store()
+    try:
+        proposal, document = store.revert(
+            proposal_id=body.proposal_id, actor=actor,
+            decision_key=body.decision_key,
+            expected_version=body.document_version)
+    except Exception as exc:  # noqa: BLE001 - OverlayStoreError carries the code
+        code = getattr(exc, "code", "revoke_failed")
+        return _fail(code, str(getattr(exc, "detail", exc))[:200],
+                     int(getattr(exc, "status_code", 409)))
+
+    # Durable state first, announce second — identical to decide, and the same
+    # narrow except: a vanished requester session must not fail the operator's
+    # revoke, and the read path reaches the same truth without the event.
+    try:
+        overlay_stream.publish(
+            overlay_stream.revoked_event(
+                session_id=str(proposal.get("session_id") or ""),
+                seq=0,  # placeholder; publish() rewrites with the durable seq
+                proposal_id=proposal["proposal_id"],
+                tokens=list((proposal.get("tokens") or {}).keys()),
+                document_version=int(document.get("version", 0) or 0),
+                reason="operator_reverted",
+            ),
+            append_event=session_store.append_event,
+        )
+    except (KeyError, overlay_stream.StreamContractError):
+        pass
+
+    return {
+        "proposal_id": proposal["proposal_id"],
+        "state": proposal["state"],
+        "document_version": int(document.get("version", 0) or 0),
+        "error": None,
+        "degraded_mode": False,
+    }
+
+
 @router.get("/api/overlay")
 def read_overlay(session_id: Optional[str] = None,
                  tenant=Depends(deps.require_tenant)) -> Any:
