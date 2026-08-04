@@ -1097,6 +1097,7 @@ export default function App() {
   }, [selectedHandle])
 
   const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
+  const tourDispatchRef = useRef(false) // P2: true only while a tour beat's dispatch is in flight
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -1143,9 +1144,10 @@ export default function App() {
     }
     // P2: confirm-to-run conversion top. `source` comes from the decision's
     // own construction site (catalog/tour stamp source; slash decisions
-    // carry slash:true; the NL route is 'prompt'). De-dupe: a tour beat arms
-    // the SAME tool twice back-to-back (dispatch route, then the tour's
-    // catalog re-arm) and must count once (review #427 round-2 warn 5).
+    // carry slash:true; the NL route is 'prompt'). A tour beat's FIRST arm
+    // comes through the dispatch route, which knows nothing of the tour, so
+    // the in-flight flag reattributes it; the tour's catalog re-arm is then
+    // the de-duped duplicate (review #427 round-2 warn 5 + round-3 warn 1).
     const emitKey = `${catalogTool.name}`
     const nowTs = Date.now()
     const last = confirmEmitRef.current
@@ -1154,7 +1156,8 @@ export default function App() {
       track('run.confirm_shown', {
         tool: catalogTool.name,
         is_write: isWrite,
-        source: decision.source || (decision.slash ? 'slash' : 'prompt'),
+        source: decision.source
+          || (tourDispatchRef.current ? 'tour' : decision.slash ? 'slash' : 'prompt'),
       })
     }
     return armed
@@ -1649,7 +1652,14 @@ export default function App() {
     if (cannedSeq.current !== seq) return
     let r = null
     try {
-      r = await onDispatch(text)
+      // The dispatch route arms the decision itself; the flag makes that arm
+      // (the one that actually emits) say 'tour' instead of 'prompt'.
+      tourDispatchRef.current = true
+      try {
+        r = await onDispatch(text)
+      } finally {
+        tourDispatchRef.current = false
+      }
       if (cannedSeq.current !== seq) return
       if (r && r.lane === 'run' && step?.action === 'run') {
         const toolObj = tools.find((t) => t.name === r.tool)
