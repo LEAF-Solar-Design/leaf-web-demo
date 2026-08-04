@@ -330,9 +330,21 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
             )}
             {state === 'landed' && record.push && (
               <div className="ops-note">
-                {record.push.pushed
-                  ? `Branch pushed to ${record.push.remote}. Next: pull request, review gate, merge, staging canary.`
-                  : 'Landed locally. Push is disabled on this environment, so the branch stays on the server until an operator collects it.'}
+                {!record.push.pushed
+                  ? 'Landed locally. Push is disabled on this environment, so the branch stays on the server until an operator collects it.'
+                  : record.pr && typeof record.pr.url === 'string' && record.pr.url.startsWith('https://')
+                    ? (
+                      <>
+                        Branch pushed to {record.push.remote}.{' '}
+                        <a href={record.pr.url} target="_blank" rel="noopener noreferrer">
+                          Pull request #{record.pr.number}
+                        </a>
+                        {' '}is open. The review gate runs next.
+                      </>
+                    )
+                    : record.pr && record.pr.error
+                      ? `Branch pushed to ${record.push.remote}, but the pull request could not be opened automatically (${record.pr.error}). Land again to retry, or open it manually.`
+                      : `Branch pushed to ${record.push.remote}. Next: pull request, review gate, merge, staging canary.`}
               </div>
             )}
 

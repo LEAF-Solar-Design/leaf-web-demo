@@ -87,6 +87,18 @@ where every other bad change is stopped: at the PR gate. Every landing receipt
 embeds this contract (`landing_path` in the response) so no session can
 honestly claim a shorter path.
 
+**PR auto-open (issue #422 Phase 1):** when `LEAF_PLATFORM_PR_OPEN=1` and a
+PR-scoped token is configured, a successful land also OPENS the pull request
+(`LEAF_PLATFORM_PR_REPO`, head = the lane branch, base = the proposal base)
+and records `pr: {number, url}` on the change record; the drawer renders the
+link inline. This automates the walk to the gate, not the gate: review and
+merge are untouched. It is best-effort by contract — any failure is recorded
+as `pr: {error}` and the land still succeeds; replaying land with the same
+exact-commit ack retries it. The token is a SEPARATE fine-grained PAT with
+Pull-requests write only (never Contents), so the push credential and the
+PR credential revoke independently — emergency containment now names two
+tokens to revoke instead of one.
+
 ## Co-sign on fundamental paths
 
 Changes touching **auth, billing, or the agent spine** (manifest:
@@ -139,6 +151,10 @@ Enable (per admin account, staging first):
    credential helper — URLs carrying userinfo are refused) and
    `LEAF_PLATFORM_CUSTOMIZE_STATE_DIR` on durable storage.
    `LEAF_CUSTOMIZATION_APPROVAL_SECRET` is already deployed in both envs.
+   Optional PR auto-open (#422 Phase 1): `LEAF_PLATFORM_PR_OPEN=1`,
+   `LEAF_PLATFORM_PR_REPO=<owner/repo>`, `LEAF_PLATFORM_PR_TOKEN=<fine-grained
+   PAT, Pull-requests write ONLY — a separate token from the Contents push
+   PAT, so each revokes independently>`.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
    404 `platform_customize_disabled`.
@@ -156,3 +172,6 @@ remove the `leaf_admin` flag · the standing agent kill file
 * Tenant-facing fork-deploy (D-2: PARKED; R7 tenant surfaces need their own
   design and canon ruling on model-bytes-in-forks).
 * Auto-merge or auto-deploy of landed branches — the PR gate is the point.
+  (PR *opening* is automated as of issue #422 Phase 1 — that walks the branch
+  to the gate; passing the gate still takes the review verdict and, in later
+  phases, a fresh operator approval.)
