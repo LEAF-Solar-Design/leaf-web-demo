@@ -104,6 +104,26 @@ def platform_db():
     return db
 
 
+def overlay_store():
+    """The T1 overlay store, through THE ONE package alias.
+
+    This module already registers the repo's platform package under
+    `leaf_platform` by file location, which no sys.path order can shadow —
+    the property the T1 lane needed after `from platform import overlay_store`
+    resolved to the stdlib module in the container and 500'd every request.
+
+    It exists so there is exactly ONE alias in the process. A second
+    file-location loader under a different name (the router briefly carried
+    `leaf_platform_pkg`) imports the package twice: two `db` modules, two
+    connection POOLS, and two copies of every module-level cache — the
+    shadowing bug traded for a resource one (sol-critic PR #439 round 6).
+    """
+    _ensure_platform_package()
+    import leaf_platform.overlay_store as store  # noqa: PLC0415
+
+    return store
+
+
 def _db_configured() -> bool:
     """True iff the platform package imports AND a DATABASE_URL resolves (env or
     platform/.env.local). Never raises; a False here is the silent no-op path

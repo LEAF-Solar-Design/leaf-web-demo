@@ -60,13 +60,20 @@ def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Reads
 # --------------------------------------------------------------------------- #
-def latest_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
-    """Highest revision wins — that IS the current state of the proposal."""
+def latest_proposal(proposal_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+    """Highest revision wins — that IS the current state of the proposal.
+
+    TENANT-SCOPED like every other lookup in this module. It has no caller
+    today, and that is exactly why it was worth fixing now: an unscoped public
+    read returning another tenant's tokens, session id and actor is a hole
+    waiting for its first caller (sol-critic PR #439 round 3).
+    """
     with db.cursor() as cur:
         cur.execute(
             f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-            "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1",
-            {"pid": proposal_id})
+            "WHERE proposal_id = %(pid)s AND tenant_id = %(tid)s "
+            "ORDER BY revision DESC LIMIT 1",
+            {"pid": proposal_id, "tid": tenant_id})
         return _row_to_dict(cur.fetchone())
 
 
@@ -343,9 +350,18 @@ def _document_on(cur: Any, tenant_id: str) -> Dict[str, Any]:
     return row
 
 
-def _lock_latest(cur: Any, proposal_id: str) -> Optional[Dict[str, Any]]:
+def _lock_latest(cur: Any, proposal_id: str,
+                 tenant_id: str) -> Optional[Dict[str, Any]]:
     """Serialize deciders on one proposal, then read the revision that is
     CURRENT once the lock is held.
+
+    SCOPED BY TENANT, and that scoping is a security boundary, not a
+    convenience: without it a caller who merely KNOWS another tenant's
+    proposal id could approve, deny or revert it, and the mutation would land
+    on that tenant's document (the code read the tenant off the PROPOSAL row,
+    never off the caller). A foreign id now reads exactly like a missing one,
+    so the caller cannot probe for existence either (sol-critic PR #439
+    round 2, MAJOR).
 
     This is two statements for a reason a live-Postgres test had to teach us.
     The obvious one-liner —
@@ -378,22 +394,24 @@ def _lock_latest(cur: Any, proposal_id: str) -> Optional[Dict[str, Any]]:
     """
     cur.execute(
         "SELECT proposal_id FROM overlay_proposals "
-        "WHERE proposal_id = %(pid)s "
+        "WHERE proposal_id = %(pid)s AND tenant_id = %(tid)s "
         "  AND revision = (SELECT MIN(revision) FROM overlay_proposals "
-        "                  WHERE proposal_id = %(pid)s) "
+        "                  WHERE proposal_id = %(pid)s AND tenant_id = %(tid)s) "
         "FOR UPDATE",
-        {"pid": proposal_id})
+        {"pid": proposal_id, "tid": tenant_id})
     if cur.fetchone() is None:
         return None
     cur.execute(
         f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-        "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1",
-        {"pid": proposal_id})
+        "WHERE proposal_id = %(pid)s AND tenant_id = %(tid)s "
+        "ORDER BY revision DESC LIMIT 1",
+        {"pid": proposal_id, "tid": tenant_id})
     return _row_to_dict(cur.fetchone())
 
 
 def approve(
-    *, proposal_id: str, actor: str, decision_key: str, expected_version: int,
+    *, proposal_id: str, tenant_id: str, actor: str, decision_key: str,
+    expected_version: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Approve and apply, atomically. Returns (proposal, document).
 
@@ -403,7 +421,7 @@ def approve(
     then try to undo.
     """
     with db.connection() as conn, conn.cursor() as cur:
-        current = _lock_latest(cur, proposal_id)
+        current = _lock_latest(cur, proposal_id, tenant_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
 
@@ -454,7 +472,7 @@ def approve(
     return decided, doc
 
 
-def deny(*, proposal_id: str, actor: str, decision_key: str,
+def deny(*, proposal_id: str, tenant_id: str, actor: str, decision_key: str,
          expected_version: int, reason: str = "") -> Dict[str, Any]:
     """Deny. Recorded and authenticated, because `pending_for_session` stops
     returning the overlay the instant this lands — that is what pulls a
@@ -472,7 +490,7 @@ def deny(*, proposal_id: str, actor: str, decision_key: str,
     and refuses a mismatch.
     """
     with db.connection() as conn, conn.cursor() as cur:
-        current = _lock_latest(cur, proposal_id)
+        current = _lock_latest(cur, proposal_id, tenant_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
         if current["state"] != "pending":
@@ -549,7 +567,8 @@ def _removed_count(before: Mapping[str, Any], doc: Mapping[str, Any]) -> int:
     return sum(1 for k in before if k not in after)
 
 
-def revert(*, proposal_id: str, actor: str, decision_key: str,
+def revert(*, proposal_id: str, tenant_id: str, actor: str,
+           decision_key: str,
            expected_version: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Undo an approved overlay by removing exactly the keys it introduced.
 
@@ -558,7 +577,7 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
     silently roll those back too.
     """
     with db.connection() as conn, conn.cursor() as cur:
-        current = _lock_latest(cur, proposal_id)
+        current = _lock_latest(cur, proposal_id, tenant_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
         if current["state"] == "reverted":

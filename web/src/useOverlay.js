@@ -15,8 +15,9 @@
  * converse restore probe needed after a review found it missing.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { openStream } from './converse.js'
 import { applyOverlay } from './overlayTheme.js'
 import { decideOverlay, fetchOverlay } from './overlayClient.js'
 
@@ -26,24 +27,140 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   const [state, setState] = useState(EMPTY)
   const [loaded, setLoaded] = useState(false)
 
-  const reload = useCallback(async () => {
+  // ONE sequenced read primitive serves the mount read, stream refreshes and
+  // the post-decision read, because three unsequenced paths raced each other
+  // (sol-critic PR #439 round 2):
+  //   * readSeq — only the NEWEST read may write state. Overlay events arrive
+  //     in bursts (a remount replays the transcript from seq 0, so every
+  //     historical overlay event fires a refresh), and concurrent reads can
+  //     land out of order; an older response would otherwise overwrite a newer
+  //     one and pin the surface to a stale theme until the next event.
+  //   * generation — bumped on every session change. Coalescing state MUST NOT
+  //     span sessions: an in-flight read for the old session would otherwise
+  //     re-fetch the OLD session after the switch, take the newest seq, and
+  //     fence out the new session's mount read, leaving the previous tenant's
+  //     overlay applied.
+  const readSeqRef = useRef(0)
+  const genRef = useRef(0)
+  const sessionRef = useRef(sessionId)
+  // `enabled` is read through a ref, not the closure, because a decision that
+  // resolves AFTER the surface went to mock mode still runs its refresh — it
+  // captured a live-mode callback and takes the post-disable generation, so
+  // neither the generation nor the session fence stops it, and tenant styling
+  // lands on the mock surface (sol-critic PR #439 round 6).
+  const enabledRef = useRef(enabled)
+  const inFlightGenRef = useRef(null)
+  const againRef = useRef(false)
+
+  useEffect(() => {
+    // A new session invalidates every in-flight read and the coalescing
+    // coordinator with them.
+    sessionRef.current = sessionId
+    genRef.current += 1
+    againRef.current = false
+    inFlightGenRef.current = null
+    setState(EMPTY)
+    setLoaded(false)
+  }, [sessionId])
+
+  const runRead = useCallback(async () => {
+    if (!enabledRef.current) return false
+    // Bound to the session THIS closure reads, not to whatever generation is
+    // current when it happens to run: a callback captured on session A (a
+    // decide() started before a switch) would otherwise stamp itself with B's
+    // generation, fetch A, pass both fences, and replace B's state with A's
+    // (sol-critic PR #439 round 3).
+    if (sessionId !== sessionRef.current) return false
+    const gen = genRef.current
+    const seq = ++readSeqRef.current
     // fetchOverlay never throws: a theme read is not worth breaking the app,
     // and an empty result leaves the committed defaults exactly as they are.
     const next = await fetchOverlay(sessionId)
-    return next
+    if (!enabledRef.current) return false               // disabled mid-flight
+    if (sessionId !== sessionRef.current) return false  // switched mid-flight
+    if (gen !== genRef.current) return false      // the session moved on
+    if (seq !== readSeqRef.current) return false  // a newer read superseded us
+    setState(next)
+    setLoaded(true)
+    return true
   }, [sessionId])
 
+  // COALESCED refresh — what a stream event and a decision both call. A replay
+  // burst of N overlay events must cost ONE settling read, not N concurrent
+  // ones: while a read is in flight FOR THIS GENERATION, further calls only
+  // raise a flag, and exactly one more read runs after it lands (so the final
+  // state still reflects the last event, never a stale mid-burst snapshot).
+  //
+  // The three resets below (session effect, loop guard, per-iteration flag
+  // clear) are MUTUALLY REDUNDANT for the interleavings a test can stage —
+  // removing any one, or two, still leaves the observable property intact,
+  // which is why the regression test pins the behaviour rather than any single
+  // guard. They are each kept because they close different interleavings: the
+  // session effect covers an old read waking before the new effect runs, the
+  // loop guard covers it waking after.
+  const refresh = useCallback(async () => {
+    const gen = genRef.current
+    if (inFlightGenRef.current === gen) { againRef.current = true; return }
+    inFlightGenRef.current = gen
+    try {
+      do {
+        againRef.current = false
+        await runRead()
+        if (gen !== genRef.current) return   // session changed mid-flight
+      } while (againRef.current)
+    } finally {
+      if (inFlightGenRef.current === gen) inFlightGenRef.current = null
+    }
+  }, [runRead])
+
   useEffect(() => {
-    if (!enabled) return undefined
-    let alive = true
-    ;(async () => {
-      const next = await reload()
-      if (!alive) return          // the session was left mid-flight
-      setState(next)
-      setLoaded(true)
-    })()
-    return () => { alive = false }
-  }, [enabled, reload])
+    enabledRef.current = enabled
+    if (!enabled) {
+      // Disabling (live -> mock) must FENCE reads already in flight and drop
+      // what is applied. The rewrite of this read path lost the original
+      // `alive` cleanup, so a live-mode response could land after the switch
+      // and paint tenant styling onto the mock surface (sol-critic PR #439
+      // round 4). Bumping the generation is the fence; clearing state is what
+      // takes the overlay off the screen (the apply effect's cleanup runs on
+      // loaded going false).
+      genRef.current += 1
+      againRef.current = false
+      inFlightGenRef.current = null
+      setState(EMPTY)
+      setLoaded(false)
+      return undefined
+    }
+    void refresh()
+    // Unmount, or any change to this effect's inputs, invalidates whatever is
+    // in flight — the same fence by the same mechanism.
+    return () => { genRef.current += 1 }
+  }, [enabled, refresh])
+
+  // THE LANE OWNS ITS OWN EVENTS. They used to arrive through ConversePanel,
+  // which is rendered conditionally — dismiss the chat panel and a later
+  // proposal never raised the decision card, and a remote revoke left the
+  // withdrawn theme on screen (sol-critic PR #439 round 7). A hot channel
+  // whose delivery depends on an unrelated panel being open is not a channel.
+  // Subscribing here means the surface repaints for as long as the session
+  // exists, whatever else is mounted.
+  //
+  // Replay-from-zero is deliberate and cheap: refresh() coalesces the burst of
+  // historical overlay events into one settling read, and the events carry ids
+  // and versions only — the client always RE-READS, so a missed or duplicated
+  // event costs latency, never correctness.
+  useEffect(() => {
+    if (!enabled || !sessionId) return undefined
+    const stream = openStream(sessionId, 0, {
+      onEvent: (envelope) => {
+        const type = envelope?.type
+        if (type === 'overlay_proposed' || type === 'overlay_decided'
+            || type === 'overlay_revoked') {
+          void refresh()
+        }
+      },
+    })
+    return () => stream.close()
+  }, [enabled, sessionId, refresh])
 
   // Applying is its own effect so a re-read swaps the overlay through the same
   // undo path rather than stacking properties on top of the previous set.
@@ -56,11 +173,12 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     const result = await decideOverlay(proposalId, opts)
     // Re-read rather than patching locally from the response. A client that
     // patches its own copy and misses one update stays wrong forever with no
-    // way to notice; the server is the only thing that knows the truth.
-    const next = await fetchOverlay(sessionId)
-    setState(next)
+    // way to notice; the server is the only thing that knows the truth. Routed
+    // through the SAME sequenced coordinator: an unsequenced write here could
+    // land after a newer event-driven read and overwrite it with older state.
+    await refresh()
     return result
-  }, [sessionId])
+  }, [refresh])
 
   return {
     tokens: state.tokens,
@@ -68,6 +186,6 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     pendingProposalId: state.pendingProposalId,
     loaded,
     decide,
-    reload: async () => setState(await reload()),
+    reload: refresh,
   }
 }

@@ -156,6 +156,7 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     # back-edge. Its absence 401'd every live chat turn while these tests
     # stayed green, because they call the route directly with a tenant header.
     assert deps._dispatch_backedge_route("POST", "/api/overlay/proposals") is True
+    # (the decide/revoke exclusions are pinned with the co-sign group below)
     # NOT back-edge: the SSE stream, the jobs list, and everything else
     assert deps._dispatch_backedge_route("GET", "/api/jobs/job-123/stream") is False
     assert deps._dispatch_backedge_route("GET", "/api/jobs") is False

@@ -1,5 +1,13 @@
 """T1 overlay routes: propose a preview, decide it, read the live document.
 
+EVERY route is TENANT-SCOPED, and that is a security boundary rather than a
+convenience. Propose binds the named session to the caller; decide and revoke
+pass the caller's tenant INTO the store, which includes it in the locked
+lookup. Without that, knowing a proposal id was enough to decide it, and the
+mutation landed on the owning tenant's document because the code read the
+tenant off the proposal row instead of off the caller (sol-critic PR #439,
+rounds 1 and 2). A foreign id answers exactly like a missing one.
+
 These three are what make the T1 spine reachable. Before them the whole lane
 was unreachable code: a registry with no callers, a decision path with no
 proposals, an operator card wired to nothing.
@@ -56,27 +64,18 @@ def _fail(code: str, message: str, status: int) -> JSONResponse:
 
 
 def _store():
-    """The platform store, imported by FILE PATH, not by name.
+    """The platform overlay store, through platform_link's package alias.
 
     `from platform import overlay_store` loses to the STDLIB platform module
-    whenever site-packages precedes the repo root on sys.path — which is
-    exactly the container layout, where it 500'd every request. Laziness only
-    moved the failure; it never dodged it. Loading the package from its known
-    location beside server/ cannot be shadowed by anything.
+    whenever site-packages precedes the repo root on sys.path — exactly the
+    container layout, where it 500'd every request (found by a live staging
+    chat turn, #440). Loading by FILE LOCATION is the fix, and platform_link
+    already does it under `leaf_platform`; going through it keeps ONE alias in
+    the process. Registering a second one here loaded the package twice — two
+    `db` modules and two connection pools (sol-critic PR #439 round 6).
     """
-    import sys
-    from pathlib import Path
-    if "leaf_platform_pkg" not in sys.modules:
-        import importlib.util
-        pkg_dir = Path(__file__).resolve().parents[2] / "platform"
-        spec = importlib.util.spec_from_file_location(
-            "leaf_platform_pkg", pkg_dir / "__init__.py",
-            submodule_search_locations=[str(pkg_dir)])
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["leaf_platform_pkg"] = mod
-        spec.loader.exec_module(mod)
-    import importlib
-    return importlib.import_module("leaf_platform_pkg.overlay_store")
+    import platform_link  # noqa: PLC0415
+    return platform_link.overlay_store()
 
 
 class ProposeBody(BaseModel):
@@ -100,7 +99,17 @@ def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> A
     # already committed — the caller would get an error for a proposal that
     # exists, then retry into pending_proposal_exists and be stuck. Refusing
     # up front means either everything happens or nothing does.
-    if session_store.get_session(body.session_id) is None:
+    #
+    # The session must ALSO belong to the calling tenant. Existence alone let a
+    # caller name ANOTHER tenant's session: the proposal row is written under
+    # the caller's tenant but keyed to the foreign session, and the
+    # overlay_proposed announce lands in that session's transcript — a
+    # cross-tenant write and a foreign card, repeatable across guessed session
+    # ids. get_session's own docstring states the contract this now honours:
+    # callers compare tenant_id and answer 404-not-403, so a prober cannot
+    # distinguish "does not exist" from "is not yours".
+    session = session_store.get_session(body.session_id)
+    if session is None or str(session.get("tenant_id") or "") != str(tenant):
         return _fail("session_not_found",
                      f"no such session {body.session_id!r}", 404)
 
@@ -159,13 +168,13 @@ def decide_overlay(body: DecideBody,
     try:
         if body.approve:
             proposal, document = store.approve(
-                proposal_id=body.proposal_id, actor=actor,
-                decision_key=body.decision_key,
+                proposal_id=body.proposal_id, tenant_id=str(tenant),
+                actor=actor, decision_key=body.decision_key,
                 expected_version=body.document_version)
         else:
             proposal = store.deny(
-                proposal_id=body.proposal_id, actor=actor,
-                decision_key=body.decision_key,
+                proposal_id=body.proposal_id, tenant_id=str(tenant),
+                actor=actor, decision_key=body.decision_key,
                 expected_version=body.document_version)
             document = store.document(str(tenant))
     except Exception as exc:  # noqa: BLE001 - OverlayStoreError carries the code
@@ -234,8 +243,8 @@ def revoke_overlay(body: RevokeBody,
     store = _store()
     try:
         proposal, document = store.revert(
-            proposal_id=body.proposal_id, actor=actor,
-            decision_key=body.decision_key,
+            proposal_id=body.proposal_id, tenant_id=str(tenant),
+            actor=actor, decision_key=body.decision_key,
             expected_version=body.document_version)
     except Exception as exc:  # noqa: BLE001 - OverlayStoreError carries the code
         code = getattr(exc, "code", "revoke_failed")

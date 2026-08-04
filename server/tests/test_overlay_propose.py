@@ -216,4 +216,9 @@ def test_store_resolution_is_stable_across_calls():
 
     first = overlay_router._store()
     assert overlay_router._store() is first
-    assert sys.modules.get("leaf_platform_pkg.overlay_store") is first
+    # The alias is `leaf_platform`, platform_link's — one package import in the
+    # process. The router briefly registered a SECOND file-location alias
+    # (`leaf_platform_pkg`), which loaded the package twice: two db modules,
+    # two connection pools (sol-critic PR #439 round 6). Asserting the shared
+    # alias is what keeps that from coming back.
+    assert sys.modules.get("leaf_platform.overlay_store") is first

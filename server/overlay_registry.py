@@ -91,7 +91,6 @@ REGISTRY: Dict[str, TokenSpec] = {
         _color("color.canvas.bg", "Workspace background"),
         _color("color.canvas.fg", "Workspace text"),
         _color("color.panel.bg", "Panel background"),
-        _color("color.panel.fg", "Panel text"),
         _color("color.accent", "Accent"),
         _color("color.accent.fg", "Text on accent"),
         _color("color.border", "Borders"),
@@ -104,9 +103,19 @@ REGISTRY: Dict[str, TokenSpec] = {
 
 #: Pairs that must stay readable together. The composed-overlay check enforces
 #: these AFTER merge, because each colour on its own is perfectly valid.
+#: color.canvas.fg is checked against BOTH backgrounds because the shipped
+#: stylesheet has ONE text colour: panels inherit it (65 rules resolve
+#: --foreground; nothing scopes text to the panel domain). A separate
+#: color.panel.fg token was in v1 and is gone — the client could not honour it
+#: without either a guessy 65-rule ancestry sweep or a fallback that inherits
+#: the overlaid canvas text, and a token the surface cannot render makes the
+#: gate certify a cascade that does not exist: the server measured its own
+#: white default while the screen showed overlaid canvas text on the panel
+#: background, 1.19:1 against this floor (sol-critic PR #439 rounds 8-9).
+#: Measuring canvas.fg against panel.bg is the pair the user actually sees.
 CONTRAST_PAIRS: Tuple[Tuple[str, str], ...] = (
     ("color.canvas.fg", "color.canvas.bg"),
-    ("color.panel.fg", "color.panel.bg"),
+    ("color.canvas.fg", "color.panel.bg"),
     ("color.accent.fg", "color.accent"),
 )
 
@@ -126,14 +135,17 @@ MIN_CONTRAST = 4.5
 #: If the two drift the contrast check is computed against a slightly stale
 #: baseline, which is a warning that is too strict or too lax by a little, not
 #: a wrong colour on screen.
+#: Aligned 2026-08-04 to web/src/styles.css's shipped values (--background,
+#: --foreground, --card, --primary, --on-accent, --border) — the first
+#: shipped set was a dark-emerald palette that never matched what the web app
+#: renders, so every contrast check ran against a baseline no user ever saw.
 PLATFORM_DEFAULTS: Dict[str, str] = {
-    "color.canvas.bg": "#0b1210",
-    "color.canvas.fg": "#e8f2ee",
-    "color.panel.bg": "#111c19",
-    "color.panel.fg": "#dfeae6",
-    "color.accent": "#1f7a5a",
-    "color.accent.fg": "#ffffff",
-    "color.border": "#22322d",
+    "color.canvas.bg": "#0a0a0a",
+    "color.canvas.fg": "#ffffff",
+    "color.panel.bg": "#18181b",
+    "color.accent": "#22c55e",
+    "color.accent.fg": "#04140a",
+    "color.border": "#27272a",
 }
 
 

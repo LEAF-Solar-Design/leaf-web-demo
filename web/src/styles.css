@@ -19,7 +19,15 @@
    - keycaps: filled quiet chips (#1c1c20, #71717a text, radius 5, ui-monospace)
 
    Tokens stay a flat contract (hex + real font names) so a WinForms port and the
-   three.js viewer (reads --cv-*) can consume them 1:1. */
+   three.js viewer (reads --cv-*) can consume them 1:1.
+
+   T1 OVERLAY: an approved tenant overlay sets these SAME tokens as inline
+   custom properties on :root (web/src/overlayTheme.js CSS_VAR_BY_TOKEN), which
+   win over the declarations below — that is the entire hot-repaint mechanism,
+   so renaming a token here without updating that map silently disconnects the
+   overlay lane. Derived shades (--primary-hover, --accent-tint*) stay
+   committed constants and do NOT follow an overlaid --primary; acceptable for
+   the v1 vocabulary, revisit when the registry grows derived tokens. */
 
 :root {
   /* --- leaf-tokens.css contract (dark, verbatim) --- */
