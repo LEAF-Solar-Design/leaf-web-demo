@@ -168,6 +168,55 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_an_ignored_path_cannot_be_silently_dropped(lane_env):
+    """sol-critic PR #423: `git add -A` SKIPS .gitignore'd paths, and the
+    porcelain check passes if ANY ONE path landed — so a request pairing a
+    tracked file with an ignored one committed only the first while the record
+    claimed both and reported APPROVED. The approval binds the EDIT SET, so a
+    commit that is a SUBSET of it is not what was approved. Must fail closed
+    BEFORE any record exists."""
+    repo = lane_env["repo"]
+    (repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ignore logs")
+
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.propose(
+            tenant_id=TENANT, subject="auth0|author-1", title="mixed",
+            edits=[
+                {"path": "docs/note.md", "content": "tracked edit\n"},
+                {"path": "audit.log", "content": "ignored edit\n"},
+            ])
+    assert exc.value.code == "edits_not_committed"
+    assert "audit.log" in exc.value.detail
+
+    # And the combined op inherits the refusal — it cannot land a partial set.
+    with pytest.raises(lane.PlatformCustomizeError) as exc2:
+        lane.propose_and_land(
+            tenant_id=TENANT, subject="auth0|author-1", title="mixed",
+            edits=[
+                {"path": "docs/note.md", "content": "tracked edit 2\n"},
+                {"path": "audit.log", "content": "ignored edit\n"},
+            ])
+    assert exc2.value.code == "edits_not_committed"
+
+
+def test_the_commit_contains_exactly_the_requested_paths(lane_env):
+    """Pin the binding positively, not just its failure mode: every approved
+    path is in the commit, and nothing else is."""
+    repo = lane_env["repo"]
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="two files",
+        edits=[
+            {"path": "docs/note.md", "content": "one\n"},
+            {"path": "docs/second.md", "content": "two\n"},
+        ])
+    changed = set(_git(repo, "diff", "--name-only",
+                       view["base_sha"], view["commit_sha"]).split())
+    assert changed == {"docs/note.md", "docs/second.md"}
+    assert set(view["paths"]) == changed
+
+
 def test_propose_and_land_never_lands_a_fundamental_change(lane_env):
     """THE invariant. One approval replaces the operator's second CLICK, never
     the second PERSON: a change touching a fundamental path must come back

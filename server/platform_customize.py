@@ -485,6 +485,33 @@ def propose(*, tenant_id: str, subject: str, title: str,
         _git_wt(git_dir, worktree, "commit", "--no-verify", "-m", message,
                 env_extra=author_env)
         commit_sha = _git_wt(git_dir, worktree, "rev-parse", "HEAD")
+
+        # THE COMMIT MUST CONTAIN EXACTLY WHAT WAS APPROVED.
+        #
+        # `git add -A` SILENTLY skips paths matched by .gitignore, and the
+        # `status --porcelain` check above passes as long as ANY ONE path
+        # landed. So a request pairing a tracked file with an ignored one (say
+        # `docs/note.md` + `audit.log`, which `.gitignore` matches via `*.log`)
+        # produced a commit holding only the first, while the record still
+        # listed BOTH paths and reported APPROVED. Part of an atomic approved
+        # change vanished with no error — and the approval binds the EDIT SET,
+        # so a commit that is a subset of it is not the thing that was
+        # approved (sol-critic PR #423).
+        #
+        # Compare the commit against the request and refuse any difference.
+        # Fail closed: this runs before the record is written, so a dropped
+        # edit can never reach a landable state.
+        committed = {
+            line for line in _git_wt(
+                git_dir, worktree, "diff", "--name-only", base_sha, commit_sha,
+            ).split("\n") if line.strip()
+        }
+        requested = {e["path"] for e in normalized}
+        dropped = sorted(requested - committed)
+        if dropped:
+            raise PlatformCustomizeError(
+                "edits_not_committed", 422,
+                f"git refused to stage (ignored or excluded): {dropped}")
         if not _SHA_RE.fullmatch(commit_sha):
             raise PlatformCustomizeError(
                 "platform_repo_unavailable", 503, f"commit_unresolvable: {commit_sha!r}")
