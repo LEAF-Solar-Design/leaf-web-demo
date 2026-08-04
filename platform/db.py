@@ -43,6 +43,15 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    # T1 runtime overlay (0028). Colour/copy tokens applied per tenant without
+    # a deploy. Declared here because the readiness proof globs the migrations
+    # directory: a CREATE TABLE with no contract fails the gate, which is the
+    # gate doing its job.
+    "overlay_proposals": {"proposal_id", "revision", "tenant_id", "session_id",
+                          "tokens", "state", "lease_expires_at"},
+    "overlay_documents": {"tenant_id", "version", "tokens"},
+    "overlay_audit": {"audit_id", "proposal_id", "tenant_id", "from_state",
+                      "to_state", "token_count"},
     "orgs": {"org_id", "tier", "status"},
     "projects": {"project_id", "org_id", "status"},
     "built_tools": {"tool_id", "project_id", "org_id", "name"},

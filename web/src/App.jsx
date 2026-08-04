@@ -15,6 +15,8 @@ import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
+import OverlayDecisionCard from './components/OverlayDecisionCard.jsx'
+import { useOverlay } from './useOverlay.js'
 import VersionHistory from './components/VersionHistory.jsx'
 import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
@@ -296,6 +298,11 @@ export default function App() {
     startTurn: startAgentTurn,
     clear: clearAgentSession,
   } = converse
+  // T1 runtime overlay. Reads on load and applies the tenant's colour/copy
+  // tokens as CSS custom properties, so an approved change is on screen
+  // without a build or a deploy. LIVE only, like the agent tier: mock mode has
+  // no tenant to read for, and applying a theme there would be theatre.
+  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
 
   const viewerRef = useRef(null)
   const drawingErrorRef = useRef(null)
@@ -2560,6 +2567,19 @@ export default function App() {
             session. LIVE only — never rendered in mock. 'race' keeps the chip
             primary; taking the chip unmounts this (onRun) without cancelling
             the server-side turn. */}
+        {/* T1 operator decision card. Rendered whenever this session has a
+            pending overlay, independent of agentMode: a proposal outlives the
+            panel that produced it, and an operator who dismissed the panel
+            must still be able to decide. */}
+        {!mock && themeOverlay.pendingProposalId && (
+          <OverlayDecisionCard
+            proposal={{ proposal_id: themeOverlay.pendingProposalId,
+                        tokens: themeOverlay.tokens }}
+            documentVersion={themeOverlay.documentVersion}
+            onDecide={(proposalId, opts) => themeOverlay.decide(proposalId, opts)}
+          />
+        )}
+
         {!mock && agentMode && agentSessionId && (
           <ConversePanel
             sessionId={agentSessionId}

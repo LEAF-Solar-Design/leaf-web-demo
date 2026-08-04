@@ -59,8 +59,7 @@ from routers import (
     tenant,
     tools,
     uploads,
-    usage,
-)
+    usage, overlay)
 
 def _cors_origins() -> list[str]:
     """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
@@ -170,6 +169,7 @@ app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (pr
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
+app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
 # at their STAMPED expiry. It starts by default even when
