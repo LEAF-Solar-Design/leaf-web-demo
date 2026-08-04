@@ -19,7 +19,15 @@ WORKDIR /app
 # effective_catalog_dir). python:3.12-slim ships no git, so without this every
 # such call raises FileNotFoundError and the app answers a 503 for a repository
 # the harness had already provisioned correctly.
-RUN apt-get update \
+# HTTPS mirrors, the harness Dockerfile's exact idiom: the self-hosted build
+# runner's VPC has no port-80 egress, which only surfaces when a base-image
+# bump busts the apt layer cache (two identical failures on 2026-08-04:
+# "Unable to connect to deb.debian.org:http").
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+    -exec sed -i \
+      -e 's|http://deb.debian.org|https://deb.debian.org|g' \
+      -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
