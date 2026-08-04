@@ -104,6 +104,23 @@ def platform_db():
     return db
 
 
+def overlay_store():
+    """Return the T1 overlay store module through the collision-safe alias.
+
+    `from platform import overlay_store` loses to the STDLIB platform module
+    whenever site-packages precedes the repo root on sys.path — the shipped
+    container layout, where GET /api/overlay 500ed with "cannot import name
+    'overlay_store' from 'platform' (/usr/local/lib/python3.12/platform.py)"
+    (confirmed live on staging 2026-08-04). This module owns the one blessed
+    loader for the alias; every platform-package consumer goes through it
+    rather than growing a second bespoke import path.
+    """
+    _ensure_platform_package()
+    import leaf_platform.overlay_store as store  # noqa: PLC0415
+
+    return store
+
+
 def _db_configured() -> bool:
     """True iff the platform package imports AND a DATABASE_URL resolves (env or
     platform/.env.local). Never raises; a False here is the silent no-op path

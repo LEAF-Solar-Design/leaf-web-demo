@@ -187,3 +187,32 @@ def test_a_blank_actor_cannot_revoke(store, session):
                                   document_version=4),
         x_actor="", tenant=TENANT)
     assert res.status_code == 400
+
+
+def test_store_import_survives_the_stdlib_platform_shadow(monkeypatch):
+    """The shipped container resolves `import platform` to the STDLIB module
+    (site-packages precedes the repo root), so the router's original
+    `from platform import overlay_store` 500ed every overlay route — confirmed
+    live on staging 2026-08-04, from a real signed-in chat turn. The router now
+    goes through platform_link's file-located `leaf_platform` alias, which no
+    sys.path order can shadow. This test recreates the hostile state
+    explicitly: the colliding name in sys.modules IS the stdlib module, and
+    the alias cache is cold."""
+    import importlib.util
+    import sys
+    import sysconfig
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "platform", Path(sysconfig.get_paths()["stdlib"]) / "platform.py")
+    stdlib_platform = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stdlib_platform)
+    assert not hasattr(stdlib_platform, "overlay_store")
+    monkeypatch.setitem(sys.modules, "platform", stdlib_platform)
+    monkeypatch.delitem(sys.modules, "leaf_platform", raising=False)
+
+    import routers.overlay as overlay_router
+    store = overlay_router._store()
+
+    assert Path(store.__file__).resolve().parent.name == "platform"
+    assert hasattr(store, "approve") and hasattr(store, "revert")
