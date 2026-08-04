@@ -47,15 +47,18 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     static = suites["platform-static"]
-    # Mirrors the floor in run-all-gates.py, so BOTH must move together when
-    # platform/tests/*_static.py gains a test. They did not: the floor sat at
-    # 96 (measured 2026-07-28) while #256 added 1 test and #401 added 5, and
-    # nothing failed, because executed ABOVE a floor is only a drift note.
-    # This assertion is the pin that makes the stale floor visible, so raise
-    # it only alongside a re-measured run-all-gates.py floor.
-    assert static.expected == 102
+    # 124 collected across the 8 *_static.py files minus the 2 DATABASE_URL-
+    # gated skips = 122 executed on a no-DB host (measured 2026-08-04). Mirrors
+    # the floor in run-all-gates.py; BOTH must move together when a *_static.py
+    # file gains a test (#432's 96->102 history), and only alongside a
+    # re-measured run-all-gates.py floor.
+    assert static.expected == 122
     assert any(
         str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
+        for arg in static.argv
+    )
+    assert any(
+        str(arg).endswith("platform/tests/test_overlay_store_static.py")
         for arg in static.argv
     )
 
@@ -72,16 +75,28 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     )
 
 
-def test_test_gate_installs_the_locked_playwright_browser_before_running():
+def test_test_gate_workflow_shards_and_fans_in():
+    """Pins the CI shape the completeness proof depends on: shard jobs run the
+    runner with shard flags AND write result JSON; a fan-in job that KEEPS the
+    job id `gate` / name `run-all-gates` (build-platform-images.yml `needs:`
+    this exact reusable job — the repo's only enforceable gate edge) verifies
+    the shard set; fail-fast stays off so a cancelled shard cannot destroy the
+    proof; the browser install still precedes the shard run."""
     workflow = (REPO / ".github" / "workflows" / "test-gate.yml").read_text(
         encoding="utf-8"
     )
     install_dependencies = workflow.index("name: Install web dependencies")
-    install_browser = workflow.index(
-        "run: npx playwright install --with-deps chromium"
-    )
-    run_gate = workflow.index("name: Run the full gate")
-    assert install_dependencies < install_browser < run_gate
+    install_browser = workflow.index("npx playwright install")
+    run_shard = workflow.index("name: Run gate shard")
+    assert install_dependencies < install_browser < run_shard
+    assert "--shard-count" in workflow and "--shard-index" in workflow
+    assert "--result-json" in workflow
+    assert "--verify-shard-results" in workflow
+    assert "fail-fast: false" in workflow
+    assert "name: run-all-gates" in workflow
+    # The fan-in must not pass on artifact presence alone: it also requires
+    # the shard matrix job itself to have succeeded.
+    assert "needs.shards.result" in workflow
 
 
 def test_spawn_failure_is_retryable_fail_row(tmp_path):
@@ -553,3 +568,435 @@ def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch)
     monkeypatch.setattr(g.shutil, "which", fake_which)
     assert g._npm().endswith("npm.cmd")
     assert g._npx().endswith("npx.cmd")
+
+
+# --------------------------------------------------------------------------- #
+# sharding
+#
+# CI splits the catalog across isolated runner checkouts. The danger sharding
+# introduces is SILENT INCOMPLETENESS: a suite that runs in no shard leaves
+# every shard green and the gate proven by nothing. These tests pin the two
+# halves of the defense: the partition is deterministic and exact, and the
+# fan-in verifier refuses every corruption of the shard set it can name.
+# --------------------------------------------------------------------------- #
+def test_measured_weights_name_only_registered_suites():
+    """A renamed suite must not strand its scheduling weight: a stale key
+    silently rebalances shards (the renamed suite drops to the default weight
+    and can pile onto the critical shard)."""
+    g = _load_runner()
+    ids = {s.id for s in g.build_suites()}
+    stale = sorted(set(g._MEASURED_EST_S) - ids)
+    assert stale == [], f"weights for unregistered suite ids: {stale}"
+
+
+def test_partition_is_deterministic_disjoint_and_exact():
+    g = _load_runner()
+    suites = g.build_suites()
+    catalog_ids = [s.id for s in suites]
+    for n in (1, 2, 4, 8):
+        first = g.partition_suites(suites, n)
+        second = g.partition_suites(suites, n)
+        assert [[s.id for s in b] for b in first] == \
+               [[s.id for s in b] for b in second], f"n={n} not deterministic"
+        union = [s.id for b in first for s in b]
+        assert sorted(union) == sorted(catalog_ids), f"n={n} union != catalog"
+        assert len(union) == len(set(union)), f"n={n} a suite landed twice"
+    # One shard is exactly a full serial run.
+    assert [s.id for s in g.partition_suites(suites, 1)[0]] == catalog_ids
+
+
+def test_partition_keeps_catalog_order_within_a_shard():
+    """A shard runs its suites in catalog order, exactly like a full run: the
+    scoreboard stays readable against build_suites() and suite-order coupling
+    bugs cannot hide behind LPT's weight ordering."""
+    g = _load_runner()
+    suites = g.build_suites()
+    order = {s.id: i for i, s in enumerate(suites)}
+    for shard in g.partition_suites(suites, 8):
+        indexes = [order[s.id] for s in shard]
+        assert indexes == sorted(indexes)
+
+
+def test_partition_separates_the_two_heaviest_suites():
+    """LPT sanity: the top two weights must never share a shard at n=8 —
+    if they do, the weights or the assignment loop regressed and the critical
+    shard quietly doubles."""
+    g = _load_runner()
+    heavy = sorted(g._MEASURED_EST_S, key=g._MEASURED_EST_S.get, reverse=True)[:2]
+    for shard in g.partition_suites(g.build_suites(), 8):
+        ids = {s.id for s in shard}
+        assert not (heavy[0] in ids and heavy[1] in ids)
+
+
+def test_catalog_fingerprint_is_stable_and_sensitive():
+    """The fan-in trusts shards only when they hashed the same catalog. Same
+    catalog -> same value; touching a floor or a command -> different value."""
+    g = _load_runner()
+    suites = g.build_suites()
+    base = g.catalog_fingerprint(suites)
+    assert base == g.catalog_fingerprint(g.build_suites())
+
+    import dataclasses
+    floor_moved = list(suites)
+    floor_moved[0] = dataclasses.replace(suites[0], expected=(suites[0].expected or 0) + 1)
+    assert g.catalog_fingerprint(floor_moved) != base
+
+    argv_moved = list(suites)
+    argv_moved[0] = dataclasses.replace(suites[0], argv=list(suites[0].argv) + ["-k", "x"])
+    assert g.catalog_fingerprint(argv_moved) != base
+
+
+def test_every_platform_static_file_is_registered_in_platform_static():
+    """The hole this closes shipped twice for real: db_primitives/db_readiness
+    (pre-#29) and then test_overlay_store_static.py (T1 lane) each sat outside
+    the gate because the platform-static target list is hand-written. Pin the
+    list against the glob so the NEXT *_static.py cannot run nowhere."""
+    g = _load_runner()
+    static = {s.id: s for s in g.build_suites()}["platform-static"]
+    registered = {Path(str(arg)).name for arg in static.argv if str(arg).endswith(".py")}
+    on_disk = {p.name for p in (REPO / "platform" / "tests").glob("*_static.py")}
+    missing = sorted(on_disk - registered)
+    assert missing == [], (
+        f"platform/tests/*_static.py not registered in platform-static: {missing}")
+
+
+def _shard_stub_suites(g):
+    suites = [
+        g.Suite(sid, sid, "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1)
+        for sid in ("stub-alpha", "stub-beta", "stub-gamma", "stub-delta")
+    ]
+    # One gated suite so a LEGITIMATE suite-level SKIP is representable:
+    # the verifier allows SKIP only for suites with a suite-level skip gate.
+    suites.append(g.Suite("stub-gated", "stub-gated", "pytest", SCRIPTS,
+                          [sys.executable, "-c", "pass"], 1, db_gated=True))
+    return suites
+
+
+def test_sharded_main_runs_exactly_its_partition_and_writes_result_json(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    ran: list[str] = []
+
+    def fake_run(suite, log_dir, attempt):
+        ran.append(suite.id)
+        return g.Result(suite, "PASS", "1", 0.1,
+                        counts={"got": 1, "passed": 1, "skipped": 0})
+
+    monkeypatch.setattr(g, "run_suite_guarded", fake_run)
+    result_path = tmp_path / "shard0.json"
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py", "--shard-count", "2", "--shard-index", "0",
+        "--result-json", str(result_path), "--log-dir", str(tmp_path),
+    ])
+
+    rc = g.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    want = [s.id for s in g.partition_suites(stubs, 2)[0]]
+    assert ran == want
+    assert "--shard-count 2 --shard-index 0" in out
+    data = __import__("json").loads(result_path.read_text(encoding="utf-8"))
+    assert data["schema"] == 1
+    assert data["catalog_fingerprint"] == g.catalog_fingerprint(stubs)
+    assert data["shard_count"] == 2 and data["shard_index"] == 0
+    assert data["suite_ids"] == want
+    assert data["any_fail"] is False
+    assert data["executed_total"] == sum(
+        e["executed"] for e in data["results"])
+
+
+def test_shard_cli_rejects_incoherent_flag_combinations(tmp_path):
+    """Each of these would otherwise run a set nobody asked for — the exact
+    silence class the --only hardening closed. All must exit 2 running
+    nothing."""
+    cases = (
+        ["--shard-count", "8"],                                   # no index
+        ["--shard-count", "8", "--shard-index", "8"],             # out of range
+        ["--shard-count", "8", "--shard-index", "-1"],            # out of range
+        ["--shard-count", "0", "--shard-index", "0"],             # bad count
+        ["--shard-count", "2", "--shard-index", "0",
+         "--only", "platform-static"],                            # subset shard
+        ["--verify-shard-results", str(tmp_path),
+         "--shard-count", "2"],                                   # mixed modes
+    )
+    for extra in cases:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "run-all-gates.py"),
+             "--log-dir", str(tmp_path)] + extra,
+            cwd=str(REPO), capture_output=True, text=True, timeout=300,
+            encoding="utf-8", errors="replace",
+        )
+        assert proc.returncode == 2, (extra, proc.stdout + proc.stderr)
+        assert "GATE SCOREBOARD" not in proc.stdout, extra
+
+
+def _write_shard_files(g, suites, tmp_path, *, statuses=None):
+    """Round-trip helper: produce shard result files through the REAL writer,
+    so the verifier tests exercise the same JSON shape CI produces."""
+    import json as _json
+    statuses = statuses or {}
+    fingerprint = g.catalog_fingerprint(suites)
+    parts = g.partition_suites(suites, 2)
+    for i, part in enumerate(parts):
+        results = []
+        attempts = {}
+        for s in part:
+            status = statuses.get(s.id, "PASS")
+            results.append(g.Result(
+                s, status, "1" if status != "SKIP" else "skip", 0.1,
+                counts=({"got": 1, "passed": 1, "skipped": 0}
+                        if status != "SKIP" else {})))
+            attempts[s.id] = 1
+        g.write_result_json(
+            str(tmp_path / f"gate-shard-{i}" / "gate-result.json"),
+            fingerprint=fingerprint, total=len(suites), shard_count=2,
+            shard_index=i, selection=f"--shard-count 2 --shard-index {i}",
+            suites=part, results=results, attempts_by_id=attempts, wall=0.2)
+    return _json
+
+
+def test_verifier_accepts_a_complete_passing_shard_set(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path)
+
+    assert g.verify_shard_results(tmp_path) == 0
+    assert "PROVEN" in capsys.readouterr().out
+
+
+def test_verifier_refuses_every_corruption_of_the_shard_set(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    def reload(mutate):
+        """Fresh good set, one named corruption, verifier must return 1."""
+        for child in tmp_path.iterdir():
+            if child.is_dir():
+                for f in child.iterdir():
+                    f.unlink()
+                child.rmdir()
+            else:
+                child.unlink()
+        _write_shard_files(g, stubs, tmp_path)
+        mutate()
+        rc = g.verify_shard_results(tmp_path)
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        return out
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    shard1 = tmp_path / "gate-shard-1" / "gate-result.json"
+
+    def load(p):
+        return _json.loads(p.read_text(encoding="utf-8"))
+
+    def dump(p, d):
+        p.write_text(_json.dumps(d), encoding="utf-8")
+
+    # A shard never ran.
+    out = reload(lambda: shard1.unlink())
+    assert "missing shard result" in out
+
+    # The same shard reported twice (and its twin missing).
+    def duplicate_index():
+        d = load(shard1)
+        d["shard_index"] = 0
+        dump(shard1, d)
+    out = reload(duplicate_index)
+    assert "more than once" in out
+
+    # A shard ran a different catalog (fingerprint mismatch).
+    def poison_fingerprint():
+        d = load(shard0)
+        d["catalog_fingerprint"] = "0" * 64
+        dump(shard0, d)
+    out = reload(poison_fingerprint)
+    assert "fingerprint mismatch" in out
+
+    # A shard ran a hand-typed subset instead of its assigned slice.
+    def hand_typed_subset():
+        d = load(shard0)
+        d["suite_ids"] = d["suite_ids"][:-1]
+        d["results"] = d["results"][:-1]
+        d["executed_total"] = sum(e["executed"] or 0 for e in d["results"])
+        dump(shard0, d)
+    out = reload(hand_typed_subset)
+    assert "differs from the deterministic partition" in out
+
+    # A shard stopped early: results do not cover its suite set.
+    def early_stop():
+        d = load(shard0)
+        d["results"] = d["results"][:-1]
+        d["executed_total"] = sum(e["executed"] or 0 for e in d["results"])
+        dump(shard0, d)
+    out = reload(early_stop)
+    assert "do not cover its suite set" in out
+
+    # The file's own arithmetic is broken.
+    def broken_total():
+        d = load(shard0)
+        d["executed_total"] = 999
+        dump(shard0, d)
+    out = reload(broken_total)
+    assert "!= per-suite sum" in out
+
+    # A suite failed.
+    def one_fail():
+        d = load(shard0)
+        d["results"][0]["status"] = "FAIL"
+        dump(shard0, d)
+    out = reload(one_fail)
+    assert "FAILED suites" in out
+
+    # Shards disagree on the shard count.
+    def count_disagreement():
+        d = load(shard1)
+        d["shard_count"] = 3
+        dump(shard1, d)
+    out = reload(count_disagreement)
+    assert "disagree on shard_count" in out
+
+
+def test_verifier_reports_an_empty_results_dir_as_failure(tmp_path, capsys):
+    g = _load_runner()
+    assert g.verify_shard_results(tmp_path) == 1
+    assert "no shard result files" in capsys.readouterr().out
+
+
+def test_verifier_accepts_a_gated_suite_level_skip(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-gated": "SKIP"})
+
+    assert g.verify_shard_results(tmp_path) == 0
+    assert "PROVEN" in capsys.readouterr().out
+
+
+def test_verifier_refuses_pass_below_the_suite_floor(tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 2: a fabricated PASS with executed 0 (and a
+    consistent executed_total) cleared every check — a suite could run
+    nowhere while the gate reported green. The verifier holds the real
+    catalog, so it re-checks executed against each suite's own floor."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"][0]["executed"] = 0
+    d["executed_total"] = sum(e["executed"] or 0 for e in d["results"])
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "below its floor" in out
+
+
+def test_verifier_refuses_an_ungated_suite_level_skip(tmp_path, monkeypatch, capsys):
+    """Suite-level SKIP is a runner behavior reserved for db_gated/opt-in
+    suites; a result file claiming SKIP for any other suite is a suite that
+    silently ran nowhere (sol-critic #436 round 2)."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-alpha": "SKIP"})
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "no suite-level skip gate" in out
+
+
+def test_verifier_refuses_non_integer_or_negative_executed_counts(
+        tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 4: bool subclasses int, so a corrupt
+    `executed: true` satisfied isinstance(executed, int) and cleared a floor
+    of 1; negative counts were equally acceptable to the floorless branch.
+    Both must be refused as proof of nothing."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    for poison in (True, -1):
+        shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+        d = _json.loads(shard0.read_text(encoding="utf-8"))
+        d["results"][0]["executed"] = poison
+        d["executed_total"] = sum(
+            e["executed"] or 0 for e in d["results"])
+        shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+        rc = g.verify_shard_results(tmp_path)
+        out = capsys.readouterr().out
+        assert rc == 1, (poison, out)
+        assert "below its floor" in out, (poison, out)
+
+
+def test_verifier_names_corrupt_result_entries_instead_of_crashing(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"] = [42] + d["results"][1:]
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)   # must NOT raise
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "non-object" in out
+
+
+def test_fingerprint_ignores_toolchain_paths_but_not_targets():
+    """The fan-in of run 30938231420 refused all eight shards because it
+    resolved a different npm path than the shard jobs (no setup-node in the
+    fan-in). Toolchain identity is part of the catalog; toolchain LOCATION is
+    part of the job image."""
+    g = _load_runner()
+
+    def stub(argv):
+        return [g.Suite("s", "s", "vitest", SCRIPTS, argv, 1)]
+
+    linux_npm = g.catalog_fingerprint(stub(["/usr/local/bin/npm", "test"]))
+    tool_npm = g.catalog_fingerprint(stub(["/opt/hostedtoolcache/node/20/bin/npm", "test"]))
+    win_npm = g.catalog_fingerprint(stub([r"C:\Program Files\nodejs\npm.cmd", "test"]))
+    assert linux_npm == tool_npm == win_npm
+
+    other_target = g.catalog_fingerprint(stub(["/usr/local/bin/npm", "run", "e2e"]))
+    assert other_target != linux_npm
+    npx_instead = g.catalog_fingerprint(stub(["/usr/local/bin/npx", "test"]))
+    assert npx_instead != linux_npm
+
+
+def test_verifier_refuses_a_status_it_does_not_recognize(tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 1: the verifier rejected only the literal FAIL
+    status, so a corrupt result file carrying an unknown status (say NOT_RUN)
+    for every suite still counted as complete coverage and printed PROVEN —
+    fail-open in the acceptance instrument itself. Every status must be a
+    recognized terminal value."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"][0]["status"] = "NOT_RUN"
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "unrecognized status" in out
