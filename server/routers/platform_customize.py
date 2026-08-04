@@ -146,6 +146,34 @@ def propose(req: ProposeRequest, tenant=Depends(deps.require_tenant)) -> Dict[st
         return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
 
 
+@router.post("/api/platform/customize/propose-and-land")
+def propose_and_land(req: ProposeRequest,
+                     tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """One approval for a change that needs no co-sign.
+
+    Same admission gate and same request shape as propose — the operator
+    approves the EXACT edit set, and the commit is a pure function of it, so
+    nothing is authorised here that the propose approval did not already cover.
+    A change touching a fundamental path comes back AWAITING_COSIGN and is NOT
+    landed: the independent co-signer is untouched.
+    """
+    admitted = _gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    tenant_id, _tier = admitted
+    try:
+        return lane.propose_and_land(
+            tenant_id=tenant_id,
+            subject=_subject(tenant, tenant_id),
+            title=req.title,
+            edits=[e.dict() for e in req.edits],
+        )
+    except lane.PlatformCustomizeError as exc:
+        return _error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
+
+
 @router.get("/api/platform/customize/{change_id}")
 def status(change_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     admitted = _gate(tenant)

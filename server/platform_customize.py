@@ -171,7 +171,14 @@ def _assert_branch_only(ref: str) -> str:
 # into operator-only detail)
 # --------------------------------------------------------------------------- #
 def _git_trust(*paths: Path) -> list[str]:
-    flags: list[str] = []
+    # --no-replace-objects on EVERY lane invocation. refs/replace/* are applied
+    # by default to almost all commands including diff and ls-tree, so a
+    # replacement for the base commit could present a tree that hides an
+    # unapproved side effect: the binding diff would report only approved
+    # paths while the PUBLISHED commit differs from the real base — and git
+    # excludes replacement refs from pack transfer, so the remote sees the
+    # unapproved change. The oracle must read real objects (sol-critic #423 r6).
+    flags: list[str] = ["--no-replace-objects"]
     for path in paths:
         try:
             resolved = str(path.resolve(strict=False))
@@ -451,6 +458,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
     try:
         _git(git_dir, "worktree", "add", "--detach", str(worktree), base_sha,
              timeout=120)
+        expected_blobs: dict[str, str] = {}
         for edit in normalized:
             _reject_symlink_escape(worktree, edit["path"])
             target = worktree / edit["path"]
@@ -462,6 +470,17 @@ def propose(*, tenant_id: str, subject: str, title: str,
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(edit["content"], encoding="utf-8", newline="\n")
+                # Capture the approved bytes' object id NOW, before `git add`
+                # can run a clean filter over them. Hashing after the add is
+                # CIRCULAR: a filter (possibly introduced by a .gitattributes
+                # edit in this very request) rewrites the file, git stages the
+                # rewritten bytes, and a later read hashes those same rewritten
+                # bytes — want == got while the landed content is not what was
+                # approved (sol-critic PR #423 round 3). git's own hasher, so
+                # the repo's object format is respected.
+                expected_blobs[edit["path"]] = _git_wt(
+                    git_dir, worktree, "hash-object", "--no-filters",
+                    "--", edit["path"]).strip()
         _git_wt(git_dir, worktree, "add", "-A")
         status = _git_wt(git_dir, worktree, "status", "--porcelain")
         if not status.strip():
@@ -485,6 +504,103 @@ def propose(*, tenant_id: str, subject: str, title: str,
         _git_wt(git_dir, worktree, "commit", "--no-verify", "-m", message,
                 env_extra=author_env)
         commit_sha = _git_wt(git_dir, worktree, "rev-parse", "HEAD")
+
+        # THE COMMIT MUST BE EXACTLY WHAT WAS APPROVED — PATHS AND BYTES.
+        #
+        # The approval binds the EDIT SET, so anything the commit holds that
+        # the operator did not approve, or any approved byte the commit does
+        # not hold, means the landed change is not the reviewed one. Two
+        # concrete ways that happened (sol-critic PR #423 rounds 1-2):
+        #
+        #   * `git add -A` SILENTLY skips .gitignore'd paths while the record
+        #     still listed them, so a mixed request committed only part of an
+        #     atomic set and reported APPROVED.
+        #   * a content filter rewrites bytes on the way in. With
+        #     core.autocrlf=true a requested CRLF body commits as LF
+        #     (measured: requested 4e349b59..., committed 814f4a42...), so a
+        #     path-only check passes while the BYTES differ. A clean filter —
+        #     including one introduced by a .gitattributes edit in the SAME
+        #     request — does the same, and its side effects can dirty extra
+        #     paths that `add -A` then stages.
+        #
+        # So: compare both directions on paths, and compare the committed blob
+        # against the exact requested bytes. Fail closed, before any durable
+        # record, marker, or lane ref exists.
+        committed = {
+            # --no-renames is LOAD-BEARING: rename detection collapses a
+            # delete+add into the destination alone, so a hidden deletion of a
+            # fundamental path could ride along beside an approved addition
+            # with identical bytes and never appear here — landing a
+            # fundamental deletion with no co-sign (sol-critic PR #423 r4).
+            line for line in _git_wt(
+                # --ignore-submodules=none likewise: diff.ignoreSubmodules=all
+                # (repo config or .gitmodules) HIDES gitlink changes from the
+                # diff family, so an unapproved staged gitlink would be absent
+                # from `committed` and the set equality would pass. The
+                # command-line option overrides both (sol-critic PR #423 r5).
+                git_dir, worktree, "diff", "--no-renames",
+                "--ignore-submodules=none", "--name-only",
+                base_sha, commit_sha,
+            ).split("\n") if line.strip()
+        }
+        requested = {e["path"] for e in normalized}
+        dropped = sorted(requested - committed)
+        if dropped:
+            raise PlatformCustomizeError(
+                "edits_not_committed", 422,
+                f"git refused to stage (ignored or excluded): {dropped}")
+        unexpected = sorted(committed - requested)
+        if unexpected:
+            raise PlatformCustomizeError(
+                "edits_not_committed", 422,
+                f"commit carries unapproved paths: {unexpected}")
+        for edit in normalized:
+            path = edit["path"]
+            entry = _git_wt(
+                git_dir, worktree, "ls-tree", commit_sha, "--", path).strip()
+            if edit.get("delete"):
+                # A delete must actually be absent from the commit's tree.
+                if entry:
+                    raise PlatformCustomizeError(
+                        "edits_not_committed", 422, f"delete_not_applied: {path}")
+                continue
+            if not entry:
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422, f"missing_from_tree: {path}")
+            # "<mode> <type> <oid>\t<path>". MODE and TYPE are recorded
+            # separately from content, so bytes alone do not pin the entry:
+            # 100755 (executable), 120000 (symlink) and 160000 (gitlink) are
+            # distinct entries a side effect could produce while the blob id
+            # still matches. A proposal writes a plain file; anything else is
+            # not what was approved (sol-critic PR #423 round 3).
+            meta = entry.partition("\t")[0].split()
+            if len(meta) < 3:
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422, f"unreadable_tree_entry: {path}")
+            mode, obj_type, oid = meta[0], meta[1], meta[2]
+            # A plain file, and the SAME kind of plain file it already was.
+            # Symlink (120000) and gitlink (160000) are never a proposal's
+            # output. An existing executable must keep 100755 — requiring a
+            # flat 100644 would refuse a legitimate edit to it (sol-critic
+            # PR #423 r4); a NEW file must be 100644.
+            base_entry = _git_wt(
+                git_dir, worktree, "ls-tree", base_sha, "--", path).strip()
+            base_mode = (base_entry.partition("\t")[0].split() or [""])[0]
+            want_mode = base_mode if base_mode in {"100644", "100755"} else "100644"
+            if mode != want_mode or obj_type != "blob":
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422,
+                    f"unexpected tree entry {mode} {obj_type} "
+                    f"(expected {want_mode} blob): {path}")
+            # expected_blobs was captured BEFORE `git add`, so a clean filter
+            # cannot make the oracle agree with its own rewrite.
+            want = expected_blobs.get(path, "")
+            if not want or oid != want:
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422,
+                    f"committed bytes differ from the approved edit "
+                    f"(filter or normalization): {path}")
+
         if not _SHA_RE.fullmatch(commit_sha):
             raise PlatformCustomizeError(
                 "platform_repo_unavailable", 503, f"commit_unresolvable: {commit_sha!r}")
@@ -696,6 +812,43 @@ def _cosign_satisfied(change_id: str, record: dict[str, Any]) -> bool:
     marker = _read_marker(change_id, "cosign")
     return bool(marker and marker.get("verdict") == "approved"
                 and marker.get("commit_sha") == record.get("commit_sha"))
+
+
+def propose_and_land(*, tenant_id: str, subject: str, title: str,
+                     edits: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Propose and, when the change needs no co-sign, land it in ONE approval.
+
+    WHY THIS EXISTS: the two-approval shape cost two LLM turn boundaries and two
+    human decisions around ~4s of real work (measured on staging: propose
+    2014ms, land 2242ms, a git rev-parse on the EFS clone 11ms). The second
+    approval bought nothing the first did not already authorise.
+
+    WHAT THE APPROVAL BINDS. ``land()`` normally demands ``ack_commit_sha`` so a
+    bare "land it" that names no bytes is never an approval. Here the operator
+    approved the EXACT EDIT SET instead, and the commit is a pure function of
+    those edits applied to the base tip, so the sha is derived rather than
+    round-tripped through a second human answer. This is not weaker: the
+    two-step shape leaves a WINDOW between propose and land in which the branch
+    could move, which is precisely why ``land()`` carries a branch-diverged
+    check; this path closes the window instead of policing it. Every one of
+    land()'s server-side guards still runs, unchanged and in order — state must
+    be APPROVED, the durable co-sign marker must exist for fundamental paths,
+    the observed ref must equal the recorded commit, and the push is SHA-pinned.
+
+    WHAT IT MUST NEVER DO: land a change that touches a fundamental path. Those
+    return AWAITING_COSIGN from propose() and this function then RETURNS that
+    view untouched, so the independent co-signer is exactly as required as
+    before. One approval replaces the operator's second click, never the second
+    PERSON.
+    """
+    view = propose(tenant_id=tenant_id, subject=subject, title=title, edits=edits)
+    # Anything other than a clean self-approval stops here and is reported as
+    # proposed. AWAITING_COSIGN is the fundamental-path case; any other state is
+    # equally not ours to land.
+    if view.get("state") != APPROVED:
+        return view
+    return land(change_id=view["change_id"], tenant_id=tenant_id,
+                ack_commit_sha=str(view["commit_sha"]))
 
 
 def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:

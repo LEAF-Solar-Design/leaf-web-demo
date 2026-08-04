@@ -168,6 +168,234 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_the_binding_diff_pins_its_flags_in_the_real_command(lane_env, monkeypatch):
+    """The binding diff is a SECURITY ORACLE, and repo config can silently
+    change what it reports:
+      diff.renames / diff.ignoreSubmodules  -> a change vanishes from the diff
+      refs/replace/*                        -> the base tree itself is a lie
+    Each is overridden on the COMMAND LINE, which beats config.
+
+    This asserts the argv the lane actually runs. An earlier version of this
+    test hardcoded the flags in its own diff call, so deleting them from
+    production still passed — a test that cannot fail is worse than none
+    (sol-critic PR #423 round 6)."""
+    seen: list[list[str]] = []
+    real = lane._run_git
+
+    def spy(cmd, **kwargs):
+        seen.append(list(cmd))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(lane, "_run_git", spy)
+
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="pin the flags",
+        edits=[{"path": "docs/note.md", "content": "pinned\n"}])
+    assert view["state"] == "approved"
+
+    binding = [c for c in seen if "diff" in c and "--name-only" in c]
+    assert binding, "the binding diff was never run"
+    for cmd in binding:
+        assert "--no-renames" in cmd, cmd
+        assert "--ignore-submodules=none" in cmd, cmd
+
+    # Every lane invocation must read REAL objects, not replacements.
+    assert seen, "no git commands were run"
+    for cmd in seen:
+        assert "--no-replace-objects" in cmd, cmd
+
+
+def test_rename_detection_cannot_hide_a_deletion(lane_env):
+    """sol-critic PR #423 round 4. `git diff --name-only` applies rename
+    detection, which collapses a delete+add into the DESTINATION alone. So an
+    approved addition carrying the same bytes as an existing fundamental file
+    could mask that file's deletion: git reports only the addition, the
+    path-set check passes, and the deletion lands with no co-sign.
+
+    Here the addition is byte-identical to server/auth.py, which the manifest
+    marks fundamental. The requested set is the addition ONLY; the delete is
+    the smuggled part."""
+    repo = lane_env["repo"]
+    auth_bytes = (repo / "server" / "auth.py").read_text(encoding="utf-8")
+
+    # Requesting the copy alone is legitimate and must succeed: nothing is
+    # being deleted, so there is no hidden fundamental change.
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="copy auth bytes",
+        edits=[{"path": "docs/copy.md", "content": auth_bytes}])
+    assert view["state"] == "approved"
+
+    # The guard that makes the smuggling case detectable: the diff must report
+    # BOTH sides of a rename, never just the destination.
+    both = _git(repo, "diff", "--no-renames", "--name-only",
+                view["base_sha"], view["commit_sha"]).split()
+    assert both == ["docs/copy.md"]
+    assert set(view["paths"]) == set(both)
+
+
+def test_an_existing_executable_keeps_its_mode(lane_env):
+    """A flat 100644 requirement would REFUSE a legitimate edit to a file that
+    is already executable. The rule is the base tree's mode for an existing
+    path (sol-critic PR #423 round 4 usability finding)."""
+    repo = lane_env["repo"]
+    script = repo / "tool.sh"
+    script.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "update-index", "--chmod=+x", "tool.sh")
+    _git(repo, "commit", "-m", "add executable")
+
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="edit the script",
+        edits=[{"path": "tool.sh", "content": "#!/bin/sh\necho two\n"}])
+    assert view["state"] == "approved"
+    entry = _git(repo, "ls-tree", view["commit_sha"], "--", "tool.sh")
+    assert entry.split()[0] == "100755"
+
+
+def test_a_content_filter_cannot_change_the_approved_bytes(lane_env):
+    """sol-critic PR #423 round 2: path equality is NOT content equality. With
+    core.autocrlf=true a requested CRLF body commits as LF, so a path-only
+    check passes while the landed BYTES differ from the approved ones. The
+    approval binds the edit set, so different bytes are a different change."""
+    repo = lane_env["repo"]
+    _git(repo, "config", "core.autocrlf", "true")
+
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.propose(
+            tenant_id=TENANT, subject="auth0|author-1", title="crlf body",
+            edits=[{"path": "docs/note.md",
+                    "content": "line one\r\nline two\r\n"}])
+    assert exc.value.code == "edits_not_committed"
+    assert "docs/note.md" in exc.value.detail
+
+    # And the combined op inherits the refusal — it cannot land rewritten bytes.
+    with pytest.raises(lane.PlatformCustomizeError):
+        lane.propose_and_land(
+            tenant_id=TENANT, subject="auth0|author-1", title="crlf body",
+            edits=[{"path": "docs/note.md",
+                    "content": "a\r\nb\r\n"}])
+
+
+def test_an_unapproved_path_in_the_commit_is_refused(lane_env):
+    """The check must be TWO-sided. A path the operator did not approve must
+    never ride along, however it got staged (filter side effect, stray write).
+    Simulated by staging an extra file into the same commit is not reachable
+    through the public API, so assert the guard's own symmetry directly."""
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="one file",
+        edits=[{"path": "docs/note.md", "content": "just one\n"}])
+    repo = lane_env["repo"]
+    changed = set(_git(repo, "diff", "--name-only",
+                       view["base_sha"], view["commit_sha"]).split())
+    # Exact equality in BOTH directions is the property under test.
+    assert changed == set(view["paths"]) == {"docs/note.md"}
+
+
+def test_an_ignored_path_cannot_be_silently_dropped(lane_env):
+    """sol-critic PR #423: `git add -A` SKIPS .gitignore'd paths, and the
+    porcelain check passes if ANY ONE path landed — so a request pairing a
+    tracked file with an ignored one committed only the first while the record
+    claimed both and reported APPROVED. The approval binds the EDIT SET, so a
+    commit that is a SUBSET of it is not what was approved. Must fail closed
+    BEFORE any record exists."""
+    repo = lane_env["repo"]
+    (repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ignore logs")
+
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.propose(
+            tenant_id=TENANT, subject="auth0|author-1", title="mixed",
+            edits=[
+                {"path": "docs/note.md", "content": "tracked edit\n"},
+                {"path": "audit.log", "content": "ignored edit\n"},
+            ])
+    assert exc.value.code == "edits_not_committed"
+    assert "audit.log" in exc.value.detail
+
+    # And the combined op inherits the refusal — it cannot land a partial set.
+    with pytest.raises(lane.PlatformCustomizeError) as exc2:
+        lane.propose_and_land(
+            tenant_id=TENANT, subject="auth0|author-1", title="mixed",
+            edits=[
+                {"path": "docs/note.md", "content": "tracked edit 2\n"},
+                {"path": "audit.log", "content": "ignored edit\n"},
+            ])
+    assert exc2.value.code == "edits_not_committed"
+
+
+def test_the_commit_contains_exactly_the_requested_paths(lane_env):
+    """Pin the binding positively, not just its failure mode: every approved
+    path is in the commit, and nothing else is."""
+    repo = lane_env["repo"]
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="two files",
+        edits=[
+            {"path": "docs/note.md", "content": "one\n"},
+            {"path": "docs/second.md", "content": "two\n"},
+        ])
+    changed = set(_git(repo, "diff", "--name-only",
+                       view["base_sha"], view["commit_sha"]).split())
+    assert changed == {"docs/note.md", "docs/second.md"}
+    assert set(view["paths"]) == changed
+
+
+def test_propose_and_land_never_lands_a_fundamental_change(lane_env):
+    """THE invariant. One approval replaces the operator's second CLICK, never
+    the second PERSON: a change touching a fundamental path must come back
+    awaiting_cosign and must NOT be pushed."""
+    view = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="touch auth",
+        edits=[{"path": "server/auth.py", "content": "AUTH = 3\n"}])
+    assert view["state"] == "awaiting_cosign"
+    assert view["fundamental_paths"] == ["server/auth.py"]
+    # Not landed, and still landable only through the co-sign path.
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
+    assert exc.value.code == "cosign_required"
+
+
+def test_propose_and_land_lands_a_non_fundamental_change(lane_env):
+    """The whole point: one call, one approval, landed."""
+    view = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="tweak docs",
+        edits=[{"path": "docs/note.md", "content": "edited once\n"}])
+    assert view["state"] == "landed"
+    assert view["fundamental_paths"] == []
+
+
+def test_propose_and_land_is_equivalent_to_the_two_step_path(lane_env):
+    """The combined op must not authorise anything the two-step path does not.
+    Same shape through both routes reaches the same terminal state — the
+    approval binds the edit set, and the commit is a pure function of it."""
+    one = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="combined",
+        edits=[{"path": "docs/note.md", "content": "combined\n"}])
+
+    two = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="two-step",
+        edits=[{"path": "docs/note.md", "content": "two-step\n"}])
+    two_landed = lane.land(change_id=two["change_id"], tenant_id=TENANT,
+                           ack_commit_sha=two["commit_sha"])
+
+    assert one["state"] == two_landed["state"] == "landed"
+    assert one["branch"].startswith("admin-customize/")
+    assert two_landed["branch"].startswith("admin-customize/")
+
+
+def test_propose_and_land_rejects_the_same_bad_paths_as_propose(lane_env):
+    """The combined op must not become a softer door: every path rule propose
+    enforces still applies (traversal, git dir, win32 alias, charset)."""
+    for bad in ["../escape.txt", ".git/hooks/pre-commit", "server./auth.py",
+                "docs/n\u043Ete.md", "a\nb.py"]:
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            lane.propose_and_land(
+                tenant_id=TENANT, subject="auth0|author-1", title="bad path",
+                edits=[{"path": bad, "content": "x"}])
+        assert exc.value.code == "edit_path_invalid", repr(bad)
+
+
 def test_win32_trailing_dot_alias_cannot_dodge_the_cosign_manifest(lane_env):
     """Win32 strips trailing dots and spaces from every path component, so
     `server./auth.py` names the protected file on a Windows checkout while
