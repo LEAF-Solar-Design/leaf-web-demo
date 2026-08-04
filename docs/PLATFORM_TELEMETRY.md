@@ -87,12 +87,12 @@ Wave B (server emits, one per verified choke point):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `agent.wall_hit` | `routers/sessions.py _turn_rejected_response` (every TurnRejected response) | wall_kind (grant/llm_quota/llm_rate/busy/entitlement/unreachable/raw code), http_status, error_code |
+| `agent.wall_hit` | `routers/sessions.py`: the TurnRejected response choke point PLUS the two walls that answer without one (TurnBusy 409, entitlement denial) | wall_kind (grant/llm_quota/llm_rate/busy/entitlement/unreachable/raw code), http_status, error_code |
 | `agent.approval_decided` | `routers/agent.py decide_approval` (recorded + expired) | outcome (approved/denied/expired), turn_id, tool when recorded, decision_latency_ms when created_at known |
 | `job.orphan_reaped` | `jobs._reap_orphans_once` (both branches) | job_id, reason (session_closed/stale_redispatched), tool, staleness_s when known |
-| `grant.linked` / `grant.unlinked` | `routers/tenant.py` link/unlink success | kind only, NEVER the token |
-| `drawing.uploaded` / `drawing.upload_rejected` | `routers/uploads.py upload_drawing` response wrapper (single choke point over every branch) | uploaded: drawing_id, minted_guest, status; rejected: reason (size/quota/disabled/validation), http_status, error_code; rejection identity is "anon" (can precede identity resolution) |
-| `drawing.extraction_finished` | `guest_uploads.run_extraction` (both outcomes, read from the marker) | drawing_id, ok, status, duration_ms, error_code when failed |
+| `grant.linked` / `grant.unlinked` | `routers/tenant.py` link/unlink success | kind ALLOWLISTED (oauth/api_key; harness response wins, else a valid requested kind, else omitted), NEVER the token |
+| `drawing.uploaded` / `drawing.upload_rejected` | `routers/uploads.py upload_drawing` response wrapper (single choke point over every branch) | uploaded: drawing_id, minted_guest (the resolver's own minted flag), status; rejected: reason (size/quota/disabled/validation), http_status, error_code; identity is the RESOLVED tenant once resolution happened, "anon" only before it |
+| `drawing.extraction_finished` | the exact terminal-transition commits only (pg ready commit, legacy ready marker write, a written=True `_mark_failed`); claim losers / purge races / replaced attempts emit nothing | drawing_id, ok, status (ready/failed), error_code when failed |
 | `author.requested` | `routers/author.py author()` entry | mode, desc_len |
 | `author.wall_hit` | customization gate deny + AuthorQuotaExceeded | wall_kind (entitlement/daily_quota) |
 | `author.fallback_served` | templated-fallback branch (harness set but unreachable) | reason (exception type) |
@@ -109,11 +109,10 @@ Wave B (server emits, one per verified choke point):
 | `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, tools_called_n, usd_est, tokens_in, tokens_out; model / grant_kind / degraded ONLY when the usage wire supplies them (optional fields the sink drops when absent) |
 | client ingest door | `POST /api/telemetry` | pre-auth trio + any valid authed event; reserved envelope/identity keys are stripped from client labels |
 
-The remaining taxonomy (author/grant/drawing/org walls and funnels, the
-client tracker's ~25 call sites) lands in the follow-up waves; labels are
-additive within schema_version 1, so early rows stay queryable. Fields
-named by the design but not yet stamped (e.g. `user_email`, `aps_live`,
-`wrote_version`) arrive additively with those waves.
+Remaining after waves A+B: the client tracker's C-column events (wave C).
+Labels are additive within schema_version 1, so early rows stay queryable.
+Fields named by the design but not yet stamped (e.g. `user_email`,
+`aps_live`, `wrote_version`) arrive additively with later waves.
 
 ## Verification (binary, per the design)
 

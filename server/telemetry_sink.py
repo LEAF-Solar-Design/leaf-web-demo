@@ -107,6 +107,14 @@ def disabled_reason() -> Optional[str]:
     try:
         if os.environ.get("LEAF_TELEMETRY_DISABLED", "") == "1":
             return "kill switch LEAF_TELEMETRY_DISABLED=1"
+        # Credentials FIRST: a credential-less deployment (today's default)
+        # must never pay the SDK import on a request path (review #426
+        # round-1 warn 7). The import only ever runs where creds exist, once.
+        if not (
+            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            return "no GOOGLE_APPLICATION_CREDENTIALS[_JSON] configured"
         if _sdk_checked is None:
             try:
                 import google.cloud.bigquery  # noqa: F401  (app image only)
@@ -116,11 +124,6 @@ def disabled_reason() -> Optional[str]:
                 _sdk_checked = False
         if not _sdk_checked:
             return "google-cloud-bigquery not installed (broker image or test env)"
-        if not (
-            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-            or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        ):
-            return "no GOOGLE_APPLICATION_CREDENTIALS[_JSON] configured"
         return None
     except Exception:  # noqa: BLE001
         return "sink self-check failed"

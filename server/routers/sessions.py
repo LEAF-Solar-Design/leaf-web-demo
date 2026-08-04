@@ -500,10 +500,13 @@ _WALL_KIND_BY_CODE = {
 }
 
 
-def _emit_agent_wall(exc: "turn_runner.TurnRejected", tenant, session_id) -> None:
+def _emit_agent_wall_kind(tenant, session_id, wall_kind: str, http_status: int,
+                          error_code: str) -> None:
     """Best-effort `agent.wall_hit` product event (P2): THE chat activation
-    blockers, per tenant. One choke point (every TurnRejected response passes
-    here); never raises; skipped when identity is absent."""
+    blockers, per tenant. Never raises; skipped when identity is absent.
+    Covers the TurnRejected choke point PLUS the two walls that answer
+    without a TurnRejected: TurnBusy's 409 and the entitlement denial
+    (review #426 round-1 warn 5)."""
     try:
         import telemetry_sink
 
@@ -516,13 +519,20 @@ def _emit_agent_wall(exc: "turn_runner.TurnRejected", tenant, session_id) -> Non
             tenant_kind="guest" if tid.startswith("guest-") else "account",
             session_id=str(session_id) if session_id else "none",
             labels={
-                "wall_kind": _WALL_KIND_BY_CODE.get(exc.error_code, exc.error_code),
-                "http_status": exc.status_code,
-                "error_code": exc.error_code,
+                "wall_kind": wall_kind,
+                "http_status": http_status,
+                "error_code": error_code,
             },
         )
     except Exception:  # noqa: BLE001 - telemetry never touches the response
         pass
+
+
+def _emit_agent_wall(exc: "turn_runner.TurnRejected", tenant, session_id) -> None:
+    _emit_agent_wall_kind(
+        tenant, session_id,
+        _WALL_KIND_BY_CODE.get(exc.error_code, exc.error_code),
+        exc.status_code, exc.error_code)
 
 
 def _turn_rejected_response(exc: "turn_runner.TurnRejected",
@@ -746,6 +756,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("converse", tier)
     if not allowed:
+        _emit_agent_wall_kind(tenant, session_id, "entitlement", 403,
+                              "ENTITLEMENT_REQUIRED")
         return entitlements.entitlement_denied_response("converse", tier)
 
     # 4. confirm path: atomically verify-and-consume the durable approval row
@@ -874,6 +886,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if confirmation_id is not None:
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
+        _emit_agent_wall_kind(tenant, session_id, "busy", 409, "turn_in_progress")
         return _busy_response(session_id, approval_lost=approval_lost)
     except turn_runner.TurnRejected as exc:
         # Same rule, second site: give the approval back on every rejection

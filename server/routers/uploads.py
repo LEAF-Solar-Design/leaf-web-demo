@@ -108,11 +108,17 @@ def _resolve_upload_read_identity(tenant: Any) -> Any:
     return deps.resolve_active_tenant_context(tenant)
 
 
-def _emit_upload_event(resp: Any) -> None:
+def _emit_upload_event(resp: Any, ident: Dict[str, Any]) -> None:
     """Best-effort drawing.uploaded / drawing.upload_rejected product event
     (P2), derived from the ONE response every branch already returns, so no
     rejection branch needs its own emit. drawing_id only, never a filename
-    (tighter than the plugin exemplar). NEVER raises."""
+    (tighter than the plugin exemplar). NEVER raises.
+
+    ``ident`` is filled by _upload_drawing the moment identity resolves, so
+    a POST-resolution rejection (entitlement/size/validation/quota) is
+    attributed to the REAL tenant; only pre-resolution failures are "anon"
+    (review #426 round-1 blocker 2). `minted` in ident is the resolver's
+    own minted flag, not token presence (round-1 warn 4)."""
     try:
         import json as _json
 
@@ -136,7 +142,7 @@ def _emit_upload_event(resp: Any) -> None:
                 session_id="server",
                 labels={
                     "drawing_id": body.get("drawing_id"),
-                    "minted_guest": bool(body.get("guest_session")),
+                    "minted_guest": bool(ident.get("minted")),
                     "status": body.get("status"),
                 },
             )
@@ -151,11 +157,11 @@ def _emit_upload_event(resp: Any) -> None:
             reason = "disabled"
         else:
             reason = "validation"
-        # Rejections can precede identity resolution; "anon" is honest there.
+        tid = str(ident.get("tenant") or "anon")
         telemetry_sink.emit(
             "drawing.upload_rejected",
-            tenant_id="anon",
-            tenant_kind="anon",
+            tenant_id=tid,
+            tenant_kind=str(ident.get("kind") or "anon"),
             session_id="server",
             labels={"reason": reason, "http_status": status,
                     "error_code": err.get("error_code")},
@@ -172,8 +178,10 @@ def upload_drawing(
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
-    resp = _upload_drawing_gated(request, file, x_tenant_id, authorization, x_guest_session)
-    _emit_upload_event(resp)
+    ident: Dict[str, Any] = {}
+    resp = _upload_drawing_gated(
+        request, file, x_tenant_id, authorization, x_guest_session, ident)
+    _emit_upload_event(resp, ident)
     return resp
 
 
@@ -183,6 +191,7 @@ def _upload_drawing_gated(
     x_tenant_id: Optional[str],
     authorization: Optional[str],
     x_guest_session: Optional[str],
+    ident: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if not write_loop.upload_import_mutations_enabled():
         return error_response(
@@ -225,6 +234,7 @@ def _upload_drawing_gated(
             x_tenant_id,
             authorization,
             x_guest_session,
+            ident,
         )
 
 
@@ -234,10 +244,15 @@ def _upload_drawing(
     x_tenant_id: Optional[str],
     authorization: Optional[str],
     x_guest_session: Optional[str],
+    ident: Optional[Dict[str, Any]] = None,
 ) -> Any:
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
         x_tenant_id, authorization, x_guest_session)
+    if ident is not None:
+        # Attribution for telemetry: from here on, any rejection belongs to
+        # THIS resolved identity, never "anon" (review #426 round-1 blocker 2).
+        ident.update(tenant=str(tenant), kind=tenant_kind, minted=_minted)
     if tenant_kind == "guest" and not guest_uploads.enabled():
         return error_response(
             ErrorCode.INTERNAL,
