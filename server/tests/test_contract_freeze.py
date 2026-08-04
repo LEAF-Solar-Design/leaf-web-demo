@@ -171,6 +171,25 @@ S18_STREAM_TYPES = {
 # The harness NDJSON union (ports/converse.ts HarnessTurnEvent), frozen. The
 # three app-side extras are synthesized by the app/store, never by POST /turn.
 HARNESS_EVENT_TYPES = S18_STREAM_TYPES - {"turn_started", "confirmation_resolved", "session_state"}
+
+# Durable session events OUTSIDE the §18.3 turn vocabulary. They are appended
+# to the transcript and pushed over the same SSE channel, but they belong to no
+# turn, so they are deliberately NOT added to S18_STREAM_TYPES — that set is
+# frozen against the §18.3 doc table and must keep describing turn events only.
+#
+# They still have to be SUBSCRIBED, and that is the distinction this repo has
+# twice failed to hold. `turn_queued` and `turn_queue_dropped` are appended by
+# turn_runner and read by composer.js, yet reached the browser only when the
+# transcript poll beat SSE. Listing them here puts them under the same gate.
+NON_TURN_STREAM_TYPES = {
+    "turn_queued", "turn_queue_dropped",
+    "overlay_proposed", "overlay_decided", "overlay_revoked",
+}
+
+#: What the web client MUST register an EventSource listener for. EventSource
+#: dispatches by event name and silently drops anything unlistened, so this is
+#: the real contract between the two ends — not the §18.3 table alone.
+SUBSCRIBABLE_STREAM_TYPES = S18_STREAM_TYPES | NON_TURN_STREAM_TYPES
 STOP_REASONS = {"end_turn", "awaiting_approval", "cap_hit", "llm_rate_limited",
                 "llm_quota_exhausted", "error", "timeout"}
 
@@ -277,6 +296,51 @@ def test_s18_sse_vocabulary_frozen():
         f"HarnessTurnEvent union drifted: {sorted(union ^ HARNESS_EVENT_TYPES)}")
     stop = _ts_union_literals(CONVERSE_TS, "export type StopReason")
     assert stop == STOP_REASONS, f"StopReason drifted: {sorted(stop ^ STOP_REASONS)}"
+
+
+def _web_stream_event_types() -> set:
+    """The event names web/src/converse.js registers SSE listeners for."""
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[:block.index("]")]
+    return set(_re.findall(r"'([a-z_]+)'", block))
+
+
+def test_web_client_subscribes_to_every_emittable_event():
+    """THE gate that was missing, and the reason two bugs shipped.
+
+    EventSource delivers only what the client called addEventListener for.
+    An emitted-but-unsubscribed type is not an error and not a warning — it is
+    dropped in silence, and the feature then works only when the transcript
+    poll wins a race against SSE. That is what happened to `question_required`
+    (a card that appeared intermittently) and to `turn_queued` /
+    `turn_queue_dropped` (durably appended, read by composer.js, never
+    subscribed).
+
+    Equality in BOTH directions is deliberate:
+      * missing from the client  -> the silent-drop bug above;
+      * extra in the client      -> a listener for something nothing emits,
+        which is a rename or a deletion that left dead code behind, and the
+        next reader cannot tell it from a real event.
+    """
+    client = _web_stream_event_types()
+    assert client == SUBSCRIBABLE_STREAM_TYPES, (
+        "web/src/converse.js STREAM_EVENT_TYPES drifted from the server "
+        f"vocabulary: {sorted(client ^ SUBSCRIBABLE_STREAM_TYPES)}")
+
+
+def test_overlay_event_names_come_from_the_module_that_emits_them():
+    """The names above are copied text; this proves they match the emitter.
+    Without it the freeze could pass while the server emits something else."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "overlay_stream", REPO_ROOT / "server" / "overlay_stream.py")
+    overlay_stream = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(overlay_stream)
+
+    assert set(overlay_stream.OVERLAY_EVENT_TYPES) == {
+        t for t in NON_TURN_STREAM_TYPES if t.startswith("overlay_")}
 
 
 def test_s21_turn_input_field_set_frozen_no_packet():

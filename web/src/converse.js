@@ -22,10 +22,21 @@ export const THRESHOLDS = { CHIP_ONLY: 0.80, RACE_MIN: 0.55 }
 
 // §3 SSE event vocabulary (event name = type; each data line is the full
 // {v, session_id, turn_id, seq, type, data} envelope).
+// EVERY type the server can emit must appear here. EventSource dispatches by
+// name, so a type without a listener below is dropped in total silence — no
+// error, no warning. It then arrives only if the transcript poll happens to
+// win a race, which is exactly how `question_required` and the two queue
+// events shipped as intermittent bugs. test_contract_freeze.py pins this list
+// against the server's S18_STREAM_TYPES so the next addition cannot repeat it.
 export const STREAM_EVENT_TYPES = [
   'turn_started', 'text_delta', 'tool_call', 'tool_result', 'job_linked',
-  'proposed_run', 'confirmation_required', 'confirmation_resolved',
+  'proposed_run', 'confirmation_required', 'question_required', 'confirmation_resolved',
   'turn_usage', 'turn_complete', 'session_state', 'error',
+  // Durable queue events (turn_runner appends them; composer.js reads them).
+  'turn_queued', 'turn_queue_dropped',
+  // T1 overlay lifecycle (server/overlay_stream.py). `overlay_revoked` is the
+  // one a user must never miss — missing it leaves a withdrawn theme on screen.
+  'overlay_proposed', 'overlay_decided', 'overlay_revoked',
 ]
 
 // Tag a non-2xx into an Error carrying the §10 body, like api.js authorTool
