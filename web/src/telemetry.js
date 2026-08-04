@@ -28,9 +28,19 @@ const state = {
   buffer: [],
   timer: null,
   sessionId: null,
-  errorCount: 0,
-  streamDownCount: 0,
-  retried: false,
+}
+
+// Session-scoped caps survive reloads: the counter lives beside the session
+// UUID in sessionStorage, so a reload cannot reset a cap within one session.
+function capCount(key) {
+  try { return Number(sessionStorage.getItem(`leaf.telemetry.cap.${key}`)) || 0 }
+  catch { return 0 }
+}
+
+function capIncrement(key) {
+  try {
+    sessionStorage.setItem(`leaf.telemetry.cap.${key}`, String(capCount(key) + 1))
+  } catch { /* storage unavailable: cap falls back to per-load counting */ }
 }
 
 function sessionId() {
@@ -55,7 +65,11 @@ function endpoint() {
 
 function identityHeaders() {
   try {
-    const out = {}
+    const out = {
+      // Auth-off parity with every other client call: the ingest door
+      // resolves this stub tenant exactly as api.js's calls do.
+      'X-Tenant-Id': import.meta.env?.VITE_TENANT_ID || 'demo-tenant',
+    }
     const tok = localStorage.getItem('leaf.jwt')
     if (tok) out.Authorization = `Bearer ${tok}`
     const guest = localStorage.getItem('leaf.guest_session')
@@ -88,9 +102,7 @@ function flush() {
     if (!state.buffer.length) return
     const events = state.buffer.splice(0, FLUSH_AT)
     post(events).catch(() => {
-      // ONE retry for the whole batch, then drop — loss-tolerant by contract.
-      if (state.retried) return
-      state.retried = true
+      // ONE retry PER BATCH, then drop — loss-tolerant by contract.
       setTimeout(() => { post(events).catch(() => {}) }, 2000)
     })
     if (state.buffer.length) schedule()
@@ -125,8 +137,8 @@ export function track(name, props = {}, eventType = 'custom_event') {
  * (api.js http(), converse.js tagged()); capped per session. */
 export function trackErrorShown(props = {}) {
   try {
-    if (state.errorCount >= ERROR_CAP) return
-    state.errorCount += 1
+    if (capCount('error') >= ERROR_CAP) return
+    capIncrement('error')
     track('error.shown', props, 'error')
   } catch { /* no-op */ }
 }
@@ -134,8 +146,8 @@ export function trackErrorShown(props = {}) {
 /** Streaming reconnects, capped per session. */
 export function trackStreamDown(reconnectsN) {
   try {
-    if (state.streamDownCount >= STREAM_DOWN_CAP) return
-    state.streamDownCount += 1
+    if (capCount('stream_down') >= STREAM_DOWN_CAP) return
+    capIncrement('stream_down')
     track('agent.stream_down', { reconnects_n: reconnectsN })
   } catch { /* no-op */ }
 }

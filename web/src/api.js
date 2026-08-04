@@ -138,7 +138,13 @@ export function isWorkspaceBootstrapRequired(error) {
 // null in mock or when auth is off. The UI uses it for the honest tier chip
 // (falls back to "demo" when absent).
 export async function getSession(mock, dwg = 'rooftop_demo') {
+  // P2: never the raw dwg value (it can be a caller-supplied name/path via
+  // ?drawing=; the privacy contract bans drawing names and paths).
+  const catalogSource = dwg === 'rooftop_demo' ? 'default' : 'custom'
   if (mock) {
+    // P2 funnel top, mock branch included: the default demo path must exist
+    // in session counts (the sink is simply dark when no server answers).
+    track('session.started', { mock: true, catalog_source: catalogSource })
     const res = await fetchWithBudget(fetch, '/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
     return { intake: await res.json(), tenant: null, tier: null, org: null }
@@ -148,7 +154,7 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
   track('session.started', {
     mock: false,
     tier: data.tier || undefined,
-    catalog_source: dwg,
+    catalog_source: catalogSource,
   })
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
