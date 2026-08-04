@@ -29,6 +29,10 @@ def stub_read_model(monkeypatch):
     monkeypatch.setattr(ops_metrics_read, "tenant_metrics",
                         lambda **kw: {"limit": kw.get("limit", 100),
                                       "tenants": [{"tenant_id": "acme", "runs": 2}]})
+    monkeypatch.setattr(ops_metrics_read, "timeseries",
+                        lambda **kw: {"scope": kw.get("tenant_id") or "fleet",
+                                      "bucket_seconds": kw.get("bucket_seconds"),
+                                      "buckets": [{"t": 1_754_000_000.0, "runs": 2}]})
 
 
 def _client() -> TestClient:
@@ -103,7 +107,8 @@ def test_legacy_mode_requires_postgres(monkeypatch, stub_read_model):
                                   "/api/ops/metrics/inflight",
                                   "/api/ops/metrics/runs",
                                   "/api/ops/metrics/tools",
-                                  "/api/ops/metrics/tenants"])
+                                  "/api/ops/metrics/tenants",
+                                  "/api/ops/metrics/timeseries"])
 def test_all_routes_fail_closed_on_wrong_secret(monkeypatch, stub_read_model, path):
     """Every route (not just /metrics) must reject a wrong X-Ops-Secret."""
     monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
@@ -148,3 +153,41 @@ def test_tenants_ok_passes_window_and_limit(monkeypatch):
     assert resp.status_code == 200
     assert seen.get("window_seconds") == 3600
     assert seen.get("limit") == 5
+
+
+def test_timeseries_ok_passes_every_param(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ops_metrics_read, "timeseries",
+                        lambda **kw: seen.update(kw) or {"buckets": []})
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    resp = _client().get(
+        "/api/ops/metrics/timeseries?window=604800&bucket=3600&tenant_id=acme&tool=panelize",
+        headers={"X-Ops-Secret": "ops-secret"})
+    assert resp.status_code == 200
+    assert seen.get("window_seconds") == 604800
+    assert seen.get("bucket_seconds") == 3600
+    assert seen.get("tenant_id") == "acme"
+    assert seen.get("tool") == "panelize"
+
+
+def test_timeseries_rejects_disallowed_bucket_before_read_model(monkeypatch):
+    """An off-menu bucket is the caller's error: 422 BAD_PARAMS, and the
+    read-model is never invoked (no silent clamp to a different bucket)."""
+    called = {}
+    monkeypatch.setattr(ops_metrics_read, "timeseries",
+                        lambda **kw: called.update(kw) or {"buckets": []})
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    resp = _client().get("/api/ops/metrics/timeseries?bucket=1234",
+                         headers={"X-Ops-Secret": "ops-secret"})
+    assert resp.status_code == 422
+    assert "bucket" in resp.json().get("error", {}).get("message", "").lower()
+    assert called == {}
+
+
+def test_timeseries_read_model_rejects_disallowed_bucket_itself():
+    """Defense in depth: the read-model raises on an off-menu bucket even if a
+    future caller bypasses the router check (raises BEFORE any DB access)."""
+    with pytest.raises(ValueError):
+        ops_metrics_read.timeseries(bucket_seconds=1234)
