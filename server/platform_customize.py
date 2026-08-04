@@ -451,6 +451,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
     try:
         _git(git_dir, "worktree", "add", "--detach", str(worktree), base_sha,
              timeout=120)
+        expected_blobs: dict[str, str] = {}
         for edit in normalized:
             _reject_symlink_escape(worktree, edit["path"])
             target = worktree / edit["path"]
@@ -462,6 +463,17 @@ def propose(*, tenant_id: str, subject: str, title: str,
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(edit["content"], encoding="utf-8", newline="\n")
+                # Capture the approved bytes' object id NOW, before `git add`
+                # can run a clean filter over them. Hashing after the add is
+                # CIRCULAR: a filter (possibly introduced by a .gitattributes
+                # edit in this very request) rewrites the file, git stages the
+                # rewritten bytes, and a later read hashes those same rewritten
+                # bytes — want == got while the landed content is not what was
+                # approved (sol-critic PR #423 round 3). git's own hasher, so
+                # the repo's object format is respected.
+                expected_blobs[edit["path"]] = _git_wt(
+                    git_dir, worktree, "hash-object", "--no-filters",
+                    "--", edit["path"]).strip()
         _git_wt(git_dir, worktree, "add", "-A")
         status = _git_wt(git_dir, worktree, "status", "--porcelain")
         if not status.strip():
@@ -525,28 +537,41 @@ def propose(*, tenant_id: str, subject: str, title: str,
                 f"commit carries unapproved paths: {unexpected}")
         for edit in normalized:
             path = edit["path"]
+            entry = _git_wt(
+                git_dir, worktree, "ls-tree", commit_sha, "--", path).strip()
             if edit.get("delete"):
                 # A delete must actually be absent from the commit's tree.
-                present = _git_wt(
-                    git_dir, worktree, "ls-tree", "--name-only", commit_sha, "--", path)
-                if present.strip():
+                if entry:
                     raise PlatformCustomizeError(
                         "edits_not_committed", 422, f"delete_not_applied: {path}")
                 continue
-            # --no-filters: hash the bytes the caller asked for, exactly as
-            # given. If git's filters rewrote them on the way in, the shas
-            # differ and we refuse rather than land bytes nobody approved.
-            # The worktree file still holds the bytes we wrote, so hashing it
-            # with --no-filters yields the REQUESTED-byte sha, unmediated by
-            # any clean filter git applied on the way into the index.
-            want = _git_wt(git_dir, worktree, "hash-object", "--no-filters",
-                           "--", path)
-            got = _git_wt(git_dir, worktree, "rev-parse", f"{commit_sha}:{path}")
-            if want.strip() != got.strip():
+            if not entry:
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422, f"missing_from_tree: {path}")
+            # "<mode> <type> <oid>\t<path>". MODE and TYPE are recorded
+            # separately from content, so bytes alone do not pin the entry:
+            # 100755 (executable), 120000 (symlink) and 160000 (gitlink) are
+            # distinct entries a side effect could produce while the blob id
+            # still matches. A proposal writes a plain file; anything else is
+            # not what was approved (sol-critic PR #423 round 3).
+            meta = entry.partition("\t")[0].split()
+            if len(meta) < 3:
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422, f"unreadable_tree_entry: {path}")
+            mode, obj_type, oid = meta[0], meta[1], meta[2]
+            if mode != "100644" or obj_type != "blob":
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422,
+                    f"unexpected tree entry {mode} {obj_type}: {path}")
+            # expected_blobs was captured BEFORE `git add`, so a clean filter
+            # cannot make the oracle agree with its own rewrite.
+            want = expected_blobs.get(path, "")
+            if not want or oid != want:
                 raise PlatformCustomizeError(
                     "edits_not_committed", 422,
                     f"committed bytes differ from the approved edit "
                     f"(filter or normalization): {path}")
+
         if not _SHA_RE.fullmatch(commit_sha):
             raise PlatformCustomizeError(
                 "platform_repo_unavailable", 503, f"commit_unresolvable: {commit_sha!r}")
