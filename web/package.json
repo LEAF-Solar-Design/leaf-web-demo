@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Leaf — build CAD tools with AI, run on Leaf. Web demo lane.",
+  "description": "Leaf \u2014 build CAD tools with AI, run on Leaf. Web demo lane.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -29,7 +29,9 @@
     "check:deployed-acceptance-contract": "node --test scripts/test_deployed_authored_cad_acceptance.mjs",
     "check:published-catalog-tool": "node --test src/site/publishedCatalogTool.test.mjs",
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
-    "check:workbench-id": "node --test src/site/workbenchId.test.mjs"
+    "check:workbench-id": "node --test src/site/workbenchId.test.mjs",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest"
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",
@@ -39,7 +41,12 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.7"
+    "jsdom": "^25.0.1",
+    "vite": "^6.0.7",
+    "vitest": "^3.2.7"
   }
 }
