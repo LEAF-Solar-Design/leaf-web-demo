@@ -171,6 +171,25 @@ S18_STREAM_TYPES = {
 # The harness NDJSON union (ports/converse.ts HarnessTurnEvent), frozen. The
 # three app-side extras are synthesized by the app/store, never by POST /turn.
 HARNESS_EVENT_TYPES = S18_STREAM_TYPES - {"turn_started", "confirmation_resolved", "session_state"}
+
+# Durable session events OUTSIDE the §18.3 turn vocabulary. They are appended
+# to the transcript and pushed over the same SSE channel, but they belong to no
+# turn, so they are deliberately NOT added to S18_STREAM_TYPES — that set is
+# frozen against the §18.3 doc table and must keep describing turn events only.
+#
+# They still have to be SUBSCRIBED, and that is the distinction this repo has
+# twice failed to hold. `turn_queued` and `turn_queue_dropped` are appended by
+# turn_runner and read by composer.js, yet reached the browser only when the
+# transcript poll beat SSE. Listing them here puts them under the same gate.
+NON_TURN_STREAM_TYPES = {
+    "turn_queued", "turn_queue_dropped",
+    "overlay_proposed", "overlay_decided", "overlay_revoked",
+}
+
+#: What the web client MUST register an EventSource listener for. EventSource
+#: dispatches by event name and silently drops anything unlistened, so this is
+#: the real contract between the two ends — not the §18.3 table alone.
+SUBSCRIBABLE_STREAM_TYPES = S18_STREAM_TYPES | NON_TURN_STREAM_TYPES
 STOP_REASONS = {"end_turn", "awaiting_approval", "cap_hit", "llm_rate_limited",
                 "llm_quota_exhausted", "error", "timeout"}
 
@@ -277,6 +296,160 @@ def test_s18_sse_vocabulary_frozen():
         f"HarnessTurnEvent union drifted: {sorted(union ^ HARNESS_EVENT_TYPES)}")
     stop = _ts_union_literals(CONVERSE_TS, "export type StopReason")
     assert stop == STOP_REASONS, f"StopReason drifted: {sorted(stop ^ STOP_REASONS)}"
+
+
+def _web_stream_event_types() -> set:
+    """The event names web/src/converse.js registers SSE listeners for.
+
+    Comments are stripped FIRST. A review found the naive extraction read a
+    commented-out entry as live: turning `'overlay_revoked'` into
+    `// 'overlay_revoked'` left the test passing while the browser silently
+    dropped every revoke. A gate that reads dead code is worse than no gate,
+    because it reports safety it is not checking.
+    """
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[block.index("[") + 1:block.index("]")]
+    return _parse_literal_list(block)
+
+
+#: A quoted JS string, either quote style, captured whole.
+_JS_STRING = r"""(['"])(.*?)\1"""
+
+
+def _parse_literal_list(block: str) -> set:
+    """The event names, read the way the JavaScript engine reads them.
+
+    LITERALS FIRST, COMMENTS SECOND. The order is the entire lesson; three
+    review rounds beat the other one:
+
+        round 2:  // 'overlay_revoked'          commented out, still read live
+        round 2:  'overlay_revoked' + '//typo'  concatenated, tail stripped
+        round 3:  'overlay_revoked/*x*/'        comment INSIDE the literal
+
+    The last is decisive. JavaScript registers a listener for the literal
+    string `overlay_revoked/*x*/`, comment syntax and all, because inside
+    quotes there are no comments. Any parser that strips comments before
+    reading quotes disagrees with the engine about what the string IS, and so
+    certifies a subscription the browser never makes.
+    """
+    literals = _re.findall(_JS_STRING, block, flags=_re.S)
+    outside = _re.sub(_JS_STRING, "", block, flags=_re.S)
+    outside = _re.sub(r"/\*.*?\*/", "", outside, flags=_re.S)
+    outside = _re.sub(r"//[^\n]*", "", outside)
+
+    # Only list punctuation may remain outside the literals. A `+`, a template
+    # literal, an identifier or a spread leaves residue and fails HERE rather
+    # than being quietly mis-read.
+    leftover = _re.sub(r"[\s,]", "", outside)
+    assert leftover == "", (
+        "STREAM_EVENT_TYPES is not a plain list of string literals "
+        f"({leftover!r}) — the gate cannot verify a computed subscription list")
+
+    # Each literal is taken WHOLE. Both quote styles are legal JavaScript, so
+    # accepting only single quotes was a false failure waiting to happen.
+    names = {text for _q, text in literals}
+    malformed = {n for n in names if not _re.fullmatch(r"[a-z_]+", n)}
+    assert not malformed, (
+        f"event names are not plain identifiers: {sorted(malformed)} — the "
+        f"browser subscribes to these verbatim, comment syntax included")
+    return names
+
+
+def test_the_subscription_gate_cannot_be_fooled_by_a_comment():
+    """The gate's own failure mode, pinned. If commenting an entry out stopped
+    failing the gate, the gate would certify a browser that drops the event."""
+    live = _web_stream_event_types()
+    assert "overlay_revoked" in live
+
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[:block.index("]")]
+    commented = block.replace("'overlay_revoked'", "// 'overlay_revoked'")
+    commented = _re.sub(r"//[^\n]*", "", commented)
+    assert "overlay_revoked" not in set(_re.findall(r"'([a-z_]+)'", commented)), (
+        "a commented-out listener still reads as live — the gate is decorative")
+
+
+def test_a_comment_INSIDE_a_literal_is_not_stripped_away():
+    """Round 3's escape, and the sharpest of the three.
+
+    `'overlay_revoked/*x*/'` makes the browser subscribe to the literal string
+    `overlay_revoked/*x*/`. A parse that strips comments first sees a clean
+    `overlay_revoked` and certifies a listener that does not exist.
+    """
+    with pytest.raises(AssertionError, match="plain identifiers"):
+        _parse_literal_list("'overlay_revoked/*x*/', 'text_delta'")
+
+    # And the honest reading of that literal is the whole string.
+    names = {t for _q, t in _re.findall(_JS_STRING, "'overlay_revoked/*x*/'")}
+    assert names == {"overlay_revoked/*x*/"}
+
+
+def test_the_gate_accepts_both_quote_styles():
+    """Both are legal JavaScript. Rejecting double quotes would fail a
+    legitimate edit, and a gate that cries wolf is a gate that gets weakened."""
+    assert _parse_literal_list("""'alpha_one', "beta_two\"""") == {
+        "alpha_one", "beta_two"}
+
+
+def test_the_gate_refuses_a_computed_subscription_list():
+    """Round 2's escape from the comment stripper.
+
+    `'overlay_revoked' + '//typo'` makes JavaScript register the CONCATENATED
+    name `overlay_revoked//typo`, which the browser then has no listener for —
+    while a comment-stripping parse deleted the tail and reported a clean
+    `overlay_revoked`. The gate would have certified a subscription that does
+    not exist. It now refuses any list that is not plain literals.
+    """
+    source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
+    block = source[source.index("export const STREAM_EVENT_TYPES"):]
+    block = block[:block.index("]")]
+    sneaky = block.replace("'overlay_revoked'", "'overlay_revoked' + '//typo'")
+
+    sneaky = _re.sub(r"//[^\n]*", "", sneaky)
+    residue = _re.sub(r"'[^'\n]*'", "", sneaky)
+    residue = residue[residue.index("[") + 1:]
+    assert _re.sub(r"[\s,]", "", residue) != "", (
+        "a concatenated event name left no residue — the gate would certify a "
+        "subscription the browser never makes")
+
+
+def test_web_client_subscribes_to_every_emittable_event():
+    """THE gate that was missing, and the reason two bugs shipped.
+
+    EventSource delivers only what the client called addEventListener for.
+    An emitted-but-unsubscribed type is not an error and not a warning — it is
+    dropped in silence, and the feature then works only when the transcript
+    poll wins a race against SSE. That is what happened to `question_required`
+    (a card that appeared intermittently) and to `turn_queued` /
+    `turn_queue_dropped` (durably appended, read by composer.js, never
+    subscribed).
+
+    Equality in BOTH directions is deliberate:
+      * missing from the client  -> the silent-drop bug above;
+      * extra in the client      -> a listener for something nothing emits,
+        which is a rename or a deletion that left dead code behind, and the
+        next reader cannot tell it from a real event.
+    """
+    client = _web_stream_event_types()
+    assert client == SUBSCRIBABLE_STREAM_TYPES, (
+        "web/src/converse.js STREAM_EVENT_TYPES drifted from the server "
+        f"vocabulary: {sorted(client ^ SUBSCRIBABLE_STREAM_TYPES)}")
+
+
+def test_overlay_event_names_come_from_the_module_that_emits_them():
+    """The names above are copied text; this proves they match the emitter.
+    Without it the freeze could pass while the server emits something else."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "overlay_stream", REPO_ROOT / "server" / "overlay_stream.py")
+    overlay_stream = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(overlay_stream)
+
+    assert set(overlay_stream.OVERLAY_EVENT_TYPES) == {
+        t for t in NON_TURN_STREAM_TYPES if t.startswith("overlay_")}
 
 
 def test_s21_turn_input_field_set_frozen_no_packet():
