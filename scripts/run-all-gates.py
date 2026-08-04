@@ -1437,7 +1437,13 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
     if head == sys.executable:
         head = "<PYTHON>"
     else:
-        name = Path(head).name.lower()
+        # String-normalize both separator styles: on Linux, Path() is
+        # PosixPath and does NOT split C:\...\npm.cmd at backslashes, so a
+        # Windows-shaped path would escape canonicalization there while being
+        # canonicalized on Windows — the fingerprint would then depend on the
+        # OS that computed it (sol-critic #436 round 3, and the real
+        # gate-shard-6 red on run 30940064231).
+        name = head.replace("\\", "/").rsplit("/", 1)[-1].lower()
         for ext in (".cmd", ".exe"):
             if name.endswith(ext):
                 name = name[: -len(ext)]
