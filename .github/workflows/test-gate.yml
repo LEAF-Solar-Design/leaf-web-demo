@@ -38,10 +38,17 @@ name: Test gate
 # gate against the exact commit it is about to push to ECR.
 # ---------------------------------------------------------------------------
 
+# NO push trigger. This gate DOES still run on every push to main — as the
+# `test` job inside build-platform-images.yml (workflow_call, below), which
+# gates image publication on it. A standalone push trigger ran the SAME suite
+# on the SAME commit a second time, concurrently: measured 600s standalone and
+# 606s nested on sha 35cbb79f. That duplicate added ~10 minutes to every
+# merge-to-deploy path and gated nothing the nested run does not already gate
+# more strictly (it blocks the ECR push; the standalone run blocked nothing).
+# The concurrency group below was written to keep the two from queueing behind
+# each other — decoupling the symptom. Removing one removes the cause.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
   workflow_call:
     inputs:
