@@ -323,6 +323,36 @@ def test_bucket_sweep_never_resets_an_exhausted_bucket(monkeypatch):
     assert not telemetry_router._bucket_allows("ip:attacker", 1)
 
 
+def test_bucket_sorted_shed_path_spares_the_most_exhausted(monkeypatch):
+    """When no bucket is refillable-to-full, the sorted fallback sheds the
+    least-restricted buckets and the exhausted one goes last (review #420
+    round-3 nit)."""
+    monkeypatch.setattr(telemetry_router, "_BUCKET_BURST", 2.0)
+    assert telemetry_router._bucket_allows("ip:attacker", 2)  # now at 0 tokens
+    import time as _t
+
+    now = _t.monotonic()
+    with telemetry_router._bucket_lock:
+        for i in range(10_002):
+            telemetry_router._buckets[f"ip:half{i}"] = [1.0, now]  # not full: pass 1 evicts none
+    assert telemetry_router._bucket_allows("ip:new", 1)  # triggers sorted shed
+    with telemetry_router._bucket_lock:
+        assert len(telemetry_router._buckets) <= 10_001  # bounded again
+        assert "ip:attacker" in telemetry_router._buckets  # exhausted survives
+    assert not telemetry_router._bucket_allows("ip:attacker", 2)
+
+
+def test_bucket_deny_path_also_sweeps(monkeypatch):
+    """A flood of always-denied keys must not grow the dict without bound
+    (review #420 round-3 warn 1)."""
+    monkeypatch.setattr(telemetry_router, "_BUCKET_BURST", 2.0)
+    for i in range(10_100):
+        # cost above burst: every request denied, every request inserts.
+        telemetry_router._bucket_allows(f"ip:deny{i}", 31)
+    with telemetry_router._bucket_lock:
+        assert len(telemetry_router._buckets) <= 10_001
+
+
 def test_ingest_client_ts_clamped_into_labels(monkeypatch):
     _enable_fake_sink(monkeypatch)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)

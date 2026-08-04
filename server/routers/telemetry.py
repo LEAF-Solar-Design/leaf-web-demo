@@ -73,30 +73,37 @@ def _bucket_allows(key: str, cost: float) -> bool:
             tokens = min(_BUCKET_BURST, tokens + (now - last) * _BUCKET_PER_S)
             if tokens < cost:
                 _buckets[key] = [tokens, now]
+                # The DENY path inserts too, so it must sweep too, or a flood
+                # of always-denied keys grows the dict without bound
+                # (review #420 round-3 warn 1).
+                _sweep_locked(now)
                 return False
             _buckets[key] = [tokens - cost, now]
-            # Unbounded dict guard. Evicting a bucket resets it to FULL burst,
-            # so only buckets whose CURRENT tokens (with refill projected to
-            # now) already round to full may be evicted: for those, eviction
-            # is semantically a no-op. A fresh-but-spent bucket (tokens just
-            # under burst) must survive (review #420 round-2 warn 2).
-            if len(_buckets) > 10_000:
-                for k, (t, l) in list(_buckets.items()):
-                    if t + (now - l) * _BUCKET_PER_S >= _BUCKET_BURST:
-                        _buckets.pop(k, None)
-                if len(_buckets) > 10_000:
-                    # Memory still wins, but shed the LEAST-restricted buckets
-                    # first; exhausted ones go last, never wholesale.
-                    by_tokens = sorted(
-                        _buckets.items(),
-                        key=lambda kv: kv[1][0] + (now - kv[1][1]) * _BUCKET_PER_S,
-                        reverse=True,
-                    )
-                    for k, _v in by_tokens[: len(_buckets) - 10_000]:
-                        _buckets.pop(k, None)
+            _sweep_locked(now)
             return True
     except Exception:  # noqa: BLE001 - never let accounting break ingest
         return False
+
+
+def _sweep_locked(now: float) -> None:
+    """Bound the bucket dict; CALLER HOLDS _bucket_lock. Evicting a bucket
+    resets it to FULL burst, so only buckets whose refill-projected tokens
+    already round to full may be evicted (a semantic no-op for them); a
+    fresh-but-spent bucket must survive. If memory still wins, shed the
+    LEAST-restricted buckets first; exhausted ones go last, never wholesale."""
+    if len(_buckets) <= 10_000:
+        return
+    for k, (t, l) in list(_buckets.items()):
+        if t + (now - l) * _BUCKET_PER_S >= _BUCKET_BURST:
+            _buckets.pop(k, None)
+    if len(_buckets) > 10_000:
+        by_tokens = sorted(
+            _buckets.items(),
+            key=lambda kv: kv[1][0] + (now - kv[1][1]) * _BUCKET_PER_S,
+            reverse=True,
+        )
+        for k, _v in by_tokens[: len(_buckets) - 10_000]:
+            _buckets.pop(k, None)
 
 
 async def _bounded_body(request: Request) -> Optional[bytes]:
