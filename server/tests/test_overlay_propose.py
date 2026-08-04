@@ -147,25 +147,40 @@ def test_request_text_is_carried_but_bounded():
 def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
     """`from platform import overlay_store` returned the STDLIB platform module
     in the container, so GET /api/overlay answered 500 on every request while
-    this suite stayed green. Reproduce that condition here: import the stdlib
-    module first and assert the name really did resolve to it, THEN require
+    this suite stayed green. Reproduce that condition here, then require
     _store() to hand back the platform package's overlay_store anyway.
 
-    Without the stdlib assertion the test would pass on a machine where the
-    repo root happens to precede site-packages, i.e. exactly the machine where
-    the bug never reproduced.
+    HOW THE PRECONDITION IS PROVEN, and why the obvious check is not enough.
+    `not hasattr(platform, "overlay_store")` looks like it proves the stdlib
+    won the name. It does not. A freshly imported REPO package has not loaded
+    its own submodule yet, so the attribute is absent there too — the check
+    passes, and the old `from platform import overlay_store` then imports the
+    submodule and succeeds. Measured: with the repo root first on sys.path,
+    `hasattr` is False and the pre-fix import returns platform.overlay_store.
+    So the precondition is established by IDENTITY instead: the stdlib
+    `platform` is a single module, never a package, and it defines
+    python_implementation. A package resolving here means the ambient sys.path
+    is not the container's, and this test cannot see the defect it guards, so
+    it fails loudly rather than passing for the wrong reason.
     """
-    import platform as stdlib_platform
+    import platform as ambient_platform
 
-    assert not hasattr(stdlib_platform, "overlay_store"), (
-        "the name 'platform' resolved to the repo package, not the stdlib "
-        "module — this test cannot observe the failure it exists to prevent")
+    assert not hasattr(ambient_platform, "__path__"), (
+        "'platform' resolved to a PACKAGE at "
+        f"{getattr(ambient_platform, '__file__', '?')}, so the repo package won "
+        "the name and the container condition is absent. This test cannot "
+        "observe the failure it exists to prevent. Run it from server/.")
+    assert hasattr(ambient_platform, "python_implementation"), (
+        "'platform' is not the stdlib module; precondition not established")
 
     from routers import overlay as overlay_router
 
     store = overlay_router._store()
-    # The real store's surface, not a truthy import: a module that resolved to
-    # the wrong package would still be an object.
+    # Origin, not truthiness: a module that resolved to the wrong package would
+    # still be an object, and would still answer some of these names.
+    assert store.__name__.endswith("overlay_store"), store.__name__
+    assert Path(store.__file__).resolve() == (
+        SERVER_DIR.parent / "platform" / "overlay_store.py").resolve(), store.__file__
     for name in ("document", "effective_tokens", "pending_for_session",
                  "create_proposal", "approve"):
         assert callable(getattr(store, name, None)), f"_store() lacks {name}()"
