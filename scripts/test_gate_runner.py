@@ -661,10 +661,15 @@ def test_every_platform_static_file_is_registered_in_platform_static():
 
 
 def _shard_stub_suites(g):
-    return [
-        g.Suite(sid, sid, "script", SCRIPTS, [sys.executable, "-c", "pass"], None)
+    suites = [
+        g.Suite(sid, sid, "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1)
         for sid in ("stub-alpha", "stub-beta", "stub-gamma", "stub-delta")
     ]
+    # One gated suite so a LEGITIMATE suite-level SKIP is representable:
+    # the verifier allows SKIP only for suites with a suite-level skip gate.
+    suites.append(g.Suite("stub-gated", "stub-gated", "pytest", SCRIPTS,
+                          [sys.executable, "-c", "pass"], 1, db_gated=True))
+    return suites
 
 
 def test_sharded_main_runs_exactly_its_partition_and_writes_result_json(
@@ -862,6 +867,92 @@ def test_verifier_reports_an_empty_results_dir_as_failure(tmp_path, capsys):
     g = _load_runner()
     assert g.verify_shard_results(tmp_path) == 1
     assert "no shard result files" in capsys.readouterr().out
+
+
+def test_verifier_accepts_a_gated_suite_level_skip(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-gated": "SKIP"})
+
+    assert g.verify_shard_results(tmp_path) == 0
+    assert "PROVEN" in capsys.readouterr().out
+
+
+def test_verifier_refuses_pass_below_the_suite_floor(tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 2: a fabricated PASS with executed 0 (and a
+    consistent executed_total) cleared every check — a suite could run
+    nowhere while the gate reported green. The verifier holds the real
+    catalog, so it re-checks executed against each suite's own floor."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"][0]["executed"] = 0
+    d["executed_total"] = sum(e["executed"] or 0 for e in d["results"])
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "below its floor" in out
+
+
+def test_verifier_refuses_an_ungated_suite_level_skip(tmp_path, monkeypatch, capsys):
+    """Suite-level SKIP is a runner behavior reserved for db_gated/opt-in
+    suites; a result file claiming SKIP for any other suite is a suite that
+    silently ran nowhere (sol-critic #436 round 2)."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-alpha": "SKIP"})
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "no suite-level skip gate" in out
+
+
+def test_verifier_names_corrupt_result_entries_instead_of_crashing(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"] = [42] + d["results"][1:]
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)   # must NOT raise
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "non-object" in out
+
+
+def test_fingerprint_ignores_toolchain_paths_but_not_targets():
+    """The fan-in of run 30938231420 refused all eight shards because it
+    resolved a different npm path than the shard jobs (no setup-node in the
+    fan-in). Toolchain identity is part of the catalog; toolchain LOCATION is
+    part of the job image."""
+    g = _load_runner()
+
+    def stub(argv):
+        return [g.Suite("s", "s", "vitest", SCRIPTS, argv, 1)]
+
+    linux_npm = g.catalog_fingerprint(stub(["/usr/local/bin/npm", "test"]))
+    tool_npm = g.catalog_fingerprint(stub(["/opt/hostedtoolcache/node/20/bin/npm", "test"]))
+    win_npm = g.catalog_fingerprint(stub([r"C:\Program Files\nodejs\npm.cmd", "test"]))
+    assert linux_npm == tool_npm == win_npm
+
+    other_target = g.catalog_fingerprint(stub(["/usr/local/bin/npm", "run", "e2e"]))
+    assert other_target != linux_npm
+    npx_instead = g.catalog_fingerprint(stub(["/usr/local/bin/npx", "test"]))
+    assert npx_instead != linux_npm
 
 
 def test_verifier_refuses_a_status_it_does_not_recognize(tmp_path, monkeypatch, capsys):

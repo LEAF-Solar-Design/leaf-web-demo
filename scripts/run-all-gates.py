@@ -806,13 +806,14 @@ def build_suites() -> List[Suite]:
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 41: the 29 measured 2026-07-28, plus the 12 sharding tests
-        # (partition determinism, catalog fingerprint, the glob pin on
-        # platform/tests/*_static.py, shard CLI rejections, and the fan-in
-        # verifier's accept + refuse-every-corruption cases), measured on this
-        # tree 2026-08-04.
+        # Floor 46: the 29 measured 2026-07-28, plus the 17 sharding tests
+        # (partition determinism, catalog fingerprint incl. toolchain-path
+        # canonicalization, the glob pin on platform/tests/*_static.py, shard
+        # CLI rejections, and the fan-in verifier's accept cases + refusal of
+        # every corruption class incl. below-floor PASS and ungated SKIP),
+        # measured on this tree 2026-08-04.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 41),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 46),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1422,20 +1423,43 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
 
 
+def _fingerprint_argv(argv: List[str]) -> List[str]:
+    """argv[0] is resolved from the ENVIRONMENT (sys.executable, shutil.which
+    for npm/npx, Git Bash discovery), so its absolute path legitimately
+    differs between jobs of one CI run: shard jobs run setup-node, the
+    fan-in does not, and run 30938231420's fan-in resolved a different npm
+    than every shard — refusing all eight as fingerprint mismatches. Hash
+    the command IDENTITY (interpreter/tool token) instead of its path;
+    positional targets and flags still hash raw."""
+    if not argv:
+        return []
+    head = str(argv[0])
+    if head == sys.executable:
+        head = "<PYTHON>"
+    else:
+        name = Path(head).name.lower()
+        for ext in (".cmd", ".exe"):
+            if name.endswith(ext):
+                name = name[: -len(ext)]
+        if name in ("npm", "npx", "bash"):
+            head = f"<{name.upper()}>"
+    return [head] + [str(a) for a in argv[1:]]
+
+
 def catalog_fingerprint(suites: List[Suite]) -> str:
     """SHA-256 over every field of every suite, so two runs agree on this
     value only when they partitioned the same catalog with the same floors,
     allowlists, and commands.
 
-    Paths (cwd, sys.executable inside argv) are hashed RAW, which binds the
-    fingerprint to one checkout layout. That is the intended scope: it is an
-    intra-run integrity token compared between the shard jobs and the fan-in
-    of a single CI run (identical runner layout), or between local runs in one
-    worktree — never across machines.
-    """
+    cwd paths are hashed RAW, which binds the fingerprint to one checkout
+    layout: an intra-run integrity token compared between the shard jobs and
+    the fan-in of a single CI run (identical layout), or between local runs
+    in one worktree — never across machines. Toolchain paths inside argv are
+    canonicalized (see _fingerprint_argv) because they vary per JOB, not per
+    catalog."""
     entries = [{
         "id": s.id, "label": s.label, "kind": s.kind, "cwd": str(s.cwd),
-        "argv": [str(a) for a in s.argv], "expected": s.expected,
+        "argv": _fingerprint_argv(s.argv), "expected": s.expected,
         "allowed_skip_reasons": list(s.allowed_skip_reasons),
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
@@ -1526,6 +1550,7 @@ def verify_shard_results(results_dir: Path) -> int:
         print("catalog has duplicate suite ids; fix build_suites() first")
         return 1
     fingerprint = catalog_fingerprint(suites)
+    suites_by_id = {s.id: s for s in suites}
 
     shard_counts = {d.get("shard_count") for _, d in parsed}
     if len(shard_counts) != 1 or not isinstance(next(iter(shard_counts)), int):
@@ -1555,13 +1580,24 @@ def verify_shard_results(results_dir: Path) -> int:
                 problems.append(
                     f"shard {i}: suite set differs from the deterministic "
                     f"partition for index {i}")
-            result_ids = sorted(e.get("id", "") for e in d.get("results", []))
+            # Shape first: a corrupt file must produce a NAMED problem, not an
+            # uncaught exception that hides which shard was corrupt.
+            raw_entries = d.get("results")
+            if not isinstance(raw_entries, list):
+                problems.append(f"shard {i}: results is not a list (corrupt result file)")
+                raw_entries = []
+            entries = [e for e in raw_entries if isinstance(e, dict)]
+            if len(entries) != len(raw_entries):
+                problems.append(
+                    f"shard {i}: {len(raw_entries) - len(entries)} non-object "
+                    f"result entr(ies) (corrupt result file)")
+            result_ids = sorted(e.get("id", "") for e in entries)
             if result_ids != sorted(d.get("suite_ids", [])):
                 problems.append(
                     f"shard {i}: results do not cover its suite set exactly "
                     f"(early stop, or a result for a suite it did not own)")
             claimed = d.get("executed_total")
-            actual = sum((e.get("executed") or 0) for e in d.get("results", []))
+            actual = sum((e.get("executed") or 0) for e in entries)
             if claimed != actual:
                 problems.append(f"shard {i}: executed_total {claimed} != per-suite sum {actual}")
             # Statuses are an allowlist, not a denylist: rejecting only the
@@ -1569,12 +1605,38 @@ def verify_shard_results(results_dir: Path) -> int:
             # (say NOT_RUN) count as complete passing coverage — fail-open in
             # the acceptance instrument (sol-critic #436 round 1).
             unknown = [f"{e.get('id')}={e.get('status')!r}"
-                       for e in d.get("results", [])
+                       for e in entries
                        if e.get("status") not in ("PASS", "FAIL", "SKIP")]
             if unknown:
                 problems.append(
                     f"shard {i}: unrecognized status(es): {', '.join(unknown)}")
-            failed = [e.get("id") for e in d.get("results", []) if e.get("status") == "FAIL"]
+            # A recognized status can still prove nothing ran (sol-critic #436
+            # round 2): a fabricated PASS with executed 0 clears every other
+            # check, and a fabricated suite-level SKIP is only legitimate for
+            # suites that HAVE a suite-level skip gate. The verifier holds the
+            # real catalog, so it re-checks both against the suite's own
+            # configuration — the same quantities coverage_verdict enforced
+            # inside the shard.
+            for e in entries:
+                suite = suites_by_id.get(e.get("id"))
+                if suite is None:
+                    continue  # already named by the suite-set checks
+                status = e.get("status")
+                executed = e.get("executed")
+                if status == "PASS":
+                    if suite.expected is not None:
+                        if not isinstance(executed, int) or executed < suite.expected:
+                            problems.append(
+                                f"shard {i}: {suite.id} PASS with executed "
+                                f"{executed!r} below its floor {suite.expected}")
+                    elif suite.kind in ("pytest", "vitest") and not executed:
+                        problems.append(
+                            f"shard {i}: {suite.id} PASS with no executed tests")
+                elif status == "SKIP" and not (suite.db_gated or suite.opt_in_env):
+                    problems.append(
+                        f"shard {i}: {suite.id} SKIP but the suite has no "
+                        f"suite-level skip gate")
+            failed = [e.get("id") for e in entries if e.get("status") == "FAIL"]
             if failed:
                 problems.append(f"shard {i}: FAILED suites: {', '.join(map(str, failed))}")
             elif d.get("any_fail"):
@@ -1592,9 +1654,13 @@ def verify_shard_results(results_dir: Path) -> int:
                 f"union of shard suite sets != catalog "
                 f"(never ran: {never_ran or '-'}; unknown: {extras or '-'})")
 
-    npass = sum(1 for d in shards.values() for e in d.get("results", [])
+    def _dict_entries(d):
+        raw = d.get("results")
+        return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+
+    npass = sum(1 for d in shards.values() for e in _dict_entries(d)
                 if e.get("status") == "PASS")
-    nskip = sum(1 for d in shards.values() for e in d.get("results", [])
+    nskip = sum(1 for d in shards.values() for e in _dict_entries(d)
                 if e.get("status") == "SKIP")
     executed = sum(d.get("executed_total") or 0 for d in shards.values())
     slowest = max((d.get("wall_seconds") or 0 for d in shards.values()), default=0)
