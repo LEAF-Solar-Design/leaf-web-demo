@@ -172,6 +172,16 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
         "observe the failure it exists to prevent. Run it from server/.")
     assert hasattr(ambient_platform, "python_implementation"), (
         "'platform' is not the stdlib module; precondition not established")
+    # Identity is necessary but NOT sufficient. Both checks above still hold if
+    # something attached an overlay_store attribute to the real stdlib module,
+    # and the pre-fix import would then succeed. Not hypothetical in this repo:
+    # platform/tests/conftest.py already deletes sys.modules["platform"] to
+    # defend the stdlib name. Identity says WHICH module won; this says the old
+    # import would actually fail here. The precondition needs both.
+    assert not hasattr(ambient_platform, "overlay_store"), (
+        "the stdlib 'platform' module carries an overlay_store attribute, so "
+        "the pre-fix import would succeed and this test would pass for the "
+        "wrong reason")
 
     from routers import overlay as overlay_router
 
