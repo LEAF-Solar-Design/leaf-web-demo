@@ -144,3 +144,94 @@ def test_upload_wrapper_never_raises_on_garbage_response(captured):
     # No exception escaped; whatever emitted carried anon identity at worst.
     for call in captured:
         assert call["tenant_id"] in ("anon",)
+
+
+# --------------------------------------------------------------------------- #
+# WIRING tests (review #426 round-2 warn): the corrected paths themselves,
+# not just the helpers — removing the ident threading, a wall call site, or
+# the pg ready emit must fail one of these.
+# --------------------------------------------------------------------------- #
+
+def test_upload_route_threads_resolved_identity_into_rejection(monkeypatch, captured):
+    """Through the REAL route: an oversize rejection AFTER identity
+    resolution is attributed to the resolved tenant, not anon."""
+    import contextlib
+
+    import entitlements
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setattr(uploads_router.write_loop,
+                        "upload_import_mutations_enabled", lambda: True)
+
+    @contextlib.contextmanager
+    def _guard():
+        yield True
+
+    monkeypatch.setattr(uploads_router.write_loop,
+                        "upload_mutation_commit_guard", _guard)
+    monkeypatch.setattr(entitlements, "resolve_tier", lambda t: "pro")
+    monkeypatch.setattr(entitlements, "resolve_roles", lambda t: ((), False))
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda tier, roles, elevated: {"upload": True})
+    monkeypatch.setattr(guest_uploads, "max_upload_bytes", lambda: 8)
+
+    app = FastAPI()
+    app.include_router(uploads_router.router)
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.post(
+        "/api/drawings/upload",
+        headers={"X-Tenant-Id": "acme"},
+        files={"file": ("plan.dxf", b"0" * 64, "application/octet-stream")},
+    )
+    assert resp.status_code == 413
+    reject = [c for c in captured if c["name"] == "drawing.upload_rejected"]
+    assert reject and reject[-1]["tenant_id"] == "acme"
+    assert reject[-1]["labels"]["reason"] == "size"
+
+
+def test_pg_ready_finalize_emits_after_commit(monkeypatch, captured):
+    """_finalize_pg_ready_attempt emits ok=True exactly once, AFTER the
+    serializable commit returns."""
+    import hashlib
+
+    data = b"intake-bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    key = "cache/k1"
+    marker = {"status": "ready", "attempt": "a1",
+              "intake_ref": key, "intake_sha256": digest}
+
+    order = []
+
+    class _Db:
+        def run_transaction(self, op, isolation=None):
+            order.append("commit")
+
+    class _Backend:
+        def put_if_absent_or_verify(self, k, d):
+            pass
+
+        def get(self, k):
+            return data
+
+        def put(self, k, d):
+            order.append("sentinel")
+
+    monkeypatch.setattr(guest_uploads, "_drawing_db", lambda: _Db())
+    monkeypatch.setitem(__import__("sys").modules, "psycopg.types.json",
+                        __import__("types").SimpleNamespace(Jsonb=lambda v: v))
+    monkeypatch.setitem(__import__("sys").modules, "psycopg.types",
+                        __import__("types").SimpleNamespace(
+                            json=__import__("sys").modules["psycopg.types.json"]))
+    monkeypatch.setitem(__import__("sys").modules, "psycopg",
+                        __import__("types").SimpleNamespace(
+                            types=__import__("sys").modules["psycopg.types"]))
+
+    guest_uploads._finalize_pg_ready_attempt(
+        _Backend(), "guest-t", "u-7", marker, "owner-1", 3, key, data)
+
+    emits = [c for c in captured if c["name"] == "drawing.extraction_finished"]
+    assert len(emits) == 1
+    assert emits[0]["labels"]["ok"] is True
+    assert order[0] == "commit"  # emit could only follow the commit

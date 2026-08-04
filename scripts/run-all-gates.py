@@ -564,6 +564,14 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_submit_latency_metric.py"), 11),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
+        # P2 telemetry (waves A + B). Floors are the measured local executed
+        # counts on 2026-08-04; neither file was registered when it landed,
+        # which made the whole telemetry suite invisible to PR CI (review
+        # #426 round-2 blocker).
+        Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
+              SERVER, _py_pytest("tests/test_telemetry.py"), 20),
+        Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
+              SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
         # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
         # test_required_platform_rejects_missing_shared_mutation_fence. The floor
