@@ -1113,6 +1113,37 @@ def test_review_terminal_pr_state_stops_observation(pushable, monkeypatch):
     assert len(calls) == n
 
 
+def test_review_pr_state_junk_is_bounded_to_the_closed_set(pushable, monkeypatch):
+    """Round 1, finding 1: any API state value outside open/closed/merged
+    persists as 'unknown', never as raw junk the drawer would render."""
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "x" * 500, "merged": False, "head": {"sha": head}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": []}),
+    })
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"]["pr_state"] == "unknown"
+
+
+def test_fetch_review_never_raises_on_malformed_pr_records(lane_env, monkeypatch):
+    """Round 1, finding 3: pr null / bool number degrade to unknown inside the
+    guarded path; and _pr_settled refuses bool numbers so the refresh gate
+    never admits them either."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    def explode(*a, **k):
+        raise AssertionError("no HTTP may happen for a malformed pr record")
+    monkeypatch.setattr(lane, "_github_request", explode)
+    for pr in (None, {}, {"number": True}, {"number": "5"}, {"number": 0}):
+        out = lane._fetch_review({"change_id": "x", "pr": pr})
+        assert out["state"] == "unknown", pr
+        assert out["error"] == "review_pr_number_invalid", pr
+        assert lane._pr_settled(pr) is False, pr
+
+
 def test_review_skipped_entirely_when_feature_off_or_no_pr(pushable, monkeypatch):
     view = _propose()
     landed = _land(view)  # PR-open off: no pr on the record

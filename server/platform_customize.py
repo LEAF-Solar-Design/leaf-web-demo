@@ -974,7 +974,10 @@ def _pr_view(data: Mapping[str, Any], *, slug: str,
 
 
 def _pr_settled(pr: Any) -> bool:
-    return isinstance(pr, dict) and isinstance(pr.get("number"), int)
+    # type() not isinstance(): bool subclasses int, and True must never read
+    # as PR #1 (the same trap _pr_view closed in PR #424 round 1).
+    return isinstance(pr, dict) and type(pr.get("number")) is int \
+        and pr.get("number") > 0
 
 
 def _pr_credentials() -> tuple[str, str] | str:
@@ -1019,10 +1022,16 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(creds, str):
         return {"state": "unknown", "error": creds, "checked_at": at}
     slug, token = creds
-    number = record.get("pr", {}).get("number")
     try:
+        # Inside the guarded path: a malformed record (pr: null, junk number)
+        # must degrade to unknown, never raise out of a status read.
+        pr = record.get("pr")
+        number = pr.get("number") if isinstance(pr, Mapping) else None
+        if type(number) is not int or number <= 0:
+            return {"state": "unknown", "error": "review_pr_number_invalid",
+                    "checked_at": at}
         status, data = _github_request(
-            "GET", f"/repos/{slug}/pulls/{int(number)}", token=token)
+            "GET", f"/repos/{slug}/pulls/{number}", token=token)
         if status != 200 or not isinstance(data, Mapping):
             return {"state": "unknown", "error": f"review_http_{int(status)}",
                     "checked_at": at}
@@ -1030,8 +1039,11 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         if not _SHA_RE.fullmatch(head):
             return {"state": "unknown", "error": "review_head_unresolvable",
                     "checked_at": at}
+        # Closed set only: junk from a misconfigured API must not become
+        # persisted record content (same invariant as _pr_view).
         pr_state = ("merged" if data.get("merged") is True
-                    else str(data.get("state") or "unknown"))
+                    else data.get("state")
+                    if data.get("state") in ("open", "closed") else "unknown")
         status2, agg = _github_request(
             "GET", f"/repos/{slug}/commits/{head}/status", token=token)
         if status2 != 200 or not isinstance(agg, Mapping):

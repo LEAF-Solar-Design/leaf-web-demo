@@ -166,10 +166,12 @@ Enable (per admin account, staging first):
    credential helper — URLs carrying userinfo are refused) and
    `LEAF_PLATFORM_CUSTOMIZE_STATE_DIR` on durable storage.
    `LEAF_CUSTOMIZATION_APPROVAL_SECRET` is already deployed in both envs.
-   Optional PR auto-open (#422 Phase 1): `LEAF_PLATFORM_PR_OPEN=1`,
-   `LEAF_PLATFORM_PR_REPO=<owner/repo>`, `LEAF_PLATFORM_PR_TOKEN=<fine-grained
-   PAT, Pull-requests write ONLY — a separate token from the Contents push
-   PAT, so each revokes independently>`.
+   Optional PR auto-open + review observation (#422 Phases 1-2):
+   `LEAF_PLATFORM_PR_OPEN=1`, `LEAF_PLATFORM_PR_REPO=<owner/repo>`,
+   `LEAF_PLATFORM_PR_TOKEN=<fine-grained PAT with exactly two permissions:
+   Pull-requests read+write AND Commit-statuses read — never Contents; it
+   stays a separate token from the Contents push PAT so each revokes
+   independently>`.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
    404 `platform_customize_disabled`.
