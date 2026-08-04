@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { openStream } from './converse.js'
 import { applyOverlay } from './overlayTheme.js'
 import { decideOverlay, fetchOverlay } from './overlayClient.js'
 
@@ -134,6 +135,32 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     // in flight — the same fence by the same mechanism.
     return () => { genRef.current += 1 }
   }, [enabled, refresh])
+
+  // THE LANE OWNS ITS OWN EVENTS. They used to arrive through ConversePanel,
+  // which is rendered conditionally — dismiss the chat panel and a later
+  // proposal never raised the decision card, and a remote revoke left the
+  // withdrawn theme on screen (sol-critic PR #439 round 7). A hot channel
+  // whose delivery depends on an unrelated panel being open is not a channel.
+  // Subscribing here means the surface repaints for as long as the session
+  // exists, whatever else is mounted.
+  //
+  // Replay-from-zero is deliberate and cheap: refresh() coalesces the burst of
+  // historical overlay events into one settling read, and the events carry ids
+  // and versions only — the client always RE-READS, so a missed or duplicated
+  // event costs latency, never correctness.
+  useEffect(() => {
+    if (!enabled || !sessionId) return undefined
+    const stream = openStream(sessionId, 0, {
+      onEvent: (envelope) => {
+        const type = envelope?.type
+        if (type === 'overlay_proposed' || type === 'overlay_decided'
+            || type === 'overlay_revoked') {
+          void refresh()
+        }
+      },
+    })
+    return () => stream.close()
+  }, [enabled, sessionId, refresh])
 
   // Applying is its own effect so a re-read swaps the overlay through the same
   // undo path rather than stacking properties on top of the previous set.

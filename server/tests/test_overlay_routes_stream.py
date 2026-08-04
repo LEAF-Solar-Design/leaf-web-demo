@@ -209,7 +209,12 @@ def test_store_import_survives_the_stdlib_platform_shadow(monkeypatch):
     spec.loader.exec_module(stdlib_platform)
     assert not hasattr(stdlib_platform, "overlay_store")
     monkeypatch.setitem(sys.modules, "platform", stdlib_platform)
-    monkeypatch.delitem(sys.modules, "leaf_platform", raising=False)
+    # Clear the package AND every submodule: leaving leaf_platform.overlay_store
+    # or leaf_platform.db cached lets the loader appear to work off a warm
+    # cache, so the "cold load" claim would be false (sol-critic PR #439 r7).
+    for name in [n for n in list(sys.modules)
+                 if n == "leaf_platform" or n.startswith("leaf_platform.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
 
     import routers.overlay as overlay_router
     store = overlay_router._store()

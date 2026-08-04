@@ -7,7 +7,10 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 vi.mock('./api.js', () => ({
   config: { apiBase: '', tenant: 't1' },
   authHeaders: () => ({}),
-  noteUnauthorized: () => {},
+  // Must PASS THE RESPONSE THROUGH like the real one: returning undefined made
+  // the stream's poll fallback throw on res.status and swallow every event,
+  // which is exactly why the panel-independence test below timed out.
+  noteUnauthorized: (res) => res,
 }))
 
 const { fetchOverlay, decideOverlay } = await import('./overlayClient.js')
@@ -114,7 +117,10 @@ describe('concurrent reads (sol-critic PR #439 round 2)', () => {
     let resolveFirst
     const gate = new Promise((r) => { resolveFirst = r })
     let calls = 0
-    globalThis.fetch = vi.fn(async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      // The hook owns the session stream now, so filter to OVERLAY reads —
+      // the stream's transcript poll is a different request.
+      if (!String(url).includes('/api/overlay')) return ok({ events: [] })
       calls += 1
       if (calls === 1) await gate
       return ok({ tokens: {}, document_version: calls, pending_proposal_id: null })
@@ -143,6 +149,7 @@ describe('concurrent reads (sol-critic PR #439 round 2)', () => {
     let resolveOld
     const oldGate = new Promise((r) => { resolveOld = r })
     globalThis.fetch = vi.fn(async (url) => {
+      if (!String(url).includes('/api/overlay')) return ok({ events: [] })
       if (String(url).includes('s-old')) {
         await oldGate
         return ok({ tokens: { 'color.accent': '#010101' },
@@ -174,6 +181,7 @@ describe('concurrent reads (sol-critic PR #439 round 2)', () => {
     let resolveOld
     const oldGate = new Promise((r) => { resolveOld = r })
     globalThis.fetch = vi.fn(async (url) => {
+      if (!String(url).includes('/api/overlay')) return ok({ events: [] })
       urls.push(String(url))
       if (String(url).includes('s-old') && urls.length === 1) {
         await oldGate
@@ -334,5 +342,40 @@ describe('a decision that outlives enablement (round 6)', () => {
 
     expect(screen.getByTestId('v').textContent).toBe('off')
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
+  })
+})
+
+describe('the lane owns its own events (round 7)', () => {
+  it('repaints on a stream event with NO chat panel mounted', async () => {
+    // The subscription used to live inside ConversePanel, which renders
+    // conditionally: dismiss the chat and a later proposal raised no card,
+    // and a remote revoke left the withdrawn theme on screen. useOverlay owns
+    // the subscription now, so only the hook needs to be mounted.
+    let version = 1
+    let sendEvent
+    globalThis.fetch = vi.fn(async (url) => {
+      const target = String(url)
+      if (target.includes('/api/overlay')) {
+        return ok({ tokens: { 'color.accent': version === 1 ? '#111111' : '#999999' },
+                    document_version: version, pending_proposal_id: null })
+      }
+      // The transcript poll IS the event transport in this environment
+      // (jsdom has no EventSource), so hand it whatever is queued.
+      const events = sendEvent ? [sendEvent] : []
+      sendEvent = null
+      return ok({ events })
+    })
+
+    render(<Probe sessionId="s-1" />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v1'))
+
+    version = 2
+    sendEvent = { seq: 1, type: 'overlay_decided', turn_id: null,
+                  data: { proposal_id: 'p-1', state: 'approved', document_version: 2 } }
+
+    await waitFor(
+      () => expect(screen.getByTestId('v').textContent).toBe('v2'),
+      { timeout: 5000 })
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#999999')
   })
 })
