@@ -824,7 +824,7 @@ def build_suites() -> List[Suite]:
         # operator-facing decision surface -- both controls, untrusted text,
         # style sinks -- was unverified on every PR.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 14),
+              [_npm(), "run", "test:unit"], 27),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
