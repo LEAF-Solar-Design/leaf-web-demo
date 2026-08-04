@@ -150,26 +150,26 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
     this suite stayed green. Reproduce that condition here, then require
     _store() to hand back the platform package's overlay_store anyway.
 
-    HOW THE PRECONDITION IS PROVEN. The test is only meaningful where the
-    pre-fix implementation would actually fail, so it must establish that first.
-    Three review rounds tried to establish it by DESCRIBING that environment,
-    and every description was incomplete:
+    THE PRECONDITION IS EXECUTED, NOT DESCRIBED, AND MUST STAY THAT WAY. This
+    test only means something where the pre-fix implementation would actually
+    fail, so it establishes that by running the pre-fix expression itself and
+    requiring it to raise. Do not "simplify" this into a check on the ambient
+    `platform` module. Every such check admits an environment where the old
+    implementation passes:
 
-      round 1  `not hasattr(platform, "overlay_store")` — a freshly imported
-               REPO package lacks the attribute too, and the old import then
-               loads the submodule and succeeds.
-      round 2  identity instead (no `__path__`, has `python_implementation`) —
-               still passes if anything attached an `overlay_store` attribute
-               to the real stdlib module.
-      round 3  identity AND absence — still passes if
-               `sys.modules["platform.overlay_store"]` exists, because
-               IMPORT_FROM falls back to the qualified sys.modules entry when
-               the parent has no such attribute.
+      `not hasattr(platform, "overlay_store")`  — a freshly imported REPO
+          package lacks the attribute too, and the old import then loads the
+          submodule and succeeds.
+      no `__path__` plus `python_implementation` (i.e. "it is the stdlib") —
+          holds even if something attached an `overlay_store` attribute to the
+          real stdlib module.
+      both of the above together — holds even so when
+          `sys.modules["platform.overlay_store"]` exists, because IMPORT_FROM
+          falls back to the qualified sys.modules entry when the parent has no
+          such attribute.
 
-    Each fix answered its own round and lost to the next. So state the
-    precondition CONSTRUCTIVELY instead: execute the exact expression the defect
-    lived in and require it to raise. That cannot be an incomplete description
-    of the environment, because it is not a description — it is the condition.
+    Executing the expression cannot be an incomplete description of the
+    environment, because it is not a description. It is the condition.
     """
     # Import the module under test FIRST. Importing it can itself mutate import
     # state, so probing before this would leave a window in which the probe
@@ -206,9 +206,9 @@ def test_store_resolution_is_stable_across_calls():
     would give two live copies of the store's module state.
 
     Object identity alone would also hold for a module-global cache, or for an
-    old-style import finding a pre-existing sys.modules entry, so identity does
-    not by itself prove the mechanism. Assert the router's private sys.modules
-    key too, which is the thing the docstring is entitled to claim.
+    import finding a pre-existing sys.modules entry, so it does not by itself
+    prove the caching mechanism. The sys.modules assertion is what makes the
+    first sentence true.
     """
     import sys
 
