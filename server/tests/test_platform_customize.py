@@ -987,7 +987,145 @@ def test_pr_view_refuses_junk_from_the_api(pushable, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 5. route gate (admin tier + R7 internal allowlist)
+# 5. review observation (issue #422 Phase 2) — read-only, cached, fail-open
+# --------------------------------------------------------------------------- #
+def _pr_env(monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+
+
+def _landed_with_pr(monkeypatch):
+    """Propose + land with the PR opened at #5, head = the lane commit."""
+    view = _propose()
+    head = view["commit_sha"]
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": 5, "html_url": "https://github.com/o/r/pull/5"}),
+    })
+    landed = _land(view)
+    assert landed["pr"]["number"] == 5
+    return view, head
+
+
+def _review_api(monkeypatch, *, head, pr_state="open", merged=False,
+                statuses=None, calls=None):
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": pr_state, "merged": merged, "head": {"sha": head}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {
+            "state": "n/a", "statuses": statuses or []}),
+    }, calls)
+
+
+def test_review_passed_is_surfaced_with_pr_state(pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _review_api(monkeypatch, head=head, statuses=[
+        {"context": "sol-critic-review", "state": "success",
+         "description": "VERDICT: PASS (round 2, run x)"}])
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"]["state"] == "passed"
+    assert out["review"]["pr_state"] == "open"
+    assert out["review"]["head_sha"] == head
+    assert "PASS" in out["review"]["description"]
+
+
+def test_review_failed_and_merged_states_map(pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _review_api(monkeypatch, head=head, pr_state="closed", merged=True,
+                statuses=[{"context": "sol-critic-review", "state": "failure",
+                           "description": "sol-critic RED, 3 finding(s)"}])
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"]["state"] == "failed"
+    assert out["review"]["pr_state"] == "merged"
+
+
+def test_review_absent_status_reads_as_none_and_foreign_contexts_ignored(
+        pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _review_api(monkeypatch, head=head, statuses=[
+        {"context": "ci/test-gate", "state": "success"}])
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"]["state"] == "none"
+
+
+def test_review_observes_the_current_head_not_the_lane_commit(
+        pushable, monkeypatch):
+    """A fix round pushed to the PR moves the head; the observation must
+    report THAT sha (new code is unreviewed until its own round posts)."""
+    _pr_env(monkeypatch)
+    view, _head = _landed_with_pr(monkeypatch)
+    moved = "a" * 40
+    _review_api(monkeypatch, head=moved, statuses=[])
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"]["head_sha"] == moved
+    assert out["review"]["state"] == "none"
+
+
+def test_review_fetch_failure_is_honest_and_never_breaks_status(
+        pushable, monkeypatch, caplog):
+    import logging
+    _pr_env(monkeypatch)
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "sekrit-review-token")
+    view, _head = _landed_with_pr(monkeypatch)
+    def boom(*a, **k):
+        raise OSError("Bearer sekrit-review-token refused")
+    monkeypatch.setattr(lane, "_github_request", boom)
+    with caplog.at_level(logging.DEBUG):
+        out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["state"] == "landed"
+    assert out["review"] == {"state": "unknown", "error": "review_fetch_failed",
+                             "checked_at": out["review"]["checked_at"]}
+    assert "sekrit-review-token" not in caplog.text
+    assert "sekrit-review-token" not in json.dumps(lane.load_record(view["change_id"]))
+
+
+def test_review_cache_prevents_api_hammering(pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    calls = []
+    _review_api(monkeypatch, head=head, calls=calls, statuses=[])
+    lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    first = len(calls)
+    assert first == 2  # one PR read + one status read
+    lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert len(calls) == first  # fresh cache: no further API calls
+
+
+def test_review_terminal_pr_state_stops_observation(pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    calls = []
+    _review_api(monkeypatch, head=head, pr_state="closed", merged=True,
+                calls=calls, statuses=[
+                    {"context": "sol-critic-review", "state": "success"}])
+    lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    n = len(calls)
+    # bust the cache clock, then confirm a terminal pr_state still skips
+    record = lane.load_record(view["change_id"])
+    record["review"]["checked_at"] = "2020-01-01T00:00:00Z"
+    lane._write_record(record)
+    lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert len(calls) == n
+
+
+def test_review_skipped_entirely_when_feature_off_or_no_pr(pushable, monkeypatch):
+    view = _propose()
+    landed = _land(view)  # PR-open off: no pr on the record
+    assert landed["pr"] is None
+    def explode(*a, **k):
+        raise AssertionError("no observation may happen without a PR")
+    monkeypatch.setattr(lane, "_github_request", explode)
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["review"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 6. route gate (admin tier + R7 internal allowlist)
 # --------------------------------------------------------------------------- #
 def _admitted(tenant, monkeypatch, *, auth=True):
     from routers import platform_customize as router_mod

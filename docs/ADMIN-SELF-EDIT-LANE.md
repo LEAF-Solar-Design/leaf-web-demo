@@ -99,6 +99,21 @@ Pull-requests write only (never Contents), so the push credential and the
 PR credential revoke independently — emergency containment now names two
 tokens to revoke instead of one.
 
+**Review observation (issue #422 Phase 2):** on status reads of a landed,
+PR-carrying record, the platform OBSERVES the standing gate — the
+`sol-critic-review` commit status at the PR's current head (the fleet
+reviewer posts every round's verdict since 2026-08-04: pending on dispatch,
+success on PASS, failure on RED, error on no-verdict) — and caches it on the
+record as `review: {state, pr_state, head_sha, description}` (60s cache;
+observation stops once the PR is merged or closed). Read-only by contract:
+the platform never runs, simulates, or gates anything on the review. A fix
+round pushed to the PR moves the head, and the observation honestly reports
+that new head as unreviewed until its own round posts. Requires the same PAT
+to ALSO carry **Commit statuses: read** — edit the existing fine-grained
+token's permissions in place (the token value is unchanged, so no secret
+rotation); until then `review.state` reads `unknown`, which is the honest
+degraded mode, never an error.
+
 ## Co-sign on fundamental paths
 
 Changes touching **auth, billing, or the agent spine** (manifest:

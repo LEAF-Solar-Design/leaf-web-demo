@@ -977,6 +977,116 @@ def _pr_settled(pr: Any) -> bool:
     return isinstance(pr, dict) and isinstance(pr.get("number"), int)
 
 
+def _pr_credentials() -> tuple[str, str] | str:
+    """(slug, token) when the follow-through config is usable, else the error
+    code. Shared by PR-open and review observation so the charset gate that
+    keeps the token out of exception text guards every HTTP path."""
+    slug = os.environ.get("LEAF_PLATFORM_PR_REPO", "").strip()
+    token = os.environ.get("LEAF_PLATFORM_PR_TOKEN", "").strip()
+    if not slug or not token:
+        return "pr_config_missing"
+    if not _REPO_SLUG_RE.fullmatch(slug):
+        return "pr_repo_invalid"
+    if _PR_TOKEN_RE.fullmatch(token) is None:
+        return "pr_token_invalid"
+    return slug, token
+
+
+# ---------------------------------------------------------------------------- #
+# Review observation (issue #422 Phase 2) — READ-ONLY, best-effort, cached.
+# The platform OBSERVES the standing review gate's verdict (the
+# `sol-critic-review` commit status at the PR head, posted by the fleet
+# reviewer on every round since 2026-08-04); it never runs, simulates, or
+# gates anything on the review itself. Absence of a verdict at a NEW head is
+# correct: pushed code is unreviewed until its own round posts.
+# ---------------------------------------------------------------------------- #
+REVIEW_CONTEXT = "sol-critic-review"
+_REVIEW_CACHE_S = 60
+
+
+def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
+    """One observation of the PR's review state. NEVER raises.
+
+    Two reads: the PR itself (current head + open/merged/closed — the head can
+    legitimately move past the lane's commit if a fix round is pushed), then
+    the commit status at that head filtered to ``REVIEW_CONTEXT``. Every
+    failure is an honest ``state: unknown`` + error code; the token needs
+    Commit-statuses read (documented in the runbook) and its absence shows up
+    here as ``unknown``, never as a crash.
+    """
+    at = _now()
+    creds = _pr_credentials()
+    if isinstance(creds, str):
+        return {"state": "unknown", "error": creds, "checked_at": at}
+    slug, token = creds
+    number = record.get("pr", {}).get("number")
+    try:
+        status, data = _github_request(
+            "GET", f"/repos/{slug}/pulls/{int(number)}", token=token)
+        if status != 200 or not isinstance(data, Mapping):
+            return {"state": "unknown", "error": f"review_http_{int(status)}",
+                    "checked_at": at}
+        head = str((data.get("head") or {}).get("sha", ""))
+        if not _SHA_RE.fullmatch(head):
+            return {"state": "unknown", "error": "review_head_unresolvable",
+                    "checked_at": at}
+        pr_state = ("merged" if data.get("merged") is True
+                    else str(data.get("state") or "unknown"))
+        status2, agg = _github_request(
+            "GET", f"/repos/{slug}/commits/{head}/status", token=token)
+        if status2 != 200 or not isinstance(agg, Mapping):
+            return {"state": "unknown", "error": f"review_http_{int(status2)}",
+                    "pr_state": pr_state, "head_sha": head, "checked_at": at}
+        verdict, description = "none", None
+        for item in agg.get("statuses") or []:
+            if isinstance(item, Mapping) and item.get("context") == REVIEW_CONTEXT:
+                raw = str(item.get("state") or "")
+                verdict = {"success": "passed", "failure": "failed",
+                           "error": "error_verdict",
+                           "pending": "pending"}.get(raw, "unknown")
+                description = str(item.get("description") or "")[:140]
+                break
+        review = {"state": verdict, "pr_state": pr_state, "head_sha": head,
+                  "checked_at": at}
+        if description:
+            review["description"] = description
+        return review
+    except Exception as exc:  # noqa: BLE001 — observation is never load-bearing
+        detail = f"{type(exc).__name__}: {exc}".replace(token, "[redacted-token]")
+        _LOG.warning("platform_customize: review fetch failed for change %s: %s",
+                     record.get("change_id"), _redact(detail)[:200])
+        return {"state": "unknown", "error": "review_fetch_failed", "checked_at": at}
+
+
+def _review_fresh(review: Any) -> bool:
+    if not isinstance(review, dict):
+        return False
+    try:
+        import calendar
+        checked = calendar.timegm(
+            time.strptime(str(review.get("checked_at")), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError, OverflowError):
+        return False
+    return (time.time() - checked) < _REVIEW_CACHE_S
+
+
+def _refresh_review(record: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the cached review projection on a landed, PR-carrying record.
+    Skips entirely when the follow-through is off, terminal (merged/closed),
+    or the cache is fresh — a drawer poll never turns into an API hammer."""
+    if not pr_open_enabled() or record.get("state") != LANDED \
+            or not _pr_settled(record.get("pr")):
+        return record
+    existing = record.get("review")
+    if _review_fresh(existing):
+        return record
+    if isinstance(existing, dict) and existing.get("pr_state") in ("merged", "closed"):
+        return record  # terminal; nothing left to observe
+    record["review"] = _fetch_review(record)
+    _write_record(record)
+    return record
+
+
 def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
     """Open (or find) the PR for the landed branch. NEVER raises.
 
@@ -986,19 +1096,15 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
     the log, redacted and bounded.
     """
     at = _now()
-    slug = os.environ.get("LEAF_PLATFORM_PR_REPO", "").strip()
-    token = os.environ.get("LEAF_PLATFORM_PR_TOKEN", "").strip()
-    if not slug or not token:
-        return {"error": "pr_config_missing", "at": at}
-    if not _REPO_SLUG_RE.fullmatch(slug):
-        return {"error": "pr_repo_invalid", "at": at}
-    # A token with whitespace/control characters would make urllib refuse the
-    # Authorization header with a ValueError QUOTING THE FULL HEADER — i.e. the
-    # token itself — which the except-arm below would log (sol-critic PR #424
-    # round 1, finding 1). Refuse it here, before it can reach any exception
-    # text, and scrub the literal token from anything logged regardless.
-    if _PR_TOKEN_RE.fullmatch(token) is None:
-        return {"error": "pr_token_invalid", "at": at}
+    # _pr_credentials carries the charset gate: a token with whitespace or
+    # control characters would make urllib refuse the Authorization header
+    # with a ValueError QUOTING THE FULL HEADER — i.e. the token itself —
+    # which the except-arm below would log (sol-critic PR #424 round 1,
+    # finding 1). Refused before any HTTP attempt.
+    creds = _pr_credentials()
+    if isinstance(creds, str):
+        return {"error": creds, "at": at}
+    slug, token = creds
     branch_ref = str(record.get("branch_ref", ""))
     try:
         _assert_branch_only(branch_ref)
@@ -1146,7 +1252,7 @@ def status_view(*, change_id: str, tenant_id: str) -> dict[str, Any]:
     record = load_record(change_id)
     if record.get("tenant_id") != str(tenant_id):
         raise PlatformCustomizeError("change_not_found", 404)
-    return public_view(_reconcile(change_id, record))
+    return public_view(_refresh_review(_reconcile(change_id, record)))
 
 
 def public_view(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1166,6 +1272,7 @@ def public_view(record: Mapping[str, Any]) -> dict[str, Any]:
         "cosign": record.get("cosign"),
         "push": record.get("push"),
         "pr": record.get("pr"),
+        "review": record.get("review"),
         "landing_path": {
             "pipeline": ["branch", "pull-request", "sol-critic review gate",
                          "merge", "ECS staging canary", "production"],

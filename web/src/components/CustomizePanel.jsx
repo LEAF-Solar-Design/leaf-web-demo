@@ -339,7 +339,20 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                         <a href={record.pr.url} target="_blank" rel="noopener noreferrer">
                           Pull request #{record.pr.number}
                         </a>
-                        {' '}is open. The review gate runs next.
+                        {' '}
+                        {record.review?.pr_state === 'merged'
+                          ? 'is merged.'
+                          : record.review?.pr_state === 'closed'
+                            ? 'was closed without merging.'
+                            : record.review?.state === 'passed'
+                              ? 'is open. Review: PASS — the merge gate is next.'
+                              : record.review?.state === 'failed'
+                                ? `is open. Review: RED${record.review.description ? ` (${record.review.description})` : ''} — a fix round runs before anything merges.`
+                                : record.review?.state === 'error_verdict'
+                                  ? 'is open. The review produced no readable verdict; it will be re-run.'
+                                  : record.review?.state === 'pending'
+                                    ? 'is open. Review: dispatched, awaiting the verdict.'
+                                    : 'is open. Review: awaiting dispatch.'}
                       </>
                     )
                     : record.pr && record.pr.error
