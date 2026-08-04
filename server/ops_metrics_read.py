@@ -407,3 +407,83 @@ def tenant_metrics(window_seconds: int = 86_400,
         "limit": limit,
         "tenants": tenants,
     }
+
+
+# Buckets the dashboard's time ranges actually use (1h / 6h / 1d), mirroring
+# its CloudWatch period ladder. An arbitrary bucket size is rejected upstream
+# rather than clamped so a caller cannot silently get different buckets than
+# it asked for.
+TIMESERIES_BUCKETS = (3_600, 21_600, 86_400)
+
+
+def timeseries(window_seconds: int = 604_800,
+               bucket_seconds: int = 86_400,
+               tenant_id: Optional[str] = None,
+               tool: Optional[str] = None) -> Dict[str, Any]:
+    """Bucketed ledger series over a trailing window: billing-grade trends
+    (the CloudWatch namespace mixes environments; this ledger does not).
+    Same denial-exclusion rule as the rollup so per-bucket ``runs``/``usd_est``
+    reconcile with it. Buckets are UTC-epoch aligned (floor(ts / bucket)) and
+    EMPTY BUCKETS ARE OMITTED: absence of a bucket means "no ledger rows",
+    never a fabricated zero row. The window is bounded on BOTH ends
+    (since <= ts <= now), so a future-dated row can neither appear nor
+    inflate bucket cardinality past the clamp (a nonaligned window still
+    intersects at most floor(window/bucket) + 1 buckets). ``bucket_seconds``
+    must be one of ``TIMESERIES_BUCKETS``."""
+    if int(bucket_seconds) not in TIMESERIES_BUCKETS:
+        raise ValueError(
+            f"bucket_seconds must be one of {TIMESERIES_BUCKETS}, got {bucket_seconds}"
+        )
+    now = time.time()
+    window_seconds = max(60, min(int(window_seconds), 30 * int(_DAY_SECONDS)))
+    bucket = int(bucket_seconds)
+    since = now - window_seconds
+    where = "WHERE ts >= %(since)s AND ts <= %(now)s"
+    params: Dict[str, Any] = {"since": float(since), "now": float(now),
+                              "bucket": float(bucket)}
+    if tenant_id:
+        where += " AND tenant_id = %(tenant_id)s"
+        params["tenant_id"] = str(tenant_id)
+    if tool:
+        where += " AND tool = %(tool)s"
+        params["tool"] = str(tool)
+    db = _db()
+    with db.get_pool().connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+              FLOOR(ts / %(bucket)s) * %(bucket)s                   AS bucket_ts,
+              COUNT(*)                                              AS attempts,
+              COUNT(*) FILTER (WHERE {_EXECUTED})                   AS runs,
+              COUNT(*) FILTER (WHERE NOT ({_EXECUTED}))             AS denied,
+              COUNT(*) FILTER (WHERE status = 'ok')                 AS ok_runs,
+              COUNT(*) FILTER (WHERE {_EXECUTED} AND status <> 'ok') AS error_runs,
+              COALESCE(SUM(usd_est) FILTER (
+                  WHERE usd_est IS NOT NULL AND {_EXECUTED}), 0)    AS usd_est,
+              COALESCE(SUM(engine_seconds) FILTER (
+                  WHERE engine_seconds IS NOT NULL), 0)             AS engine_seconds_sum
+            FROM broker_usage_ledger
+            {where}
+            GROUP BY bucket_ts
+            ORDER BY bucket_ts
+            """,
+            params,
+        ).fetchall()
+    buckets = [{
+        "t": float(r["bucket_ts"]),
+        "attempts": int(r["attempts"] or 0),
+        "runs": int(r["runs"] or 0),
+        "denied": int(r["denied"] or 0),
+        "ok_runs": int(r["ok_runs"] or 0),
+        "error_runs": int(r["error_runs"] or 0),
+        "usd_est": round(float(r["usd_est"] or 0.0), 6),
+        "engine_seconds_sum": round(float(r["engine_seconds_sum"] or 0.0), 3),
+    } for r in rows]
+    return {
+        "scope": tenant_id or "fleet",
+        "tool": tool,
+        "window_seconds": window_seconds,
+        "bucket_seconds": bucket,
+        "generated_at": now,
+        "buckets": buckets,
+    }

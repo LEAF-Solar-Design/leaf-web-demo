@@ -189,3 +189,60 @@ def test_tool_and_tenant_aggregates_over_real_postgres():
     assert mine["usd_est"] == pytest.approx(0.03)
     assert mine["engine_seconds_sum"] == pytest.approx(6.0, abs=1e-6)
     assert mine["last_ts"] is not None
+
+
+def test_timeseries_over_real_postgres():
+    """Executes the bucketed GROUP BY: epoch-aligned buckets, per-bucket
+    denial exclusion, tool filter, ascending order, and omitted empty buckets
+    (absence means no rows, never a fabricated zero row)."""
+    db = broker_pg_store._load_db()
+    db.apply_migration()
+    store = broker_pg_store.PostgresBrokerStore(db)
+
+    tenant = f"obs-ts-{uuid.uuid4()}"
+    now = time.time()
+    bucket = 3600
+    # Two adjacent hour buckets, timestamps pinned INSIDE each bucket and
+    # STRICTLY IN THE PAST: the query bounds ts <= now, so rows two and one
+    # hours back stay visible no matter where inside the current hour the
+    # test runs (no first-30-seconds flake).
+    b1 = (int(now) // bucket - 2) * bucket   # two hours back
+    b2 = b1 + bucket                          # one hour back
+    rows = [
+        # bucket 1: one ok run, one quota denial (denial excluded from
+        # runs/cost, counted in attempts/denied)
+        (str(uuid.uuid4()) + ":broker-run", "ok", True, 2.0, 0.01, "panel_layout", b1 + 10),
+        (str(uuid.uuid4()) + ":broker-run", "quota_exceeded", True, None, None, "panel_layout", b1 + 20),
+        # bucket 2: one chargeable FAILED run on a different tool
+        (str(uuid.uuid4()) + ":broker-run", "WORKITEM_FAILED", True, 4.0, 0.02, "string_sizer", b2 + 30),
+    ]
+    for event_key, status, aps_live, engine_seconds, usd, tool, ts in rows:
+        _admit(store, event_key, tenant)
+        with db.get_pool().connection() as conn:
+            _insert_ledger(conn, event_key, tenant, status, aps_live,
+                           engine_seconds, usd, ts, tool=tool)
+
+    series = ops_metrics_read.timeseries(
+        window_seconds=3 * bucket + 120, bucket_seconds=bucket, tenant_id=tenant)
+    assert series["bucket_seconds"] == bucket
+    assert series["scope"] == tenant
+    got = {int(b["t"]): b for b in series["buckets"]}
+    # Exactly the two populated buckets, ascending; no fabricated empties.
+    assert [int(b["t"]) for b in series["buckets"]] == sorted(got.keys())
+    assert set(got.keys()) == {b1, b2}
+    assert got[b1]["attempts"] == 2
+    assert got[b1]["runs"] == 1              # denial excluded
+    assert got[b1]["denied"] == 1
+    assert got[b1]["ok_runs"] == 1
+    assert got[b1]["usd_est"] == pytest.approx(0.01)
+    assert got[b2]["runs"] == 1
+    assert got[b2]["error_runs"] == 1
+    assert got[b2]["usd_est"] == pytest.approx(0.02)   # chargeable FAILED counts
+    assert got[b2]["engine_seconds_sum"] == pytest.approx(4.0, abs=1e-6)
+
+    # tool filter narrows to that tool's buckets only
+    only_ps = ops_metrics_read.timeseries(
+        window_seconds=3 * bucket + 120, bucket_seconds=bucket,
+        tenant_id=tenant, tool="string_sizer")
+    assert [int(b["t"]) for b in only_ps["buckets"]] == [b2]
+    assert only_ps["tool"] == "string_sizer"
