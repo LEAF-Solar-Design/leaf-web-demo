@@ -178,6 +178,29 @@ export interface GrantSettlement {
   retry_after_s?: number;
 }
 
+// --------------------------------------------------------------------------- //
+// Turn intent — which of the two changeable surfaces a message is about.
+// --------------------------------------------------------------------------- //
+
+/** "drawing" = the CAD file; "product" = this web app; "unclear" = say so. */
+export type TurnIntentTarget = "product" | "drawing" | "unclear";
+
+export interface TurnIntent {
+  target: TurnIntentTarget;
+  /** Short reason, for the operator-visible signal. Never a credential. */
+  rationale: string;
+}
+
+/**
+ * Classify ONE user message by which surface it is about, so the spine does not
+ * have to infer it from vocabulary. ADVISORY: the result is a hint the spine
+ * model may override, never a gate. Implementations MUST fail open (`null`)
+ * rather than let a classifier problem cost the user their turn.
+ */
+export interface IntentSynthesizer {
+  synthesize(text: string): Promise<TurnIntent | null>;
+}
+
 export interface OAuthGrantProvider {
   /** Resolve the per-tenant Agent SDK grant. Concern 2 only. */
   getGrant(tenantId: string): Promise<AgentGrant>;
