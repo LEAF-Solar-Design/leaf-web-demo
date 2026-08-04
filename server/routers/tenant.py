@@ -254,7 +254,43 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(_require_grant_owner)):
         hj = r.json()
     except ValueError:
         return _unreachable("harness returned non-JSON")
+    _emit_grant_event("grant.linked", tenant, hj, req.kind)
     return deps.tenant_echo(_status_body(hj), tenant)
+
+
+# The only kind vocabulary telemetry may carry: the request model accepts any
+# string (the harness ignores invalid values and auto-detects), so emitting a
+# raw req.kind would let a caller place arbitrary text (or a token) into
+# telemetry (review #426 round-1 blocker 3).
+_GRANT_KINDS = frozenset({"oauth", "api_key"})
+
+
+def _emit_grant_event(name: str, tenant, harness_body, requested_kind=None) -> None:
+    """Best-effort grant.linked / grant.unlinked product event (P2): the
+    unlock for Build + chat. `kind` is ALLOWLISTED: the harness response's
+    kind wins when valid, else a valid requested kind, else the label is
+    omitted entirely. NEVER the token; NEVER raises."""
+    try:
+        import telemetry_sink
+
+        kind = None
+        if isinstance(harness_body, dict):
+            for key in ("kind", "grant_kind"):
+                if harness_body.get(key) in _GRANT_KINDS:
+                    kind = harness_body[key]
+                    break
+        if kind is None and requested_kind in _GRANT_KINDS:
+            kind = requested_kind
+        tid = str(tenant)
+        telemetry_sink.emit(
+            name,
+            tenant_id=tid,
+            tenant_kind="guest" if tid.startswith("guest-") else "account",
+            session_id="server",
+            labels={"kind": kind} if kind else None,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the grant flow
+        pass
 
 
 @router.patch("/api/tenant/claude-grant")
@@ -328,4 +364,5 @@ def unlink_grant(account_id: Optional[str] = None, tenant=Depends(_require_grant
     except ValueError:
         # a bodyless 200/204 delete is fine -> report unlinked.
         hj = {"linked": False, "linked_at": None}
+    _emit_grant_event("grant.unlinked", tenant, hj)
     return deps.tenant_echo(_status_body(hj), tenant)

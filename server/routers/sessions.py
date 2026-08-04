@@ -490,8 +490,54 @@ def _report_give_back_failure(reason: str, confirmation_id: str, session_id: str
         pass
 
 
+_WALL_KIND_BY_CODE = {
+    "GRANT_REQUIRED": "grant",
+    "llm_quota_exhausted": "llm_quota",
+    "llm_rate_limited": "llm_rate",
+    "turn_in_progress": "busy",
+    "ENTITLEMENT_REQUIRED": "entitlement",
+    "BROKER_UNREACHABLE": "unreachable",
+}
+
+
+def _emit_agent_wall_kind(tenant, session_id, wall_kind: str, http_status: int,
+                          error_code: str) -> None:
+    """Best-effort `agent.wall_hit` product event (P2): THE chat activation
+    blockers, per tenant. Never raises; skipped when identity is absent.
+    Covers the TurnRejected choke point PLUS the two walls that answer
+    without a TurnRejected: TurnBusy's 409 and the entitlement denial
+    (review #426 round-1 warn 5)."""
+    try:
+        import telemetry_sink
+
+        if tenant is None:
+            return
+        tid = str(tenant)
+        telemetry_sink.emit(
+            "agent.wall_hit",
+            tenant_id=tid,
+            tenant_kind="guest" if tid.startswith("guest-") else "account",
+            session_id=str(session_id) if session_id else "none",
+            labels={
+                "wall_kind": wall_kind,
+                "http_status": http_status,
+                "error_code": error_code,
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the response
+        pass
+
+
+def _emit_agent_wall(exc: "turn_runner.TurnRejected", tenant, session_id) -> None:
+    _emit_agent_wall_kind(
+        tenant, session_id,
+        _WALL_KIND_BY_CODE.get(exc.error_code, exc.error_code),
+        exc.status_code, exc.error_code)
+
+
 def _turn_rejected_response(exc: "turn_runner.TurnRejected",
-                            approval_lost: bool = False) -> JSONResponse:
+                            approval_lost: bool = False,
+                            tenant=None, session_id=None) -> JSONResponse:
     """TurnRejected -> HTTP response: exc.extra merged TOP-LEVEL (e.g.
     {'grant_required': True}) alongside the §10-valid `error` object.
 
@@ -499,6 +545,7 @@ def _turn_rejected_response(exc: "turn_runner.TurnRejected",
     given back. It forces `retryable` false and surfaces
     `approval_recovered: false`, because retrying with the same confirmation_id
     can then only fail `already_consumed` — see `_busy_response`."""
+    _emit_agent_wall(exc, tenant, session_id)
     retryable = _RETRYABLE_BY_CODE.get(exc.error_code, False)
     if approval_lost:
         retryable = False
@@ -709,6 +756,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("converse", tier)
     if not allowed:
+        _emit_agent_wall_kind(tenant, session_id, "entitlement", 403,
+                              "ENTITLEMENT_REQUIRED")
         return entitlements.entitlement_denied_response("converse", tier)
 
     # 4. confirm path: atomically verify-and-consume the durable approval row
@@ -817,7 +866,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                     tenant, session_id, text=req.text,
                     classifier_hint=req.classifier_hint, model=req.model)
             except turn_runner.TurnRejected as exc:
-                return _turn_rejected_response(exc)
+                return _turn_rejected_response(exc, tenant=tenant, session_id=session_id)
             if q_status == "queued":
                 return JSONResponse(
                     status_code=202,
@@ -837,6 +886,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if confirmation_id is not None:
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
+        _emit_agent_wall_kind(tenant, session_id, "busy", 409, "turn_in_progress")
         return _busy_response(session_id, approval_lost=approval_lost)
     except turn_runner.TurnRejected as exc:
         # Same rule, second site: give the approval back on every rejection
@@ -880,7 +930,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 print(f"[leaf-agent] transcript closure FAILED for turn "
                       f"{exc.turn_id!r} on session {session_id!r}; the turn "
                       f"dangles until repair", file=sys.stderr, flush=True)
-        return _turn_rejected_response(exc, approval_lost=approval_lost)
+        return _turn_rejected_response(exc, approval_lost=approval_lost,
+                                       tenant=tenant, session_id=session_id)
 
     return JSONResponse(
         status_code=202,
@@ -911,7 +962,7 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
     try:
         outcome = turn_runner.request_cancel(tenant, session_id, turn_id)
     except turn_runner.TurnRejected as exc:
-        return _turn_rejected_response(exc)
+        return _turn_rejected_response(exc, tenant=tenant, session_id=session_id)
 
     if outcome == "not_active":
         return error_response(

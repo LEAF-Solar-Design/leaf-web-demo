@@ -821,6 +821,9 @@ def _finalize_pg_ready_attempt(
             raise RuntimeError("upload extraction lease expired before ready commit")
 
     db.run_transaction(operation, isolation="serializable")
+    # The serializable commit above IS the ready transition; any lost lease
+    # or race raised out instead of reaching this line.
+    _emit_extraction_terminal(tenant_id, drawing_id, ok=True)
     try:
         backend.put(
             write_loop.upload_marker_key(tenant_id, drawing_id),
@@ -1044,11 +1047,17 @@ def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any
     with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return False
-        return _mark_failed_committed(
+        written = _mark_failed_committed(
             backend, tenant_id, drawing_id, marker, error_code, message,
             retryable, extraction_owner=extraction_owner,
             extraction_fence=extraction_fence,
         )
+        if written:
+            # written=True is the transition proof: this caller's failure
+            # record actually landed (not a lost race / purged / replaced).
+            _emit_extraction_terminal(tenant_id, drawing_id, ok=False,
+                                      error_code=error_code)
+        return written
 
 
 def _mark_failed_committed(
@@ -1179,6 +1188,35 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         if not commit_enabled:
             return
         _run_extraction(tenant_id, drawing_id, ext)
+
+
+def _emit_extraction_terminal(tenant_id: str, drawing_id: str, ok: bool,
+                              error_code: Optional[str] = None) -> None:
+    """Best-effort `drawing.extraction_finished` product event (P2), emitted
+    ONLY at the exact sites where THIS worker provably committed the terminal
+    transition (the pg ready commit, the legacy ready marker write, and a
+    _mark_failed write that reported written=True). Claim losers, purge
+    races, replaced attempts, and twin workers emit NOTHING (review #426
+    round-1 blocker 1). NEVER raises."""
+    try:
+        import telemetry_sink
+
+        labels: Dict[str, Any] = {
+            "drawing_id": drawing_id,
+            "ok": ok,
+            "status": "ready" if ok else "failed",
+        }
+        if error_code:
+            labels["error_code"] = error_code
+        telemetry_sink.emit(
+            "drawing.extraction_finished",
+            tenant_id=str(tenant_id),
+            tenant_kind="guest" if str(tenant_id).startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break extraction
+        pass
 
 
 def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
@@ -1438,6 +1476,8 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                 write_marker(backend, tenant_id, drawing_id, marker)
         except KeyError:
             return  # purged before this attempt could publish; receipt stands
+        # The guarded marker write above IS the legacy ready transition.
+        _emit_extraction_terminal(tenant_id, drawing_id, ok=True)
 
 
 class _ExtractError(Exception):

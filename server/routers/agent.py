@@ -212,6 +212,37 @@ def pending_approvals(session_id: str, limit: int = 100,
     )
 
 
+def _emit_approval_decided(approval: Dict[str, Any], outcome: str) -> None:
+    """Best-effort `agent.approval_decided` product event (P2): trust-gate
+    conversion for write actions. NEVER raises."""
+    try:
+        import telemetry_sink
+        import time as _time
+
+        tid = str(approval.get("tenant_id") or "")
+        if not tid:
+            return
+        labels: Dict[str, Any] = {
+            "outcome": outcome,
+            "turn_id": approval.get("turn_id"),
+        }
+        tool = approval.get("tool") or approval.get("tool_name")
+        if tool:
+            labels["tool"] = tool
+        created = approval.get("created_at")
+        if isinstance(created, (int, float)) and created > 0:
+            labels["decision_latency_ms"] = int(max(0.0, _time.time() - created) * 1000)
+        telemetry_sink.emit(
+            "agent.approval_decided",
+            tenant_id=tid,
+            tenant_kind="guest" if tid.startswith("guest-") else "account",
+            session_id=str(approval.get("session_id") or "none"),
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the decision
+        pass
+
+
 @router.post("/api/agent/approvals/{confirmation_id}")
 def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
                      tenant=Depends(deps.require_active_tenant)):
@@ -260,6 +291,7 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
                 # grant_approval auto-denied the expired record; recording an
                 # approve session-side would create the exact cross-store
                 # contradiction gate-first ordering exists to prevent.
+                _emit_approval_decided(approval, "expired")
                 return error_response(
                     ErrorCode.CONFIRMATION_EXPIRED,
                     f"confirmation_id {confirmation_id!r} expired before the decision",
@@ -320,6 +352,7 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
         {"confirmation_id": confirmation_id, "approved": bool(req.approved),
          "by": decision_actor},
     )
+    _emit_approval_decided(approval, "approved" if req.approved else "denied")
     return deps.tenant_echo(
         with_envelope_fields({"resolved": True, "approved": bool(req.approved)}),
         tenant,

@@ -171,6 +171,7 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
     else:
         org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
                else store.create_org(body.name))
+    _emit_org_event("org.created", str(org.org_id), {"tier": org.tier})
     return {"org": org.to_dict()}
 
 
@@ -559,6 +560,7 @@ def offboard(org_id: uuid.UUID, x_admin_token: str | None = Header(default=None)
         )
     except OrgNotFound:
         raise HTTPException(status_code=404, detail="org not found")
+    _emit_org_event("org.offboarded", str(result.org_id), {"status": result.status})
     return {
         "org_id": str(result.org_id), "status": result.status,
         "deleted_projects": result.deleted_projects,
@@ -682,6 +684,9 @@ def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
         # the read above and the write — refuse rather than guess (TOCTOU).
         raise HTTPException(status_code=409,
                             detail="organization state changed during sync; tier not updated")
+    if updated.tier != org.tier:
+        _emit_org_event("billing.tier_changed", str(org_id), {
+            "from_tier": org.tier, "to_tier": updated.tier})
     return {
         "org_id": str(org_id),
         "previous_tier": org.tier,
@@ -690,3 +695,22 @@ def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
         "stripe_subscription_id": body.stripe_subscription_id,
         "stripe_event_id": body.stripe_event_id,
     }
+
+
+def _emit_org_event(name: str, org_id: str, labels=None) -> None:
+    """Best-effort enterprise/revenue product event (P2): near-zero volume,
+    high value (org.created / billing.tier_changed / org.offboarded).
+    NEVER raises; a standalone platform process without server/ on sys.path
+    simply skips (ImportError caught)."""
+    try:
+        import telemetry_sink
+
+        telemetry_sink.emit(
+            name,
+            tenant_id=org_id,
+            tenant_kind="account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches org lifecycle
+        pass
