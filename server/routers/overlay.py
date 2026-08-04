@@ -35,6 +35,8 @@ from pydantic import BaseModel, Field
 import deps
 import overlay_propose
 import overlay_registry
+import overlay_stream
+import session_store
 from envelopes import ErrorCode, error_obj
 
 router = APIRouter()
@@ -43,7 +45,12 @@ router = APIRouter()
 def _fail(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse(
         status_code=status,
-        content={"error": error_obj(ErrorCode.BAD_PARAMS, message, detail=code),
+        # code rides in the message ("code: detail") because error_obj's shape
+        # is frozen (error_code/message/retryable only) and BAD_PARAMS is the
+        # envelope code the client classifies on; retryable=False because every
+        # refusal here needs a changed request, not a retry.
+        content={"error": error_obj(ErrorCode.BAD_PARAMS, f"{code}: {message}",
+                                    False),
                  "degraded_mode": False},
     )
 
@@ -75,6 +82,15 @@ class DecideBody(BaseModel):
 @router.post("/api/overlay/proposals")
 def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> Any:
     """Open a pending preview for one session."""
+    # Validate the session BEFORE any write. append_event raises KeyError for
+    # an unknown session, and by the time publish() runs the proposal row is
+    # already committed — the caller would get an error for a proposal that
+    # exists, then retry into pending_proposal_exists and be stuck. Refusing
+    # up front means either everything happens or nothing does.
+    if session_store.get_session(body.session_id) is None:
+        return _fail("session_not_found",
+                     f"no such session {body.session_id!r}", 404)
+
     store = _store()
     try:
         out = overlay_propose.propose(
@@ -85,6 +101,14 @@ def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> A
             store=store,
             current_document=store.document(str(tenant)),
             defaults=overlay_registry.defaults(),
+            # THE "broadcaster" IS the durable store. This app has no
+            # in-memory fan-out: GET /api/sessions/{id}/stream polls
+            # events_after on the transcript, so appending here is what makes
+            # the event arrive over SSE within one poll tick — and the same
+            # append is the replay source for a client that reconnects.
+            # `broadcast` stays None because there is nothing else to push to;
+            # publish() still rewrites the envelope with the durable seq.
+            append_event=session_store.append_event,
         )
     except overlay_propose.OverlayProposeError as exc:
         return _fail(exc.code, exc.detail or exc.code, exc.status_code)
@@ -135,6 +159,28 @@ def decide_overlay(body: DecideBody,
         code = getattr(exc, "code", "decision_failed")
         return _fail(code, str(getattr(exc, "detail", exc))[:200],
                      int(getattr(exc, "status_code", 409)))
+
+    # Announce AFTER the decision committed, into the requester's transcript —
+    # this is what clears their card within one SSE poll tick instead of on
+    # their next full read. Announce failure must not fail the decision: the
+    # state is already durable in overlay_proposals, and the client's read
+    # path (GET /api/overlay) reaches the same truth without the event. The
+    # narrow except is deliberate: KeyError = the requester's session is gone
+    # (nobody is left to notify), StreamContractError = a store misreporting
+    # its seq; anything else is a real bug and should surface.
+    try:
+        overlay_stream.publish(
+            overlay_stream.decided_event(
+                session_id=str(proposal.get("session_id") or ""),
+                seq=0,  # placeholder; publish() rewrites with the durable seq
+                proposal_id=proposal["proposal_id"],
+                state=proposal["state"],
+                document_version=int(document.get("version", 0) or 0),
+            ),
+            append_event=session_store.append_event,
+        )
+    except (KeyError, overlay_stream.StreamContractError):
+        pass
 
     return {
         "proposal_id": proposal["proposal_id"],
