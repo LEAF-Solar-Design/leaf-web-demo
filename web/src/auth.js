@@ -13,11 +13,28 @@
 // (the calm demo gate). Proven end-to-end against the already-allowed
 // http://localhost:8080 callback.
 
+import { track } from './telemetry.js'
+
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
 const AUDIENCE = import.meta.env.VITE_AUTH0_AUDIENCE || ''
 const JWT_KEY = 'leaf.jwt'
 const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
+const AUTH_SEEN_KEY = 'leaf.auth.completed_before'
+
+// P2 wave C-2: both outcomes of the redirect callback. The failure branch was
+// invisible before (silently swallowed into the signed-out gate); this makes
+// it a countable activation-funnel loss. first_time is a browser-local guess
+// (this browser has never completed sign-in), honest to its label. The page
+// often reloads right after; the tracker's pagehide beacon carries the event.
+function trackAuthCompleted(ok) {
+  let firstTime = true
+  try { firstTime = !localStorage.getItem(AUTH_SEEN_KEY) } catch { /* unknown stays true-ish; acceptable */ }
+  track('auth.completed', { ok, first_time: firstTime })
+  if (ok) {
+    try { localStorage.setItem(AUTH_SEEN_KEY, '1') } catch { /* storage unavailable */ }
+  }
+}
 
 // True only when all three public SPA config values are baked into the build.
 export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
@@ -76,9 +93,11 @@ export async function handleRedirectCallback() {
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
     if (token) localStorage.setItem(JWT_KEY, token)
     clean()
+    trackAuthCompleted(!!token)
     return !!token
   } catch {
     clean()
+    trackAuthCompleted(false)
     return false
   }
 }

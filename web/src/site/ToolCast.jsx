@@ -1294,7 +1294,7 @@ export default function ToolCast({
             />
           )}
           {jobResult?.degraded_mode && (
-            <DegradedBanner reason={jobResult.degraded_reason || jobResult.result?.degraded_reason || jobResult.result?.reason} />
+            <DegradedBanner source="toolcast" reason={jobResult.degraded_reason || jobResult.result?.degraded_reason || jobResult.result?.reason} />
           )}
           <ResultPanel
             running={jobRunning}

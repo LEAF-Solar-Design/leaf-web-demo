@@ -696,6 +696,18 @@ export function closeJobBeacon(jobId) {
   }
 }
 
+// P2 wave C-2: the run-lane wall classifier. One call per recognized wall,
+// placed exactly where runToolAsync already classifies the response for the
+// UI, so the event can never disagree with the card the user saw. wall_kind
+// is a CLOSED vocabulary; nothing client-influenceable passes through raw.
+function trackRunWall(wallKind, toolName, tier) {
+  track('run.wall_hit', {
+    wall_kind: wallKind,
+    tool: toolName,
+    ...(tier ? { tier } : {}),
+  })
+}
+
 // --- Run (LIVE async) ---------------------------------------------------
 // POST /api/run -> 202 {job_id} -> subscribe -> resolve with the §3 envelope.
 // `opts.onSubmit(job_id)` fires the instant the job_id is known (for durable
@@ -719,6 +731,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     // renders it CALM (amber), like a spend cap, not a red failure. Checked FIRST
     // so the tag survives even when the body also carries `ok`.
     if (res.status === 403 && body && body.entitlement_required) {
+      trackRunWall('entitlement', toolName, body.tier)
       return {
         ok: false, tool: toolName, version: null, result: null, overlay: null,
         timing_ms: 0, cost: null, degraded_mode: false,
@@ -734,6 +747,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     // renders the calm "daily run limit reached" card (amber), never the spend
     // card and never a red failure. Nothing ran; the job was rejected pre-APS.
     if (res.status === 429) {
+      trackRunWall('daily_quota', toolName, body && body.tier)
       const qErr = (body && body.error) ||
         { error_code: 'quota_exceeded', message: 'Daily run limit reached.', retryable: true }
       return {
@@ -748,7 +762,15 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     }
     // Submission itself failed. If the server already returned a §3 envelope
     // (e.g. UNKNOWN_TOOL 404), pass it straight through; else synthesize one.
-    if (body && 'ok' in body) return body
+    // The 402 spend cap arrives on this path as a quota_exceeded envelope
+    // WITHOUT quota_kind (the 429 daily-runs branch above tags its own), which
+    // is exactly the predicate the UI's spend card uses.
+    if (body && 'ok' in body) {
+      if (body.error?.error_code === 'quota_exceeded') {
+        trackRunWall('spend_cap', toolName, body.tier)
+      }
+      return body
+    }
     if (body && body.error) {
       return { ok: false, tool: toolName, version: null, result: null, overlay: null,
         timing_ms: 0, cost: null, error: body.error, degraded_mode: false }

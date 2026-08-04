@@ -1,6 +1,6 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { track } from './telemetry.js'
+import { track, setTourStep } from './telemetry.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -48,6 +48,7 @@ import {
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
+import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import { THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills } from './converse.js'
@@ -267,6 +268,23 @@ export default function App() {
   // still leaves a way back in (the tour re-enters at beat 1).
   const tourAvailable = useRef(false)
   if (tourOn) tourAvailable.current = true
+  // P2 wave C-2: the tour funnel. tourStepRef mirrors DemoTour's (uncontrolled)
+  // index so exit can say where; setTourStep stamps `tour_step` onto every
+  // organic event while the tour is active (design: tour beats ride the REAL
+  // handlers, so organic events carry the step instead of tour.* duplicates).
+  const tourStepRef = useRef(0)
+  const tourStartedRef = useRef(false)
+  useEffect(() => {
+    if (tourOn && !tourStartedRef.current) {
+      // Only the deep-link entry can be true at mount; the button entry emits
+      // in its own onClick below.
+      tourStartedRef.current = true
+      tourStepRef.current = 0
+      setTourStep(TOUR_STEPS[0]?.id)
+      track('tour.started', { entry: 'deeplink' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
   const { converse } = useWorkspaceControllers()
@@ -1044,15 +1062,34 @@ export default function App() {
   }, [intake, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
+  // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
+  // version-navigation gestures; action is the closed vocabulary
+  // undo/redo/history/preview, counted only when the navigation happened.
   const onUndo = useCallback(async () => {
     const view = await undoDrawingVersion()
-    if (view) showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+    if (view) {
+      track('drawing.version_navigated', { action: 'undo' })
+      showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+    }
   }, [drawingState, showToast, undoDrawingVersion, viewViewer])
 
   const onRedo = useCallback(async () => {
     const view = await redoDrawingVersion()
-    if (view) showToast({ text: `Advanced to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+    if (view) {
+      track('drawing.version_navigated', { action: 'redo' })
+      showToast({ text: `Advanced to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+    }
   }, [drawingState, redoDrawingVersion, showToast, viewViewer])
+
+  const onToggleHistoryTracked = useCallback(() => {
+    if (!historyOpen) track('drawing.version_navigated', { action: 'history' })
+    onToggleHistory()
+  }, [historyOpen, onToggleHistory])
+
+  const onPreviewVersionTracked = useCallback((...args) => {
+    track('drawing.version_navigated', { action: 'preview' })
+    return onPreviewVersion(...args)
+  }, [onPreviewVersion])
 
   // --- version-history browser + read-only preview -------------------------
   // --- projects / orgs workspace handlers (item 1) -------------------------
@@ -1098,6 +1135,10 @@ export default function App() {
 
   const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
   const tourDispatchRef = useRef(false) // P2: true only while a tour beat's dispatch is in flight
+  // P2: render-mirrored snapshot for the Esc-interrupt emit (refs, not effect
+  // deps — elapsed ticks every 200ms).
+  const interruptSnapshotRef = useRef({ tool: null, elapsedMs: null })
+  interruptSnapshotRef.current = { tool: selectedTool?.name || null, elapsedMs: runElapsedMs }
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -1152,12 +1193,15 @@ export default function App() {
     const nowTs = Date.now()
     const last = confirmEmitRef.current
     if (!(last && last.key === emitKey && nowTs - last.ts < 2000)) {
-      confirmEmitRef.current = { key: emitKey, ts: nowTs }
+      const source = decision.source
+        || (tourDispatchRef.current ? 'tour' : decision.slash ? 'slash' : 'prompt')
+      // `source` rides the ref so run.confirmed can report the SAME
+      // provenance and ms_since_shown without re-deriving either.
+      confirmEmitRef.current = { key: emitKey, ts: nowTs, source }
       track('run.confirm_shown', {
         tool: catalogTool.name,
         is_write: isWrite,
-        source: decision.source
-          || (tourDispatchRef.current ? 'tour' : decision.slash ? 'slash' : 'prompt'),
+        source,
       })
     }
     return armed
@@ -1289,7 +1333,9 @@ export default function App() {
     if (previewing) return null
     if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    dismissRoute()
+    // ranTool lets the controller resolve a shown route honestly: this run IS
+    // the routed tool -> accepted; a different tool -> invalidated.
+    dismissRoute({ ranTool: tool.name })
     if (agentMode === 'race') clearAgentMode()
     setSelectedTool(tool)
     setOverlayStale(false); markRefreshFailure(null)
@@ -1350,6 +1396,20 @@ export default function App() {
       dismissRoute()
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
       return
+    }
+    // P2 wave C-2: trust-gate friction. This is THE confirm click (the only
+    // path from an armed intent to onRun with intentConfirmed). source and
+    // ms_since_shown come from the confirm_shown emit's own record; when the
+    // ref names a different tool (2s window expired edge), both are omitted
+    // rather than guessed.
+    {
+      const shownRec = confirmEmitRef.current
+      const matches = shownRec && shownRec.key === currentTool?.name
+      track('run.confirmed', {
+        tool: currentTool?.name,
+        ...(matches && shownRec.source ? { source: shownRec.source } : {}),
+        ...(matches ? { ms_since_shown: Date.now() - shownRec.ts } : {}),
+      })
     }
     onRun(currentTool, confirmed.execution.params, {
       intentConfirmed: true,
@@ -1417,6 +1477,9 @@ export default function App() {
 
   const onAttachAgentJob = useCallback(async (jobId, toolName) => {
     if (!jobId || mock) return null
+    // P2 wave C-2: agent-to-deterministic-run conversion, at the one seam
+    // where a chat-dispatched job enters the run pane.
+    track('agent.job_linked', { tool: toolName || 'job' })
     setSelectedTool({ name: toolName || 'job' })
     return attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
   }, [attachSharedJob, mock])
@@ -1677,9 +1740,21 @@ export default function App() {
     }
   }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, tools])
 
+  const onTourStepChange = useCallback((index) => {
+    tourStepRef.current = index
+    const stepId = TOUR_STEPS[index]?.id
+    setTourStep(stepId)
+    track('tour.step_reached', { step_id: stepId })
+  }, [])
+
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
     // drawing, with your last real result on screen.
+    track('tour.exited', {
+      at_step: TOUR_STEPS[tourStepRef.current]?.id,
+      completed: tourStepRef.current >= TOUR_STEPS.length - 1,
+    })
+    setTourStep(null)
     cannedSeq.current += 1   // kills any in-flight typing / dispatch
     setTourOn(false)
     setTourLanded(true)
@@ -1843,7 +1918,19 @@ export default function App() {
         if (historyOpen) { closeHistory(); return }
         if (route) { dismissRoute(); return }
         if (routeErr || runErr) { clearRouteError(); clearRunErr(); return }
-        if (running) { interruptRun(); return }
+        if (running) {
+          // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
+          // ONE interrupt gesture (the rail keeps the job; nothing cancels
+          // server-side). Refs, not deps: elapsed ticks every 200ms and must
+          // not re-subscribe this listener.
+          track('run.interrupted', {
+            ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+            ...(interruptSnapshotRef.current.elapsedMs != null
+              ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+          })
+          interruptRun()
+          return
+        }
         if (selectedHandle) { setSelectedHandle(null); return }
         // Bottom rung: the WorkspaceSummary Esc cap — close the open project
         // only once every higher surface has already yielded.
@@ -2171,11 +2258,34 @@ export default function App() {
         {/* There is a way back IN: leaving the tour (Skip / Exit) used to be
             one-way, with a hard reload the only re-entry — forbidden on stage. */}
         {mock && !tourOn && tourAvailable.current && (
-          <button type="button" className="chip-neutral" onClick={() => { setTourLanded(true); setTourOn(true) }}>
+          <button
+            type="button"
+            className="chip-neutral"
+            onClick={() => {
+              tourStartedRef.current = true
+              tourStepRef.current = 0
+              setTourStep(TOUR_STEPS[0]?.id)
+              track('tour.started', { entry: 'button' })
+              setTourLanded(true); setTourOn(true)
+            }}
+          >
             Restart guided tour
           </button>
         )}
-        {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
+        {signedOut && authConfigured && (
+          <SignedOutGate
+            onDemo={() => {
+              // P2 (pre-auth allowlisted): the stranger split at the front door.
+              track('gate.choice', { choice: 'demo' })
+              setMock(true)
+            }}
+            onSignIn={() => {
+              // The redirect to Auth0 follows; the pagehide beacon carries this.
+              track('gate.choice', { choice: 'sign_in' })
+              login()
+            }}
+          />
+        )}
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -2278,7 +2388,7 @@ export default function App() {
                   <div className="vh-anchor">
                     <button
                       className="btn ghost"
-                      onClick={onToggleHistory}
+                      onClick={onToggleHistoryTracked}
                       aria-expanded={historyOpen}
                       disabled={versionBusy}
                     >
@@ -2290,7 +2400,7 @@ export default function App() {
                         error={historyErr}
                         loading={historyLoading}
                         previewingVersion={previewing?.version ?? null}
-                        onPreview={onPreviewVersion}
+                        onPreview={onPreviewVersionTracked}
                         onBackToHead={onBackToHead}
                         onClose={closeHistory}
                         onRetry={loadHistory}
@@ -2631,6 +2741,7 @@ export default function App() {
       {mock && tourOn && (
         <DemoTour
           onCannedPrompt={onCannedPrompt}
+          onIndexChange={onTourStepChange}
           onExit={onTourExit}
           landed={tourLanded && !running && !routing}
           busy={running || routing}

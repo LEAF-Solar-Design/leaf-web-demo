@@ -7,10 +7,15 @@
 // sentence + one quiet Details action (reveals the mono reason inline) + a
 // self-clearing note. Persists while the condition is true and clears itself —
 // never user-dismissed.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { track } from '../telemetry.js'
 
-export default function DegradedBanner({ reason }) {
+export default function DegradedBanner({ reason, source = 'workspace' }) {
   const [showReason, setShowReason] = useState(false)
+  // P2 wave C-2: degraded-mode EXPOSURE, counted when the banner actually
+  // mounts for a user. `source` is a mount-site enum (workspace/toolcast),
+  // never the free-text reason.
+  useEffect(() => { track('degraded.shown', { source }) }, [source])
   return (
     <div className="banner" role="status">
       <b>Degraded</b>

@@ -6,6 +6,8 @@
 // (the default) the app makes ZERO /api calls — the bundled capture IS the
 // canonical source, so we serve it directly instead of probing a backend
 // that doesn't exist.
+import { track } from '../telemetry.js'
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
 
@@ -64,7 +66,14 @@ export function loadDemoSolve() {
       } finally {
         if (timer) clearTimeout(timer)
       }
-    })().catch((e) => { demoSolvePromise = null; throw e })
+    })().then((solve) => {
+      // P2 wave C-2 (pre-auth allowlisted): the memo means exactly one emit
+      // per session, at the moment the demo actually resolved for a viewer.
+      // `degraded` is the code's own flag: the intended live solve vs the
+      // bundled fallback.
+      track('site.demo_viewed', { live_or_fallback: solve?.degraded ? 'fallback' : 'live' })
+      return solve
+    }).catch((e) => { demoSolvePromise = null; throw e })
   }
   return demoSolvePromise
 }

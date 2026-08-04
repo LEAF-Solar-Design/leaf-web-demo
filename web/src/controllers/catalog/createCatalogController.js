@@ -125,12 +125,29 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     }
   }
 
-  const dismissRoute = () => {
+  // P2 wave C-2: ONE event when a shown route resolves, emitted at the route
+  // state's own clearing transitions so no caller can double-count. outcome
+  // is a closed vocabulary: accepted (the run that started IS the routed
+  // tool), invalidated (typed over / replaced by a different run),
+  // dismissed (explicit Esc/X), alternative_picked (below).
+  const noteRouteResolved = (outcome, tool) => {
+    track('route.outcome', { outcome, ...(tool ? { tool } : {}) })
+  }
+
+  const dismissRoute = ({ ranTool = null } = {}) => {
+    if (state.route) {
+      noteRouteResolved(
+        ranTool == null ? 'dismissed' : ranTool === state.route.tool ? 'accepted' : 'invalidated',
+        state.route.tool || undefined,
+      )
+    }
     adapters.dismissDecision?.()
     publish({ route: null })
   }
 
   const setPrompt = (value) => {
+    // Typing over a shown route resolves it: the user moved on.
+    if (state.route) noteRouteResolved('invalidated', state.route.tool || undefined)
     adapters.dismissDecision?.()
     publish({
       prompt: value,
@@ -145,8 +162,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // P2 funnel top: THE active dispatch path (the legacy App.jsx inline
     // handler is disabled). text_len only, never text. slash vs typed only:
     // a string override is NOT a reliable canned signal (ToolCast passes
-    // typed text as a string); tour attribution arrives with wave C-2's
-    // tour_step envelope property.
+    // typed text as a string); tour attribution rides the tracker's
+    // tour_step context (telemetry.setTourStep), stamped on every organic
+    // event while the tour is active.
     track('prompt.submitted', {
       input_kind: text.startsWith('/') ? 'slash' : 'typed',
       text_len: text.length,

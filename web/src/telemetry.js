@@ -28,6 +28,14 @@ const state = {
   buffer: [],
   timer: null,
   sessionId: null,
+  tourStep: null,
+}
+
+/** Wave C-2: while the guided tour is active, every organic event carries a
+ * `tour_step` label instead of duplicate tour.* variants of each event (the
+ * tour rides the REAL handlers by design). Null clears it on exit. */
+export function setTourStep(stepId) {
+  try { state.tourStep = stepId == null ? null : String(stepId) } catch { /* no-op */ }
 }
 
 // Session-scoped caps survive reloads: the counter lives beside the session
@@ -133,7 +141,9 @@ export function track(name, props = {}, eventType = 'custom_event') {
       event_type: eventType,
       event_name: name,
       client_ts: Date.now() / 1000,
-      labels: props,
+      labels: state.tourStep != null && props.tour_step === undefined
+        ? { ...props, tour_step: state.tourStep }
+        : props,
     })
     if (state.buffer.length > BUFFER_MAX) state.buffer.shift()
     if (state.buffer.length >= FLUSH_AT) flush()

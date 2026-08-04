@@ -109,7 +109,47 @@ Wave B (server emits, one per verified choke point):
 | `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, tools_called_n, usd_est, tokens_in, tokens_out; model / grant_kind / degraded ONLY when the usage wire supplies them (optional fields the sink drops when absent) |
 | client ingest door | `POST /api/telemetry` | pre-auth trio + any valid authed event; reserved envelope/identity keys are stripped from client labels |
 
-Remaining after waves A+B: the client tracker's C-column events (wave C).
+## Events live in v1 (wave C: the client tracker)
+
+All client events ride `web/src/telemetry.js` (buffer 20/5s, one retry per
+batch, pagehide beacon, kill switch `VITE_TELEMETRY_DISABLED=1`). Identity
+is SERVER-stamped at the ingest door; the client only ever sends names,
+labels, and its browser-session UUID. While the guided tour is active every
+organic event additionally carries a `tour_step` label (the tour rides the
+real handlers; there are no tour.* duplicates of product events).
+
+C-1 (merged #427):
+
+| Event | Choke point | Labels |
+|---|---|---|
+| `session.started` | `api.getSession`, AFTER the session resolved (both branches) | mock, tier (live), catalog_source (default/custom, never the raw dwg) |
+| `prompt.submitted` | `createCatalogController.dispatch` (THE active path) | input_kind (slash/typed), text_len |
+| `prompt.routed` | `api.nlPrompt` both outcomes | lane, tool, stub, confidence_bucket, alternatives_n |
+| `run.confirm_shown` | `App.armDecision` (2s same-tool de-dupe over the tour double-arm) | tool, is_write, source (prompt/slash/catalog/tour/agent) |
+| `error.shown` | the two transport seams: `api.http()`, `converse.tagged()`; cap 20/session | http_status, error_code, endpoint_class |
+| `agent.stream_down` | `converse.onStreamDown`; cap 10/session | reconnects_n |
+| `client.exception` | ErrorBoundary | message_class, component_stack_hash |
+
+C-2 (this change):
+
+| Event | Choke point | Labels |
+|---|---|---|
+| `gate.choice` | SignedOutGate's two buttons (pre-auth allowlisted) | choice (demo/sign_in) |
+| `auth.completed` | `auth.handleRedirectCallback`, BOTH branches (the failure branch was invisible before); pagehide beacon survives the post-auth reload | ok, first_time (browser-local: this browser never completed sign-in) |
+| `route.outcome` | the controller's own route-clearing transitions (no caller can double-count): run started (accepted/invalidated by tool match), typed over (invalidated), explicit dismiss, alternative picked | outcome (accepted/alternative_picked/dismissed/invalidated), tool |
+| `run.confirmed` | `App.onConfirmCatalogRun`, the one armed-intent-to-run path | tool, source + ms_since_shown (from the confirm_shown record; omitted, never guessed, if it names another tool) |
+| `run.wall_hit` | `api.runToolAsync` at the exact branches the UI classifies (403 entitlement, 429 daily quota, quota_exceeded pass-through = 402 spend cap) | wall_kind (entitlement/daily_quota/spend_cap), tool, tier when present |
+| `run.interrupted` | the Esc ladder's running rung (the one interrupt gesture) | tool, elapsed_ms |
+| `run.reattached` | `useJobController` boot re-attach, ONLY for a still-running job (the only reattach:true site) | from (boot), job_age_s (from the inflight pointer's own ts) |
+| `agent.job_linked` | `App.onAttachAgentJob` | tool |
+| `tour.started` / `tour.step_reached` / `tour.exited` | tour deep-link mount effect + the entry button / DemoTour index changes / `App.onTourExit` | entry (deeplink/button) / step_id / at_step, completed |
+| `site.demo_viewed` | `site/intakeCache.loadDemoSolve` resolve (memoized: one per session; pre-auth allowlisted) | live_or_fallback (the loader's own degraded flag) |
+| `degraded.shown` | DegradedBanner mount | source (workspace/toolcast), never the free-text reason |
+| `drawing.version_navigated` | undo/redo success, History open, preview click | action (undo/redo/history/preview) |
+
+Only the pre-auth trio (`gate.choice`, `site.demo_viewed`, `tour.started`)
+is accepted anonymously at the ingest door; every other client event
+identifies like any API call (stub tenant off-auth, verified identity on).
 Labels are additive within schema_version 1, so early rows stay queryable.
 Fields named by the design but not yet stamped (e.g. `user_email`,
 `aps_live`, `wrote_version`) arrive additively with later waves.
