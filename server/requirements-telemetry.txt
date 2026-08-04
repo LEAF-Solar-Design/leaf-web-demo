@@ -1,0 +1,4 @@
+# P2 product-event sink (telemetry_sink.py) — APP IMAGE ONLY.
+# The broker image stays SDK-free by contract (emf_metrics.py docstring);
+# telemetry_sink guards this import and reports disabled where absent.
+google-cloud-bigquery

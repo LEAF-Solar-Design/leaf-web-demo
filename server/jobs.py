@@ -42,6 +42,11 @@ try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
 except Exception:  # pragma: no cover
     emf_metrics = None  # type: ignore[assignment]
 
+try:  # P2 product events (BigQuery sink); best-effort, optional
+    import telemetry_sink
+except Exception:  # pragma: no cover
+    telemetry_sink = None  # type: ignore[assignment]
+
 
 def _emit_job_terminal(status: str) -> None:
     """Best-effort JobTerminal EMF emit. NEVER raises: called on the terminal
@@ -51,6 +56,54 @@ def _emit_job_terminal(status: str) -> None:
     try:
         emf_metrics.emit_job_terminal(status)
     except Exception:  # noqa: BLE001 - metrics must never break job completion
+        pass
+
+
+def _emit_job_terminal_event(job_id: str, status: str,
+                             error: Optional[Dict[str, Any]],
+                             provenance: Optional[Dict[str, Any]],
+                             tenant_id: Optional[str] = None,
+                             tool: Optional[str] = None,
+                             elapsed_ms: Optional[int] = None) -> None:
+    """Best-effort `job.terminal` PRODUCT event (P2 telemetry): the identity-
+    carrying twin of the EMF JobTerminal count. NEVER raises; a lookup miss
+    emits nothing rather than a row with fabricated identity.
+
+    The sqlite call site captures tenant/tool INSIDE its locked region and
+    passes VALUES (no connection crosses the lock boundary). The pg call
+    site passes nothing and this helper does one indexed read — gated on an
+    ENABLED sink so a dark deployment pays zero extra round trips."""
+    if telemetry_sink is None:
+        return
+    try:
+        if telemetry_sink.disabled_reason() is not None:
+            return
+        if tenant_id is None and job_store_mode() == "postgres":
+            ctx = _pg_store.event_context(job_id)
+            if ctx:
+                tenant_id, tool, elapsed_ms = ctx["tenant_id"], ctx["tool"], ctx["elapsed_ms"]
+        if not tenant_id:
+            return
+        labels: Dict[str, Any] = {"job_id": job_id, "status": status}
+        if tool:
+            labels["tool"] = tool
+        if elapsed_ms is not None:
+            labels["duration_ms"] = elapsed_ms
+        if isinstance(error, dict) and error.get("code"):
+            labels["error_code"] = error["code"]
+        if isinstance(provenance, dict):
+            if provenance.get("attempt") is not None:
+                labels["attempts"] = provenance["attempt"]
+            if provenance.get("execution_path"):
+                labels["execution_path"] = provenance["execution_path"]
+        telemetry_sink.emit(
+            "job.terminal",
+            tenant_id=str(tenant_id),
+            tenant_kind="guest" if str(tenant_id).startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break job completion
         pass
 
 logger = logging.getLogger(__name__)
@@ -829,17 +882,21 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             # correlation housekeeping is left to do here.
             platform_link.forget(job_id)
             _emit_job_terminal(status)
+            _emit_job_terminal_event(job_id, status, error, provenance)
         return outcome
     applied = False
     with _lock:
         conn = _db()
         durable = conn.execute(
-            "SELECT attempt, execution_json, org_id, project_id "
+            "SELECT attempt, execution_json, org_id, project_id, tenant_id, tool "
             "FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         if durable is None:
             return "missing"
         durable_attempt = int(durable["attempt"] or 0)
+        # Captured under the lock for the post-lock telemetry emit: no
+        # connection may cross the lock boundary (review #420 round 1).
+        event_tenant_id, event_tool = durable["tenant_id"], durable["tool"]
         _validate_terminal_context(
             status, result_env, provenance, durable_attempt,
             json.loads(durable["execution_json"] or "{}"),
@@ -914,6 +971,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             else:
                 _clear_platform_mirror_pending(job_id)
         _emit_job_terminal(status)
+        _emit_job_terminal_event(job_id, status, error, provenance,
+                                 tenant_id=event_tenant_id, tool=event_tool)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 

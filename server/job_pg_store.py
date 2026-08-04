@@ -249,6 +249,25 @@ class PostgresJobStore:
             return None
         return {"attempt": int(row["attempt"] or 0), "execution": _json(row["execution_json"]) or {}}
 
+    def event_context(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Identity/attribution fields for the terminal product event (P2
+        telemetry). Read-only, one row; the caller treats any failure as
+        best-effort absence."""
+        db = _db()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT tenant_id, tool, elapsed_ms FROM async_jobs WHERE job_id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "tenant_id": row["tenant_id"],
+            "tool": row["tool"],
+            "elapsed_ms": row["elapsed_ms"],
+        }
+
     def complete(
         self, job_id: str, durable_attempt: int, status: str, result: Any,
         error: Any, provenance: Any, fingerprint: str, worker_id: Optional[str],
