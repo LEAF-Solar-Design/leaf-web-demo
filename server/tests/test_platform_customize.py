@@ -168,6 +168,62 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_propose_and_land_never_lands_a_fundamental_change(lane_env):
+    """THE invariant. One approval replaces the operator's second CLICK, never
+    the second PERSON: a change touching a fundamental path must come back
+    awaiting_cosign and must NOT be pushed."""
+    view = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="touch auth",
+        edits=[{"path": "server/auth.py", "content": "AUTH = 3\n"}])
+    assert view["state"] == "awaiting_cosign"
+    assert view["fundamental_paths"] == ["server/auth.py"]
+    # Not landed, and still landable only through the co-sign path.
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.land(change_id=view["change_id"], tenant_id=TENANT,
+                  ack_commit_sha=view["commit_sha"])
+    assert exc.value.code == "cosign_required"
+
+
+def test_propose_and_land_lands_a_non_fundamental_change(lane_env):
+    """The whole point: one call, one approval, landed."""
+    view = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="tweak docs",
+        edits=[{"path": "docs/note.md", "content": "edited once\n"}])
+    assert view["state"] == "landed"
+    assert view["fundamental_paths"] == []
+
+
+def test_propose_and_land_is_equivalent_to_the_two_step_path(lane_env):
+    """The combined op must not authorise anything the two-step path does not.
+    Same shape through both routes reaches the same terminal state — the
+    approval binds the edit set, and the commit is a pure function of it."""
+    one = lane.propose_and_land(
+        tenant_id=TENANT, subject="auth0|author-1", title="combined",
+        edits=[{"path": "docs/note.md", "content": "combined\n"}])
+
+    two = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="two-step",
+        edits=[{"path": "docs/note.md", "content": "two-step\n"}])
+    two_landed = lane.land(change_id=two["change_id"], tenant_id=TENANT,
+                           ack_commit_sha=two["commit_sha"])
+
+    assert one["state"] == two_landed["state"] == "landed"
+    assert one["branch"].startswith("admin-customize/")
+    assert two_landed["branch"].startswith("admin-customize/")
+
+
+def test_propose_and_land_rejects_the_same_bad_paths_as_propose(lane_env):
+    """The combined op must not become a softer door: every path rule propose
+    enforces still applies (traversal, git dir, win32 alias, charset)."""
+    for bad in ["../escape.txt", ".git/hooks/pre-commit", "server./auth.py",
+                "docs/n\u043Ete.md", "a\nb.py"]:
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            lane.propose_and_land(
+                tenant_id=TENANT, subject="auth0|author-1", title="bad path",
+                edits=[{"path": bad, "content": "x"}])
+        assert exc.value.code == "edit_path_invalid", repr(bad)
+
+
 def test_win32_trailing_dot_alias_cannot_dodge_the_cosign_manifest(lane_env):
     """Win32 strips trailing dots and spaces from every path component, so
     `server./auth.py` names the protected file on a Windows checkout while

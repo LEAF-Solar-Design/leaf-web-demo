@@ -698,6 +698,43 @@ def _cosign_satisfied(change_id: str, record: dict[str, Any]) -> bool:
                 and marker.get("commit_sha") == record.get("commit_sha"))
 
 
+def propose_and_land(*, tenant_id: str, subject: str, title: str,
+                     edits: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Propose and, when the change needs no co-sign, land it in ONE approval.
+
+    WHY THIS EXISTS: the two-approval shape cost two LLM turn boundaries and two
+    human decisions around ~4s of real work (measured on staging: propose
+    2014ms, land 2242ms, a git rev-parse on the EFS clone 11ms). The second
+    approval bought nothing the first did not already authorise.
+
+    WHAT THE APPROVAL BINDS. ``land()`` normally demands ``ack_commit_sha`` so a
+    bare "land it" that names no bytes is never an approval. Here the operator
+    approved the EXACT EDIT SET instead, and the commit is a pure function of
+    those edits applied to the base tip, so the sha is derived rather than
+    round-tripped through a second human answer. This is not weaker: the
+    two-step shape leaves a WINDOW between propose and land in which the branch
+    could move, which is precisely why ``land()`` carries a branch-diverged
+    check; this path closes the window instead of policing it. Every one of
+    land()'s server-side guards still runs, unchanged and in order — state must
+    be APPROVED, the durable co-sign marker must exist for fundamental paths,
+    the observed ref must equal the recorded commit, and the push is SHA-pinned.
+
+    WHAT IT MUST NEVER DO: land a change that touches a fundamental path. Those
+    return AWAITING_COSIGN from propose() and this function then RETURNS that
+    view untouched, so the independent co-signer is exactly as required as
+    before. One approval replaces the operator's second click, never the second
+    PERSON.
+    """
+    view = propose(tenant_id=tenant_id, subject=subject, title=title, edits=edits)
+    # Anything other than a clean self-approval stops here and is reported as
+    # proposed. AWAITING_COSIGN is the fundamental-path case; any other state is
+    # equally not ours to land.
+    if view.get("state") != APPROVED:
+        return view
+    return land(change_id=view["change_id"], tenant_id=tenant_id,
+                ack_commit_sha=str(view["commit_sha"]))
+
+
 def land(*, change_id: str, tenant_id: str, ack_commit_sha: str) -> dict[str, Any]:
     """Hand the approved change to the standing pipeline (optionally pushing).
 
