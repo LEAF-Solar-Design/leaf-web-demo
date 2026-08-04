@@ -1013,7 +1013,9 @@ def _review_api(monkeypatch, *, head, pr_state="open", merged=False,
                 statuses=None, calls=None):
     _fake_github(monkeypatch, {
         ("GET", "/repos/o/r/pulls/5"): (200, {
-            "state": pr_state, "merged": merged, "head": {"sha": head}}),
+            "state": pr_state, "merged": merged, "head": {"sha": head},
+            "base": {"ref": "main", "repo": {"full_name": "o/r"}},
+            **({"merge_commit_sha": "e" * 40} if merged else {})}),
         ("GET", f"/repos/o/r/commits/{head}/status"): (200, {
             "state": "n/a", "statuses": statuses or []}),
     }, calls)
@@ -1168,7 +1170,8 @@ def _mergeable_api(monkeypatch, *, head, calls=None, put=None, delete=None):
     """Review passed at `head`, PR open; PUT/DELETE overridable per test."""
     _fake_github(monkeypatch, {
         ("GET", "/repos/o/r/pulls/5"): (200, {
-            "state": "open", "merged": False, "head": {"sha": head}}),
+            "state": "open", "merged": False, "head": {"sha": head},
+            "base": {"ref": "main", "repo": {"full_name": "o/r"}}}),
         ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
             {"context": "sol-critic-review", "state": "success",
              "description": "VERDICT: PASS"}]}),
@@ -1232,7 +1235,7 @@ def test_merge_refuses_unpassed_review_and_moved_head_and_closed_pr(
     # review pending
     _fake_github(monkeypatch, {
         ("GET", "/repos/o/r/pulls/5"): (200, {
-            "state": "open", "merged": False, "head": {"sha": head}}),
+            "state": "open", "merged": False, "head": {"sha": head}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}}),
         ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
             {"context": "sol-critic-review", "state": "pending"}]}),
     })
@@ -1248,7 +1251,7 @@ def test_merge_refuses_unpassed_review_and_moved_head_and_closed_pr(
     # pr closed
     _fake_github(monkeypatch, {
         ("GET", "/repos/o/r/pulls/5"): (200, {
-            "state": "closed", "merged": False, "head": {"sha": head}}),
+            "state": "closed", "merged": False, "head": {"sha": head}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}}),
         ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
             {"context": "sol-critic-review", "state": "success"}]}),
     })
@@ -1341,7 +1344,8 @@ def test_merge_token_never_reaches_record_or_logs(pushable, monkeypatch, caplog)
             raise ValueError(f"Invalid header value b'Bearer {token}'")
         return {
             ("GET", f"/repos/o/r/pulls/5"): (200, {
-                "state": "open", "merged": False, "head": {"sha": head}}),
+                "state": "open", "merged": False, "head": {"sha": head},
+                "base": {"ref": "main", "repo": {"full_name": "o/r"}}}),
             ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
                 {"context": "sol-critic-review", "state": "success"}]}),
         }[(method, path.split("?")[0])]
@@ -1363,6 +1367,64 @@ def test_merge_route_is_not_on_the_harness_backedge():
         "POST", f"/api/platform/customize/{cid}/land") is True
     assert deps._dispatch_backedge_route(
         "POST", f"/api/platform/customize/{cid}/merge") is False
+
+
+def test_merge_refuses_a_retargeted_pr(pushable, monkeypatch):
+    """Round 1, finding 1: a PR retargeted after the verdict keeps its head
+    and its commit-scoped status; the merge would land on the NEW base. The
+    base binding must refuse it."""
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "open", "merged": False, "head": {"sha": head},
+            "base": {"ref": "release", "repo": {"full_name": "o/r"}}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "success"}]}),
+    })
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_base_retargeted"
+    # a base in a FOREIGN repo (fork retarget) is refused the same way
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "open", "merged": False, "head": {"sha": head},
+            "base": {"ref": "main", "repo": {"full_name": "evil/fork"}}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "success"}]}),
+    })
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_base_retargeted"
+
+
+def test_merge_recovers_a_delivery_to_marker_crash(pushable, monkeypatch):
+    """Round 1, finding 3: GitHub merged, crash before the marker. The next
+    attempt sees the PR merged AT OUR EXACT HEAD, which is proof of delivery:
+    it completes the transition instead of wedging on merge_pr_not_open."""
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    calls = []
+    _review_api(monkeypatch, head=head, pr_state="closed", merged=True,
+                calls=calls, statuses=[
+                    {"context": "sol-critic-review", "state": "success"}])
+    out = _merge(view)
+    assert out["state"] == "merged"
+    assert out["merge"]["recovered"] is True
+    assert out["merge"]["merge_commit_sha"] == "e" * 40
+    assert lane._read_marker(view["change_id"], "merged") is not None
+    assert not [c for c in calls if c[0] == "PUT"]  # recovery never re-PUTs
+
+
+def test_merge_refuses_a_pr_merged_at_a_foreign_head(pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _review_api(monkeypatch, head="a" * 40, pr_state="closed", merged=True,
+                statuses=[{"context": "sol-critic-review", "state": "success"}])
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_pr_not_open"
+    assert lane._read_marker(view["change_id"], "merged") is None
 
 
 # --------------------------------------------------------------------------- #

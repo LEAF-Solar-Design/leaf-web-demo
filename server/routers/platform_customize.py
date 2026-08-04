@@ -42,6 +42,7 @@ _ERROR_MESSAGES = {
     "merge_review_not_passed": "The review gate has not passed this exact commit yet.",
     "merge_head_moved": "The pull request no longer points at the approved commit. Nothing was merged.",
     "merge_pr_not_open": "The pull request is no longer open.",
+    "merge_base_retargeted": "The pull request no longer targets the branch the proposal named. Nothing was merged.",
 }
 
 

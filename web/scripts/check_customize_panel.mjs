@@ -16,6 +16,16 @@ function assert(ok, message) {
 assert(api.includes("'/api/platform/customize'"), 'self-edit client must use the canonical propose route')
 assert(api.includes('/api/platform/customize/${'), 'self-edit client must use the status/land routes by change id')
 
+// Every POSTing client must declare JSON: fetch defaults a string body to
+// text/plain and FastAPI rejects it before the route runs (sol-critic PR #437
+// round 1, finding 2 — the merge call shipped without the header).
+for (const fn of ['proposePlatformChange', 'landPlatformChange', 'mergePlatformChange']) {
+  const start = api.indexOf(`export async function ${fn}`)
+  assert(start !== -1, `${fn} must exist`)
+  const bodyEnd = api.indexOf('}\n', api.indexOf('body:', start))
+  assert(api.slice(start, bodyEnd).includes("'Content-Type': 'application/json'"), `${fn} must send Content-Type: application/json`)
+}
+
 // The co-sign approval authority must NEVER enter the browser: no client for
 // the secret-authenticated internal routes, no approval-secret header, in ANY
 // web source file (not just the two we know about today).

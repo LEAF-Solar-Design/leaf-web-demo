@@ -456,6 +456,7 @@ export async function getPlatformChange(changeId) {
 export async function mergePlatformChange(changeId, commitSha) {
   return http(`/api/platform/customize/${encodeURIComponent(changeId)}/merge`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ commit_sha: commitSha }),
   })
 }

@@ -1071,6 +1071,16 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         pr_state = ("merged" if data.get("merged") is True
                     else data.get("state")
                     if data.get("state") in ("open", "closed") else "unknown")
+        # Base bindings (sol-critic PR #437 round 1, finding 1): a PR can be
+        # RETARGETED after the verdict while keeping its head and its
+        # commit-scoped status, so the observation must carry where the merge
+        # would actually land. Bounded strings, comparison-only.
+        base = data.get("base") if isinstance(data.get("base"), Mapping) else {}
+        base_repo = base.get("repo") if isinstance(base.get("repo"), Mapping) else {}
+        base_ref = str(base.get("ref") or "")[:100]
+        base_repo_name = str(base_repo.get("full_name") or "")[:200]
+        merge_commit = str(data.get("merge_commit_sha") or "") \
+            if data.get("merged") is True else ""
         status2, agg = _github_request(
             "GET", f"/repos/{slug}/commits/{head}/status", token=token)
         if status2 != 200 or not isinstance(agg, Mapping):
@@ -1086,9 +1096,12 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
                 description = str(item.get("description") or "")[:140]
                 break
         review = {"state": verdict, "pr_state": pr_state, "head_sha": head,
+                  "base_ref": base_ref, "base_repo": base_repo_name,
                   "checked_at": at}
         if description:
             review["description"] = description
+        if merge_commit and _SHA_RE.fullmatch(merge_commit):
+            review["merge_commit_sha"] = merge_commit
         return review
     except Exception as exc:  # noqa: BLE001 — observation is never load-bearing
         detail = f"{type(exc).__name__}: {exc}".replace(token, "[redacted-token]")
@@ -1151,9 +1164,37 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
     if record.get("fundamental_paths") and not _cosign_satisfied(change_id, record):
         raise PlatformCustomizeError("cosign_required", 409)
 
+    creds = _pr_credentials()
+    if isinstance(creds, str):  # slug validation rides the same helper
+        raise PlatformCustomizeError("merge_config_missing", 503, creds)
+    slug, _observe_token = creds
+
     # FRESH observation, deliberately bypassing the cache: a merge decision
     # must never ride a 59-second-old projection.
     review = _fetch_review(record)
+
+    # Delivery-to-marker crash recovery (sol-critic PR #437 round 1, finding
+    # 3): if a previous merge() crashed AFTER GitHub merged but BEFORE the
+    # marker was claimed, the record says LANDED while the PR is merged — and
+    # every later attempt would wedge on merge_pr_not_open. The PR being
+    # merged AT EXACTLY THE RECORDED COMMIT is proof our delivery completed,
+    # so complete the transition honestly. A PR merged at any OTHER head is
+    # not ours to claim and falls through to the refusals below.
+    if review.get("pr_state") == "merged" and review.get("head_sha") == commit_sha:
+        _claim_marker(change_id, "merged", {
+            "commit_sha": commit_sha,
+            "merge_commit_sha": review.get("merge_commit_sha"),
+            "at": _now()})  # False = already claimed; either way it exists now
+        record["merge"] = {
+            "merged": True, "commit_sha": commit_sha,
+            "merge_commit_sha": review.get("merge_commit_sha"),
+            "approved_by_subject": str(approver_subject or ""),
+            "branch_deleted": False, "recovered": True, "at": _now(),
+        }
+        record["state"] = MERGED
+        _write_record(record)
+        return public_view(record)
+
     if review.get("state") != "passed":
         raise PlatformCustomizeError(
             "merge_review_not_passed", 409,
@@ -1165,11 +1206,21 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
         raise PlatformCustomizeError(
             "merge_head_moved", 409,
             f"head={review.get('head_sha')} recorded={commit_sha}")
-
-    creds = _pr_credentials()
-    if isinstance(creds, str):  # slug validation rides the same helper
-        raise PlatformCustomizeError("merge_config_missing", 503, creds)
-    slug, _observe_token = creds
+    # Retarget refusal (finding 1): the merge lands on the PR's CURRENT base,
+    # so the base must still be the branch the proposal named, in the
+    # configured repository. GitHub's sha pin protects the head only.
+    expected_base = str(record.get("base_ref") or base_ref())
+    if expected_base.startswith("refs/heads/"):
+        expected_base = expected_base[len("refs/heads/"):]
+    if review.get("base_ref") != expected_base:
+        raise PlatformCustomizeError(
+            "merge_base_retargeted", 409,
+            f"base={review.get('base_ref')} expected={expected_base}")
+    if review.get("base_repo") and \
+            str(review.get("base_repo")).lower() != slug.lower():
+        raise PlatformCustomizeError(
+            "merge_base_retargeted", 409,
+            f"base_repo={review.get('base_repo')} expected={slug}")
     merge_token = os.environ.get("LEAF_PLATFORM_MERGE_TOKEN", "").strip()
     if not merge_token:
         raise PlatformCustomizeError("merge_config_missing", 503,
