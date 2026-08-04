@@ -2,6 +2,9 @@
  * T1 preview render. Each test names the failure it prevents; the sink test is
  * the one an adversarial review found in the card's equivalent code.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
@@ -45,18 +48,38 @@ describe('the token map is closed', () => {
     }
   })
 
-  it('mirrors the server registry colour vocabulary exactly', () => {
-    // server/overlay_registry.py REGISTRY is the source of truth; this list is
-    // its mirror. The first shipped map drifted (surface.* client-side,
-    // panel.*/accent.fg/border unmapped) and five of seven approved tokens
-    // silently set nothing. Either side changing without the other fails here.
-    const REGISTRY_COLOR_TOKENS = [
-      'color.canvas.bg', 'color.canvas.fg',
-      'color.panel.bg', 'color.panel.fg',
-      'color.accent', 'color.accent.fg',
-      'color.border',
-    ]
-    expect(Object.keys(CSS_VAR_BY_TOKEN).sort()).toEqual(REGISTRY_COLOR_TOKENS.sort())
+  it('mirrors the server registry colour vocabulary exactly (read from source)', () => {
+    // CROSS-BOUNDARY on purpose. An earlier version of this test compared the
+    // client map against a second hard-coded client list, so it passed happily
+    // while the registry drifted underneath both — exactly the failure it was
+    // written to catch (the shipped map had client-only surface.* tokens and
+    // left panel.*/accent.fg/border unmapped, so five of seven approved tokens
+    // set nothing). This parses the REGISTRY block out of
+    // server/overlay_registry.py, so adding a token there and not here fails.
+    // Resolved from the vitest root (web/), not import.meta.url — under the
+    // jsdom environment import.meta.url is an http: URL and readFileSync
+    // rejects it.
+    const registryPath = resolve(process.cwd(), '../server/overlay_registry.py')
+    const src = readFileSync(registryPath, 'utf8')
+    const block = src.slice(src.indexOf('REGISTRY: Dict[str, TokenSpec]'),
+                            src.indexOf('CONTRAST_PAIRS'))
+    const serverColorTokens = [...block.matchAll(/_color\("([^"]+)"/g)].map((m) => m[1])
+    expect(serverColorTokens.length).toBeGreaterThan(0)  // the parse itself must work
+    expect(Object.keys(CSS_VAR_BY_TOKEN).sort()).toEqual([...serverColorTokens].sort())
+  })
+
+  it('pins EVERY token-to-property mapping, not just a sample', () => {
+    // The map is the whole repaint contract; a silent re-point (say accent ->
+    // a var no rule reads) would be invisible without this.
+    expect(CSS_VAR_BY_TOKEN).toEqual({
+      'color.canvas.bg': ['--background'],
+      'color.canvas.fg': ['--foreground'],
+      'color.panel.bg': ['--card', '--card-grad'],
+      'color.panel.fg': ['--panel-fg'],
+      'color.accent': ['--primary'],
+      'color.accent.fg': ['--on-accent'],
+      'color.border': ['--border'],
+    })
   })
 
   it('maps tokens to the REAL stylesheet tokens, and panel.bg to both card vars', () => {

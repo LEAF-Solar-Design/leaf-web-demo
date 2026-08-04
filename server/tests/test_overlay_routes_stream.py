@@ -216,3 +216,33 @@ def test_store_import_survives_the_stdlib_platform_shadow(monkeypatch):
 
     assert Path(store.__file__).resolve().parent.name == "platform"
     assert hasattr(store, "approve") and hasattr(store, "revert")
+
+
+def test_a_foreign_tenants_session_is_refused_BEFORE_any_write(store, monkeypatch):
+    """Existence alone was not enough (sol-critic PR #439 round 1, MAJOR).
+
+    A valid caller for tenant A could name tenant B's session: the proposal row
+    lands under A but keyed to B's session, and the overlay_proposed announce
+    lands in B's transcript — a cross-tenant write plus a foreign card, and
+    repeatable across guessed session ids. Now the session must BELONG to the
+    caller, answered 404-not-403 so a prober cannot tell "gone" from "not
+    yours" (session_store.get_session's own stated contract).
+
+    This route only became reachable from the harness back edge in this PR, so
+    the guard ships with the allowlist entry.
+    """
+    other = session_store.get_or_create_session(
+        "tenant-other", f"dwg-{os.urandom(4).hex()}")["session_id"]
+    proposed = []
+    monkeypatch.setattr(store, "create_proposal",
+                        lambda **kw: proposed.append(kw))
+
+    res = overlay_router.propose_overlay(
+        ProposeBody(tokens={"color.border": "#123456"},
+                    request_text="not mine", session_id=other),
+        tenant=TENANT)
+
+    assert res.status_code == 404
+    assert "session_not_found" in res.body.decode()
+    assert proposed == [], "a foreign session must not reach the store"
+    assert _events(other) == [], "nothing may be appended to a foreign transcript"

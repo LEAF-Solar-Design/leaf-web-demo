@@ -15,7 +15,7 @@
  * converse restore probe needed after a review found it missing.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { applyOverlay } from './overlayTheme.js'
 import { decideOverlay, fetchOverlay } from './overlayClient.js'
@@ -25,6 +25,14 @@ const EMPTY = { tokens: {}, documentVersion: 0, pendingProposalId: null }
 export function useOverlay(sessionId, { enabled = true } = {}) {
   const [state, setState] = useState(EMPTY)
   const [loaded, setLoaded] = useState(false)
+  // Monotonic request id: only the NEWEST read may write state. Overlay
+  // events arrive in bursts (a remount replays the transcript from seq 0, so
+  // every historical overlay event fires a refresh), and concurrent reads can
+  // land out of order — an older response would then overwrite a newer one
+  // and pin the surface to a stale theme until the next event.
+  const readSeqRef = useRef(0)
+  const inFlightRef = useRef(false)
+  const againRef = useRef(false)
 
   const reload = useCallback(async () => {
     // fetchOverlay never throws: a theme read is not worth breaking the app,
@@ -36,9 +44,12 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   useEffect(() => {
     if (!enabled) return undefined
     let alive = true
+    const seq = ++readSeqRef.current
     ;(async () => {
       const next = await reload()
-      if (!alive) return          // the session was left mid-flight
+      // Two fences: the component may have unmounted (alive), and a coalesced
+      // refresh may have superseded this mount read (seq).
+      if (!alive || seq !== readSeqRef.current) return
       setState(next)
       setLoaded(true)
     })()
@@ -62,12 +73,35 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     return result
   }, [sessionId])
 
+  // COALESCED refresh — what a stream event calls. A replay burst of N
+  // overlay events must cost ONE settling read, not N concurrent ones: while
+  // a read is in flight, further calls only raise a flag, and exactly one
+  // more read runs after it lands (so the final state still reflects the last
+  // event, never a stale mid-burst snapshot). Out-of-order landings are
+  // additionally fenced by the request id.
+  const refresh = useCallback(async () => {
+    if (inFlightRef.current) { againRef.current = true; return }
+    inFlightRef.current = true
+    try {
+      do {
+        againRef.current = false
+        const seq = ++readSeqRef.current
+        const next = await fetchOverlay(sessionId)
+        if (seq !== readSeqRef.current) continue  // a newer read superseded us
+        setState(next)
+        setLoaded(true)
+      } while (againRef.current)
+    } finally {
+      inFlightRef.current = false
+    }
+  }, [sessionId])
+
   return {
     tokens: state.tokens,
     documentVersion: state.documentVersion,
     pendingProposalId: state.pendingProposalId,
     loaded,
     decide,
-    reload: async () => setState(await reload()),
+    reload: refresh,
   }
 }

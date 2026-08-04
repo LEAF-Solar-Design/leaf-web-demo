@@ -100,7 +100,17 @@ def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> A
     # already committed — the caller would get an error for a proposal that
     # exists, then retry into pending_proposal_exists and be stuck. Refusing
     # up front means either everything happens or nothing does.
-    if session_store.get_session(body.session_id) is None:
+    #
+    # The session must ALSO belong to the calling tenant. Existence alone let a
+    # caller name ANOTHER tenant's session: the proposal row is written under
+    # the caller's tenant but keyed to the foreign session, and the
+    # overlay_proposed announce lands in that session's transcript — a
+    # cross-tenant write and a foreign card, repeatable across guessed session
+    # ids. get_session's own docstring states the contract this now honours:
+    # callers compare tenant_id and answer 404-not-403, so a prober cannot
+    # distinguish "does not exist" from "is not yours".
+    session = session_store.get_session(body.session_id)
+    if session is None or str(session.get("tenant_id") or "") != str(tenant):
         return _fail("session_not_found",
                      f"no such session {body.session_id!r}", 404)
 
