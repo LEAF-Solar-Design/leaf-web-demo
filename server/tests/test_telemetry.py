@@ -286,6 +286,43 @@ def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):
     assert accepted == 2  # burst of 2, then the bucket drops silently
 
 
+def test_ingest_nested_values_are_bounded_on_the_wire(monkeypatch):
+    """Objects/arrays are serialized THEN capped: no client value may exceed
+    MAX_LABEL_VALUE_LEN on the wire (review #420 round-2 blocker 1)."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    c = _client()
+    nested = {"deep": ["x" * 300, {"more": "y" * 300}]}
+    resp = _post(
+        c,
+        {"events": [{"event_name": "a.b", "labels": {"blob": nested, "n": 12345}}]},
+        headers={"X-Tenant-Id": "acme"},
+    )
+    assert resp.json()["accepted"] == 1
+    labels = telemetry_sink._queue[-1]["labels"]
+    assert len(labels["blob"]) <= telemetry_router.MAX_LABEL_VALUE_LEN
+    assert labels["n"] == "12345"
+
+
+def test_bucket_sweep_never_resets_an_exhausted_bucket(monkeypatch):
+    """At the dict cap, only would-be-full buckets are evicted; a spent
+    bucket survives the sweep still spent (review #420 round-2 warn 2)."""
+    monkeypatch.setattr(telemetry_router, "_BUCKET_BURST", 2.0)
+    # Exhaust one attacker bucket.
+    assert telemetry_router._bucket_allows("ip:attacker", 2)
+    assert not telemetry_router._bucket_allows("ip:attacker", 1)
+    # Force the dict over the cap with idle full buckets.
+    import time as _t
+
+    now = _t.monotonic()
+    with telemetry_router._bucket_lock:
+        for i in range(10_001):
+            telemetry_router._buckets[f"ip:idle{i}"] = [2.0, now]
+    # A new caller triggers the sweep; the attacker bucket must survive spent.
+    assert telemetry_router._bucket_allows("ip:new", 1)
+    assert not telemetry_router._bucket_allows("ip:attacker", 1)
+
+
 def test_ingest_client_ts_clamped_into_labels(monkeypatch):
     _enable_fake_sink(monkeypatch)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)

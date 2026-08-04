@@ -75,13 +75,25 @@ def _bucket_allows(key: str, cost: float) -> bool:
                 _buckets[key] = [tokens, now]
                 return False
             _buckets[key] = [tokens - cost, now]
-            # Unbounded dict guard: evict only REFILLED (idle) buckets first,
-            # so an exhausted attacker bucket is never reset by the sweep.
+            # Unbounded dict guard. Evicting a bucket resets it to FULL burst,
+            # so only buckets whose CURRENT tokens (with refill projected to
+            # now) already round to full may be evicted: for those, eviction
+            # is semantically a no-op. A fresh-but-spent bucket (tokens just
+            # under burst) must survive (review #420 round-2 warn 2).
             if len(_buckets) > 10_000:
-                for k in [k for k, (t, _l) in _buckets.items() if t >= _BUCKET_BURST - 1.0]:
-                    _buckets.pop(k, None)
+                for k, (t, l) in list(_buckets.items()):
+                    if t + (now - l) * _BUCKET_PER_S >= _BUCKET_BURST:
+                        _buckets.pop(k, None)
                 if len(_buckets) > 10_000:
-                    _buckets.clear()  # last resort; logged nowhere, telemetry is loss-tolerant
+                    # Memory still wins, but shed the LEAST-restricted buckets
+                    # first; exhausted ones go last, never wholesale.
+                    by_tokens = sorted(
+                        _buckets.items(),
+                        key=lambda kv: kv[1][0] + (now - kv[1][1]) * _BUCKET_PER_S,
+                        reverse=True,
+                    )
+                    for k, _v in by_tokens[: len(_buckets) - 10_000]:
+                        _buckets.pop(k, None)
             return True
     except Exception:  # noqa: BLE001 - never let accounting break ingest
         return False
@@ -196,7 +208,18 @@ async def ingest(request: Request,
                 key = str(k)[:MAX_LABEL_KEY_LEN]
                 if key in RESERVED_LABEL_KEYS:
                     continue
-                merged[key] = str(v)[:MAX_LABEL_VALUE_LEN] if isinstance(v, str) else v
+                # EVERY client value becomes a bounded string AT THE DOOR:
+                # objects/arrays are serialized first so the cap applies to
+                # the wire size, not just to values that arrived as strings
+                # (review #420 round-2 blocker 1).
+                if v is None:
+                    continue
+                try:
+                    sval = v if isinstance(v, str) else _json.dumps(v, default=str) \
+                        if isinstance(v, (dict, list)) else str(v)
+                except Exception:  # noqa: BLE001 - skip the one bad value
+                    continue
+                merged[key] = sval[:MAX_LABEL_VALUE_LEN]
             client_ts = _clamped_client_ts(ev.get("client_ts"))
             if client_ts is not None:
                 merged["client_ts"] = client_ts
