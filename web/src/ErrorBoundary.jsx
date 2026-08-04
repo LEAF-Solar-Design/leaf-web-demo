@@ -68,6 +68,19 @@ export default class ErrorBoundary extends React.Component {
       // eslint-disable-next-line no-console
       console.error('[ErrorBoundary]', error, info && info.componentStack)
     } catch { /* noop */ }
+    // P2 crash rate: message CLASS and a stack hash only, never raw text
+    // (the boundary stays dependency-light: dynamic import, never throws).
+    try {
+      import('./telemetry.js').then((t) => {
+        let hash = 0
+        const stack = String(info?.componentStack || '')
+        for (let i = 0; i < stack.length; i++) hash = ((hash << 5) - hash + stack.charCodeAt(i)) | 0
+        t.trackException({
+          message_class: (error && error.name) || 'Error',
+          component_stack_hash: String(hash >>> 0),
+        })
+      }).catch(() => {})
+    } catch { /* noop */ }
   }
 
   onReload() {

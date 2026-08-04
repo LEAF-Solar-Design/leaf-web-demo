@@ -19,6 +19,7 @@ import { groupToolsByFamily } from './mock/mockCapabilities.js'
 import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalog.js'
 import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
+import { track, trackErrorShown } from './telemetry.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -110,6 +111,13 @@ async function http(path, opts, timeoutMs = null) {
     try {
       e.body = await res.clone().json()
     } catch { /* non-JSON errors keep the stable status-only contract */ }
+    // P2 auto-capture: the transport seam every user-visible API error
+    // crosses. endpoint_class = the route shape, never ids or params.
+    trackErrorShown({
+      http_status: res.status,
+      error_code: e.body?.error?.error_code,
+      endpoint_class: path.split('?')[0].split('/').slice(0, 3).join('/'),
+    })
     throw e
   }
   return res.json()
@@ -136,6 +144,12 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
     return { intake: await res.json(), tenant: null, tier: null, org: null }
   }
   const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, STARTUP_FETCH_TIMEOUT_MS)
+  // P2 funnel top: how many people open the product, and as who.
+  track('session.started', {
+    mock: false,
+    tier: data.tier || undefined,
+    catalog_source: dwg,
+  })
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
     intake: data.intake,
@@ -166,11 +180,24 @@ export async function nlPrompt(mock, text, tools = []) {
       throw error
     }
     const body = await res.json()
-    return { alternatives: [], ...body, stub: false }
+    const route = { alternatives: [], ...body, stub: false }
+    // P2: router quality and lane mix (folds the raw dispatch-tier signal).
+    track('prompt.routed', {
+      lane: route.lane, tool: route.tool, stub: false,
+      confidence_bucket: route.confidence >= 0.8 ? 'high'
+        : route.confidence >= 0.5 ? 'mid' : 'low',
+      alternatives_n: route.alternatives.length,
+    })
+    return route
   } catch (e) {
     if (e?.status === 401) throw e
     // Endpoint not live yet (sibling lands it concurrently) — route locally.
-    return { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
+    const route = { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
+    track('prompt.routed', {
+      lane: route.lane, tool: route.tool, stub: true,
+      alternatives_n: (route.alternatives || []).length,
+    })
+    return route
   }
 }
 

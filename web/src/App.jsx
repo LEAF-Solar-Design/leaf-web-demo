@@ -1,5 +1,6 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+import { track } from './telemetry.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -1139,6 +1140,12 @@ export default function App() {
       params: staged.intent.params,
       runIntent: staged.intent,
     }
+    // P2: confirm-to-run conversion top (source folds catalog/slash/prompt).
+    track('run.confirm_shown', {
+      tool: catalogTool.name,
+      is_write: isWrite,
+      source: decision.slash ? 'catalog_or_slash' : 'prompt',
+    })
     return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
@@ -1477,6 +1484,11 @@ export default function App() {
   const onDispatch = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
+    // P2 funnel top: the one-prompt-box entry (text length only, never text).
+    track('prompt.submitted', {
+      input_kind: text.startsWith('/') ? 'slash' : typeof override === 'string' ? 'canned' : 'typed',
+      text_len: text.length,
+    })
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // Slash fast-path: "/name" is an EXPLICIT invocation — no NL router call.
     // The route decision strip still asks for confirmation before anything runs.
