@@ -20,15 +20,30 @@
  * the failure mode is an outbound request from a user's browser.
  */
 
-/** Token id -> the CSS custom property it drives. A CLOSED map: an id with no
- *  entry here sets nothing, so a compromised or stale server cannot invent a
- *  property name and reach a declaration this app never intended to expose. */
+/** Token id -> the CSS custom properties it drives (a token may drive more
+ *  than one — panel.bg must override both the flat card colour and the card
+ *  gradient, or gradient-backed panels keep the committed theme). A CLOSED
+ *  map: an id with no entry here sets nothing, so a compromised or stale
+ *  server cannot invent a property name and reach a declaration this app
+ *  never intended to expose.
+ *
+ *  The values are the REAL tokens styles.css consumes (--background,
+ *  --card...), not overlay-namespaced vars: an inline custom property on
+ *  :root wins over the stylesheet's :root declaration, so setting the real
+ *  token is what makes every consumer repaint with zero stylesheet
+ *  indirection. The first shipped version set --canvas-bg/--surface-* — names
+ *  no rule ever read — and an approved overlay repainted nothing.
+ *
+ *  This list mirrors server/overlay_registry.py's colour vocabulary exactly;
+ *  the mirror test in overlayTheme.test.js fails when either side drifts. */
 export const CSS_VAR_BY_TOKEN = {
-  'color.canvas.bg': '--canvas-bg',
-  'color.canvas.fg': '--canvas-fg',
-  'color.accent': '--accent',
-  'color.surface.bg': '--surface-bg',
-  'color.surface.fg': '--surface-fg',
+  'color.canvas.bg': ['--background'],
+  'color.canvas.fg': ['--foreground'],
+  'color.panel.bg': ['--card', '--card-grad'],
+  'color.panel.fg': ['--panel-fg'],
+  'color.accent': ['--primary'],
+  'color.accent.fg': ['--on-accent'],
+  'color.border': ['--border'],
 }
 
 /** Canonical six-digit hex. Deliberately narrower than CSS accepts: named
@@ -51,10 +66,10 @@ export function isRenderableColor(value) {
 export function cssVarsFor(tokens) {
   const out = {}
   for (const [id, value] of Object.entries(tokens || {})) {
-    const prop = CSS_VAR_BY_TOKEN[id]
-    if (!prop) continue                       // not a token we expose
+    const props = CSS_VAR_BY_TOKEN[id]
+    if (!props) continue                      // not a token we expose
     if (!isRenderableColor(value)) continue   // not a value we will apply
-    out[prop] = String(value)
+    for (const prop of props) out[prop] = String(value)
   }
   return out
 }

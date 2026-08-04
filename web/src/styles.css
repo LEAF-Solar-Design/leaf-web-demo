@@ -19,7 +19,15 @@
    - keycaps: filled quiet chips (#1c1c20, #71717a text, radius 5, ui-monospace)
 
    Tokens stay a flat contract (hex + real font names) so a WinForms port and the
-   three.js viewer (reads --cv-*) can consume them 1:1. */
+   three.js viewer (reads --cv-*) can consume them 1:1.
+
+   T1 OVERLAY: an approved tenant overlay sets these SAME tokens as inline
+   custom properties on :root (web/src/overlayTheme.js CSS_VAR_BY_TOKEN), which
+   win over the declarations below — that is the entire hot-repaint mechanism,
+   so renaming a token here without updating that map silently disconnects the
+   overlay lane. Derived shades (--primary-hover, --accent-tint*) stay
+   committed constants and do NOT follow an overlaid --primary; acceptable for
+   the v1 vocabulary, revisit when the registry grows derived tokens. */
 
 :root {
   /* --- leaf-tokens.css contract (dark, verbatim) --- */
@@ -407,6 +415,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card-grad);
+  color: var(--panel-fg, inherit);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -483,6 +492,9 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   background: var(--card-grad);
   border-radius: 10px;
   padding: 14px 16px;
+  /* Overlay token color.panel.fg; inherit (not --foreground) as the fallback
+     so the committed cascade is byte-identical when no overlay is applied. */
+  color: var(--panel-fg, inherit);
 }
 .card > h3 {
   margin: 0 0 10px;
@@ -649,7 +661,7 @@ footer .warn-txt { color: var(--status-warning); }
 .dim { color: var(--muted); font-weight: 400; }
 
 .tool-list { display: flex; flex-direction: column; gap: 8px; }
-.tool-card { border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad); overflow: hidden; }
+.tool-card { border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad); color: var(--panel-fg, inherit); overflow: hidden; }
 .tool-card.open { box-shadow: inset 2px 0 0 var(--primary); } /* open = SL1 2px accent left bar, never a full accent border */
 .tool-head { width: 100%; text-align: left; background: none; border: none; color: inherit; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
 .tool-head:hover { background: rgba(255, 255, 255, .03); }

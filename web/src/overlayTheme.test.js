@@ -28,7 +28,7 @@ describe('what reaches a style sink', () => {
   })
 
   it('applies a canonical six-digit hex', () => {
-    expect(cssVarsFor({ 'color.accent': '#AABBCC' })).toEqual({ '--accent': '#AABBCC' })
+    expect(cssVarsFor({ 'color.accent': '#AABBCC' })).toEqual({ '--primary': '#AABBCC' })
   })
 })
 
@@ -40,9 +40,33 @@ describe('the token map is closed', () => {
   })
 
   it('exposes only custom properties, never bare identifiers', () => {
-    for (const prop of Object.values(CSS_VAR_BY_TOKEN)) {
-      expect(prop.startsWith('--')).toBe(true)
+    for (const props of Object.values(CSS_VAR_BY_TOKEN)) {
+      for (const prop of props) expect(prop.startsWith('--')).toBe(true)
     }
+  })
+
+  it('mirrors the server registry colour vocabulary exactly', () => {
+    // server/overlay_registry.py REGISTRY is the source of truth; this list is
+    // its mirror. The first shipped map drifted (surface.* client-side,
+    // panel.*/accent.fg/border unmapped) and five of seven approved tokens
+    // silently set nothing. Either side changing without the other fails here.
+    const REGISTRY_COLOR_TOKENS = [
+      'color.canvas.bg', 'color.canvas.fg',
+      'color.panel.bg', 'color.panel.fg',
+      'color.accent', 'color.accent.fg',
+      'color.border',
+    ]
+    expect(Object.keys(CSS_VAR_BY_TOKEN).sort()).toEqual(REGISTRY_COLOR_TOKENS.sort())
+  })
+
+  it('maps tokens to the REAL stylesheet tokens, and panel.bg to both card vars', () => {
+    // Inline :root properties win over the stylesheet declarations, so setting
+    // the real tokens is the entire repaint mechanism; --canvas-bg-style names
+    // that no rule reads were the original dead-end.
+    expect(cssVarsFor({ 'color.canvas.bg': '#111111' })).toEqual({ '--background': '#111111' })
+    expect(cssVarsFor({ 'color.panel.bg': '#222222' }))
+      .toEqual({ '--card': '#222222', '--card-grad': '#222222' })
+    expect(cssVarsFor({ 'color.border': '#333333' })).toEqual({ '--border': '#333333' })
   })
 
   it('one bad token does not discard the good ones', () => {
@@ -51,30 +75,30 @@ describe('the token map is closed', () => {
       'color.accent': '#123456',
       'color.canvas.bg': 'url(x)',
     })
-    expect(vars).toEqual({ '--accent': '#123456' })
+    expect(vars).toEqual({ '--primary': '#123456' })
   })
 })
 
 describe('applying and undoing', () => {
   it('sets the properties on the root', () => {
     applyOverlay({ 'color.accent': '#101010' })
-    expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#101010')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#101010')
   })
 
   it('removes EXACTLY what it set, so the committed default returns', () => {
     // The undo path is what pulls a denied or lapsed preview off the screen.
     const undo = applyOverlay({ 'color.accent': '#101010' })
     undo()
-    expect(document.documentElement.style.getPropertyValue('--accent')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
   })
 
   it('undo does not clobber a property it never set', () => {
     // A snapshot-restore undo would roll back a LATER overlay's value. This is
     // the same defect the server's revert path had.
-    document.documentElement.style.setProperty('--canvas-bg', '#ffffff')
+    document.documentElement.style.setProperty('--background', '#ffffff')
     const undo = applyOverlay({ 'color.accent': '#101010' })
     undo()
-    expect(document.documentElement.style.getPropertyValue('--canvas-bg')).toBe('#ffffff')
+    expect(document.documentElement.style.getPropertyValue('--background')).toBe('#ffffff')
   })
 
   it('undoing twice is harmless', () => {

@@ -36,7 +36,7 @@ describe('the read on load', () => {
     }))
     render(<Probe sessionId="s1" />)
     await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v3'))
-    expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#123456')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#123456')
   })
 
   it('leaves the committed defaults alone when the read FAILS', async () => {
@@ -60,9 +60,9 @@ describe('the read on load', () => {
     }))
     const { unmount } = render(<Probe sessionId="s1" />)
     await waitFor(() =>
-      expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#123456'))
+      expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#123456'))
     unmount()
-    expect(document.documentElement.style.getPropertyValue('--accent')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('')
   })
 })
 

@@ -126,14 +126,18 @@ MIN_CONTRAST = 4.5
 #: If the two drift the contrast check is computed against a slightly stale
 #: baseline, which is a warning that is too strict or too lax by a little, not
 #: a wrong colour on screen.
+#: Aligned 2026-08-04 to web/src/styles.css's shipped values (--background,
+#: --foreground, --card, --primary, --on-accent, --border) — the first
+#: shipped set was a dark-emerald palette that never matched what the web app
+#: renders, so every contrast check ran against a baseline no user ever saw.
 PLATFORM_DEFAULTS: Dict[str, str] = {
-    "color.canvas.bg": "#0b1210",
-    "color.canvas.fg": "#e8f2ee",
-    "color.panel.bg": "#111c19",
-    "color.panel.fg": "#dfeae6",
-    "color.accent": "#1f7a5a",
-    "color.accent.fg": "#ffffff",
-    "color.border": "#22322d",
+    "color.canvas.bg": "#0a0a0a",
+    "color.canvas.fg": "#ffffff",
+    "color.panel.bg": "#18181b",
+    "color.panel.fg": "#ffffff",
+    "color.accent": "#22c55e",
+    "color.accent.fg": "#04140a",
+    "color.border": "#27272a",
 }
 
 

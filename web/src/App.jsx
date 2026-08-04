@@ -2588,6 +2588,7 @@ export default function App() {
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
+            onOverlayEvent={() => themeOverlay.reload()}
           />
         )}
 

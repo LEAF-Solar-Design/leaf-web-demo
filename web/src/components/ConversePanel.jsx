@@ -182,6 +182,7 @@ export default function ConversePanel({
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
   onAttachJob,               // (jobId, tool) -> App's existing §7 job attach affordance
   onJobLinked,               // a job_linked event arrived -> refresh the job rail
+  onOverlayEvent,            // an overlay_* lifecycle event arrived -> App re-reads the overlay
   writeLocked = false,
 }) {
   const [events, setEvents] = useState([])
@@ -241,6 +242,19 @@ export default function ConversePanel({
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
           jobSeenRef.current.add(env.data.job_id)
           if (onJobLinked) onJobLinked(env.data.job_id, env.data.tool) // the rail shows the agent-dispatched job
+        }
+        // Overlay lifecycle events are the "surface state changed, re-read"
+        // signal. The fold below deliberately skips them (no turn_id, not chat
+        // content), so WITHOUT this hook they reach the browser and change
+        // nothing on screen — the exact server-emits/client-never-listens
+        // failure overlay_stream.py documents three shipped instances of.
+        // The revoke case is the one a user must never miss: a withdrawn
+        // theme staying on screen. App re-READS via GET /api/overlay rather
+        // than patching from the envelope (a missed event costs latency,
+        // never correctness).
+        if (env.type === 'overlay_proposed' || env.type === 'overlay_decided'
+            || env.type === 'overlay_revoked') {
+          if (onOverlayEvent) onOverlayEvent(env)
         }
         setEvents((prev) => [...prev, env])
       },
