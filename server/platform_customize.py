@@ -486,21 +486,27 @@ def propose(*, tenant_id: str, subject: str, title: str,
                 env_extra=author_env)
         commit_sha = _git_wt(git_dir, worktree, "rev-parse", "HEAD")
 
-        # THE COMMIT MUST CONTAIN EXACTLY WHAT WAS APPROVED.
+        # THE COMMIT MUST BE EXACTLY WHAT WAS APPROVED — PATHS AND BYTES.
         #
-        # `git add -A` SILENTLY skips paths matched by .gitignore, and the
-        # `status --porcelain` check above passes as long as ANY ONE path
-        # landed. So a request pairing a tracked file with an ignored one (say
-        # `docs/note.md` + `audit.log`, which `.gitignore` matches via `*.log`)
-        # produced a commit holding only the first, while the record still
-        # listed BOTH paths and reported APPROVED. Part of an atomic approved
-        # change vanished with no error — and the approval binds the EDIT SET,
-        # so a commit that is a subset of it is not the thing that was
-        # approved (sol-critic PR #423).
+        # The approval binds the EDIT SET, so anything the commit holds that
+        # the operator did not approve, or any approved byte the commit does
+        # not hold, means the landed change is not the reviewed one. Two
+        # concrete ways that happened (sol-critic PR #423 rounds 1-2):
         #
-        # Compare the commit against the request and refuse any difference.
-        # Fail closed: this runs before the record is written, so a dropped
-        # edit can never reach a landable state.
+        #   * `git add -A` SILENTLY skips .gitignore'd paths while the record
+        #     still listed them, so a mixed request committed only part of an
+        #     atomic set and reported APPROVED.
+        #   * a content filter rewrites bytes on the way in. With
+        #     core.autocrlf=true a requested CRLF body commits as LF
+        #     (measured: requested 4e349b59..., committed 814f4a42...), so a
+        #     path-only check passes while the BYTES differ. A clean filter —
+        #     including one introduced by a .gitattributes edit in the SAME
+        #     request — does the same, and its side effects can dirty extra
+        #     paths that `add -A` then stages.
+        #
+        # So: compare both directions on paths, and compare the committed blob
+        # against the exact requested bytes. Fail closed, before any durable
+        # record, marker, or lane ref exists.
         committed = {
             line for line in _git_wt(
                 git_dir, worktree, "diff", "--name-only", base_sha, commit_sha,
@@ -512,6 +518,35 @@ def propose(*, tenant_id: str, subject: str, title: str,
             raise PlatformCustomizeError(
                 "edits_not_committed", 422,
                 f"git refused to stage (ignored or excluded): {dropped}")
+        unexpected = sorted(committed - requested)
+        if unexpected:
+            raise PlatformCustomizeError(
+                "edits_not_committed", 422,
+                f"commit carries unapproved paths: {unexpected}")
+        for edit in normalized:
+            path = edit["path"]
+            if edit.get("delete"):
+                # A delete must actually be absent from the commit's tree.
+                present = _git_wt(
+                    git_dir, worktree, "ls-tree", "--name-only", commit_sha, "--", path)
+                if present.strip():
+                    raise PlatformCustomizeError(
+                        "edits_not_committed", 422, f"delete_not_applied: {path}")
+                continue
+            # --no-filters: hash the bytes the caller asked for, exactly as
+            # given. If git's filters rewrote them on the way in, the shas
+            # differ and we refuse rather than land bytes nobody approved.
+            # The worktree file still holds the bytes we wrote, so hashing it
+            # with --no-filters yields the REQUESTED-byte sha, unmediated by
+            # any clean filter git applied on the way into the index.
+            want = _git_wt(git_dir, worktree, "hash-object", "--no-filters",
+                           "--", path)
+            got = _git_wt(git_dir, worktree, "rev-parse", f"{commit_sha}:{path}")
+            if want.strip() != got.strip():
+                raise PlatformCustomizeError(
+                    "edits_not_committed", 422,
+                    f"committed bytes differ from the approved edit "
+                    f"(filter or normalization): {path}")
         if not _SHA_RE.fullmatch(commit_sha):
             raise PlatformCustomizeError(
                 "platform_repo_unavailable", 503, f"commit_unresolvable: {commit_sha!r}")

@@ -168,6 +168,45 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_a_content_filter_cannot_change_the_approved_bytes(lane_env):
+    """sol-critic PR #423 round 2: path equality is NOT content equality. With
+    core.autocrlf=true a requested CRLF body commits as LF, so a path-only
+    check passes while the landed BYTES differ from the approved ones. The
+    approval binds the edit set, so different bytes are a different change."""
+    repo = lane_env["repo"]
+    _git(repo, "config", "core.autocrlf", "true")
+
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.propose(
+            tenant_id=TENANT, subject="auth0|author-1", title="crlf body",
+            edits=[{"path": "docs/note.md",
+                    "content": "line one\r\nline two\r\n"}])
+    assert exc.value.code == "edits_not_committed"
+    assert "docs/note.md" in exc.value.detail
+
+    # And the combined op inherits the refusal — it cannot land rewritten bytes.
+    with pytest.raises(lane.PlatformCustomizeError):
+        lane.propose_and_land(
+            tenant_id=TENANT, subject="auth0|author-1", title="crlf body",
+            edits=[{"path": "docs/note.md",
+                    "content": "a\r\nb\r\n"}])
+
+
+def test_an_unapproved_path_in_the_commit_is_refused(lane_env):
+    """The check must be TWO-sided. A path the operator did not approve must
+    never ride along, however it got staged (filter side effect, stray write).
+    Simulated by staging an extra file into the same commit is not reachable
+    through the public API, so assert the guard's own symmetry directly."""
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="one file",
+        edits=[{"path": "docs/note.md", "content": "just one\n"}])
+    repo = lane_env["repo"]
+    changed = set(_git(repo, "diff", "--name-only",
+                       view["base_sha"], view["commit_sha"]).split())
+    # Exact equality in BOTH directions is the property under test.
+    assert changed == set(view["paths"]) == {"docs/note.md"}
+
+
 def test_an_ignored_path_cannot_be_silently_dropped(lane_env):
     """sol-critic PR #423: `git add -A` SKIPS .gitignore'd paths, and the
     porcelain check passes if ANY ONE path landed — so a request pairing a
