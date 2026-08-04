@@ -147,6 +147,11 @@ def pr_open_enabled() -> bool:
 
 _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# Printable ASCII, no spaces: anything wider (whitespace, control bytes) is not
+# a GitHub token and would make urllib quote the full header value — token
+# included — into a ValueError.
+_PR_TOKEN_RE = re.compile(r"^[\x21-\x7E]+$")
+
 
 def _github_api_root() -> str:
     return (os.environ.get("LEAF_PLATFORM_GITHUB_API", "").strip()
@@ -645,6 +650,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
         "author_subject": str(subject),
         "title": title,
         "branch_ref": ref,
+        "base_ref": base_ref(),
         "base_sha": base_sha,
         "commit_sha": commit_sha,
         "paths": [e["path"] for e in normalized],
@@ -948,13 +954,21 @@ def _pr_body(record: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _pr_view(data: Mapping[str, Any], *, reused: bool) -> Optional[dict[str, Any]]:
+def _pr_view(data: Mapping[str, Any], *, slug: str,
+             reused: bool) -> Optional[dict[str, Any]]:
     """Validate the fields we persist — a misconfigured API root must not be
-    able to plant arbitrary junk (or a javascript: URL) in the record the
-    drawer renders as a link."""
+    able to plant junk in the record the drawer renders as a link.
+
+    Strict by construction (sol-critic PR #424 round 1, finding 2):
+    ``type(number) is int`` because ``bool`` subclasses ``int`` and ``True``
+    must not read as PR #1; and the URL is not merely https — it must be
+    EXACTLY the canonical GitHub address this repo+number implies, so a
+    "successful" response cannot plant a phishing link.
+    """
     number, url = data.get("number"), data.get("html_url")
-    if not isinstance(number, int) or not isinstance(url, str) \
-            or not url.startswith("https://"):
+    if type(number) is not int or number <= 0:
+        return None
+    if url != f"https://github.com/{slug}/pull/{number}":
         return None
     return {"number": number, "url": url, "reused": reused, "at": _now()}
 
@@ -978,6 +992,13 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"error": "pr_config_missing", "at": at}
     if not _REPO_SLUG_RE.fullmatch(slug):
         return {"error": "pr_repo_invalid", "at": at}
+    # A token with whitespace/control characters would make urllib refuse the
+    # Authorization header with a ValueError QUOTING THE FULL HEADER — i.e. the
+    # token itself — which the except-arm below would log (sol-critic PR #424
+    # round 1, finding 1). Refuse it here, before it can reach any exception
+    # text, and scrub the literal token from anything logged regardless.
+    if _PR_TOKEN_RE.fullmatch(token) is None:
+        return {"error": "pr_token_invalid", "at": at}
     branch_ref = str(record.get("branch_ref", ""))
     try:
         _assert_branch_only(branch_ref)
@@ -985,7 +1006,12 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"error": "pr_branch_invalid", "at": at}
     branch = branch_ref[len("refs/heads/"):]
     owner = slug.split("/", 1)[0]
-    base = base_ref()
+    # The base is BOUND AT PROPOSAL TIME (recorded next to base_sha): the env
+    # read happens once, in propose(), so flipping LEAF_PLATFORM_REPO_BASE_REF
+    # between proposal and landing cannot retarget the PR (round 1, finding 3).
+    # Records written before this field existed fall back to the current env —
+    # the exact pre-fix behavior, for replay compatibility only.
+    base = str(record.get("base_ref") or base_ref())
     base = base[len("refs/heads/"):] if base.startswith("refs/heads/") else base
     from urllib.parse import quote
 
@@ -997,7 +1023,7 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
         if status == 200 and isinstance(data, list):
             for item in data:
                 if isinstance(item, Mapping):
-                    view = _pr_view(item, reused=True)
+                    view = _pr_view(item, slug=slug, reused=True)
                     if view:
                         return view
         status, data = _github_request("POST", f"/repos/{slug}/pulls", token=token, payload={
@@ -1007,7 +1033,7 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
             "body": _pr_body(record),
         })
         if status == 201 and isinstance(data, Mapping):
-            view = _pr_view(data, reused=False)
+            view = _pr_view(data, slug=slug, reused=False)
             if view:
                 return view
         if status == 422:
@@ -1016,16 +1042,18 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
             if status2 == 200 and isinstance(data2, list):
                 for item in data2:
                     if isinstance(item, Mapping):
-                        view = _pr_view(item, reused=True)
+                        view = _pr_view(item, slug=slug, reused=True)
                         if view:
                             return view
         _LOG.warning("platform_customize: PR open answered %s for change %s",
                      status, record.get("change_id"))
         return {"error": f"pr_open_http_{int(status)}", "at": at}
     except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        # Defense in depth behind the charset gate: whatever the exception
+        # quotes, the literal token never reaches the log.
+        detail = f"{type(exc).__name__}: {exc}".replace(token, "[redacted-token]")
         _LOG.warning("platform_customize: PR open failed for change %s: %s",
-                     record.get("change_id"),
-                     _redact(f"{type(exc).__name__}: {exc}")[:200])
+                     record.get("change_id"), _redact(detail)[:200])
         return {"error": "pr_open_failed", "at": at}
 
 

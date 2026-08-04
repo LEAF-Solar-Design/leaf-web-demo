@@ -887,6 +887,90 @@ def test_landed_replay_retries_a_failed_pr_open(pushable, monkeypatch):
     assert settled["pr"]["number"] == 12
 
 
+def test_pr_token_with_header_breaking_bytes_is_refused_and_never_logged(
+        pushable, monkeypatch, caplog):
+    """Round 1, finding 1: a token with an internal newline makes urllib raise
+    ValueError QUOTING THE FULL HEADER — the token itself — which the fail-open
+    arm would log. The charset gate must refuse it before any HTTP attempt."""
+    import logging
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "sekrit\ntoken-bytes")
+    def explode(*a, **k):
+        raise AssertionError("no HTTP attempt may happen with an unsafe token")
+    monkeypatch.setattr(lane, "_github_request", explode)
+    with caplog.at_level(logging.DEBUG):
+        landed = _land(_propose())
+    assert landed["state"] == "landed"
+    assert landed["pr"]["error"] == "pr_token_invalid"
+    assert "sekrit" not in caplog.text
+
+
+def test_pr_open_exception_text_is_scrubbed_of_the_token(
+        pushable, monkeypatch, caplog):
+    """Defense in depth behind the charset gate: even an exception that quotes
+    the token verbatim reaches the log scrubbed."""
+    import logging
+    token = "ghp_valid-charset-but-quoted-by-the-error"
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", token)
+    def quoting_boom(*a, **k):
+        raise ValueError(f"Invalid header value b'Bearer {token}'")
+    monkeypatch.setattr(lane, "_github_request", quoting_boom)
+    with caplog.at_level(logging.DEBUG):
+        landed = _land(_propose())
+    assert landed["pr"]["error"] == "pr_open_failed"
+    assert token not in caplog.text
+    assert "[redacted-token]" in caplog.text
+
+
+def test_pr_base_is_bound_at_proposal_not_at_land(pushable, monkeypatch):
+    """Round 1, finding 3: flipping LEAF_PLATFORM_REPO_BASE_REF between
+    proposal and landing must not retarget the PR — the base rides the
+    record."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    calls = []
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": 3, "html_url": "https://github.com/o/r/pull/3"}),
+    }, calls)
+    view = _propose()
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_BASE_REF", "refs/heads/release")
+    landed = _land(view)
+    assert landed["pr"]["number"] == 3
+    _method, _path, payload = calls[-1]
+    assert payload["base"] == "main"
+
+
+def test_pr_view_refuses_bool_number_and_noncanonical_url(pushable, monkeypatch):
+    """Round 1, finding 2: bool subclasses int, so True must not read as PR #1;
+    and a 'successful' payload pointing anywhere but the canonical
+    github.com/<slug>/pull/<number> address is refused."""
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "t")
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": True, "html_url": "https://evil.example/phish"}),
+    })
+    landed = _land(_propose())
+    assert landed["pr"]["error"] == "pr_open_http_201"
+    assert lane._pr_view({"number": True,
+                          "html_url": "https://github.com/o/r/pull/1"},
+                         slug="o/r", reused=False) is None
+    assert lane._pr_view({"number": 7,
+                          "html_url": "https://evil.example/o/r/pull/7"},
+                         slug="o/r", reused=False) is None
+    assert lane._pr_view({"number": 7,
+                          "html_url": "https://github.com/o/r/pull/7"},
+                         slug="o/r", reused=False) is not None
+
+
 def test_pr_view_refuses_junk_from_the_api(pushable, monkeypatch):
     """A misconfigured API root cannot plant a non-https URL (or junk types)
     into the record the drawer renders as a link."""
