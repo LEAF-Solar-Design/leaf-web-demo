@@ -118,10 +118,23 @@ def test_reads_filter_the_lease_in_sql():
     assert "lease_expires_at > NOW()" in src
 
 
-def test_approve_locks_the_row_it_decides():
-    """Without FOR UPDATE two concurrent approvals could both read 'pending'."""
+def test_every_decision_path_takes_the_lock_through_the_one_helper():
+    """Counting "FOR UPDATE" occurrences was the original check here, and it was
+    false comfort twice over: a docstring mentioning the phrase inflates the
+    count, and the count says nothing about whether the lock actually
+    serializes. A live-Postgres run proved the old single-statement lock did
+    NOT serialize (see test_overlay_store_postgres.py), so what matters now is
+    that all three write paths go through `_lock_latest` and none re-invents it.
+    """
     src = _store()
-    assert src.count("FOR UPDATE") >= 3
+    assert "def _lock_latest(" in src
+    body = src.split("def _lock_latest(", 1)[1]
+    for path in ("def approve(", "def deny(", "def revert("):
+        segment = body.split(path, 1)[1].split("\ndef ", 1)[0]
+        assert "_lock_latest(cur, proposal_id)" in segment, path
+        assert "ORDER BY revision DESC LIMIT 1 FOR UPDATE" not in segment, (
+            f"{path} re-introduced the single-statement lock that does not "
+            f"serialize under READ COMMITTED")
 
 
 def test_sweeper_does_not_block_the_decision_path():

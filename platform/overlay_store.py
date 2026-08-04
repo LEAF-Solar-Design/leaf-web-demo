@@ -180,6 +180,55 @@ def _audit(cur: Any, *, proposal: Mapping[str, Any], from_state: str,
          "d": json.dumps(detail or {})})
 
 
+def _lock_latest(cur: Any, proposal_id: str) -> Optional[Dict[str, Any]]:
+    """Serialize deciders on one proposal, then read the revision that is
+    CURRENT once the lock is held.
+
+    This is two statements for a reason a live-Postgres test had to teach us.
+    The obvious one-liner —
+
+        SELECT ... WHERE proposal_id = %s ORDER BY revision DESC LIMIT 1 FOR UPDATE
+
+    — reads correctly and does NOT serialize. Under READ COMMITTED the
+    ORDER BY/LIMIT is evaluated against the statement's snapshot BEFORE it
+    waits on the row lock, so a decider that blocks behind another one wakes up
+    and returns the row it had already chosen. That row is by then a superseded
+    revision, still saying `pending`, and the second operator walks straight
+    past the `state != 'pending'` guard.
+
+    Confirmed against PostgreSQL 16, not reasoned about: with the single
+    statement the second decider observes `pending` after the first committed
+    `approved`; with the two below it observes `approved`.
+
+    So:
+      1. Lock the LOWEST revision, which is a stable anchor — revisions are
+         only ever appended, so this row exists for the life of the proposal
+         and never moves. Any other decider blocks here.
+      2. Re-read the latest revision as a SEPARATE statement. READ COMMITTED
+         gives each statement a fresh snapshot, so this one sees whatever the
+         decider ahead of us committed.
+
+    The CAS in approve() would still refuse the second write, so this is not
+    the only thing standing between us and a lost update. It is what makes the
+    refusal an honest `already_decided` instead of a primary-key violation on
+    a revision number that was taken while we waited.
+    """
+    cur.execute(
+        "SELECT proposal_id FROM overlay_proposals "
+        "WHERE proposal_id = %(pid)s "
+        "  AND revision = (SELECT MIN(revision) FROM overlay_proposals "
+        "                  WHERE proposal_id = %(pid)s) "
+        "FOR UPDATE",
+        {"pid": proposal_id})
+    if cur.fetchone() is None:
+        return None
+    cur.execute(
+        f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
+        "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1",
+        {"pid": proposal_id})
+    return _row_to_dict(cur.fetchone())
+
+
 def approve(
     *, proposal_id: str, actor: str, decision_key: str, expected_version: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -191,12 +240,7 @@ def approve(
     then try to undo.
     """
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-            "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1 "
-            "FOR UPDATE",
-            {"pid": proposal_id})
-        current = _row_to_dict(cur.fetchone())
+        current = _lock_latest(cur, proposal_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
 
@@ -254,11 +298,7 @@ def deny(*, proposal_id: str, actor: str, decision_key: str,
     overlay the instant this lands. That is what pulls a rejected preview off
     the requester's screen without depending on a push event arriving."""
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-            "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1 FOR UPDATE",
-            {"pid": proposal_id})
-        current = _row_to_dict(cur.fetchone())
+        current = _lock_latest(cur, proposal_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
         if current["state"] != "pending":
@@ -309,11 +349,7 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
     silently roll those back too.
     """
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-            "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1 FOR UPDATE",
-            {"pid": proposal_id})
-        current = _row_to_dict(cur.fetchone())
+        current = _lock_latest(cur, proposal_id)
         if current is None:
             raise OverlayStoreError("proposal_not_found", 404, proposal_id)
         if current["state"] == "reverted":
