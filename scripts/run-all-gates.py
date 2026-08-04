@@ -342,6 +342,24 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_author_quota.py"), 57),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 12),
+        # The T1 overlay lane's SERVER half. Only its platform/ half was
+        # registered (platform-static picked up test_overlay_store_static.py);
+        # these five files, 115 tests, ran nowhere in CI from the day the lane
+        # shipped. That is how two live-only defects reached staging under a
+        # green gate: the back-edge allowlist gap and the stdlib-platform
+        # import shadow, both found by a real chat turn, neither by CI.
+        # Floors are the executed counts measured on this tree 2026-08-04 with
+        # no DATABASE_URL; every one of these files is dependency-free.
+        Suite("server-overlay-propose", "server tests/test_overlay_propose.py", "pytest",
+              SERVER, _py_pytest("tests/test_overlay_propose.py"), 13),
+        Suite("server-overlay-decision", "server tests/test_overlay_decision.py", "pytest",
+              SERVER, _py_pytest("tests/test_overlay_decision.py"), 21),
+        Suite("server-overlay-routes-stream", "server tests/test_overlay_routes_stream.py",
+              "pytest", SERVER, _py_pytest("tests/test_overlay_routes_stream.py"), 8),
+        Suite("server-overlay-stream", "server tests/test_overlay_stream.py", "pytest",
+              SERVER, _py_pytest("tests/test_overlay_stream.py"), 18),
+        Suite("server-overlay-registry", "server tests/test_overlay_registry.py", "pytest",
+              SERVER, _py_pytest("tests/test_overlay_registry.py"), 55),
         # One process per file (below) is exactly why the cross-file connection
         # leak this pins was invisible to CI: every file passed alone.
         Suite("server-jobs-connection-ownership",

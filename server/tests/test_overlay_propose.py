@@ -139,3 +139,81 @@ def test_request_text_is_carried_but_bounded():
     payload."""
     out = _propose(request_text="x" * 5000)
     assert len(out["request_text"]) == 500
+
+
+# --------------------------------------------------------------------------- #
+# The router's store resolution, under the condition that broke it in prod
+# --------------------------------------------------------------------------- #
+def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
+    """`from platform import overlay_store` returned the STDLIB platform module
+    in the container, so GET /api/overlay answered 500 on every request while
+    this suite stayed green. Reproduce that condition here, then require
+    _store() to hand back the platform package's overlay_store anyway.
+
+    THE PRECONDITION IS EXECUTED, NOT DESCRIBED, AND MUST STAY THAT WAY. This
+    test only means something where the pre-fix implementation would actually
+    fail, so it establishes that by running the pre-fix expression itself and
+    requiring it to raise. Do not "simplify" this into a check on the ambient
+    `platform` module. Every such check admits an environment where the old
+    implementation passes:
+
+      `not hasattr(platform, "overlay_store")`  — a freshly imported REPO
+          package lacks the attribute too, and the old import then loads the
+          submodule and succeeds.
+      no `__path__` plus `python_implementation` (i.e. "it is the stdlib") —
+          holds even if something attached an `overlay_store` attribute to the
+          real stdlib module.
+      both of the above together — holds even so when
+          `sys.modules["platform.overlay_store"]` exists, because IMPORT_FROM
+          falls back to the qualified sys.modules entry when the parent has no
+          such attribute.
+
+    Executing the expression cannot be an incomplete description of the
+    environment, because it is not a description. It is the condition.
+    """
+    # Import the module under test FIRST. Importing it can itself mutate import
+    # state, so probing before this would leave a window in which the probe
+    # raises, the router import registers sys.modules["platform.overlay_store"]
+    # or attaches the attribute, and the pre-fix _store() then succeeds anyway.
+    # Probe immediately before the call so check and use see the same state.
+    from routers import overlay as overlay_router
+
+    try:
+        from platform import overlay_store as _pre_fix_import  # noqa: F401
+    except ImportError:
+        pass  # precondition holds: the pre-fix implementation fails here
+    else:
+        pytest.fail(
+            "precondition absent: `from platform import overlay_store` SUCCEEDS "
+            f"here (resolved {getattr(_pre_fix_import, '__file__', '?')}), so "
+            "the pre-fix implementation would pass this test and the test "
+            "cannot observe the defect it guards. Run from server/ with a "
+            "sys.modules that has no 'platform' package entry.")
+
+    store = overlay_router._store()
+    # Origin, not truthiness: a module that resolved to the wrong package would
+    # still be an object, and would still answer some of these names.
+    assert store.__name__.endswith("overlay_store"), store.__name__
+    assert Path(store.__file__).resolve() == (
+        SERVER_DIR.parent / "platform" / "overlay_store.py").resolve(), store.__file__
+    for name in ("document", "effective_tokens", "pending_for_session",
+                 "create_proposal", "approve"):
+        assert callable(getattr(store, name, None)), f"_store() lacks {name}()"
+
+
+def test_store_resolution_is_stable_across_calls():
+    """A second call must return the SAME module object — reloading per request
+    would give two live copies of the store's module state.
+
+    Object identity alone would also hold for a module-global cache, or for an
+    import finding a pre-existing sys.modules entry, so it does not by itself
+    prove the caching mechanism. The sys.modules assertion is what makes the
+    first sentence true.
+    """
+    import sys
+
+    from routers import overlay as overlay_router
+
+    first = overlay_router._store()
+    assert overlay_router._store() is first
+    assert sys.modules.get("leaf_platform_pkg.overlay_store") is first
