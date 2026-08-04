@@ -567,6 +567,7 @@ def test_windows_prefers_cmd_shims_over_extensionless_node_wrappers(monkeypatch)
 
     monkeypatch.setattr(g.shutil, "which", fake_which)
     assert g._npm().endswith("npm.cmd")
+    assert g._npx().endswith("npx.cmd")
 
 
 # --------------------------------------------------------------------------- #
@@ -861,4 +862,25 @@ def test_verifier_reports_an_empty_results_dir_as_failure(tmp_path, capsys):
     g = _load_runner()
     assert g.verify_shard_results(tmp_path) == 1
     assert "no shard result files" in capsys.readouterr().out
-    assert g._npx().endswith("npx.cmd")
+
+
+def test_verifier_refuses_a_status_it_does_not_recognize(tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 1: the verifier rejected only the literal FAIL
+    status, so a corrupt result file carrying an unknown status (say NOT_RUN)
+    for every suite still counted as complete coverage and printed PROVEN —
+    fail-open in the acceptance instrument itself. Every status must be a
+    recognized terminal value."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"][0]["status"] = "NOT_RUN"
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "unrecognized status" in out

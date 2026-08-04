@@ -806,13 +806,13 @@ def build_suites() -> List[Suite]:
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 40: the 29 measured 2026-07-28, plus the 11 sharding tests
+        # Floor 41: the 29 measured 2026-07-28, plus the 12 sharding tests
         # (partition determinism, catalog fingerprint, the glob pin on
         # platform/tests/*_static.py, shard CLI rejections, and the fan-in
         # verifier's accept + refuse-every-corruption cases), measured on this
         # tree 2026-08-04.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 40),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 41),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1564,6 +1564,16 @@ def verify_shard_results(results_dir: Path) -> int:
             actual = sum((e.get("executed") or 0) for e in d.get("results", []))
             if claimed != actual:
                 problems.append(f"shard {i}: executed_total {claimed} != per-suite sum {actual}")
+            # Statuses are an allowlist, not a denylist: rejecting only the
+            # literal FAIL would let a corrupt file carrying any OTHER value
+            # (say NOT_RUN) count as complete passing coverage — fail-open in
+            # the acceptance instrument (sol-critic #436 round 1).
+            unknown = [f"{e.get('id')}={e.get('status')!r}"
+                       for e in d.get("results", [])
+                       if e.get("status") not in ("PASS", "FAIL", "SKIP")]
+            if unknown:
+                problems.append(
+                    f"shard {i}: unrecognized status(es): {', '.join(unknown)}")
             failed = [e.get("id") for e in d.get("results", []) if e.get("status") == "FAIL"]
             if failed:
                 problems.append(f"shard {i}: FAILED suites: {', '.join(map(str, failed))}")
