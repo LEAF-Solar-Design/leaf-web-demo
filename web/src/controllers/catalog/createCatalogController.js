@@ -143,10 +143,12 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
     // P2 funnel top: THE active dispatch path (the legacy App.jsx inline
-    // handler is disabled). text_len only, never text.
+    // handler is disabled). text_len only, never text. slash vs typed only:
+    // a string override is NOT a reliable canned signal (ToolCast passes
+    // typed text as a string); tour attribution arrives with wave C-2's
+    // tour_step envelope property.
     track('prompt.submitted', {
-      input_kind: text.startsWith('/') ? 'slash'
-        : typeof override === 'string' ? 'canned' : 'typed',
+      input_kind: text.startsWith('/') ? 'slash' : 'typed',
       text_len: text.length,
     })
     adapters.dismissDecision?.()

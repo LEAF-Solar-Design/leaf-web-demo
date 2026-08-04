@@ -1096,6 +1096,7 @@ export default function App() {
     return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
   }, [selectedHandle])
 
+  const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -1141,24 +1142,32 @@ export default function App() {
       runIntent: staged.intent,
     }
     // P2: confirm-to-run conversion top. `source` comes from the decision's
-    // own construction site (catalog selections stamp source:'catalog';
-    // slash decisions carry slash:true; the NL route is 'prompt').
-    track('run.confirm_shown', {
-      tool: catalogTool.name,
-      is_write: isWrite,
-      source: decision.source || (decision.slash ? 'slash' : 'prompt'),
-    })
+    // own construction site (catalog/tour stamp source; slash decisions
+    // carry slash:true; the NL route is 'prompt'). De-dupe: a tour beat arms
+    // the SAME tool twice back-to-back (dispatch route, then the tour's
+    // catalog re-arm) and must count once (review #427 round-2 warn 5).
+    const emitKey = `${catalogTool.name}`
+    const nowTs = Date.now()
+    const last = confirmEmitRef.current
+    if (!(last && last.key === emitKey && nowTs - last.ts < 2000)) {
+      confirmEmitRef.current = { key: emitKey, ts: nowTs }
+      track('run.confirm_shown', {
+        tool: catalogTool.name,
+        is_write: isWrite,
+        source: decision.source || (decision.slash ? 'slash' : 'prompt'),
+      })
+    }
     return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
-  const onRequestCatalogRun = useCallback((tool, params, rationale = null) => {
+  const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
     if (!tool) return
     return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
       rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
-      source: 'catalog', // P2: run.confirm_shown attribution
+      source, // P2: run.confirm_shown attribution (catalog by default, tour from the tour beat)
     })
   }, [commitCatalogDecision])
 
@@ -1646,7 +1655,8 @@ export default function App() {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
         if (toolObj && !isWrite) {
-          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.')
+          onRequestCatalogRun(toolObj, r.params || {},
+            'Guided tour selection. Confirm before it runs.', 'tour')
         }
       }
     } finally {

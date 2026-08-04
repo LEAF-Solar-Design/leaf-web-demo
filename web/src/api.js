@@ -142,12 +142,13 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
   // ?drawing=; the privacy contract bans drawing names and paths).
   const catalogSource = dwg === 'rooftop_demo' ? 'default' : 'custom'
   if (mock) {
-    // P2 funnel top, mock branch included: the default demo path must exist
-    // in session counts (the sink is simply dark when no server answers).
-    track('session.started', { mock: true, catalog_source: catalogSource })
     const res = await fetchWithBudget(fetch, '/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
-    return { intake: await res.json(), tenant: null, tier: null, org: null }
+    const intake = await res.json()
+    // P2 funnel top, mock branch included, emitted only AFTER the session
+    // actually resolved (a failed intake must not inflate session counts).
+    track('session.started', { mock: true, catalog_source: catalogSource })
+    return { intake, tenant: null, tier: null, org: null }
   }
   const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, STARTUP_FETCH_TIMEOUT_MS)
   // P2 funnel top: how many people open the product, and as who.

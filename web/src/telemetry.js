@@ -31,16 +31,23 @@ const state = {
 }
 
 // Session-scoped caps survive reloads: the counter lives beside the session
-// UUID in sessionStorage, so a reload cannot reset a cap within one session.
+// UUID in sessionStorage, WITH an in-memory floor so a throwing storage can
+// never disable a cap (it degrades to per-load counting, still capped).
+const memCaps = {}
+
 function capCount(key) {
-  try { return Number(sessionStorage.getItem(`leaf.telemetry.cap.${key}`)) || 0 }
-  catch { return 0 }
+  const mem = memCaps[key] || 0
+  try {
+    return Math.max(mem, Number(sessionStorage.getItem(`leaf.telemetry.cap.${key}`)) || 0)
+  } catch { return mem }
 }
 
 function capIncrement(key) {
+  const next = capCount(key) + 1
+  memCaps[key] = next
   try {
-    sessionStorage.setItem(`leaf.telemetry.cap.${key}`, String(capCount(key) + 1))
-  } catch { /* storage unavailable: cap falls back to per-load counting */ }
+    sessionStorage.setItem(`leaf.telemetry.cap.${key}`, String(next))
+  } catch { /* storage unavailable: the in-memory floor still enforces */ }
 }
 
 function sessionId() {
@@ -64,18 +71,19 @@ function endpoint() {
 }
 
 function identityHeaders() {
+  // Auth-off parity with every other client call: the ingest door resolves
+  // this stub tenant exactly as api.js's calls do. Built OUTSIDE the storage
+  // try so a throwing localStorage can never drop it.
+  const out = {
+    'X-Tenant-Id': import.meta.env?.VITE_TENANT_ID || 'demo-tenant',
+  }
   try {
-    const out = {
-      // Auth-off parity with every other client call: the ingest door
-      // resolves this stub tenant exactly as api.js's calls do.
-      'X-Tenant-Id': import.meta.env?.VITE_TENANT_ID || 'demo-tenant',
-    }
     const tok = localStorage.getItem('leaf.jwt')
     if (tok) out.Authorization = `Bearer ${tok}`
     const guest = localStorage.getItem('leaf.guest_session')
     if (guest) out['X-Guest-Session'] = guest
-    return out
-  } catch { return {} }
+  } catch { /* storage unavailable: stub tenant header still applies */ }
+  return out
 }
 
 function payload(events) {
