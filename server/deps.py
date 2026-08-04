@@ -504,6 +504,12 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
             "/api/author",
             "/api/author/publication-requests",
             "/api/platform/customize",
+            # T1 overlay: the harness's propose_overlay tool calls this over
+            # the back-edge (X-Dispatch-Secret, no user JWT). Absent from this
+            # list, the call fell through to the JWT leg and 401'd — found by
+            # a live staging chat turn, not by tests, because every test
+            # called the route directly with a tenant header.
+            "/api/overlay/proposals",
         ):
             return True
         # R7 spine mount: land is per-change (one path segment, no deeper).

@@ -56,14 +56,27 @@ def _fail(code: str, message: str, status: int) -> JSONResponse:
 
 
 def _store():
-    """The platform store, imported lazily.
+    """The platform store, imported by FILE PATH, not by name.
 
-    Lazily because the repo-root `platform/` package shadows the stdlib module
-    of the same name, and importing it at module scope drags that ordering
-    problem into every consumer of this router.
+    `from platform import overlay_store` loses to the STDLIB platform module
+    whenever site-packages precedes the repo root on sys.path — which is
+    exactly the container layout, where it 500'd every request. Laziness only
+    moved the failure; it never dodged it. Loading the package from its known
+    location beside server/ cannot be shadowed by anything.
     """
-    from platform import overlay_store  # noqa: PLC0415
-    return overlay_store
+    import sys
+    from pathlib import Path
+    if "leaf_platform_pkg" not in sys.modules:
+        import importlib.util
+        pkg_dir = Path(__file__).resolve().parents[2] / "platform"
+        spec = importlib.util.spec_from_file_location(
+            "leaf_platform_pkg", pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)])
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["leaf_platform_pkg"] = mod
+        spec.loader.exec_module(mod)
+    import importlib
+    return importlib.import_module("leaf_platform_pkg.overlay_store")
 
 
 class ProposeBody(BaseModel):
