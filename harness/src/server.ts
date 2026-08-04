@@ -894,6 +894,9 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
   const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
+  const { HaikuIntentSynthesizer } = await import(
+    "./ports/impl/haikuIntentSynthesizer.js"
+  );
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
 
@@ -914,6 +917,10 @@ export async function startReal(port = 8130): Promise<Server> {
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
         runnerFor: (grant) => new ConverseSdkRunner({ grant }),
+        // Classify the turn's surface (drawing vs the product) with a small
+        // fast model instead of matching vocabulary in the prompt. Advisory
+        // and fail-open: see HaikuIntentSynthesizer.
+        intentFor: (grant) => new HaikuIntentSynthesizer({ grant }),
         instantExecutor,
       })
     : undefined;

@@ -48,6 +48,7 @@ import { ConverseLoop } from "./converseLoop.js";
 import { wireGrantToAgentGrant } from "../ports/wireGrant.js";
 import { grantSecrets, isRedactableSecret, stripSecrets } from "../redact.js";
 import type {
+  IntentSynthesizer,
   AgentGrant,
   AppRunClient,
   ConfirmationRecord,
@@ -87,6 +88,12 @@ export interface SpineTurnAdapterPorts {
   store: SessionStore;
   /** Per-turn LLM runner factory (real: ConverseSdkRunner with the tenant grant). */
   runnerFor: (grant: AgentGrant) => SpineConverseRunner;
+  /**
+   * Optional per-turn intent classifier factory (real: HaikuIntentSynthesizer
+   * with the same tenant grant). Absent = no signal, and the turn behaves
+   * exactly as it did before intent synthesis existed.
+   */
+  intentFor?: (grant: AgentGrant) => IntentSynthesizer;
   instantExecutor?: InstantExecutorClient;
 }
 
@@ -183,6 +190,7 @@ export class SpineTurnAdapter implements ConverseRunner {
         },
         store,
         instantExecutor: this.ports.instantExecutor,
+        ...(this.ports.intentFor ? { intent: this.ports.intentFor(grant) } : {}),
       },
       {
         // Per-session model ("mount your LLM"): the wire value wins, then the
