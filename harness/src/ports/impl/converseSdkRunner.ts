@@ -161,6 +161,8 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Request creation of a new tool when nothing in the catalog fits. Args {description, mode?, confirmation_id?}. Re-invoke with the gate-issued confirmation_id after approval.",
   request_publication:
     "Request or resume publication of a durable staged change. Args {change_set_id}. This does not grant approval and never accepts a receipt or confirmation.",
+  propose_overlay:
+    "Open a live colour/copy PREVIEW of the product UI for this session when the user asks to change how the product looks or reads (background colour, accent, headline text). Args {tokens: {token_id: value}, request_text}. Token ids: color.canvas.bg, color.canvas.fg, color.panel.bg, color.panel.fg, color.accent, color.accent.fg, color.border (values #rrggbb) and copy.home.title, copy.home.subtitle, copy.empty.result, copy.cta.primary (short text). The user sees the preview immediately; an operator approves or denies it. NOT for drawing changes.",
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
   customize_platform:
@@ -260,6 +262,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         confirmation_id: z.string().optional(),
       },
       request_publication: { change_set_id: z.string() },
+      propose_overlay: {
+        tokens: z.record(z.string()),
+        request_text: z.string().optional(),
+      },
       request_confirmation: { kind: z.string(), payload: z.record(z.unknown()).optional() },
       customize_platform: {
         op: z.enum(["propose", "status", "land"]),

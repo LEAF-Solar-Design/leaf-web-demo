@@ -679,6 +679,16 @@ export class ConverseLoop {
             action: "request_publication",
             args: { change_set_id: String(args.change_set_id ?? "") },
           };
+        case "propose_overlay":
+          return {
+            action: "propose_overlay",
+            args: {
+              tokens: (args.tokens ?? {}) as Record<string, string>,
+              ...(typeof args.request_text === "string"
+                ? { request_text: args.request_text }
+                : {}),
+            },
+          };
         case "request_confirmation":
           // The catalog carries this UI-only action at rung 0 with policy
           // always-confirm, so the gate answers awaiting_approval and MINTS the
@@ -1102,6 +1112,29 @@ export class ConverseLoop {
         return ok(JSON.stringify(publication));
       }
 
+      case "propose_overlay": {
+        const tokens =
+          args.tokens && typeof args.tokens === "object"
+            ? (args.tokens as Record<string, string>)
+            : {};
+        if (Object.keys(tokens).length === 0) {
+          return err("propose_overlay requires a non-empty args.tokens map");
+        }
+        // The preview is scoped to THIS converse session so only the requester
+        // sees it; the server validates every token against its closed
+        // registry and refuses anything non-canonical.
+        return ok(
+          JSON.stringify(
+            await appRun.proposeOverlay(
+              tenantId,
+              ctx.authoritySessionId ?? "",
+              tokens,
+              String(args.request_text ?? ""),
+            ),
+          ),
+        );
+      }
+
       case "customize_platform": {
         const op = args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
         const authority = {
@@ -1290,6 +1323,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `kind=${String(args.kind ?? "confirm")}`;
     case "customize_platform":
       return `op=${String(args.op ?? "propose")}${args.confirmation_id ? " (confirmed)" : ""}`;
+    case "propose_overlay":
+      return `tokens=${Object.keys((args.tokens as object) ?? {}).length}`;
   }
 }
 

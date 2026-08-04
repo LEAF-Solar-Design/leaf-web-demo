@@ -154,6 +154,29 @@ export class FakeAppRunClient implements AppRunClient {
     return row;
   }
 
+  proposeOverlayCalls: Array<{
+    tenantId: string;
+    sessionId: string;
+    tokens: Record<string, string>;
+    requestText: string;
+  }> = [];
+
+  async proposeOverlay(
+    tenantId: string,
+    sessionId: string,
+    tokens: Record<string, string>,
+    requestText: string,
+  ): Promise<Record<string, unknown>> {
+    this.proposeOverlayCalls.push({ tenantId, sessionId, tokens, requestText });
+    return {
+      proposal_id: "fake-overlay-proposal",
+      tokens,
+      document_version: 0,
+      expires_at: "2026-01-01T00:00:00Z",
+      error: null,
+    };
+  }
+
   async requestPublication(
     tenantId: string,
     changeSetId: string,

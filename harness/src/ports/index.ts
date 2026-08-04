@@ -530,6 +530,7 @@ export const SPINE_TOOL_NAMES = [
   "author_tool",
   "request_publication",
   "request_confirmation",
+  "propose_overlay",
   "customize_platform",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
@@ -778,6 +779,15 @@ export interface AppRunClient {
   requestPublication(
     tenantId: string,
     changeSetId: string,
+  ): Promise<Record<string, unknown>>;
+  /** POST /api/overlay/proposals — T1 runtime overlay: open a session-scoped
+   * colour/copy preview. Cheap and reversible by design; the operator's
+   * decide tap is the gate, not this call. */
+  proposeOverlay(
+    tenantId: string,
+    sessionId: string,
+    tokens: Record<string, string>,
+    requestText: string,
   ): Promise<Record<string, unknown>>;
   /** POST /api/run for registered deterministic tool execution. */
   submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse>;

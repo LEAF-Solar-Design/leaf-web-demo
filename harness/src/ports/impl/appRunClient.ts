@@ -252,6 +252,19 @@ export class HttpAppRunClient implements AppRunClient {
     return { job_id: jobId, status };
   }
 
+  async proposeOverlay(
+    tenantId: string,
+    sessionId: string,
+    tokens: Record<string, string>,
+    requestText: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(tenantId, "POST", "/api/overlay/proposals", {
+      session_id: sessionId,
+      tokens,
+      request_text: requestText,
+    });
+  }
+
   async requestPublication(
     tenantId: string,
     changeSetId: string,
