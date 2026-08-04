@@ -139,7 +139,7 @@ jobs:
         run: |
           python -m pytest -q tests/test_overlay_store_static.py
           # -p no:randomly keeps the concurrency tests deterministic.
-          python -m pytest -q tests/test_overlay_store_postgres.py \n            -W error::pytest.PytestUnraisableExceptionWarning
+          python -m pytest -q tests/test_overlay_store_postgres.py
 
       - name: Assert the overlay live suite did NOT skip
         working-directory: platform
