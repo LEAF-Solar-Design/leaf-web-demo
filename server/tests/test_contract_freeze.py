@@ -309,25 +309,51 @@ def _web_stream_event_types() -> set:
     """
     source = (REPO_ROOT / "web" / "src" / "converse.js").read_text(encoding="utf-8")
     block = source[source.index("export const STREAM_EVENT_TYPES"):]
-    block = block[:block.index("]")]
-    block = _re.sub(r"/\*.*?\*/", "", block, flags=_re.S)   # block comments
-    block = _re.sub(r"//[^\n]*", "", block)                  # line comments
+    block = block[block.index("[") + 1:block.index("]")]
+    return _parse_literal_list(block)
 
-    # The list must be PURE string literals. Round 2 escaped the comment
-    # stripper with `'overlay_revoked' + '//typo'`: JavaScript registers the
-    # concatenated name `overlay_revoked//typo`, but stripping removed the tail
-    # and extraction still reported a clean `overlay_revoked`. So after
-    # removing the literals themselves, only list punctuation may remain — a
-    # `+`, a template literal, an identifier or a spread leaves residue and
-    # fails HERE rather than being quietly mis-read.
-    residue = _re.sub(r"'[^'\n]*'", "", block)
-    residue = residue[residue.index("[") + 1:] if "[" in residue else residue
-    leftover = _re.sub(r"[\s,]", "", residue)
+
+#: A quoted JS string, either quote style, captured whole.
+_JS_STRING = r"""(['"])(.*?)\1"""
+
+
+def _parse_literal_list(block: str) -> set:
+    """The event names, read the way the JavaScript engine reads them.
+
+    LITERALS FIRST, COMMENTS SECOND. The order is the entire lesson; three
+    review rounds beat the other one:
+
+        round 2:  // 'overlay_revoked'          commented out, still read live
+        round 2:  'overlay_revoked' + '//typo'  concatenated, tail stripped
+        round 3:  'overlay_revoked/*x*/'        comment INSIDE the literal
+
+    The last is decisive. JavaScript registers a listener for the literal
+    string `overlay_revoked/*x*/`, comment syntax and all, because inside
+    quotes there are no comments. Any parser that strips comments before
+    reading quotes disagrees with the engine about what the string IS, and so
+    certifies a subscription the browser never makes.
+    """
+    literals = _re.findall(_JS_STRING, block, flags=_re.S)
+    outside = _re.sub(_JS_STRING, "", block, flags=_re.S)
+    outside = _re.sub(r"/\*.*?\*/", "", outside, flags=_re.S)
+    outside = _re.sub(r"//[^\n]*", "", outside)
+
+    # Only list punctuation may remain outside the literals. A `+`, a template
+    # literal, an identifier or a spread leaves residue and fails HERE rather
+    # than being quietly mis-read.
+    leftover = _re.sub(r"[\s,]", "", outside)
     assert leftover == "", (
         "STREAM_EVENT_TYPES is not a plain list of string literals "
         f"({leftover!r}) — the gate cannot verify a computed subscription list")
 
-    return set(_re.findall(r"'([a-z_]+)'", block))
+    # Each literal is taken WHOLE. Both quote styles are legal JavaScript, so
+    # accepting only single quotes was a false failure waiting to happen.
+    names = {text for _q, text in literals}
+    malformed = {n for n in names if not _re.fullmatch(r"[a-z_]+", n)}
+    assert not malformed, (
+        f"event names are not plain identifiers: {sorted(malformed)} — the "
+        f"browser subscribes to these verbatim, comment syntax included")
+    return names
 
 
 def test_the_subscription_gate_cannot_be_fooled_by_a_comment():
@@ -343,6 +369,28 @@ def test_the_subscription_gate_cannot_be_fooled_by_a_comment():
     commented = _re.sub(r"//[^\n]*", "", commented)
     assert "overlay_revoked" not in set(_re.findall(r"'([a-z_]+)'", commented)), (
         "a commented-out listener still reads as live — the gate is decorative")
+
+
+def test_a_comment_INSIDE_a_literal_is_not_stripped_away():
+    """Round 3's escape, and the sharpest of the three.
+
+    `'overlay_revoked/*x*/'` makes the browser subscribe to the literal string
+    `overlay_revoked/*x*/`. A parse that strips comments first sees a clean
+    `overlay_revoked` and certifies a listener that does not exist.
+    """
+    with pytest.raises(AssertionError, match="plain identifiers"):
+        _parse_literal_list("'overlay_revoked/*x*/', 'text_delta'")
+
+    # And the honest reading of that literal is the whole string.
+    names = {t for _q, t in _re.findall(_JS_STRING, "'overlay_revoked/*x*/'")}
+    assert names == {"overlay_revoked/*x*/"}
+
+
+def test_the_gate_accepts_both_quote_styles():
+    """Both are legal JavaScript. Rejecting double quotes would fail a
+    legitimate edit, and a gate that cries wolf is a gate that gets weakened."""
+    assert _parse_literal_list("""'alpha_one', "beta_two\"""") == {
+        "alpha_one", "beta_two"}
 
 
 def test_the_gate_refuses_a_computed_subscription_list():

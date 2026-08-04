@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import db  # noqa: F401  (package-relative, matches store.py's idiom)
@@ -140,6 +141,31 @@ _INVISIBLE = frozenset(
 )
 
 
+def _is_invisible(ch: str) -> bool:
+    """Is this character invisible or direction-altering to a human reader?
+
+    CLASSIFIED, not enumerated. The hand-written set missed U+2061 (which the
+    registry rejected, so the two layers disagreed) and U+115F HANGUL CHOSEONG
+    FILLER (which both accepted, and which the card does not expose either).
+    Every hand-maintained list of invisible code points is a list that is out
+    of date; `unicodedata.category` is maintained by someone else.
+
+    Cf  format characters, which covers the bidi controls and U+2061.
+    Cc  controls.  Cs/Co  surrogates and private use.
+    Zl/Zp  line and paragraph separators.
+    Plus the width-less fillers Unicode classifies as ordinary letters (Lo),
+    which no category catches and which render as nothing.
+    """
+    if ch in _INVISIBLE_LETTERS:
+        return True
+    return unicodedata.category(ch) in ("Cf", "Cc", "Cs", "Co", "Zl", "Zp")
+
+
+#: Invisible code points Unicode classifies as LETTERS, so no category check
+#: finds them. They render at zero width and are pure deception in copy.
+_INVISIBLE_LETTERS = frozenset("ᅟᅠㅤﾠ")
+
+
 def _reject_unvalidated(tokens: Mapping[str, str]) -> None:
     """Refuse anything that is not already canonical.
 
@@ -164,7 +190,7 @@ def _reject_unvalidated(tokens: Mapping[str, str]) -> None:
         # and the store did not, so `"Save‮eleteD"` could be persisted:
         # copy that reads as one thing and renders as another. A boundary that
         # is weaker than its own validator is not a boundary.
-        if any(ord(ch) in _INVISIBLE for ch in v):
+        if any(_is_invisible(ch) for ch in v):
             raise OverlayStoreError("deceptive_char_in_value", 400, str(tid))
         low = v.lower()
         for bad in _UNSAFE_IN_VALUE:
@@ -200,11 +226,31 @@ def create_proposal(
         # the append-only invariant is worth more than the tidier-looking row:
         # the lease already makes this proposal expired to every reader, and
         # the stamp is what actually frees the index slot.
+        #
+        # It also APPENDS an 'expired' revision rather than only stamping.
+        # Stamping alone freed the slot but suppressed the expiry forever:
+        # sweep_expired skips superseded rows, so no pending->expired revision
+        # was ever written, latest_proposal still read 'pending', and anything
+        # publishing revokes from the sweep never learned the overlay lapsed.
+        # A slot freed silently is a state change nobody can observe.
         cur.execute(
-            "UPDATE overlay_proposals SET superseded_at = NOW() "
-            "WHERE tenant_id = %(t)s AND session_id = %(s)s "
-            "  AND state = 'pending' AND superseded_at IS NULL "
-            "  AND lease_expires_at <= NOW()",
+            "WITH lapsed AS ("
+            "  SELECT proposal_id, MAX(revision) AS rev FROM overlay_proposals "
+            "  WHERE tenant_id = %(t)s AND session_id = %(s)s "
+            "    AND state = 'pending' AND superseded_at IS NULL "
+            "    AND lease_expires_at <= NOW() GROUP BY proposal_id), "
+            "stamped AS ("
+            "  UPDATE overlay_proposals p SET superseded_at = NOW() "
+            "  FROM lapsed l "
+            "  WHERE p.proposal_id = l.proposal_id AND p.revision = l.rev "
+            "  RETURNING p.proposal_id, p.revision, p.tenant_id, p.session_id, "
+            "            p.tokens, p.created_at, p.lease_expires_at) "
+            "INSERT INTO overlay_proposals "
+            "  (proposal_id, revision, tenant_id, session_id, tokens, state, "
+            "   created_at, lease_expires_at, decided_at, reason) "
+            "SELECT proposal_id, revision + 1, tenant_id, session_id, tokens, "
+            "       'expired', created_at, lease_expires_at, NOW(), 'lease lapsed' "
+            "FROM stamped",
             {"t": tenant_id, "s": session_id})
         try:
             cur.execute(
@@ -439,11 +485,19 @@ def deny(*, proposal_id: str, actor: str, decision_key: str,
         # FOR UPDATE, not a bare read. Without the lock another approval can
         # move the document between this comparison and the commit, so the
         # stale denial the check exists to refuse still lands.
+        # Seed the row BEFORE locking it. `FOR UPDATE` over zero rows locks
+        # nothing, so a first-ever denial and a first-ever approval could both
+        # proceed: the denial read version 0 from an absent row while the
+        # approval inserted the document and moved it to 1. Approve already
+        # seeds for exactly this reason; deny has to as well.
+        cur.execute(
+            "INSERT INTO overlay_documents (tenant_id, version, tokens) "
+            "VALUES (%(t)s, 0, '{}'::jsonb) ON CONFLICT (tenant_id) DO NOTHING",
+            {"t": current["tenant_id"]})
         cur.execute(
             "SELECT version FROM overlay_documents WHERE tenant_id = %(t)s "
             "FOR UPDATE", {"t": current["tenant_id"]})
-        row = _row_to_dict(cur.fetchone())
-        seen = 0 if row is None else row["version"]
+        seen = _row_to_dict(cur.fetchone())["version"]
         if int(seen) != int(expected_version):
             raise OverlayStoreError(
                 "version_conflict", 409,
@@ -483,7 +537,7 @@ def sweep_expired(limit: int = 100) -> List[Dict[str, Any]]:
     return swept
 
 
-def _removed_count(current: Mapping[str, Any], doc: Mapping[str, Any]) -> int:
+def _removed_count(before: Mapping[str, Any], doc: Mapping[str, Any]) -> int:
     """How many keys the revert ACTUALLY removed.
 
     Reporting the proposal's token count instead was wrong once removal became
@@ -492,7 +546,7 @@ def _removed_count(current: Mapping[str, Any], doc: Mapping[str, Any]) -> int:
     runtime mutation.
     """
     after = dict(doc.get("tokens") or {})
-    return sum(1 for k in (current.get("tokens") or {}) if k not in after)
+    return sum(1 for k in before if k not in after)
 
 
 def revert(*, proposal_id: str, actor: str, decision_key: str,
@@ -519,6 +573,11 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
         # set: approve A (bg=#111), approve B (bg=#222), revert A, and a blind
         # `tokens - keys` drops B's #222 entirely. The operator reverting A
         # would have silently undone B's decision.
+        # The pre-update document. A post-update snapshot cannot tell how many
+        # keys the update removed: a key already absent beforehand looks
+        # identical to one this revert removed, so the audit claimed a runtime
+        # mutation that never happened.
+        before = dict(_document_on(cur, current["tenant_id"]).get("tokens") or {})
         mine = json.dumps(dict(current["tokens"] or {}))
         cur.execute(
             "UPDATE overlay_documents d "
@@ -541,6 +600,6 @@ def revert(*, proposal_id: str, actor: str, decision_key: str,
             reason="reverted")
         _audit(cur, proposal=current, from_state="approved",
                to_state="reverted", actor=actor, decision_key=decision_key,
-               detail={"removed_token_count": _removed_count(current, doc)})
+               detail={"removed_token_count": _removed_count(before, doc)})
         conn.commit()
     return reverted, doc

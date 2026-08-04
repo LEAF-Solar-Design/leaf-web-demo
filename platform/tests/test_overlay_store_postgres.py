@@ -590,13 +590,48 @@ def test_reverting_a_partially_superseded_set_removes_only_the_untouched(conn, t
 # Round 2 findings — expiry lockout and the deny race
 # --------------------------------------------------------------------------- #
 def _retire_lapsed(conn, tenant, session):
-    """create_proposal's pre-insert retire, verbatim."""
+    """create_proposal's pre-insert retire, verbatim.
+
+    It stamps AND appends an 'expired' revision. Stamping alone freed the index
+    slot but suppressed the expiry forever: sweep_expired skips superseded
+    rows, so no pending->expired revision was ever written and anything
+    publishing revokes from the sweep never learned the overlay had lapsed.
+    """
     conn.execute(
-        "UPDATE overlay_proposals SET superseded_at = NOW() "
-        "WHERE tenant_id = %(t)s AND session_id = %(s)s "
-        "  AND state = 'pending' AND superseded_at IS NULL "
-        "  AND lease_expires_at <= NOW()",
+        "WITH lapsed AS ("
+        "  SELECT proposal_id, MAX(revision) AS rev FROM overlay_proposals "
+        "  WHERE tenant_id = %(t)s AND session_id = %(s)s "
+        "    AND state = 'pending' AND superseded_at IS NULL "
+        "    AND lease_expires_at <= NOW() GROUP BY proposal_id), "
+        "stamped AS ("
+        "  UPDATE overlay_proposals p SET superseded_at = NOW() "
+        "  FROM lapsed l "
+        "  WHERE p.proposal_id = l.proposal_id AND p.revision = l.rev "
+        "  RETURNING p.proposal_id, p.revision, p.tenant_id, p.session_id, "
+        "            p.tokens, p.created_at, p.lease_expires_at) "
+        "INSERT INTO overlay_proposals "
+        "  (proposal_id, revision, tenant_id, session_id, tokens, state, "
+        "   created_at, lease_expires_at, decided_at, reason) "
+        "SELECT proposal_id, revision + 1, tenant_id, session_id, tokens, "
+        "       'expired', created_at, lease_expires_at, NOW(), 'lease lapsed' "
+        "FROM stamped",
         {"t": tenant, "s": session})
+
+
+def test_expiry_is_RECORDED_not_just_silently_freed(conn, tenant):
+    """Round 3 major, newly introduced by my own round-2 fix. Freeing the slot
+    without appending a revision made the lapse unobservable: latest_proposal
+    still read 'pending' and no revoke could ever be published for it."""
+    session = str(uuid.uuid4())
+    pid = _new_proposal(conn, tenant, session_id=session, lease="-1 minute")
+    _retire_lapsed(conn, tenant, session)
+    conn.commit()
+
+    latest = conn.execute(
+        "SELECT state, reason FROM overlay_proposals WHERE proposal_id = %s "
+        "ORDER BY revision DESC LIMIT 1", (pid,)).fetchone()
+    assert latest["state"] == "expired", "the lapse left no observable record"
+    assert latest["reason"] == "lease lapsed"
 
 
 def test_an_expired_proposal_does_not_lock_the_session_out(conn, tenant):
