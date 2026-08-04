@@ -168,6 +168,31 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
+def test_repo_config_cannot_hide_a_change_from_the_binding_diff(lane_env):
+    """sol-critic PR #423 round 5. Repo config can HIDE changes from the diff
+    family — diff.ignoreSubmodules=all suppresses gitlink entries, and rename
+    detection collapses a delete+add. Either would let an unapproved change sit
+    outside `committed` while the path-set equality passed. The binding diff
+    therefore pins both on the command line, which overrides config.
+
+    Asserted against the real repo: with the hostile config set, the flags this
+    lane passes still report the change."""
+    repo = lane_env["repo"]
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+    _git(repo, "config", "diff.renames", "copies")
+
+    view = lane.propose(
+        tenant_id=TENANT, subject="auth0|author-1", title="under hostile config",
+        edits=[{"path": "docs/note.md", "content": "still bound\n"}])
+    assert view["state"] == "approved"
+
+    # The exact flag set the lane uses must still see the change.
+    seen = _git(repo, "diff", "--no-renames", "--ignore-submodules=none",
+                "--name-only", view["base_sha"], view["commit_sha"]).split()
+    assert seen == ["docs/note.md"]
+    assert set(view["paths"]) == set(seen)
+
+
 def test_rename_detection_cannot_hide_a_deletion(lane_env):
     """sol-critic PR #423 round 4. `git diff --name-only` applies rename
     detection, which collapses a delete+add into the DESTINATION alone. So an

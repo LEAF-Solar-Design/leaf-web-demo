@@ -526,7 +526,13 @@ def propose(*, tenant_id: str, subject: str, title: str,
             # with identical bytes and never appear here — landing a
             # fundamental deletion with no co-sign (sol-critic PR #423 r4).
             line for line in _git_wt(
-                git_dir, worktree, "diff", "--no-renames", "--name-only",
+                # --ignore-submodules=none likewise: diff.ignoreSubmodules=all
+                # (repo config or .gitmodules) HIDES gitlink changes from the
+                # diff family, so an unapproved staged gitlink would be absent
+                # from `committed` and the set equality would pass. The
+                # command-line option overrides both (sol-critic PR #423 r5).
+                git_dir, worktree, "diff", "--no-renames",
+                "--ignore-submodules=none", "--name-only",
                 base_sha, commit_sha,
             ).split("\n") if line.strip()
         }
