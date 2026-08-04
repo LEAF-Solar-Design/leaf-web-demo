@@ -108,17 +108,33 @@ export class HaikuIntentSynthesizer implements IntentSynthesizer {
     const message = (text ?? "").trim();
     if (!message) return null;
 
-    // ONE controller for both the wait and the work: on timeout the query is
-    // aborted, not merely abandoned. A hung child must not outlive the turn.
+    // TWO guarantees, and both are needed — dropping either one is a bug I
+    // shipped and a test caught:
+    //   the ABORT stops the work, so a hung query cannot keep running on the
+    //     tenant's grant and accumulate across turns (round-1 finding), and
+    //   the RACE stops the WAIT, so `synthesize` resolves on schedule even if
+    //     the SDK ever ignores the signal. handleMessage awaits this, so a
+    //     cancel-only design would hang the whole turn on a stubborn query.
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), this.timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        resolve(null);
+      }, this.timeoutMs);
+    });
+
+    // Swallow a late rejection: once the budget wins, nothing awaits this
+    // promise, and an unhandled rejection would surface as a process warning.
+    const work = this.classify(message, abort).catch(() => null);
+
     try {
-      return await this.classify(message, abort);
+      return await Promise.race([work, budget]);
     } catch {
       // Fail open: an unclassified turn behaves exactly as it did before.
       return null;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       // Covers the success path too: nothing keeps running past the verdict.
       abort.abort();
     }
@@ -139,10 +155,24 @@ export class HaikuIntentSynthesizer implements IntentSynthesizer {
         env: childEnv,
         maxTurns: 1,
         abortController: abort,
-        // Containment, matching ConverseSdkRunner. `allowedTools: []` would NOT
-        // do this — it governs auto-approval, not availability.
+        // CONTAINMENT. Three separate knobs are required and none substitutes
+        // for another; each was found missing by a review round, so treat this
+        // block as load-bearing rather than boilerplate:
+        //   tools: []            — disables the BUILT-IN tools. `allowedTools: []`
+        //                          does NOT: it governs auto-approval, not
+        //                          availability (sdk.d.ts:1350-1353, 1404-1407).
+        //   settingSources: []   — stops user/project/local settings loading.
+        //   strictMcpConfig      — an EMPTY `mcpServers` map does not disable
+        //                          DISCOVERED servers. Only this flag ignores
+        //                          project .mcp.json, user settings, plugins and
+        //                          on-disk agent frontmatter (sdk.d.ts:1934), and
+        //                          the SDK emits no --strict-mcp-config without
+        //                          it. Without this the classifier — which reads
+        //                          untrusted text — can still reach a discovered
+        //                          MCP tool surface.
         tools: [],
         mcpServers: {},
+        strictMcpConfig: true,
         settingSources: [],
         permissionMode: "default",
         settings: { disableSkillShellExecution: true, disableAllHooks: true },

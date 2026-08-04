@@ -13,7 +13,10 @@ import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
 import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeIntentSynthesizer } from "../src/ports/fakes/fakeIntentSynthesizer.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
-import { parseIntent } from "../src/ports/impl/haikuIntentSynthesizer.js";
+import {
+  HaikuIntentSynthesizer,
+  parseIntent,
+} from "../src/ports/impl/haikuIntentSynthesizer.js";
 
 const PACKET = { drawing: { id: "rooftop_demo" } };
 
@@ -132,6 +135,75 @@ describe("turn intent synthesis", () => {
       })
       .catch(() => undefined); // an unknown confirmation is rejected; that is fine here
     expect(intent.calls.length).toBe(before);
+  });
+});
+
+describe("classifier containment", () => {
+  /**
+   * This classifier feeds UNTRUSTED user text to a model, so its sandbox is the
+   * whole design. Three review rounds each found a different knob missing, and
+   * every one of them looked contained without being contained. Pin the exact
+   * option set the SDK receives.
+   *
+   * These are all TOP-LEVEL Options fields (sdk.d.ts), which is why asserting
+   * on the options object is valid proof here — unlike Settings fields, which
+   * do nothing when passed at the top level and must be checked differently.
+   */
+  it("passes every option needed to actually disable tool access", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const sdkStub = {
+      // eslint-disable-next-line require-yield
+      async *query(args: { options: Record<string, unknown> }) {
+        seen.push(args.options);
+        return;
+      },
+    };
+    const synth = new HaikuIntentSynthesizer({
+      grant: { kind: "api_key", apiKey: "test-key-not-real" },
+      sdkImport: async () => sdkStub,
+    });
+
+    await synth.synthesize("change the background to light mode");
+
+    expect(seen).toHaveLength(1);
+    const o = seen[0]!;
+    // Built-ins off. allowedTools:[] would NOT do this — it is auto-approval.
+    expect(o.tools).toEqual([]);
+    // Discovered MCP servers off. An empty mcpServers map alone does NOT do
+    // this; without strictMcpConfig the SDK emits no --strict-mcp-config and
+    // project .mcp.json / user settings / plugins still load.
+    expect(o.strictMcpConfig).toBe(true);
+    expect(o.mcpServers).toEqual({});
+    // User/project/local settings off.
+    expect(o.settingSources).toEqual([]);
+    // Skills and hooks cannot reach execution.
+    expect(o.settings).toEqual({
+      disableSkillShellExecution: true,
+      disableAllHooks: true,
+    });
+    // The work is cancellable, so a hung query cannot outlive the turn.
+    expect(o.abortController).toBeInstanceOf(AbortController);
+  });
+
+  it("aborts the query when the budget expires, and still fails open", async () => {
+    let observed: AbortSignal | undefined;
+    const hangingSdk = {
+      async *query(args: { options: Record<string, unknown> }) {
+        observed = (args.options.abortController as AbortController).signal;
+        await new Promise((r) => setTimeout(r, 5_000)); // never finishes in time
+        yield {};
+      },
+    };
+    const synth = new HaikuIntentSynthesizer({
+      grant: { kind: "api_key", apiKey: "test-key-not-real" },
+      sdkImport: async () => hangingSdk,
+      timeoutMs: 25,
+    });
+
+    const verdict = await synth.synthesize("anything");
+
+    expect(verdict).toBeNull(); // fail open
+    expect(observed?.aborted).toBe(true); // and the work was actually cancelled
   });
 });
 
