@@ -256,21 +256,23 @@ def test_ingest_caps_events_per_body(monkeypatch):
 
 
 def test_ingest_anonymous_allowlist_only(monkeypatch):
-    """With auth live and no credentials at all, exactly the pre-auth trio is
-    accepted; everything else drops silently (still 202)."""
+    """With auth live and no credentials at all, exactly the pre-auth
+    allowlist (the funnel trio + auth.completed, whose failure branch never
+    has a bearer) is accepted; everything else drops silently (still 202)."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     c = _client()
     resp = _post(c, {"events": [
         {"event_name": "gate.choice", "labels": {"choice": "demo"}},
         {"event_name": "tour.started"},
+        {"event_name": "auth.completed", "labels": {"ok": "false"}},
         {"event_name": "prompt.submitted"},   # NOT allowlisted pre-auth
     ]})
     assert resp.status_code == 202
-    assert resp.json()["accepted"] == 2
+    assert resp.json()["accepted"] == 3
     rows = list(telemetry_sink._queue)
     assert all(r["tenant_id"] == "anon" for r in rows)
-    assert {r["event_name"] for r in rows} == {"gate.choice", "tour.started"}
+    assert {r["event_name"] for r in rows} == {"gate.choice", "tour.started", "auth.completed"}
 
 
 def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):

@@ -7,10 +7,21 @@
 // sentence + one quiet Details action (reveals the mono reason inline) + a
 // self-clearing note. Persists while the condition is true and clears itself —
 // never user-dismissed.
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { track } from '../telemetry.js'
 
-export default function DegradedBanner({ reason }) {
+export default function DegradedBanner({ reason, source = 'workspace' }) {
   const [showReason, setShowReason] = useState(false)
+  // P2 wave C-2: degraded-mode EXPOSURE, counted once per banner instance.
+  // The ref guard survives dev StrictMode's simulated remount (state and
+  // refs are preserved across it), so one exposure is one event. `source`
+  // is a mount-site enum (workspace/toolcast), never the free-text reason.
+  const emittedRef = useRef(false)
+  useEffect(() => {
+    if (emittedRef.current) return
+    emittedRef.current = true
+    track('degraded.shown', { source })
+  }, [source])
   return (
     <div className="banner" role="status">
       <b>Degraded</b>

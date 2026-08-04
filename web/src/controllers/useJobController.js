@@ -7,6 +7,7 @@ import {
   listJobs as defaultListJobs,
   recordToEnvelope as defaultRecordToEnvelope,
 } from '../api.js'
+import { track } from '../telemetry.js'
 
 export const INFLIGHT_JOB_KEY = 'leaf.inflightJob'
 
@@ -369,6 +370,17 @@ export default function useJobController({
         return
       }
       if (!alive || sequenceRef.current !== sequenceAtLoad) return
+      // P2 wave C-2: does session-survival UX earn its keep? Counted only for
+      // a job still in flight (a terminal record is just a result render, not
+      // a re-attach). This boot path is the ONLY reattach:true call site.
+      if (!isTerminal(record.status)) {
+        track('run.reattached', {
+          from: 'boot',
+          ...(Number.isFinite(pointer.ts)
+            ? { job_age_s: Math.round((Date.now() - pointer.ts) / 1000) }
+            : {}),
+        })
+      }
       await attachJob(pointer.job_id, {
         toolName: pointer.tool || record.tool || 'job',
         persist: true,

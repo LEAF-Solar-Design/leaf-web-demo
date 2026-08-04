@@ -81,9 +81,24 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     return snapshot
   }
 
-  const commitDecision = (decision) => {
+  // P2 wave C-2 (shape from review #428 round 1): route.outcome fires ONLY
+  // for prompt-lane routes (the NL box and slash fast-path; catalog/tour/
+  // authored arms carry a source and are excluded), only at the transitions
+  // that actually clear or replace the shown route, and only when the
+  // replacement really happened (an adapter that refuses to arm returns
+  // undefined and the route stays shown).
+  const isPromptRoute = (route) => !route?.source
+  const noteRouteResolved = (outcome, route) => {
+    if (!route || !isPromptRoute(route)) return
+    track('route.outcome', { outcome, ...(route.tool ? { tool: route.tool } : {}) })
+  }
+
+  const commitDecision = (decision, { routeOutcome = 'invalidated' } = {}) => {
     const committed = adapters.commitDecision ? adapters.commitDecision(decision) : decision
-    if (committed !== undefined) publish({ route: committed })
+    if (committed !== undefined) {
+      if (state.route && state.route !== committed) noteRouteResolved(routeOutcome, state.route)
+      publish({ route: committed })
+    }
     return committed
   }
 
@@ -125,12 +140,25 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     }
   }
 
-  const dismissRoute = () => {
+  // outcome vocabulary: accepted (the run that started IS the routed tool),
+  // alternative_picked, dismissed (explicit Esc/X), invalidated (typed over,
+  // replaced, or the armed confirmation died). An explicit `outcome` from the
+  // caller wins over the ranTool inference.
+  const dismissRoute = ({ ranTool = null, outcome = null } = {}) => {
+    if (state.route) {
+      noteRouteResolved(
+        outcome
+          || (ranTool == null ? 'dismissed' : ranTool === state.route.tool ? 'accepted' : 'invalidated'),
+        state.route,
+      )
+    }
     adapters.dismissDecision?.()
     publish({ route: null })
   }
 
   const setPrompt = (value) => {
+    // Typing over a shown route resolves it: the user moved on.
+    if (state.route) noteRouteResolved('invalidated', state.route)
     adapters.dismissDecision?.()
     publish({
       prompt: value,
@@ -145,12 +173,16 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // P2 funnel top: THE active dispatch path (the legacy App.jsx inline
     // handler is disabled). text_len only, never text. slash vs typed only:
     // a string override is NOT a reliable canned signal (ToolCast passes
-    // typed text as a string); tour attribution arrives with wave C-2's
-    // tour_step envelope property.
+    // typed text as a string); tour attribution rides the tracker's
+    // tour_step context (telemetry.setTourStep), stamped on every organic
+    // event while the tour is active.
     track('prompt.submitted', {
       input_kind: text.startsWith('/') ? 'slash' : 'typed',
       text_len: text.length,
     })
+    // A route still shown at re-dispatch (override strings skip setPrompt)
+    // resolves as invalidated before the state below silently nulls it.
+    if (state.route) noteRouteResolved('invalidated', state.route)
     adapters.dismissDecision?.()
 
     const slash = slashDecision(text, state.tools)
@@ -245,7 +277,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     completeSlash(name) { setPrompt(name ? `/${name}` : '/') },
     dispatchSlash(name) { return dispatch(name ? `/${name}` : '/') },
     pickAlternative(name) {
-      return commitDecision(alternativeDecision(state.route, name))
+      return commitDecision(alternativeDecision(state.route, name), { routeOutcome: 'alternative_picked' })
     },
     clearRouteError() { publish({ routeError: null }) },
   })

@@ -46,9 +46,11 @@ MAX_LABELS_PER_EVENT = 40
 MAX_LABEL_KEY_LEN = 64
 MAX_LABEL_VALUE_LEN = 512
 
-# Pre-auth allowlist: exactly the three top-of-funnel events that fire before
-# any identity exists. Everything else requires a principal.
-PREAUTH_EVENTS = frozenset({"gate.choice", "site.demo_viewed", "tour.started"})
+# Pre-auth allowlist: the top-of-funnel events that fire before any identity
+# exists, plus auth.completed, whose failure branch NEVER has a bearer (that
+# invisible loss is the event's whole point) and whose success branch races a
+# reload the beacon cannot authenticate. Everything else requires a principal.
+PREAUTH_EVENTS = frozenset({"gate.choice", "site.demo_viewed", "tour.started", "auth.completed"})
 
 # Per-IP token bucket for the pre-auth lane (the guest-quota pattern, in
 # miniature): burst 30, refill 30 per minute, in-process only. Telemetry is
