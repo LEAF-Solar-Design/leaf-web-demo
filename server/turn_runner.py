@@ -1663,11 +1663,19 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 f"[leaf-agent] terminal metering failed: {type(exc).__name__}",
                 file=sys.stderr, flush=True,
             )
-        # P2 product event: one enqueue of the record the ledger already
-        # holds — identity-attached chat engagement/cost/stop-reason mix.
-        # Deep per-turn forensics stay in session_events; this never raises
-        # (telemetry_sink contract) and never blocks the CAS release.
         try:
+            session_store.end_turn(session_id, turn_id)
+        except Exception:  # noqa: BLE001
+            pass
+        # P2 product event: one enqueue of the record the ledger already
+        # holds (identity-attached chat engagement/cost/stop-reason mix).
+        # Deliberately AFTER end_turn so a slow first sink self-check can
+        # never extend the busy window. Deep per-turn forensics stay in
+        # session_events; this never raises (telemetry_sink contract).
+        # `model`: the usage wire may supply `model` or `models` (plural);
+        # optional fields not supplied are dropped by the sink, additively.
+        try:
+            model = record.get("model") or usage.get("models")
             telemetry_sink.emit(
                 "agent.turn_completed",
                 tenant_id=str(tenant_id),
@@ -1676,7 +1684,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 labels={
                     "turn_id": turn_id,
                     "stop_reason": stop_reason,
-                    "model": record.get("model"),
+                    "model": model,
                     "grant_kind": record.get("grant_kind"),
                     "degraded": record.get("degraded_mode"),
                     "tools_called_n": len(tools_called),
@@ -1686,10 +1694,6 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 },
             )
         except Exception:  # noqa: BLE001 - belt over the sink's own suspenders
-            pass
-        try:
-            session_store.end_turn(session_id, turn_id)
-        except Exception:  # noqa: BLE001
             pass
         # Policy auto-confirm runs FIRST (it continues the interaction the
         # user is already in); if it starts a confirm turn, the queue kicker

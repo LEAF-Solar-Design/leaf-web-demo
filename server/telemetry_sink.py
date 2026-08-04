@@ -59,10 +59,12 @@ _TABLE_SCHEMA = [
 _lock = threading.Lock()
 _queue: deque = deque(maxlen=_QUEUE_MAX)
 _wake = threading.Condition(_lock)
+_flusher_lock = threading.Lock()
 _flusher_started = False
 _client = None
 _created_tables: set = set()
 _noted: set = set()
+_sdk_checked: Optional[bool] = None
 
 # Counters are observability for tests and the ops surface, never control flow.
 _stats = {"enqueued": 0, "dropped_overflow": 0, "dropped_flush": 0, "flushed": 0}
@@ -95,13 +97,24 @@ def _app_version() -> Optional[str]:
 
 
 def disabled_reason() -> Optional[str]:
-    """None when the sink can run; else why it cannot. Never raises."""
+    """None when the sink can run; else why it cannot. Never raises.
+
+    Credential PRESENCE, not validity: a malformed key or wrong-project SA
+    surfaces on the first flush as the sink's one stderr drop line, never in
+    a product path. The SDK import result is cached so terminal-path callers
+    pay it at most once per process."""
+    global _sdk_checked
     try:
         if os.environ.get("LEAF_TELEMETRY_DISABLED", "") == "1":
             return "kill switch LEAF_TELEMETRY_DISABLED=1"
-        try:
-            import google.cloud.bigquery  # noqa: F401  (app image only)
-        except Exception:  # noqa: BLE001
+        if _sdk_checked is None:
+            try:
+                import google.cloud.bigquery  # noqa: F401  (app image only)
+
+                _sdk_checked = True
+            except Exception:  # noqa: BLE001
+                _sdk_checked = False
+        if not _sdk_checked:
             return "google-cloud-bigquery not installed (broker image or test env)"
         if not (
             os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
@@ -140,8 +153,11 @@ def _table_id(day: str) -> str:
 
 def _ensure_table(day: str) -> None:
     """Create the day's table once per process (leaf_website creation-lock
-    pattern). Races with other tasks are benign: create raises Conflict,
-    which we treat as created."""
+    pattern). exists_ok=True absorbs the benign already-exists race; any
+    OTHER failure (network, permission) RAISES into _flush_batch's drop
+    handler and is NOT cached as created, so the next batch retries instead
+    of dropping for the rest of the day. The memo only ever holds the
+    current and previous day."""
     if day in _created_tables:
         return
     from google.cloud import bigquery
@@ -151,10 +167,9 @@ def _ensure_table(day: str) -> None:
         _table_id(day),
         schema=[bigquery.SchemaField(n, t, mode=m) for n, t, m in _TABLE_SCHEMA],
     )
-    try:
-        client.create_table(table, exists_ok=True)
-    except Exception:  # noqa: BLE001 - Conflict/exists races are benign
-        pass
+    client.create_table(table, exists_ok=True)
+    if len(_created_tables) >= 2:
+        _created_tables.clear()
     _created_tables.add(day)
 
 
@@ -208,17 +223,25 @@ def _flusher_loop() -> None:  # pragma: no cover - thread loop; body covered via
 
 
 def _ensure_flusher() -> None:
+    """Start the flusher exactly once; the flag flips only AFTER a successful
+    Thread.start(), so a failed start retries on the next emit."""
     global _flusher_started
     if _flusher_started:
         return
-    _flusher_started = True
-    threading.Thread(target=_flusher_loop, name="leaf-telemetry-flush", daemon=True).start()
+    with _flusher_lock:
+        if _flusher_started:
+            return
+        threading.Thread(
+            target=_flusher_loop, name="leaf-telemetry-flush", daemon=True
+        ).start()
+        _flusher_started = True
 
 
-def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[str]:
-    """All label values become STRINGS (exemplar SAFE_CAST discipline); the
-    column is JSON, serialized once here so a bad value can never poison a
-    whole batch."""
+def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """All label values become STRINGS (exemplar SAFE_CAST discipline). The
+    return value is a DICT, not serialized text: BigQuery's streaming API
+    stores a JSON column from an object; a pre-serialized string would land
+    as a JSON string and break every JSON_VALUE(labels.x) query."""
     if not labels:
         return None
     out: Dict[str, str] = {}
@@ -229,7 +252,7 @@ def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[str]:
             out[str(k)] = v if isinstance(v, str) else json.dumps(v) if isinstance(v, (dict, list)) else str(v)
         except Exception:  # noqa: BLE001 - skip the one bad value, keep the event
             continue
-    return json.dumps(out, separators=(",", ":"), default=str) if out else None
+    return out or None
 
 
 def emit(
@@ -256,7 +279,9 @@ def emit(
         if event_type not in EVENT_TYPES:
             return False
         merged = dict(labels or {})
-        merged.setdefault("schema_version", "1")
+        # Server authority: no caller (least of all a client payload routed
+        # through the ingest door) may assert a different schema_version.
+        merged["schema_version"] = "1"
         row = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
             + f".{int((time.time() % 1) * 1e6):06d}Z",

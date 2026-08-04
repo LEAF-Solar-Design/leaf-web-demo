@@ -35,6 +35,17 @@ CLIENT_TS_CLAMP_S = 24 * 3600.0
 
 _NAME_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
+# Identity and envelope fields are SERVER-STAMPED; a client may not smuggle
+# them (or lookalikes) in as labels. Stripped silently before merge.
+RESERVED_LABEL_KEYS = frozenset({
+    "tenant_id", "tenant_kind", "user_id", "user_email", "session_id",
+    "environment", "app_version", "schema_version", "timestamp",
+    "event_type", "event_name", "client_ts", "ingest",
+})
+MAX_LABELS_PER_EVENT = 40
+MAX_LABEL_KEY_LEN = 64
+MAX_LABEL_VALUE_LEN = 512
+
 # Pre-auth allowlist: exactly the three top-of-funnel events that fire before
 # any identity exists. Everything else requires a principal.
 PREAUTH_EVENTS = frozenset({"gate.choice", "site.demo_viewed", "tour.started"})
@@ -48,22 +59,52 @@ _buckets: Dict[str, List[float]] = {}
 _bucket_lock = threading.Lock()
 
 
-def _preauth_bucket_allows(ip: str) -> bool:
+def _bucket_allows(key: str, cost: float) -> bool:
+    """Token bucket keyed by caller (pre-auth: IP; guest: tenant id). COST is
+    the event count, so one request with 50 events spends 50 tokens, not 1.
+    Behind the ALB the pre-auth key is the ASGI peer (uvicorn's
+    --proxy-headers governs whether that is the client or the proxy); guests
+    key on their verified tenant id, which no proxy topology can merge."""
     try:
+        cost = max(1.0, float(cost))
         now = time.monotonic()
         with _bucket_lock:
-            tokens, last = _buckets.get(ip, (_BUCKET_BURST, now))
+            tokens, last = _buckets.get(key, (_BUCKET_BURST, now))
             tokens = min(_BUCKET_BURST, tokens + (now - last) * _BUCKET_PER_S)
-            if tokens < 1.0:
-                _buckets[ip] = [tokens, now]
+            if tokens < cost:
+                _buckets[key] = [tokens, now]
                 return False
-            _buckets[ip] = [tokens - 1.0, now]
-            # Unbounded dict guard: telemetry may be hit by scanners.
+            _buckets[key] = [tokens - cost, now]
+            # Unbounded dict guard: evict only REFILLED (idle) buckets first,
+            # so an exhausted attacker bucket is never reset by the sweep.
             if len(_buckets) > 10_000:
-                _buckets.clear()
+                for k in [k for k, (t, _l) in _buckets.items() if t >= _BUCKET_BURST - 1.0]:
+                    _buckets.pop(k, None)
+                if len(_buckets) > 10_000:
+                    _buckets.clear()  # last resort; logged nowhere, telemetry is loss-tolerant
             return True
     except Exception:  # noqa: BLE001 - never let accounting break ingest
         return False
+
+
+async def _bounded_body(request: Request) -> Optional[bytes]:
+    """Read at most MAX_BODY_BYTES without ever buffering an unbounded public
+    payload: reject on the Content-Length header when present, and abort a
+    chunked stream the moment it crosses the cap."""
+    try:
+        declared = request.headers.get("content-length")
+        if declared is not None and int(declared) > MAX_BODY_BYTES:
+            return None
+    except Exception:  # noqa: BLE001 - a garbage header is an oversize body
+        return None
+    chunks: List[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _resolve_principal(request: Request, x_tenant_id, authorization,
@@ -96,14 +137,16 @@ async def ingest(request: Request,
                  x_guest_session: Optional[str] = Header(default=None)) -> Any:
     accepted = 0
     try:
-        raw = await request.body()
-        if len(raw) > MAX_BODY_BYTES:
+        raw = await _bounded_body(request)
+        if raw is None:
             return {"accepted": 0}
         try:
             import json as _json
 
             body = _json.loads(raw or b"{}")
         except Exception:  # noqa: BLE001
+            return {"accepted": 0}
+        if not isinstance(body, dict):
             return {"accepted": 0}
         events = body.get("events")
         if not isinstance(events, list):
@@ -112,13 +155,18 @@ async def ingest(request: Request,
         principal = _resolve_principal(
             request, x_tenant_id, authorization, x_dispatch_secret, x_guest_session)
 
+        n_cost = min(len(events), MAX_EVENTS)
         if principal is not None:
             tenant_id = str(principal)
             tenant_kind = "guest" if tenant_id.startswith("guest-") else "account"
             user_id = getattr(principal, "subject", None)
+            # Guests are verified but self-mintable; they ride the same bucket
+            # keyed by their tenant id. Accounts are not bucketed.
+            if tenant_kind == "guest" and not _bucket_allows(f"g:{tenant_id}", n_cost):
+                return {"accepted": 0}
         else:
             client_host = getattr(getattr(request, "client", None), "host", None) or "unknown"
-            if not _preauth_bucket_allows(str(client_host)):
+            if not _bucket_allows(f"ip:{client_host}", n_cost):
                 return {"accepted": 0}
             tenant_id = "anon"
             tenant_kind = "anon"
@@ -141,7 +189,14 @@ async def ingest(request: Request,
             if principal is None and name not in PREAUTH_EVENTS:
                 continue
             labels = ev.get("labels") if isinstance(ev.get("labels"), dict) else {}
-            merged: Dict[str, Any] = dict(labels)
+            # Reserved keys are server-stamped envelope/identity fields: a
+            # client may not smuggle them (or oversize junk) in as labels.
+            merged: Dict[str, Any] = {}
+            for k, v in list(labels.items())[: MAX_LABELS_PER_EVENT]:
+                key = str(k)[:MAX_LABEL_KEY_LEN]
+                if key in RESERVED_LABEL_KEYS:
+                    continue
+                merged[key] = str(v)[:MAX_LABEL_VALUE_LEN] if isinstance(v, str) else v
             client_ts = _clamped_client_ts(ev.get("client_ts"))
             if client_ts is not None:
                 merged["client_ts"] = client_ts

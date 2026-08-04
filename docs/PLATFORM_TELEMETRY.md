@@ -67,8 +67,8 @@ bounded queue, drop-oldest, kill switch, never-raise emitters.
 
 ## Config (staging first; prod rides the normal deploy train)
 
-- `LEAF_TELEMETRY_DISABLED=1` — kill switch (mirrors `APS_EMF_DISABLED`).
-- `GOOGLE_APPLICATION_CREDENTIALS_JSON` — insert-only service account for
+- `LEAF_TELEMETRY_DISABLED=1`: kill switch (mirrors `APS_EMF_DISABLED`).
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON`: insert-only service account for
   the ONE dataset (NEVER the ops-dashboard reader SA), via AWS Secrets
   Manager + terraform.
 - `LEAF_TELEMETRY_DATASET` (default `leaf_platform_analytics`),
@@ -86,8 +86,8 @@ bounded queue, drop-oldest, kill switch, never-raise emitters.
 | Event | Source | Labels live today |
 |---|---|---|
 | `job.terminal` | server, `jobs.complete_callback` (both store modes) | job_id, status, tool, duration_ms (pg mode), error_code, attempts, execution_path |
-| `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, model, grant_kind, degraded, tools_called_n, usd_est, tokens_in, tokens_out |
-| client ingest door | `POST /api/telemetry` | pre-auth trio + any valid authed event |
+| `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, tools_called_n, usd_est, tokens_in, tokens_out; model / grant_kind / degraded ONLY when the usage wire supplies them (optional fields the sink drops when absent) |
+| client ingest door | `POST /api/telemetry` | pre-auth trio + any valid authed event; reserved envelope/identity keys are stripped from client labels |
 
 The remaining taxonomy (author/grant/drawing/org walls and funnels, the
 client tracker's ~25 call sites) lands in the follow-up waves; labels are

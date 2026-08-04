@@ -21,11 +21,18 @@ from routers import telemetry as telemetry_router
 
 @pytest.fixture(autouse=True)
 def _reset_sink(monkeypatch):
-    # Each test starts with an empty queue and fresh counters.
-    telemetry_sink._queue.clear()
-    for k in telemetry_sink._stats:
-        telemetry_sink._stats[k] = 0
-    telemetry_router._buckets.clear()
+    # Each test starts with fresh module state, mutated under the sink's own
+    # locks so a lingering flusher thread from another test cannot race the
+    # reset.
+    with telemetry_sink._wake:
+        telemetry_sink._queue.clear()
+        for k in telemetry_sink._stats:
+            telemetry_sink._stats[k] = 0
+    telemetry_sink._created_tables.clear()
+    telemetry_sink._noted.clear()
+    telemetry_sink._sdk_checked = None
+    with telemetry_router._bucket_lock:
+        telemetry_router._buckets.clear()
     yield
 
 
@@ -75,12 +82,62 @@ def test_sink_enqueues_row_with_stringified_labels(monkeypatch):
     assert row["event_name"] == "job.terminal"
     assert row["tenant_id"] == "acme"
     assert row["environment"] == "staging"
-    labels = json.loads(row["labels"])
-    # ALL values strings; None dropped; schema_version stamped.
+    labels = row["labels"]
+    # The labels column is a DICT (a JSON OBJECT on the wire): a serialized
+    # string would break every JSON_VALUE(labels.x) query downstream
+    # (review #420 round-1 blocker 1).
+    assert isinstance(labels, dict)
+    # ALL values strings; None dropped; schema_version stamped by the server
+    # even if a caller supplied one.
     assert labels["attempts"] == "2"
     assert labels["usd_est"] == "0.01"
     assert labels["schema_version"] == "1"
     assert "none_dropped" not in labels
+
+
+def test_sink_schema_version_is_server_authority(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    telemetry_sink.emit(
+        "a.b", tenant_id="t", tenant_kind="account", session_id="s",
+        labels={"schema_version": "999"})
+    assert telemetry_sink._queue[-1]["labels"]["schema_version"] == "1"
+
+
+def test_ensure_table_failure_is_not_cached_as_created(monkeypatch):
+    """A transient create failure must RAISE into the batch-drop handler and
+    leave the day uncached so the next batch retries (review #420 round-1
+    blocker 4)."""
+    class _FailingClient:
+        project = "p"
+
+        def create_table(self, table, exists_ok=False):
+            raise RuntimeError("transient permission blip")
+
+        def insert_rows_json(self, *a, **kw):  # pragma: no cover - unreached
+            return []
+
+    monkeypatch.setattr(telemetry_sink, "_get_client", lambda: _FailingClient())
+    # _ensure_table imports the SDK for schema objects; fake just enough.
+    import types as _types
+    import sys as _sys
+
+    class _SchemaField:
+        def __init__(self, *a, **kw):
+            pass
+
+    class _Table:
+        def __init__(self, *a, **kw):
+            pass
+
+    fake_bq = _types.SimpleNamespace(SchemaField=_SchemaField, Table=_Table)
+    fake_cloud = _types.SimpleNamespace(bigquery=fake_bq)
+    monkeypatch.setitem(_sys.modules, "google", _types.SimpleNamespace(cloud=fake_cloud))
+    monkeypatch.setitem(_sys.modules, "google.cloud", fake_cloud)
+    monkeypatch.setitem(_sys.modules, "google.cloud.bigquery", fake_bq)
+
+    telemetry_sink._flush_batch([{"event_name": "a.b"}])
+    assert telemetry_sink._created_tables == set()
+    assert telemetry_sink.stats()["dropped_flush"] == 1
 
 
 def test_sink_rejects_unknown_event_type(monkeypatch):
@@ -106,7 +163,7 @@ def test_sink_drops_oldest_on_overflow(monkeypatch):
         )
     q = list(telemetry_sink._queue)
     assert len(q) == 3
-    kept = [json.loads(r["labels"])["i"] for r in q]
+    kept = [r["labels"]["i"] for r in q]
     assert kept == ["2", "3", "4"]  # oldest dropped, newest kept
     assert telemetry_sink.stats()["dropped_overflow"] == 2
 
@@ -137,9 +194,10 @@ def test_ingest_oversize_body_dropped_as_202(monkeypatch):
     assert resp.json() == {"accepted": 0}
 
 
-def test_ingest_identity_is_server_stamped_never_client(monkeypatch):
-    """Legacy auth-off mode resolves X-Tenant-Id (or the default tenant); a
-    tenant_id smuggled in labels must NOT become the row identity."""
+def test_ingest_identity_is_server_stamped_and_reserved_labels_stripped(monkeypatch):
+    """Identity comes ONLY from the resolved principal, and reserved
+    envelope/identity keys smuggled as labels are DROPPED entirely
+    (review #420 round-1 blocker 3)."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     c = _client()
@@ -147,7 +205,9 @@ def test_ingest_identity_is_server_stamped_never_client(monkeypatch):
         c,
         {"session_id": "browser-1",
          "events": [{"event_name": "prompt.submitted",
-                     "labels": {"tenant_id": "victim", "input_kind": "typed"}}]},
+                     "labels": {"tenant_id": "victim", "user_email": "x@y.z",
+                                "schema_version": "999", "environment": "prod",
+                                "input_kind": "typed"}}]},
         headers={"X-Tenant-Id": "acme"},
     )
     assert resp.status_code == 202
@@ -155,10 +215,34 @@ def test_ingest_identity_is_server_stamped_never_client(monkeypatch):
     row = telemetry_sink._queue[-1]
     assert row["tenant_id"] == "acme"          # from the resolved principal
     assert row["session_id"] == "browser-1"
-    labels = json.loads(row["labels"])
-    # The smuggled label survives AS A LABEL but the identity column wins.
-    assert labels.get("tenant_id") == "victim"
-    assert row["tenant_id"] != "victim"
+    labels = row["labels"]
+    assert labels["input_kind"] == "typed"
+    for smuggled in ("tenant_id", "user_email", "environment"):
+        assert smuggled not in labels
+    assert labels["schema_version"] == "1"     # server authority, not "999"
+
+
+def test_ingest_malformed_raw_json_is_202_zero(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    c = _client()
+    resp = c.post("/api/telemetry", content=b"\x00not json",
+                  headers={"Content-Type": "application/json"})
+    assert resp.status_code == 202
+    assert resp.json() == {"accepted": 0}
+
+
+def test_ingest_bucket_costs_events_not_requests(monkeypatch):
+    """One anonymous request with N allowlisted events spends N tokens
+    (review #420 round-1 warn 5)."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setattr(telemetry_router, "_BUCKET_BURST", 5.0)
+    c = _client()
+    resp = _post(c, {"events": [{"event_name": "tour.started"}] * 4})
+    assert resp.json()["accepted"] == 4
+    # 1 token left; a 2-event request must drop entirely.
+    resp = _post(c, {"events": [{"event_name": "tour.started"}] * 2})
+    assert resp.json()["accepted"] == 0
 
 
 def test_ingest_caps_events_per_body(monkeypatch):
@@ -215,6 +299,6 @@ def test_ingest_client_ts_clamped_into_labels(monkeypatch):
         headers={"X-Tenant-Id": "acme"},
     )
     assert resp.json()["accepted"] == 1
-    labels = json.loads(telemetry_sink._queue[-1]["labels"])
+    labels = telemetry_sink._queue[-1]["labels"]
     clamped = float(labels["client_ts"])
     assert abs(_t.time() - clamped) <= telemetry_router.CLIENT_TS_CLAMP_S + 5

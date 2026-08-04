@@ -62,29 +62,26 @@ def _emit_job_terminal(status: str) -> None:
 def _emit_job_terminal_event(job_id: str, status: str,
                              error: Optional[Dict[str, Any]],
                              provenance: Optional[Dict[str, Any]],
-                             conn: Any = None) -> None:
+                             tenant_id: Optional[str] = None,
+                             tool: Optional[str] = None,
+                             elapsed_ms: Optional[int] = None) -> None:
     """Best-effort `job.terminal` PRODUCT event (P2 telemetry): the identity-
     carrying twin of the EMF JobTerminal count. NEVER raises; a lookup miss
     emits nothing rather than a row with fabricated identity.
 
-    ``conn``: the sqlite call site already holds the module `_lock` (which is
-    NOT re-entrant), so it passes its open connection; the pg call site
-    passes none and reads through the store."""
+    The sqlite call site captures tenant/tool INSIDE its locked region and
+    passes VALUES (no connection crosses the lock boundary). The pg call
+    site passes nothing and this helper does one indexed read — gated on an
+    ENABLED sink so a dark deployment pays zero extra round trips."""
     if telemetry_sink is None:
         return
     try:
-        tenant_id = tool = None
-        elapsed_ms = None
-        if job_store_mode() == "postgres":
+        if telemetry_sink.disabled_reason() is not None:
+            return
+        if tenant_id is None and job_store_mode() == "postgres":
             ctx = _pg_store.event_context(job_id)
             if ctx:
                 tenant_id, tool, elapsed_ms = ctx["tenant_id"], ctx["tool"], ctx["elapsed_ms"]
-        elif conn is not None:
-            row = conn.execute(
-                "SELECT tenant_id, tool FROM jobs WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if row is not None:
-                tenant_id, tool = row["tenant_id"], row["tool"]
         if not tenant_id:
             return
         labels: Dict[str, Any] = {"job_id": job_id, "status": status}
@@ -891,12 +888,15 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
     with _lock:
         conn = _db()
         durable = conn.execute(
-            "SELECT attempt, execution_json, org_id, project_id "
+            "SELECT attempt, execution_json, org_id, project_id, tenant_id, tool "
             "FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         if durable is None:
             return "missing"
         durable_attempt = int(durable["attempt"] or 0)
+        # Captured under the lock for the post-lock telemetry emit: no
+        # connection may cross the lock boundary (review #420 round 1).
+        event_tenant_id, event_tool = durable["tenant_id"], durable["tool"]
         _validate_terminal_context(
             status, result_env, provenance, durable_attempt,
             json.loads(durable["execution_json"] or "{}"),
@@ -971,7 +971,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             else:
                 _clear_platform_mirror_pending(job_id)
         _emit_job_terminal(status)
-        _emit_job_terminal_event(job_id, status, error, provenance, conn=conn)
+        _emit_job_terminal_event(job_id, status, error, provenance,
+                                 tenant_id=event_tenant_id, tool=event_tool)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 
