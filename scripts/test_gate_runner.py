@@ -916,6 +916,31 @@ def test_verifier_refuses_an_ungated_suite_level_skip(tmp_path, monkeypatch, cap
     assert "no suite-level skip gate" in out
 
 
+def test_verifier_refuses_non_integer_or_negative_executed_counts(
+        tmp_path, monkeypatch, capsys):
+    """sol-critic #436 round 4: bool subclasses int, so a corrupt
+    `executed: true` satisfied isinstance(executed, int) and cleared a floor
+    of 1; negative counts were equally acceptable to the floorless branch.
+    Both must be refused as proof of nothing."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _json = _write_shard_files(g, stubs, tmp_path)
+
+    for poison in (True, -1):
+        shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+        d = _json.loads(shard0.read_text(encoding="utf-8"))
+        d["results"][0]["executed"] = poison
+        d["executed_total"] = sum(
+            e["executed"] or 0 for e in d["results"])
+        shard0.write_text(_json.dumps(d), encoding="utf-8")
+
+        rc = g.verify_shard_results(tmp_path)
+        out = capsys.readouterr().out
+        assert rc == 1, (poison, out)
+        assert "below its floor" in out, (poison, out)
+
+
 def test_verifier_names_corrupt_result_entries_instead_of_crashing(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()

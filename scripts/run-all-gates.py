@@ -806,14 +806,14 @@ def build_suites() -> List[Suite]:
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 46: the 29 measured 2026-07-28, plus the 17 sharding tests
+        # Floor 47: the 29 measured 2026-07-28, plus the 18 sharding tests
         # (partition determinism, catalog fingerprint incl. toolchain-path
         # canonicalization, the glob pin on platform/tests/*_static.py, shard
         # CLI rejections, and the fan-in verifier's accept cases + refusal of
         # every corruption class incl. below-floor PASS and ungated SKIP),
         # measured on this tree 2026-08-04.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 46),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 47),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1630,12 +1630,18 @@ def verify_shard_results(results_dir: Path) -> int:
                 status = e.get("status")
                 executed = e.get("executed")
                 if status == "PASS":
+                    # type() is int, NOT isinstance: bool subclasses int, so a
+                    # corrupt `executed: true` would satisfy isinstance and
+                    # clear a floor of 1 (sol-critic #436 round 4). Negative
+                    # counts are equally meaningless and refused.
                     if suite.expected is not None:
-                        if not isinstance(executed, int) or executed < suite.expected:
+                        if (type(executed) is not int or executed < 0
+                                or executed < suite.expected):
                             problems.append(
                                 f"shard {i}: {suite.id} PASS with executed "
                                 f"{executed!r} below its floor {suite.expected}")
-                    elif suite.kind in ("pytest", "vitest") and not executed:
+                    elif suite.kind in ("pytest", "vitest") and (
+                            type(executed) is not int or executed < 1):
                         problems.append(
                             f"shard {i}: {suite.id} PASS with no executed tests")
                 elif status == "SKIP" and not (suite.db_gated or suite.opt_in_env):
