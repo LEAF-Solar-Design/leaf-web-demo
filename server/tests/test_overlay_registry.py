@@ -22,7 +22,6 @@ DEFAULTS = {
     "color.canvas.bg": "#ffffff",
     "color.canvas.fg": "#1a1a1a",
     "color.panel.bg": "#f5f5f5",
-    "color.panel.fg": "#1a1a1a",
     "color.accent": "#0f6e56",
     "color.accent.fg": "#ffffff",
     "color.border": "#d0d0d0",
@@ -195,7 +194,7 @@ def test_composition_accounts_for_an_already_approved_overlay():
     overlay to erase contrast."""
     current = {"color.panel.bg": "#101010"}
     with pytest.raises(reg.OverlayTokenError):
-        reg.validate_overlay({"color.panel.fg": "#121212"},
+        reg.validate_overlay({"color.canvas.fg": "#121212"},
                              current=current, defaults=DEFAULTS)
 
 
@@ -210,3 +209,25 @@ def test_empty_or_oversized_overlays_refused():
         reg.validate_overlay({}, defaults=DEFAULTS)
     with pytest.raises(reg.OverlayTokenError):
         reg.validate_overlay({f"k{i}": "#fff" for i in range(99)}, defaults=DEFAULTS)
+
+
+def test_panel_text_is_validated_against_the_pair_that_RENDERS():
+    """The shipped stylesheet has ONE text colour — panels inherit it. A
+    separate color.panel.fg token therefore certified a cascade that did not
+    exist (sol-critic PR #439 rounds 8-9): the server measured its own default
+    while the screen showed overlaid canvas text on the panel background.
+
+    The token is gone and canvas.fg is measured against BOTH backgrounds, so
+    a proposal that clears the canvas pair but would be unreadable on panels
+    is refused.
+    """
+    assert "color.panel.fg" not in reg.REGISTRY
+    assert ("color.canvas.fg", "color.panel.bg") in reg.CONTRAST_PAIRS
+
+    # 4.55:1 on the canvas, 4.07:1 on the panel — accepted before, refused now.
+    defaults = dict(DEFAULTS)
+    defaults.update({"color.canvas.bg": "#0a0a0a", "color.panel.bg": "#18181b"})
+    assert reg.contrast_ratio("#797979", "#0a0a0a") > reg.MIN_CONTRAST
+    assert reg.contrast_ratio("#797979", "#18181b") < reg.MIN_CONTRAST
+    with pytest.raises(reg.OverlayTokenError):
+        reg.validate_overlay({"color.canvas.fg": "#797979"}, defaults=defaults)

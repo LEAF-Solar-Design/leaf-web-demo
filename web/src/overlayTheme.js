@@ -40,7 +40,6 @@ export const CSS_VAR_BY_TOKEN = {
   'color.canvas.bg': ['--background'],
   'color.canvas.fg': ['--foreground'],
   'color.panel.bg': ['--card', '--card-grad'],
-  'color.panel.fg': ['--panel-fg'],
   'color.accent': ['--primary'],
   'color.accent.fg': ['--on-accent'],
   'color.border': ['--border'],
