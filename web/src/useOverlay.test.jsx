@@ -207,3 +207,45 @@ describe('concurrent reads (sol-critic PR #439 round 2)', () => {
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#020202')
   })
 })
+
+describe('a decision that outlives its session (round 3)', () => {
+  it('cannot write session A state after a switch to B', async () => {
+    // decide() captures its refresh on session A. If the session changes while
+    // the decision is in flight, that A-era callback used to read the CURRENT
+    // generation, fetch A, pass both fences, and replace B's state.
+    let resolveDecide
+    const decideGate = new Promise((r) => { resolveDecide = r })
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const target = String(url)
+      if ((init?.method || 'GET') === 'POST') {
+        await decideGate
+        return ok({ proposal_id: 'p-1', state: 'approved', document_version: 1 })
+      }
+      if (target.includes('s-A')) {
+        return ok({ tokens: { 'color.accent': '#0a0a0a' },
+                    document_version: 1, pending_proposal_id: null })
+      }
+      return ok({ tokens: { 'color.accent': '#0b0b0b' },
+                  document_version: 7, pending_proposal_id: null })
+    })
+
+    let hook
+    function P({ sessionId }) {
+      hook = useOverlay(sessionId)
+      return <div data-testid="v">{hook.loaded ? `v${hook.documentVersion}` : 'loading'}</div>
+    }
+    const { rerender } = render(<P sessionId="s-A" />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v1'))
+
+    const pending = hook.decide('p-1', { approve: true, documentVersion: 1 })
+    rerender(<P sessionId="s-B" />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v7'))
+
+    resolveDecide()
+    await pending.catch(() => {})
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(screen.getByTestId('v').textContent).toBe('v7')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#0b0b0b')
+  })
+})

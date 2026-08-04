@@ -41,12 +41,14 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   //     overlay applied.
   const readSeqRef = useRef(0)
   const genRef = useRef(0)
+  const sessionRef = useRef(sessionId)
   const inFlightGenRef = useRef(null)
   const againRef = useRef(false)
 
   useEffect(() => {
     // A new session invalidates every in-flight read and the coalescing
     // coordinator with them.
+    sessionRef.current = sessionId
     genRef.current += 1
     againRef.current = false
     inFlightGenRef.current = null
@@ -55,11 +57,18 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
   }, [sessionId])
 
   const runRead = useCallback(async () => {
+    // Bound to the session THIS closure reads, not to whatever generation is
+    // current when it happens to run: a callback captured on session A (a
+    // decide() started before a switch) would otherwise stamp itself with B's
+    // generation, fetch A, pass both fences, and replace B's state with A's
+    // (sol-critic PR #439 round 3).
+    if (sessionId !== sessionRef.current) return false
     const gen = genRef.current
     const seq = ++readSeqRef.current
     // fetchOverlay never throws: a theme read is not worth breaking the app,
     // and an empty result leaves the committed defaults exactly as they are.
     const next = await fetchOverlay(sessionId)
+    if (sessionId !== sessionRef.current) return false  // switched mid-flight
     if (gen !== genRef.current) return false      // the session moved on
     if (seq !== readSeqRef.current) return false  // a newer read superseded us
     setState(next)

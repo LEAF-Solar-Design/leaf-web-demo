@@ -162,10 +162,30 @@ def test_every_decision_path_takes_the_lock_through_the_one_helper():
     body = src.split("def _lock_latest(", 1)[1]
     for path in ("def approve(", "def deny(", "def revert("):
         segment = body.split(path, 1)[1].split("\ndef ", 1)[0]
-        assert "_lock_latest(cur, proposal_id)" in segment, path
+        assert "_lock_latest(cur, proposal_id, tenant_id)" in segment, path
         assert "ORDER BY revision DESC LIMIT 1 FOR UPDATE" not in segment, (
             f"{path} re-introduced the single-statement lock that does not "
             f"serialize under READ COMMITTED")
+
+
+def test_the_locked_lookup_is_tenant_scoped_in_BOTH_statements():
+    """Tenant scoping in the locked lookup is a security boundary, not a
+    filter: without it, knowing another tenant's proposal id was enough to
+    approve, deny or revert it, and the mutation landed on THEIR document
+    because the code read the tenant off the proposal row (sol-critic PR #439
+    round 2). Both statements need the predicate — the anchor-row FOR UPDATE
+    and the latest-revision re-read — or the lock and the read disagree about
+    which rows exist.
+    """
+    src = _store()
+    body = src.split("def _lock_latest(", 1)[1].split("\ndef ", 1)[0]
+    statements = [chunk for chunk in body.split("cur.execute(")[1:]]
+    assert len(statements) == 2, "the two-statement lock discipline changed"
+    for statement in statements:
+        assert "tenant_id = %(tid)s" in statement, statement[:120]
+    # The anchor subquery must be scoped too, or MIN(revision) is taken over
+    # another tenant's rows and the FOR UPDATE matches nothing.
+    assert body.count("tenant_id = %(tid)s") >= 3
 
 
 def test_sweeper_does_not_block_the_decision_path():

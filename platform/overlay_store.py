@@ -60,13 +60,20 @@ def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Reads
 # --------------------------------------------------------------------------- #
-def latest_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
-    """Highest revision wins — that IS the current state of the proposal."""
+def latest_proposal(proposal_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+    """Highest revision wins — that IS the current state of the proposal.
+
+    TENANT-SCOPED like every other lookup in this module. It has no caller
+    today, and that is exactly why it was worth fixing now: an unscoped public
+    read returning another tenant's tokens, session id and actor is a hole
+    waiting for its first caller (sol-critic PR #439 round 3).
+    """
     with db.cursor() as cur:
         cur.execute(
             f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
-            "WHERE proposal_id = %(pid)s ORDER BY revision DESC LIMIT 1",
-            {"pid": proposal_id})
+            "WHERE proposal_id = %(pid)s AND tenant_id = %(tid)s "
+            "ORDER BY revision DESC LIMIT 1",
+            {"pid": proposal_id, "tid": tenant_id})
         return _row_to_dict(cur.fetchone())
 
 
