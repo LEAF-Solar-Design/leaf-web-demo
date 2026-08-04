@@ -1735,8 +1735,9 @@ export default function App() {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
         if (toolObj && !isWrite) {
-          onRequestCatalogRun(toolObj, r.params || {},
-            'Guided tour selection. Confirm before it runs.', 'tour')
+          // Kept on ONE line: scripts/check_run_intent.mjs pins this exact
+          // call shape as the PR107 intent-contract witness.
+          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.', 'tour')
         }
       }
     } finally {
