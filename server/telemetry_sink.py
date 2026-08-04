@@ -240,11 +240,14 @@ def _ensure_flusher() -> None:
         _flusher_started = True
 
 
-def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
-    """All label values become STRINGS (exemplar SAFE_CAST discipline). The
-    return value is a DICT, not serialized text: BigQuery's streaming API
-    stores a JSON column from an object; a pre-serialized string would land
-    as a JSON string and break every JSON_VALUE(labels.x) query."""
+def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[str]:
+    """All label values become STRINGS (exemplar SAFE_CAST discipline), and
+    the whole object is returned as ONE json.dumps string. LIVE-PROVEN, not
+    theory: the legacy insertAll API (insert_rows_json) takes a JSON column
+    as a JSON-encoded string and parses it into a JSON VALUE server-side;
+    passing a dict fails the row with "This field: labels is not a record"
+    (first live insert, staging 2026-08-04, the day table was created and
+    the row skipped). JSON_VALUE(labels.x) works against the parsed value."""
     if not labels:
         return None
     out: Dict[str, str] = {}
@@ -255,7 +258,7 @@ def _stringify_labels(labels: Optional[Dict[str, Any]]) -> Optional[Dict[str, st
             out[str(k)] = v if isinstance(v, str) else json.dumps(v) if isinstance(v, (dict, list)) else str(v)
         except Exception:  # noqa: BLE001 - skip the one bad value, keep the event
             continue
-    return out or None
+    return json.dumps(out) if out else None
 
 
 def emit(
