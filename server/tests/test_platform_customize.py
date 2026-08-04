@@ -168,29 +168,41 @@ def test_case_variant_spelling_still_classifies_fundamental(lane_env):
     assert lane.classify_fundamental(["docs/note.md"]) == []
 
 
-def test_repo_config_cannot_hide_a_change_from_the_binding_diff(lane_env):
-    """sol-critic PR #423 round 5. Repo config can HIDE changes from the diff
-    family — diff.ignoreSubmodules=all suppresses gitlink entries, and rename
-    detection collapses a delete+add. Either would let an unapproved change sit
-    outside `committed` while the path-set equality passed. The binding diff
-    therefore pins both on the command line, which overrides config.
+def test_the_binding_diff_pins_its_flags_in_the_real_command(lane_env, monkeypatch):
+    """The binding diff is a SECURITY ORACLE, and repo config can silently
+    change what it reports:
+      diff.renames / diff.ignoreSubmodules  -> a change vanishes from the diff
+      refs/replace/*                        -> the base tree itself is a lie
+    Each is overridden on the COMMAND LINE, which beats config.
 
-    Asserted against the real repo: with the hostile config set, the flags this
-    lane passes still report the change."""
-    repo = lane_env["repo"]
-    _git(repo, "config", "diff.ignoreSubmodules", "all")
-    _git(repo, "config", "diff.renames", "copies")
+    This asserts the argv the lane actually runs. An earlier version of this
+    test hardcoded the flags in its own diff call, so deleting them from
+    production still passed — a test that cannot fail is worse than none
+    (sol-critic PR #423 round 6)."""
+    seen: list[list[str]] = []
+    real = lane._run_git
+
+    def spy(cmd, **kwargs):
+        seen.append(list(cmd))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(lane, "_run_git", spy)
 
     view = lane.propose(
-        tenant_id=TENANT, subject="auth0|author-1", title="under hostile config",
-        edits=[{"path": "docs/note.md", "content": "still bound\n"}])
+        tenant_id=TENANT, subject="auth0|author-1", title="pin the flags",
+        edits=[{"path": "docs/note.md", "content": "pinned\n"}])
     assert view["state"] == "approved"
 
-    # The exact flag set the lane uses must still see the change.
-    seen = _git(repo, "diff", "--no-renames", "--ignore-submodules=none",
-                "--name-only", view["base_sha"], view["commit_sha"]).split()
-    assert seen == ["docs/note.md"]
-    assert set(view["paths"]) == set(seen)
+    binding = [c for c in seen if "diff" in c and "--name-only" in c]
+    assert binding, "the binding diff was never run"
+    for cmd in binding:
+        assert "--no-renames" in cmd, cmd
+        assert "--ignore-submodules=none" in cmd, cmd
+
+    # Every lane invocation must read REAL objects, not replacements.
+    assert seen, "no git commands were run"
+    for cmd in seen:
+        assert "--no-replace-objects" in cmd, cmd
 
 
 def test_rename_detection_cannot_hide_a_deletion(lane_env):

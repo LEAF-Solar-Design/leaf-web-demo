@@ -171,7 +171,14 @@ def _assert_branch_only(ref: str) -> str:
 # into operator-only detail)
 # --------------------------------------------------------------------------- #
 def _git_trust(*paths: Path) -> list[str]:
-    flags: list[str] = []
+    # --no-replace-objects on EVERY lane invocation. refs/replace/* are applied
+    # by default to almost all commands including diff and ls-tree, so a
+    # replacement for the base commit could present a tree that hides an
+    # unapproved side effect: the binding diff would report only approved
+    # paths while the PUBLISHED commit differs from the real base — and git
+    # excludes replacement refs from pack transfer, so the remote sees the
+    # unapproved change. The oracle must read real objects (sol-critic #423 r6).
+    flags: list[str] = ["--no-replace-objects"]
     for path in paths:
         try:
             resolved = str(path.resolve(strict=False))
