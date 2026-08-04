@@ -55,8 +55,8 @@ for i in range(TRIALS):
 
     t0 = time.perf_counter()
     proposal, doc = overlay_store.approve(
-        proposal_id=pid, actor="op@measure", decision_key="k1234567",
-        expected_version=0)
+        proposal_id=pid, tenant_id=tenant, actor="op@measure",
+        decision_key="k1234567", expected_version=0)
     approve_ms.append((time.perf_counter() - t0) * 1000.0)
     assert proposal["state"] == "approved" and doc["version"] == 1
 

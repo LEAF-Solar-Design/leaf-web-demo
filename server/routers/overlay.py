@@ -1,5 +1,13 @@
 """T1 overlay routes: propose a preview, decide it, read the live document.
 
+EVERY route is TENANT-SCOPED, and that is a security boundary rather than a
+convenience. Propose binds the named session to the caller; decide and revoke
+pass the caller's tenant INTO the store, which includes it in the locked
+lookup. Without that, knowing a proposal id was enough to decide it, and the
+mutation landed on the owning tenant's document because the code read the
+tenant off the proposal row instead of off the caller (sol-critic PR #439,
+rounds 1 and 2). A foreign id answers exactly like a missing one.
+
 These three are what make the T1 spine reachable. Before them the whole lane
 was unreachable code: a registry with no callers, a decision path with no
 proposals, an operator card wired to nothing.
@@ -169,13 +177,13 @@ def decide_overlay(body: DecideBody,
     try:
         if body.approve:
             proposal, document = store.approve(
-                proposal_id=body.proposal_id, actor=actor,
-                decision_key=body.decision_key,
+                proposal_id=body.proposal_id, tenant_id=str(tenant),
+                actor=actor, decision_key=body.decision_key,
                 expected_version=body.document_version)
         else:
             proposal = store.deny(
-                proposal_id=body.proposal_id, actor=actor,
-                decision_key=body.decision_key,
+                proposal_id=body.proposal_id, tenant_id=str(tenant),
+                actor=actor, decision_key=body.decision_key,
                 expected_version=body.document_version)
             document = store.document(str(tenant))
     except Exception as exc:  # noqa: BLE001 - OverlayStoreError carries the code
@@ -244,8 +252,8 @@ def revoke_overlay(body: RevokeBody,
     store = _store()
     try:
         proposal, document = store.revert(
-            proposal_id=body.proposal_id, actor=actor,
-            decision_key=body.decision_key,
+            proposal_id=body.proposal_id, tenant_id=str(tenant),
+            actor=actor, decision_key=body.decision_key,
             expected_version=body.document_version)
     except Exception as exc:  # noqa: BLE001 - OverlayStoreError carries the code
         code = getattr(exc, "code", "revoke_failed")

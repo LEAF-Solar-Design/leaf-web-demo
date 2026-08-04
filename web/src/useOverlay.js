@@ -25,36 +25,81 @@ const EMPTY = { tokens: {}, documentVersion: 0, pendingProposalId: null }
 export function useOverlay(sessionId, { enabled = true } = {}) {
   const [state, setState] = useState(EMPTY)
   const [loaded, setLoaded] = useState(false)
-  // Monotonic request id: only the NEWEST read may write state. Overlay
-  // events arrive in bursts (a remount replays the transcript from seq 0, so
-  // every historical overlay event fires a refresh), and concurrent reads can
-  // land out of order — an older response would then overwrite a newer one
-  // and pin the surface to a stale theme until the next event.
+
+  // ONE sequenced read primitive serves the mount read, stream refreshes and
+  // the post-decision read, because three unsequenced paths raced each other
+  // (sol-critic PR #439 round 2):
+  //   * readSeq — only the NEWEST read may write state. Overlay events arrive
+  //     in bursts (a remount replays the transcript from seq 0, so every
+  //     historical overlay event fires a refresh), and concurrent reads can
+  //     land out of order; an older response would otherwise overwrite a newer
+  //     one and pin the surface to a stale theme until the next event.
+  //   * generation — bumped on every session change. Coalescing state MUST NOT
+  //     span sessions: an in-flight read for the old session would otherwise
+  //     re-fetch the OLD session after the switch, take the newest seq, and
+  //     fence out the new session's mount read, leaving the previous tenant's
+  //     overlay applied.
   const readSeqRef = useRef(0)
-  const inFlightRef = useRef(false)
+  const genRef = useRef(0)
+  const inFlightGenRef = useRef(null)
   const againRef = useRef(false)
 
-  const reload = useCallback(async () => {
+  useEffect(() => {
+    // A new session invalidates every in-flight read and the coalescing
+    // coordinator with them.
+    genRef.current += 1
+    againRef.current = false
+    inFlightGenRef.current = null
+    setState(EMPTY)
+    setLoaded(false)
+  }, [sessionId])
+
+  const runRead = useCallback(async () => {
+    const gen = genRef.current
+    const seq = ++readSeqRef.current
     // fetchOverlay never throws: a theme read is not worth breaking the app,
     // and an empty result leaves the committed defaults exactly as they are.
     const next = await fetchOverlay(sessionId)
-    return next
+    if (gen !== genRef.current) return false      // the session moved on
+    if (seq !== readSeqRef.current) return false  // a newer read superseded us
+    setState(next)
+    setLoaded(true)
+    return true
   }, [sessionId])
+
+  // COALESCED refresh — what a stream event and a decision both call. A replay
+  // burst of N overlay events must cost ONE settling read, not N concurrent
+  // ones: while a read is in flight FOR THIS GENERATION, further calls only
+  // raise a flag, and exactly one more read runs after it lands (so the final
+  // state still reflects the last event, never a stale mid-burst snapshot).
+  //
+  // The three resets below (session effect, loop guard, per-iteration flag
+  // clear) are MUTUALLY REDUNDANT for the interleavings a test can stage —
+  // removing any one, or two, still leaves the observable property intact,
+  // which is why the regression test pins the behaviour rather than any single
+  // guard. They are each kept because they close different interleavings: the
+  // session effect covers an old read waking before the new effect runs, the
+  // loop guard covers it waking after.
+  const refresh = useCallback(async () => {
+    const gen = genRef.current
+    if (inFlightGenRef.current === gen) { againRef.current = true; return }
+    inFlightGenRef.current = gen
+    try {
+      do {
+        againRef.current = false
+        await runRead()
+        if (gen !== genRef.current) return   // session changed mid-flight
+      } while (againRef.current)
+    } finally {
+      if (inFlightGenRef.current === gen) inFlightGenRef.current = null
+    }
+  }, [runRead])
 
   useEffect(() => {
     if (!enabled) return undefined
-    let alive = true
-    const seq = ++readSeqRef.current
-    ;(async () => {
-      const next = await reload()
-      // Two fences: the component may have unmounted (alive), and a coalesced
-      // refresh may have superseded this mount read (seq).
-      if (!alive || seq !== readSeqRef.current) return
-      setState(next)
-      setLoaded(true)
-    })()
-    return () => { alive = false }
-  }, [enabled, reload])
+    void refresh()
+    return undefined
+  }, [enabled, refresh])
 
   // Applying is its own effect so a re-read swaps the overlay through the same
   // undo path rather than stacking properties on top of the previous set.
@@ -67,34 +112,12 @@ export function useOverlay(sessionId, { enabled = true } = {}) {
     const result = await decideOverlay(proposalId, opts)
     // Re-read rather than patching locally from the response. A client that
     // patches its own copy and misses one update stays wrong forever with no
-    // way to notice; the server is the only thing that knows the truth.
-    const next = await fetchOverlay(sessionId)
-    setState(next)
+    // way to notice; the server is the only thing that knows the truth. Routed
+    // through the SAME sequenced coordinator: an unsequenced write here could
+    // land after a newer event-driven read and overwrite it with older state.
+    await refresh()
     return result
-  }, [sessionId])
-
-  // COALESCED refresh — what a stream event calls. A replay burst of N
-  // overlay events must cost ONE settling read, not N concurrent ones: while
-  // a read is in flight, further calls only raise a flag, and exactly one
-  // more read runs after it lands (so the final state still reflects the last
-  // event, never a stale mid-burst snapshot). Out-of-order landings are
-  // additionally fenced by the request id.
-  const refresh = useCallback(async () => {
-    if (inFlightRef.current) { againRef.current = true; return }
-    inFlightRef.current = true
-    try {
-      do {
-        againRef.current = false
-        const seq = ++readSeqRef.current
-        const next = await fetchOverlay(sessionId)
-        if (seq !== readSeqRef.current) continue  // a newer read superseded us
-        setState(next)
-        setLoaded(true)
-      } while (againRef.current)
-    } finally {
-      inFlightRef.current = false
-    }
-  }, [sessionId])
+  }, [refresh])
 
   return {
     tokens: state.tokens,

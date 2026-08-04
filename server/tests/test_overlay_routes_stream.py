@@ -246,3 +246,42 @@ def test_a_foreign_tenants_session_is_refused_BEFORE_any_write(store, monkeypatc
     assert "session_not_found" in res.body.decode()
     assert proposed == [], "a foreign session must not reach the store"
     assert _events(other) == [], "nothing may be appended to a foreign transcript"
+
+
+def test_every_decision_route_passes_the_callers_tenant_to_the_store(store, session):
+    """sol-critic PR #439 round 2, MAJOR. The store's locked lookup filtered on
+    proposal_id ALONE and then acted on the tenant read off the PROPOSAL row,
+    so knowing another tenant's proposal id was enough to approve, deny or
+    revert it — and the mutation landed on THEIR document. The store now scopes
+    the lookup by tenant (a foreign id reads exactly like a missing one); this
+    pins the other half, that the routes actually hand it the CALLER's tenant
+    rather than dropping it.
+    """
+    seen = {}
+    store.approve = lambda **kw: (seen.setdefault("approve", kw),
+                                  ({"proposal_id": kw["proposal_id"],
+                                    "state": "approved", "session_id": session},
+                                   {"version": 5, "tokens": {}}))[1]
+    store.deny = lambda **kw: (seen.setdefault("deny", kw),
+                               {"proposal_id": kw["proposal_id"],
+                                "state": "denied", "session_id": session})[1]
+    store.revert = lambda **kw: (seen.setdefault("revert", kw),
+                                 ({"proposal_id": kw["proposal_id"],
+                                   "state": "reverted", "session_id": session,
+                                   "tokens": {"color.border": "#123456"}},
+                                  {"version": 6, "tokens": {}}))[1]
+
+    overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=True, decision_key="k1234567",
+                   document_version=3), x_actor="op@leaf", tenant=TENANT)
+    overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-2", approve=False, decision_key="k7654321",
+                   document_version=3), x_actor="op@leaf", tenant=TENANT)
+    overlay_router.revoke_overlay(
+        overlay_router.RevokeBody(proposal_id="p-3", decision_key="k1112223",
+                                  document_version=3),
+        x_actor="op@leaf", tenant=TENANT)
+
+    assert set(seen) == {"approve", "deny", "revert"}
+    for name, kw in seen.items():
+        assert kw.get("tenant_id") == TENANT, f"{name} dropped the caller's tenant"

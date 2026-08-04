@@ -105,3 +105,105 @@ describe('deciding', () => {
     })).rejects.toMatchObject({ errorCode: 'already_decided' })
   })
 })
+
+describe('concurrent reads (sol-critic PR #439 round 2)', () => {
+  it('coalesces a replay burst into ONE settling read', async () => {
+    // A remount replays the transcript from seq 0, so every historical overlay
+    // event fires a refresh. Unbounded, that is N concurrent GETs whose
+    // responses can land out of order.
+    let resolveFirst
+    const gate = new Promise((r) => { resolveFirst = r })
+    let calls = 0
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) await gate
+      return ok({ tokens: {}, document_version: calls, pending_proposal_id: null })
+    })
+
+    let hook
+    function Burst() {
+      hook = useOverlay('s-1')
+      return <div data-testid="v">{hook.loaded ? `v${hook.documentVersion}` : 'loading'}</div>
+    }
+    render(<Burst />)
+    await waitFor(() => expect(calls).toBe(1))   // the mount read is in flight
+
+    hook.reload(); hook.reload(); hook.reload(); hook.reload()  // the burst
+    resolveFirst()
+
+    // One settling read after the in-flight one, never four.
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v2'))
+    expect(calls).toBe(2)
+  })
+
+  it('a stale session read cannot fence out the new session', async () => {
+    // The coalescing coordinator must not span sessions: an in-flight read for
+    // the OLD session used to re-fetch it after the switch, take the newest
+    // seq, and leave the previous overlay applied.
+    let resolveOld
+    const oldGate = new Promise((r) => { resolveOld = r })
+    globalThis.fetch = vi.fn(async (url) => {
+      if (String(url).includes('s-old')) {
+        await oldGate
+        return ok({ tokens: { 'color.accent': '#010101' },
+                    document_version: 1, pending_proposal_id: null })
+      }
+      return ok({ tokens: { 'color.accent': '#020202' },
+                  document_version: 2, pending_proposal_id: null })
+    })
+
+    const { rerender } = render(<Probe sessionId="s-old" />)
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
+    rerender(<Probe sessionId="s-new" />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v2'))
+
+    resolveOld()   // the old session's read lands LAST
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(screen.getByTestId('v').textContent).toBe('v2')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#020202')
+  })
+
+  it('a coalesced burst on the OLD session cannot re-fetch it after a switch', async () => {
+    // The reviewer's exact scenario, and the one the seq fence alone does NOT
+    // cover: the burst flag makes the old session's coalescing loop run a
+    // SECOND fetch. Without the generation check in that loop, that late read
+    // takes the newest seq and fences out the new session's own read, leaving
+    // the previous tenant's overlay on screen.
+    const urls = []
+    let resolveOld
+    const oldGate = new Promise((r) => { resolveOld = r })
+    globalThis.fetch = vi.fn(async (url) => {
+      urls.push(String(url))
+      if (String(url).includes('s-old') && urls.length === 1) {
+        await oldGate
+        return ok({ tokens: { 'color.accent': '#010101' },
+                    document_version: 1, pending_proposal_id: null })
+      }
+      if (String(url).includes('s-old')) {
+        return ok({ tokens: { 'color.accent': '#0a0a0a' },
+                    document_version: 9, pending_proposal_id: null })
+      }
+      return ok({ tokens: { 'color.accent': '#020202' },
+                  document_version: 2, pending_proposal_id: null })
+    })
+
+    let hook
+    function Probe2({ sessionId }) {
+      hook = useOverlay(sessionId)
+      return <div data-testid="v">{hook.loaded ? `v${hook.documentVersion}` : 'loading'}</div>
+    }
+    const { rerender } = render(<Probe2 sessionId="s-old" />)
+    await waitFor(() => expect(urls.length).toBe(1))
+    hook.reload()                    // raises the burst flag on the OLD loop
+    rerender(<Probe2 sessionId="s-new" />)
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v2'))
+    resolveOld()                     // the old loop wakes AFTER the switch
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(urls.filter((u) => u.includes('s-old')).length)
+      .toBe(1)                       // the queued old-session read never ran
+    expect(screen.getByTestId('v').textContent).toBe('v2')
+    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#020202')
+  })
+})
