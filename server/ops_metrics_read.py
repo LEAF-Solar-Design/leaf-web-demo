@@ -420,13 +420,16 @@ def timeseries(window_seconds: int = 604_800,
                bucket_seconds: int = 86_400,
                tenant_id: Optional[str] = None,
                tool: Optional[str] = None) -> Dict[str, Any]:
-    """Bucketed ledger series over a trailing window — billing-grade trends
+    """Bucketed ledger series over a trailing window: billing-grade trends
     (the CloudWatch namespace mixes environments; this ledger does not).
     Same denial-exclusion rule as the rollup so per-bucket ``runs``/``usd_est``
     reconcile with it. Buckets are UTC-epoch aligned (floor(ts / bucket)) and
     EMPTY BUCKETS ARE OMITTED: absence of a bucket means "no ledger rows",
-    never a fabricated zero row. ``bucket_seconds`` must be one of
-    ``TIMESERIES_BUCKETS``."""
+    never a fabricated zero row. The window is bounded on BOTH ends
+    (since <= ts <= now), so a future-dated row can neither appear nor
+    inflate bucket cardinality past the clamp (a nonaligned window still
+    intersects at most floor(window/bucket) + 1 buckets). ``bucket_seconds``
+    must be one of ``TIMESERIES_BUCKETS``."""
     if int(bucket_seconds) not in TIMESERIES_BUCKETS:
         raise ValueError(
             f"bucket_seconds must be one of {TIMESERIES_BUCKETS}, got {bucket_seconds}"
@@ -435,8 +438,9 @@ def timeseries(window_seconds: int = 604_800,
     window_seconds = max(60, min(int(window_seconds), 30 * int(_DAY_SECONDS)))
     bucket = int(bucket_seconds)
     since = now - window_seconds
-    where = "WHERE ts >= %(since)s"
-    params: Dict[str, Any] = {"since": float(since), "bucket": float(bucket)}
+    where = "WHERE ts >= %(since)s AND ts <= %(now)s"
+    params: Dict[str, Any] = {"since": float(since), "now": float(now),
+                              "bucket": float(bucket)}
     if tenant_id:
         where += " AND tenant_id = %(tenant_id)s"
         params["tenant_id"] = str(tenant_id)

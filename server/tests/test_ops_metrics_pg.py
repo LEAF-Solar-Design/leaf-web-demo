@@ -202,10 +202,12 @@ def test_timeseries_over_real_postgres():
     tenant = f"obs-ts-{uuid.uuid4()}"
     now = time.time()
     bucket = 3600
-    # Two adjacent hour buckets, timestamps pinned INSIDE each bucket. The
-    # window comfortably covers both plus slack.
-    b1 = (int(now) // bucket - 1) * bucket   # previous hour bucket
-    b2 = b1 + bucket                          # current hour bucket
+    # Two adjacent hour buckets, timestamps pinned INSIDE each bucket and
+    # STRICTLY IN THE PAST: the query bounds ts <= now, so rows two and one
+    # hours back stay visible no matter where inside the current hour the
+    # test runs (no first-30-seconds flake).
+    b1 = (int(now) // bucket - 2) * bucket   # two hours back
+    b2 = b1 + bucket                          # one hour back
     rows = [
         # bucket 1: one ok run, one quota denial (denial excluded from
         # runs/cost, counted in attempts/denied)

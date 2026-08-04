@@ -182,7 +182,10 @@ def test_timeseries_rejects_disallowed_bucket_before_read_model(monkeypatch):
     resp = _client().get("/api/ops/metrics/timeseries?bucket=1234",
                          headers={"X-Ops-Secret": "ops-secret"})
     assert resp.status_code == 422
-    assert "bucket" in resp.json().get("error", {}).get("message", "").lower()
+    err = resp.json().get("error", {})
+    assert "bucket" in err.get("message", "").lower()
+    assert err.get("error_code") == "BAD_PARAMS"
+    assert err.get("retryable") is False
     assert called == {}
 
 
