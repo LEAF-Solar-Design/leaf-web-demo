@@ -98,8 +98,12 @@ def test_the_event_is_persisted_before_it_is_pushed():
     the live client saw it, every reconnecting client never will, and the two
     disagree permanently."""
     order = []
-    st.publish(_revoked(),
-               append_event=lambda *a: order.append("append"),
+
+    def append(*_a):
+        order.append("append")
+        return 5
+
+    st.publish(_revoked(), append_event=append,
                broadcast=lambda e: order.append("broadcast"))
     assert order == ["append", "broadcast"]
 
@@ -112,8 +116,11 @@ def test_a_failed_broadcast_does_not_fail_the_revoke():
     def boom(_event):
         raise ConnectionError("subscriber gone")
 
-    result = st.publish(_revoked(), append_event=lambda *a: appended.append(a),
-                        broadcast=boom)
+    def append(*a):
+        appended.append(a)
+        return 5
+
+    result = st.publish(_revoked(), append_event=append, broadcast=boom)
     assert appended and result["type"] == st.OVERLAY_REVOKED
 
 
@@ -174,3 +181,25 @@ def test_replay_does_not_hand_back_the_callers_own_objects():
     events = [{"seq": 1, "type": "overlay_decided"}]
     st.replay_after(events, after_seq=0)[0]["seq"] = 99
     assert events[0]["seq"] == 1
+
+
+def test_the_broadcast_carries_the_DURABLE_seq_not_the_caller_guess():
+    """The review's second blocker. The transcript allocates the real sequence;
+    if the broadcast announces a different one the client advances its cursor
+    past the durable event and can never replay it. A revoke lost this way is
+    lost permanently, and the withdrawn theme stays on screen."""
+    sent = {}
+    published = st.publish(
+        _revoked(seq=99),                       # the caller's guess, wrong
+        append_event=lambda *a: 6,              # the transcript's real seq
+        broadcast=lambda e: sent.update(e))
+    assert published["seq"] == 6
+    assert sent["seq"] == 6, "the client would have advanced its cursor to 99"
+
+
+def test_publish_refuses_a_store_that_does_not_report_its_seq():
+    """Without a durable seq the broadcast cursor is a guess, and a guess here
+    silently drops revokes. Fail loudly instead."""
+    with pytest.raises(st.StreamContractError):
+        st.publish(_revoked(), append_event=lambda *a: None,
+                   broadcast=lambda e: None)

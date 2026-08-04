@@ -103,12 +103,43 @@ def test_approve_uses_compare_and_swap_on_the_document_version():
     assert "version_conflict" in src
 
 
-def test_decided_proposals_are_never_updated_in_place():
+def test_decision_content_is_never_updated_in_place():
     """Transitions INSERT a new revision so the previous one stays readable.
-    An UPDATE against overlay_proposals would break the audit trail."""
+
+    This check used to be `"UPDATE overlay_proposals" not in src`, which was
+    too blunt: a review found the append-only design deadlocked a session
+    permanently, because the superseded revision kept reading `pending` and the
+    partial unique index blocked every later proposal. The fix stamps
+    `superseded_at` on the old row, so one UPDATE now exists ON PURPOSE.
+
+    The invariant that actually matters is narrower and is what this asserts:
+    the only column any UPDATE may touch is `superseded_at`. Rewriting state,
+    actor, decision_key or tokens would break the audit trail.
+    """
     src = _store()
-    assert "UPDATE overlay_proposals" not in src
     assert "_insert_revision" in src
+    updates = re.findall(r"UPDATE overlay_proposals SET ([a-z_]+)", src)
+    assert updates, "expected the supersession stamp"
+    assert set(updates) == {"superseded_at"}, (
+        f"an UPDATE rewrites decision content: {sorted(set(updates))}")
+
+
+def test_supersession_is_stamped_wherever_a_revision_is_appended():
+    """The stamp and the append must not drift apart: an append without a stamp
+    re-creates the session deadlock, silently."""
+    src = _store()
+    body = src.split("def _insert_revision(", 1)[1].split("\ndef ", 1)[0]
+    assert "superseded_at = NOW()" in body
+    assert body.index("UPDATE overlay_proposals") < body.index("INSERT INTO overlay_proposals")
+
+
+def test_reads_that_must_ignore_superseded_revisions_do():
+    """A preview read that forgets this serves an overlay the operator already
+    decided on; a sweeper that forgets it re-expires settled history."""
+    src = _store()
+    for fn in ("def pending_for_session(", "def sweep_expired("):
+        segment = src.split(fn, 1)[1].split("\ndef ", 1)[0]
+        assert "superseded_at IS NULL" in segment, fn
 
 
 def test_reads_filter_the_lease_in_sql():

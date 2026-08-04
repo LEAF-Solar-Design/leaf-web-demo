@@ -174,14 +174,30 @@ def publish(event: Mapping[str, Any], *, append_event, broadcast=None) -> Dict[s
     if type_ not in OVERLAY_EVENT_TYPES:
         raise StreamContractError(f"{type_!r} is not an overlay event")
 
-    append_event(event["session_id"], event["turn_id"], type_, event["data"])
+    # THE BROADCAST MUST CARRY THE DURABLE SEQ, not the one the caller guessed.
+    #
+    # An adversarial review caught this and it is the worst possible bug for
+    # this module, because it defeats the exact guarantee the module exists to
+    # provide. The transcript allocates the real sequence number. If a revoke
+    # persists at 6 but broadcasts as 7, the live client advances lastSeq to 7
+    # and reconnects with ?after_seq=7 — so the durable event at 6 is never
+    # replayed to it. The revoke is in history, the user never sees it, and the
+    # withdrawn theme stays on screen permanently.
+    durable_seq = append_event(event["session_id"], event["turn_id"], type_,
+                               event["data"])
+    if durable_seq is None:
+        raise StreamContractError(
+            "append_event must return the durable seq; without it the "
+            "broadcast cursor cannot be trusted and a revoke can be skipped")
+    published = dict(event)
+    published["seq"] = int(durable_seq)
 
     if broadcast is not None:
         try:
-            broadcast(event)
+            broadcast(published)
         except Exception:  # noqa: BLE001 — see docstring: durability already won
             pass
-    return dict(event)
+    return published
 
 
 def replay_after(events: Iterable[Mapping[str, Any]], *, after_seq: int) -> list:

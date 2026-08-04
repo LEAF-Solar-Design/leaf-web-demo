@@ -45,7 +45,7 @@ class OverlayStoreError(RuntimeError):
 _PROPOSAL_COLS = (
     "proposal_id, revision, tenant_id, session_id, tokens, state, "
     "created_at, lease_expires_at, decided_at, decided_by, decision_key, "
-    "applied_version, reason"
+    "applied_version, reason, superseded_at"
 )
 
 
@@ -79,6 +79,7 @@ def pending_for_session(tenant_id: str, session_id: str) -> Optional[Dict[str, A
         cur.execute(
             f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals "
             "WHERE tenant_id = %(t)s AND session_id = %(s)s AND state = 'pending' "
+            "  AND superseded_at IS NULL "
             "  AND lease_expires_at > NOW() "
             "ORDER BY revision DESC LIMIT 1",
             {"t": tenant_id, "s": session_id})
@@ -142,10 +143,24 @@ def create_proposal(
 
 
 def _insert_revision(cur: Any, current: Mapping[str, Any], **changes: Any) -> Dict[str, Any]:
-    """Append the next revision. Never UPDATE a decided row: the previous
-    revision stays readable, which is what makes the trail auditable."""
+    """Append the next revision and mark the one it replaces as superseded.
+
+    The stamp is not bookkeeping, it is the fix for a permanent session
+    deadlock. Appending alone left the previous revision still reading
+    `state = 'pending'`, so the partial unique index blocked every future
+    proposal for that session and the preview kept serving a decided overlay.
+
+    Decision content stays immutable — state, actor, decision_key and tokens on
+    the old row are never rewritten, so the trail is still auditable. Only
+    `superseded_at` is set, and it records ordering rather than any decision.
+    """
     nxt = dict(current)
     nxt.update(changes)
+    cur.execute(
+        "UPDATE overlay_proposals SET superseded_at = NOW() "
+        "WHERE proposal_id = %(pid)s AND revision = %(rev)s "
+        "  AND superseded_at IS NULL",
+        {"pid": current["proposal_id"], "rev": current["revision"]})
     cur.execute(
         "INSERT INTO overlay_proposals "
         "  (proposal_id, revision, tenant_id, session_id, tokens, state, "
@@ -325,7 +340,8 @@ def sweep_expired(limit: int = 100) -> List[Dict[str, Any]]:
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute(
             f"SELECT {_PROPOSAL_COLS} FROM overlay_proposals p "
-            "WHERE state = 'pending' AND lease_expires_at <= NOW() "
+            "WHERE state = 'pending' AND superseded_at IS NULL "
+            "  AND lease_expires_at <= NOW() "
             "  AND revision = (SELECT MAX(revision) FROM overlay_proposals q "
             "                  WHERE q.proposal_id = p.proposal_id) "
             "ORDER BY lease_expires_at LIMIT %(lim)s FOR UPDATE SKIP LOCKED",

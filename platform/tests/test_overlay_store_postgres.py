@@ -458,3 +458,79 @@ def test_audit_rows_record_a_count_and_never_the_content(conn, tenant):
         "WHERE table_name = 'overlay_audit'").fetchall()}
     assert "token_count" in cols
     assert "tokens" not in cols
+
+
+# --------------------------------------------------------------------------- #
+# The supersession blocker — found by review, reproduced here first
+# --------------------------------------------------------------------------- #
+def _append_revision(conn, pid, *, state, stamp=True):
+    """overlay_store._insert_revision, as the two statements it runs."""
+    if stamp:
+        conn.execute(
+            "UPDATE overlay_proposals SET superseded_at = NOW() "
+            "WHERE proposal_id = %s AND superseded_at IS NULL "
+            "  AND revision = (SELECT MAX(revision) FROM overlay_proposals "
+            "                  WHERE proposal_id = %s)", (pid, pid))
+    conn.execute(
+        "INSERT INTO overlay_proposals (proposal_id, revision, tenant_id, "
+        "session_id, tokens, state, lease_expires_at) "
+        "SELECT proposal_id, revision + 1, tenant_id, session_id, tokens, %s, "
+        "lease_expires_at FROM overlay_proposals WHERE proposal_id = %s "
+        "ORDER BY revision DESC LIMIT 1", (state, pid))
+    conn.commit()
+
+
+def test_deciding_frees_the_session_for_a_new_proposal(conn, tenant):
+    """THE blocker. Appending a decided revision without stamping the old one
+    left it reading 'pending', so the partial unique index rejected every later
+    proposal for that session — permanently, for the life of the tenant."""
+    session = str(uuid.uuid4())
+    pid = _new_proposal(conn, tenant, session_id=session)
+    _append_revision(conn, pid, state="denied")
+
+    _new_proposal(conn, tenant, session_id=session)  # must not raise
+    conn.commit()
+
+
+def test_the_deadlock_returns_if_the_stamp_is_skipped(conn, tenant):
+    """Pin the mechanism, not just the symptom: without the stamp the very same
+    sequence fails. If this ever stops failing, the index predicate changed and
+    the stamp may be removable."""
+    session = str(uuid.uuid4())
+    pid = _new_proposal(conn, tenant, session_id=session)
+    _append_revision(conn, pid, state="denied", stamp=False)
+
+    with pytest.raises(pg_errors.UniqueViolation):
+        _new_proposal(conn, tenant, session_id=session)
+    conn.rollback()
+
+
+def test_a_decided_proposal_stops_being_previewed(conn, tenant):
+    """The other half of the same bug: the preview read kept serving a REJECTED
+    overlay until its lease lapsed, so the user watched a theme the operator
+    had already denied."""
+    session = str(uuid.uuid4())
+    pid = _new_proposal(conn, tenant, session_id=session)
+    _append_revision(conn, pid, state="denied")
+
+    row = conn.execute(
+        "SELECT proposal_id FROM overlay_proposals WHERE tenant_id = %s "
+        "AND session_id = %s AND state = 'pending' AND superseded_at IS NULL "
+        "AND lease_expires_at > NOW()", (tenant, session)).fetchone()
+    assert row is None
+
+
+def test_supersession_never_rewrites_decision_content(conn, tenant):
+    """The stamp is the ONLY mutation. If it ever rewrote state or tokens the
+    audit trail would stop being true."""
+    session = str(uuid.uuid4())
+    pid = _new_proposal(conn, tenant, session_id=session,
+                        tokens='{"color.canvas.bg": "#abcdef"}')
+    _append_revision(conn, pid, state="approved")
+
+    old = conn.execute(
+        "SELECT state, tokens, superseded_at FROM overlay_proposals "
+        "WHERE proposal_id = %s AND revision = 1", (pid,)).fetchone()
+    assert old["state"] == "pending", "the original decision content was rewritten"
+    assert old["tokens"] == {"color.canvas.bg": "#abcdef"}
+    assert old["superseded_at"] is not None

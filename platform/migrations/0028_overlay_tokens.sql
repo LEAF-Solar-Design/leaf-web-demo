@@ -42,20 +42,37 @@ CREATE TABLE IF NOT EXISTS overlay_proposals (
   -- Tenant-document version this approval produced (NULL for non-approvals).
   applied_version   INTEGER,
   reason            TEXT,
+  -- Set on a revision when a LATER revision supersedes it. This exists because
+  -- an adversarial review found the original design deadlocked a session
+  -- permanently: transitions append a new revision and never touch the old
+  -- row, so after a deny, revision 0 still read `state = 'pending'`. The
+  -- partial index below then saw that stale row forever and rejected every
+  -- future proposal for the session, while the preview read kept returning the
+  -- rejected overlay until its lease lapsed.
+  --
+  -- This is the ONLY mutable column on the table, and it deliberately carries
+  -- no decision content — not state, not actor, not tokens. Those stay
+  -- immutable, so the audit trail is still true; this column only records that
+  -- a newer revision exists, which is a fact about ordering rather than about
+  -- the decision.
+  superseded_at     TIMESTAMPTZ,
   PRIMARY KEY (proposal_id, revision)
 );
 
 -- One live proposal per session at a time: a second pending preview would make
 -- "what the user is looking at" ambiguous, and the revoke path would not know
 -- which overlay to pull.
+--
+-- `superseded_at IS NULL` is load-bearing, not defensive. Without it a decided
+-- proposal's stale pending revision blocks the session forever (see above).
 CREATE UNIQUE INDEX IF NOT EXISTS overlay_proposals_one_pending_per_session
   ON overlay_proposals (tenant_id, session_id)
-  WHERE state = 'pending';
+  WHERE state = 'pending' AND superseded_at IS NULL;
 
 -- The sweeper and the operator queue both read pending-by-deadline.
 CREATE INDEX IF NOT EXISTS overlay_proposals_pending_lease_idx
   ON overlay_proposals (lease_expires_at)
-  WHERE state = 'pending';
+  WHERE state = 'pending' AND superseded_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS overlay_proposals_tenant_created_idx
   ON overlay_proposals (tenant_id, created_at DESC);
