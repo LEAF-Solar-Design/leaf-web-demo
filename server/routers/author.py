@@ -274,6 +274,9 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         source = "template"
         if harness_url:
             preview = "[harness unreachable; templated fallback] " + preview
+            # P2: the silent-degradation rate, previously invisible.
+            _emit_author_event("author.fallback_served", tenant, {
+                "reason": type(harness_failure).__name__ if harness_failure else "unknown"})
     if use_llm:
         # Real LLM authoring is optional and gated. No key wired here; we fall
         # back to templating and note it in the preview rather than fail.
@@ -593,6 +596,26 @@ def _customization_gate(wave: int, tenant: Any) -> JSONResponse | None:
     return None
 
 
+def _emit_author_event(name: str, tenant, labels=None) -> None:
+    """Best-effort author-lane product event (P2): Build is the
+    differentiator, so its funnel (requested -> staged -> published) and its
+    walls get identity-attached events. NEVER raises; never carries
+    descriptions or code, only lengths/modes/reasons."""
+    try:
+        import telemetry_sink
+
+        tid = str(tenant)
+        telemetry_sink.emit(
+            name,
+            tenant_id=tid,
+            tenant_kind="guest" if tid.startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the author flow
+        pass
+
+
 @router.post("/api/author")
 def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -601,6 +624,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
            authority_turn_id: str | None = Header(
                default=None, alias="X-Authority-Turn-Id")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
+    _emit_author_event("author.requested", tenant, {
+        "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
         # The legacy path also delegates to the authoring harness when
         # LEAF_AUTHOR_HARNESS_URL is set, so it is metered by the same cap.
@@ -615,6 +640,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         tenant, authority_session_id, authority_turn_id)
     denied = _customization_gate(5, tenant)
     if denied is not None:
+        _emit_author_event("author.wall_hit", tenant, {"wall_kind": "entitlement"})
         return denied
     if not idempotency_key or not idempotency_key.strip():
         return _customization_error(
@@ -635,6 +661,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
     except author_quota.AuthorQuotaExceeded as exc:
+        _emit_author_event("author.wall_hit", tenant, {"wall_kind": "daily_quota"})
         return _quota_exceeded_response(str(tenant), exc)
     except author_quota.AuthorQuotaStoreError as exc:
         return _quota_store_error(exc)
@@ -717,12 +744,17 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
     if denied is not None:
         return denied
     try:
-        return CustomizationService.configured().publish(
+        result = CustomizationService.configured().publish(
             tenant=tenant,
             request=PublishRequest(req.change_set_id, req.staged_commit, req.catalog_digest,
                                    req.platform_release, req.workspace_contract_digest),
             confirmation_id=req.confirmation_id, idempotency_key=req.idempotency_key,
         )
+        # P2 KEY milestone: a user-made tool exists. Emitted only on the
+        # service's successful return; every refusal raises past this line.
+        _emit_author_event("author.published", tenant, {
+            "change_set_id": req.change_set_id})
+        return result
     except (CustomizationServiceError, AuthorityError, ValueError) as exc:
         if isinstance(exc, CustomizationServiceError):
             return _customization_error(exc)
@@ -793,9 +825,13 @@ def rollback(req: RollbackRequest, tenant=Depends(deps.require_tenant)) -> Dict[
     if denied is not None:
         return denied
     try:
-        return CustomizationService.configured().rollback(
+        result = CustomizationService.configured().rollback(
             tenant=tenant, change_set_id=req.change_set_id, idempotency_key=req.idempotency_key,
         )
+        # P2: regret rate / generated-tool quality.
+        _emit_author_event("author.rolled_back", tenant, {
+            "change_set_id": req.change_set_id})
+        return result
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(
@@ -895,10 +931,14 @@ def customization_staged(
         denied = _customization_gate(5, tenant_id)
         if denied is not None:
             return denied
-        return CustomizationService.configured().record_staged_callback(
+        result = CustomizationService.configured().record_staged_callback(
             tenant_id=tenant_id,
             receipt=req.receipt,
         )
+        # P2: requested -> STAGED -> published funnel middle. The harness's
+        # staged callback is the one place a successful stage lands.
+        _emit_author_event("author.staged", tenant_id, {"source": "harness"})
+        return result
     except (CustomizationServiceError, AuthorityError) as exc:
         if isinstance(exc, AuthorityError):
             return _customization_error(

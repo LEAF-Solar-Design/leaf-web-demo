@@ -1265,11 +1265,50 @@ def _reap_orphans_once() -> int:
                                               "orphaned: session closed (tab-close)", True),
                               _allow_closed=True)
             _cancel_remote_workitem(row["job_id"], _row_get(row, "tenant_id"))
+            _emit_orphan_reaped_event(row, "session_closed")
             handled += 1
             continue
         if _redispatch_record(row["job_id"]):
+            _emit_orphan_reaped_event(row, "stale_redispatched")
             handled += 1
     return handled
+
+
+def _emit_orphan_reaped_event(row: Any, reason: str) -> None:
+    """Best-effort `job.orphan_reaped` product event (P2): the silent-failure
+    class, per tenant. NEVER raises. The pg sweep projection carries only
+    job_id+progress, so identity comes from the store lookup, gated on an
+    ENABLED sink; a lookup miss emits nothing rather than fabricated
+    identity."""
+    if telemetry_sink is None:
+        return
+    try:
+        if telemetry_sink.disabled_reason() is not None:
+            return
+        job_id = row["job_id"]
+        tenant_id = _row_get(row, "tenant_id")
+        tool = _row_get(row, "tool")
+        if not tenant_id and job_store_mode() == "postgres":
+            ctx = _pg_store.event_context(job_id)
+            if ctx:
+                tenant_id, tool = ctx["tenant_id"], ctx["tool"]
+        if not tenant_id:
+            return
+        labels: Dict[str, Any] = {"job_id": job_id, "reason": reason}
+        if tool:
+            labels["tool"] = tool
+        updated_at = _row_get(row, "updated_at")
+        if updated_at is not None:
+            labels["staleness_s"] = round(max(0.0, time.time() - float(updated_at)), 1)
+        telemetry_sink.emit(
+            "job.orphan_reaped",
+            tenant_id=str(tenant_id),
+            tenant_kind="guest" if str(tenant_id).startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break the reaper
+        pass
 
 
 def _row_get(row: Any, key: str) -> Any:

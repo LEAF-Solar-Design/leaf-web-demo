@@ -254,7 +254,27 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(_require_grant_owner)):
         hj = r.json()
     except ValueError:
         return _unreachable("harness returned non-JSON")
+    _emit_grant_event("grant.linked", tenant, req.kind)
     return deps.tenant_echo(_status_body(hj), tenant)
+
+
+def _emit_grant_event(name: str, tenant, kind) -> None:
+    """Best-effort grant.linked / grant.unlinked product event (P2): the
+    unlock for Build + chat. Carries the KIND only, NEVER the token (which
+    this router already refuses to persist or log). NEVER raises."""
+    try:
+        import telemetry_sink
+
+        tid = str(tenant)
+        telemetry_sink.emit(
+            name,
+            tenant_id=tid,
+            tenant_kind="guest" if tid.startswith("guest-") else "account",
+            session_id="server",
+            labels={"kind": kind} if kind else None,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the grant flow
+        pass
 
 
 @router.patch("/api/tenant/claude-grant")
@@ -328,4 +348,5 @@ def unlink_grant(account_id: Optional[str] = None, tenant=Depends(_require_grant
     except ValueError:
         # a bodyless 200/204 delete is fine -> report unlinked.
         hj = {"linked": False, "linked_at": None}
+    _emit_grant_event("grant.unlinked", tenant, None)
     return deps.tenant_echo(_status_body(hj), tenant)

@@ -108,6 +108,62 @@ def _resolve_upload_read_identity(tenant: Any) -> Any:
     return deps.resolve_active_tenant_context(tenant)
 
 
+def _emit_upload_event(resp: Any) -> None:
+    """Best-effort drawing.uploaded / drawing.upload_rejected product event
+    (P2), derived from the ONE response every branch already returns, so no
+    rejection branch needs its own emit. drawing_id only, never a filename
+    (tighter than the plugin exemplar). NEVER raises."""
+    try:
+        import json as _json
+
+        import telemetry_sink
+
+        if isinstance(resp, JSONResponse):
+            status = resp.status_code
+            body = _json.loads(resp.body)
+        elif isinstance(resp, dict):
+            status, body = 202, resp
+        else:
+            return
+        if status < 300:
+            tid = str(body.get("tenant_id") or "")
+            if not tid:
+                return
+            telemetry_sink.emit(
+                "drawing.uploaded",
+                tenant_id=tid,
+                tenant_kind=str(body.get("tenant_kind") or "account"),
+                session_id="server",
+                labels={
+                    "drawing_id": body.get("drawing_id"),
+                    "minted_guest": bool(body.get("guest_session")),
+                    "status": body.get("status"),
+                },
+            )
+            return
+        err = body.get("error") or {}
+        message = str(err.get("message") or "").lower()
+        if status == 413 or "byte upload cap" in message:
+            reason = "size"
+        elif "quota" in message:
+            reason = "quota"
+        elif "disabled" in message or "not configured" in message or "cutover" in message:
+            reason = "disabled"
+        else:
+            reason = "validation"
+        # Rejections can precede identity resolution; "anon" is honest there.
+        telemetry_sink.emit(
+            "drawing.upload_rejected",
+            tenant_id="anon",
+            tenant_kind="anon",
+            session_id="server",
+            labels={"reason": reason, "http_status": status,
+                    "error_code": err.get("error_code")},
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the upload path
+        pass
+
+
 @router.post("/api/drawings/upload")
 def upload_drawing(
     request: Request,
@@ -115,6 +171,18 @@ def upload_drawing(
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
+) -> Any:
+    resp = _upload_drawing_gated(request, file, x_tenant_id, authorization, x_guest_session)
+    _emit_upload_event(resp)
+    return resp
+
+
+def _upload_drawing_gated(
+    request: Request,
+    file: UploadFile,
+    x_tenant_id: Optional[str],
+    authorization: Optional[str],
+    x_guest_session: Optional[str],
 ) -> Any:
     if not write_loop.upload_import_mutations_enabled():
         return error_response(

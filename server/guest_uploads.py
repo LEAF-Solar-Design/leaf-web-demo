@@ -1178,7 +1178,40 @@ def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
     with write_loop.upload_mutation_commit_guard() as commit_enabled:
         if not commit_enabled:
             return
+        started = time.time()
         _run_extraction(tenant_id, drawing_id, ext)
+        _emit_extraction_event(tenant_id, drawing_id, started)
+
+
+def _emit_extraction_event(tenant_id: str, drawing_id: str, started: float) -> None:
+    """Best-effort `drawing.extraction_finished` product event (P2): the
+    reliability/latency of the #1 onboarding step, BOTH outcomes, read from
+    the marker _run_extraction just transitioned (the single source of upload
+    truth, so the event can never disagree with the surface). NEVER raises."""
+    try:
+        import telemetry_sink
+
+        backend = write_loop.upload_backend_for_tenant(tenant_id)
+        marker = read_marker(backend, tenant_id, drawing_id) or {}
+        status = str(marker.get("status") or "unknown")
+        labels: Dict[str, Any] = {
+            "drawing_id": drawing_id,
+            "ok": status == "ready",
+            "status": status,
+            "duration_ms": int(max(0.0, time.time() - started) * 1000),
+        }
+        err = marker.get("error")
+        if isinstance(err, dict) and err.get("error_code"):
+            labels["error_code"] = err["error_code"]
+        telemetry_sink.emit(
+            "drawing.extraction_finished",
+            tenant_id=str(tenant_id),
+            tenant_kind="guest" if str(tenant_id).startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break extraction
+        pass
 
 
 def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:

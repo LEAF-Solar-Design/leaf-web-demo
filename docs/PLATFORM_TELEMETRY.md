@@ -81,7 +81,27 @@ bounded queue, drop-oldest, kill switch, never-raise emitters.
   The broker image stays SDK-free; `telemetry_sink` reports disabled where
   the SDK or credentials are absent.
 
-## Events live in v1 (this PR wave)
+## Events live in v1 (waves A + B)
+
+Wave B (server emits, one per verified choke point):
+
+| Event | Choke point | Labels |
+|---|---|---|
+| `agent.wall_hit` | `routers/sessions.py _turn_rejected_response` (every TurnRejected response) | wall_kind (grant/llm_quota/llm_rate/busy/entitlement/unreachable/raw code), http_status, error_code |
+| `agent.approval_decided` | `routers/agent.py decide_approval` (recorded + expired) | outcome (approved/denied/expired), turn_id, tool when recorded, decision_latency_ms when created_at known |
+| `job.orphan_reaped` | `jobs._reap_orphans_once` (both branches) | job_id, reason (session_closed/stale_redispatched), tool, staleness_s when known |
+| `grant.linked` / `grant.unlinked` | `routers/tenant.py` link/unlink success | kind only, NEVER the token |
+| `drawing.uploaded` / `drawing.upload_rejected` | `routers/uploads.py upload_drawing` response wrapper (single choke point over every branch) | uploaded: drawing_id, minted_guest, status; rejected: reason (size/quota/disabled/validation), http_status, error_code; rejection identity is "anon" (can precede identity resolution) |
+| `drawing.extraction_finished` | `guest_uploads.run_extraction` (both outcomes, read from the marker) | drawing_id, ok, status, duration_ms, error_code when failed |
+| `author.requested` | `routers/author.py author()` entry | mode, desc_len |
+| `author.wall_hit` | customization gate deny + AuthorQuotaExceeded | wall_kind (entitlement/daily_quota) |
+| `author.fallback_served` | templated-fallback branch (harness set but unreachable) | reason (exception type) |
+| `author.staged` | `/internal/customization/staged` callback success | source=harness |
+| `author.published` | `register()` service success | change_set_id |
+| `author.rolled_back` | `rollback()` service success | change_set_id |
+| `org.created` / `billing.tier_changed` / `org.offboarded` | `platform/api.py` (tier event only when the tier actually changed) | tier / from_tier+to_tier / status; tenant_id = org_id |
+
+## Events live in v1 (wave A)
 
 | Event | Source | Labels live today |
 |---|---|---|
