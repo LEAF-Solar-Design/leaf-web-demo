@@ -139,3 +139,42 @@ def test_request_text_is_carried_but_bounded():
     payload."""
     out = _propose(request_text="x" * 5000)
     assert len(out["request_text"]) == 500
+
+
+# --------------------------------------------------------------------------- #
+# The router's store resolution, under the condition that broke it in prod
+# --------------------------------------------------------------------------- #
+def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
+    """`from platform import overlay_store` returned the STDLIB platform module
+    in the container, so GET /api/overlay answered 500 on every request while
+    this suite stayed green. Reproduce that condition here: import the stdlib
+    module first and assert the name really did resolve to it, THEN require
+    _store() to hand back the platform package's overlay_store anyway.
+
+    Without the stdlib assertion the test would pass on a machine where the
+    repo root happens to precede site-packages, i.e. exactly the machine where
+    the bug never reproduced.
+    """
+    import platform as stdlib_platform
+
+    assert not hasattr(stdlib_platform, "overlay_store"), (
+        "the name 'platform' resolved to the repo package, not the stdlib "
+        "module — this test cannot observe the failure it exists to prevent")
+
+    from routers import overlay as overlay_router
+
+    store = overlay_router._store()
+    # The real store's surface, not a truthy import: a module that resolved to
+    # the wrong package would still be an object.
+    for name in ("document", "effective_tokens", "pending_for_session",
+                 "create_proposal", "approve"):
+        assert callable(getattr(store, name, None)), f"_store() lacks {name}()"
+
+
+def test_store_resolution_is_stable_across_calls():
+    """The router caches the loaded package in sys.modules. A second call must
+    return the same module object — reloading it per request would give two
+    live copies of the store's module state."""
+    from routers import overlay as overlay_router
+
+    assert overlay_router._store() is overlay_router._store()

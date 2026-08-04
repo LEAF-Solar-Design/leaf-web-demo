@@ -152,6 +152,10 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize") is True
     assert deps._dispatch_backedge_route("GET", "/api/platform/customize/chg-1") is True
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize/chg-1/land") is True
+    # T1 overlay: the harness's propose_overlay tool reaches this over the
+    # back-edge. Its absence 401'd every live chat turn while these tests
+    # stayed green, because they call the route directly with a tenant header.
+    assert deps._dispatch_backedge_route("POST", "/api/overlay/proposals") is True
     # NOT back-edge: the SSE stream, the jobs list, and everything else
     assert deps._dispatch_backedge_route("GET", "/api/jobs/job-123/stream") is False
     assert deps._dispatch_backedge_route("GET", "/api/jobs") is False
@@ -163,6 +167,12 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("POST", "/internal/platform-customize/deny") is False
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize/a/b/land") is False
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize//land") is False
+    # The harness PROPOSES an overlay; it must never decide or revoke its own
+    # proposal. Same authority split as co-sign above, and the reason to pin it
+    # is that widening the allowlist to a prefix would silently grant both.
+    assert deps._dispatch_backedge_route("POST", "/api/overlay/decisions") is False
+    assert deps._dispatch_backedge_route("POST", "/api/overlay/revocations") is False
+    assert deps._dispatch_backedge_route("GET", "/api/overlay") is False
     assert deps._dispatch_backedge_route("GET", "/api/platform/customize/a/b") is False
     assert deps._dispatch_backedge_route("GET", "/api/platform/customize/") is False
 
