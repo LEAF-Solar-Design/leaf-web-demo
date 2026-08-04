@@ -29,11 +29,13 @@ RUN apt-get update \
 # (see deploy/README.md) — the default demo never imports it.
 COPY server/requirements.txt        /app/server/requirements.txt
 COPY server/requirements-auth.txt   /app/server/requirements-auth.txt
+COPY server/requirements-telemetry.txt /app/server/requirements-telemetry.txt
 COPY platform/requirements.txt      /app/platform/requirements.txt
 COPY da/requirements.txt            /app/da/requirements.txt
 RUN pip install --no-cache-dir \
       -r /app/server/requirements.txt \
       -r /app/server/requirements-auth.txt \
+      -r /app/server/requirements-telemetry.txt \
       -r /app/platform/requirements.txt \
       -r /app/da/requirements.txt
 

@@ -614,10 +614,12 @@ _GUEST_GET_ROUTE_RE = _re.compile(
 
 def _guest_route_allowed(method: str, path: str) -> bool:
     """The COMPLETE surface a guest-session identity may touch (§19): its own
-    uploads and reads of them. Everything else — run/author/sessions/tenant/
-    undo/redo/checkout — needs a real account, full stop."""
+    uploads and reads of them, plus the telemetry ingest door (loss-tolerant,
+    identity server-stamped, can never mutate product state). Everything else
+    — run/author/sessions/tenant/undo/redo/checkout — needs a real account,
+    full stop."""
     if method == "POST":
-        return path == "/api/drawings/upload"
+        return path in {"/api/drawings/upload", "/api/telemetry"}
     if method == "GET":
         return bool(_GUEST_GET_ROUTE_RE.match(path))
     return False

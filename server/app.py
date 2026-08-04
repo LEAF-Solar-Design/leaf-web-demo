@@ -55,6 +55,7 @@ from routers import (
     sessions,
     skills,
     site,
+    telemetry,
     tenant,
     tools,
     uploads,
@@ -168,6 +169,7 @@ app.include_router(ops_metrics.router)  # APS observability read-API: fleet metr
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
+app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
 # at their STAMPED expiry. It starts by default even when

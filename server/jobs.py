@@ -42,6 +42,11 @@ try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
 except Exception:  # pragma: no cover
     emf_metrics = None  # type: ignore[assignment]
 
+try:  # P2 product events (BigQuery sink); best-effort, optional
+    import telemetry_sink
+except Exception:  # pragma: no cover
+    telemetry_sink = None  # type: ignore[assignment]
+
 
 def _emit_job_terminal(status: str) -> None:
     """Best-effort JobTerminal EMF emit. NEVER raises: called on the terminal
@@ -51,6 +56,57 @@ def _emit_job_terminal(status: str) -> None:
     try:
         emf_metrics.emit_job_terminal(status)
     except Exception:  # noqa: BLE001 - metrics must never break job completion
+        pass
+
+
+def _emit_job_terminal_event(job_id: str, status: str,
+                             error: Optional[Dict[str, Any]],
+                             provenance: Optional[Dict[str, Any]],
+                             conn: Any = None) -> None:
+    """Best-effort `job.terminal` PRODUCT event (P2 telemetry): the identity-
+    carrying twin of the EMF JobTerminal count. NEVER raises; a lookup miss
+    emits nothing rather than a row with fabricated identity.
+
+    ``conn``: the sqlite call site already holds the module `_lock` (which is
+    NOT re-entrant), so it passes its open connection; the pg call site
+    passes none and reads through the store."""
+    if telemetry_sink is None:
+        return
+    try:
+        tenant_id = tool = None
+        elapsed_ms = None
+        if job_store_mode() == "postgres":
+            ctx = _pg_store.event_context(job_id)
+            if ctx:
+                tenant_id, tool, elapsed_ms = ctx["tenant_id"], ctx["tool"], ctx["elapsed_ms"]
+        elif conn is not None:
+            row = conn.execute(
+                "SELECT tenant_id, tool FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is not None:
+                tenant_id, tool = row["tenant_id"], row["tool"]
+        if not tenant_id:
+            return
+        labels: Dict[str, Any] = {"job_id": job_id, "status": status}
+        if tool:
+            labels["tool"] = tool
+        if elapsed_ms is not None:
+            labels["duration_ms"] = elapsed_ms
+        if isinstance(error, dict) and error.get("code"):
+            labels["error_code"] = error["code"]
+        if isinstance(provenance, dict):
+            if provenance.get("attempt") is not None:
+                labels["attempts"] = provenance["attempt"]
+            if provenance.get("execution_path"):
+                labels["execution_path"] = provenance["execution_path"]
+        telemetry_sink.emit(
+            "job.terminal",
+            tenant_id=str(tenant_id),
+            tenant_kind="guest" if str(tenant_id).startswith("guest-") else "account",
+            session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break job completion
         pass
 
 logger = logging.getLogger(__name__)
@@ -829,6 +885,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             # correlation housekeeping is left to do here.
             platform_link.forget(job_id)
             _emit_job_terminal(status)
+            _emit_job_terminal_event(job_id, status, error, provenance)
         return outcome
     applied = False
     with _lock:
@@ -914,6 +971,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             else:
                 _clear_platform_mirror_pending(job_id)
         _emit_job_terminal(status)
+        _emit_job_terminal_event(job_id, status, error, provenance, conn=conn)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
 
