@@ -82,10 +82,13 @@ def test_sink_enqueues_row_with_stringified_labels(monkeypatch):
     assert row["event_name"] == "job.terminal"
     assert row["tenant_id"] == "acme"
     assert row["environment"] == "staging"
-    labels = row["labels"]
-    # The labels column is a DICT (a JSON OBJECT on the wire): a serialized
-    # string would break every JSON_VALUE(labels.x) query downstream
-    # (review #420 round-1 blocker 1).
+    # The labels column travels as ONE json.dumps STRING: the legacy
+    # insertAll API takes a JSON column as a JSON-encoded string and parses
+    # it server-side; a dict fails the row with "labels is not a record"
+    # (LIVE-proven on the first staging insert, 2026-08-04; this supersedes
+    # review #420 round-1's dict theory, which was never live-verified).
+    assert isinstance(row["labels"], str)
+    labels = json.loads(row["labels"])
     assert isinstance(labels, dict)
     # ALL values strings; None dropped; schema_version stamped by the server
     # even if a caller supplied one.
@@ -100,7 +103,7 @@ def test_sink_schema_version_is_server_authority(monkeypatch):
     telemetry_sink.emit(
         "a.b", tenant_id="t", tenant_kind="account", session_id="s",
         labels={"schema_version": "999"})
-    assert telemetry_sink._queue[-1]["labels"]["schema_version"] == "1"
+    assert json.loads(telemetry_sink._queue[-1]["labels"])["schema_version"] == "1"
 
 
 def test_ensure_table_failure_is_not_cached_as_created(monkeypatch):
@@ -163,7 +166,7 @@ def test_sink_drops_oldest_on_overflow(monkeypatch):
         )
     q = list(telemetry_sink._queue)
     assert len(q) == 3
-    kept = [r["labels"]["i"] for r in q]
+    kept = [json.loads(r["labels"])["i"] for r in q]
     assert kept == ["2", "3", "4"]  # oldest dropped, newest kept
     assert telemetry_sink.stats()["dropped_overflow"] == 2
 
@@ -215,7 +218,7 @@ def test_ingest_identity_is_server_stamped_and_reserved_labels_stripped(monkeypa
     row = telemetry_sink._queue[-1]
     assert row["tenant_id"] == "acme"          # from the resolved principal
     assert row["session_id"] == "browser-1"
-    labels = row["labels"]
+    labels = json.loads(row["labels"])
     assert labels["input_kind"] == "typed"
     for smuggled in ("tenant_id", "user_email", "environment"):
         assert smuggled not in labels
@@ -301,7 +304,7 @@ def test_ingest_nested_values_are_bounded_on_the_wire(monkeypatch):
         headers={"X-Tenant-Id": "acme"},
     )
     assert resp.json()["accepted"] == 1
-    labels = telemetry_sink._queue[-1]["labels"]
+    labels = json.loads(telemetry_sink._queue[-1]["labels"])
     assert len(labels["blob"]) <= telemetry_router.MAX_LABEL_VALUE_LEN
     assert labels["n"] == "12345"
 
@@ -368,6 +371,6 @@ def test_ingest_client_ts_clamped_into_labels(monkeypatch):
         headers={"X-Tenant-Id": "acme"},
     )
     assert resp.json()["accepted"] == 1
-    labels = telemetry_sink._queue[-1]["labels"]
+    labels = json.loads(telemetry_sink._queue[-1]["labels"])
     clamped = float(labels["client_ts"])
     assert abs(_t.time() - clamped) <= telemetry_router.CLIENT_TS_CLAMP_S + 5
