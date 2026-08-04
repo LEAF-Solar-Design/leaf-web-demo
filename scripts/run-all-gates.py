@@ -75,6 +75,8 @@ emit per-test skip reasons.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -762,34 +764,17 @@ def build_suites() -> List[Suite]:
         # also explicit here so this PR cannot ship its dependency-free
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
-        # invariant to DB presence: 104 collected either way, measured on this
-        # tree 2026-08-04. The floor below is the EXECUTED count on a host with
-        # no DATABASE_URL -- 104 collected minus the 2 DB-gated skips named in
-        # allowed_skip_reasons = 102.
-        # The floor was 96 (98 collected, 2 skips) measured 2026-07-28, and two
-        # merges since then added 6 collected tests without moving it:
-        #   +1  test_db_primitives_static.py, 18 -> 19, in 2eb279f
-        #       "perf(db): release idle PostgreSQL connections (#256)" --
-        #       test_reset_pool_closes_and_clears_the_shared_pool, a new
-        #       dependency-free function covering db.reset_pool().
-        #   +5  test_db_schema_proof_static.py, 37 -> 42, in fadf874
-        #       "fix(platform): prove quota attempt migration (#401)" --
-        #       test_author_quota_attempt_trigger_cannot_be_missing_at_startup
-        #       plus test_author_quota_attempt_trigger_is_required_and_enabled
-        #       parametrized over the 4 pg_trigger tgenabled states (O/A/D/R),
-        #       each asserting a distinct accept/reject outcome.
-        # Both are real added coverage, not duplicates or a re-parametrisation
-        # of existing cases, so the floor rises to match rather than the tests
-        # being pruned. Neither merge was caught, because executed ABOVE the
-        # floor is only an "(executed-count drift)" note: this suite has been
-        # PASSing on main the whole time. The visible "EXP 96 GOT 104" line is
-        # that note, not the failure -- a red platform-static on a branch is a
-        # real test failure, so read the FAILED lines before touching this
-        # number.
-        # 102, not 104: the scoreboard's GOT column is passed+failed+skipped,
-        # while the floor is compared against executed = GOT - skipped. On a
-        # host WITH a DB the 2 gated tests run and executed is 104, so 104
-        # would red-fail every hermetic CI run at executed 102.
+        # invariant to DB presence. The floor below is the EXECUTED count on a
+        # host with no DATABASE_URL: 124 collected minus the 2 DB-gated skips
+        # named in allowed_skip_reasons = 122, measured on this tree
+        # 2026-08-04. History of the floor: 96 (2026-07-28, 98 collected);
+        # #256 and #401 then added 6 tests that only surfaced as a drift
+        # note (#432 moved the floor to 102 for those);
+        # test_overlay_store_static.py (20 dependency-free tests, added with
+        # the T1 overlay lane) was registered NOWHERE until this entry picked
+        # it up. gate-runner-selftest now pins this list against
+        # glob("platform/tests/*_static.py") so the next *_static.py file
+        # cannot silently run nowhere.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -797,7 +782,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
-                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py"], 102,
+                 f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
+                 f"{repo_name}/platform/tests/test_overlay_store_static.py"], 122,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -820,10 +806,13 @@ def build_suites() -> List[Suite]:
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 29: 27 baseline tests, plus the PostgreSQL proof registration
-        # and Chromium workflow tests measured on this tree 2026-07-28.
+        # Floor 40: the 29 measured 2026-07-28, plus the 11 sharding tests
+        # (partition determinism, catalog fingerprint, the glob pin on
+        # platform/tests/*_static.py, shard CLI rejections, and the fan-in
+        # verifier's accept + refuse-every-corruption cases), measured on this
+        # tree 2026-08-04.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 29),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 40),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1348,6 +1337,270 @@ def describe_selection(patterns: List[str]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# sharding: deterministic partition + result files + fan-in verifier
+#
+# CI splits the catalog across N isolated runner checkouts (test-gate.yml
+# matrix). Isolation is the point: suites share on-disk state inside one
+# checkout (jobs.db, the versioned drawing store, authored_tools.json, broker
+# ledgers — see the module docstring), so the suites of one shard still run
+# STRICTLY SERIALLY, exactly as a full run does. Nothing about a suite's
+# environment, retry, floor, or log changes under sharding; only WHICH suites
+# a given invocation runs.
+#
+# The completeness proof lives in the fan-in, not in trust: every shard writes
+# a result file carrying a fingerprint of the full catalog it partitioned, and
+# --verify-shard-results recomputes the partition from ITS OWN checkout and
+# refuses unless every shard ran exactly its assigned slice of the exact same
+# catalog and every suite passed. A shard silently dropped, duplicated, run
+# against a different tree, or run with a hand-typed --only cannot verify.
+# --------------------------------------------------------------------------- #
+
+# Measured wall seconds per suite (CI ubuntu-latest, runs 30922601347 /
+# 30924090296, 2026-08-04) — scheduling weights for the partition, nothing
+# more. Only suites >= ~3s are listed; the long tail defaults. A stale or
+# missing weight only unbalances shard makespans, never correctness, but keep
+# the heavy entries roughly honest or one shard quietly becomes the critical
+# path. gate-runner-selftest pins every key here to a registered suite id so a
+# rename cannot strand a weight.
+_MEASURED_EST_S = {
+    "web-version-restore-proof": 100.0,
+    "server-checkout-crossproc": 60.0,
+    "server-backbone": 50.0,
+    "harness-vitest": 36.0,
+    "server-sessions-router": 29.0,
+    "web-author-quota-gate": 20.0,
+    "server-turn-runner": 16.0,
+    "server-write-loop": 12.0,
+    "server-sessions-e2e": 12.0,
+    "server-sessions-routes": 7.0,
+    "server-wave5": 7.0,
+    "server-hardening-3b": 6.6,
+    "harness-tsc-noemit": 5.8,
+    "server-wave3": 5.2,
+    "server-platform-customize": 4.7,
+    "server-guest-uploads": 4.6,
+    "harness-tsc-build": 4.6,
+    "server-microvm": 4.5,
+    "server-dynamic-loader": 4.3,
+    "web-demo-gate": 4.1,
+    "web-build": 3.8,
+    "server-wave2": 3.7,
+    "server-guest-purge": 3.7,
+    "server-customization-adversarial": 3.4,
+    "server-ui-wave": 3.3,
+    "server-wave4": 3.2,
+    "server-agent-e2e": 3.2,
+    "server-jobs-connection-ownership": 3.1,
+}
+_DEFAULT_EST_S = 2.0
+
+
+def suite_weight(suite: Suite) -> float:
+    return _MEASURED_EST_S.get(suite.id, _DEFAULT_EST_S)
+
+
+def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]:
+    """Deterministic longest-processing-time partition of the catalog.
+
+    Heaviest suite first (ties broken by id), each into the currently
+    least-loaded shard (ties broken by lowest index). Every input on both
+    sides of a tie is totally ordered, so the same catalog and count always
+    produce the same partition — the property the fan-in verifier recomputes
+    and stands on. Within a shard, suites run in catalog order, like a full
+    run does.
+    """
+    if shard_count < 1:
+        raise ValueError("shard_count must be >= 1")
+    index_of = {s.id: i for i, s in enumerate(suites)}
+    heaviest_first = sorted(suites, key=lambda s: (-suite_weight(s), s.id))
+    loads = [0.0] * shard_count
+    bins: List[List[Suite]] = [[] for _ in range(shard_count)]
+    for suite in heaviest_first:
+        target = min(range(shard_count), key=lambda k: (loads[k], k))
+        bins[target].append(suite)
+        loads[target] += suite_weight(suite)
+    return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
+
+
+def catalog_fingerprint(suites: List[Suite]) -> str:
+    """SHA-256 over every field of every suite, so two runs agree on this
+    value only when they partitioned the same catalog with the same floors,
+    allowlists, and commands.
+
+    Paths (cwd, sys.executable inside argv) are hashed RAW, which binds the
+    fingerprint to one checkout layout. That is the intended scope: it is an
+    intra-run integrity token compared between the shard jobs and the fan-in
+    of a single CI run (identical runner layout), or between local runs in one
+    worktree — never across machines.
+    """
+    entries = [{
+        "id": s.id, "label": s.label, "kind": s.kind, "cwd": str(s.cwd),
+        "argv": [str(a) for a in s.argv], "expected": s.expected,
+        "allowed_skip_reasons": list(s.allowed_skip_reasons),
+        "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
+        "reset_authored": s.reset_authored, "db_gated": s.db_gated,
+        "opt_in_env": s.opt_in_env, "timeout_s": s.timeout_s,
+    } for s in suites]
+    blob = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def executed_count(res: Result) -> Optional[int]:
+    """Executed tests behind a result row: got minus skipped, the same
+    quantity coverage_verdict compares floors against. None for rows that
+    carry no test counts at all (tsc / script suites); 0 for suite-level
+    SKIPs."""
+    if res.status == "SKIP":
+        return 0
+    c = res.counts
+    if not c or "got" not in c:
+        return None
+    try:
+        return int(c["got"]) - int(c.get("skipped", 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def write_result_json(path: str, *, fingerprint: str, total: int,
+                      shard_count: int, shard_index: int, selection: str,
+                      suites: List[Suite], results: List[Result],
+                      attempts_by_id: dict, wall: float) -> None:
+    """One shard's machine-readable outcome, written even when suites failed
+    so the fan-in can name the failure instead of reporting a missing shard."""
+    entries = []
+    for r in results:
+        entries.append({
+            "id": r.suite.id,
+            "status": r.status,
+            "got": r.got,
+            "executed": executed_count(r),
+            "expected": r.suite.expected,
+            "attempts": attempts_by_id.get(r.suite.id, 1),
+            "seconds": round(r.seconds, 1),
+            "note": r.note,
+        })
+    payload = {
+        "schema": 1,
+        "catalog_fingerprint": fingerprint,
+        "total_suites": total,
+        "shard_count": shard_count,
+        "shard_index": shard_index,
+        "selection": selection,
+        "suite_ids": [s.id for s in suites],
+        "results": entries,
+        "executed_total": sum(e["executed"] or 0 for e in entries),
+        "any_fail": any(r.status == "FAIL" for r in results),
+        "wall_seconds": round(wall, 1),
+    }
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+
+def verify_shard_results(results_dir: Path) -> int:
+    """Fan-in: prove the shard set covered the exact catalog, exactly once,
+    on the same tree, and everything passed. Exit 0 only on that proof.
+
+    Every check here exists because its absence is a silent hole:
+      * missing/duplicate shard  -> a slice of the catalog never ran
+      * fingerprint mismatch     -> a shard ran a different catalog or tree
+      * suite set != partition   -> someone ran a hand-typed subset
+      * results != suite set     -> a shard stopped early (e.g. --fail-fast)
+      * executed_total mismatch  -> the file's own arithmetic is broken
+    """
+    problems: List[str] = []
+    parsed: List[tuple] = []
+    for p in sorted(results_dir.rglob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("schema") == 1:
+            parsed.append((p, data))
+    if not parsed:
+        print(f"no shard result files (schema 1) found under {results_dir}")
+        return 1
+
+    suites = build_suites()
+    if duplicate_suite_ids(suites):
+        print("catalog has duplicate suite ids; fix build_suites() first")
+        return 1
+    fingerprint = catalog_fingerprint(suites)
+
+    shard_counts = {d.get("shard_count") for _, d in parsed}
+    if len(shard_counts) != 1 or not isinstance(next(iter(shard_counts)), int):
+        problems.append(f"shard files disagree on shard_count: {sorted(map(str, shard_counts))}")
+        shard_count = 0
+    else:
+        shard_count = next(iter(shard_counts))
+
+    shards: dict = {}
+    if shard_count >= 1:
+        expected_partition = partition_suites(suites, shard_count)
+        for path, d in parsed:
+            i = d.get("shard_index")
+            if not isinstance(i, int) or not (0 <= i < shard_count):
+                problems.append(f"{path.name}: shard_index {i!r} outside 0..{shard_count - 1}")
+                continue
+            if i in shards:
+                problems.append(f"shard {i}: reported more than once")
+                continue
+            shards[i] = d
+            if d.get("catalog_fingerprint") != fingerprint:
+                problems.append(
+                    f"shard {i}: catalog fingerprint mismatch — it partitioned a "
+                    f"different catalog (different tree, floors, or commands)")
+            want_ids = [s.id for s in expected_partition[i]]
+            if d.get("suite_ids") != want_ids:
+                problems.append(
+                    f"shard {i}: suite set differs from the deterministic "
+                    f"partition for index {i}")
+            result_ids = sorted(e.get("id", "") for e in d.get("results", []))
+            if result_ids != sorted(d.get("suite_ids", [])):
+                problems.append(
+                    f"shard {i}: results do not cover its suite set exactly "
+                    f"(early stop, or a result for a suite it did not own)")
+            claimed = d.get("executed_total")
+            actual = sum((e.get("executed") or 0) for e in d.get("results", []))
+            if claimed != actual:
+                problems.append(f"shard {i}: executed_total {claimed} != per-suite sum {actual}")
+            failed = [e.get("id") for e in d.get("results", []) if e.get("status") == "FAIL"]
+            if failed:
+                problems.append(f"shard {i}: FAILED suites: {', '.join(map(str, failed))}")
+            elif d.get("any_fail"):
+                problems.append(f"shard {i}: any_fail set without a FAIL row (corrupt result file)")
+        missing = [i for i in range(shard_count) if i not in shards]
+        if missing:
+            problems.append(f"missing shard result(s): {missing}")
+
+        covered = [sid for i in sorted(shards) for sid in shards[i].get("suite_ids", [])]
+        catalog_ids = [s.id for s in suites]
+        if not missing and sorted(covered) != sorted(catalog_ids):
+            never_ran = sorted(set(catalog_ids) - set(covered))
+            extras = sorted(set(covered) - set(catalog_ids))
+            problems.append(
+                f"union of shard suite sets != catalog "
+                f"(never ran: {never_ran or '-'}; unknown: {extras or '-'})")
+
+    npass = sum(1 for d in shards.values() for e in d.get("results", [])
+                if e.get("status") == "PASS")
+    nskip = sum(1 for d in shards.values() for e in d.get("results", [])
+                if e.get("status") == "SKIP")
+    executed = sum(d.get("executed_total") or 0 for d in shards.values())
+    slowest = max((d.get("wall_seconds") or 0 for d in shards.values()), default=0)
+    print(f"shard fan-in: {len(shards)}/{shard_count or '?'} shards, "
+          f"suites {npass} PASS {nskip} SKIP, executed {executed}, "
+          f"slowest shard {slowest}s")
+    if problems:
+        for problem in problems:
+            print(f"NOT PROVEN: {problem}")
+        return 1
+    print("PROVEN: every suite in the catalog ran exactly once on one catalog "
+          "fingerprint and passed")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # scoreboard
 # --------------------------------------------------------------------------- #
 def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
@@ -1432,7 +1685,48 @@ def main() -> int:
                          "masked. Use --retry 0 to capture raw first-attempt results.")
     ap.add_argument("--log-dir", default=None,
                     help="directory for per-suite logs (default: C:/tmp/leaf-web-demo-gates)")
+    ap.add_argument("--shard-count", type=int, default=1, metavar="N",
+                    help="partition the catalog into N deterministic shards and run "
+                         "only one of them (see --shard-index). Suites inside a shard "
+                         "still run strictly serially; sharding changes WHICH suites "
+                         "this invocation runs, never how any suite runs.")
+    ap.add_argument("--shard-index", type=int, default=None, metavar="I",
+                    help="0-based shard to run; required when --shard-count > 1. "
+                         "Cannot combine with --only: shards must partition the FULL "
+                         "catalog or the fan-in completeness proof is meaningless.")
+    ap.add_argument("--result-json", default=None, metavar="PATH",
+                    help="write this run's machine-readable outcome (catalog "
+                         "fingerprint, per-suite verdicts, executed counts) for "
+                         "--verify-shard-results to consume.")
+    ap.add_argument("--verify-shard-results", default=None, metavar="DIR",
+                    help="fan-in mode: read every shard result JSON under DIR "
+                         "(recursively), recompute the partition from THIS checkout, "
+                         "and exit 0 only when every shard ran exactly its slice of "
+                         "the exact same catalog and every suite passed. Runs nothing.")
     args = ap.parse_args()
+
+    if args.verify_shard_results:
+        if (args.only or args.result_json or args.shard_count != 1
+                or args.shard_index is not None):
+            print("--verify-shard-results is a fan-in mode and takes no run flags "
+                  "(--only/--shard-count/--shard-index/--result-json)")
+            return 2
+        return verify_shard_results(Path(args.verify_shard_results))
+
+    if args.shard_count < 1:
+        print(f"--shard-count must be >= 1 (got {args.shard_count})")
+        return 2
+    if args.shard_count > 1 and args.shard_index is None:
+        print(f"--shard-count {args.shard_count} needs --shard-index (0..{args.shard_count - 1})")
+        return 2
+    if args.shard_index is not None:
+        if not (0 <= args.shard_index < args.shard_count):
+            print(f"--shard-index {args.shard_index} outside 0..{args.shard_count - 1}")
+            return 2
+        if args.only:
+            print("--only cannot combine with sharding: shards must partition the "
+                  "full catalog, or a suite could silently run nowhere")
+            return 2
 
     default_logroot = Path("C:/tmp") if Path("C:/tmp").exists() else Path.cwd()
     log_dir = Path(args.log_dir) if args.log_dir else (default_logroot / "leaf-web-demo-gates")
@@ -1450,6 +1744,9 @@ def main() -> int:
               "registration in build_suites().")
         return 2
     total = len(suites)
+    # Over the FULL catalog, before any selection: every shard of one run must
+    # report the same fingerprint, whatever slice it ran.
+    fingerprint = catalog_fingerprint(suites)
     only: List[str] = args.only or []
     selection = describe_selection(only)
     if only:
@@ -1461,6 +1758,11 @@ def main() -> int:
                   f"suite. Selection was: {selection}")
             return 2
         selection += f"  -> {len(suites)} of {total} suites"
+    elif args.shard_index is not None:
+        suites = partition_suites(suites, args.shard_count)[args.shard_index]
+        selection = (f"--shard-count {args.shard_count} "
+                     f"--shard-index {args.shard_index}"
+                     f"  -> {len(suites)} of {total} suites")
 
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
@@ -1476,6 +1778,7 @@ def main() -> int:
     authored_existed = AUTHORED_TOOLS.exists()
 
     results: List[Result] = []
+    attempts_by_id: dict = {}
     wall0 = time.perf_counter()
     try:
       for suite in suites:
@@ -1498,6 +1801,7 @@ def main() -> int:
         if res.status == "FAIL" and attempts > 1:
             res.note = (f"FAIL after {attempts} attempts"
                         + (f" ({res.note})" if res.note else ""))
+        attempts_by_id[suite.id] = attempts
         results.append(res)
         tail = f"{res.got:>4}  {res.seconds:5.1f}s"
         if res.note:
@@ -1516,6 +1820,14 @@ def main() -> int:
 
     wall = time.perf_counter() - wall0
     print_scoreboard(results, log_dir, wall, selection)
+
+    if args.result_json:
+        write_result_json(
+            args.result_json, fingerprint=fingerprint, total=total,
+            shard_count=args.shard_count,
+            shard_index=args.shard_index if args.shard_index is not None else 0,
+            selection=selection, suites=suites, results=results,
+            attempts_by_id=attempts_by_id, wall=wall)
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" for r in results)

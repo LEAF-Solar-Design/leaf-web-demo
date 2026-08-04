@@ -19,6 +19,22 @@ name: Test gate
 # suite that DID run fail unless the runner has an exact allowlist, and skipped
 # tests never satisfy executed-count floors.
 #
+# SHARDED (2026-08-04): the serial catalog measured 536s of suite time against
+# a 110s critical suite, so the run is split across 8 isolated runner
+# checkouts. Isolation is load-bearing — suites share on-disk state inside one
+# checkout (jobs.db, drawing store, authored_tools.json, broker ledgers; see
+# the runner's module docstring), so suites within a shard still run strictly
+# serially and NOTHING about how a suite runs changes; only which job runs it.
+# The completeness proof lives in the `gate` fan-in job: every shard writes a
+# result JSON carrying a fingerprint of the catalog it partitioned, and
+# --verify-shard-results recomputes the partition from its own checkout and
+# passes only when every shard ran exactly its assigned slice of the exact
+# same catalog and every suite passed. A shard dropped, duplicated, run
+# against a different tree, or run with a hand-typed subset cannot verify.
+# The fan-in job KEEPS the id `gate` / name `run-all-gates` because
+# build-platform-images.yml `needs:` this reusable job as the repo's only
+# enforceable pre-ECR gate (branch protection is unavailable on this plan).
+#
 # Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
 # required or provided:
 #   * DATABASE_URL is unset, so the runner's Postgres probe returns NO_DSN and
@@ -68,10 +84,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gate:
-    name: run-all-gates
+  shards:
+    name: gate-shard-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
+    strategy:
+      # A cancelled shard destroys the fan-in's completeness proof while
+      # telling the reader nothing a red shard would not: never fail fast.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - uses: actions/checkout@v4
@@ -115,11 +137,28 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # The browser download was the single biggest uncached setup step
+      # (~28s per job, now ×8 jobs). The cache key follows web/package-lock.json
+      # because that lockfile pins the playwright version whose browser build
+      # gets downloaded. System libraries are NOT in the cached directory, so a
+      # cache hit still runs install-deps (apt, a few seconds on this image).
+      - name: Restore Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
       - name: Install Chromium for browser proofs
         working-directory: web
-        run: npx playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
 
-      - name: Run the full gate
+      - name: Run gate shard ${{ matrix.shard }}
         env:
           # The autofill-solver is a sibling checkout on an operator box and is
           # not vendored here. test_autofill_adapter.py offers exactly this flag
@@ -132,13 +171,64 @@ jobs:
         # attempt 2 still exits 0. The runner prints a FLAKED line naming those
         # suites -- treat it as a defect to chase, not as a clean pass. Use
         # --retry 0 to see raw first-attempt signal.
-        run: python scripts/run-all-gates.py --retry 1 --log-dir "$RUNNER_TEMP/gate-logs"
+        run: >
+          python scripts/run-all-gates.py --retry 1
+          --shard-count 8 --shard-index ${{ matrix.shard }}
+          --result-json "$RUNNER_TEMP/gate-results/gate-result.json"
+          --log-dir "$RUNNER_TEMP/gate-logs"
 
-      - name: Upload per-suite gate logs
-        if: failure()
+      # Always, not just on failure: the fan-in needs every shard's result
+      # JSON to prove completeness. `overwrite: true` (no run_attempt in the
+      # name) keeps `gh run rerun --failed` working — the rerun shard replaces
+      # its own artifact while untouched shards keep theirs, so the fan-in of
+      # the new attempt still sees exactly one result per shard. The cost is
+      # that a rerun discards the failed attempt's per-suite logs.
+      - name: Upload shard result and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gate-logs
+          name: gate-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/gate-results
+            ${{ runner.temp }}/gate-logs
           if-no-files-found: warn
           retention-days: 14
+          overwrite: true
+
+  gate:
+    name: run-all-gates
+    needs: shards
+    # always(): when a shard fails this job must still run and FAIL with the
+    # verifier's naming of what broke, not report as skipped.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # The verifier is stdlib-only (see run-all-gates.py imports): no pip.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-shard-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/shard-results
+
+      - name: Verify the complete gate
+        env:
+          SHARD_JOB_RESULT: ${{ needs.shards.result }}
+        # Two independent conditions, both required:
+        #   1. the verifier proves the shard set covered the exact catalog on
+        #      one fingerprint with zero failures;
+        #   2. the shard matrix job itself succeeded — artifact presence alone
+        #      must never pass the gate.
+        run: |
+          python scripts/run-all-gates.py --verify-shard-results "$RUNNER_TEMP/shard-results"
+          test "$SHARD_JOB_RESULT" = "success"
