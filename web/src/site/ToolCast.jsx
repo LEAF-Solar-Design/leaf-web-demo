@@ -653,6 +653,9 @@ export default function ToolCast({
       confidence: 1,
       rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
+      // P2: provenance excludes this arm from route.outcome (catalog is not
+      // the prompt funnel) and attributes run.confirm_shown honestly.
+      source: 'catalog',
     })
   }, [canOperate, catalog.actions])
 
@@ -839,6 +842,9 @@ export default function ToolCast({
       rationale: `Authored just now. Confirm to run ${runnableTool.name}.`,
       alternatives: [],
       refreshedTool: runnableTool,
+      // P2: provenance (see requestCatalogRun above); 'authored' is in the
+      // run.confirm_shown source vocabulary already.
+      source: 'authored',
     })
   }, [catalog.actions, sessionReady])
 
