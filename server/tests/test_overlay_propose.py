@@ -150,38 +150,38 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
     this suite stayed green. Reproduce that condition here, then require
     _store() to hand back the platform package's overlay_store anyway.
 
-    HOW THE PRECONDITION IS PROVEN, and why the obvious check is not enough.
-    `not hasattr(platform, "overlay_store")` looks like it proves the stdlib
-    won the name. It does not. A freshly imported REPO package has not loaded
-    its own submodule yet, so the attribute is absent there too — the check
-    passes, and the old `from platform import overlay_store` then imports the
-    submodule and succeeds. Measured: with the repo root first on sys.path,
-    `hasattr` is False and the pre-fix import returns platform.overlay_store.
-    So the precondition is established by IDENTITY instead: the stdlib
-    `platform` is a single module, never a package, and it defines
-    python_implementation. A package resolving here means the ambient sys.path
-    is not the container's, and this test cannot see the defect it guards, so
-    it fails loudly rather than passing for the wrong reason.
-    """
-    import platform as ambient_platform
+    HOW THE PRECONDITION IS PROVEN. The test is only meaningful where the
+    pre-fix implementation would actually fail, so it must establish that first.
+    Three review rounds tried to establish it by DESCRIBING that environment,
+    and every description was incomplete:
 
-    assert not hasattr(ambient_platform, "__path__"), (
-        "'platform' resolved to a PACKAGE at "
-        f"{getattr(ambient_platform, '__file__', '?')}, so the repo package won "
-        "the name and the container condition is absent. This test cannot "
-        "observe the failure it exists to prevent. Run it from server/.")
-    assert hasattr(ambient_platform, "python_implementation"), (
-        "'platform' is not the stdlib module; precondition not established")
-    # Identity is necessary but NOT sufficient. Both checks above still hold if
-    # something attached an overlay_store attribute to the real stdlib module,
-    # and the pre-fix import would then succeed. Not hypothetical in this repo:
-    # platform/tests/conftest.py already deletes sys.modules["platform"] to
-    # defend the stdlib name. Identity says WHICH module won; this says the old
-    # import would actually fail here. The precondition needs both.
-    assert not hasattr(ambient_platform, "overlay_store"), (
-        "the stdlib 'platform' module carries an overlay_store attribute, so "
-        "the pre-fix import would succeed and this test would pass for the "
-        "wrong reason")
+      round 1  `not hasattr(platform, "overlay_store")` — a freshly imported
+               REPO package lacks the attribute too, and the old import then
+               loads the submodule and succeeds.
+      round 2  identity instead (no `__path__`, has `python_implementation`) —
+               still passes if anything attached an `overlay_store` attribute
+               to the real stdlib module.
+      round 3  identity AND absence — still passes if
+               `sys.modules["platform.overlay_store"]` exists, because
+               IMPORT_FROM falls back to the qualified sys.modules entry when
+               the parent has no such attribute.
+
+    Each fix answered its own round and lost to the next. So state the
+    precondition CONSTRUCTIVELY instead: execute the exact expression the defect
+    lived in and require it to raise. That cannot be an incomplete description
+    of the environment, because it is not a description — it is the condition.
+    """
+    try:
+        from platform import overlay_store as _pre_fix_import  # noqa: F401
+    except ImportError:
+        pass  # precondition holds: the pre-fix implementation fails here
+    else:
+        pytest.fail(
+            "precondition absent: `from platform import overlay_store` SUCCEEDS "
+            f"here (resolved {getattr(_pre_fix_import, '__file__', '?')}), so "
+            "the pre-fix implementation would pass this test and the test "
+            "cannot observe the defect it guards. Run from server/ with a "
+            "sys.modules that has no 'platform' package entry.")
 
     from routers import overlay as overlay_router
 
@@ -197,9 +197,18 @@ def test_store_resolves_when_the_stdlib_platform_module_wins_the_name():
 
 
 def test_store_resolution_is_stable_across_calls():
-    """The router caches the loaded package in sys.modules. A second call must
-    return the same module object — reloading it per request would give two
-    live copies of the store's module state."""
+    """A second call must return the SAME module object — reloading per request
+    would give two live copies of the store's module state.
+
+    Object identity alone would also hold for a module-global cache, or for an
+    old-style import finding a pre-existing sys.modules entry, so identity does
+    not by itself prove the mechanism. Assert the router's private sys.modules
+    key too, which is the thing the docstring is entitled to claim.
+    """
+    import sys
+
     from routers import overlay as overlay_router
 
-    assert overlay_router._store() is overlay_router._store()
+    first = overlay_router._store()
+    assert overlay_router._store() is first
+    assert sys.modules.get("leaf_platform_pkg.overlay_store") is first
