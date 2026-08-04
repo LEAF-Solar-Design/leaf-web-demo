@@ -1156,7 +1156,217 @@ def test_review_skipped_entirely_when_feature_off_or_no_pr(pushable, monkeypatch
 
 
 # --------------------------------------------------------------------------- #
-# 6. route gate (admin tier + R7 internal allowlist)
+# 6. merge on operator approval (issue #422 Phase 3) — blast radius: main
+# --------------------------------------------------------------------------- #
+def _merge_env(monkeypatch):
+    _pr_env(monkeypatch)
+    monkeypatch.setenv("LEAF_PLATFORM_MERGE_ENABLED", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_MERGE_TOKEN", "merge-token")
+
+
+def _mergeable_api(monkeypatch, *, head, calls=None, put=None, delete=None):
+    """Review passed at `head`, PR open; PUT/DELETE overridable per test."""
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "open", "merged": False, "head": {"sha": head}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "success",
+             "description": "VERDICT: PASS"}]}),
+        ("PUT", "/repos/o/r/pulls/5/merge"): put if put is not None else (
+            200, {"merged": True, "sha": "c" * 40}),
+        ("DELETE", "/repos/o/r/git/refs/heads/admin-customize/"): (
+            delete if delete is not None else (204, None)),
+    }, calls)
+
+
+def _merge(view):
+    return lane.merge(change_id=view["change_id"], tenant_id=TENANT,
+                      ack_commit_sha=view["commit_sha"],
+                      approver_subject="auth0|operator")
+
+
+def test_merge_disabled_by_default(pushable, monkeypatch):
+    _pr_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _mergeable_api(monkeypatch, head=head)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_disabled"
+
+
+def test_merge_requires_the_exact_commit_ack(pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _mergeable_api(monkeypatch, head=head)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.merge(change_id=view["change_id"], tenant_id=TENANT,
+                   ack_commit_sha="0" * 40, approver_subject="auth0|operator")
+    assert exc.value.code == "merge_ack_mismatch"
+
+
+def test_merge_happy_path_records_receipt_and_deletes_branch(
+        pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    calls = []
+    _mergeable_api(monkeypatch, head=head, calls=calls)
+    out = _merge(view)
+    assert out["state"] == "merged"
+    assert out["merge"]["merged"] is True
+    assert out["merge"]["commit_sha"] == view["commit_sha"]
+    assert out["merge"]["merge_commit_sha"] == "c" * 40
+    assert out["merge"]["approved_by_subject"] == "auth0|operator"
+    assert out["merge"]["branch_deleted"] is True
+    put = next(c for c in calls if c[0] == "PUT")
+    # GitHub's own same-tree guard: the PUT pins the exact approved sha and
+    # squashes.
+    assert put[2] == {"sha": view["commit_sha"], "merge_method": "squash"}
+    assert lane._read_marker(view["change_id"], "merged")["commit_sha"] == \
+        view["commit_sha"]
+
+
+def test_merge_refuses_unpassed_review_and_moved_head_and_closed_pr(
+        pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    # review pending
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "open", "merged": False, "head": {"sha": head}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "pending"}]}),
+    })
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_review_not_passed"
+    # head moved: review passed but at a DIFFERENT sha
+    moved = "a" * 40
+    _mergeable_api(monkeypatch, head=moved)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_head_moved"
+    # pr closed
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls/5"): (200, {
+            "state": "closed", "merged": False, "head": {"sha": head}}),
+        ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+            {"context": "sol-critic-review", "state": "success"}]}),
+    })
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_pr_not_open"
+
+
+def test_merge_github_409_means_head_moved_between_check_and_put(
+        pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    _mergeable_api(monkeypatch, head=head, put=(409, {"message": "sha mismatch"}))
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "merge_head_moved"
+    # nothing marked, record still landed
+    assert lane._read_marker(view["change_id"], "merged") is None
+    assert lane.load_record(view["change_id"])["state"] == "landed"
+
+
+def test_merge_is_idempotent_after_success(pushable, monkeypatch):
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    calls = []
+    _mergeable_api(monkeypatch, head=head, calls=calls)
+    _merge(view)
+    puts = [c for c in calls if c[0] == "PUT"]
+    again = _merge(view)  # replay with the same ack: no second PUT
+    assert again["state"] == "merged"
+    assert [c for c in calls if c[0] == "PUT"] == puts
+    # replay still demands the exact ack
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.merge(change_id=view["change_id"], tenant_id=TENANT,
+                   ack_commit_sha="0" * 40, approver_subject="auth0|operator")
+    assert exc.value.code == "merge_ack_mismatch"
+
+
+def test_merge_cannot_route_around_cosign(pushable, monkeypatch):
+    """A fundamental-path change whose cosign marker is missing must refuse to
+    merge even if a stale record claims LANDED."""
+    _merge_env(monkeypatch)
+    view = _propose(edits=[{"path": "server/auth.py", "content": "AUTH = 99\n"}])
+    assert view["state"] == "awaiting_cosign"
+    record = lane.load_record(view["change_id"])
+    record["state"] = "landed"  # stale/forged projection, no cosign marker
+    record["pr"] = {"number": 5, "url": "https://github.com/o/r/pull/5",
+                    "reused": False, "at": "2026-08-04T00:00:00Z"}
+    lane._write_record(record)
+    _mergeable_api(monkeypatch, head=view["commit_sha"])
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        _merge(view)
+    assert exc.value.code == "cosign_required"
+
+
+def test_forged_merged_marker_cannot_skip_the_gates(pushable, monkeypatch):
+    """A merged marker against a non-LANDED record is outside the legitimate
+    crash window and must be ignored by reconcile."""
+    _pr_env(monkeypatch)
+    view = _propose()
+    assert view["state"] == "approved"
+    assert lane._claim_marker(view["change_id"], "merged", {
+        "commit_sha": view["commit_sha"], "at": "2026-08-04T00:00:00Z"})
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["state"] == "approved"
+
+
+def test_crashed_merge_heals_to_merged_on_next_touch(pushable, monkeypatch):
+    """Marker claimed (PUT delivered), record write lost: the next touch heals
+    to merged with an honest healed flag."""
+    _merge_env(monkeypatch)
+    view, head = _landed_with_pr(monkeypatch)
+    assert lane._claim_marker(view["change_id"], "merged", {
+        "commit_sha": view["commit_sha"], "merge_commit_sha": "d" * 40,
+        "at": "2026-08-04T00:00:00Z"})
+    out = lane.status_view(change_id=view["change_id"], tenant_id=TENANT)
+    assert out["state"] == "merged"
+    assert out["merge"]["healed"] is True
+    assert out["merge"]["merge_commit_sha"] == "d" * 40
+
+
+def test_merge_token_never_reaches_record_or_logs(pushable, monkeypatch, caplog):
+    import logging
+    _merge_env(monkeypatch)
+    monkeypatch.setenv("LEAF_PLATFORM_MERGE_TOKEN", "sekrit-merge-token")
+    view, head = _landed_with_pr(monkeypatch)
+    real_calls = {}
+    def fake(method, path, *, token, payload=None, timeout=15):
+        if method == "PUT":
+            raise ValueError(f"Invalid header value b'Bearer {token}'")
+        return {
+            ("GET", f"/repos/o/r/pulls/5"): (200, {
+                "state": "open", "merged": False, "head": {"sha": head}}),
+            ("GET", f"/repos/o/r/commits/{head}/status"): (200, {"statuses": [
+                {"context": "sol-critic-review", "state": "success"}]}),
+        }[(method, path.split("?")[0])]
+    monkeypatch.setattr(lane, "_github_request", fake)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(lane.PlatformCustomizeError) as exc:
+            _merge(view)
+    assert exc.value.code == "merge_failed"
+    assert "sekrit-merge-token" not in exc.value.detail
+    assert "sekrit-merge-token" not in caplog.text
+    assert "sekrit-merge-token" not in json.dumps(lane.load_record(view["change_id"]))
+
+
+def test_merge_route_is_not_on_the_harness_backedge():
+    """The drawer is the only door (issue #422 operator constraint): the
+    back-edge allowlist admits land but must never admit merge."""
+    cid = "12345678-1234-1234-1234-1234567890ab"
+    assert deps._dispatch_backedge_route(
+        "POST", f"/api/platform/customize/{cid}/land") is True
+    assert deps._dispatch_backedge_route(
+        "POST", f"/api/platform/customize/{cid}/merge") is False
+
+
+# --------------------------------------------------------------------------- #
+# 7. route gate (admin tier + R7 internal allowlist)
 # --------------------------------------------------------------------------- #
 def _admitted(tenant, monkeypatch, *, auth=True):
     from routers import platform_customize as router_mod

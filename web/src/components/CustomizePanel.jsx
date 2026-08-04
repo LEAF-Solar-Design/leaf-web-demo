@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getPlatformChange, landPlatformChange, proposePlatformChange } from '../api.js'
+import { getPlatformChange, landPlatformChange, mergePlatformChange, proposePlatformChange } from '../api.js'
 import './popovers.css'
 
 // Platform self-edit drawer (R7 admin lane) — visible only with ?customize=1
@@ -91,6 +91,7 @@ const STATE_LABEL = {
   awaiting_cosign: ['quota', 'Awaiting co-sign'],
   denied: ['red', 'Denied'],
   landed: ['done', 'Landed'],
+  merged: ['done', 'Merged'],
 }
 
 const EMPTY_EDIT = { path: '', content: '', delete: false }
@@ -116,6 +117,8 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const [refreshing, setRefreshing] = useState(false)
   const [landConfirming, setLandConfirming] = useState(false)
   const [landing, setLanding] = useState(false)
+  const [mergeConfirming, setMergeConfirming] = useState(false)
+  const [merging, setMerging] = useState(false)
 
   useEffect(() => {
     restoreRef.current = document.activeElement
@@ -216,6 +219,22 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     }
   }, [record])
 
+  const merge = useCallback(async () => {
+    if (!record?.change_id || !record?.commit_sha) return
+    setMerging(true); setErr(null)
+    try {
+      // The merge ack is the EXACT recorded commit, same discipline as the
+      // land ack; the server re-verifies review PASS + open PR + unmoved
+      // head, then GitHub's sha-pinned merge refuses moved bytes.
+      setRecord(await mergePlatformChange(record.change_id, record.commit_sha))
+      setMergeConfirming(false)
+    } catch (e) {
+      setErr(describeError(e))
+    } finally {
+      setMerging(false)
+    }
+  }, [record])
+
   const state = record?.state
   const stateChip = STATE_LABEL[state] || ['', state || '']
   const fundamentals = record?.fundamental_paths || []
@@ -235,7 +254,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
           <div className="ops-section-head">
             <div>
               <div id="cst-propose-title" className="ops-section-title">Propose a change</div>
-              <div className="ops-section-copy">Branch-only edits to the platform repo · nothing merges or deploys from here</div>
+              <div className="ops-section-copy">Branch-only edits to the platform repo · merging needs your fresh approval of the exact commit · nothing deploys from here</div>
             </div>
           </div>
 
@@ -328,6 +347,13 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                 browser; refresh here once it is recorded.
               </div>
             )}
+            {state === 'merged' && record.merge && (
+              <div className="ops-note">
+                Merged into main
+                {record.merge.merge_commit_sha ? ` as ${String(record.merge.merge_commit_sha).slice(0, 12)}` : ''}.
+                The staging canary is the next stage; deploys stay outside this panel.
+              </div>
+            )}
             {state === 'landed' && record.push && (
               <div className="ops-note">
                 {!record.push.pushed
@@ -378,6 +404,21 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                   </span>
                 ) : (
                   <button className="chip-act" onClick={() => setLandConfirming(true)}>Land</button>
+                )
+              )}
+              {state === 'landed' && record.review?.state === 'passed' && record.review?.pr_state === 'open' && (
+                mergeConfirming ? (
+                  <span className="ops-confirm">
+                    <span className="confirm-q">Merge commit {String(record.commit_sha || '').slice(0, 12)} into main?</span>
+                    <button className="chip-act" onClick={merge} disabled={merging}>
+                      {merging ? 'Merging…' : 'Merge'}
+                    </button>
+                    <button className="chip-neutral" onClick={() => setMergeConfirming(false)} disabled={merging}>
+                      Keep
+                    </button>
+                  </span>
+                ) : (
+                  <button className="chip-act" onClick={() => setMergeConfirming(true)}>Merge</button>
                 )
               )}
             </div>

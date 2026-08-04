@@ -12,10 +12,14 @@ Landing is a HANDOFF, not a deploy: ``land()`` (optionally) pushes the branch
 and returns a receipt naming the standing pipeline the branch must ride —
 branch -> PR -> sol-critic review gate -> merge -> ECS staging canary -> prod,
 rollback = previous ECS task-definition revision (docs/ADMIN-SELF-EDIT-LANE.md).
-The lane never merges, never touches ECS, and never bypasses the PR gate.
+The lane never touches ECS and never bypasses the review gate.
 When configured (``LEAF_PLATFORM_PR_OPEN`` + a PR-scoped token), landing also
-opens the pull request automatically — best-effort and recorded, never
-load-bearing (leaf-web-demo#422 Phase 1); the review/merge gates are unchanged.
+opens the pull request automatically and status reads observe the review
+verdict (leaf-web-demo#422 Phases 1-2) — best-effort and recorded, never
+load-bearing. Merging exists ONLY as ``merge()`` (#422 Phase 3): its own kill
+switch and credential, a fresh operator approval naming the exact commit, and
+a twice-executed same-tree guard; it is not on the harness back-edge, so the
+drawer is the only door.
 
 FUNDAMENTAL PATHS (auth, billing, agent spine — see
 ``platform_fundamental_paths.json``) require the out-of-band co-sign before the
@@ -67,6 +71,7 @@ AWAITING_COSIGN = "awaiting_cosign"
 APPROVED = "approved"
 DENIED = "denied"
 LANDED = "landed"
+MERGED = "merged"
 
 
 class PlatformCustomizeError(RuntimeError):
@@ -140,7 +145,8 @@ def _redact(text: str) -> str:
 def pr_open_enabled() -> bool:
     """Phase 1 of the operator-gated follow-through (leaf-web-demo#422):
     after a successful push, open the pull request automatically. OFF by
-    default; the lane still never merges, reviews, or deploys."""
+    default; opening a PR merges nothing and the review gate is untouched
+    (merging is Phase 3's separately-gated, separately-credentialed step)."""
     return os.environ.get("LEAF_PLATFORM_PR_OPEN", "").strip().lower() in {
         "1", "true", "yes", "on"}
 
@@ -823,6 +829,27 @@ def _reconcile(change_id: str, record: dict[str, Any]) -> dict[str, Any]:
             "platform_customize: landed marker present against state=%s for "
             "change %s — ignored (illegitimate heal window)",
             record.get("state"), change_id)
+    merged_marker = _read_marker(change_id, "merged")
+    if (merged_marker and merged_marker.get("commit_sha") == commit_sha
+            and record.get("state") == LANDED):
+        # The only state merge() can legitimately crash out of: the sha-pinned
+        # PUT succeeded (marker proves delivery) but the record write was
+        # lost. A merged marker against any other state is forged or
+        # misplaced and is deliberately IGNORED — it must never stand in for
+        # the land/co-sign/review gates it skipped.
+        record["merge"] = {
+            "merged": True, "commit_sha": commit_sha,
+            "merge_commit_sha": merged_marker.get("merge_commit_sha"),
+            "approved_by_subject": None, "branch_deleted": False,
+            "at": merged_marker.get("at"), "healed": True,
+        }
+        record["state"] = MERGED
+        changed = True
+    elif merged_marker and record.get("state") not in (MERGED, LANDED):
+        _LOG.warning(
+            "platform_customize: merged marker present against state=%s for "
+            "change %s — ignored (illegitimate heal window)",
+            record.get("state"), change_id)
     if changed:
         _write_record(record)
     return record
@@ -1070,6 +1097,138 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"state": "unknown", "error": "review_fetch_failed", "checked_at": at}
 
 
+# ---------------------------------------------------------------------------- #
+# Merge on operator approval (issue #422 Phase 3). This is the first stage
+# whose blast radius is the SHARED MAIN BRANCH, so it takes the strictest
+# posture in the lane:
+#   - its own kill switch (LEAF_PLATFORM_MERGE_ENABLED), independent of
+#     PR-open/observation, defaulting OFF;
+#   - its own credential (LEAF_PLATFORM_MERGE_TOKEN: Contents write + Pull
+#     requests write — necessarily the most powerful of the three tokens, so
+#     it revokes independently; emergency containment names THREE tokens);
+#   - a fresh operator approval naming the exact commit, one-shot marker;
+#   - a same-tree guard executed TWICE: a fresh (never cached) observation
+#     that the review PASSED at a head equal to the recorded commit with the
+#     PR still open, and then GitHub's own sha-pinned merge (the API refuses
+#     if the head moved between our check and the PUT).
+# The review gate is untouched: merge is only ever offered AFTER the standing
+# reviewer passed the exact bytes.
+# ---------------------------------------------------------------------------- #
+def merge_enabled() -> bool:
+    return os.environ.get("LEAF_PLATFORM_MERGE_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
+          approver_subject: str) -> dict[str, Any]:
+    """Merge the landed change's PR — only on a fresh, exact-commit approval.
+
+    ``ack_commit_sha`` is the operator's fresh per-invocation approval (the
+    land-ack idiom): a bare "merge it" that names no bytes is not an approval,
+    and the idempotent replay of an already-merged record demands the same
+    exact ack. Delivery-then-mark like land(): GitHub's sha-pinned merge is
+    the delivery, the one-shot marker serializes the record transition, and a
+    crash between the two heals honestly on the next touch.
+    """
+    record = load_record(change_id)
+    if record.get("tenant_id") != str(tenant_id):
+        raise PlatformCustomizeError("change_not_found", 404)
+    record = _reconcile(change_id, record)
+    commit_sha = str(record.get("commit_sha", ""))
+    if not isinstance(ack_commit_sha, str) or ack_commit_sha != commit_sha:
+        raise PlatformCustomizeError("merge_ack_mismatch", 409)
+    if record.get("state") == MERGED:
+        return public_view(record)
+    if not merge_enabled():
+        raise PlatformCustomizeError("merge_disabled", 404)
+    if record.get("state") != LANDED:
+        raise PlatformCustomizeError("merge_not_ready", 409)
+    pr = record.get("pr")
+    if not _pr_settled(pr):
+        raise PlatformCustomizeError("merge_no_pr", 409)
+    # Defense in depth: a fundamental-path change must still show the durable
+    # approved co-sign marker — merging cannot become the path around it.
+    if record.get("fundamental_paths") and not _cosign_satisfied(change_id, record):
+        raise PlatformCustomizeError("cosign_required", 409)
+
+    # FRESH observation, deliberately bypassing the cache: a merge decision
+    # must never ride a 59-second-old projection.
+    review = _fetch_review(record)
+    if review.get("state") != "passed":
+        raise PlatformCustomizeError(
+            "merge_review_not_passed", 409,
+            f"review_state={review.get('state')} error={review.get('error')}")
+    if review.get("pr_state") != "open":
+        raise PlatformCustomizeError(
+            "merge_pr_not_open", 409, f"pr_state={review.get('pr_state')}")
+    if review.get("head_sha") != commit_sha:
+        raise PlatformCustomizeError(
+            "merge_head_moved", 409,
+            f"head={review.get('head_sha')} recorded={commit_sha}")
+
+    creds = _pr_credentials()
+    if isinstance(creds, str):  # slug validation rides the same helper
+        raise PlatformCustomizeError("merge_config_missing", 503, creds)
+    slug, _observe_token = creds
+    merge_token = os.environ.get("LEAF_PLATFORM_MERGE_TOKEN", "").strip()
+    if not merge_token:
+        raise PlatformCustomizeError("merge_config_missing", 503,
+                                     "LEAF_PLATFORM_MERGE_TOKEN unset")
+    if _PR_TOKEN_RE.fullmatch(merge_token) is None:
+        raise PlatformCustomizeError("merge_config_missing", 503,
+                                     "merge token charset")
+
+    number = int(pr["number"])
+    try:
+        # GitHub's own same-tree guard: `sha` pins the exact head this
+        # approval covers; a head moved between our check and this PUT
+        # answers 409 instead of merging different bytes.
+        status, data = _github_request(
+            "PUT", f"/repos/{slug}/pulls/{number}/merge", token=merge_token,
+            payload={"sha": commit_sha, "merge_method": "squash"})
+    except Exception as exc:  # noqa: BLE001
+        detail = f"{type(exc).__name__}: {exc}".replace(
+            merge_token, "[redacted-token]")
+        raise PlatformCustomizeError(
+            "merge_failed", 503, _redact(detail)[:200])
+    if status == 409:
+        raise PlatformCustomizeError("merge_head_moved", 409, "github_409")
+    if status == 405:
+        raise PlatformCustomizeError("merge_not_mergeable", 409, "github_405")
+    if status != 200 or not isinstance(data, Mapping) \
+            or data.get("merged") is not True:
+        raise PlatformCustomizeError(
+            "merge_failed", 503, f"github_{int(status)}")
+    merge_commit = str(data.get("sha") or "")
+
+    if not _claim_marker(change_id, "merged", {
+            "commit_sha": commit_sha, "merge_commit_sha": merge_commit,
+            "at": _now()}):
+        return public_view(_reconcile(change_id, load_record(change_id)))
+
+    # Best-effort branch delete (Contents write travels with the merge
+    # token); refusing to fail the merge over cleanup.
+    branch_deleted = False
+    try:
+        ref = _assert_branch_only(str(record.get("branch_ref", "")))
+        status2, _ = _github_request(
+            "DELETE", f"/repos/{slug}/git/refs/{ref[len('refs/'):]}",
+            token=merge_token)
+        branch_deleted = status2 in (204, 422)  # 422: already gone
+    except Exception:  # noqa: BLE001
+        pass
+
+    record["merge"] = {
+        "merged": True, "commit_sha": commit_sha,
+        "merge_commit_sha": merge_commit or None,
+        "approved_by_subject": str(approver_subject or ""),
+        "branch_deleted": branch_deleted, "at": _now(),
+    }
+    record["state"] = MERGED
+    _write_record(record)
+    return public_view(record)
+
+
 def _review_fresh(review: Any) -> bool:
     if not isinstance(review, dict):
         return False
@@ -1285,10 +1444,13 @@ def public_view(record: Mapping[str, Any]) -> dict[str, Any]:
         "push": record.get("push"),
         "pr": record.get("pr"),
         "review": record.get("review"),
+        "merge": record.get("merge"),
         "landing_path": {
             "pipeline": ["branch", "pull-request", "sol-critic review gate",
                          "merge", "ECS staging canary", "production"],
             "rollback": "previous ECS task-definition revision",
-            "writes": "branch-only; this lane never merges or deploys",
+            "writes": ("branch-only; merge happens ONLY on a fresh operator "
+                       "approval naming the exact commit, after the review "
+                       "gate passed those bytes; this lane never deploys"),
         },
     }

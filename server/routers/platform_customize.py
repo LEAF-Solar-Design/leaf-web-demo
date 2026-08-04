@@ -38,6 +38,10 @@ _ERROR_MESSAGES = {
     "protected_ref_refused": "Only admin-customize branches may be written; protected refs are refused.",
     "cosign_required": "This change touches fundamental paths and needs the out-of-band co-sign before landing.",
     "cosign_self_approval": "The proposing subject cannot co-sign their own change.",
+    "merge_disabled": "Merging from the platform is not enabled on this deployment.",
+    "merge_review_not_passed": "The review gate has not passed this exact commit yet.",
+    "merge_head_moved": "The pull request no longer points at the approved commit. Nothing was merged.",
+    "merge_pr_not_open": "The pull request is no longer open.",
 }
 
 
@@ -69,6 +73,16 @@ class CosignRequest(BaseModel):
 class LandRequest(BaseModel):
     """The fresh per-invocation approval on the API lane: landing must NAME
     the exact commit (mirrors the catalog's always-confirm posture)."""
+    commit_sha: str = Field(..., min_length=40, max_length=40)
+
+    class Config:
+        extra = "forbid"
+
+
+class MergeRequest(BaseModel):
+    """Phase 3's fresh operator approval: merging must NAME the exact commit.
+    Deliberately identical in shape to LandRequest — same always-confirm
+    posture, higher blast radius, so nothing less than the land ack."""
     commit_sha: str = Field(..., min_length=40, max_length=40)
 
     class Config:
@@ -199,6 +213,26 @@ def land(change_id: str, req: LandRequest,
     try:
         return lane.land(change_id=change_id, tenant_id=tenant_id,
                          ack_commit_sha=req.commit_sha)
+    except lane.PlatformCustomizeError as exc:
+        return _error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
+
+
+@router.post("/api/platform/customize/{change_id}/merge")
+def merge(change_id: str, req: MergeRequest,
+          tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Phase 3 (issue #422): merge on a fresh operator approval. NOT on the
+    harness back-edge allowlist — the drawer is the only door. The approving
+    subject is recorded on the merge receipt."""
+    admitted = _gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    tenant_id, _tier = admitted
+    try:
+        return lane.merge(change_id=change_id, tenant_id=tenant_id,
+                          ack_commit_sha=req.commit_sha,
+                          approver_subject=_subject(tenant, tenant_id))
     except lane.PlatformCustomizeError as exc:
         return _error(exc)
     except Exception as exc:  # noqa: BLE001

@@ -62,9 +62,17 @@ for (const file of await walk(srcDir)) {
 // Landing ack: the exact recorded commit, never a re-read of the mutable ref.
 assert(panel.includes('landPlatformChange(record.change_id, record.commit_sha)'), 'land must acknowledge the recorded commit sha')
 
+// Merge ack (#422 Phase 3): same exact-commit discipline as land, and the
+// button may only be OFFERED on a passed review with the PR still open —
+// the server re-verifies, but the drawer must not invite a doomed approval.
+assert(panel.includes('mergePlatformChange(record.change_id, record.commit_sha)'), 'merge must acknowledge the recorded commit sha')
+assert(panel.includes("record.review?.state === 'passed' && record.review?.pr_state === 'open'"), 'the merge affordance must be gated on a passed review and an open PR')
+assert((panel.match(/mergePlatformChange\(/g) || []).length === 1, 'exactly one merge call site')
+
 // Calm-copy pins for the hold and handoff states.
 assert(panel.includes('Awaiting co-sign'), 'awaiting_cosign must render as a calm hold')
 assert(panel.includes('co-sign authority never enters the browser'), 'the drawer must state the co-sign boundary')
-assert(panel.includes('nothing merges or deploys from here'), 'the drawer must state the branch-only boundary')
+assert(panel.includes('merging needs your fresh approval of the exact commit'), 'the drawer must state the merge-approval boundary')
+assert(panel.includes('nothing deploys from here'), 'the drawer must state the no-deploy boundary')
 
 console.log('customize panel web checks passed')

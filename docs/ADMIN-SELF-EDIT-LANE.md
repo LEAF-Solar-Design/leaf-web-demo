@@ -81,11 +81,27 @@ branch → pull request → sol-critic review gate → merge
 ```
 
 Rollback at the deploy step is the previous ECS task-definition revision —
-the same rollback every deploy names. The lane itself never merges, never
-deploys, never touches ECS; a compromised or mistaken admin change is stopped
-where every other bad change is stopped: at the PR gate. Every landing receipt
-embeds this contract (`landing_path` in the response) so no session can
-honestly claim a shorter path.
+the same rollback every deploy names. The lane never deploys and never
+touches ECS; a compromised or mistaken admin change is stopped where every
+other bad change is stopped: at the review gate. Every landing receipt embeds
+this contract (`landing_path` in the response) so no session can honestly
+claim a shorter path.
+
+**Merge on operator approval (issue #422 Phase 3):** once the standing
+reviewer has PASSED the exact landed commit and the PR is open, the drawer
+offers Merge. It is NOT auto-merge: the operator approves freshly, naming the
+exact commit (the land-ack idiom, one-shot marker), and the server then
+re-verifies everything at merge time with a fresh, uncached observation —
+review passed, PR open, head still equal to the recorded commit — before
+issuing GitHub's own sha-pinned squash merge, which refuses if the head moved
+in between. Its own kill switch (`LEAF_PLATFORM_MERGE_ENABLED`, default OFF)
+and its own credential (`LEAF_PLATFORM_MERGE_TOKEN`: Contents write + Pull
+requests write — necessarily the most powerful of the three tokens, so it
+revokes independently; **emergency containment now names three tokens**).
+Fundamental-path changes still show the durable co-sign marker before merge —
+merging is never a path around co-sign. The route is NOT on the harness
+back-edge: the drawer is the only door, and the approving subject is recorded
+on the merge receipt.
 
 **PR auto-open (issue #422 Phase 1):** when `LEAF_PLATFORM_PR_OPEN=1` and a
 PR-scoped token is configured, a successful land also OPENS the pull request
@@ -172,6 +188,10 @@ Enable (per admin account, staging first):
    Pull-requests read+write AND Commit-statuses read — never Contents; it
    stays a separate token from the Contents push PAT so each revokes
    independently>`.
+   Optional merge-on-approval (#422 Phase 3, blast radius = main — enable
+   LAST): `LEAF_PLATFORM_MERGE_ENABLED=1`,
+   `LEAF_PLATFORM_MERGE_TOKEN=<fine-grained PAT: Contents read+write AND
+   Pull-requests read+write, THIRD token, never shared with the other two>`.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
    404 `platform_customize_disabled`.
@@ -188,7 +208,8 @@ remove the `leaf_admin` flag · the standing agent kill file
   is wanted; the API lane works without it.
 * Tenant-facing fork-deploy (D-2: PARKED; R7 tenant surfaces need their own
   design and canon ruling on model-bytes-in-forks).
-* Auto-merge or auto-deploy of landed branches — the PR gate is the point.
-  (PR *opening* is automated as of issue #422 Phase 1 — that walks the branch
-  to the gate; passing the gate still takes the review verdict and, in later
-  phases, a fresh operator approval.)
+* AUTO-merge and any deploy of landed branches. PR opening is automated
+  (#422 Phase 1), the review verdict is observed (#422 Phase 2), and merge
+  exists behind a fresh operator approval of the exact commit (#422 Phase 3)
+  — but nothing in this lane merges without that approval, and nothing here
+  deploys, ever. The staged-rollout stage (#422 Phase 4) is not designed yet.
