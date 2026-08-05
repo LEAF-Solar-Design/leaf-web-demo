@@ -52,8 +52,8 @@ def main() -> None:
     assert "python -m executor.bootstrap control" in documentation
     assert "python -m executor.bootstrap executor" in documentation
     assert "mode `0600`" in documentation
-    assert "cryptography>=48.0.1,<49" in control_plane_requirements
-    assert "cryptography>=48.0.1,<49" in runtime_requirements
+    assert "cryptography>=50.0.0,<51" in control_plane_requirements
+    assert "cryptography>=50.0.0,<51" in runtime_requirements
 
     forbidden = (
         "AWS_ACCESS_KEY_ID",
