@@ -25,6 +25,7 @@ deterministically with **no LLM in the request hot path**.
 | **Understand how the pieces fit** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | **Read the API/behavior contract** | [`contract/CONTRACT.md`](contract/CONTRACT.md) + [`server/CONTRACT-ADDENDUM.md`](server/CONTRACT-ADDENDUM.md) (§7–§17) |
 | **Understand identity / auth** | [`contract/AUTH.md`](contract/AUTH.md) |
+| **Know why a main build skipped its test gate** | [`docs/GATE-TREE-REUSE.md`](docs/GATE-TREE-REUSE.md) |
 
 Fastest path:
 
