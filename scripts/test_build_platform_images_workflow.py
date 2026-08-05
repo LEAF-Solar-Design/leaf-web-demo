@@ -68,27 +68,41 @@ def main() -> None:
     # mean a new job that provably needs registry access, not a convenience.
     assert text.count("id-token: write") == 3
 
-    # The private key is scoped to the canonical-worker lane. It is used only
-    # for a fail-closed presence check and the one exact solver checkout. It is
+    # The private key is scoped to the canonical-worker lane of BOTH image
+    # jobs: `build`, and `warm` since operator decision D1 (2026-08-05) let
+    # the deploy key into the warm lane so canonical-worker stops being the
+    # only cold post-gate build. In each lane it is used only for a
+    # fail-closed presence check and the one exact solver checkout. It is
     # never passed to Docker as an argument or inherited by the whole job.
     secret_ref = "secrets.AUTOFILL_SOLVER_DEPLOY_KEY"
-    assert text.count(secret_ref) == 2
-    require_start = text.index(
-        "      - name: Require the read-only canonical solver deploy key"
-    )
-    checkout_start = text.index(
-        "      - name: Check out the exact canonical solver source"
-    )
-    buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
-    require_body = text[require_start:checkout_start]
-    checkout_body = text[checkout_start:buildx_start]
-    assert "if: matrix.image == 'canonical-worker'" in require_body
-    assert "if: matrix.image == 'canonical-worker'" in checkout_body
-    assert "persist-credentials: false" in checkout_body
-    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 1
+    assert text.count(secret_ref) == 4
+    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 2
     assert "AUTOFILL_SOLVER_DEPLOY_KEY=" not in text
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY:" not in text[:require_start]
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY" not in text[buildx_start:]
+    # Five mentions per lane (env key + secret ref, presence test, error
+    # message, ssh-key) and none anywhere else: a new reference to the key
+    # in any other step or comment must consciously bump this count.
+    assert text.count("AUTOFILL_SOLVER_DEPLOY_KEY") == 10
+    lane_search = 0
+    for lane in ("warm", "build"):
+        require_start = text.index(
+            "      - name: Require the read-only canonical solver deploy key",
+            lane_search,
+        )
+        checkout_start = text.index(
+            "      - name: Check out the exact canonical solver source", require_start
+        )
+        buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
+        require_body = text[require_start:checkout_start]
+        checkout_body = text[checkout_start:buildx_start]
+        assert "if: matrix.image == 'canonical-worker'" in require_body, lane
+        assert "if: matrix.image == 'canonical-worker'" in checkout_body, lane
+        assert "persist-credentials: false" in checkout_body, lane
+        # One env reference for the presence check and one ssh-key input per
+        # lane: with the total pinned at 4 above, the secret provably
+        # appears nowhere outside these two step bodies.
+        assert require_body.count(secret_ref) == 1, lane
+        assert checkout_body.count(secret_ref) == 1, lane
+        lane_search = buildx_start
 
     # An untested image can never reach ECR: the build job waits on the full
     # gate, run against the exact commit `prepare` resolved. Branch protection
@@ -97,9 +111,19 @@ def main() -> None:
     assert "uses: ./.github/workflows/test-gate.yml" in text
     assert "needs: [prepare, test]" in text
 
-    # The matrix isolates all five images and does not cancel siblings after
-    # one failure. A failed matrix entry still blocks the verification job.
-    assert re.search(r"image:\s*\[app, broker, canonical-worker, harness, web\]", text)
+    # BOTH image matrices (warm and build) carry all five images and do not
+    # cancel siblings after one failure. Warm covering canonical-worker is
+    # operator decision D1 (2026-08-05); silently dropping an image from
+    # either matrix reopens a cold post-gate build. A failed build matrix
+    # entry still blocks the verification job.
+    assert (
+        len(
+            re.findall(
+                r"image:\s*\[app, broker, canonical-worker, harness, web\]", text
+            )
+        )
+        == 2
+    )
     assert "fail-fast: false" in text
     assert "needs: [prepare, build]" in text
 
@@ -246,7 +270,7 @@ def main() -> None:
         try:
             start = next(i for i, l in enumerate(lines) if l == "        with:")
         except StopIteration:
-            raise AssertionError("the warm build step carries no with: mapping")
+            raise AssertionError("a build-push-action step carries no with: mapping")
         body = []
         for line in lines[start + 1:]:
             if line.strip() and not line.startswith("          "):
@@ -261,6 +285,41 @@ def main() -> None:
         assert banned not in warm_build_step, (
             "the warm build step must not carry %r: every publication channel "
             "of build-push-action stays closed in the warm lane" % banned)
+
+    # A warmed layer only matches the gated build if both builds hash the
+    # same inputs. Any drift between the two steps' context, Dockerfile,
+    # build-args, or extra build-contexts makes warm burn runners while the
+    # post-gate build silently goes cold again — the exact regression this
+    # job exists to prevent — so the cache-key-bearing inputs must stay
+    # byte-identical.
+    gated_builds = [
+        s
+        for s in re.split(r"\n      - ", build_block)
+        if "uses: docker/build-push-action" in s
+    ]
+    assert len(gated_builds) == 1, "build holds exactly one build-push-action step"
+    build_with = _with_mapping(gated_builds[0])
+
+    def _with_input(body: str, key: str) -> str:
+        lines = body.splitlines()
+        try:
+            start = next(
+                i for i, l in enumerate(lines) if l.startswith("          " + key)
+            )
+        except StopIteration:
+            raise AssertionError("a build step's with: mapping lacks %r" % key)
+        taken = [lines[start]]
+        for line in lines[start + 1:]:
+            if line.strip() and not line.startswith("            "):
+                break
+            taken.append(line)
+        return "\n".join(taken)
+
+    for key in ("context:", "file:", "build-args:", "build-contexts:"):
+        assert _with_input(warm_with, key) == _with_input(build_with, key), (
+            "warm and build must carry a byte-identical %s input, or the "
+            "warmed cache never matches the gated build" % key)
+
     # And no publish path outside that step either.
     assert "docker push" not in warm_block
     assert "aws ecr put-image" not in warm_block
