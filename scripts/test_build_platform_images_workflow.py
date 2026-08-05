@@ -234,6 +234,82 @@ HINT_SCRIPT = """\
           exit 0
 """
 
+# The warm chain-keeper script, pinned BYTE-EXACT for the same reason as
+# HINT_SCRIPT above: no substring set proves the absence of a rewrite.
+# Sol-critic round 1 on this PR showed the concrete defeat — inverting the
+# probe polarity (`"$found" != "1"`) satisfied every targeted pin while
+# recreating the exact chain-starvation defect this step exists to close
+# (a missing predecessor or failed probe would SKIP warm instead of
+# running it). Any edit to the chain script is a conscious edit of this
+# copy too. Raw string: the script carries backslash continuations.
+CHAIN_SCRIPT = r"""
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must land on skip=false — warm
+          # runs and republishes the chain; a redundant warm costs about a
+          # runner-minute, while a false skip starves every later cache
+          # consumer (warm, gated build, and speculative imports alike).
+          set -uo pipefail
+          set +e
+          skip="false"
+          if [[ "$GATE_REUSE_EXPECTED" == "true" && -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"
+            if [[ "$found" == "1" ]]; then
+              skip="true"
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [[ "$skip" == "true" ]]; then
+            echo "::notice::$IMAGE_NAME: gate reuse is expected and the predecessor cache $PREVIOUS_CACHE_TAG exists; this warm leg exits early"
+          else
+            echo "::notice::$IMAGE_NAME: warming (gate reuse expected: ${GATE_REUSE_EXPECTED:-false}; predecessor cache tag: ${PREVIOUS_CACHE_TAG:-<none>})"
+          fi
+          exit 0
+""".lstrip("\n")
+
+# The nearest-ancestor fallback's EXECUTABLE lines, one canonical copy for
+# all three cache-selection lanes (warm, build, speculate — their comments
+# differ, their code must not). Binds the walk's exact flags
+# (--first-parent --skip=1 --max-count=15: the checkouts fetch 20 commits
+# for precisely this), the single batch-get-image probe (deliberately not
+# an ECR listing: neither workflow role is granted one, so a
+# describe-images variant would AccessDenied and silently run cold —
+# sol-critic round 1 on this PR), the nearest-first selection order, and
+# the fail-open tail. Raw string: backslash continuations again.
+FALLBACK_SCRIPT = r"""
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+""".lstrip("\n")
+
 
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
@@ -1095,11 +1171,24 @@ def main() -> None:
     )
     assert "set +e" in chain_code
     assert 'skip="false"' in chain_code
-    assert '--image-ids "imageTag=$PREVIOUS_CACHE_TAG"' in chain_code
-    assert '"$GATE_REUSE_EXPECTED" == "true"' in chain_code
-    assert 'echo "skip=$skip"' in chain_code
     assert chain_code.rstrip().endswith("exit 0"), (
         "the chain decide step must degrade internally, never redden warm")
+    # BYTE-EXACT script pin (sol-critic round 1 on this PR): the targeted
+    # substring pins above allowed a polarity inversion ("$found" != "1")
+    # that skipped warm exactly when the chain was starving — the defect
+    # this step exists to close. One plain run header, nothing structural
+    # after it, and the content equals the canonical copy.
+    chain_lines = chain_step.splitlines()
+    chain_run_keys = [l for l in chain_lines if _key_of(l) == "run"]
+    assert chain_run_keys == ["        run: |"], chain_run_keys
+    chain_run_at = chain_lines.index("        run: |")
+    chain_tail = chain_lines[chain_run_at + 1:]
+    for line in chain_tail:
+        assert not line.strip() or line.startswith("          "), (
+            "the run block must end the chain step: %r" % line)
+    assert "\n".join(chain_tail).rstrip("\n") == CHAIN_SCRIPT.rstrip("\n"), (
+        "the chain-keeper script must equal its canonical pinned copy in "
+        "this file; edit both together, consciously")
     # Every warm step after the decide carries exactly the skip condition
     # (the solver pair additionally carries the canonical-worker arm,
     # pinned with build's above), and the output reaches nothing outside
@@ -1232,6 +1321,14 @@ def main() -> None:
         for probe in probes:
             assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
                 lane, probe)
+        # The fallback's executable lines equal the one canonical copy
+        # (sol-critic round 1 on this PR: probe counts alone bound neither
+        # the walk's flags nor the batch probe, so dropping fetch-depth or
+        # swapping in an ungranted listing call passed unnoticed).
+        assert "\n".join(live).count(FALLBACK_SCRIPT.rstrip("\n")) == 1, (
+            "the %s lane must carry exactly the canonical nearest-ancestor "
+            "fallback; edit FALLBACK_SCRIPT and every lane together, "
+            "consciously" % lane)
         assert not re.search(
             r'--repository-name "\$IMAGE_NAME"(?!-)', "\n".join(live)
         ), lane
@@ -1255,6 +1352,16 @@ def main() -> None:
     assert sorted(
         '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
     ) == [False, True, True], speculate_probes
+    # Same canonical fallback bytes as warm/build (their comments differ,
+    # their code must not), and no lane anywhere may reach for an ECR
+    # listing: neither workflow role is granted one, so a describe-images
+    # variant would AccessDenied and silently run every build cold
+    # (sol-critic round 1 on this PR).
+    assert "\n".join(speculate_live).count(FALLBACK_SCRIPT.rstrip("\n")) == 1, (
+        "the speculative lane must carry exactly the canonical "
+        "nearest-ancestor fallback")
+    assert "describe-images" not in text
+    assert "list-images" not in text
     tag_values = [
         _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
     ]
@@ -1667,6 +1774,19 @@ def main() -> None:
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
     assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
 
+    # The cache fallback's ancestor walk reads real history: the three
+    # image-building jobs' checkouts must fetch 20 commits (the walk's
+    # --max-count is 15). actions/checkout defaults to depth 1, which
+    # would make every walk silently empty while the fallback pins stayed
+    # green (sol-critic round 1 on this PR). Parsed, not text-matched.
+    for job_name in ("warm", "build", "speculate"):
+        first_step = wf_jobs[job_name]["steps"][0]
+        assert str(first_step.get("uses", "")).startswith(
+            "actions/checkout@"), job_name
+        assert first_step["with"].get("fetch-depth") == 20, (
+            "%s's checkout must declare fetch-depth: 20 for the "
+            "nearest-ancestor walk" % job_name)
+
     # The release role is reachable only through the ecr-release GitHub
     # environment (main-only deployment branch policy): every job that
     # assumes AWS_ECR_PUSH_ROLE declares it as a plain scalar, so its OIDC
@@ -1818,6 +1938,15 @@ def main() -> None:
     assert len(adopt_nodes) == 1
     assert len(verify_nodes) == 1
     assert adopt_nodes[0]["with"] == verify_nodes[0]["with"]
+
+    # warm's and build's cache-select scripts are byte-identical, the same
+    # idiom that binds their build-push inputs: drift would let one lane's
+    # fallback rot while the other lane's pins stayed green.
+    cache_step_name = "Select immutable cache references"
+    warm_cache_run = _sole_named(wf_jobs["warm"]["steps"], cache_step_name)["run"]
+    build_cache_run = _sole_named(wf_jobs["build"]["steps"], cache_step_name)["run"]
+    assert warm_cache_run == build_cache_run, (
+        "warm and build must carry byte-identical cache-select scripts")
 
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
