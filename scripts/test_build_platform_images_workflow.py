@@ -14,6 +14,51 @@ WORKFLOW = (
 ROOT = WORKFLOW.parents[2]
 DEPLOY_DOC = (ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
 
+# The warm-skip hint script, pinned BYTE-EXACT (sol-critic round 3 on
+# PR #449): substring pins over "live" lines were spoofed by TRAILING
+# comments carrying the pinned text while the code beside them was
+# rewritten, and no substring set proves the absence of a rewrite. Any
+# edit to the hint script is therefore a conscious edit of this copy
+# too. The same idiom already binds warm's and build's cache-bearing
+# inputs byte-identical.
+HINT_SCRIPT = """\
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must degrade to expected=false —
+          # warm runs, the pre-hint behaviour — never redden the build.
+          set -uo pipefail
+          set +e
+          expected="false"
+          tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null)"
+          if [[ "$tree" =~ ^[0-9a-f]{40}$ ]]; then
+            repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null)"
+            listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=gate-proof-$tree&per_page=30" 2>/dev/null)"
+            if [[ -n "$repo_id" && -n "$listing" ]]; then
+              # Same-repo provenance comes from the artifact's workflow_run
+              # metadata, exactly as in the gate's probe: a fork's
+              # pull_request run can upload an artifact with any name. The
+              # probe's per-candidate minting-workflow check is skipped here
+              # on purpose — it costs one API call per candidate, and a
+              # same-repo actor gaming a warm SKIP is outside the threat
+              # model (they hold push and could edit this workflow).
+              hits="$(jq -r --argjson repo_id "$repo_id" '
+                [.artifacts[]
+                 | select(.expired | not)
+                 | select(.workflow_run.head_repository_id == $repo_id)]
+                | length' <<<"$listing" 2>/dev/null)"
+              if [[ "$hits" =~ ^[1-9][0-9]*$ ]]; then
+                expected="true"
+              fi
+            fi
+          fi
+          echo "expected=$expected" >> "$GITHUB_OUTPUT"
+          if [[ "$expected" == "true" ]]; then
+            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+          else
+            echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
+          fi
+          exit 0
+"""
+
 
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
@@ -499,24 +544,34 @@ def main() -> None:
         if any(re.match(r"^        id: reuse-hint\s*$", l) for l in s.splitlines())
     ]
     assert len(hint_steps) == 1, "prepare must hold exactly one reuse-hint step"
-    hint_live = "\n".join(
-        l for l in hint_steps[0].splitlines() if not l.strip().startswith("#")
-    )
-    prepare_live = "\n".join(
-        l for l in prepare_block.splitlines() if not l.strip().startswith("#")
-    )
-    # Exactly one LIVE listing call in all of prepare, and it lives in the
-    # hint step, keyed on this exact tree's proof name with the probe's two
-    # provenance filters and the output write beside it.
-    assert prepare_live.count("artifacts?name=gate-proof-$tree") == 1
-    for pinned in (
-        "artifacts?name=gate-proof-$tree",
-        "select(.expired | not)",
-        "select(.workflow_run.head_repository_id == $repo_id)",
-        'echo "expected=$expected" >> "$GITHUB_OUTPUT"',
-    ):
-        assert pinned in hint_live, pinned
-        assert prepare_live.count(pinned) == 1, pinned
+    # The step's run block must equal the canonical module-level copy:
+    # inline comments spoofed the previous live-line substring pins
+    # (round 3, finding 1 — the pinned text survived in a trailing
+    # comment while the live query was broadened and the output write
+    # hard-coded), and unreachable no-op carriers of the pinned text are
+    # the same class. Byte-equality has no text left to hide in.
+    hint_lines = hint_steps[0].splitlines()
+    run_headers = [i for i, l in enumerate(hint_lines) if l == "        run: |"]
+    assert len(run_headers) == 1, "the hint step carries exactly one run block"
+    hint_script = []
+    for line in hint_lines[run_headers[0] + 1:]:
+        if line.strip() and not line.startswith("          "):
+            break
+        hint_script.append(line)
+    assert "\n".join(hint_script).rstrip("\n") == HINT_SCRIPT.rstrip("\n"), (
+        "the warm-skip hint script must equal its canonical pinned copy in "
+        "this file; edit both together, consciously")
+    # And the step must actually RUN, with the workflow token: an if: on
+    # the step (or an emptied GH_TOKEN) silently restores permanent
+    # expected=false — warm runs on every reuse path again with nothing
+    # red anywhere (round 3, finding 2). Same idiom as the build job's
+    # "must not be conditional" pins.
+    assert "if" not in _keys_in(hint_steps[0]), (
+        "the reuse hint must not be conditional")
+    hint_tokens = [
+        _value_of(l) for l in hint_lines if _key_of(l) == "GH_TOKEN"
+    ]
+    assert hint_tokens == ["${{ github.token }}"], hint_tokens
     # The grant backing the listing must sit in prepare's own job-level
     # permissions MAPPING, sliced as a mapping: an `actions: read` parked
     # under a job env satisfied the previous header-wide scan while the
