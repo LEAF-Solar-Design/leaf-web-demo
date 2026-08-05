@@ -575,6 +575,15 @@ def main() -> None:
     assert len(hint_ranges) == 1, "prepare must hold exactly one reuse-hint step"
     hint_seg = annotated[hint_ranges[0][0]:hint_ranges[0][1]]
     hint_structural = [l for l, s in hint_seg if s]
+    # The step's structural key set is EXACT and ordered: pinning the run
+    # block, the condition, and the token still permitted an extra key,
+    # and `shell: bash -c true {0}` before the run block returns success
+    # without ever executing the pinned script — empty output, warm runs
+    # on every reuse path again (sol-critic round 5 on PR #449). Any new
+    # key on this step (shell, with, working-directory, continue-on-error,
+    # a second env entry, ...) is a conscious contract edit.
+    hint_keys = [k for k in (_key_of(l) for l in hint_structural) if k]
+    assert hint_keys == ["name", "id", "env", "GH_TOKEN", "run"], hint_keys
     # Exactly one run key, spelled exactly as the one plain literal header
     # (a folded, chomped, quoted, or comment-carrying header is a
     # different spelling and fails), and the run block must END the step:
