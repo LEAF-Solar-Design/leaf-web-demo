@@ -698,7 +698,17 @@ def main() -> None:
     assert "/compare/$ACCEPTANCE_HEAD_SHA...main" in handoff_body
     assert "staging-authored-execute-" in text
     assert "platform_release_manifest.py verify-staging" in handoff_body
-    assert "git fetch --no-tags origin main" in handoff_body
+    # The handoff checkout persists no credentials and the repository is
+    # private, so the pre-verify-staging main fetch must carry the scoped
+    # auth-header idiom on the workflow's own token. A bare
+    # `git fetch --no-tags origin main` fails on auth the first time a
+    # promote is dispatched (it has never fired: no promote has run), and
+    # the job-level cross-repo PAT stays out of the git header.
+    assert "git fetch --no-tags origin main" not in handoff_body
+    assert "http.https://github.com/.extraheader" in handoff_body
+    assert "fetch --no-tags origin main" in handoff_body
+    assert "x-access-token:$MAIN_FETCH_TOKEN" in handoff_body
+    assert "MAIN_FETCH_TOKEN: ${{ github.token }}" in handoff_body
     assert "--main-ref origin/main" in handoff_body
     assert "production-handoff-candidate-" in handoff_body
     assert "-attempt-${{ github.run_attempt }}" in handoff_body
@@ -1954,6 +1964,19 @@ def check_docs_noop_filter(text: str) -> None:
         _executable_bash(s.get("run", "")) for s in jobs["handoff"]["steps"]
     )
     assert handoff_code.count("artifacts?per_page=100") == 2
+
+    # The main fetch's auth binding, counted over executable text and the
+    # parsed step env so a comment cannot stand in for either half: the
+    # header is built from the workflow's own token, the step env supplies
+    # it, and the job-level cross-repo PAT never enters the git header.
+    assert "x-access-token:$MAIN_FETCH_TOKEN" in handoff_code
+    assert "x-access-token:$GH_TOKEN" not in handoff_code
+    consume_step = next(
+        s
+        for s in jobs["handoff"]["steps"]
+        if str(s.get("name", "")).startswith("Consume the release manifest")
+    )
+    assert consume_step["env"]["MAIN_FETCH_TOKEN"] == "${{ github.token }}"
 
     # Decision vectors run against the SHIPPED module.
     scripts_dir = str(Path(__file__).resolve().parent)
