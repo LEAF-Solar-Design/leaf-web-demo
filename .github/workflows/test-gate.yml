@@ -267,7 +267,13 @@ jobs:
             da/requirements.txt
             platform/requirements.txt
             scripts/requirements-ci.txt
+            executor/control_plane/requirements.txt
+            executor/runtime/requirements.txt
 
+      # The two executor/ files cover the executor suite (cryptography 50,
+      # gunicorn, psycopg, redis); one pip resolve across all seven keeps the
+      # pins consistent (e.g. platform's cryptography>=42 meets executor's
+      # >=50,<51 at 50.x).
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -276,7 +282,9 @@ jobs:
             -r server/requirements-auth.txt \
             -r da/requirements.txt \
             -r platform/requirements.txt \
-            -r scripts/requirements-ci.txt
+            -r scripts/requirements-ci.txt \
+            -r executor/control_plane/requirements.txt \
+            -r executor/runtime/requirements.txt
 
       - uses: actions/setup-node@v4
         with:

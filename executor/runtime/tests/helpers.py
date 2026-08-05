@@ -44,7 +44,15 @@ def documents(source: str, *, assignment_id: str | None = None, lease_id: str | 
             "artifact_digest": source_digest, "runtime": "python-3.12", "entrypoint": "tool:run"}
     catalog = {"contract": "leaf.instant-execution/v1", "catalog_commit": "0" * 40, "capability": capability,
                "execution_class": "instant", "runtime": "python-3.12",
-               "limits": {"max_wall_ms": 200, "max_cpu_ms": 200, "max_memory_mb": 32, "max_output_bytes": 4096, "max_tool_calls": 0},
+               # max_memory_mb becomes a real RLIMIT_AS on POSIX (child.py), and a
+               # warm CPython child's address space sits near 32MB there: at 32 the
+               # high-water accounting test's ~1MB tool allocation tipped the child
+               # into MemoryError on Linux CI (run 31052822849) while every
+               # Windows run sailed (no RLIMIT on nt). 256 is headroom for tools
+               # that must SUCCEED; tests that prove limit ENFORCEMENT pin their
+               # own tight limit locally (test_linux_memory_limit_* sets 32
+               # against a 64MB allocation), so nothing is weakened here.
+               "limits": {"max_wall_ms": 200, "max_cpu_ms": 200, "max_memory_mb": 256, "max_output_bytes": 4096, "max_tool_calls": 0},
                "code_digest": source_digest, "artifact_digest": source_digest, "entrypoint": "tool:run",
                "params_schema_digest": "sha256:" + "c" * 64}
     invocation = {"contract": "leaf.instant-execution/v1", "invocation_id": str(uuid.uuid4()), "tenant_id": "tenant-demo",
