@@ -537,6 +537,10 @@ def check_docs_noop_filter(text: str) -> None:
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
     assert set(dispatch_job) == {"if", "runs-on", "timeout-minutes", "env", "steps"}
+    # Pinned VALUES, not just keys: on a self-hosted runner the PAT-backed
+    # step would execute on infrastructure outside GitHub's ephemeral VMs.
+    assert dispatch_job["runs-on"] == "ubuntu-latest"
+    assert dispatch_job["timeout-minutes"] == 5
     assert dispatch_job["env"] == {
         "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
         "DEPLOY_WORKFLOW": "deploy-leaf-platform-staging.yml",
