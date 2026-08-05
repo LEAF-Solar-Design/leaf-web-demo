@@ -60,3 +60,6 @@ threat model: with no branch protection they can already edit the gate itself.
 * Skew: the direct push that added this file changed the tree with no PR
   gate, so its build ran the full 8-shard gate (see that run's
   `gate-reuse-probe` log: "no verified gate proof binds tree …").
+* Literal skew: a PR whose gate ran against an older main and merged after
+  main advanced takes the full gate the same way — its merge tree no longer
+  matches the gated preview tree, so no proof binds it.
