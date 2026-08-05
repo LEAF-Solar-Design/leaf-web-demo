@@ -8,6 +8,13 @@ executable bash (a guard that drifts into a comment stops counting),
 and the decide script is extracted from the parsed YAML and EXECUTED
 against a real git history, including the rename vector that rename
 detection would disguise as a docs-only diff.
+
+The speculative dispatcher's step bash is additionally bound as
+STATEMENT-shaped pins (whole-line assignments, command-position
+invocations over logical lines, filename-occurrence arithmetic), and an
+in-file decoy battery proves each pin catches the executable-decoy
+vectors from sol-critic round 2 on PR #452 while ordinary maintenance
+edits still pass.
 """
 
 from pathlib import Path
@@ -66,6 +73,10 @@ def _executable_bash(script: str) -> str:
         if code.strip():
             lines.append(code)
     return "\n".join(lines)
+
+
+def _folded(value) -> str:
+    return " ".join(str(value).split())
 
 
 WORKFLOW = (
@@ -1365,9 +1376,6 @@ def main() -> None:
     wf_doc = _strict_yaml(text)
     wf_jobs = wf_doc["jobs"]
 
-    def _folded(value) -> str:
-        return " ".join(str(value).split())
-
     assert wf_jobs["speculate"]["if"] == (
         "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
     )
@@ -1423,93 +1431,12 @@ def main() -> None:
     )
     assert relay_text.count("is not an accepted staging supply-set schema") == 1
 
-    # The dispatcher is deliberately secretless and same-repo-gated: the
-    # real build runs on the MAIN ref (main's workflow text, main's OIDC
-    # subject). If a secrets.* reference ever appears here, the PR-editable
-    # pull_request surface has grown a credential, which is exactly what
-    # the dispatch indirection exists to prevent. Bound to the PARSED
-    # document (strict loader, duplicate keys refused), so a trigger,
-    # permission, or guard relocated into a scalar cannot satisfy it; the
-    # dispatch command lines are bound to the step's comment-stripped
-    # EXECUTABLE bash.
-    dispatcher_text = (WORKFLOW.parent / "speculate-platform-images.yml").read_text(
-        encoding="utf-8"
-    )
-    # ABSENCE over the raw text: a comment mentioning secrets fails too,
-    # which is the safe direction.
-    assert "secrets." not in dispatcher_text
-    dsp_doc = _strict_yaml(dispatcher_text)
-    # YAML parses the `on:` key as boolean True.
-    assert dsp_doc[True] == {"pull_request": {"branches": ["main"]}}
-    assert dsp_doc["permissions"] == {"contents": "read", "actions": "write"}
-    assert set(dsp_doc["jobs"]) == {"dispatch"}
-    dispatch_job = dsp_doc["jobs"]["dispatch"]
-    assert "permissions" not in dispatch_job, (
-        "a job-level permissions block would REPLACE the workflow-level set"
-    )
-    assert _folded(dispatch_job["if"]) == (
-        "github.event.pull_request.head.repo.full_name == github.repository && "
-        "github.event.pull_request.head.repo.fork == false"
-    )
-    dispatch_steps = dispatch_job["steps"]
-    assert len(dispatch_steps) == 2
-    # Step 0 feeds the docs-only decision: an absorbed, credential-free
-    # preview checkout. Absorption matters (a conflicted preview must not
-    # redden the PR) and so does the credential posture (nothing later in
-    # this job may find a persisted token).
-    checkout_step = dispatch_steps[0]
-    assert checkout_step["uses"] == "actions/checkout@v4"
-    assert checkout_step["continue-on-error"] is True
-    assert checkout_step["with"]["persist-credentials"] is False
-    assert checkout_step["with"]["fetch-depth"] == 2
-    assert checkout_step["with"]["ref"] == (
-        "refs/pull/${{ github.event.pull_request.number }}/merge"
-    )
-    assert set(dispatch_steps[1]) <= {"name", "env", "run"}, (
-        "the dispatch step runs plain bash with github.token only"
-    )
-    dispatch_script = _executable_bash(dispatch_steps[1]["run"])
-    assert "gh workflow run build-platform-images.yml" in dispatch_script
-    assert "--ref main" in dispatch_script
-    assert '-f "speculative=true"' in dispatch_script
-    assert '-f "source_sha=$HEAD_SHA"' in dispatch_script
-    assert '-f "speculative_pr_number=$PR_NUMBER"' in dispatch_script
-    # Docs-only skip, fail-open, with the SHAPE bound rather than merely
-    # ordered (sol-critic round 1 on PR #452): exactly one DISPATCH=true
-    # (the fail-open initializer) and one DISPATCH=false (inside the
-    # literal-"skip" arm); the skip EXIT is pinned as a block so deleting
-    # it cannot pass; and the filter executes from the TRUSTED first
-    # parent via git show, never from the PR-controlled preview checkout —
-    # this step's env carries GH_TOKEN with actions:write, so a
-    # preview-sourced filter would hand a same-repo PR that token before
-    # merge. The preview supplies only the FILE LIST (data, not code).
-    assert dispatch_script.count("DISPATCH=true") == 1
-    assert dispatch_script.count("DISPATCH=false") == 1
-    assert "git diff --no-renames --name-only HEAD^1 HEAD" in dispatch_script
-    assert (
-        "git show 'HEAD^1:scripts/docs_noop_filter.py'" in dispatch_script
-    )
-    assert 'python3 "$RUNNER_TEMP/docs_noop_filter.py"' in dispatch_script
-    assert "python3 scripts/docs_noop_filter.py" not in dispatch_script, (
-        "the filter must never execute from the PR-controlled checkout"
-    )
-    assert '[ "$VERDICT" = "skip" ]' in dispatch_script
-    assert dispatch_script.index('[ "$VERDICT" = "skip" ]') < (
-        dispatch_script.index("DISPATCH=false")
-    )
-    skip_exit = re.search(
-        r'if \[ "\$DISPATCH" != "true" \]; then\s*\n\s*exit 0\s*\n\s*fi',
-        dispatch_script,
-    )
-    assert skip_exit, "the docs-only skip must exit before the dispatch"
-    assert skip_exit.start() > dispatch_script.index("DISPATCH=true")
-    assert skip_exit.end() < dispatch_script.index(
-        "gh workflow run build-platform-images.yml"
-    )
-    assert dispatch_script.count("exit 0") == 1, (
-        "exactly one exit 0: the docs-only skip; every other early exit is "
-        "a validation error"
-    )
+    # The speculative dispatcher's whole contract lives in
+    # check_speculative_dispatcher, callable on mutated text so the decoy
+    # battery can prove each pin catches the vector it names.
+    dispatcher_path = WORKFLOW.parent / "speculate-platform-images.yml"
+    check_speculative_dispatcher(dispatcher_path.read_text(encoding="utf-8"))
+    check_speculative_dispatcher_battery(dispatcher_path)
 
     # Cache growth for the speculative namespace has the same explicit
     # bounded-retention infrastructure contract buildcache-* carries.
@@ -1950,6 +1877,276 @@ def _rehearse_decide_script(decide_src: str, dnf) -> None:
         assert decide_run("workflow_dispatch", base, docs_head) == "true"
         assert decide_run("push", "0" * 40, docs_head) == "true"
         assert decide_run("push", "deadbeef" * 5, docs_head) == "true"
+
+
+def check_speculative_dispatcher(dispatcher_text: str) -> None:
+    # The dispatcher is deliberately secretless and same-repo-gated: the
+    # real build runs on the MAIN ref (main's workflow text, main's OIDC
+    # subject). If a secrets.* reference ever appears here, the PR-editable
+    # pull_request surface has grown a credential, which is exactly what
+    # the dispatch indirection exists to prevent. Bound to the PARSED
+    # document (strict loader, duplicate keys refused), so a trigger,
+    # permission, or guard relocated into a scalar cannot satisfy it; the
+    # dispatch command lines are bound to the step's comment-stripped
+    # EXECUTABLE bash.
+    #
+    # ABSENCE over the raw text: a comment mentioning secrets fails too,
+    # which is the safe direction.
+    assert "secrets." not in dispatcher_text
+    dsp_doc = _strict_yaml(dispatcher_text)
+    # YAML parses the `on:` key as boolean True.
+    assert dsp_doc[True] == {"pull_request": {"branches": ["main"]}}
+    assert dsp_doc["permissions"] == {"contents": "read", "actions": "write"}
+    assert set(dsp_doc["jobs"]) == {"dispatch"}
+    dispatch_job = dsp_doc["jobs"]["dispatch"]
+    assert "permissions" not in dispatch_job, (
+        "a job-level permissions block would REPLACE the workflow-level set"
+    )
+    assert _folded(dispatch_job["if"]) == (
+        "github.event.pull_request.head.repo.full_name == github.repository && "
+        "github.event.pull_request.head.repo.fork == false"
+    )
+    dispatch_steps = dispatch_job["steps"]
+    assert len(dispatch_steps) == 2
+    # Step 0 feeds the docs-only decision: an absorbed, credential-free
+    # preview checkout. Absorption matters (a conflicted preview must not
+    # redden the PR) and so does the credential posture (nothing later in
+    # this job may find a persisted token). With step 0 pinned to `uses:`
+    # and the step count pinned, step 1's `run` is this job's ONLY bash.
+    checkout_step = dispatch_steps[0]
+    assert checkout_step["uses"] == "actions/checkout@v4"
+    assert checkout_step["continue-on-error"] is True
+    assert checkout_step["with"]["persist-credentials"] is False
+    assert checkout_step["with"]["fetch-depth"] == 2
+    assert checkout_step["with"]["ref"] == (
+        "refs/pull/${{ github.event.pull_request.number }}/merge"
+    )
+    assert set(dispatch_steps[1]) <= {"name", "env", "run"}, (
+        "the dispatch step runs plain bash with github.token only"
+    )
+    dispatch_script = _executable_bash(dispatch_steps[1]["run"])
+    assert "gh workflow run build-platform-images.yml" in dispatch_script
+    assert "--ref main" in dispatch_script
+    assert '-f "speculative=true"' in dispatch_script
+    assert '-f "source_sha=$HEAD_SHA"' in dispatch_script
+    assert '-f "speculative_pr_number=$PR_NUMBER"' in dispatch_script
+    # Docs-only skip, fail-open, with the SHAPE bound rather than merely
+    # ordered (sol-critic round 1 on PR #452): exactly one DISPATCH=true
+    # (the fail-open initializer) and one DISPATCH=false (inside the
+    # literal-"skip" arm); the skip EXIT is pinned as a block so deleting
+    # it cannot pass; and the filter executes from the TRUSTED first
+    # parent via git show, never from the PR-controlled preview checkout,
+    # because this step's env carries GH_TOKEN with actions:write and a
+    # preview-sourced filter would hand a same-repo PR that token before
+    # merge. The preview supplies only the FILE LIST (data, not code).
+    #
+    # Round 2 of that review (merged past by operator direction, hardened
+    # here) proved substring pins alone are satisfied by executable
+    # DECOYS: a `:` no-op quoting the git-show token, a quoted no-op
+    # carrying the $RUNNER_TEMP invocation, `python3 ./scripts/...` with
+    # a `./` the banned literal missed, and `: "DISPATCH=false"`. The
+    # load-bearing lines are therefore bound as STATEMENTS: whole-line
+    # assignments, the trusted-copy extraction and the filter invocation
+    # in the command position of their logical lines, and filename
+    # arithmetic accounting for every occurrence of the filter's name.
+    assert dispatch_script.count("DISPATCH=true") == 1
+    assert dispatch_script.count("DISPATCH=false") == 1
+    assert re.search(r"^[ \t]*DISPATCH=true[ \t]*$", dispatch_script, re.M), (
+        "DISPATCH=true must be a whole-line assignment statement, not a "
+        "decoy inside quotes or a `:` no-op"
+    )
+    assert re.search(
+        r'if \[ "\$VERDICT" = "skip" \]; then\n'
+        r"(?:[ \t]*echo [^\n]*\n)*"
+        r"[ \t]*DISPATCH=false\n"
+        r"[ \t]*fi",
+        dispatch_script,
+    ), (
+        "DISPATCH=false must be a whole-line assignment inside the "
+        '[ "$VERDICT" = "skip" ] arm; `: "DISPATCH=false"` preserves '
+        "every count and ordering while leaving DISPATCH true at runtime"
+    )
+    # Multi-line statements are pinned over LOGICAL lines (backslash
+    # continuations joined) so each must sit in the command position of
+    # its line, where a quoted decoy cannot.
+    dispatch_logical = re.sub(r"[ \t]*\\\n[ \t]*", " ", dispatch_script)
+    assert re.search(
+        r"^[ \t]*if git rev-parse --verify --quiet 'HEAD\^1' >/dev/null 2>&1 "
+        r"&& git show 'HEAD\^1:scripts/docs_noop_filter\.py' "
+        r'> "\$RUNNER_TEMP/docs_noop_filter\.py" 2>/dev/null; then[ \t]*$',
+        dispatch_logical,
+        re.M,
+    ), (
+        "the trusted-copy extraction must run git show in command "
+        "position, redirected to the $RUNNER_TEMP copy"
+    )
+    assert re.search(
+        r"^[ \t]*if FILES=\$\(git diff --no-renames --name-only "
+        r"HEAD\^1 HEAD 2>/dev/null\); then[ \t]*$",
+        dispatch_logical,
+        re.M,
+    )
+    assert re.search(
+        r"^[ \t]*if VERDICT=\$\(printf '%s\\n' \"\$FILES\" \| "
+        r'python3 "\$RUNNER_TEMP/docs_noop_filter\.py" 2>/dev/null\); then[ \t]*$',
+        dispatch_logical,
+        re.M,
+    ), (
+        "the filter must execute the $RUNNER_TEMP copy in the command "
+        "position of the VERDICT capture, fed the file list on stdin"
+    )
+    # Filename arithmetic: the filter's name may appear ONLY inside the
+    # two trusted tokens, the first-parent git-show source (once) and the
+    # $RUNNER_TEMP copy it writes then executes (twice). 1 + 2 accounts
+    # for all 3 bare-name occurrences, so ANY other spelling (a bare
+    # `scripts/` path, the `./` variant, a decoy quoting a trusted token)
+    # changes a count and fails.
+    assert dispatch_script.count("docs_noop_filter.py") == 3
+    assert dispatch_script.count("'HEAD^1:scripts/docs_noop_filter.py'") == 1
+    assert dispatch_script.count('"$RUNNER_TEMP/docs_noop_filter.py"') == 2
+    assert '[ "$VERDICT" = "skip" ]' in dispatch_script
+    assert dispatch_script.index('[ "$VERDICT" = "skip" ]') < (
+        dispatch_script.index("DISPATCH=false")
+    )
+    skip_exit = re.search(
+        r'if \[ "\$DISPATCH" != "true" \]; then\s*\n\s*exit 0\s*\n\s*fi',
+        dispatch_script,
+    )
+    assert skip_exit, "the docs-only skip must exit before the dispatch"
+    assert skip_exit.start() > dispatch_script.index("DISPATCH=true")
+    assert skip_exit.end() < dispatch_script.index(
+        "gh workflow run build-platform-images.yml"
+    )
+    assert dispatch_script.count("exit 0") == 1, (
+        "exactly one exit 0: the docs-only skip; every other early exit is "
+        "a validation error"
+    )
+    # LIMITATION, stated rather than chased (the PR #445 review lesson:
+    # before tightening a lint again, ask whether the property is
+    # enforceable at that layer at all). These are text checks over
+    # comment-stripped bash, not a bash parser. They bind the statement
+    # shape of the current trusted-copy implementation, so single-token
+    # rewrites fail a shape pin or the arithmetic; they CANNOT exclude
+    # deliberate obfuscation that never spells a pinned token: variable
+    # indirection (f="scripts/..."; python3 "$f"), globs
+    # (python3 scripts/*_filter.py), eval / source / sh -c, string
+    # splicing ("docs_noop_filter"".py"), or code smuggled inside a
+    # multi-line quoted string. The boundaries that hold against a
+    # determined editor are the ones asserted from the parsed document
+    # above (a dispatcher whose only credential is github.token, the
+    # same-repo non-fork job gate, the real build running MAIN's workflow
+    # text via workflow_dispatch) plus review of any diff that touches
+    # this workflow; the statement pins exist to catch accidental drift
+    # and casual smuggling, not to certify the absence of hostile bash.
+
+
+def check_speculative_dispatcher_battery(dispatcher_path: Path) -> None:
+    """Decoy mutation battery for check_speculative_dispatcher.
+
+    Negatives are the executable decoys from sol-critic round 2 on PR
+    #452 plus close variants; each must be CAUGHT. Positive controls are
+    ordinary maintenance edits; each must still PASS (the PR #445
+    round-10 tell: a rule can be simultaneously incomplete and hostile
+    to normal edits).
+    """
+    original = dispatcher_path.read_text(encoding="utf-8")
+
+    def mutate(text: str, old: str, new: str) -> str:
+        assert old in text, f"battery fixture drifted: {old!r} not in workflow"
+        return text.replace(old, new)
+
+    initializer = "          DISPATCH=true\n"
+    invocation = 'python3 "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null); then'
+    skip_assignment = "                  DISPATCH=false\n"
+    git_show_decoy = "          : \"git show 'HEAD^1:scripts/docs_noop_filter.py'\"\n"
+    runner_temp_decoy = "          : 'python3 \"$RUNNER_TEMP/docs_noop_filter.py\"'\n"
+
+    negatives = [
+        (
+            "no-op decoy quoting the git-show token",
+            mutate(original, initializer, initializer + git_show_decoy),
+        ),
+        (
+            "no-op decoy quoting the $RUNNER_TEMP invocation",
+            mutate(original, initializer, initializer + runner_temp_decoy),
+        ),
+        (
+            "./-prefixed preview execution replacing the trusted copy",
+            mutate(
+                original,
+                invocation,
+                "python3 ./scripts/docs_noop_filter.py 2>/dev/null); then",
+            ),
+        ),
+        (
+            "quoted no-op replacing the DISPATCH=false assignment",
+            mutate(
+                original, skip_assignment, '                  : "DISPATCH=false"\n'
+            ),
+        ),
+        (
+            "quoted no-op replacing the DISPATCH=true initializer",
+            mutate(original, initializer, '          : "DISPATCH=true"\n'),
+        ),
+    ]
+    # The round-2 composite: both no-op decoys keep the old substring pins
+    # satisfied while the filter actually executes from the PR-controlled
+    # checkout and the skip arm assigns nothing.
+    composite = mutate(
+        original, initializer, initializer + git_show_decoy + runner_temp_decoy
+    )
+    composite = mutate(
+        composite,
+        invocation,
+        "python3 ./scripts/docs_noop_filter.py 2>/dev/null); then",
+    )
+    composite = mutate(
+        composite, skip_assignment, '                  : "DISPATCH=false"\n'
+    )
+    negatives.append(("round-2 composite decoy scenario", composite))
+
+    for name, mutant in negatives:
+        assert mutant != original
+        try:
+            check_speculative_dispatcher(mutant)
+        except AssertionError:
+            continue
+        raise AssertionError(f"dispatcher decoy battery: {name} was NOT caught")
+
+    dispatched_echo = (
+        '            echo "Dispatched a speculative build of PR'
+        ' #$PR_NUMBER at $HEAD_SHA."\n'
+    )
+    positives = [
+        ("unmodified workflow", original),
+        (
+            "added full-line bash comment",
+            mutate(
+                original,
+                initializer,
+                "          # fail-open: every abnormal path dispatches\n"
+                + initializer,
+            ),
+        ),
+        (
+            "added innocuous echo in the success arm",
+            mutate(
+                original,
+                dispatched_echo,
+                dispatched_echo + '            echo "speculation is best-effort"\n',
+            ),
+        ),
+    ]
+    for name, control in positives:
+        try:
+            check_speculative_dispatcher(control)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"dispatcher decoy battery: control {name!r} must pass "
+                f"but tripped: {exc}"
+            )
+
+    print("speculative dispatcher decoy battery: PASS")
 
 
 def test_build_platform_images_workflow_invariants() -> None:
