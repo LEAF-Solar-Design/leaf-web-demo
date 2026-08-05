@@ -309,10 +309,12 @@ def main() -> None:
         # the file total pinned to 4, it reaches no other job either.
         assert block.count(secret_ref) == 2, lane
 
-    # An untested image can never reach ECR: the build job waits on the full
-    # gate, run against the exact commit `prepare` resolved. Branch protection
-    # is unavailable on this repository's plan, so this workflow-internal
-    # dependency is the only enforceable gate and must not be loosened.
+    # The BUILD job cannot publish an untested image: it waits on the full
+    # gate, run against the exact commit `prepare` resolved. Branch
+    # protection is unavailable on this repository's plan, so this
+    # workflow-internal dependency is what enforces that for build, and must
+    # not be loosened. It says nothing about the warm job; see the
+    # limitation block below.
     assert "uses: ./.github/workflows/test-gate.yml" in text
     assert "needs: [prepare, test]" in text
 
@@ -519,7 +521,13 @@ def main() -> None:
             "the warm build step must not carry the %r input: every "
             "publication channel of build-push-action stays closed in the "
             "warm lane" % banned)
-    assert "push: true" not in warm_build_step
+    # Value-level, not substring: a comment mentioning push: true inside the
+    # step is harmless text (sol-critic round 12 false positive), while the
+    # real input is already pinned to false by the with:-mapping assertion
+    # above. This catches a second push key sneaking in beside it.
+    assert [
+        _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "push"
+    ] == ["false"]
 
     # A warmed layer only matches the gated build if both builds hash the
     # same inputs. Any drift between the two steps' context, Dockerfile,
@@ -606,8 +614,8 @@ def main() -> None:
     # `needs: [prepare] # needs: [prepare, test]` (sol-critic round 6),
     # which drops the gate dependency while reading as intact.
     assert re.search(r"(?m)^    needs: \[prepare, test\]$", build_block), (
-        "the gate edge is this repository's only enforcement that an untested "
-        "image never reaches ECR")
+        "the gate edge is what stops the BUILD job publishing an untested "
+        "image; nothing else in this repository does")
     assert len(re.findall(r"(?m)^    needs:", build_block)) == 1, (
         "the build job declares exactly one needs: list")
     assert "push: true" in build_block
@@ -647,7 +655,11 @@ def main() -> None:
             if re.match(r"^\s*(?:readonly\s+|declare\s+)?cache_to=", _comment_cut(l))
         ]
         assert len(writes) == 2, (lane, writes)
-        assert writes[0].strip() == 'cache_to=""', lane
+        # The same prefixes the regex accepts are accepted here, or
+        # `declare cache_to=""` would match as a write and then fail the
+        # literal comparison (sol-critic round 12).
+        assert re.sub(r"^(?:readonly|declare)\s+", "", writes[0].strip()) == (
+            'cache_to=""'), lane
         assert writes[1] == exports[0], lane
         for rewrite in (r"\bunset\s+cache_to\b", r"\bexport\s+cache_to\b",
                         r"\bprintf\s+-v\s+cache_to\b", r"\bread\s+cache_to\b"):

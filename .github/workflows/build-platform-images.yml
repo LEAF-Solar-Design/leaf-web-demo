@@ -238,11 +238,13 @@ jobs:
           echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
 
   test:
-    # An untested image must never reach ECR. Branch protection is unavailable
+    # An untested image must not reach ECR. Branch protection is unavailable
     # on this repository's GitHub plan (the branch-protection API answers 403),
-    # so this workflow-internal dependency is the ONLY enforceable gate: build
-    # cannot start until the full run-all-gates.py scoreboard is green for the
-    # exact commit `prepare` resolved -- not merely for the branch tip.
+    # so this workflow-internal dependency is what enforces that FOR THE BUILD
+    # JOB: build cannot start until the full run-all-gates.py scoreboard is
+    # green for the exact commit `prepare` resolved -- not merely for the
+    # branch tip. It does not constrain the `warm` job, which holds the same
+    # push role; see warm's header below.
     needs: prepare
     if: ${{ !inputs.promote }}
     uses: ./.github/workflows/test-gate.yml
@@ -255,12 +257,18 @@ jobs:
     with:
       ref: ${{ needs.prepare.outputs.source_sha }}
 
-  # Layer-cache warmer. Runs BESIDE the test gate, not after it, and pushes
-  # NOTHING: the gate stays the only thing standing between a commit and an
-  # image in ECR (this repository has no branch protection, so
-  # `build: needs: [prepare, test]` is the whole enforcement). All this job
-  # publishes is the buildcache-<sha> layer tag the real build then reuses,
-  # turning a cold ~100s post-gate build into a cache hit.
+  # Layer-cache warmer. Runs BESIDE the test gate, not after it, and is
+  # CONFIGURED to publish no image: push:false, no tags. All it publishes is
+  # the buildcache-<sha> layer tag the real build then reuses, turning a cold
+  # ~100s post-gate build into a cache hit.
+  #
+  # Be precise about what enforces that, because the contract test cannot:
+  # `build: needs: [prepare, test]` constrains the BUILD job only. This job
+  # holds the same ECR push role, since it reads and writes the registry
+  # layer cache, so nothing prevents a future shell step here from publishing
+  # a release image before the gate is green. The boundary would come from
+  # narrowing that role to buildcache-* writes; see the limitation block in
+  # scripts/test_build_platform_images_workflow.py.
   #
   # canonical-worker IS warmed since operator decision D1 (2026-08-05). Its
   # original exclusion was a deliberate security call: warming it hands the
