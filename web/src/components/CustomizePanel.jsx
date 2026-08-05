@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getPlatformChange, landPlatformChange, mergePlatformChange, proposePlatformChange } from '../api.js'
 import './popovers.css'
 
-// Platform self-edit drawer (R7 admin lane) — visible only with ?customize=1
-// AND a policy read that carries platform_customize: true (strict; App gates
-// the mount). A DT2 right drawer like OpsDrawer: propose branch-only edits to
+// Platform self-edit drawer (R7 admin lane) — opened by ?customize=1 or the
+// entitled admin's header entry. Both require a policy read that carries
+// platform_customize: true (strict; App gates the mount), so this surface
+// is discoverable without knowing the deep-link flag. A DT2 right drawer like
+// OpsDrawer: propose branch-only edits to
 // the platform repo, watch the change record, land the approved commit into
 // the standing PR pipeline. The co-sign approve/deny step is deliberately
 // ABSENT here: it authenticates with an independent secret that must never

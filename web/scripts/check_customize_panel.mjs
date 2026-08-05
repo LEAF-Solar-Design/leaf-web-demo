@@ -45,11 +45,17 @@ for (const file of await walk(srcDir)) {
   assert(!text.includes('X-Approval-Secret'), `approval secret header must not appear in the browser bundle: ${file}`)
 }
 
-// Mount gating: strict entitlement (no permissive-unknown fallback), plus the
-// hidden ?customize=1 flag, plus live mode. All three, verbatim.
+// Mount gating: strict entitlement (no permissive-unknown fallback) plus live
+// mode. The query flag remains a deep link, but an entitled admin must also get
+// a visible header entry so platform self-edit is discoverable.
 assert(app.includes("entitlements?.entitlements?.platform_customize === true"), 'panel mount must gate on a STRICT platform_customize grant')
-assert(app.includes("get('customize') === '1'"), 'panel must stay behind the ?customize=1 flag')
-assert(app.includes('customizeFlag && !mock && !customizeDismissed && platformCustomizeEntitled'), 'panel mount must require flag AND live mode AND strict entitlement')
+assert(app.includes("get('customize') === '1'"), 'panel must preserve the ?customize=1 deep link')
+assert(app.includes('const canOpenCustomize = !mock && signedIn && platformCustomizeEntitled'), 'the shared gate must require live mode, an active token, and strict entitlement')
+const exitGuard = app.match(/const customizeExit = useExit\(([^)\n]+)\)/)
+assert(exitGuard?.[1].trim() === 'customizeOpen && canOpenCustomize', 'panel mount must use only the fail-closed open-and-authorized guard')
+assert(app.includes('{canOpenCustomize && (') && app.includes('>Customize</button>'), 'an authorized admin must get a visible Customize entry')
+assert(app.includes('onClick={() => setCustomizeOpen(true)}'), 'the visible Customize entry must open the guarded panel')
+assert(app.includes('subscribeUnauthorized(() => {') && app.includes('setCustomizeOpen(false)'), 'a 401 must close the privileged drawer immediately')
 
 // Guard strings alone cannot prove the mount is gated: a SECOND unconditional
 // <CustomizePanel /> would keep every assert above green. Pin the mount count
@@ -57,7 +63,7 @@ assert(app.includes('customizeFlag && !mock && !customizeDismissed && platformCu
 // the component to App.jsx as its only consumer.
 const mountSites = app.match(/<CustomizePanel\b/g) || []
 assert(mountSites.length === 1, `App.jsx must mount CustomizePanel exactly once (found ${mountSites.length})`)
-assert(/\{customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must be behind customizeExit.shown')
+assert(/\{signedIn && customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must bypass its exit hold after auth loss')
 // Exact-path allowlist, not endsWith: "OtherApp.jsx" must NOT be exempt.
 const allowedConsumers = new Set([
   join(srcDir, 'App.jsx'),
