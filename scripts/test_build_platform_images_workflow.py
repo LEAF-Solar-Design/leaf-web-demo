@@ -11,6 +11,7 @@ detection would disguise as a docs-only diff.
 """
 
 from pathlib import Path
+import hashlib
 import os
 import re
 import shutil
@@ -486,8 +487,23 @@ def check_docs_noop_filter(text: str) -> None:
     # compared with EXACT equality, never substring: a guard weakened to
     # `X == 'true' || true` still contains the healthy text and must fail.
     relay_wf = yaml.safe_load(relay_text)
+    # Workflow shape is frozen top to bottom (PyYAML reads the bare `on`
+    # key as True). A new trigger, job, or permission grant must land here.
+    assert set(relay_wf) == {"name", True, "permissions", "concurrency", "jobs"}
+    # CAPABILITY WALL: dispatching the infra repo requires the PAT, and the
+    # workflow's own token is pinned read-only, so an assembled command in
+    # an unguarded script has nothing to dispatch WITH. The token-denial
+    # scan below is only a tripwire on top of this.
+    assert relay_wf["permissions"] == {"actions": "read", "contents": "read"}
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
+    assert set(dispatch_job) == {"if", "runs-on", "timeout-minutes", "env", "steps"}
+    assert dispatch_job["env"] == {
+        "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
+        "DEPLOY_WORKFLOW": "deploy-leaf-platform-staging.yml",
+        "BUILD_RUN_ID": "${{ github.event.workflow_run.id }}",
+        "BUILD_HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
+    }
     assert dispatch_job["if"] == (
         "github.event.workflow_run.conclusion == 'success' && "
         "github.event.workflow_run.event == 'push' && "
@@ -495,24 +511,73 @@ def check_docs_noop_filter(text: str) -> None:
     )
     relay_steps = dispatch_job["steps"]
     assert [s.get("id") for s in relay_steps] == ["tip", "manifest", None]
-    assert all("uses" not in s for s in relay_steps), (
-        "the relay runs no imported actions: a uses: step is an "
-        "unreviewed dispatch path")
     tip_step, manifest_step, dispatch_step = relay_steps
-    assert tip_step.get("if") is None
+    # Step KEY SETS are exact: no uses:, no shell:, no working-directory:,
+    # no continue-on-error: may appear on any step without breaking this.
+    assert set(tip_step) == {"name", "id", "env", "run"}
+    assert set(manifest_step) == {"name", "id", "if", "env", "run"}
+    assert set(dispatch_step) == {"name", "if", "env", "run"}
+    # Step ENV dicts are exact: the unguarded steps hold only the
+    # read-scoped workflow token, never the infra-repo PAT.
+    assert tip_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert manifest_step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
+    }
+    assert dispatch_step["env"] == {
+        "GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}",
+        "IMAGE_TAG": "${{ steps.manifest.outputs.image_tag }}",
+    }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
     assert dispatch_step["if"] == (
         "steps.tip.outputs.current == 'true' && "
         "steps.manifest.outputs.deploy == 'true'"
     ), "without this exact guard a docs-only run dispatches an empty tag"
-    assert (
-        dispatch_step["env"]["IMAGE_TAG"]
-        == "${{ steps.manifest.outputs.image_tag }}"
+
+    # The PAT appears EXACTLY once in the whole parsed workflow, at the
+    # guarded dispatch step's GH_TOKEN. Walking parsed values (not raw
+    # text) keeps comments out of the count in both directions.
+    def _walk_strings(node, path=""):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield from _walk_strings(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                yield from _walk_strings(value, f"{path}[{index}]")
+        elif isinstance(node, str):
+            yield path, node
+
+    secret_refs = [
+        (path, value)
+        for path, value in _walk_strings(relay_wf)
+        if "secrets." in value
+    ]
+    assert len(secret_refs) == 1, (
+        f"exactly one secret reference may exist in the relay: {secret_refs}"
     )
+    assert secret_refs[0][1] == "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+    assert ".steps[2].env.GH_TOKEN" in secret_refs[0][0]
 
     tip_code = _executable_bash(tip_step["run"])
     manifest_code = _executable_bash(manifest_step["run"])
     dispatch_code = _executable_bash(dispatch_step["run"])
+
+    # The UNGUARDED scripts are content-frozen: any edit to their
+    # executable text (comments excluded) must update this hash in the
+    # same PR, so the change is visible to review — an assembled dispatch
+    # smuggled into tip or manifest cannot land silently. The guarded
+    # dispatch script stays property-checked (its exact guard above is
+    # the contract), and the capability wall means the frozen scripts
+    # hold no credential able to dispatch even if edited.
+    frozen = hashlib.sha256(
+        (tip_code + "\n===\n" + manifest_code).encode("utf-8")
+    ).hexdigest()
+    assert frozen == (
+        "ce04a9766bfdf5af80a33fc61c7002fbaa35f735e55ecf6816d0fd5f99e88872"
+    ), (
+        "tip/manifest relay scripts changed: review the diff for dispatch "
+        "capability, then update this hash in the same PR"
+    )
 
     assert (
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
@@ -525,10 +590,11 @@ def check_docs_noop_filter(text: str) -> None:
         "manifest-and-marker both absent must stay a hard error: a "
         "successful build without a supply set is a partial run")
 
-    # Only the guarded third step may know how to dispatch anything. The
-    # token scan is a heuristic tripwire (fragments can always be
-    # assembled past any static scan); the load-bearing wall is the
-    # frozen step list plus the exact guards above.
+    # Only the guarded third step may know how to dispatch anything. This
+    # token scan is a heuristic tripwire on top of the capability wall
+    # above (read-only permissions plus the PAT pinned to the guarded
+    # step): an assembled command in tip or manifest trips this, and even
+    # one that slips past has no credential able to dispatch.
     for step_name, code in (("tip", tip_code), ("manifest", manifest_code)):
         for token in (
             "gh workflow run",
