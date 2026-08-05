@@ -1032,10 +1032,15 @@ def main() -> None:
     #    through the gate into a release image (inherent to remote layer
     #    cache reuse, and present before warm existed via the predecessor
     #    cache);
-    #  * both roles trust the SAME OIDC subject, so code executing in warm
-    #    could mint a fresh job token and assume the release role directly.
-    #    Closing that needs a GitHub-environment-scoped subject on the
-    #    gated jobs — filed as a follow-up, not faked here.
+    #  * the same-subject escape (code in warm minting a fresh job token
+    #    and assuming the release role directly) is closed by the
+    #    ecr-release GitHub environment: every release-role job declares
+    #    environment: ecr-release (asserted on the parsed workflow below),
+    #    warm never does, and the release role's IAM trust accepts only the
+    #    environment-qualified subject once the 2026-08-05 transition in
+    #    leaf-automation-aws-terraform's leaf_iam.tf completes. Until the
+    #    ref-based subject is removed there, the escape is merely narrowed,
+    #    not closed -- the trust policy, not this file, is the boundary.
     #
     # What the warm assertions above and below DO buy: they pin the job's
     # declared configuration, so drift in what it is written to do is
@@ -1403,6 +1408,44 @@ def main() -> None:
     assert wf_jobs["build"]["needs"] == ["prepare", "test", "adopt"]
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
     assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
+
+    # The release role is reachable only through the ecr-release GitHub
+    # environment (main-only deployment branch policy): every job that
+    # assumes AWS_ECR_PUSH_ROLE declares it as a plain scalar, so its OIDC
+    # sub presents repo:...:environment:ecr-release. warm deliberately does
+    # NOT declare it (nor does any other job): warm's ref-based subject must
+    # stop matching the release role's trust once the leaf_iam.tf transition
+    # removes the ref-based subject. Parsed, not text-matched, so a
+    # commented copy or a {name: ...} mapping variant cannot satisfy it.
+    release_env_jobs = {"build", "verify", "speculate", "speculate-manifest", "adopt"}
+    for job_name in release_env_jobs:
+        assert wf_jobs[job_name].get("environment") == "ecr-release", job_name
+    for job_name, job in wf_jobs.items():
+        if job_name not in release_env_jobs:
+            assert "environment" not in job, (
+                "%s must not declare a GitHub environment" % job_name)
+
+    # The fail-fast main-ref guard in prepare. workflow_dispatch can target
+    # any branch or tag; on a non-main ref the five release-role jobs would
+    # otherwise only die at the ecr-release environment's main-only
+    # deployment branch policy AFTER burning the full gate (sol-critic on
+    # PR #454, round 1). Bound to the comment-stripped executable line so a
+    # commented copy cannot satisfy it.
+    env_prepare_block = text.split("\n  prepare:\n", 1)[1].split(
+        "\n  test:\n", 1)[0]
+    env_prepare_live = [
+        _comment_cut(l) for l in env_prepare_block.splitlines()
+        if not l.strip().startswith("#")
+    ]
+    guard_lines = [
+        l for l in env_prepare_live
+        if 'if [ "$GITHUB_REF" != "refs/heads/main" ]; then' in l
+    ]
+    assert len(guard_lines) == 1, (
+        "prepare must fail fast exactly once when not on refs/heads/main")
+    assert any(
+        "may only run on refs/heads/main" in l for l in env_prepare_live
+    ), "the main-ref guard must fail with an actionable error message"
     assert wf_jobs["adopt"]["permissions"] == {
         "id-token": "write",
         "contents": "read",

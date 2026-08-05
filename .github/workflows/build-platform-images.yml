@@ -51,7 +51,15 @@ name: Build platform images
 # leaf-github-web-demo-buildcache-push-role (AWS_ECR_BUILDCACHE_PUSH_ROLE repo
 # secret), which can reach nothing but the five *-buildcache repositories --
 # IAM, not convention, is what keeps warm's configured credential away from
-# every tag the deploy rail consumes. (speculate pushes real spec-* images by
+# every tag the deploy rail consumes. Every release-role job additionally
+# declares environment: ecr-release (a GitHub environment with a main-only
+# deployment branch policy), so its OIDC sub presents the
+# repo:...:environment:ecr-release form. warm never declares it: once the
+# release role's trust drops the ref-based subject
+# (leaf-automation-aws-terraform leaf_iam.tf, 2026-08-05 transition), a
+# token minted inside warm cannot assume the release role at all -- that
+# closes the same-subject residual both #453 and #451 reviews filed.
+# (speculate pushes real spec-* images by
 # design, so it genuinely needs the release role; that namespace is fenced
 # from deploys as described above.)
 # TERRAFORM_REPO_TOKEN (PAT with Actions read access to both repositories) is
@@ -239,6 +247,16 @@ jobs:
           STAGING_ACCEPTANCE_RUN_ATTEMPT: ${{ inputs.staging_acceptance_run_attempt }}
         run: |
           set -euo pipefail
+          # Fail fast off refs/heads/main. The push trigger is main-only and
+          # every automated dispatcher passes --ref main, so a non-main ref
+          # can only be a manual or API dispatch. Without this check such a
+          # run burns the whole gate and then dies at the ecr-release
+          # environment's main-only deployment branch policy on the first
+          # release-role job (sol-critic on PR #454, round 1).
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::build-platform-images may only run on refs/heads/main (got '$GITHUB_REF'); dispatch with --ref main. The ecr-release environment's main-only branch policy blocks every release-role job on any other ref."
+            exit 1
+          fi
           api_get() {
             curl --fail --silent --show-error --retry 3 --retry-all-errors \
               -H "Authorization: Bearer $GH_TOKEN" \
@@ -713,6 +731,10 @@ jobs:
            (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # The ecr-release GitHub environment (main-only deployment branch
+    # policy) is what qualifies this job's OIDC subject for the release
+    # role's trust; warm deliberately never declares it.
+    environment: ecr-release
     permissions:
       id-token: write
       contents: read
@@ -877,6 +899,7 @@ jobs:
             needs.adopt.outputs.adopted == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ecr-release
     permissions:
       id-token: write
       contents: read
@@ -1017,6 +1040,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    environment: ecr-release
     permissions:
       id-token: write
       contents: read
@@ -1153,6 +1177,7 @@ jobs:
           inputs.speculative && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ecr-release
     permissions:
       id-token: write
       contents: read
@@ -1267,6 +1292,7 @@ jobs:
     if: ${{ !inputs.promote && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ecr-release
     permissions:
       id-token: write
       contents: read
