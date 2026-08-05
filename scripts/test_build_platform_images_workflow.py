@@ -437,11 +437,37 @@ def main() -> None:
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
-    # FOUR build-lane jobs now carry the promote guard (test, warm, build,
+    # THREE build-lane jobs carry the bare promote guard (test, build,
     # verify): a promote run reuses already-published digests and must never
-    # rebuild, so the cache warmer is skipped on that path exactly like the
-    # jobs it feeds.
-    assert text.count("if: ${{ !inputs.promote }}") == 4
+    # rebuild. The cache warmer is skipped on that path too, but its guard
+    # is compound — promote AND prepare's gate-reuse hint — so it is pinned
+    # by exact parsed value below rather than counted here.
+    assert text.count("if: ${{ !inputs.promote }}") == 3
+    # Warm's guard, whole and at the job's own if: key. Warm is also skipped
+    # when a same-repo gate proof already names this exact tree: the gate leg
+    # then reuses the verdict in ~30s, the build job starts before any warm
+    # leg could publish its cache, and warm burns five runners for nothing
+    # (measured: zero of nine warm legs contributed across the first two
+    # reuse-path runs, 30978164812 and 30983842725). `!= 'true'` keeps the
+    # hint fail-open: an empty, missing, or failed hint output runs warm.
+    warm_job_header = warm_block[: warm_block.index("    steps:")]
+    warm_guards = [
+        _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
+    ]
+    assert warm_guards == [
+        "${{ !inputs.promote && needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+    ], warm_guards
+    # The hint is an ECONOMIC signal with a deliberately narrow blast
+    # radius: it may gate warm and NOTHING else. Skipping the GATE stays the
+    # sole business of the called gate's verified reuse probe and fan-in
+    # re-verification, and the build job's own tree binding is what refuses
+    # an unproven push — a hint defect must never widen past a colder
+    # build. Exactly two occurrences: the prepare output that mints it and
+    # the warm guard that consumes it.
+    assert text.count("gate_reuse_expected") == 2
+    prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
+    assert prepare_block.count("gate_reuse_expected") == 1
+    assert warm_job_header.count("gate_reuse_expected") == 1
     assert "Production handoff requires the exact release source_sha input" in text
     assert "Production handoff requires the successful release workflow run ID" in text
     assert "Production handoff requires the exact release run attempt" in text

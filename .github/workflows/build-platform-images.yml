@@ -75,6 +75,13 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Job-level permissions REPLACE the workflow-level set, so the two
+    # workflow-level grants are restated. actions:read is new and backs one
+    # step: the warm-skip hint's gate-proof artifact listing. Read-only.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
 
     outputs:
       tag: ${{ steps.tag.outputs.value }}
@@ -84,6 +91,7 @@ jobs:
       source_mode: ${{ steps.source.outputs.mode }}
       solver_revision: ${{ steps.solver.outputs.revision }}
       solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
+      gate_reuse_expected: ${{ steps.reuse-hint.outputs.expected }}
 
     steps:
       - uses: actions/checkout@v4
@@ -237,6 +245,62 @@ jobs:
           echo "cache_value=$current_cache_tag" >> "$GITHUB_OUTPUT"
           echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
 
+      # Warm-skip hint. When a same-repo gate proof already names this exact
+      # tree, the called gate's reuse probe is expected to skip the shards
+      # (operator decision D3), the gate leg collapses to ~30s, and the build
+      # job starts long before any warm leg could publish its cache: on the
+      # first two reuse-path runs (30978164812, 30983842725) zero of nine
+      # warm legs finished before build began — five runners burned per push
+      # for nothing. The hint mirrors the probe's LISTING filters (exact
+      # artifact name, un-expired, same-repo workflow_run provenance) but
+      # deliberately not its download-and-verify, because both divergence
+      # directions are benign: a false "expected" costs one full-gate run its
+      # warm (build falls back to the predecessor cache), a missed one costs
+      # today's redundant warm. Skipping the GATE stays the sole business of
+      # test-gate.yml's verified probe and fan-in re-verification; this
+      # output gates the warm job and nothing else, and the contract test
+      # pins exactly that.
+      - name: Probe for an expected gate reuse (warm-skip hint)
+        id: reuse-hint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must degrade to expected=false —
+          # warm runs, the pre-hint behaviour — never redden the build.
+          set -uo pipefail
+          set +e
+          expected="false"
+          tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null)"
+          if [[ "$tree" =~ ^[0-9a-f]{40}$ ]]; then
+            repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null)"
+            listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=gate-proof-$tree&per_page=30" 2>/dev/null)"
+            if [[ -n "$repo_id" && -n "$listing" ]]; then
+              # Same-repo provenance comes from the artifact's workflow_run
+              # metadata, exactly as in the gate's probe: a fork's
+              # pull_request run can upload an artifact with any name. The
+              # probe's per-candidate minting-workflow check is skipped here
+              # on purpose — it costs one API call per candidate, and a
+              # same-repo actor gaming a warm SKIP is outside the threat
+              # model (they hold push and could edit this workflow).
+              hits="$(jq -r --argjson repo_id "$repo_id" '
+                [.artifacts[]
+                 | select(.expired | not)
+                 | select(.workflow_run.head_repository_id == $repo_id)]
+                | length' <<<"$listing" 2>/dev/null)"
+              if [[ "$hits" =~ ^[1-9][0-9]*$ ]]; then
+                expected="true"
+              fi
+            fi
+          fi
+          echo "expected=$expected" >> "$GITHUB_OUTPUT"
+          if [[ "$expected" == "true" ]]; then
+            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+          else
+            echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
+          fi
+          exit 0
+
   test:
     # An untested image must not reach ECR. Branch protection is unavailable
     # on this repository's GitHub plan (the branch-protection API answers 403),
@@ -282,9 +346,17 @@ jobs:
   #
   # continue-on-error is deliberate: a warm failure must degrade to today's
   # behaviour (a cold build off the predecessor cache), never redden a run.
+  #
+  # SKIPPED when prepare's reuse hint expects the gate verdict to be reused
+  # (this exact tree already carries a same-repo gate proof): the gate leg is
+  # then ~30s instead of ~220s, the build job starts before any warm leg
+  # could publish, and warming cannot pay off. The guard is fail-open — an
+  # empty or failed hint output runs warm — and skipping warm never starves
+  # the cache chain, because the build job publishes buildcache-<shortsha>
+  # itself whenever warm did not.
   warm:
     needs: prepare
-    if: ${{ !inputs.promote }}
+    if: ${{ !inputs.promote && needs.prepare.outputs.gate_reuse_expected != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
