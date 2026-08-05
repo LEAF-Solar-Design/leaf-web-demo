@@ -546,15 +546,8 @@ def main() -> None:
             "warm and build must carry a byte-identical %s input, or the "
             "warmed cache never matches the gated build" % key)
 
-    # And no publish path outside that step either. Enumerating publishing
-    # COMMANDS is a losing game — `docker buildx build --push` beat the
-    # first list (sol-critic round 8), then `docker image push`, `podman
-    # push`, and `buildctl ... push=true` beat the second (round 9). So the
-    # contract is structural instead: warm may only run the five pinned
-    # actions, and it may contain exactly ONE shell step, the cache
-    # selector. A publishing command needs somewhere to live, and in this
-    # job there is nowhere: any added run step fails outright, whatever it
-    # contains.
+    # Warm may only use these actions. Adding one is a conscious act in a
+    # job that holds the solver deploy key, so it should cost a test edit.
     allowed_uses = {
         "actions/checkout@v4",
         "docker/setup-buildx-action@v3",
@@ -566,33 +559,34 @@ def main() -> None:
         _value_of(l) for l in warm_block.splitlines() if _key_of(l) == "uses"
     ]
     assert set(warm_uses) <= allowed_uses, sorted(set(warm_uses) - allowed_uses)
-    warm_run_steps = [s for s in warm_steps if "run" in _keys_in(s)]
-    assert [s.splitlines()[0] for s in warm_run_steps] == [
-        "name: Require the read-only canonical solver deploy key",
-        "name: Select immutable cache references",
-    ], "warm carries exactly these two shell steps; a third is where a " \
-       "pre-gate publish would live"
-
-    # Those two steps talk to ECR only to READ tags. Comments are stripped
-    # first, so a comment naming a banned tool is fine (round-9 false
-    # positive); an actual invocation is not. Container tooling has no
-    # business in either, which is why the ban is on the tool name rather
-    # than on a verb list that keeps growing.
-    warm_script = "\n".join(
-        _comment_cut(l) for s in warm_run_steps for l in s.splitlines()
-    )
-    forbidden_tool = re.search(
-        r"\b(docker|podman|nerdctl|buildctl|buildah|crane|skopeo|oras|regctl)\b",
-        warm_script,
-    )
-    assert not forbidden_tool, (
-        "the warm shell steps must not invoke container tooling: %r"
-        % (forbidden_tool.group(1) if forbidden_tool else ""))
-    for call in re.findall(r"aws ecr [a-z-]+", warm_script):
-        assert call == "aws ecr batch-get-image", call
     assert "push: true" not in warm_block
     assert "tags" not in _keys_in(warm_block), (
         "a cache warmer publishes no image tag")
+
+    # ------------------------------------------------------------------ #
+    # WHAT THIS TEST DOES NOT PROVE, stated plainly so nobody mistakes a
+    # green run for a guarantee (sol-critic rounds 8 to 10 on PR #445).
+    #
+    # Warm holds the same ECR push role the gated build does, because it
+    # reads and writes the registry layer cache. Any shell it runs can
+    # therefore publish an image before the gate is green. Three attempts
+    # to forbid that by inspection all failed: a command denylist was
+    # beaten by `docker buildx build --push`, then by `docker image push`,
+    # `podman push`, and `buildctl ... push=true`; and a structural rule
+    # tight enough to try (an exact list of permitted shell steps) still
+    # admitted `ctr images push`, `cosign copy`, and any helper script or
+    # make target, while rejecting five ordinary maintenance edits —
+    # a third diagnostic step, `aws ecr describe-images`, `docker
+    # version`, and renaming or reordering the permitted steps.
+    #
+    # A text check cannot prove the absence of a publishing command in
+    # arbitrary shell. What actually bounds warm is (a) the gate edge
+    # asserted below, which is what keeps an untested image off the
+    # RELEASE tag, and (b) the scope of AWS_ECR_PUSH_ROLE. Narrowing that
+    # role so the warm job can write buildcache-* and nothing else is the
+    # real control, is infrastructure rather than workflow, and is filed
+    # as a follow-up rather than faked here.
+    # ------------------------------------------------------------------ #
 
     # The gate edge, pinned as an EFFECTIVE job key at its exact
     # indentation. A bare substring search was satisfied by
@@ -627,15 +621,20 @@ def main() -> None:
         # assertion above still passes (sol-critic round 7, finding 4). The
         # only assignments allowed are the empty initialiser and the pinned
         # export line.
-        # Every mention of the variable is accounted for, not just lines
-        # that begin with an assignment: `unset cache_to`, `export
-        # cache_to=...`, and `printf -v cache_to ...` all rewrite it after
-        # the pinned line (sol-critic round 8, finding 4).
-        mentions = [l for l in live if "cache_to" in _comment_cut(l)]
-        assert len(mentions) == 3, (lane, mentions)
-        assert mentions[0].strip() == 'cache_to=""', lane
-        assert mentions[1] == exports[0], lane
-        assert mentions[2].strip() == 'echo "to=$cache_to" >> "$GITHUB_OUTPUT"', lane
+        # The variable is written exactly twice, the empty initialiser then
+        # the pinned export, and never rewritten afterwards: `unset
+        # cache_to`, `export cache_to=...`, and `printf -v cache_to ...`
+        # each strip the option back off while the assertions above still
+        # pass (sol-critic round 8, finding 4). Reads are unrestricted, so
+        # an added debug echo does not redden the gate.
+        writes = [l for l in live if re.match(r"^\s*cache_to=", _comment_cut(l))]
+        assert len(writes) == 2, (lane, writes)
+        assert writes[0].strip() == 'cache_to=""', lane
+        assert writes[1] == exports[0], lane
+        for rewrite in (r"\bunset\s+cache_to\b", r"\bexport\s+cache_to\b",
+                        r"\bprintf\s+-v\s+cache_to\b", r"\bread\s+cache_to\b"):
+            assert not re.search(rewrite, "\n".join(_comment_cut(l) for l in live)), (
+                lane, rewrite)
 
     # ------------------------------------------------------------------ #
     # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
