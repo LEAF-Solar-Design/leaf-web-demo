@@ -987,6 +987,50 @@ def main() -> None:
             f"consumption scanner drift on: {probe_run!r} "
             f"(offended={offended}, expected {must_offend})"
         )
+
+    # Dockerfile.instant-execution is built by the sibling staging workflow
+    # (build-instant-execution-image.yml), not this one, but it consumes the
+    # same per-commit LEAF_SOURCE_SHA and so shares the layer-cache contract.
+    # This file owns the scanner and is the PR-gated one of the two
+    # (run-all-gates), so the invariant binds the staging image here. Its one
+    # RUN below the ARG is the sha-format gate, which consumes it.
+    instant = (ROOT / "deploy" / "Dockerfile.instant-execution").read_text(
+        encoding="utf-8"
+    )
+    assert "ARG LEAF_SOURCE_SHA" in instant
+    assert "LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}" in instant
+    offending = _runs_after_per_commit_arg(instant)
+    assert offending == [], (
+        "Dockerfile.instant-execution: RUN below a per-commit ARG without "
+        f"consuming it re-runs on every merge: {offending}"
+    )
+
+    # The broker's toolchain block (apt libstdc++6/git + node binary + e2b
+    # node_modules) reads nothing from the source tree, so it must sit ABOVE
+    # the per-commit source COPYs: an instruction below them re-executes on
+    # every merge regardless of the ARG placement the scanner enforces
+    # (run 31006198764: apt 6.1s + node 0.7s re-ran after the source COPYs).
+    # Comment lines are stripped first so a mention in prose can neither
+    # satisfy nor break the ordering pin.
+    broker_exec = "\n".join(
+        line
+        for line in (ROOT / "deploy" / "Dockerfile.broker")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    first_source_copy = broker_exec.index("COPY server/  /app/server/")
+    for toolchain_marker in (
+        "apt-get install -y --no-install-recommends libstdc++6 git",
+        "COPY --from=node:20-slim /usr/local/bin/node",
+        "COPY --from=e2bdeps /helper/node_modules",
+        "COPY harness/scripts/e2b-tool-exec.mjs",
+    ):
+        assert broker_exec.index(toolchain_marker) < first_source_copy, (
+            f"Dockerfile.broker: {toolchain_marker!r} is below the per-commit "
+            "source COPYs and re-runs on every merge"
+        )
+
     canonical = (ROOT / "deploy" / "Dockerfile.canonical-worker").read_text(
         encoding="utf-8"
     )

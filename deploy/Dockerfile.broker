@@ -36,16 +36,6 @@ RUN pip install --no-cache-dir \
       -r /app/da/requirements.txt \
       -r /app/platform/requirements.txt
 
-# --- Broker source + the siblings it resolves via PROJECT_ROOT = /app --------
-# (broker.py: SERVER_DIR.parent; inserts /app + /app/server on sys.path, then
-# imports da/, engine tools, data/rooftop_demo.intake.json for the mock path).
-COPY server/  /app/server/
-COPY da/      /app/da/
-COPY engine/  /app/engine/
-COPY platform/ /app/platform/
-COPY contract/ /app/contract/
-COPY data/    /app/data/
-
 # --- Node runtime for the E2B micro-VM tool-exec helper (LEAF_SANDBOX=e2b-microvm,
 #     F2 opt-in tier; the shipped default remains the LEAF_SANDBOX=e2b subprocess
 #     tier and needs none of this). libstdc++6 satisfies the copied node binary's
@@ -59,6 +49,11 @@ COPY data/    /app/data/
 # still unusable. python:3.12-slim ships no git.
 # HTTPS mirrors (see Dockerfile.app / Dockerfile.harness: the build runner's
 # VPC has no port-80 egress).
+# This whole block sits ABOVE the per-commit source COPYs deliberately:
+# nothing in it reads the source tree (the one COPY from the build context,
+# e2b-tool-exec.mjs, keys its cache on that file's content alone), and below
+# them the apt + node layers re-ran on every merge (run 31006198764: apt 6.1s
+# + node 0.7s rebuilt after cache-busting source COPYs).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     -exec sed -i \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
@@ -77,6 +72,18 @@ COPY harness/scripts/e2b-tool-exec.mjs /app/harness/scripts/e2b-tool-exec.mjs
 # CMD, /usr/local/bin/node and /app/harness/node_modules must stay world/uid
 # readable so that uid can still exec the helper.
 ENV LEAF_E2B_HELPER=/app/harness/scripts/e2b-tool-exec.mjs
+
+# --- Broker source + the siblings it resolves via PROJECT_ROOT = /app --------
+# (broker.py: SERVER_DIR.parent; inserts /app + /app/server on sys.path, then
+# imports da/, engine tools, data/rooftop_demo.intake.json for the mock path).
+# These change on every merge, so they stay below every source-independent
+# layer above.
+COPY server/  /app/server/
+COPY da/      /app/da/
+COPY engine/  /app/engine/
+COPY platform/ /app/platform/
+COPY contract/ /app/contract/
+COPY data/    /app/data/
 
 # Run from the server workdir (broker.py caches stdlib `platform`/`queue` before
 # the PROJECT_ROOT sys.path insert, so the local da/queue.py never shadows them).

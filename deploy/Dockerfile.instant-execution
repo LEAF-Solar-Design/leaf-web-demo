@@ -4,12 +4,9 @@
 # reconciler, executor runtime, and their declared Python dependencies only.
 FROM python:3.12-slim
 
-ARG LEAF_SOURCE_SHA
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" "$LEAF_SOURCE_SHA" \
     && addgroup --system --gid 65532 leaf \
     && adduser --system --uid 65532 --ingroup leaf --home /nonexistent --no-create-home leaf \
     && mkdir -p /run/leaf/secrets \
@@ -33,6 +30,15 @@ COPY --chown=65532:65532 executor/runtime/*.py /opt/leaf/executor/runtime/
 COPY --chown=65532:65532 executor/registry/*.py /opt/leaf/executor/registry/
 COPY --chown=65532:65532 executor/contracts/*.py /opt/leaf/executor/contracts/
 COPY --chown=65532:65532 executor/contracts/schemas/ /opt/leaf/executor/contracts/schemas/
+
+# Declared below every cacheable instruction, deliberately: this value is a
+# new commit sha on every build, and a changed in-scope ARG is a buildx cache
+# miss for everything after it — declared at the top it made the apt and pip
+# layers above uncacheable across commits (the same defect PR #458 fixed in
+# the five platform Dockerfiles). The sha-format gate moved down with it; it
+# still fails the whole build, before any push, on a malformed value.
+ARG LEAF_SOURCE_SHA
+RUN python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" "$LEAF_SOURCE_SHA"
 
 LABEL org.opencontainers.image.revision=$LEAF_SOURCE_SHA \
       org.opencontainers.image.title=leaf-platform-instant-execution
