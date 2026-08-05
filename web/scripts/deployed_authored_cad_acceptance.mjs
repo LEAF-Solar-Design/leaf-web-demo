@@ -83,6 +83,57 @@ export function scrubbedDetail(error) {
     .slice(0, 700)
 }
 
+// AcceptanceError.details is internal by default. Only these narrow,
+// token-free job correlation fields may cross into the one-line workflow
+// failure record. Do not serialize arbitrary backend response bodies here.
+export function safeFailureDetails(error) {
+  if (!(error instanceof AcceptanceError) || !error.details) return undefined
+  const details = {}
+  const jobId = String(error.details.job_id || '')
+  const terminalStatus = String(error.details.terminal_status || '')
+  const errorCode = String(error.details.error_code || '')
+  if (UUID.test(jobId)) details.job_id = jobId
+  if (/^(failed|http_error|timeout)$/.test(terminalStatus)) {
+    details.terminal_status = terminalStatus
+  }
+  const allowedErrorCodes = new Set([
+    'BAD_PARAMS',
+    'ENTITLEMENT_REQUIRED',
+    'INTERNAL',
+    'already_decided',
+    'quota_exceeded',
+    'version_conflict',
+  ])
+  if (allowedErrorCodes.has(errorCode)) {
+    details.error_code = errorCode
+  }
+  if (Number.isInteger(error.details.http_status)
+      && error.details.http_status >= 100
+      && error.details.http_status <= 599) {
+    details.http_status = error.details.http_status
+  }
+  return Object.keys(details).length ? details : undefined
+}
+
+export function safeFailureRecord(error, stepName = currentStep) {
+  const detail = scrubbedDetail(error)
+  const details = safeFailureDetails(error)
+  const authoredJobFailure = error instanceof AcceptanceError && error.check === 'authored_job'
+  return {
+    ok: false,
+    check: error instanceof AcceptanceError ? error.check : 'unexpected',
+    error: error?.name || 'Error',
+    message: authoredJobFailure
+      ? 'authored job did not complete successfully'
+      : error instanceof AcceptanceError
+      ? (detail || 'acceptance check failed')
+      : 'acceptance driver failed',
+    step: stepName,
+    ...(!authoredJobFailure && detail ? { detail } : {}),
+    ...(details ? { details } : {}),
+  }
+}
+
 function required(env, name) {
   const value = String(env[name] || '').trim()
   if (!value) throw new AcceptanceError('configuration', `${name} is required`)
@@ -445,25 +496,56 @@ export async function waitForTerminalJob(
   jobId,
   { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
 ) {
-  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-    const observed = await requestJson(
-      config,
-      tenant,
-      `/api/jobs/${encodeURIComponent(jobId)}`,
-      { fetchImpl },
+  if (typeof jobId !== 'string' || !UUID.test(jobId)) {
+    throw new AcceptanceError(
+      'authored_job',
+      'the authored write job id was invalid',
+      { terminal_status: 'http_error' },
     )
+  }
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    let observed
+    try {
+      observed = await requestJson(
+        config,
+        tenant,
+        `/api/jobs/${encodeURIComponent(jobId)}`,
+        { fetchImpl },
+      )
+    } catch {
+      throw new AcceptanceError(
+        'authored_job',
+        'the authored write job status could not be read',
+        { job_id: jobId, terminal_status: 'http_error' },
+      )
+    }
     if (observed.status !== 200) {
-      throw new AcceptanceError('authored_job', `job status returned HTTP ${observed.status}`)
+      throw new AcceptanceError(
+        'authored_job',
+        `job status returned HTTP ${observed.status}`,
+        { job_id: jobId, terminal_status: 'http_error', http_status: observed.status },
+      )
     }
     if (observed.body?.status === 'failed') {
       const error = observed.body.error || {}
-      const detail = [error.error_code, error.message].filter(Boolean).join(': ')
-      throw new AcceptanceError('authored_job', detail || 'the authored write job failed')
+      throw new AcceptanceError(
+        'authored_job',
+        'the authored write job failed',
+        {
+          job_id: jobId,
+          terminal_status: 'failed',
+          ...(error.error_code ? { error_code: error.error_code } : {}),
+        },
+      )
     }
     if (observed.body?.status === 'complete') return observed.body
     await waitImpl(pollMs)
   }
-  throw new AcceptanceError('authored_job', 'the authored write job did not finish before the acceptance deadline')
+  throw new AcceptanceError(
+    'authored_job',
+    'the authored write job did not finish before the acceptance deadline',
+    { job_id: jobId, terminal_status: 'timeout' },
+  )
 }
 
 // Like waitForTerminalJob, but RETURNS the terminal body for either outcome
@@ -475,15 +557,35 @@ export async function waitForJobOutcome(
   jobId,
   { fetchImpl = fetch, waitImpl = wait, pollMs = 1_000, maxPolls = 900 } = {},
 ) {
-  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-    const observed = await requestJson(
-      config,
-      tenant,
-      `/api/jobs/${encodeURIComponent(jobId)}`,
-      { fetchImpl },
+  if (typeof jobId !== 'string' || !UUID.test(jobId)) {
+    throw new AcceptanceError(
+      'authored_job',
+      'the authored replay job id was invalid',
+      { terminal_status: 'http_error' },
     )
+  }
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    let observed
+    try {
+      observed = await requestJson(
+        config,
+        tenant,
+        `/api/jobs/${encodeURIComponent(jobId)}`,
+        { fetchImpl },
+      )
+    } catch {
+      throw new AcceptanceError(
+        'authored_job',
+        'the authored replay job status could not be read',
+        { job_id: jobId, terminal_status: 'http_error' },
+      )
+    }
     if (observed.status !== 200) {
-      throw new AcceptanceError('authored_job', `job status returned HTTP ${observed.status}`)
+      throw new AcceptanceError(
+        'authored_job',
+        `job status returned HTTP ${observed.status}`,
+        { job_id: jobId, terminal_status: 'http_error', http_status: observed.status },
+      )
     }
     if (observed.body?.status === 'failed' || observed.body?.status === 'complete') {
       return observed.body
@@ -1054,7 +1156,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     }
     const runBody = await runResponse.json()
     const jobId = runBody?.job_id
-    if (typeof jobId !== 'string' || !jobId) {
+    if (typeof jobId !== 'string' || !UUID.test(jobId)) {
       throw new AcceptanceError('exact_write', 'the accepted write did not return a job id')
     }
     step('authored_job', tenant.label)
@@ -1474,7 +1576,7 @@ export async function provePinnedWriteRejections(config, browserResults, fetchIm
           'the synchronous rejection was not the stale drawing-head pin',
         )
       }
-    } else if (staleHeadReplay.status === 202 && staleHeadReplay.body?.job_id) {
+    } else if (staleHeadReplay.status === 202 && UUID.test(staleHeadReplay.body?.job_id || '')) {
       const outcome = await waitForJobOutcome(
         config, tenant, staleHeadReplay.body.job_id, { fetchImpl },
       )
@@ -1672,15 +1774,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     }))
     return 0
   } catch (error) {
-    const safe = {
-      ok: false,
-      check: error instanceof AcceptanceError ? error.check : 'unexpected',
-      error: error?.name || 'Error',
-      message: error instanceof AcceptanceError ? error.message : 'acceptance driver failed',
-      step: currentStep,
-      detail: scrubbedDetail(error),
-    }
-    console.error(JSON.stringify(safe))
+    console.error(JSON.stringify(safeFailureRecord(error)))
     return 1
   }
 }
