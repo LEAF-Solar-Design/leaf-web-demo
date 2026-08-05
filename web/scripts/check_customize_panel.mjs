@@ -63,7 +63,7 @@ assert(app.includes('subscribeUnauthorized(() => {') && app.includes('setCustomi
 // the component to App.jsx as its only consumer.
 const mountSites = app.match(/<CustomizePanel\b/g) || []
 assert(mountSites.length === 1, `App.jsx must mount CustomizePanel exactly once (found ${mountSites.length})`)
-assert(/\{customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must be behind customizeExit.shown')
+assert(/\{signedIn && customizeExit\.shown && <CustomizePanel\b/.test(app), 'the single CustomizePanel mount must bypass its exit hold after auth loss')
 // Exact-path allowlist, not endsWith: "OtherApp.jsx" must NOT be exempt.
 const allowedConsumers = new Set([
   join(srcDir, 'App.jsx'),
