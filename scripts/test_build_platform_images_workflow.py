@@ -68,6 +68,35 @@ def main() -> None:
     # mean a new job that provably needs registry access, not a convenience.
     assert text.count("id-token: write") == 3
 
+    # ------------------------------------------------------------------ #
+    # This contract is enforced by TEXT extraction (stdlib only, no YAML
+    # parser), so YAML constructs that change parse-time meaning without
+    # changing the asserted literals are banned outright (sol-critic round 3
+    # on PR #445):
+    # * every step-list item must use the one canonical marker "- " at step
+    #   indentation. A bare "-" line starts a valid YAML step the
+    #   marker-based splitter cannot see, so an inserted step's content
+    #   would ride inside the previous step's slice;
+    # * anchors, aliases, and merge keys (&x, *x, <<:) can graft the
+    #   key-bearing env or with mapping into an unrelated step without a
+    #   second literal secret reference appearing anywhere.
+    # With these banned, the "\n      - " splitter used throughout this file
+    # sees every step, and literal-count scoping is sound.
+    # ------------------------------------------------------------------ #
+    for line in text.splitlines():
+        assert line.strip() != "-", "bare sequence-dash line: %r" % line
+        if re.match(r"^      -", line):
+            assert re.match(r"^      - \S", line), (
+                "non-canonical step marker: %r" % line)
+    assert "<<:" not in text, "YAML merge keys are banned in this workflow"
+    assert re.search(r"(?m):[ \t]+[&*][A-Za-z0-9_]", text) is None, (
+        "YAML anchor/alias in value position is banned in this workflow")
+    assert re.search(r"(?m)-[ \t]+[&*][A-Za-z0-9_]", text) is None, (
+        "YAML anchor/alias in sequence position is banned in this workflow")
+    assert re.search(
+        r"(?m)(?:^|[ \t])&[A-Za-z0-9_][A-Za-z0-9_-]*[ \t]*$", text
+    ) is None, ("trailing YAML anchor is banned in this workflow")
+
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
     # PR #445, a global positional search accepted the key steps relocated
