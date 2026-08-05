@@ -2141,6 +2141,42 @@ def main() -> None:
     # a decoy of its own while the whole-script pins stay green.
     assert WARM_BUILD_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
     assert SPECULATE_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
+    # Identity binding, name -> id -> consumer (sol-critic round 4 on
+    # this PR): the name-pinned step must BE the `id: cache` step, that
+    # id must be unique in its job, its condition must be exactly the
+    # lane's legitimate gate (none in build), and the lane's build-push
+    # step must consume exactly steps.cache's outputs — otherwise a
+    # canonical-script decoy under the pinned NAME could sit unreferenced
+    # while a renamed hollow step feeds the consumers empty outputs.
+    cache_expr_from = "${{ steps.cache.outputs.from }}"
+    cache_expr_to = "${{ steps.cache.outputs.to }}"
+    for job_name, step_name, expected_if in (
+        ("warm", cache_step_name, "steps.chain.outputs.skip != 'true'"),
+        ("build", cache_step_name, None),
+        ("speculate", "Select the merged-onto main tip's cache, import-only",
+         "steps.exists.outputs.present != 'true'"),
+    ):
+        cache_step_parsed = _sole_named(wf_jobs[job_name]["steps"], step_name)
+        assert cache_step_parsed.get("id") == "cache", (
+            "%s's cache-select step must carry id: cache — the id the "
+            "lane's build-push step consumes" % job_name)
+        same_id = [
+            s for s in wf_jobs[job_name]["steps"] if s.get("id") == "cache"
+        ]
+        assert len(same_id) == 1, job_name
+        assert cache_step_parsed.get("if") == expected_if, (
+            job_name, cache_step_parsed.get("if"))
+        build_push_steps = [
+            s for s in wf_jobs[job_name]["steps"]
+            if str(s.get("uses", "")).startswith("docker/build-push-action")
+        ]
+        assert len(build_push_steps) == 1, job_name
+        push_with = build_push_steps[0]["with"]
+        assert push_with.get("cache-from") == cache_expr_from, job_name
+        if job_name == "speculate":
+            assert "cache-to" not in push_with
+        else:
+            assert push_with.get("cache-to") == cache_expr_to, job_name
 
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
