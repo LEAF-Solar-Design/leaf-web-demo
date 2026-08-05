@@ -236,8 +236,27 @@ def main() -> None:
     warm_builds = [s for s in warm_steps if "uses: docker/build-push-action" in s]
     assert len(warm_builds) == 1, "warm holds exactly one build-push-action step"
     warm_build_step = warm_builds[0]
-    assert re.search(r"^          push: false$", warm_build_step, re.M), (
-        "the warm build step must set the literal input push: false")
+
+    def _with_mapping(step: str) -> str:
+        # The action only reads inputs from the step's with: mapping. A
+        # push: false parked under env: (or any other step key) satisfies an
+        # indentation-only regex while the action input is gone, so the
+        # assertion below must scan the with: body and nothing else.
+        lines = step.splitlines()
+        try:
+            start = next(i for i, l in enumerate(lines) if l == "        with:")
+        except StopIteration:
+            raise AssertionError("the warm build step carries no with: mapping")
+        body = []
+        for line in lines[start + 1:]:
+            if line.strip() and not line.startswith("          "):
+                break
+            body.append(line)
+        return "\n".join(body)
+
+    warm_with = _with_mapping(warm_build_step)
+    assert re.search(r"^          push: false$", warm_with, re.M), (
+        "the warm build step's with: mapping must set the literal input push: false")
     for banned in ("push: true", "tags:", "outputs:", "provenance:", "sbom:", "attests:"):
         assert banned not in warm_build_step, (
             "the warm build step must not carry %r: every publication channel "
