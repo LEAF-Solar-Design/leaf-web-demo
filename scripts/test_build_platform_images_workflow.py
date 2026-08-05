@@ -1947,6 +1947,28 @@ def main() -> None:
     build_cache_run = _sole_named(wf_jobs["build"]["steps"], cache_step_name)["run"]
     assert warm_cache_run == build_cache_run, (
         "warm and build must carry byte-identical cache-select scripts")
+    # The canonical fallback binds to the PARSED run value of each named
+    # cache-selection step (sol-critic round 2 on this PR): the live-line
+    # counts earlier scan whole job blocks, so canonical bytes parked in
+    # an unused multiline env value (an indentation indicator can place
+    # scalar content at the run blocks' exact columns) could stand in for
+    # scripts that lost the fallback — and the decoy would even carry the
+    # probe line the per-lane probe counts look for. Only what YAML parses
+    # as the step's own run content executes. The scalar's base
+    # indentation (ten columns) is stripped by the parser, so the
+    # canonical copy is dedented before comparing.
+    fallback_dedented = "\n".join(
+        l[10:] for l in FALLBACK_SCRIPT.rstrip("\n").splitlines()
+    )
+    for job_name, fallback_step_name in (
+        ("warm", cache_step_name),
+        ("build", cache_step_name),
+        ("speculate", "Select the merged-onto main tip's cache, import-only"),
+    ):
+        run_value = _sole_named(wf_jobs[job_name]["steps"], fallback_step_name)["run"]
+        assert run_value.count(fallback_dedented) == 1, (
+            "%s's %r step must execute the canonical nearest-ancestor "
+            "fallback exactly once" % (job_name, fallback_step_name))
 
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
