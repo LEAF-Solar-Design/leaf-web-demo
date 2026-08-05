@@ -75,6 +75,41 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     )
 
 
+def test_executor_suite_is_registered_with_its_measured_floor():
+    """The executor tree ran in NO CI until this registration (the
+    WeakValueDictionary assignment-lock no-op fixed in #455 sat undetected for
+    exactly that reason). This pin mirrors the floor in run-all-gates.py the
+    same way the platform-static pin does: BOTH must move together, and only
+    alongside a re-measured run. Floor 106 is the Windows executed count
+    (112 collected - 2 opt-in Postgres skips - 4 Windows-only environment
+    skips, measured 2026-08-05); Linux CI executes 110 and reports upward
+    drift, the min-across-environments convention."""
+    g = _load_runner()
+    executor = {s.id: s for s in g.build_suites()}["executor"]
+
+    assert executor.expected == 106
+    # cwd is the REPO ROOT (test_control_plane.py opens
+    # executor/contracts/schemas/*.json relative to it) and -P keeps that cwd
+    # OFF sys.path so the repo's platform/ package cannot shadow the stdlib
+    # during pytest plugin import.
+    assert executor.cwd == REPO
+    assert "-P" in executor.argv
+    assert "executor" in executor.argv
+    # The two PostgreSQL adapter tests gate on the suite's own explicit
+    # opt-in, never a general ambient DATABASE_URL.
+    assert any("POSTGRES_CONTROL_PLANE_TEST_URL" in r
+               for r in executor.allowed_skip_reasons)
+    # The collision-breaking package anchors: without executor/conftest.py the
+    # runner's cwd cannot import `executor.*`, and without bench/__init__.py
+    # executor/tests and executor/bench/tests both claim the top-level package
+    # name `tests` and co-collection fails.
+    assert (REPO / "executor" / "conftest.py").is_file()
+    assert (REPO / "executor" / "bench" / "__init__.py").is_file()
+    # The suite boots warm-pool servers: the default 2.0s weight would
+    # understate it badly and quietly pile it onto the critical shard.
+    assert "executor" in g._MEASURED_EST_S
+
+
 def test_test_gate_workflow_shards_and_fans_in():
     """Pins the CI shape the completeness proof depends on: shard jobs run the
     runner with shard flags AND write result JSON; a fan-in job that KEEPS the

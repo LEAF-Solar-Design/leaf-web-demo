@@ -692,6 +692,44 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(
                   r"local AutoCAD 2026 console and tracked demo DWG are required",
               )),
+        # --- executor/ (cwd=REPO ROOT; the instant-execution tree) --- #
+        # These ~110 unit tests ran in NO CI workflow: this runner had no
+        # executor suite, and build-instant-execution-image.yml's test job runs
+        # only the two scripts/ harnesses. That gap let the
+        # WeakValueDictionary assignment-lock no-op (fixed in #455) sit
+        # undetected until a cryptography bump exposed it locally. One process
+        # for the whole tree, unlike the per-file server/ suites: these are
+        # hermetic unittest modules (per-test tmp dirs, ephemeral ports, no
+        # shared on-disk state or env toggles) authored to co-collect;
+        # executor/conftest.py + executor/bench/__init__.py fixed the
+        # duplicate-basename collision that used to break exactly that.
+        # cwd is the REPO ROOT because test_control_plane.py opens
+        # executor/contracts/schemas/*.json relative to it. `-P` (safe path)
+        # keeps that cwd OFF sys.path, so the repo's platform/ package cannot
+        # shadow the stdlib during pytest plugin import — the window before
+        # executor/conftest.py runs and appends the repo root for `executor.*`.
+        # Floor 106 is the Windows executed count (112 collected − 2 opt-in
+        # Postgres skips − 4 Windows-only environment skips), measured
+        # 2026-08-05. Linux CI executes 110 (the POSIX/chmod/symlink probes
+        # run there) and reports upward drift — the same min-across-
+        # environments convention as server-customization-adversarial.
+        # The two PostgreSQL adapter integration tests gate on the suite's own
+        # POSTGRES_CONTROL_PLANE_TEST_URL opt-in (never a general
+        # DATABASE_URL), so they skip on the hermetic gate by design:
+        # allowlisted below rather than db_gated, which would throw away the
+        # 100+ DB-free tests on every DB-less runner.
+        Suite("executor", "executor unit tests (bootstrap+control-plane+runtime+registry+bench)",
+              "pytest", REPO,
+              [sys.executable, "-P", "-m", "pytest", "executor", "-q", "--color=no",
+               "-r", "s", "-p", "no:cacheprovider"], 106,
+              allowed_skip_reasons=(
+                  r"set POSTGRES_CONTROL_PLANE_TEST_URL to run the PostgreSQL "
+                  r"integration test",
+                  r"POSIX CPU timers are unavailable",
+                  r"POSIX resource limits are unavailable on Windows",
+                  r"Windows chmod semantics do not match Fargate mounts",
+                  r"Windows symlink creation can require elevated developer mode",
+              )),
         # --- tenant customization control plane (one process per file) --- #
         Suite("server-customization-authority", "server customization authority", "pytest",
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
@@ -832,9 +870,12 @@ def build_suites() -> List[Suite]:
         # measured on this tree 2026-08-04; plus the 10 tree-bound gate-proof
         # tests (emission refusal on dirty/non-git checkouts, verification of
         # every forgery class, proof CLI rejections, the emit-only-on-PROVEN
-        # wiring, and the test-gate.yml reuse-shape pin), measured 2026-08-05.
+        # wiring, and the test-gate.yml reuse-shape pin), measured 2026-08-05;
+        # plus the executor-suite registration pin (floor mirror, cwd/-P
+        # shape, opt-in Postgres allowlist, and the two collision-breaking
+        # package anchors), measured 2026-08-05.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 57),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 58),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1392,6 +1433,10 @@ _MEASURED_EST_S = {
     "server-sessions-router": 29.0,
     "web-author-quota-gate": 20.0,
     "server-turn-runner": 16.0,
+    # Local (Windows) measurement at registration, 2026-08-05: the suite boots
+    # warm-pool servers, so the default 2.0 would understate it badly.
+    # Re-baseline from a CI run like the entries above when convenient.
+    "executor": 15.0,
     "server-write-loop": 12.0,
     "server-sessions-e2e": 12.0,
     "server-sessions-routes": 7.0,
