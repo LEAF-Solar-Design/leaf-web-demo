@@ -313,73 +313,94 @@ def main() -> None:
     print("build-platform-images workflow invariants: PASS")
 
 
-def _github_filter_matches(pattern: str, path: str) -> bool:
-    # GitHub Actions path-filter semantics (filter pattern cheat sheet):
-    # `*` matches zero or more characters but never `/`; `**` matches zero
-    # or more of ANY character. The pattern must cover the whole path.
-    parts = []
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("**", i):
-            parts.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            parts.append("[^/]*")
-            i += 1
-        else:
-            parts.append(re.escape(pattern[i]))
-            i += 1
-    return re.fullmatch("".join(parts), path) is not None
-
-
 def check_docs_noop_filter(text: str) -> None:
     # ------------------------------------------------------------------ #
-    # Docs-only no-op filter. A push whose every changed file is markdown
-    # or under docs/ can change no image input, so the push trigger skips
-    # the run — and with no run there is no workflow_run event, so the
-    # staging relay (dispatch-staging-deploys.yml) never fires. The
-    # decision is GitHub-native and fails OPEN: an uncomputable diff
-    # always builds. The set below is deliberately deploy-nothing-or-
-    # everything; never grow it into a per-service dependency closure.
+    # Docs-only no-op gate. The decision must NOT be a native paths /
+    # paths-ignore filter: GitHub evaluates those over a truncated
+    # changed-file window (its docs cite 300 files), so a large mixed
+    # push could hide a code file past the window and silently skip a
+    # build — fail-closed in exactly the direction this repo cannot
+    # afford. The decision lives in the `noop` job (real git diff, no
+    # window) and scripts/docs_noop_filter.py (imported and exercised
+    # below — the shipped logic, not a re-implementation).
     # ------------------------------------------------------------------ #
+    assert "paths-ignore" not in text, (
+        "native path filtering is fail-closed on truncated diffs; the "
+        "noop job owns the docs-only decision")
     on_at = text.index("\non:\n")
     push_block = text[on_at:text.index("  workflow_dispatch:", on_at)]
-    ignore = re.findall(r'^      - "([^"]+)"$', push_block, flags=re.M)
-    assert ignore == ["**.md", "docs/**"], (
-        "the docs-only ignore set is pinned; the vectors below must be "
-        "re-proven against any change to it")
-    assert text.count("paths-ignore:") == 1, (
-        "the filter belongs to the push trigger only — a paths filter on "
-        "any other trigger could weaken the PR test gate")
+    assert "paths:" not in push_block
 
-    def push_skipped(changed):
-        # GitHub skips the run only when the changed-file list is known and
-        # every entry matches the ignore set; an uncomputable diff (None)
-        # runs. An empty diff skips vacuously — zero files touch no image.
-        if changed is None:
-            return False
-        return all(
-            any(_github_filter_matches(p, f) for p in ignore) for f in changed
-        )
+    # The gate job gates the whole graph through prepare, and only an
+    # explicit build=true opens it (a missing/skipped output stays shut
+    # for the build path but can never push an image: everything needs
+    # prepare).
+    noop_block = text.split("\n  noop:\n", 1)[1].split("\n  prepare:\n", 1)[0]
+    prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
+    assert "needs: noop" in prepare_block
+    assert "if: needs.noop.outputs.build == 'true'" in prepare_block
 
-    # The motivating shape (6e73747: root README edit) must skip, as must
-    # nested markdown and non-markdown assets under docs/.
-    assert push_skipped(["README.md"])
-    assert push_skipped(["docs/design/tree-bound-gate.md", "web/README.md"])
-    assert push_skipped(["docs/img/staging-train.png"])
+    # Fail-open arms: every abnormal path must land on build=true before
+    # the docs-only verdict is even consulted.
+    for arm in (
+        '[ "$EVENT_NAME" = "push" ] || build',
+        '[[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || build',
+        '[[ "$BEFORE_SHA" =~ ^0{40}$ ]] && build',
+        '|| build "before-sha unfetchable"',
+        '|| build "diff failed"',
+        "|| VERDICT=build",
+        '[ "$VERDICT" = "skip" ] || build',
+    ):
+        assert arm in noop_block, f"missing fail-open arm: {arm}"
+    assert "scripts/docs_noop_filter.py" in noop_block
+
+    # The relay tells a deliberate no-op from a broken run by this marker;
+    # its name must mirror the supply-set naming (sha + attempt).
+    assert (
+        "name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}"
+    ) in noop_block
+
+    # Decision vectors run against the SHIPPED module.
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import docs_noop_filter as dnf
+
+    # The motivating shapes: root README (6e73747) and docs/ trees skip.
+    assert dnf.decide(["README.md"]) == "skip"
+    assert dnf.decide(["docs/GATE-TREE-REUSE.md", "RUN.md"]) == "skip"
+    assert dnf.decide(["docs/img/staging-train.png"]) == "skip"
     # A synthetic MIXED diff builds: one code file beside any docs.
-    assert not push_skipped(["README.md", "web/src/App.jsx"])
-    # Code-only, workflow, and dependency changes always build.
-    assert not push_skipped(["server/app.py"])
-    assert not push_skipped([".github/workflows/build-platform-images.yml"])
-    assert not push_skipped(["web/package-lock.json"])
-    # Unknown diff fails open to building.
-    assert not push_skipped(None)
-    # Pattern-spelling guard: `**.md` reaches root-level files; the naive
-    # `**/*.md` would NOT (its `/` is literal), silently unfiltering the
-    # single most common docs commit. Keep `**.md`.
-    assert _github_filter_matches("**.md", "README.md")
-    assert not _github_filter_matches("**/*.md", "README.md")
+    assert dnf.decide(["README.md", "web/src/App.jsx"]) == "build"
+    # NESTED markdown is an image input (Dockerfile.app/broker COPY
+    # server/ and contract/ wholesale; .dockerignore keeps markdown), so
+    # it builds — the ignore set is docs/** plus ROOT *.md only.
+    assert dnf.decide(["server/README.md"]) == "build"
+    assert dnf.decide(["contract/AUTH.md"]) == "build"
+    assert dnf.decide(["web/README.md"]) == "build"
+    # Code, workflow, dependency, and root non-markdown changes build.
+    assert dnf.decide(["server/app.py"]) == "build"
+    assert dnf.decide([".github/workflows/build-platform-images.yml"]) == "build"
+    assert dnf.decide(["docker-compose.yml"]) == "build"
+    # Unknown / empty / garbage diffs fail open to building.
+    assert dnf.decide([]) == "build"
+    assert dnf.decide(["", "  "]) == "build"
+    assert dnf.decide(['"docs/\\303\\251.md"']) == "build"
+
+    # The relay must skip cleanly on the marker and stay loud otherwise.
+    relay = (
+        WORKFLOW.parent / "dispatch-staging-deploys.yml"
+    ).read_text(encoding="utf-8")
+    assert 'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"' in relay
+    assert relay.count('echo "deploy=false"') == 1
+    assert relay.count('echo "deploy=true"') == 1
+    assert "no $NOOP_NAME marker present" in relay, (
+        "manifest-and-marker both absent must stay a hard error: a "
+        "successful build without a supply set is a partial run")
+    dispatch_at = relay.index("Dispatch the web and app staging deploys")
+    assert "steps.manifest.outputs.deploy == 'true'" in relay[dispatch_at:]
 
 
 def test_build_platform_images_workflow_invariants() -> None:
