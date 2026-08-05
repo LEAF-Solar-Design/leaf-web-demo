@@ -30,6 +30,9 @@ def _executable_bash(script: str) -> str:
     Text assertions run against this so they bind to executable lines
     only: a guard that drifts into a comment stops counting. The hash
     survives when glued to non-space (e.g. ${#array[@]}, "## heading").
+    Known tradeoff: a quoted value containing a whitespace-preceded hash
+    ("status # data") would be truncated; none of the checked scripts
+    carries one, and a false trip here fails loud, never silently green.
     """
     lines = []
     for line in script.splitlines():
@@ -477,26 +480,40 @@ def check_docs_noop_filter(text: str) -> None:
     assert dnf.decide(["", "  "]) == "build"
     assert dnf.decide(['"docs/\\303\\251.md"']) == "build"
 
-    # The relay must skip cleanly on the marker and stay loud otherwise.
-    # Everything here binds to parsed step structure or comment-stripped
-    # executable text: the drift class where a guard moves into a comment
-    # while raw-text assertions stay green cannot satisfy these.
+    # The relay is a FROZEN three-step surface: tip check, manifest read,
+    # guarded dispatch. Adding a step, importing an action, or reordering
+    # must break this harness and force a deliberate co-review. Guards are
+    # compared with EXACT equality, never substring: a guard weakened to
+    # `X == 'true' || true` still contains the healthy text and must fail.
     relay_wf = yaml.safe_load(relay_text)
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
-    job_guard = str(dispatch_job["if"])
-    for clause in (
-        "github.event.workflow_run.conclusion == 'success'",
-        "github.event.workflow_run.event == 'push'",
-        "github.event.workflow_run.head_branch == 'main'",
-    ):
-        assert clause in job_guard, f"relay job guard lost: {clause}"
-
-    manifest_step = next(
-        s for s in dispatch_job["steps"] if s.get("id") == "manifest"
+    assert dispatch_job["if"] == (
+        "github.event.workflow_run.conclusion == 'success' && "
+        "github.event.workflow_run.event == 'push' && "
+        "github.event.workflow_run.head_branch == 'main'"
     )
+    relay_steps = dispatch_job["steps"]
+    assert [s.get("id") for s in relay_steps] == ["tip", "manifest", None]
+    assert all("uses" not in s for s in relay_steps), (
+        "the relay runs no imported actions: a uses: step is an "
+        "unreviewed dispatch path")
+    tip_step, manifest_step, dispatch_step = relay_steps
+    assert tip_step.get("if") is None
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
+    assert dispatch_step["if"] == (
+        "steps.tip.outputs.current == 'true' && "
+        "steps.manifest.outputs.deploy == 'true'"
+    ), "without this exact guard a docs-only run dispatches an empty tag"
+    assert (
+        dispatch_step["env"]["IMAGE_TAG"]
+        == "${{ steps.manifest.outputs.image_tag }}"
+    )
+
+    tip_code = _executable_bash(tip_step["run"])
     manifest_code = _executable_bash(manifest_step["run"])
+    dispatch_code = _executable_bash(dispatch_step["run"])
+
     assert (
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
         in manifest_code
@@ -508,23 +525,33 @@ def check_docs_noop_filter(text: str) -> None:
         "manifest-and-marker both absent must stay a hard error: a "
         "successful build without a supply set is a partial run")
 
-    # Find the dispatching step by what it EXECUTES, not by its name, so
-    # renaming or duplicating it cannot dodge the guard assertions.
-    dispatching = [
-        s
-        for s in dispatch_job["steps"]
-        if "gh workflow run" in _executable_bash(s.get("run", ""))
-    ]
-    assert len(dispatching) == 1, "exactly one relay step may dispatch deploys"
-    dispatch_guard = str(dispatching[0]["if"])
-    assert "steps.tip.outputs.current == 'true'" in dispatch_guard
-    assert "steps.manifest.outputs.deploy == 'true'" in dispatch_guard, (
-        "without this step-level guard a docs-only run would dispatch "
-        "with an empty image tag")
-    assert (
-        dispatching[0]["env"]["IMAGE_TAG"]
-        == "${{ steps.manifest.outputs.image_tag }}"
-    )
+    # Only the guarded third step may know how to dispatch anything. The
+    # token scan is a heuristic tripwire (fragments can always be
+    # assembled past any static scan); the load-bearing wall is the
+    # frozen step list plus the exact guards above.
+    for step_name, code in (("tip", tip_code), ("manifest", manifest_code)):
+        for token in (
+            "gh workflow run",
+            "/dispatches",
+            "curl",
+            "wget",
+            "-X POST",
+            "--method",
+        ):
+            assert token not in code, (
+                f"relay {step_name} step must not carry a dispatch "
+                f"path: {token}"
+            )
+
+    assert "gh workflow run" in dispatch_code
+    assert '--repo "$INFRA_REPO"' in dispatch_code
+    for dispatch_input in (
+        '"service=$SERVICE"',
+        '"expected_task_definition=auto-live"',
+        '"image_tag=$IMAGE_TAG"',
+        '"app_deploy_intent=forward"',
+    ):
+        assert dispatch_input in dispatch_code
 
     # Finally, run the extracted decide script for real.
     _rehearse_decide_script(decide_src, dnf)
