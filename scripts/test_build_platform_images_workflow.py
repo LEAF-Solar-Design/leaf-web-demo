@@ -88,14 +88,29 @@ def main() -> None:
         if re.match(r"^      -", line):
             assert re.match(r"^      - \S", line), (
                 "non-canonical step marker: %r" % line)
+    # Anchor names admit nearly any character: YAML 1.2.2 section 6.9.2
+    # excludes only flow indicators and whitespace, so `&-x` is as legal as
+    # `&x` (sol-critic round 4 on PR #445). The name class below is
+    # therefore "anything but whitespace and flow indicators", not a word
+    # class.
+    anchor_name = r"[^\s,\[\]{}]"
     assert "<<:" not in text, "YAML merge keys are banned in this workflow"
-    assert re.search(r"(?m):[ \t]+[&*][A-Za-z0-9_]", text) is None, (
+    assert re.search(r"(?m):[ \t]+[&*]" + anchor_name, text) is None, (
         "YAML anchor/alias in value position is banned in this workflow")
-    assert re.search(r"(?m)-[ \t]+[&*][A-Za-z0-9_]", text) is None, (
+    assert re.search(r"(?m)-[ \t]+[&*]" + anchor_name, text) is None, (
         "YAML anchor/alias in sequence position is banned in this workflow")
-    assert re.search(
-        r"(?m)(?:^|[ \t])&[A-Za-z0-9_][A-Za-z0-9_-]*[ \t]*$", text
-    ) is None, ("trailing YAML anchor is banned in this workflow")
+    # Trailing tokens: the one legitimate trailing &/* form in this file is
+    # the literal `&&` ending the multi-line GitHub expression continuations
+    # inside the handoff job's `if: >-` block scalar (scalar TEXT, not a
+    # YAML node). Everything else trailing is banned. `&&` itself is inert:
+    # its only alias spelling `*&` stays banned in value, sequence, and
+    # trailing position alike.
+    for match in re.finditer(
+        r"(?m)(?:^|[ \t])([&*]" + anchor_name + r"*)[ \t]*$", text
+    ):
+        assert match.group(1) == "&&", (
+            "trailing YAML anchor/alias is banned in this workflow: %r"
+            % match.group(1))
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
