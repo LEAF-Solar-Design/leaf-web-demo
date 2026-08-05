@@ -284,6 +284,30 @@ def main() -> None:
     assert warm_block.count("ignore-error=true") == 1
     assert build_block.count("ignore-error=true") == 1
 
+    # ------------------------------------------------------------------ #
+    # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
+    # gate may skip its shards when a verified proof already binds the exact
+    # tree, so the build job must in turn refuse to push any image unless the
+    # gate's proven tree equals the tree it checked out — before the push
+    # step, with no way to pass on an empty output. And the called workflow's
+    # reuse probe reads cross-run gate-proof artifacts through the Actions
+    # API, whose permissions are capped by THIS caller's grant: dropping
+    # actions:read here silently disables the skip (every build runs the full
+    # gate and the probe 403s), so the grant is pinned.
+    # ------------------------------------------------------------------ #
+    test_block = text.split("\n  test:\n", 1)[1].split("\n  warm:\n", 1)[0]
+    assert "uses: ./.github/workflows/test-gate.yml" in test_block
+    assert "actions: read" in test_block
+    assert "PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}" in build_block
+    assert '[[ "$PROVEN_TREE" =~ ^[0-9a-f]{40}$ ]]' in build_block
+    assert 'built_tree="$(git rev-parse ' in build_block
+    assert build_block.count("refusing to push images") == 2, (
+        "both refusal arms — no proven tree at all, and a foreign tree — "
+        "must stay fail-closed")
+    bind_at = build_block.index("Require the green gate verdict to bind")
+    push_at = build_block.index("uses: docker/build-push-action")
+    assert bind_at < push_at, "the tree binding must precede the push step"
+
     print("build-platform-images workflow invariants: PASS")
 
 

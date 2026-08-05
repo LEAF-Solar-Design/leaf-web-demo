@@ -99,6 +99,62 @@ def test_test_gate_workflow_shards_and_fans_in():
     assert "needs.shards.result" in workflow
 
 
+def test_test_gate_workflow_tree_identity_reuse_shape():
+    """Pins the tree-identity skip's fail-closed seams (operator decision D3,
+    2026-08-05). The probe may only run for exact-ref workflow_call runs and
+    may never fail the build; the shards run unless a VERIFIED proof says
+    otherwise; the fan-in re-verifies the bound proof itself, asserts the
+    shards were skipped (not failed) on the reuse path, mints the proof only
+    behind the two-condition full verdict, and exports the proven tree the
+    build workflow refuses to push without."""
+    workflow = (REPO / ".github" / "workflows" / "test-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    # Probe scope + can't-redden posture.
+    assert "if: ${{ inputs.ref != '' }}" in workflow
+    probe_at = workflow.index("\n  probe:\n")
+    shards_at = workflow.index("\n  shards:\n")
+    gate_at = workflow.index("\n  gate:\n")
+    assert probe_at < shards_at < gate_at
+    probe_block = workflow[probe_at:shards_at]
+    assert "continue-on-error: true" in probe_block
+    # Provenance comes from artifact metadata, never from the file: same-repo
+    # origin and the gate-workflow allowlist are both checked in the probe.
+    assert "head_repository_id" in probe_block
+    assert ".github/workflows/test-gate.yml|.github/workflows/build-platform-images.yml" \
+        in probe_block
+    # The runs API answers a bare path today (verified live), but other
+    # GitHub surfaces render `path@ref`; the probe strips a suffix before the
+    # exact allowlist match so the skip cannot silently die on either shape.
+    assert 'path="${path%%@*}"' in probe_block
+    assert "select(.expired | not)" in probe_block
+    # Shards skip ONLY on a verified reuse; a skipped/failed probe falls
+    # through to the full gate.
+    shards_block = workflow[shards_at:gate_at]
+    assert "needs: probe" in shards_block
+    assert "if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' }}" \
+        in shards_block
+    # Fan-in: reuse path re-verifies the proof against its own checkout and
+    # requires the shards to have been SKIPPED, not failed.
+    gate_block = workflow[gate_at:]
+    assert "needs: [probe, shards]" in gate_block
+    assert "--verify-gate-proof" in gate_block
+    assert "--expect-tree" in gate_block
+    assert 'test "$SHARD_JOB_RESULT" = "skipped"' in gate_block
+    # Full path still requires both conditions and mints the tree-bound proof
+    # in the same step, so a proof can never outlive a red verdict.
+    assert 'test "$SHARD_JOB_RESULT" = "success"' in gate_block
+    assert "--emit-proof" in gate_block
+    assert "name: gate-proof-${{ steps.tree.outputs.value }}" in gate_block
+    assert "overwrite: true" in gate_block
+    # The proven tree is exported for build-platform-images.yml's pre-push
+    # binding check.
+    assert "proven_tree: ${{ steps.tree.outputs.value }}" in workflow
+    assert "value: ${{ jobs.gate.outputs.proven_tree }}" in workflow
+    # The probe and fan-in read cross-run artifacts through the Actions API.
+    assert "actions: read" in workflow
+
+
 def test_spawn_failure_is_retryable_fail_row(tmp_path):
     g = _load_runner()
     suite = g.Suite("spawn-victim", "spawn victim", "script", SCRIPTS,
@@ -1000,3 +1056,260 @@ def test_verifier_refuses_a_status_it_does_not_recognize(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "unrecognized status" in out
+
+
+# --------------------------------------------------------------------------- #
+# tree-bound gate proof (operator decision D3, 2026-08-05)
+#
+# The proof lets an identical tree skip the 8-shard re-run on the push-to-main
+# build. The danger it introduces is a VACUOUS SKIP: a proof that binds the
+# wrong tree, a fabricated document, or an emission from a checkout whose
+# working tree is not the tree the suites ran on. These tests pin both halves:
+# emission refuses rather than fabricates, and verification refuses every
+# forgery it can name. Provenance (who uploaded the artifact) is the
+# workflow's job and is pinned by the workflow-shape test above.
+# --------------------------------------------------------------------------- #
+def _scratch_git_checkout(tmp_path):
+    repo = tmp_path / "scratch-repo"
+    repo.mkdir()
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "gate", "GIT_AUTHOR_EMAIL": "gate@test",
+           "GIT_COMMITTER_NAME": "gate", "GIT_COMMITTER_EMAIL": "gate@test"}
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
+                       capture_output=True, text=True, timeout=60)
+
+    git("init", "-q")
+    (repo / "f.txt").write_text("v1\n", encoding="utf-8")
+    git("add", "f.txt")
+    git("commit", "-q", "-m", "v1")
+    return repo
+
+
+def test_checkout_tree_identity_reports_the_committed_tree(tmp_path):
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+
+    tree, head, problem = g.checkout_tree_identity(repo)
+
+    assert problem == ""
+    assert g._HEX40.fullmatch(tree) and g._HEX40.fullmatch(head)
+    expect = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        capture_output=True, text=True, timeout=60, check=True,
+    ).stdout.strip()
+    assert tree == expect
+
+
+def test_checkout_tree_identity_refuses_dirty_and_untracked_worktrees(tmp_path):
+    """The suites run on the WORKING tree, so anything beyond the committed
+    tree means the tree hash does not name what was tested. Both a modified
+    tracked file and a fresh untracked file must refuse."""
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+
+    (repo / "f.txt").write_text("v2\n", encoding="utf-8")
+    tree, head, problem = g.checkout_tree_identity(repo)
+    assert (tree, head) == ("", "")
+    assert "differs from HEAD" in problem
+
+    subprocess.run(["git", "-C", str(repo), "checkout", "--", "f.txt"],
+                   check=True, capture_output=True, timeout=60)
+    (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+    tree, head, problem = g.checkout_tree_identity(repo)
+    assert (tree, head) == ("", "")
+    assert "differs from HEAD" in problem
+
+
+def test_checkout_tree_identity_refuses_a_non_git_directory(tmp_path):
+    g = _load_runner()
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    tree, head, problem = g.checkout_tree_identity(plain)
+
+    assert (tree, head) == ("", "")
+    assert "not a usable git checkout" in problem
+
+
+def test_emit_gate_proof_writes_a_bound_schema1_document(tmp_path):
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    out = tmp_path / "proofs" / "gate-proof.json"
+
+    problem = g.emit_gate_proof(out, fingerprint="f" * 64, total=5, repo=repo)
+
+    assert problem == ""
+    data = __import__("json").loads(out.read_text(encoding="utf-8"))
+    tree, head, _ = g.checkout_tree_identity(repo)
+    assert data["schema"] == 1
+    assert data["kind"] == "leaf-gate-proof"
+    assert data["tree"] == tree
+    assert data["head_sha"] == head
+    assert data["catalog_fingerprint"] == "f" * 64
+    assert data["total_suites"] == 5
+
+
+def test_emit_gate_proof_refuses_rather_than_fabricates(tmp_path):
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    (repo / "f.txt").write_text("dirty\n", encoding="utf-8")
+    out = tmp_path / "gate-proof.json"
+
+    problem = g.emit_gate_proof(out, fingerprint="f" * 64, total=5, repo=repo)
+
+    assert "differs from HEAD" in problem
+    assert not out.exists(), "a refused emission must write nothing"
+
+
+def test_verify_gate_proof_accepts_its_own_emission(tmp_path, capsys):
+    """Round trip through the REAL catalog fingerprint: the proof a green
+    fan-in emits is exactly the proof the probe and the reuse-path fan-in
+    accept."""
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    fingerprint = g.catalog_fingerprint(g.build_suites())
+    out = tmp_path / "gate-proof.json"
+    assert g.emit_gate_proof(out, fingerprint=fingerprint, total=1, repo=repo) == ""
+    tree, _, _ = g.checkout_tree_identity(repo)
+
+    rc = g.verify_gate_proof(out, tree)
+
+    assert rc == 0
+    assert "VERIFIED: gate proof binds tree" in capsys.readouterr().out
+
+
+def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
+    """Each mutation is one lie the skip path must not honor. All must refuse
+    with a NAMED reason, and the accept case above proves the base document is
+    otherwise sound (so each refusal is caused by its mutation alone)."""
+    import json as _json
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    fingerprint = g.catalog_fingerprint(g.build_suites())
+    base_path = tmp_path / "gate-proof.json"
+    assert g.emit_gate_proof(
+        base_path, fingerprint=fingerprint, total=1, repo=repo) == ""
+    tree, _, _ = g.checkout_tree_identity(repo)
+    base = _json.loads(base_path.read_text(encoding="utf-8"))
+
+    def refuse(expect_tree, fragment, mutate=None):
+        doc = _json.loads(_json.dumps(base))
+        if mutate is not None:
+            mutate(doc)
+        p = tmp_path / "mutated.json"
+        p.write_text(_json.dumps(doc), encoding="utf-8")
+        rc = g.verify_gate_proof(p, expect_tree)
+        out = capsys.readouterr().out
+        assert rc == 1, (fragment, out)
+        assert fragment in out, (fragment, out)
+
+    # The consumer asked about a DIFFERENT tree than the proof binds.
+    refuse("0" * 40, "bound to tree")
+    # A non-hex expectation is a caller bug, never a pass.
+    refuse("HEAD", "must be a 40-hex git tree id")
+    # Wrong document type / schema.
+    refuse(tree, "not a schema-1 leaf-gate-proof",
+           lambda d: d.update(kind="something-else"))
+    refuse(tree, "not a schema-1 leaf-gate-proof",
+           lambda d: d.update(schema=2))
+    # A proof whose own tree field is garbage.
+    refuse(tree, "no 40-hex tree", lambda d: d.update(tree="not-hex"))
+    # A proof for the right tree but a different catalog: same tree hash with
+    # a different catalog should be impossible, so reuse is refused.
+    refuse(tree, "catalog fingerprint differs",
+           lambda d: d.update(catalog_fingerprint="0" * 64))
+    refuse(tree, "catalog fingerprint differs",
+           lambda d: d.pop("catalog_fingerprint"))
+
+    # Unreadable file.
+    missing = tmp_path / "missing.json"
+    rc = g.verify_gate_proof(missing, tree)
+    out = capsys.readouterr().out
+    assert rc == 1 and "unreadable proof file" in out
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("{not json", encoding="utf-8")
+    rc = g.verify_gate_proof(garbage, tree)
+    out = capsys.readouterr().out
+    assert rc == 1 and "unreadable proof file" in out
+
+
+def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
+    """Same silence class as the shard CLI guards: each of these would
+    otherwise answer a different question than the one typed. All must exit 2
+    running nothing."""
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text("{}", encoding="utf-8")
+    cases = (
+        ["--verify-gate-proof", str(proof)],                      # no tree
+        ["--expect-tree", "0" * 40],                              # no proof
+        ["--emit-proof", str(tmp_path / "out.json")],             # no fan-in
+        ["--verify-gate-proof", str(proof), "--expect-tree", "0" * 40,
+         "--shard-count", "2", "--shard-index", "0"],             # mixed modes
+        ["--verify-gate-proof", str(proof), "--expect-tree", "0" * 40,
+         "--verify-shard-results", str(tmp_path)],                # mixed modes
+        ["--verify-gate-proof", str(proof), "--expect-tree", "0" * 40,
+         "--emit-proof", str(tmp_path / "out.json")],             # mixed modes
+    )
+    for extra in cases:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "run-all-gates.py"),
+             "--log-dir", str(tmp_path)] + extra,
+            cwd=str(REPO), capture_output=True, text=True, timeout=300,
+            encoding="utf-8", errors="replace",
+        )
+        assert proc.returncode == 2, (extra, proc.stdout + proc.stderr)
+        assert "GATE SCOREBOARD" not in proc.stdout, extra
+
+
+def test_fanin_emits_proof_only_on_a_proven_gate(tmp_path, monkeypatch, capsys):
+    """The wiring main() adds around verify_shard_results: emission happens
+    exactly when the fan-in PROVES the gate, an emission refusal never changes
+    the verify exit code, and a red fan-in never emits. emit_gate_proof itself
+    is stubbed here (its real behavior is pinned above) so this test drives
+    main() without depending on the state of the developer's checkout."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path)
+    emitted = []
+
+    def fake_emit(path, *, fingerprint, total, repo=None):
+        emitted.append((str(path), fingerprint, total))
+        return ""
+
+    monkeypatch.setattr(g, "emit_gate_proof", fake_emit)
+    proof_path = tmp_path / "out" / "gate-proof.json"
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py", "--verify-shard-results", str(tmp_path),
+        "--emit-proof", str(proof_path),
+    ])
+
+    rc = g.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert emitted == [(str(proof_path), g.catalog_fingerprint(stubs), len(stubs))]
+    assert "gate proof emitted" in out
+
+    # A refused emission is reported but the PROVEN verdict stands.
+    monkeypatch.setattr(g, "emit_gate_proof",
+                        lambda *a, **k: "checkout is dirty")
+    rc = g.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gate proof NOT emitted (checkout is dirty)" in out
+
+    # A red fan-in must never mint.
+    emitted.clear()
+    monkeypatch.setattr(g, "emit_gate_proof", fake_emit)
+    shard0 = tmp_path / "gate-shard-0" / "gate-result.json"
+    import json as _json
+    d = _json.loads(shard0.read_text(encoding="utf-8"))
+    d["results"][0]["status"] = "FAIL"
+    shard0.write_text(_json.dumps(d), encoding="utf-8")
+    rc = g.main()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert emitted == []
+    assert "the fan-in did not prove the gate" in out

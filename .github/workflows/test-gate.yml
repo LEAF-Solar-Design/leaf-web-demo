@@ -54,6 +54,29 @@ name: Test gate
 # gate against the exact commit it is about to push to ECR.
 # ---------------------------------------------------------------------------
 
+# TREE-IDENTITY REUSE (operator decision D3, 2026-08-05): the fan-in binds its
+# green verdict to the git TREE hash of the checkout it verified and publishes
+# it as a `gate-proof-<tree>` artifact. When this workflow is CALLED with an
+# exact ref (the build-platform-images.yml path), a probe job first looks for
+# an existing proof bound to that exact tree: a clean merge of a PR whose gate
+# just ran produces a merge commit with a byte-identical tree, so re-running
+# the same 8 shards on the same bytes proves nothing new. On a verified hit
+# the shards are skipped and the fan-in re-verifies the bound proof itself;
+# on ANY miss — main moved under the PR, a proof from a fork or a non-gate
+# workflow, expired artifact, content mismatch, API error — the full gate
+# runs. The skip path is fail-closed at every seam:
+#   * the probe accepts a proof only from a run of THIS repository (a fork's
+#     pull_request run can upload an artifact with any name and content, so
+#     provenance comes from the artifact's workflow_run metadata, never from
+#     the file), and only from the two workflows that contain this fan-in;
+#   * the fan-in independently re-downloads and re-verifies the proof against
+#     its own checkout — the verdict never rests on a string that crossed
+#     jobs — and fails red if anything disagrees;
+#   * build-platform-images.yml separately refuses to push any image unless
+#     the gate's proven tree equals the tree it checked out.
+# pull_request runs never probe: they are the runs that MINT proofs by
+# running the full gate.
+#
 # NO push trigger. This gate DOES still run on every push to main — as the
 # `test` job inside build-platform-images.yml (workflow_call, below), which
 # gates image publication on it. A standalone push trigger ran the SAME suite
@@ -72,9 +95,22 @@ on:
         description: "Exact commit to test. Empty means the triggering ref."
         type: string
         required: false
+    outputs:
+      proven_tree:
+        description: >-
+          The git tree hash the green gate verdict is bound to — either the
+          tree the full 8-shard run verified, or the tree of the re-verified
+          reused proof. The caller must refuse to publish anything whose
+          checkout tree differs from this value.
+        value: ${{ jobs.gate.outputs.proven_tree }}
 
 permissions:
   contents: read
+  # actions:read lets the reuse probe and the fan-in read gate-proof
+  # artifacts minted by OTHER runs through the Actions API. Read-only. A
+  # caller of this reusable workflow caps these permissions, so
+  # build-platform-images.yml grants the same pair on its `test` job.
+  actions: read
 
 concurrency:
   # github.workflow is the CALLER's name for a reusable workflow, so a run
@@ -84,8 +120,127 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Tree-identity reuse probe. Runs ONLY when this workflow was called with an
+  # exact ref (build-platform-images.yml always passes one): pull_request and
+  # bare-dispatch runs have no ref input, mint proofs rather than consume
+  # them, and skip this job at zero cost. The probe's one product is the
+  # reuse decision; it is deliberately unable to fail the build — every error
+  # degrades to reuse=false, which means the full gate runs (the fail-closed
+  # direction of this feature is "run the suites").
+  probe:
+    name: gate-reuse-probe
+    if: ${{ inputs.ref != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Same posture as the build workflow's warm job: a probe defect must cost
+    # the optimization, never redden the run. Failures are absorbed in-script
+    # too; this covers action-level failures (checkout, setup).
+    continue-on-error: true
+
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      tree: ${{ steps.decide.outputs.tree }}
+      proof_artifact_id: ${{ steps.decide.outputs.artifact_id }}
+      proof_run_url: ${{ steps.decide.outputs.run_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # The proof verifier is stdlib-only (see run-all-gates.py): no pip.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Decide whether a green gate already binds this exact tree
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must degrade to reuse=false (the
+          # full gate runs), never redden the build.
+          set -uo pipefail
+          set +e
+          tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+          reuse="false"; artifact_id=""; run_id=""; run_url=""
+          if [[ "$tree" =~ ^[0-9a-f]{40}$ ]]; then
+            repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null || true)"
+            listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=gate-proof-$tree&per_page=30" 2>/dev/null || true)"
+            if [[ -n "$repo_id" && -n "$listing" ]]; then
+              # Newest first, un-expired, and minted by a run of THIS
+              # repository: a fork's pull_request run can upload an artifact
+              # with ANY name and content, so same-repo origin is checked on
+              # the artifact's workflow_run metadata before the file is even
+              # opened. The self-reported source block inside the proof is
+              # never consulted for provenance.
+              mapfile -t candidates < <(jq -r --argjson repo_id "$repo_id" '
+                .artifacts
+                | sort_by(.created_at) | reverse | .[]
+                | select(.expired | not)
+                | select(.workflow_run.head_repository_id == $repo_id)
+                | [.id, .workflow_run.id] | @tsv' <<<"$listing" 2>/dev/null || true)
+              for row in "${candidates[@]}"; do
+                [[ -n "$row" ]] || continue
+                candidate_id="${row%%$'\t'*}"; candidate_run="${row##*$'\t'}"
+                # Only the two workflows that contain the fan-in verifier may
+                # mint a proof. `path` comes from the run record, not from
+                # anything inside the artifact. The runs API returns the bare
+                # workflow path (verified live on this repo: pull_request run
+                # 30977456166 and push run 30975460947 both answer
+                # `.github/workflows/<name>.yml`), but OTHER GitHub surfaces
+                # render workflow paths with an `@ref` suffix
+                # (referenced_workflows, reusable-workflow job names), so
+                # strip one defensively before the exact match rather than
+                # bet the allowlist on that shape never leaking in.
+                path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" --jq .path 2>/dev/null || true)"
+                path="${path%%@*}"
+                case "$path" in
+                  .github/workflows/test-gate.yml|.github/workflows/build-platform-images.yml) ;;
+                  *)
+                    echo "::notice::gate-proof artifact $candidate_id minted by ${path:-<unknown>} — not a gate workflow, skipping"
+                    continue ;;
+                esac
+                rm -rf "$RUNNER_TEMP/gate-proof-candidate"
+                mkdir -p "$RUNNER_TEMP/gate-proof-candidate"
+                gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
+                  > "$RUNNER_TEMP/gate-proof-candidate.zip" 2>/dev/null || continue
+                unzip -q -o "$RUNNER_TEMP/gate-proof-candidate.zip" \
+                  -d "$RUNNER_TEMP/gate-proof-candidate" || continue
+                proof="$RUNNER_TEMP/gate-proof-candidate/gate-proof.json"
+                [[ -f "$proof" ]] || continue
+                if python scripts/run-all-gates.py \
+                    --verify-gate-proof "$proof" --expect-tree "$tree"; then
+                  reuse="true"; artifact_id="$candidate_id"; run_id="$candidate_run"
+                  run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$candidate_run"
+                  break
+                fi
+              done
+            fi
+          fi
+          {
+            echo "reuse=$reuse"
+            echo "tree=$tree"
+            echo "artifact_id=$artifact_id"
+            echo "run_url=$run_url"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$reuse" == "true" ]]; then
+            echo "::notice::tree $tree already has a verified green gate ($run_url); shards will be skipped and the fan-in will re-verify the bound proof"
+          else
+            echo "::notice::no verified gate proof binds tree ${tree:-<unknown>}; the full 8-shard gate will run"
+          fi
+          exit 0
+
   shards:
     name: gate-shard-${{ matrix.shard }}
+    needs: probe
+    # `!cancelled()` and not the implicit success(): when the probe is SKIPPED
+    # (pull_request and bare-dispatch runs never probe) the shards must still
+    # run, and every probe failure mode falls through to reuse != 'true' —
+    # the full gate. Only a verified tree-bound proof skips the suites.
+    if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -197,12 +352,21 @@ jobs:
 
   gate:
     name: run-all-gates
-    needs: shards
+    needs: [probe, shards]
     # always(): when a shard fails this job must still run and FAIL with the
     # verifier's naming of what broke, not report as skipped.
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    outputs:
+      # The tree this job's checkout resolves to. Meaningful to consumers only
+      # when this job SUCCEEDS (build-platform-images.yml reaches it through
+      # `needs: test`), and then it names the tree the verdict is bound to on
+      # BOTH paths: the full run verified shard results whose catalog came
+      # from this same ref, and the reuse path re-verified the bound proof
+      # against exactly this checkout.
+      proven_tree: ${{ steps.tree.outputs.value }}
 
     steps:
       - uses: actions/checkout@v4
@@ -215,13 +379,68 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Resolve this checkout's tree identity
+        id: tree
+        # Fail loudly on an unresolvable tree: everything downstream — the
+        # proof re-verification, the minted artifact's name, the proven_tree
+        # output the build workflow refuses to push without — binds to this
+        # value.
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]]
+          echo "value=$tree" >> "$GITHUB_OUTPUT"
+
+      # ---- reuse path: a verified proof already binds this exact tree ---- #
+      - name: Re-verify the bound gate proof (tree-identity skip)
+        if: ${{ needs.probe.outputs.reuse == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROOF_ARTIFACT_ID: ${{ needs.probe.outputs.proof_artifact_id }}
+          PROOF_RUN_URL: ${{ needs.probe.outputs.proof_run_url }}
+          SHARD_JOB_RESULT: ${{ needs.shards.result }}
+          TREE: ${{ steps.tree.outputs.value }}
+        # The probe's decision is not the gate's verdict: this job downloads
+        # the SAME artifact and re-runs the full content verification against
+        # its own checkout, so the verdict never rests on an output string
+        # that crossed jobs. Any failure here is a red gate — fail closed;
+        # the skip path must be at least as hard to pass as the gate it
+        # replaces.
+        run: |
+          set -euo pipefail
+          test "$SHARD_JOB_RESULT" = "skipped"
+          [[ "$PROOF_ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/gate-proof-reuse"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROOF_ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/gate-proof-reuse.zip"
+          unzip -q -o "$RUNNER_TEMP/gate-proof-reuse.zip" \
+            -d "$RUNNER_TEMP/gate-proof-reuse"
+          python scripts/run-all-gates.py \
+            --verify-gate-proof "$RUNNER_TEMP/gate-proof-reuse/gate-proof.json" \
+            --expect-tree "$TREE"
+          echo "GATE SKIPPED BY TREE-IDENTITY REUSE"
+          echo "  tree:  $TREE"
+          echo "  proof: artifact $PROOF_ARTIFACT_ID from $PROOF_RUN_URL"
+          cat "$RUNNER_TEMP/gate-proof-reuse/gate-proof.json"
+          {
+            echo "## Gate verdict reused by tree identity"
+            echo ""
+            echo "Tree \`$TREE\` already passed the full 8-shard gate."
+            echo "Bound proof: artifact \`$PROOF_ARTIFACT_ID\` minted by $PROOF_RUN_URL."
+            echo "This run re-verified the proof's content against its own checkout;"
+            echo "no suite was re-run. Any tree skew runs the full gate."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- full path: verify the shard set, then mint this tree's proof --- #
       - name: Download shard results
+        if: ${{ needs.probe.outputs.reuse != 'true' }}
         uses: actions/download-artifact@v4
         with:
           pattern: gate-shard-*-${{ github.run_id }}
           path: ${{ runner.temp }}/shard-results
 
       - name: Verify the complete gate
+        if: ${{ needs.probe.outputs.reuse != 'true' }}
         env:
           SHARD_JOB_RESULT: ${{ needs.shards.result }}
         # Two independent conditions, both required:
@@ -229,6 +448,25 @@ jobs:
         #      one fingerprint with zero failures;
         #   2. the shard matrix job itself succeeded — artifact presence alone
         #      must never pass the gate.
+        # --emit-proof writes the tree-bound proof document only when the
+        # verifier PROVES the gate; an emission refusal (impossible on a CI
+        # checkout) costs the next identical-tree build its skip, nothing else.
         run: |
-          python scripts/run-all-gates.py --verify-shard-results "$RUNNER_TEMP/shard-results"
+          python scripts/run-all-gates.py \
+            --verify-shard-results "$RUNNER_TEMP/shard-results" \
+            --emit-proof "$RUNNER_TEMP/gate-proof/gate-proof.json"
           test "$SHARD_JOB_RESULT" = "success"
+
+      # Runs only when the step above passed BOTH conditions (implicit
+      # success() on the if:), so a proof can never outlive a red verdict.
+      - name: Publish the tree-bound gate proof
+        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-proof-${{ steps.tree.outputs.value }}
+          path: ${{ runner.temp }}/gate-proof
+          # A refused emission (dirty local checkout — impossible on CI) must
+          # cost the optimization, never the verdict: warn, don't fail.
+          if-no-files-found: warn
+          retention-days: 30
+          overwrite: true

@@ -824,14 +824,17 @@ def build_suites() -> List[Suite]:
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
-        # Floor 47: the 29 measured 2026-07-28, plus the 18 sharding tests
+        # Floor 57: the 29 measured 2026-07-28, plus the 18 sharding tests
         # (partition determinism, catalog fingerprint incl. toolchain-path
         # canonicalization, the glob pin on platform/tests/*_static.py, shard
         # CLI rejections, and the fan-in verifier's accept cases + refusal of
         # every corruption class incl. below-floor PASS and ungated SKIP),
-        # measured on this tree 2026-08-04.
+        # measured on this tree 2026-08-04; plus the 10 tree-bound gate-proof
+        # tests (emission refusal on dirty/non-git checkouts, verification of
+        # every forgery class, proof CLI rejections, the emit-only-on-PROVEN
+        # wiring, and the test-gate.yml reuse-shape pin), measured 2026-08-05.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 47),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 57),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1493,6 +1496,153 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+# --------------------------------------------------------------------------- #
+# tree-bound gate proof (operator decision D3, 2026-08-05)
+#
+# The fan-in's green verdict is bound to the git TREE hash of the checkout it
+# verified, not the commit SHA. A pull_request gate runs on the PR's merge
+# preview; the merge that lands on main mints a NEW commit whose tree is
+# byte-identical whenever main did not move in between. Binding the proof to
+# the tree lets the push-to-main build recognize "these exact bytes already
+# passed the full gate" and skip re-running it, while ANY skew — main moved,
+# a different merge result, a hand-edited commit — changes the tree and runs
+# the full gate. Precedent: leaf_website #200 binds promotion proof to HEAD.
+#
+# Trust model: this file only proves CONTENT — that a proof document names the
+# expected tree and the exact catalog this checkout derives. WHO minted the
+# document is deliberately out of scope here: a forged file can claim any
+# source, so the consuming workflow establishes provenance from the artifact
+# listing's own workflow_run metadata (same-repository origin, gate-workflow
+# path) BEFORE this verifier ever opens the file.
+# --------------------------------------------------------------------------- #
+GATE_PROOF_SCHEMA = 1
+GATE_PROOF_KIND = "leaf-gate-proof"
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, timeout=60, check=True,
+        encoding="utf-8", errors="replace",
+    )
+    return proc.stdout.strip()
+
+
+def checkout_tree_identity(repo: Path = REPO) -> tuple[str, str, str]:
+    """(tree, head, problem) for the checkout a proof would bind.
+
+    `problem` is non-empty whenever a tree-bound proof would be dishonest:
+    not a git checkout, or a working tree that differs from HEAD's committed
+    tree (dirty tracked files OR untracked files — the suites ran on the
+    working tree, so anything beyond the committed tree means the tree hash
+    does not name what was actually tested). CI checkouts are always clean;
+    this refusal exists for local runs."""
+    try:
+        head = _git(repo, "rev-parse", "HEAD")
+        tree = _git(repo, "rev-parse", "HEAD^{tree}")
+        dirty = _git(repo, "status", "--porcelain")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", "", (f"not a usable git checkout: "
+                        f"{type(exc).__name__}: {str(exc)[:160]}")
+    if dirty:
+        return "", "", ("working tree differs from HEAD (dirty or untracked "
+                        "files): a tree-bound proof would attest a tree the "
+                        "suites did not run on")
+    if not _HEX40.fullmatch(tree) or not _HEX40.fullmatch(head):
+        return "", "", "git returned a non-40-hex object id"
+    return tree, head, ""
+
+
+def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
+                    repo: Path = REPO) -> str:
+    """Write the tree-bound proof document. Returns '' on success, else the
+    reason emission was REFUSED. Never raises and never fabricates: a refusal
+    only costs the next identical-tree build its skip (it runs the full gate),
+    so the caller must not turn a refusal into a red verdict."""
+    tree, head, problem = checkout_tree_identity(repo)
+    if problem:
+        return problem
+    payload = {
+        "schema": GATE_PROOF_SCHEMA,
+        "kind": GATE_PROOF_KIND,
+        "tree": tree,
+        "head_sha": head,
+        "catalog_fingerprint": fingerprint,
+        "total_suites": total,
+        # Informational ONLY. Provenance is established by the consuming
+        # workflow from the artifact's workflow_run metadata; nothing may
+        # trust this self-reported block.
+        "source": {
+            "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            "event": os.environ.get("GITHUB_EVENT_NAME", ""),
+            "workflow": os.environ.get("GITHUB_WORKFLOW", ""),
+            "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+        },
+    }
+    try:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    except OSError as exc:
+        return f"cannot write proof: {type(exc).__name__}: {str(exc)[:160]}"
+    return ""
+
+
+def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
+    """Exit code for --verify-gate-proof: 0 only when the document is a
+    schema-1 tree-bound gate proof whose tree equals `expect_tree` AND whose
+    catalog fingerprint equals the one THIS checkout derives. Runs nothing.
+
+    The fingerprint check looks redundant with tree equality (the catalog is
+    a pure function of the tree) but is not: the fingerprint hashes checkout
+    cwd paths raw, so it additionally refuses a proof minted from a
+    differently-rooted checkout — where the equal-tree argument holds but was
+    never load-tested. Refusal is always safe: the caller falls back to
+    running the full gate."""
+    expect = (expect_tree or "").strip().lower()
+    if not _HEX40.fullmatch(expect):
+        print(f"NOT VERIFIED: --expect-tree must be a 40-hex git tree id, "
+              f"got {expect_tree!r}")
+        return 1
+    try:
+        data = json.loads(Path(proof_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"NOT VERIFIED: unreadable proof file: "
+              f"{type(exc).__name__}: {str(exc)[:160]}")
+        return 1
+    if not isinstance(data, dict) or data.get("schema") != GATE_PROOF_SCHEMA \
+            or data.get("kind") != GATE_PROOF_KIND:
+        print("NOT VERIFIED: not a schema-1 leaf-gate-proof document")
+        return 1
+    tree = data.get("tree")
+    if not (isinstance(tree, str) and _HEX40.fullmatch(tree)):
+        print(f"NOT VERIFIED: proof carries no 40-hex tree (got {tree!r})")
+        return 1
+    if tree != expect:
+        print(f"NOT VERIFIED: proof is bound to tree {tree}, expected {expect}")
+        return 1
+    suites = build_suites()
+    if duplicate_suite_ids(suites):
+        print("NOT VERIFIED: catalog has duplicate suite ids; fix "
+              "build_suites() first")
+        return 1
+    fingerprint = catalog_fingerprint(suites)
+    if data.get("catalog_fingerprint") != fingerprint:
+        print("NOT VERIFIED: proof's catalog fingerprint differs from the one "
+              "this checkout derives (a different catalog, or a proof minted "
+              "from a differently-rooted checkout); refusing to reuse")
+        return 1
+    src = data.get("source") if isinstance(data.get("source"), dict) else {}
+    print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
+          f"{fingerprint} (self-reported mint: run {src.get('run_id') or '?'} "
+          f"attempt {src.get('run_attempt') or '?'}, event "
+          f"{src.get('event') or '?'} — informational; provenance comes from "
+          f"the artifact's workflow_run metadata)")
+    return 0
+
+
 def executed_count(res: Result) -> Optional[int]:
     """Executed tests behind a result row: got minus skipped, the same
     quantity coverage_verdict compares floors against. None for rows that
@@ -1809,7 +1959,38 @@ def main() -> int:
                          "(recursively), recompute the partition from THIS checkout, "
                          "and exit 0 only when every shard ran exactly its slice of "
                          "the exact same catalog and every suite passed. Runs nothing.")
+    ap.add_argument("--emit-proof", default=None, metavar="PATH",
+                    help="with --verify-shard-results only: after the fan-in PROVES "
+                         "the gate, write a tree-bound proof document (git tree hash "
+                         "+ catalog fingerprint) to PATH. Emission is refused, never "
+                         "fabricated, on a dirty or non-git checkout; a refusal does "
+                         "not change the verify exit code.")
+    ap.add_argument("--verify-gate-proof", default=None, metavar="FILE",
+                    help="proof-check mode (with --expect-tree): exit 0 only when "
+                         "FILE is a tree-bound gate proof for exactly that tree and "
+                         "this checkout's exact catalog. Runs nothing. Provenance of "
+                         "the file is the CALLER's job (GitHub artifact metadata).")
+    ap.add_argument("--expect-tree", default=None, metavar="TREEHEX",
+                    help="the 40-hex git tree id --verify-gate-proof must find in "
+                         "the proof document.")
     args = ap.parse_args()
+
+    if args.verify_gate_proof or args.expect_tree:
+        if not (args.verify_gate_proof and args.expect_tree):
+            print("--verify-gate-proof and --expect-tree must be used together")
+            return 2
+        if (args.only or args.result_json or args.shard_count != 1
+                or args.shard_index is not None or args.verify_shard_results
+                or args.emit_proof):
+            print("--verify-gate-proof is a proof-check mode and takes no other "
+                  "mode or run flags")
+            return 2
+        return verify_gate_proof(Path(args.verify_gate_proof), args.expect_tree)
+
+    if args.emit_proof and not args.verify_shard_results:
+        print("--emit-proof requires --verify-shard-results: the proof is the "
+              "fan-in's verified verdict, never a standalone claim")
+        return 2
 
     if args.verify_shard_results:
         if (args.only or args.result_json or args.shard_count != 1
@@ -1817,7 +1998,22 @@ def main() -> int:
             print("--verify-shard-results is a fan-in mode and takes no run flags "
                   "(--only/--shard-count/--shard-index/--result-json)")
             return 2
-        return verify_shard_results(Path(args.verify_shard_results))
+        rc = verify_shard_results(Path(args.verify_shard_results))
+        if args.emit_proof:
+            if rc == 0:
+                suites = build_suites()
+                problem = emit_gate_proof(
+                    Path(args.emit_proof),
+                    fingerprint=catalog_fingerprint(suites), total=len(suites))
+                if problem:
+                    print(f"gate proof NOT emitted ({problem}); the verdict "
+                          f"above stands — the next identical-tree build just "
+                          f"runs the full gate")
+                else:
+                    print(f"gate proof emitted -> {args.emit_proof}")
+            else:
+                print("gate proof NOT emitted: the fan-in did not prove the gate")
+        return rc
 
     if args.shard_count < 1:
         print(f"--shard-count must be >= 1 (got {args.shard_count})")
