@@ -13,16 +13,32 @@ from typing import Any, Sequence
 
 
 SCHEMA = "leaf.staging-supply-set.v1"
+# v2 = v1 plus tree-identity provenance (operator decision D3, 2026-08-05):
+# the merge run that ADOPTS speculative PR-built images re-stamps the supply
+# set with the git tree hash both builds realize and the run that built the
+# digests. Deployable consumers (the staging relay, the production handoff
+# verifier) accept BOTH schemas, because a rerun of a pre-v2 build run
+# regenerates its artifact from the old workflow and must keep dispatching.
+SCHEMA_V2 = "leaf.staging-supply-set.v2"
+ACCEPTED_SCHEMAS = (SCHEMA, SCHEMA_V2)
+SPECULATIVE_SCHEMA = "leaf.speculative-supply-set.v1"
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
 REPOSITORIES = {name: f"leaf-platform-{name}" for name in SERVICES}
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_TREE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SOURCE_HASH = re.compile(r"^[0-9a-f]{64}$")
 _TAG = re.compile(r"^(?:prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$")
+# tree + the merge-preview commit that baked the images: two previews can
+# realize the SAME tree while baking different LEAF_SOURCE_SHA values, so a
+# tree-only tag would let a later run mint provenance for images an earlier
+# run built (sol-critic round 1 on PR #450, finding 1).
+_SPEC_TAG = re.compile(r"^spec-[0-9a-f]{40}-[0-9a-f]{12}$")
 _RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
 _RUN_ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _RECEIPT_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{5,49}$")
+_PR_NUMBER = re.compile(r"^[1-9][0-9]{0,9}$")
 
 
 class ContractError(ValueError):
@@ -60,6 +76,7 @@ def build_manifest(
     solver_revision: str,
     solver_source_sha256: str,
     web_artifact_sha256: str,
+    speculative: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not _SHA.fullmatch(source_revision):
         raise ContractError("source revision must be a full lowercase commit SHA")
@@ -93,20 +110,31 @@ def build_manifest(
         if name == "web":
             service["artifact_sha256"] = web_artifact_sha256
         services[name] = service
-    return {
+    manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "source_revision": source_revision,
         "build_tag": build_tag,
         "services": services,
     }
+    if speculative is not None:
+        manifest["schema"] = SCHEMA_V2
+        manifest["source_tree"] = speculative["source_tree"]
+        manifest["speculative"] = {
+            "built_from_revision": speculative["built_from_revision"],
+            "pr_number": speculative["pr_number"],
+            "workflow_run_id": speculative["workflow_run_id"],
+        }
+    return manifest
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    _exact_keys(
-        manifest, {"schema", "source_revision", "build_tag", "services"}, "manifest"
-    )
-    if manifest["schema"] != SCHEMA:
+    schema = manifest.get("schema")
+    if schema not in ACCEPTED_SCHEMAS:
         raise ContractError("unsupported release manifest schema")
+    top_level = {"schema", "source_revision", "build_tag", "services"}
+    if schema == SCHEMA_V2:
+        top_level |= {"source_tree", "speculative"}
+    _exact_keys(manifest, top_level, "manifest")
     source = manifest["source_revision"]
     if not isinstance(source, str) or not _SHA.fullmatch(source):
         raise ContractError("release source revision is not a full commit SHA")
@@ -161,6 +189,148 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         provenance["solver_source_sha256"], str
     ) or not _SOURCE_HASH.fullmatch(provenance["solver_source_sha256"]):
         raise ContractError("canonical-worker solver source hash is invalid")
+    if schema == SCHEMA_V2:
+        tree = manifest["source_tree"]
+        if not isinstance(tree, str) or not _TREE.fullmatch(tree):
+            raise ContractError("release source tree is not a full git tree hash")
+        speculative = manifest["speculative"]
+        if not isinstance(speculative, dict):
+            raise ContractError("speculative provenance must be an object")
+        _exact_keys(
+            speculative,
+            {"built_from_revision", "pr_number", "workflow_run_id"},
+            "speculative provenance",
+        )
+        built_from = speculative["built_from_revision"]
+        if not isinstance(built_from, str) or not _SHA.fullmatch(built_from):
+            raise ContractError("speculative built-from revision is invalid")
+        pr_number = speculative["pr_number"]
+        if not isinstance(pr_number, int) or not _PR_NUMBER.fullmatch(str(pr_number)):
+            raise ContractError("speculative PR number is invalid")
+        run_id = speculative["workflow_run_id"]
+        if not isinstance(run_id, int) or not _RUN_ID.fullmatch(str(run_id)):
+            raise ContractError("speculative workflow run ID is invalid")
+
+
+def build_speculative_manifest(
+    source_tree: str,
+    built_from_revision: str,
+    pr_number: str,
+    workflow_run_id: str,
+    image_digests: dict[str, str],
+    solver_revision: str,
+    solver_source_sha256: str,
+) -> dict[str, Any]:
+    if not _TREE.fullmatch(source_tree):
+        raise ContractError("speculative source tree must be a full git tree hash")
+    if not _SHA.fullmatch(built_from_revision):
+        raise ContractError("speculative built-from revision must be a full commit SHA")
+    if not _PR_NUMBER.fullmatch(pr_number):
+        raise ContractError("speculative PR number is invalid")
+    if not _RUN_ID.fullmatch(workflow_run_id):
+        raise ContractError("speculative workflow run ID is invalid")
+    if set(image_digests) != set(SERVICES):
+        raise ContractError("speculative set must contain exactly five services")
+    if not _SHA.fullmatch(solver_revision):
+        raise ContractError("solver revision must be a full lowercase commit SHA")
+    if not _SOURCE_HASH.fullmatch(solver_source_sha256):
+        raise ContractError("solver source hash must be lowercase SHA-256")
+    services: dict[str, Any] = {}
+    for name in SERVICES:
+        digest = image_digests[name]
+        if not _DIGEST.fullmatch(digest):
+            raise ContractError(f"{name} speculative image digest is not immutable")
+        services[name] = {
+            "repository": REPOSITORIES[name],
+            "image_digest": digest,
+        }
+    return {
+        "schema": SPECULATIVE_SCHEMA,
+        "source_tree": source_tree,
+        "spec_tag": f"spec-{source_tree}-{built_from_revision[:12]}",
+        "built_from_revision": built_from_revision,
+        "pr_number": int(pr_number),
+        "workflow_run_id": int(workflow_run_id),
+        "solver": {
+            "solver_source_revision": solver_revision,
+            "solver_source_sha256": solver_source_sha256,
+        },
+        "services": services,
+    }
+
+
+def validate_speculative_manifest(
+    manifest: dict[str, Any], expect_tree: str | None = None
+) -> None:
+    _exact_keys(
+        manifest,
+        {
+            "schema",
+            "source_tree",
+            "spec_tag",
+            "built_from_revision",
+            "pr_number",
+            "workflow_run_id",
+            "solver",
+            "services",
+        },
+        "speculative manifest",
+    )
+    if manifest["schema"] != SPECULATIVE_SCHEMA:
+        raise ContractError("unsupported speculative manifest schema")
+    tree = manifest["source_tree"]
+    if not isinstance(tree, str) or not _TREE.fullmatch(tree):
+        raise ContractError("speculative source tree is not a full git tree hash")
+    if expect_tree is not None and tree != expect_tree:
+        raise ContractError("speculative manifest binds a different source tree")
+    built_from = manifest["built_from_revision"]
+    if not isinstance(built_from, str) or not _SHA.fullmatch(built_from):
+        raise ContractError("speculative built-from revision is invalid")
+    if manifest["spec_tag"] != f"spec-{tree}-{built_from[:12]}" or not (
+        _SPEC_TAG.fullmatch(manifest["spec_tag"])
+    ):
+        raise ContractError(
+            "speculative tag does not derive from the source tree and the"
+            " built-from revision"
+        )
+    pr_number = manifest["pr_number"]
+    if not isinstance(pr_number, int) or not _PR_NUMBER.fullmatch(str(pr_number)):
+        raise ContractError("speculative PR number is invalid")
+    run_id = manifest["workflow_run_id"]
+    if not isinstance(run_id, int) or not _RUN_ID.fullmatch(str(run_id)):
+        raise ContractError("speculative workflow run ID is invalid")
+    solver = manifest["solver"]
+    if not isinstance(solver, dict):
+        raise ContractError("speculative solver provenance must be an object")
+    _exact_keys(
+        solver,
+        {"solver_source_revision", "solver_source_sha256"},
+        "speculative solver provenance",
+    )
+    if not isinstance(solver["solver_source_revision"], str) or not _SHA.fullmatch(
+        solver["solver_source_revision"]
+    ):
+        raise ContractError("speculative solver revision is invalid")
+    if not isinstance(
+        solver["solver_source_sha256"], str
+    ) or not _SOURCE_HASH.fullmatch(solver["solver_source_sha256"]):
+        raise ContractError("speculative solver source hash is invalid")
+    services = manifest["services"]
+    if not isinstance(services, dict) or set(services) != set(SERVICES):
+        raise ContractError(
+            "speculative manifest does not contain exactly five services"
+        )
+    for name in SERVICES:
+        service = services[name]
+        if not isinstance(service, dict):
+            raise ContractError(f"{name} speculative entry must be an object")
+        _exact_keys(service, {"repository", "image_digest"}, f"{name} speculative entry")
+        if service["repository"] != REPOSITORIES[name]:
+            raise ContractError(f"{name} speculative repository is not canonical")
+        if not isinstance(service["image_digest"], str) or not _DIGEST.fullmatch(
+            service["image_digest"]
+        ):
+            raise ContractError(f"{name} speculative image digest is not immutable")
 
 
 def verify_workflow_run(
@@ -399,6 +569,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     generate.add_argument("--web-artifact-sha256", required=True)
     generate.add_argument("--image", action="append", default=[])
     generate.add_argument("--output", type=Path, required=True)
+    # All three or none: a v2 supply set records where its adopted digests
+    # were speculatively built. Passing a subset is a caller bug.
+    generate.add_argument("--source-tree")
+    generate.add_argument("--speculative-built-from")
+    generate.add_argument("--speculative-pr-number")
+    generate.add_argument("--speculative-run-id")
+    generate_speculative = commands.add_parser("generate-speculative")
+    generate_speculative.add_argument("--source-tree", required=True)
+    generate_speculative.add_argument("--built-from-revision", required=True)
+    generate_speculative.add_argument("--pr-number", required=True)
+    generate_speculative.add_argument("--workflow-run-id", required=True)
+    generate_speculative.add_argument("--solver-revision", required=True)
+    generate_speculative.add_argument("--solver-source-sha256", required=True)
+    generate_speculative.add_argument("--image", action="append", default=[])
+    generate_speculative.add_argument("--output", type=Path, required=True)
+    verify_speculative = commands.add_parser("verify-speculative")
+    verify_speculative.add_argument("--manifest", type=Path, required=True)
+    verify_speculative.add_argument("--expect-tree", required=True)
+    verify_speculative.add_argument("--output", type=Path, required=True)
     verify = commands.add_parser("verify-staging")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--receipt", type=Path, required=True)
@@ -450,6 +639,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 head_sha=args.head_sha,
             )
         elif args.command == "generate":
+            speculative_args = (
+                args.source_tree,
+                args.speculative_built_from,
+                args.speculative_pr_number,
+                args.speculative_run_id,
+            )
+            speculative = None
+            if any(value is not None for value in speculative_args):
+                if any(value is None for value in speculative_args):
+                    raise ContractError(
+                        "speculative provenance requires --source-tree, "
+                        "--speculative-built-from, --speculative-pr-number, "
+                        "and --speculative-run-id together"
+                    )
+                if not _TREE.fullmatch(args.source_tree):
+                    raise ContractError(
+                        "speculative source tree must be a full git tree hash"
+                    )
+                if not _SHA.fullmatch(args.speculative_built_from):
+                    raise ContractError(
+                        "speculative built-from revision must be a full commit SHA"
+                    )
+                if not _PR_NUMBER.fullmatch(args.speculative_pr_number):
+                    raise ContractError("speculative PR number is invalid")
+                if not _RUN_ID.fullmatch(args.speculative_run_id):
+                    raise ContractError("speculative workflow run ID is invalid")
+                speculative = {
+                    "source_tree": args.source_tree,
+                    "built_from_revision": args.speculative_built_from,
+                    "pr_number": int(args.speculative_pr_number),
+                    "workflow_run_id": int(args.speculative_run_id),
+                }
             value = build_manifest(
                 args.source_revision,
                 args.build_tag,
@@ -457,8 +678,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.solver_revision,
                 args.solver_source_sha256,
                 args.web_artifact_sha256,
+                speculative=speculative,
             )
             validate_manifest(value)
+        elif args.command == "generate-speculative":
+            value = build_speculative_manifest(
+                args.source_tree,
+                args.built_from_revision,
+                args.pr_number,
+                args.workflow_run_id,
+                _images(args.image),
+                args.solver_revision,
+                args.solver_source_sha256,
+            )
+            validate_speculative_manifest(value)
+        elif args.command == "verify-speculative":
+            value = load_json(args.manifest)
+            validate_speculative_manifest(value, expect_tree=args.expect_tree)
         else:
             value = verify_staging_receipt(
                 load_json(args.manifest),

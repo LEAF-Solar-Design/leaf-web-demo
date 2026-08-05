@@ -163,28 +163,49 @@ def main() -> None:
     solver_start = text.index("      - name: Resolve canonical solver provenance")
     source_body = text[source_start:solver_start]
     assert '--arg repo "$GITHUB_REPOSITORY"' in source_body
+    # TWO PR-validating arms live in this step now: the draft-PR dispatch
+    # mode and the speculative mode (which validates the exact open PR by
+    # number). Both must pin the same-repository, non-fork, exact-head jq
+    # conditions; only the draft arm requires .draft.
     for required_check in (
         '.state == "open"',
-        ".draft == true",
         '.base.ref == "main"',
         ".head.repo.full_name == $repo",
         ".head.repo.fork == false",
         "(.head.sha | ascii_downcase) == $sha",
     ):
-        assert source_body.count(required_check) == 1
+        assert source_body.count(required_check) == 2, required_check
+    assert source_body.count(".draft == true") == 1
     assert "exact head of an open same-repository draft PR" in source_body
+    # The speculative arm builds the merge preview only after proving it
+    # still merges the dispatched head, and can never promote.
+    assert "A speculative run can never promote." in source_body
+    assert (
+        'fetch --no-tags --depth=2 origin "refs/pull/$SPECULATIVE_PR_NUMBER/merge"'
+        in source_body
+    )
+    # The preview fetch carries a scoped auth header (the checkout persisted
+    # no credentials because later prepare steps execute preview-authored
+    # scripts); nothing may flip the checkout itself to persisted
+    # credentials.
+    assert "http.https://github.com/.extraheader" in source_body
+    prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
+    assert "persist-credentials: true" not in prepare_block
+    assert '"$PREVIEW_SHA^2"' in source_body
+    assert 'git checkout --quiet "$PREVIEW_SHA"' in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
-    # THREE jobs hold the ECR push credential, not two: `warm` joined build
-    # and verify when layer warming moved beside the test gate. It genuinely
-    # needs the role, since it reads and writes the registry-backed layer
-    # cache. Note what that means and what this count does NOT buy: a third
-    # job can reach ECR with push rights, and no assertion in this file can
-    # prevent it from using them (see the limitation block below). Raising
-    # this number should mean a new job that provably needs registry
-    # access, not a convenience.
+    # SIX jobs hold the ECR push credential: warm, build, verify, and the
+    # speculative lane's speculate (pushes spec-<tree> images),
+    # speculate-manifest (reads live digests to mint the tree-bound
+    # manifest), and adopt (aliases the release tag onto verified digests).
+    # Each provably needs registry access. Note what that means and what
+    # this count does NOT buy: six jobs can reach ECR with push rights, and
+    # no assertion in this file can prevent them from using them (see the
+    # limitation block below). Raising this number should mean a new job
+    # that provably needs registry access, not a convenience.
     # Counted by parsed key and value, not by exact text: `id-token : write`
-    # or a quoted key grants OIDC while leaving a literal count at three,
+    # or a quoted key grants OIDC while leaving a literal count short,
     # and a comment mentioning the grant inflates it (sol-critic round 8,
     # findings 3 and 6). The structural line list is built below, so this
     # count is taken once it exists.
@@ -334,14 +355,14 @@ def main() -> None:
         assert not raw_key or "\\" not in raw_key.group(1), (
             "escape sequences in a mapping key are banned: %r" % line)
 
-    # THREE jobs hold the ECR push credential: warm, build, verify. See the
-    # note above the deferred assignment for why this is parsed, not
-    # text-matched.
+    # SIX jobs hold the ECR push credential (see the note above the
+    # deferred assignment for the roster and for why this is parsed, not
+    # text-matched).
     oidc_grants = [
         l for l in structural
         if _key_of(l) == "id-token" and _value_of(l) == "write"
     ]
-    assert len(oidc_grants) == 3, oidc_grants
+    assert len(oidc_grants) == 6, oidc_grants
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
@@ -357,20 +378,20 @@ def main() -> None:
     # fail-closed presence check and the one exact solver checkout. It is
     # never passed to Docker as an argument or inherited by the whole job.
     secret_ref = "secrets.AUTOFILL_SOLVER_DEPLOY_KEY"
-    assert text.count(secret_ref) == 4
-    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 2
+    assert text.count(secret_ref) == 6
+    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 3
     assert "AUTOFILL_SOLVER_DEPLOY_KEY=" not in text
     # Five mentions per lane (env key + secret ref, presence test, error
     # message, ssh-key) and none anywhere else: a new reference to the key
     # in any other step or comment must consciously bump this count.
-    assert text.count("AUTOFILL_SOLVER_DEPLOY_KEY") == 10
+    assert text.count("AUTOFILL_SOLVER_DEPLOY_KEY") == 15
     require_name = "      - name: Require the read-only canonical solver deploy key"
     checkout_name = "      - name: Check out the exact canonical solver source"
     # Exactly one presence-check and one solver-checkout step per image job,
     # and none anywhere else in the workflow: with the global total pinned to
     # 2, a key step relocated into any other job cannot go unnoticed.
-    assert text.count(require_name) == 2
-    assert text.count(checkout_name) == 2
+    assert text.count(require_name) == 3
+    assert text.count(checkout_name) == 3
     for lane, block in (("warm", warm_block), ("build", build_block)):
         assert block.count(require_name) == 1, lane
         assert block.count(checkout_name) == 1, lane
@@ -432,7 +453,7 @@ def main() -> None:
     # not be loosened. It says nothing about the warm job; see the
     # limitation block below.
     assert "uses: ./.github/workflows/test-gate.yml" in text
-    assert "needs: [prepare, test]" in text
+    assert "needs: [prepare, test, adopt]" in text
 
     # BOTH image matrices (warm and build) carry all five images and do not
     # cancel siblings after one failure. Warm covering canonical-worker is
@@ -457,7 +478,17 @@ def main() -> None:
         ], (lane, members)
     assert "fail-fast: false" in warm_block
     assert "fail-fast: false" in build_block
-    assert "needs: [prepare, build]" in text
+    assert "needs: [prepare, adopt, build]" in text
+    verify_guard = (
+        "    if: >-\n"
+        "      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&\n"
+        "          needs.prepare.result == 'success' &&\n"
+        "          (needs.build.result == 'success' ||\n"
+        "           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&\n"
+        "            needs.adopt.outputs.adopted == 'true')) }}\n"
+    )
+    assert text.count(verify_guard) == 1
+
 
     # ECR tags are immutable. Current and previous commits have distinct cache
     # tags, fixed buildcache is forbidden, and a rerun never overwrites cache.
@@ -553,12 +584,14 @@ def main() -> None:
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
-    # THREE build-lane jobs carry the bare promote guard (test, build,
-    # verify): a promote run reuses already-published digests and must never
-    # rebuild. The cache warmer is skipped on that path too, but its guard
-    # is compound — promote AND prepare's gate-reuse hint — so it is pinned
-    # by exact parsed value below rather than counted here.
-    assert text.count("if: ${{ !inputs.promote }}") == 3
+    # test carries the promote guard AND the speculative guard (a
+    # speculative dispatch must not run the gate: its PR's standalone gate
+    # run mints the proof). build and verify moved to compound whole-pinned
+    # guards (see build_guard/verify_guard), and warm's guard is compound —
+    # promote, speculative, and prepare's gate-reuse hint — pinned by exact
+    # parsed value below rather than counted here.
+    assert text.count("if: ${{ !inputs.promote }}") == 0
+    assert text.count("if: ${{ !inputs.promote && !inputs.speculative }}") == 1
     # Warm's guard, whole and at the job's own if: key. Warm is also skipped
     # when a same-repo gate proof already names this exact tree: the gate leg
     # then reuses the verdict in ~30s, the build job starts before any warm
@@ -571,7 +604,8 @@ def main() -> None:
         _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
     ]
     assert warm_guards == [
-        "${{ !inputs.promote && needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+        "${{ !inputs.promote && !inputs.speculative && "
+        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
     ], warm_guards
     # The hint is an ECONOMIC signal with a deliberately narrow blast
     # radius: it may gate warm and NOTHING else. Skipping the GATE stays the
@@ -909,12 +943,27 @@ def main() -> None:
     # The gate edge, pinned as an EFFECTIVE job key at its exact
     # indentation. A bare substring search was satisfied by
     # `needs: [prepare] # needs: [prepare, test]` (sol-critic round 6),
-    # which drops the gate dependency while reading as intact.
-    assert re.search(r"(?m)^    needs: \[prepare, test\]$", build_block), (
+    # which drops the gate dependency while reading as intact. `adopt`
+    # joined the list for ORDERING (its verdict decides whether this matrix
+    # runs at all); the gate dependency is the same edge it always was, and
+    # the job guard below additionally requires the gate's success by
+    # explicit result check, so a skipped-but-satisfied adopt cannot smuggle
+    # a build past a failed gate.
+    assert re.search(r"(?m)^    needs: \[prepare, test, adopt\]$", build_block), (
         "the gate edge is what stops the BUILD job publishing an untested "
         "image; nothing else in this repository does")
     assert len(re.findall(r"(?m)^    needs:", build_block)) == 1, (
         "the build job declares exactly one needs: list")
+    build_guard = (
+        "    if: >-\n"
+        "      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&\n"
+        "          needs.prepare.result == 'success' &&\n"
+        "          needs.test.result == 'success' &&\n"
+        "          (needs.adopt.result == 'skipped' ||\n"
+        "           (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}\n"
+    )
+    assert text.count(build_guard) == 1
+    assert build_guard in build_block
     assert "push: true" in build_block
 
     # The warmed cache is what makes the post-gate build cheap; without this
@@ -1000,6 +1049,335 @@ def main() -> None:
     assert bind_at < push_at, "the tree binding must precede the push step"
 
     check_docs_noop_filter(text)
+
+    # ------------------------------------------------------------------ #
+    # Speculative PR builds (lane L5, operator decision D3, 2026-08-05).
+    # Three jobs joined the workflow: `speculate` (matrix build of the merge
+    # preview, pushed under the non-deployable spec-<tree> namespace),
+    # `speculate-manifest` (the tree-redefined partial-push invariant: a
+    # spec-supply-set artifact exists only when all five digests verify),
+    # and `adopt` (the merge-run half: alias the release tag onto verified
+    # speculative digests, else degrade to the full build). The pins below
+    # hold the seams that keep untested content unreachable by any deploy:
+    # the spec namespace never overlaps sha-/prod-, adoption requires the
+    # gate's proven tree, and every adopt failure lands on adopted=false.
+    # ------------------------------------------------------------------ #
+    speculate_block = text.split("\n  speculate:\n", 1)[1].split(
+        "\n  speculate-manifest:\n", 1
+    )[0]
+    manifest_block = text.split("\n  speculate-manifest:\n", 1)[1].split(
+        "\n  adopt:\n", 1
+    )[0]
+    adopt_block = text.split("\n  adopt:\n", 1)[1].split("\n  handoff:\n", 1)[0]
+
+    # Speculative dispatches must never queue inside the release concurrency
+    # group (they are dispatched on the main ref), and only they may cancel
+    # a predecessor.
+    assert (
+        "group: build-platform-images-${{ inputs.speculative && "
+        "format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}"
+    ) in text
+    assert "cancel-in-progress: ${{ inputs.speculative || false }}" in text
+
+    # The spec tag IS the tree, derived in prepare, and the derivation
+    # exports the tree for the manifest and adopt jobs.
+    assert 'image_tag="spec-$current_tree-$current_spec_short"' in text
+    assert "current_tree=\"$(git rev-parse 'HEAD^{tree}')\"" in text
+    assert 'echo "tree=$current_tree"' in text
+    assert "source_tree: ${{ steps.tag.outputs.tree }}" in text
+
+    # speculate runs ONLY as a speculative dispatch, carries the same
+    # five-image matrix as warm/build, and never cancels siblings early.
+    speculate_guards = [
+        _value_of(l)
+        for l in speculate_block.splitlines()
+        if _key_of(l) == "if" and l.startswith("    if")
+    ]
+    assert speculate_guards == [
+        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
+    ], speculate_guards
+    assert "fail-fast: false" in speculate_block
+    speculate_matrices = [
+        l for l in speculate_block.splitlines() if re.match(r"^\s*image: \[", l)
+    ]
+    assert len(speculate_matrices) == 1
+    speculate_members = [
+        m.strip()
+        for m in speculate_matrices[0].split("[", 1)[1].rstrip("]").split(",")
+    ]
+    assert sorted(speculate_members) == [
+        "app", "broker", "canonical-worker", "harness", "web",
+    ], speculate_members
+
+    # The speculative build must hash the same inputs as the gated build, or
+    # an adopted image would not realize the tree the gate proved. Same
+    # byte-identity contract warm already carries.
+    speculate_builds = [
+        s
+        for s in re.split(r"\n      - ", speculate_block)
+        if "uses: docker/build-push-action" in s
+    ]
+    assert len(speculate_builds) == 1, "speculate holds exactly one build step"
+    speculate_with = _with_mapping(speculate_builds[0])
+    for key in ("context:", "file:", "build-args:", "build-contexts:"):
+        assert _with_input(speculate_with, key) == _with_input(build_with, key), (
+            "speculate and build must carry a byte-identical %s input" % key
+        )
+    assert re.search(r"^          push: true$", speculate_with, re.M)
+    assert (
+        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+        in speculate_with
+    )
+    # Import-only cache: no export, so no immutable-tag export race exists
+    # in this lane at all. Live lines only — the shell comment explaining
+    # the posture is allowed to name the option.
+    speculate_live = [
+        l for l in speculate_block.splitlines() if not l.strip().startswith("#")
+    ]
+    assert not [l for l in speculate_live if "cache_to" in l], (
+        "the speculative lane must not export layer cache"
+    )
+    assert "cache-to" not in _keys_in(speculate_builds[0])
+    # The push step and the solver steps are conditional on the
+    # existence-skip: a tree already pushed is adopted as-is and the solver
+    # key is never fetched for it. Pinned by parsed value, as elsewhere.
+    speculate_condition = (
+        "matrix.image == 'canonical-worker' && "
+        "steps.exists.outputs.present != 'true'"
+    )
+    for step_name in (
+        "name: Require the read-only canonical solver deploy key",
+        "name: Check out the exact canonical solver source",
+    ):
+        steps = [
+            s
+            for s in re.split(r"\n      - ", speculate_block)
+            if s.startswith(step_name)
+        ]
+        assert len(steps) == 1, step_name
+        conditions = [
+            _value_of(l) for l in steps[0].splitlines() if _key_of(l) == "if"
+        ]
+        assert conditions == [speculate_condition], (step_name, conditions)
+    assert [
+        _value_of(l)
+        for l in speculate_builds[0].splitlines()
+        if _key_of(l) == "if"
+    ] == ["steps.exists.outputs.present != 'true'"]
+    assert speculate_block.count(secret_ref) == 2
+    # Both preview-consuming jobs re-verify the checkout is the exact
+    # preview prepare resolved; a moved preview aborts rather than builds
+    # the wrong bytes.
+    assert speculate_block.count("Require the same merge preview prepare resolved") == 1
+    assert manifest_block.count("Require the same merge preview prepare resolved") == 1
+
+    # The partial-push invariant over tree identity: no artifact without all
+    # five digests, and the mint is gated on the SAME step output the upload
+    # is. if-no-files-found stays error so an empty upload cannot pass.
+    manifest_guard = (
+        "    if: >-\n"
+        "      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&\n"
+        "          inputs.speculative && needs.prepare.result == 'success' }}\n"
+    )
+    assert text.count(manifest_guard) == 1
+    assert manifest_guard in manifest_block
+    assert "complete=false" in manifest_block
+    assert "the speculative set is incomplete and no manifest will be minted" in (
+        manifest_block
+    )
+    assert "generate-speculative" in manifest_block
+    mint_or_upload = [
+        s
+        for s in re.split(r"\n      - ", manifest_block)
+        if s.startswith("name: Mint the tree-bound speculative supply set")
+        or "uses: actions/upload-artifact" in s
+    ]
+    assert len(mint_or_upload) == 2
+    for step in mint_or_upload:
+        assert [
+            _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
+        ] == ["steps.digests.outputs.complete == 'true'"]
+    assert (
+        "name: spec-supply-set-${{ needs.prepare.outputs.source_tree }}"
+        in manifest_block
+    )
+    assert "if-no-files-found: error" in manifest_block
+
+    # adopt: absorbed like the gate-reuse probe (a defect costs the
+    # optimization, never the push run), reads artifacts with an explicit
+    # read-only Actions grant, and follows the probe's provenance
+    # discipline: same-repo origin from workflow_run metadata, this
+    # workflow's bare path, a main-ref workflow_dispatch run. Content
+    # verifies via verify-speculative BEFORE any tag is written, only the
+    # release prod- namespace may be aliased, and every alias re-verifies
+    # before adopted=true is declared.
+    adopt_guards = [
+        _value_of(l)
+        for l in adopt_block.splitlines()
+        if _key_of(l) == "if" and l.startswith("    if")
+    ]
+    assert adopt_guards == [
+        "${{ !inputs.promote && github.event_name == 'push' }}"
+    ], adopt_guards
+    # NO JOB-level continue-on-error: before the first tag write the EXIT
+    # trap (and the individually absorbed SETUP steps — see the parsed
+    # step pins below) degrade every failure to adopted=false, and after
+    # it adoption is committed — a deliberate exit 1 must fail the run,
+    # because the fallback rebuild would collide with the half-aliased
+    # immutable release tag. The build guard above refuses to run when
+    # adopt FAILED for the same reason.
+    adopt_header = adopt_block[: adopt_block.index("    steps:")]
+    assert "continue-on-error" not in _keys_in(adopt_header)
+    assert "trap on_exit EXIT" in adopt_block
+    assert "COMMITTED=false" in adopt_block
+    assert adopt_block.count("RERUN THIS RUN") == 2
+    assert "positively absent" in adopt_block
+    assert [
+        _value_of(l)
+        for l in adopt_block.splitlines()
+        if _key_of(l) == "actions"
+    ] == ["read"]
+    assert "PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}" in adopt_block
+    assert ".workflow_run.head_repository_id == $repo_id" in adopt_block
+    assert 'path="${path%%@*}"' in adopt_block
+    assert '.github/workflows/build-platform-images.yml" ]] || continue' in adopt_block
+    assert '"workflow_dispatch" ]] || continue' in adopt_block
+    assert '"main" ]] || continue' in adopt_block
+    assert "verify-speculative" in adopt_block
+    assert "--expect-tree" in adopt_block
+    # The spec tag comes from the verified manifest (tree + baking preview,
+    # sol-critic round 1 finding 1), never re-derived from the tree alone.
+    assert "spec_tag=\"$(jq -r '.spec_tag' \"$verified\")\"" in adopt_block
+    assert "spec-[0-9a-f]{40}-[0-9a-f]{12}" in adopt_block
+    assert adopt_block.index("verify-speculative") < adopt_block.index(
+        "aws ecr put-image"
+    ), "no tag may be written before the manifest verifies"
+    assert adopt_block.count("aws ecr put-image") == 1
+    assert "refusing to alias non-release tag" in adopt_block
+    assert "re-verification failed" in adopt_block
+    assert 'echo "adopted=$1"' in adopt_block
+    # The decide step carries no if: at all — like the probe, it absorbs
+    # failures internally; a conditional here could leave stale outputs
+    # deciding whether the build matrix runs.
+    decide_steps = [
+        s
+        for s in re.split(r"\n      - ", adopt_block)
+        if s.startswith("name: Adopt a verified speculative supply set")
+    ]
+    assert len(decide_steps) == 1
+    assert "if" not in _keys_in(decide_steps[0])
+
+    # Effective parsed values (sol-critic round 2 on PR #450, finding 3):
+    # the text pins above bind format; these bind what GitHub actually
+    # evaluates — a guard relocated into a name: scalar or a permission
+    # hidden behind write-all fails here.
+    wf_doc = _strict_yaml(text)
+    wf_jobs = wf_doc["jobs"]
+
+    def _folded(value) -> str:
+        return " ".join(str(value).split())
+
+    assert wf_jobs["speculate"]["if"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
+    )
+    assert wf_jobs["adopt"]["if"] == (
+        "${{ !inputs.promote && github.event_name == 'push' }}"
+    )
+    assert _folded(wf_jobs["speculate-manifest"]["if"]) == (
+        "${{ !cancelled() && github.event_name == 'workflow_dispatch' && "
+        "inputs.speculative && needs.prepare.result == 'success' }}"
+    )
+    assert _folded(wf_jobs["build"]["if"]) == (
+        "${{ !cancelled() && !inputs.promote && !inputs.speculative && "
+        "needs.prepare.result == 'success' && "
+        "needs.test.result == 'success' && "
+        "(needs.adopt.result == 'skipped' || "
+        "(needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}"
+    )
+    assert _folded(wf_jobs["verify"]["if"]) == (
+        "${{ !cancelled() && !inputs.promote && !inputs.speculative && "
+        "needs.prepare.result == 'success' && "
+        "(needs.build.result == 'success' || "
+        "(needs.build.result == 'skipped' && needs.adopt.result == 'success' && "
+        "needs.adopt.outputs.adopted == 'true')) }}"
+    )
+    assert wf_jobs["build"]["needs"] == ["prepare", "test", "adopt"]
+    assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
+    assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
+    assert wf_jobs["adopt"]["permissions"] == {
+        "id-token": "write",
+        "contents": "read",
+        "actions": "read",
+    }
+    assert "continue-on-error" not in wf_jobs["adopt"]
+    # adopt's SETUP steps are individually absorbed (a pre-write failure
+    # must degrade through decide, not veto the fallback build); the decide
+    # step is the deliberate exception — its only nonzero exit is the
+    # post-write committed path, which must fail the run.
+    adopt_steps = wf_jobs["adopt"]["steps"]
+    assert len(adopt_steps) == 5
+    assert adopt_steps[-1].get("id") == "decide"
+    for step in adopt_steps[:-1]:
+        assert step.get("continue-on-error") is True, step
+    assert "continue-on-error" not in adopt_steps[-1]
+    assert "if" not in adopt_steps[-1]
+
+    # The staging relay accepts exactly the two supply-set schemas; the
+    # deployable fields are the same shape in both.
+    relay_text = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "leaf.staging-supply-set.v1|leaf.staging-supply-set.v2) ;;" in relay_text
+    )
+    assert relay_text.count("is not an accepted staging supply-set schema") == 1
+
+    # The dispatcher is deliberately secretless and same-repo-gated: the
+    # real build runs on the MAIN ref (main's workflow text, main's OIDC
+    # subject). If a secrets.* reference ever appears here, the PR-editable
+    # pull_request surface has grown a credential, which is exactly what
+    # the dispatch indirection exists to prevent. Bound to the PARSED
+    # document (strict loader, duplicate keys refused), so a trigger,
+    # permission, or guard relocated into a scalar cannot satisfy it; the
+    # dispatch command lines are bound to the step's comment-stripped
+    # EXECUTABLE bash.
+    dispatcher_text = (WORKFLOW.parent / "speculate-platform-images.yml").read_text(
+        encoding="utf-8"
+    )
+    # ABSENCE over the raw text: a comment mentioning secrets fails too,
+    # which is the safe direction.
+    assert "secrets." not in dispatcher_text
+    dsp_doc = _strict_yaml(dispatcher_text)
+    # YAML parses the `on:` key as boolean True.
+    assert dsp_doc[True] == {"pull_request": {"branches": ["main"]}}
+    assert dsp_doc["permissions"] == {"contents": "read", "actions": "write"}
+    assert set(dsp_doc["jobs"]) == {"dispatch"}
+    dispatch_job = dsp_doc["jobs"]["dispatch"]
+    assert "permissions" not in dispatch_job, (
+        "a job-level permissions block would REPLACE the workflow-level set"
+    )
+    assert _folded(dispatch_job["if"]) == (
+        "github.event.pull_request.head.repo.full_name == github.repository && "
+        "github.event.pull_request.head.repo.fork == false"
+    )
+    dispatch_steps = dispatch_job["steps"]
+    assert len(dispatch_steps) == 1
+    assert set(dispatch_steps[0]) <= {"name", "env", "run"}, (
+        "the dispatch step runs plain bash with github.token only"
+    )
+    dispatch_script = _executable_bash(dispatch_steps[0]["run"])
+    assert "gh workflow run build-platform-images.yml" in dispatch_script
+    assert "--ref main" in dispatch_script
+    assert '-f "speculative=true"' in dispatch_script
+    assert '-f "source_sha=$HEAD_SHA"' in dispatch_script
+    assert '-f "speculative_pr_number=$PR_NUMBER"' in dispatch_script
+    assert dispatch_job["env"] if "env" in dispatch_job else True
+
+    # Cache growth for the speculative namespace has the same explicit
+    # bounded-retention infrastructure contract buildcache-* carries.
+    assert "spec-* tags" in text
+    assert "leaf.staging-supply-set.v2" in DEPLOY_DOC
+    assert "spec-<tree>" in DEPLOY_DOC
 
     print("build-platform-images workflow invariants: PASS")
 
@@ -1244,8 +1622,11 @@ def check_docs_noop_filter(text: str) -> None:
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
+    # Hash updated for lane L5 (PR #450): the manifest step's schema pin
+    # widened to accept leaf.staging-supply-set.v1 OR .v2 — same deployable
+    # fields, no new dispatch capability, no new secret surface.
     assert frozen == (
-        "f4cfca76c7de56ff0a1a7b99dfd04039d74a2fccc08be9a227d18f0f589caa13"
+        "a4fd3f7b49df61be1a15b307c1b8425d08a6d47ad0410cfcedb38225fc4ff22a"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"

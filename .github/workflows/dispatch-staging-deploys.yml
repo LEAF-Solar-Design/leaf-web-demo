@@ -115,10 +115,18 @@ jobs:
             > supply-set.zip
           unzip -o supply-set.zip
           SCHEMA=$(jq -er '.schema' staging-supply-set.json)
-          [ "$SCHEMA" = "leaf.staging-supply-set.v1" ] || {
-            echo "::error::Supply-set schema '$SCHEMA' is not leaf.staging-supply-set.v1."
-            exit 1
-          }
+          # v2 = v1 plus tree-identity provenance (adopted speculative PR
+          # builds). Both dispatch identically: the deployable fields are
+          # byte-for-byte the same shape. v1 stays accepted because a rerun
+          # of a pre-v2 build run regenerates its artifact from the old
+          # workflow and must keep dispatching.
+          case "$SCHEMA" in
+            leaf.staging-supply-set.v1|leaf.staging-supply-set.v2) ;;
+            *)
+              echo "::error::Supply-set schema '$SCHEMA' is not an accepted staging supply-set schema."
+              exit 1
+              ;;
+          esac
           IMAGE_TAG=$(jq -er '.build_tag' staging-supply-set.json)
           [[ "$IMAGE_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || {
             echo "::error::Supply-set build_tag '$IMAGE_TAG' is not an immutable prod tag."
