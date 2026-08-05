@@ -116,6 +116,12 @@ export function makeCatProofState() {
 export function catProofResponse({ method, path, body = {}, query = {} }, state) {
   const json = (value, status = 200) => ({ status, body: value })
   if (method === 'OPTIONS') return { status: 204, body: null }
+  if (path === '/api/converse/mcp') return json({ servers: [] })
+  if (path === '/api/converse/registry') return json({ entries: [], counts: {} })
+  if (path === '/api/skills') return json({ skills: [] })
+  if (path === '/api/overlay') return json({ tokens: {}, document_version: 0, pending_proposal_id: null })
+  if (path === '/api/agent/approvals/pending') return json({ approvals: [] })
+  if (path === '/api/telemetry' && method === 'POST') return { status: 204, body: null }
   if (path === '/api/site/guest-upload-policy') return json({
     enabled: true, retention_hours: 24, max_bytes: 1024 * 1024,
     accepted: ['.dwg', '.dxf'], extract_live: false, dxf_local_ok: true,

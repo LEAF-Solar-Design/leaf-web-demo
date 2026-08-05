@@ -373,7 +373,6 @@ export default function ToolCast({
     const requestedDrawingId = MODE_DRAWING_ID || drawingId
     const drawingSource = PROOF_MODE ? 'cat' : PUBLIC_DEMO ? 'rooftop_demo' : requestedDrawingId
     if (drawing.shown && drawing.drawingState?.drawing_id === requestedDrawingId) {
-      setPhase(Number(drawing.head) > 1 ? 'complete' : 'ready')
       return undefined
     }
     if (!drawingSource) {
@@ -1586,7 +1585,7 @@ export default function ToolCast({
       </div>
       <Toast toast={toast} onDone={(id) => setToast((current) => current?.id === id ? null : current)} />
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
-      {opsOpen && sessionReady && (
+      {opsOpen && (
         <div className="drawer-layer tc-ops-layer">
           <OpsDrawer onDismiss={() => setOpsOpen(false)} />
         </div>
