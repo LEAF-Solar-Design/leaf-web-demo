@@ -45,11 +45,14 @@ for (const file of await walk(srcDir)) {
   assert(!text.includes('X-Approval-Secret'), `approval secret header must not appear in the browser bundle: ${file}`)
 }
 
-// Mount gating: strict entitlement (no permissive-unknown fallback), plus the
-// hidden ?customize=1 flag, plus live mode. All three, verbatim.
+// Mount gating: strict entitlement (no permissive-unknown fallback) plus live
+// mode. The query flag remains a deep link, but an entitled admin must also get
+// a visible header entry so platform self-edit is discoverable.
 assert(app.includes("entitlements?.entitlements?.platform_customize === true"), 'panel mount must gate on a STRICT platform_customize grant')
-assert(app.includes("get('customize') === '1'"), 'panel must stay behind the ?customize=1 flag')
-assert(app.includes('customizeFlag && !mock && !customizeDismissed && platformCustomizeEntitled'), 'panel mount must require flag AND live mode AND strict entitlement')
+assert(app.includes("get('customize') === '1'"), 'panel must preserve the ?customize=1 deep link')
+assert(app.includes('customizeOpen && !mock && platformCustomizeEntitled'), 'panel mount must require open state, live mode, and strict entitlement')
+assert(app.includes('platformCustomizeEntitled && (') && app.includes('>Customize</button>'), 'an entitled admin must get a visible Customize entry')
+assert(app.includes('onClick={() => setCustomizeOpen(true)}'), 'the visible Customize entry must open the guarded panel')
 
 // Guard strings alone cannot prove the mount is gated: a SECOND unconditional
 // <CustomizePanel /> would keep every assert above green. Pin the mount count

@@ -250,7 +250,7 @@ export default function App() {
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
-  const [customizeDismissed, setCustomizeDismissed] = useState(false)
+  const [customizeOpen, setCustomizeOpen] = useState(customizeFlag)
 
   // --- NT2 toast (one slot — newest replaces) + DT2 details drawer ---
   const [toast, setToast] = useState(null)   // {id, text, action?}
@@ -2116,7 +2116,7 @@ export default function App() {
   // The internal ops / tenant kill-switch drawer must never be reachable from a
   // public demo build — `?ops=1` is a no-op in mock.
   const opsExit = useExit(opsFlag && !mock && !opsDismissed)
-  const customizeExit = useExit(customizeFlag && !mock && !customizeDismissed && platformCustomizeEntitled)
+  const customizeExit = useExit(customizeOpen && !mock && platformCustomizeEntitled)
 
   return (
     <div className="app">
@@ -2147,6 +2147,9 @@ export default function App() {
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
+          {!mock && platformCustomizeEntitled && (
+            <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+          )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
           {devControls && (
             <label className="switch">
@@ -2759,7 +2762,7 @@ export default function App() {
 
       {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}
 
-      {customizeExit.shown && <CustomizePanel tenant={tenant} onDismiss={() => setCustomizeDismissed(true)} exiting={customizeExit.exiting} />}
+      {customizeExit.shown && <CustomizePanel tenant={tenant} onDismiss={() => setCustomizeOpen(false)} exiting={customizeExit.exiting} />}
 
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}

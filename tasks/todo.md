@@ -423,3 +423,18 @@ Risks:
 - [x] Consume it only for the exact holder and drawing, then hold an exclusive browser lock before installing authority.
 - [x] Prove stale/mismatched rejection, one-use deletion, failed-race remint, and unchanged duplicate-tab isolation.
 - [x] Run focused checks, build, checkout server tests, relevant staging gates, and self-review before deployment.
+
+# Subscription-mount product readiness (2026-08-05)
+
+- [x] Reconcile the preserved Pro/Max/Team/Enterprise mount change onto current main.
+- [x] Keep mounts owner-scoped, tenant-isolated, non-pooled, usage-aware, and token-safe.
+- [x] Prove supported-plan routing and reject unsupported or unattested OAuth mounts.
+- [x] Add a visible Customize entry for strictly entitled admins while preserving the guarded deep link.
+- [ ] Run focused server, harness, web, build, and full repository gates.
+- [ ] Self-review, publish for protected CI, integrate, deploy through the shared staging train, and verify one authenticated mounted-account turn.
+
+Risks:
+
+- A subscription credential must never enter platform identity claims, logs, or another tenant's route.
+- The UI must not imply that Free accounts or pooled team credit are supported.
+- The change must not bypass the account-owner gate or the existing API-key lane.
