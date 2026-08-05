@@ -96,15 +96,24 @@ _PER_COMMIT_DECL = re.compile(
 def _consumes_per_commit_arg(run_body: str) -> bool:
     """True only where the shell would actually expand a per-commit ARG.
 
-    Exec-form RUN (a JSON array) never invokes a shell, so nothing
-    expands. In shell form, a $NAME / ${NAME} reference expands except
-    inside single quotes or with a backslash-escaped dollar; double
-    quotes (including apostrophes nested inside them) do expand. Known
-    scope boundary, named here on purpose: heredoc RUN bodies and $$
-    self-escapes are not modeled — no checked Dockerfile uses them, and
-    a false trip fails loud, never silently green.
+    Exec-form RUN (a JSON array, with or without leading --flags such as
+    --mount) never invokes a shell, so nothing expands. In shell form, a
+    $NAME / ${NAME} reference expands except inside single quotes or with
+    a backslash-escaped dollar; double quotes (including apostrophes
+    nested inside them) do expand. Known scope boundary, named here on
+    purpose: heredoc RUN bodies, $$ self-escapes, and BuildKit's own
+    expansion inside --flag values are not modeled — no checked
+    Dockerfile uses them, and a false trip fails loud, never silently
+    green.
     """
     body = run_body.strip()
+    # RUN flags (--mount/--network/--security[=value]) precede either
+    # form; skip them before deciding exec vs shell.
+    while body.startswith("--"):
+        parts = body.split(None, 1)
+        if len(parts) < 2:
+            return False
+        body = parts[1].lstrip()
     if body.startswith("["):
         return False
     in_single = in_double = False
@@ -966,6 +975,8 @@ def main() -> None:
         ("RUN echo '$LEAF_SOURCE_SHA'", True),
         ("RUN echo \\$LEAF_SOURCE_SHA", True),
         ('RUN ["echo", "$LEAF_SOURCE_SHA"]', True),
+        ('RUN --mount=type=cache,target=/tmp ["echo", "$LEAF_SOURCE_SHA"]', True),
+        ('RUN --network=none printf "%s" "$LEAF_SOURCE_SHA"', False),
         ('RUN printf "%s" "$LEAF_SOURCE_SHA" > /tmp/sha', False),
         ("RUN test -n $LEAF_SOURCE_SHA", False),
         ("RUN seal ${LEAF_SOURCE_SHA}", False),
