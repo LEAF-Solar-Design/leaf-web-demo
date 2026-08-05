@@ -1,0 +1,114 @@
+name: Dispatch staging deploys
+
+# ---------------------------------------------------------------------------
+# Auto-dispatches the leaf-platform staging deploys (web + app, concurrently)
+# when a main-branch "Build platform images" push run succeeds. Removes the
+# hand-dispatch gap between build success and deploy start.
+#
+# The image tag is read from the build run's own staging supply-set manifest
+# artifact (leaf.staging-supply-set.v1, field build_tag), never re-derived,
+# so the deployed tag is exactly the tag the build recorded.
+#
+# Ordering guard: deploys dispatch only while the built commit is still the
+# tip of main. If main has moved on, this run skips and the newer commit's
+# build dispatches instead, so an older overlapping build can never roll
+# staging backwards.
+#
+# Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
+# repo) — the same pattern the aws-* service repos use with
+# deploy-service-staging.yml. The deploys themselves run in
+# LEAF-Solar-Design/leaf-automation-aws-terraform with its own review gates.
+#
+# Rollback: delete this file (or revert its PR). Manual workflow_dispatch of
+# deploy-leaf-platform-staging.yml with an exact task-definition ARN is
+# unchanged and remains the recovery path.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_run:
+    workflows: ["Build platform images"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: dispatch-staging-deploys-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
+      DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
+      BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+      BUILD_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Skip when the built commit is no longer the tip of main
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MAIN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+          if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+            echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA; the newer build's dispatch supersedes this one."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the exact image tag from the build's supply-set manifest
+        id: manifest
+        if: steps.tip.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100" \
+            > artifacts.json
+          ARTIFACT_ID=$(jq -er --arg prefix "staging-supply-set-$BUILD_HEAD_SHA-attempt-" '
+            [.artifacts[] | select(.name | startswith($prefix))]
+            | sort_by(.name) | last | .id
+          ' artifacts.json)
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            > supply-set.zip
+          unzip -o supply-set.zip
+          IMAGE_TAG=$(jq -er '.build_tag' staging-supply-set.json)
+          [[ "$IMAGE_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || {
+            echo "::error::Supply-set build_tag '$IMAGE_TAG' is not an immutable prod tag."
+            exit 1
+          }
+          MANIFEST_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+          [ "$MANIFEST_SHA" = "$BUILD_HEAD_SHA" ] || {
+            echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
+            exit 1
+          }
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the web and app staging deploys concurrently
+        if: steps.tip.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          IMAGE_TAG: ${{ steps.manifest.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          for SERVICE in web app; do
+            gh workflow run "$DEPLOY_WORKFLOW" \
+              --repo "$INFRA_REPO" \
+              --ref main \
+              -f "service=$SERVICE" \
+              -f "expected_task_definition=auto-live" \
+              -f "image_tag=$IMAGE_TAG" \
+              -f "app_deploy_intent=forward"
+            echo "Dispatched $SERVICE deploy of $IMAGE_TAG."
+          done
