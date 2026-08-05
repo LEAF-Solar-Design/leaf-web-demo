@@ -59,13 +59,14 @@ def main() -> None:
     assert "exact head of an open same-repository draft PR" in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
-    # THREE jobs hold the ECR push credential, not two: `warm` joined build and
-    # verify when layer warming moved beside the test gate. It genuinely needs
-    # the role — it reads and writes the registry-backed layer cache — so the
-    # honest statement is that a third job can reach ECR, and the thing that
-    # keeps an untested IMAGE out is the assertion below that warm's build step
-    # sets push:false and publishes no tag. Raising this number again should
-    # mean a new job that provably needs registry access, not a convenience.
+    # THREE jobs hold the ECR push credential, not two: `warm` joined build
+    # and verify when layer warming moved beside the test gate. It genuinely
+    # needs the role, since it reads and writes the registry-backed layer
+    # cache. Note what that means and what this count does NOT buy: a third
+    # job can reach ECR with push rights, and no assertion in this file can
+    # prevent it from using them (see the limitation block below). Raising
+    # this number should mean a new job that provably needs registry
+    # access, not a convenience.
     # Counted by parsed key and value, not by exact text: `id-token : write`
     # or a quoted key grants OIDC while leaving a literal count at three,
     # and a comment mentioning the grant inflates it (sol-critic round 8,
@@ -323,15 +324,19 @@ def main() -> None:
     # five-image list surviving only in a comment cannot satisfy it (sol-
     # critic round 1 on PR #445). A failed build matrix entry still blocks
     # the verification job.
-    five_image_matrix = (
-        r"^        image: \[app, broker, canonical-worker, harness, web\]$"
-    )
-    assert len(re.findall(five_image_matrix, warm_block, re.M)) == 1
-    assert len(re.findall(five_image_matrix, build_block, re.M)) == 1
-    # And no OTHER image matrix line survives in either block: four-image
-    # lists or duplicates fail here rather than hiding beside the pinned one.
-    assert len(re.findall(r"^\s*image: \[", warm_block, re.M)) == 1
-    assert len(re.findall(r"^\s*image: \[", build_block, re.M)) == 1
+    # Membership, not line order: reordering the same five images is a
+    # legitimate edit (sol-critic round 11 false positive), dropping one is
+    # not. Exactly one matrix line per block, so a second cannot hide
+    # beside the pinned one.
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        matrices = [
+            l for l in block.splitlines() if re.match(r"^\s*image: \[", l)
+        ]
+        assert len(matrices) == 1, lane
+        members = [m.strip() for m in matrices[0].split("[", 1)[1].rstrip("]").split(",")]
+        assert sorted(members) == [
+            "app", "broker", "canonical-worker", "harness", "web",
+        ], (lane, members)
     assert "fail-fast: false" in warm_block
     assert "fail-fast: false" in build_block
     assert "needs: [prepare, build]" in text
@@ -463,11 +468,15 @@ def main() -> None:
     assert "/app/.leaf-source-revision" in canonical
 
     # ------------------------------------------------------------------ #
-    # The warm/build split: layers may be prepared in parallel with the test
-    # gate, but NOTHING may reach ECR as an image before the gate is green.
-    # This repository has no branch protection, so `build: needs: [prepare,
-    # test]` is the entire enforcement — a warm job that ever learns to push,
-    # or a build job that stops needing `test`, silently removes it.
+    # The warm/build split: layers are prepared in parallel with the test
+    # gate, and the DECLARED intent is that no image reaches ECR before the
+    # gate is green. This repository has no branch protection, so
+    # `build: needs: [prepare, test]` is what enforces that for the build
+    # job. It does not constrain warm, which holds the same push role; the
+    # limitation block below says what that leaves unenforced. The
+    # assertions here pin warm's declared no-publish configuration, which
+    # catches drift in what the job is written to do, not what its
+    # credentials would permit.
     # ------------------------------------------------------------------ #
     assert "needs: prepare" in warm_block
     assert "continue-on-error: true" in warm_block, (
@@ -559,7 +568,6 @@ def main() -> None:
         _value_of(l) for l in warm_block.splitlines() if _key_of(l) == "uses"
     ]
     assert set(warm_uses) <= allowed_uses, sorted(set(warm_uses) - allowed_uses)
-    assert "push: true" not in warm_block
     assert "tags" not in _keys_in(warm_block), (
         "a cache warmer publishes no image tag")
 
@@ -580,12 +588,17 @@ def main() -> None:
     # version`, and renaming or reordering the permitted steps.
     #
     # A text check cannot prove the absence of a publishing command in
-    # arbitrary shell. What actually bounds warm is (a) the gate edge
-    # asserted below, which is what keeps an untested image off the
-    # RELEASE tag, and (b) the scope of AWS_ECR_PUSH_ROLE. Narrowing that
-    # role so the warm job can write buildcache-* and nothing else is the
-    # real control, is infrastructure rather than workflow, and is filed
-    # as a follow-up rather than faked here.
+    # arbitrary shell. State the consequence without softening it: there
+    # is currently NO enforceable boundary preventing the warm job from
+    # publishing a release image before the gate is green. The gate edge
+    # asserted below constrains the BUILD job only; it says nothing about
+    # warm, which holds the same push role. The boundary would come from
+    # narrowing AWS_ECR_PUSH_ROLE so warm can write buildcache-* and
+    # nothing else — infrastructure rather than workflow, filed as a
+    # follow-up rather than faked here.
+    #
+    # What the warm assertions below DO buy: they pin the job's declared
+    # configuration, so drift in what it is written to do is caught.
     # ------------------------------------------------------------------ #
 
     # The gate edge, pinned as an EFFECTIVE job key at its exact
@@ -621,13 +634,18 @@ def main() -> None:
         # assertion above still passes (sol-critic round 7, finding 4). The
         # only assignments allowed are the empty initialiser and the pinned
         # export line.
-        # The variable is written exactly twice, the empty initialiser then
-        # the pinned export, and never rewritten afterwards: `unset
-        # cache_to`, `export cache_to=...`, and `printf -v cache_to ...`
-        # each strip the option back off while the assertions above still
-        # pass (sol-critic round 8, finding 4). Reads are unrestricted, so
-        # an added debug echo does not redden the gate.
-        writes = [l for l in live if re.match(r"^\s*cache_to=", _comment_cut(l))]
+        # Direct assignments: the empty initialiser, then the pinned
+        # export, optionally hardened with `readonly` or `declare`. This
+        # catches DRIFT in how the variable is set. It is not a proof that
+        # nothing later rewrites it — shell offers too many spellings, and
+        # `declare cache_to="${cache_to%,*}"` slipped past the previous
+        # attempt (sol-critic round 11). The named rewrites below are the
+        # ones seen in review, not an exhaustive set. Reads are
+        # unrestricted, so a debug echo does not redden the gate.
+        writes = [
+            l for l in live
+            if re.match(r"^\s*(?:readonly\s+|declare\s+)?cache_to=", _comment_cut(l))
+        ]
         assert len(writes) == 2, (lane, writes)
         assert writes[0].strip() == 'cache_to=""', lane
         assert writes[1] == exports[0], lane
