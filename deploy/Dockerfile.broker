@@ -22,8 +22,6 @@ RUN npm init -y && npm install e2b@^2.35.0
 
 FROM python:3.12-slim AS broker
 
-ARG LEAF_SOURCE_SHA=unknown
-
 WORKDIR /app
 
 # --- Python deps: server + da + the opt-in PostgreSQL authority runtime. -------
@@ -84,6 +82,19 @@ ENV LEAF_E2B_HELPER=/app/harness/scripts/e2b-tool-exec.mjs
 # the PROJECT_ROOT sys.path insert, so the local da/queue.py never shadows them).
 WORKDIR /app/server
 
+# F11: the broker must not run as root. Runtime EFS mounts replace these
+# directories in ECS, while the local directories keep compose/dev runs writable.
+RUN useradd --system --uid 10001 --user-group --home /home/leaf --create-home leaf \
+  && mkdir -p /data/state /data/drawings \
+  && chown -R 10001:10001 /data /home/leaf
+
+# Declared below every non-consuming instruction, deliberately: this value is a
+# new commit sha on every build, and a changed in-scope ARG is a buildx cache
+# miss for everything after it — declared at the top it made the pip/apt layers
+# uncacheable across commits (run 30983842725: predecessor cache imported,
+# 0 layers CACHED).
+ARG LEAF_SOURCE_SHA=unknown
+
 ENV APS_LIVE=0 \
     BROKER_PORT=8140 \
     LEAF_CALLBACK_REPLAY_STORE=legacy \
@@ -100,11 +111,6 @@ EXPOSE 8140
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8140/broker/health', timeout=4)" || exit 1
 
-# F11: the broker must not run as root. Runtime EFS mounts replace these
-# directories in ECS, while the local directories keep compose/dev runs writable.
-RUN useradd --system --uid 10001 --user-group --home /home/leaf --create-home leaf \
-  && mkdir -p /data/state /data/drawings \
-  && chown -R 10001:10001 /data /home/leaf
 USER 10001:10001
 
 # uvicorn --host 0.0.0.0 is REQUIRED here: `python broker.py` binds 127.0.0.1

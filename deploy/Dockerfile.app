@@ -9,8 +9,6 @@
 # harness over LEAF_AUTHOR_HARNESS_URL.
 FROM python:3.12-slim AS app
 
-ARG LEAF_SOURCE_SHA=unknown
-
 WORKDIR /app
 
 # --- git: REQUIRED, not optional. ---------------------------------------------
@@ -66,6 +64,13 @@ RUN chmod 0500 /app/server/start-app.sh
 # runs from the /app/server cwd exactly like the native flow, so `import platform`
 # stays stdlib. Run from the server workdir.
 WORKDIR /app/server
+
+# Declared below every non-consuming instruction, deliberately: this value is a
+# new commit sha on every build, and a changed in-scope ARG is a buildx cache
+# miss for everything after it — declared at the top it made the apt/pip layers
+# uncacheable across commits (run 30983842725: predecessor cache imported,
+# 0 layers CACHED).
+ARG LEAF_SOURCE_SHA=unknown
 
 ENV APS_LIVE=0 \
     APP_PORT=8130 \

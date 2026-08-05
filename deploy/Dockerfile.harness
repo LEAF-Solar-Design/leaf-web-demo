@@ -12,8 +12,6 @@ FROM node:22-bookworm AS trust-store
 
 FROM node:22-slim AS harness
 
-ARG LEAF_SOURCE_SHA=unknown
-
 # The self-hosted build runner cannot reach Debian mirrors over port 80. Seed
 # TLS trust from the full Node image, then rewrite the slim image's Debian
 # sources before the first apt metadata request.
@@ -51,6 +49,19 @@ RUN npx tsc -p tsconfig.build.json \
   && npm prune --omit=dev \
   && chmod 0555 /app/scripts/start-harness.sh
 
+# F11: authored tenant repositories and grant metadata are writable only through
+# the dedicated non-root harness identity.
+RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home leaf \
+  && mkdir -p /data/tenants /data/grants /data/sessions \
+  && chown -R 10002:10002 /data /home/leaf
+
+# Declared below every non-consuming instruction, deliberately: this value is a
+# new commit sha on every build, and a changed in-scope ARG is a buildx cache
+# miss for everything after it — declared at the top it made the apt/npm ci
+# layers uncacheable across commits (run 30983842725: predecessor cache
+# imported, 0 layers CACHED).
+ARG LEAF_SOURCE_SHA=unknown
+
 ENV HARNESS_PORT=8150 \
     LEAF_RUNTIME_ENV=production \
     LEAF_AUTHORED_EXECUTION=0 \
@@ -72,11 +83,6 @@ EXPOSE 8150
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
   CMD node -e "require('http').get('http://localhost:8150/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-# F11: authored tenant repositories and grant metadata are writable only through
-# the dedicated non-root harness identity.
-RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home leaf \
-  && mkdir -p /data/tenants /data/grants /data/sessions \
-  && chown -R 10002:10002 /data /home/leaf
 USER 10002:10002
 
 CMD ["/app/scripts/start-harness.sh"]
