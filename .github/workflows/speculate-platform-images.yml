@@ -18,6 +18,14 @@ name: Speculate platform images
 # after the gate's tree-bound proof matches. See
 # docs/SPECULATIVE-PR-BUILDS.md.
 #
+# Docs-only PRs are not dispatched: their merge no-ops the whole build
+# train (the noop gate in build-platform-images.yml), so speculative images
+# for them can never be adopted — five builds per PR update for nothing.
+# The decision reuses scripts/docs_noop_filter.py against the exact merge
+# delta (preview vs its first parent, rename detection disabled) and FAILS
+# OPEN to dispatching: an unfetchable preview, a failed diff, or a garbled
+# verdict dispatches normally, mirroring the merge-side gate's posture.
+#
 # Fork PRs are skipped: they cannot be speculatively built (no OIDC, no
 # adoption trust) and the build workflow re-validates same-repo origin
 # against the pulls API anyway. Failures here cost only the speculation —
@@ -46,6 +54,16 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      # The preview checkout only feeds the docs-only decision; it is
+      # absorbed so a conflicted or still-computing preview cannot redden
+      # the PR — the decide step then fails open and dispatches.
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 2
+          persist-credentials: false
+
       - name: Dispatch the speculative build on the main ref
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,6 +79,35 @@ jobs:
             echo "::error::PR number is invalid."
             exit 1
           }
+          # Docs-only skip, FAIL-OPEN to dispatching: the diff below is the
+          # exact merge delta (preview vs the main tip it merged onto), the
+          # same basis the merge-side noop gate uses, with rename detection
+          # disabled for the same reason (a rename reports only its
+          # destination). Every abnormal path leaves DISPATCH=true.
+          #
+          # The filter EXECUTES from the TRUSTED first parent (the main tip
+          # the preview merged onto), never from the PR-controlled preview
+          # checkout: this step's env carries GH_TOKEN with actions:write,
+          # so running preview-authored code here would hand a same-repo PR
+          # that token before merge — the exact boundary the dispatch
+          # indirection exists to hold. Only the FILE LIST is PR-derived,
+          # and the filter treats stdin strictly as data.
+          DISPATCH=true
+          if git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1 \
+            && git show 'HEAD^1:scripts/docs_noop_filter.py' \
+              > "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null; then
+            if FILES=$(git diff --no-renames --name-only HEAD^1 HEAD 2>/dev/null); then
+              if VERDICT=$(printf '%s\n' "$FILES" | python3 "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null); then
+                if [ "$VERDICT" = "skip" ]; then
+                  echo "::notice::PR #$PR_NUMBER changes documentation only; its merge will no-op the build train, so there is nothing worth speculating."
+                  DISPATCH=false
+                fi
+              fi
+            fi
+          fi
+          if [ "$DISPATCH" != "true" ]; then
+            exit 0
+          fi
           # Soft-fail: speculation is an optimization. A failed dispatch
           # (e.g. main's workflow predates the speculative inputs while this
           # PR introduces them) must not redden the PR; the merge run simply

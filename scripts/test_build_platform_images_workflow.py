@@ -1361,17 +1361,64 @@ def main() -> None:
         "github.event.pull_request.head.repo.fork == false"
     )
     dispatch_steps = dispatch_job["steps"]
-    assert len(dispatch_steps) == 1
-    assert set(dispatch_steps[0]) <= {"name", "env", "run"}, (
+    assert len(dispatch_steps) == 2
+    # Step 0 feeds the docs-only decision: an absorbed, credential-free
+    # preview checkout. Absorption matters (a conflicted preview must not
+    # redden the PR) and so does the credential posture (nothing later in
+    # this job may find a persisted token).
+    checkout_step = dispatch_steps[0]
+    assert checkout_step["uses"] == "actions/checkout@v4"
+    assert checkout_step["continue-on-error"] is True
+    assert checkout_step["with"]["persist-credentials"] is False
+    assert checkout_step["with"]["fetch-depth"] == 2
+    assert checkout_step["with"]["ref"] == (
+        "refs/pull/${{ github.event.pull_request.number }}/merge"
+    )
+    assert set(dispatch_steps[1]) <= {"name", "env", "run"}, (
         "the dispatch step runs plain bash with github.token only"
     )
-    dispatch_script = _executable_bash(dispatch_steps[0]["run"])
+    dispatch_script = _executable_bash(dispatch_steps[1]["run"])
     assert "gh workflow run build-platform-images.yml" in dispatch_script
     assert "--ref main" in dispatch_script
     assert '-f "speculative=true"' in dispatch_script
     assert '-f "source_sha=$HEAD_SHA"' in dispatch_script
     assert '-f "speculative_pr_number=$PR_NUMBER"' in dispatch_script
-    assert dispatch_job["env"] if "env" in dispatch_job else True
+    # Docs-only skip, fail-open, with the SHAPE bound rather than merely
+    # ordered (sol-critic round 1 on PR #452): exactly one DISPATCH=true
+    # (the fail-open initializer) and one DISPATCH=false (inside the
+    # literal-"skip" arm); the skip EXIT is pinned as a block so deleting
+    # it cannot pass; and the filter executes from the TRUSTED first
+    # parent via git show, never from the PR-controlled preview checkout —
+    # this step's env carries GH_TOKEN with actions:write, so a
+    # preview-sourced filter would hand a same-repo PR that token before
+    # merge. The preview supplies only the FILE LIST (data, not code).
+    assert dispatch_script.count("DISPATCH=true") == 1
+    assert dispatch_script.count("DISPATCH=false") == 1
+    assert "git diff --no-renames --name-only HEAD^1 HEAD" in dispatch_script
+    assert (
+        "git show 'HEAD^1:scripts/docs_noop_filter.py'" in dispatch_script
+    )
+    assert 'python3 "$RUNNER_TEMP/docs_noop_filter.py"' in dispatch_script
+    assert "python3 scripts/docs_noop_filter.py" not in dispatch_script, (
+        "the filter must never execute from the PR-controlled checkout"
+    )
+    assert '[ "$VERDICT" = "skip" ]' in dispatch_script
+    assert dispatch_script.index('[ "$VERDICT" = "skip" ]') < (
+        dispatch_script.index("DISPATCH=false")
+    )
+    skip_exit = re.search(
+        r'if \[ "\$DISPATCH" != "true" \]; then\s*\n\s*exit 0\s*\n\s*fi',
+        dispatch_script,
+    )
+    assert skip_exit, "the docs-only skip must exit before the dispatch"
+    assert skip_exit.start() > dispatch_script.index("DISPATCH=true")
+    assert skip_exit.end() < dispatch_script.index(
+        "gh workflow run build-platform-images.yml"
+    )
+    assert dispatch_script.count("exit 0") == 1, (
+        "exactly one exit 0: the docs-only skip; every other early exit is "
+        "a validation error"
+    )
 
     # Cache growth for the speculative namespace has the same explicit
     # bounded-retention infrastructure contract buildcache-* carries.
