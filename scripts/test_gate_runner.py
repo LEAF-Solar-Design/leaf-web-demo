@@ -123,6 +123,10 @@ def test_test_gate_workflow_tree_identity_reuse_shape():
     assert "head_repository_id" in probe_block
     assert ".github/workflows/test-gate.yml|.github/workflows/build-platform-images.yml" \
         in probe_block
+    # The runs API answers a bare path today (verified live), but other
+    # GitHub surfaces render `path@ref`; the probe strips a suffix before the
+    # exact allowlist match so the skip cannot silently die on either shape.
+    assert 'path="${path%%@*}"' in probe_block
     assert "select(.expired | not)" in probe_block
     # Shards skip ONLY on a verified reuse; a skipped/failed probe falls
     # through to the full gate.

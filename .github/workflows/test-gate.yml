@@ -187,8 +187,16 @@ jobs:
                 candidate_id="${row%%$'\t'*}"; candidate_run="${row##*$'\t'}"
                 # Only the two workflows that contain the fan-in verifier may
                 # mint a proof. `path` comes from the run record, not from
-                # anything inside the artifact.
+                # anything inside the artifact. The runs API returns the bare
+                # workflow path (verified live on this repo: pull_request run
+                # 30977456166 and push run 30975460947 both answer
+                # `.github/workflows/<name>.yml`), but OTHER GitHub surfaces
+                # render workflow paths with an `@ref` suffix
+                # (referenced_workflows, reusable-workflow job names), so
+                # strip one defensively before the exact match rather than
+                # bet the allowlist on that shape never leaking in.
                 path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" --jq .path 2>/dev/null || true)"
+                path="${path%%@*}"
                 case "$path" in
                   .github/workflows/test-gate.yml|.github/workflows/build-platform-images.yml) ;;
                   *)
