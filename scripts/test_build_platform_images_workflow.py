@@ -486,18 +486,54 @@ def main() -> None:
         if _key_of(l) == "gate_reuse_expected"
     ]
     assert hint_outputs == ["${{ steps.reuse-hint.outputs.expected }}"], hint_outputs
-    hint_ids = [
-        l for l in prepare_block.splitlines()
-        if _key_of(l) == "id" and _value_of(l) == "reuse-hint"
+    # The hint STEP is sliced as a step and identified by its STEP-level id
+    # key at its exact indentation, not by a floating `id:` match: an
+    # `id: reuse-hint` parked inside another step's env satisfied the
+    # previous spelling while the real step id changed (sol-critic round 2
+    # on PR #449, finding 2). Content pins then read the step's LIVE lines
+    # only — the pinned text surviving in a comment kept the round-1
+    # skip-every-push defect green (round 2, finding 1).
+    prepare_steps = re.split(r"\n      - ", prepare_block)
+    hint_steps = [
+        s for s in prepare_steps
+        if any(re.match(r"^        id: reuse-hint\s*$", l) for l in s.splitlines())
     ]
-    assert len(hint_ids) == 1, "prepare must hold exactly one reuse-hint step"
-    assert prepare_block.count("artifacts?name=gate-proof-$tree") == 1, (
-        "the hint must key its listing on this exact tree's proof name")
-    assert 'echo "expected=$expected" >> "$GITHUB_OUTPUT"' in prepare_block
+    assert len(hint_steps) == 1, "prepare must hold exactly one reuse-hint step"
+    hint_live = "\n".join(
+        l for l in hint_steps[0].splitlines() if not l.strip().startswith("#")
+    )
+    prepare_live = "\n".join(
+        l for l in prepare_block.splitlines() if not l.strip().startswith("#")
+    )
+    # Exactly one LIVE listing call in all of prepare, and it lives in the
+    # hint step, keyed on this exact tree's proof name with the probe's two
+    # provenance filters and the output write beside it.
+    assert prepare_live.count("artifacts?name=gate-proof-$tree") == 1
+    for pinned in (
+        "artifacts?name=gate-proof-$tree",
+        "select(.expired | not)",
+        "select(.workflow_run.head_repository_id == $repo_id)",
+        'echo "expected=$expected" >> "$GITHUB_OUTPUT"',
+    ):
+        assert pinned in hint_live, pinned
+        assert prepare_live.count(pinned) == 1, pinned
+    # The grant backing the listing must sit in prepare's own job-level
+    # permissions MAPPING, sliced as a mapping: an `actions: read` parked
+    # under a job env satisfied the previous header-wide scan while the
+    # real grant vanished and the hint 403'd into a permanent
+    # expected=false (round 2, finding 3). A job-level block REPLACES the
+    # workflow-level set, so the two standing grants are pinned with it.
+    header_lines = prepare_header.splitlines()
+    assert header_lines.count("    permissions:") == 1, (
+        "prepare declares exactly one job-level permissions block")
+    perm_start = header_lines.index("    permissions:")
+    perm_lines = []
+    for line in header_lines[perm_start + 1:]:
+        if line.strip() and not line.startswith("      "):
+            break
+        perm_lines.append(line)
     prepare_perms = sorted(
-        (_key_of(l), _value_of(l))
-        for l in prepare_header.splitlines()
-        if _key_of(l) in ("contents", "pull-requests", "actions")
+        (_key_of(l), _value_of(l)) for l in perm_lines if _key_of(l)
     )
     assert prepare_perms == [
         ("actions", "read"), ("contents", "read"), ("pull-requests", "read"),
