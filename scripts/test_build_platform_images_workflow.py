@@ -1687,6 +1687,40 @@ def main() -> None:
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
     assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
 
+    # src- identity stamp, bound to PARSED EXECUTABLE values (the raw-text
+    # pins earlier are convenience; these are the load-bearing ones — a
+    # commented decoy or a value smuggled into a name: scalar fails here).
+    # The build push's tags are the parsed with.tags value, line-exact.
+    src_push_steps = [
+        s
+        for s in wf_jobs["build"]["steps"]
+        if str(s.get("name", "")).startswith("Build and push")
+    ]
+    assert len(src_push_steps) == 1
+    src_tag_lines = [
+        l.strip()
+        for l in src_push_steps[0]["with"]["tags"].splitlines()
+        if l.strip()
+    ]
+    assert src_tag_lines == [
+        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}",
+        "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
+        "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
+        "needs.prepare.outputs.source_sha) || '' }}",
+    ], src_tag_lines
+    # The adopt stamp is checked on the decide step's parsed run scalar by
+    # a dedicated checker with its own decoy battery below.
+    src_decide_steps = [
+        s
+        for s in wf_jobs["adopt"]["steps"]
+        if str(s.get("name", "")).startswith(
+            "Adopt a verified speculative supply set"
+        )
+    ]
+    assert len(src_decide_steps) == 1
+    check_adopt_src_stamp(src_decide_steps[0]["run"])
+    check_adopt_src_stamp_battery(src_decide_steps[0]["run"])
+
     # The release role is reachable only through the ecr-release GitHub
     # environment (main-only deployment branch policy): every job that
     # assumes AWS_ECR_PUSH_ROLE declares it as a plain scalar, so its OIDC
@@ -2512,6 +2546,140 @@ def check_speculative_dispatcher(dispatcher_text: str) -> None:
     # text via workflow_dispatch) plus review of any diff that touches
     # this workflow; the statement pins exist to catch accidental drift
     # and casual smuggling, not to certify the absence of hostile bash.
+
+
+def _executable_shell(run_text: str) -> str:
+    """The run block's executable lines only: full-line comments and blank
+    lines dropped. A pin against this text cannot be satisfied by a
+    commented decoy, and a live line commented out stops satisfying it."""
+    return "\n".join(
+        raw
+        for raw in run_text.splitlines()
+        if raw.strip() and not raw.strip().startswith("#")
+    )
+
+
+def check_adopt_src_stamp(decide_run: str) -> None:
+    """The adopted app image's src-<full-commit> identity stamp.
+
+    Invariants, bound to executable shell lines:
+    - exactly one live assignment line `src_tag="src-$SOURCE_SHA"` (line-
+      exact, so a quoted no-op decoy `: '...'` does not count);
+    - the stamp sits AFTER the release-alias re-verify loop and before the
+      spec_run_id output block;
+    - the stamp block is best-effort: no exit, no finish, no COMMITTED
+      mutation — a failure may only warn;
+    - it touches only leaf-platform-app and writes only "$src_tag";
+    - the full-commit guard on SOURCE_SHA is present and exact.
+    """
+    text = _executable_shell(decide_run)
+    lines = [l.strip() for l in text.splitlines()]
+    assert lines.count('src_tag="src-$SOURCE_SHA"') == 1, (
+        "exactly one executable src_tag assignment line")
+    guard = 'if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then'
+    assert lines.count(guard) == 1, "full-commit guard on SOURCE_SHA"
+    reverify_at = text.index("re-verification failed after aliasing")
+    stamp_at = text.index('src_tag="src-$SOURCE_SHA"')
+    assert reverify_at < stamp_at, (
+        "the stamp must follow the release-alias re-verify loop")
+    start = text.index(guard)
+    end = text.index('spec_run_id="$(jq -r', start)
+    assert start < stamp_at < end, "stamp block bounds"
+    block = text[start:end]
+    for banned in ("exit", "finish ", "COMMITTED="):
+        assert banned not in block, (
+            f"src- stamp block is best-effort and must not contain {banned!r}")
+    assert block.count("aws ecr put-image") == 1
+    assert '--image-tag "$src_tag"' in block
+    assert block.count("--repository-name leaf-platform-app") == 2, (
+        "the stamp probes and writes leaf-platform-app only")
+    assert "--repository-name leaf-platform-web" not in block
+    assert "::warning::adopt: could not stamp leaf-platform-app:$src_tag" in block
+    assert "already names a different digest" in block
+    assert text.index('--image-tag "$PROD_TAG"') < stamp_at, (
+        "the release alias loop writes before any stamp")
+
+
+def check_adopt_src_stamp_battery(decide_run: str) -> None:
+    """Decoy mutation battery for check_adopt_src_stamp: each negative is
+    an executable decoy that must be CAUGHT; each positive control is an
+    ordinary maintenance edit that must still PASS."""
+    original = decide_run
+
+    def mutate(text: str, old: str, new: str) -> str:
+        assert old in text, f"battery fixture drifted: {old!r} not in decide run"
+        return text.replace(old, new)
+
+    assignment = 'src_tag="src-$SOURCE_SHA"'
+    guard = 'if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then'
+    warn_stamp = (
+        'echo "::warning::adopt: could not stamp leaf-platform-app:$src_tag'
+    )
+
+    negatives = [
+        (
+            "assignment commented out (decoy text keeps raw pins green)",
+            mutate(original, assignment, "true # " + assignment),
+        ),
+        (
+            "quoted no-op replacing the live assignment",
+            mutate(original, assignment, ": '" + assignment + "'"),
+        ),
+        (
+            "exit smuggled into the best-effort block",
+            mutate(original, warn_stamp, "exit 1\n            " + warn_stamp),
+        ),
+        (
+            "stamp retargeted at the web repository",
+            mutate(
+                original,
+                "--repository-name leaf-platform-app \\\n    --image-ids \"imageTag=$src_tag\"",
+                "--repository-name leaf-platform-web \\\n    --image-ids \"imageTag=$src_tag\"",
+            ),
+        ),
+        (
+            "full-commit guard loosened to a short prefix",
+            mutate(original, guard, guard.replace("{40}", "{7,40}")),
+        ),
+    ]
+    for name, mutant in negatives:
+        assert mutant != original
+        try:
+            check_adopt_src_stamp(mutant)
+        except AssertionError:
+            continue
+        raise AssertionError(f"adopt src- stamp battery: {name} was NOT caught")
+
+    positives = [
+        ("unmodified decide step", original),
+        (
+            "added full-line comment inside the stamp block",
+            mutate(
+                original,
+                "  " + assignment,
+                "  # identity stamp is best-effort by design\n"
+                "  " + assignment,
+            ),
+        ),
+        (
+            "added innocuous notice in the stamp block",
+            mutate(
+                original,
+                warn_stamp,
+                'echo "stamp is best-effort"\n            ' + warn_stamp,
+            ),
+        ),
+    ]
+    for name, control in positives:
+        try:
+            check_adopt_src_stamp(control)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"adopt src- stamp battery: control {name!r} must pass "
+                f"but tripped: {exc}"
+            )
+
+    print("adopt src- stamp decoy battery: PASS")
 
 
 def check_speculative_dispatcher_battery(dispatcher_path: Path) -> None:
