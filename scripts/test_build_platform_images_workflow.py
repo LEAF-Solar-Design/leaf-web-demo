@@ -577,6 +577,39 @@ def main() -> None:
     step_starts = [
         i for i, (l, s) in enumerate(annotated) if s and l.startswith("      - ")
     ]
+    # prepare's step LIST is pinned, first key and value per step, in
+    # order: a step inserted ahead of the hint can poison the environment
+    # of every later step (round 7 on PR #449 exported
+    # BASH_ENV=/tmp/... via GITHUB_ENV, so the next bash step exited 0
+    # before the byte-pinned script ran — empty output, warm silently
+    # runs on every reuse path). Adding a step to this job is a conscious
+    # contract edit.
+    #
+    # WHAT THIS PIN DOES NOT PROVE, plainly, in the tradition of the
+    # limitation block above the gate-edge assertions: a text contract
+    # cannot prove the hint step will EXECUTE its pinned script in an
+    # unpoisoned environment — an edit to an EXISTING step's free-text
+    # run block can still export BASH_ENV, rewrite PATH, or shadow
+    # gh/jq, and no enumerable ban closes arbitrary shell. Every defeat
+    # of that kind leaves the hint's output empty or false, and the warm
+    # guard's `!= 'true'` polarity maps exactly that to RUNNING warm —
+    # the pre-#449 behaviour, slower and never wrong. The enforceable
+    # boundary, pinned throughout this section, is blast radius: the
+    # hint's output reaches the warm guard and nothing else, so no
+    # defeat of the hint can redden a build, skip a gate, or publish an
+    # image.
+    prepare_step_heads = []
+    for n, start in enumerate(step_starts):
+        first = annotated[start][0]
+        prepare_step_heads.append((_key_of(first), _value_of(first)))
+    assert prepare_step_heads == [
+        ("uses", "actions/checkout@v4"),
+        ("name", "Require exact source to be reviewed"),
+        ("name", "Resolve canonical solver provenance"),
+        ("name", "Validate image workflow invariants"),
+        ("name", "Derive immutable image tag"),
+        ("name", "Probe for an expected gate reuse (warm-skip hint)"),
+    ], prepare_step_heads
     hint_ranges = []
     for n, start in enumerate(step_starts):
         end = step_starts[n + 1] if n + 1 < len(step_starts) else len(annotated)
