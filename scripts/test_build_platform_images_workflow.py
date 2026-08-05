@@ -59,48 +59,288 @@ def main() -> None:
     assert "exact head of an open same-repository draft PR" in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
-    # THREE jobs hold the ECR push credential, not two: `warm` joined build and
-    # verify when layer warming moved beside the test gate. It genuinely needs
-    # the role — it reads and writes the registry-backed layer cache — so the
-    # honest statement is that a third job can reach ECR, and the thing that
-    # keeps an untested IMAGE out is the assertion below that warm's build step
-    # sets push:false and publishes no tag. Raising this number again should
-    # mean a new job that provably needs registry access, not a convenience.
-    assert text.count("id-token: write") == 3
+    # THREE jobs hold the ECR push credential, not two: `warm` joined build
+    # and verify when layer warming moved beside the test gate. It genuinely
+    # needs the role, since it reads and writes the registry-backed layer
+    # cache. Note what that means and what this count does NOT buy: a third
+    # job can reach ECR with push rights, and no assertion in this file can
+    # prevent it from using them (see the limitation block below). Raising
+    # this number should mean a new job that provably needs registry
+    # access, not a convenience.
+    # Counted by parsed key and value, not by exact text: `id-token : write`
+    # or a quoted key grants OIDC while leaving a literal count at three,
+    # and a comment mentioning the grant inflates it (sol-critic round 8,
+    # findings 3 and 6). The structural line list is built below, so this
+    # count is taken once it exists.
+    oidc_grants = None  # set immediately after the lexical gate
 
-    # The private key is scoped to the canonical-worker lane. It is used only
-    # for a fail-closed presence check and the one exact solver checkout. It is
+    # ------------------------------------------------------------------ #
+    # Lexical gate. This contract is enforced by TEXT extraction (stdlib
+    # only, no YAML parser), so a construct that changes what YAML PARSES
+    # while leaving the asserted literals intact would silently void every
+    # assertion below it. Rounds 3 through 6 of sol-critic on PR #445 each
+    # found another one (bare-dash step markers, anchors, exotic anchor
+    # names, tag-fronted anchors, adjacent-value aliases, and finally an
+    # anchor on the line AFTER its key), so the position-by-position bans
+    # they produced are replaced here by one rule that does not enumerate:
+    #
+    #   * every line is classified as structural YAML or block-scalar
+    #     content. Inside a block scalar (run: |, if: >-) YAML parses
+    #     nothing, so shell operators and expression text are free;
+    #   * on a structural line, expression spans (${{ ... }}) and quoted
+    #     scalars are masked out, since both are opaque text to YAML;
+    #   * what remains is pure structure, and there the anchor, alias, tag,
+    #     and merge characters may not appear AT ALL. No position analysis,
+    #     so no position left to hide in.
+    #
+    # Document markers are banned for the same reason (a second document
+    # could carry its own copy of the asserted literals), and every step
+    # item must use the canonical "- " marker so the step splitter used
+    # throughout this file provably sees every step.
+    # ------------------------------------------------------------------ #
+    def _mask_opaque(line: str) -> str:
+        # ${{ ... }} expressions and quoted scalars are text to YAML: an
+        # anchor inside one is not a node. Masking them keeps GitHub
+        # expression operators (&&, ||, !) and quoted content from reading
+        # as YAML syntax, while an anchor placed OUTSIDE them stays visible.
+        # The double-quote pattern honours backslash escapes so an escaped
+        # quote inside a legitimate scalar cannot end the mask early
+        # (sol-critic round 7 false positive). Masking is LENGTH-PRESERVING
+        # so offsets still index the original line.
+        def fill(match: "re.Match[str]") -> str:
+            return "x" * (match.end() - match.start())
+
+        masked = re.sub(r"\$\{\{.*?\}\}", fill, line)
+        masked = re.sub(r"'(?:[^'])*'", fill, masked)
+        masked = re.sub(r'"(?:\\.|[^"\\])*"', fill, masked)
+        return masked
+
+    def _comment_cut(line: str) -> str:
+        # The line with any trailing comment removed, quotes intact. A `#`
+        # inside a quoted scalar or an expression is not a comment.
+        cut = _mask_opaque(line).find("#")
+        return line if cut < 0 else line[:cut]
+
+    def _uncommented(line: str) -> str:
+        # Comment-free AND masked: for scans that must not see YAML
+        # indicator characters that are really scalar text.
+        return _mask_opaque(_comment_cut(line))
+
+    # A block scalar header may carry an explicit indentation indicator and
+    # a chomping indicator in EITHER order (|2-, >-2, |+, ...), and a
+    # trailing comment. Content is always indented deeper than the header
+    # line, whatever the indicator says, so the indicator does not change
+    # the scan below — but an unrecognised header used to leave shell text
+    # classified as structure and redden the run (round-7 false positive).
+    # The header is matched on the COMMENT-STRIPPED line, so a `# run: |`
+    # inline comment cannot spoof one (round-7 finding 1).
+    block_header = re.compile(r"(?::|^\s*-)\s*[|>](?:[-+][0-9]?|[0-9][-+]?)?\s*$")
+    structural = []
+    block_scalar_indent = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block_scalar_indent is not None:
+            if not stripped or indent > block_scalar_indent:
+                continue
+            block_scalar_indent = None
+        assert stripped != "-", "bare sequence-dash line: %r" % line
+        if re.match(r"^      -", line):
+            assert re.match(r"^      - \S", line), (
+                "non-canonical step marker: %r" % line)
+        assert not re.match(r"^\s*(---|\.\.\.)(\s|$)", line), (
+            "YAML document markers are banned in this workflow: %r" % line)
+        if not stripped.startswith("#"):
+            structural.append(line)
+        if block_header.search(_uncommented(line)):
+            block_scalar_indent = indent
+
+    # &, *, and ! are YAML indicators ONLY at the start of a node. Inside a
+    # plain scalar they are ordinary text, so `run: true && echo ok` and
+    # `name: Build & verify` are perfectly legal and must not redden the
+    # gate (sol-critic round 8 false positives). The scan therefore looks
+    # at node-START positions only: after `key:`, after `- `, after a flow
+    # delimiter, or the first character of a continuation line.
+    node_start = re.compile(r"(?:^\s*|:\s|-\s|[\[{,]\s*)([&*!])")
+    for line in structural:
+        masked = _uncommented(line)
+        found = node_start.search(masked)
+        assert not found, (
+            "YAML anchor/alias/tag at a node start is banned in this "
+            "workflow: %r in %r" % (found.group(1) if found else "", line))
+        assert "<<" not in masked, (
+            "YAML merge keys are banned in this workflow: %r" % line)
+        # Explicit-key syntax (`? key`) is another way to spell a mapping
+        # key that no literal key scan would see.
+        assert not re.match(r"^\s*\?\s", masked), (
+            "explicit-key syntax is banned in this workflow: %r" % line)
+
+    # Keys may be quoted (`"if":` parses as `if`), so every key-level check
+    # in this file reads normalised keys rather than raw text: a quoted key
+    # otherwise slips past a literal scan while GitHub honours it
+    # (sol-critic round 7, findings 2 and 3).
+    def _key_of(line: str):
+        match = re.match(
+            r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:(?:\s|$)',
+            _comment_cut(line),
+        )
+        if not match:
+            return None
+        key = match.group(1).strip()
+        if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+            key = key[1:-1]
+        return key
+
+    def _keys_in(block: str):
+        return [k for k in (_key_of(l) for l in block.splitlines()) if k]
+
+    def _value_of(line: str):
+        # The comment-stripped value text after `key:`, unquoted. Used where
+        # the VALUE carries the invariant (a step condition, a permission
+        # grant): `if: true # if: matrix.image == ...` presents the real key
+        # with a neutered value while a substring scan stays green
+        # (sol-critic round 8, finding 2).
+        raw = _comment_cut(line)
+        match = re.match(r'^\s*(?:-\s+)?(?:"(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:\s*(.*)$', raw)
+        if not match:
+            return None
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+
+    # A YAML escape inside a quoted key decodes to a different key than the
+    # literal text shows (`"\u0069f"` is `if`), which no text-level
+    # normalisation can follow. Keys in this workflow are plain (sol-critic
+    # round 8, finding 5).
+    for line in structural:
+        raw_key = re.match(r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\')\s*:', line)
+        assert not raw_key or "\\" not in raw_key.group(1), (
+            "escape sequences in a mapping key are banned: %r" % line)
+
+    # THREE jobs hold the ECR push credential: warm, build, verify. See the
+    # note above the deferred assignment for why this is parsed, not
+    # text-matched.
+    oidc_grants = [
+        l for l in structural
+        if _key_of(l) == "id-token" and _value_of(l) == "write"
+    ]
+    assert len(oidc_grants) == 3, oidc_grants
+
+    # The two image-building job blocks. Everything the warm/build contract
+    # asserts below is bound INSIDE these slices: per sol-critic round 1 on
+    # PR #445, a global positional search accepted the key steps relocated
+    # into `prepare` and a five-image list surviving only in a comment.
+    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
+    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
+
+    # The private key is scoped to the canonical-worker lane of BOTH image
+    # jobs: `build`, and `warm` since operator decision D1 (2026-08-05) let
+    # the deploy key into the warm lane so canonical-worker stops being the
+    # only cold post-gate build. In each lane it is used only for a
+    # fail-closed presence check and the one exact solver checkout. It is
     # never passed to Docker as an argument or inherited by the whole job.
     secret_ref = "secrets.AUTOFILL_SOLVER_DEPLOY_KEY"
-    assert text.count(secret_ref) == 2
-    require_start = text.index(
-        "      - name: Require the read-only canonical solver deploy key"
-    )
-    checkout_start = text.index(
-        "      - name: Check out the exact canonical solver source"
-    )
-    buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
-    require_body = text[require_start:checkout_start]
-    checkout_body = text[checkout_start:buildx_start]
-    assert "if: matrix.image == 'canonical-worker'" in require_body
-    assert "if: matrix.image == 'canonical-worker'" in checkout_body
-    assert "persist-credentials: false" in checkout_body
-    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 1
+    assert text.count(secret_ref) == 4
+    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 2
     assert "AUTOFILL_SOLVER_DEPLOY_KEY=" not in text
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY:" not in text[:require_start]
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY" not in text[buildx_start:]
+    # Five mentions per lane (env key + secret ref, presence test, error
+    # message, ssh-key) and none anywhere else: a new reference to the key
+    # in any other step or comment must consciously bump this count.
+    assert text.count("AUTOFILL_SOLVER_DEPLOY_KEY") == 10
+    require_name = "      - name: Require the read-only canonical solver deploy key"
+    checkout_name = "      - name: Check out the exact canonical solver source"
+    # Exactly one presence-check and one solver-checkout step per image job,
+    # and none anywhere else in the workflow: with the global total pinned to
+    # 2, a key step relocated into any other job cannot go unnoticed.
+    assert text.count(require_name) == 2
+    assert text.count(checkout_name) == 2
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        assert block.count(require_name) == 1, lane
+        assert block.count(checkout_name) == 1, lane
+        assert block.index(require_name) < block.index(checkout_name), lane
+        # Bind to the individual STEP slices, not the span between step
+        # names: per sol-critic round 2 on PR #445, a span swallows any
+        # intervening step, so the key env or the ssh-key input could move
+        # into an inserted unrelated step while the span counts stayed
+        # green. Steps are split on the step-list marker at its exact
+        # indentation, so each slice below is one step and nothing else.
+        steps = re.split(r"\n      - ", block)
+        require_steps = [
+            s
+            for s in steps
+            if s.startswith("name: Require the read-only canonical solver deploy key")
+        ]
+        checkout_steps = [
+            s
+            for s in steps
+            if s.startswith("name: Check out the exact canonical solver source")
+        ]
+        assert len(require_steps) == 1, lane
+        assert len(checkout_steps) == 1, lane
+        require_step = require_steps[0]
+        checkout_step = checkout_steps[0]
+        # The condition is pinned by parsed VALUE: `if: true # if: matrix...`
+        # keeps the literal while presenting the key and checking out the
+        # solver on every matrix entry (sol-critic round 8, finding 2).
+        for step in (require_step, checkout_step):
+            conditions = [
+                _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
+            ]
+            assert conditions == ["matrix.image == 'canonical-worker'"], (
+                lane, conditions)
+        # The presence check carries the key as its own step env and nothing
+        # more; the solver checkout is the pinned repository with the key as
+        # its ssh-key input and no persisted credentials.
+        assert (
+            "AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}"
+            in require_step
+        ), lane
+        assert require_step.count(secret_ref) == 1, lane
+        assert "uses: actions/checkout@v4" in checkout_step, lane
+        assert "repository: LEAF-Solar-Design/autofill-solver" in checkout_step, lane
+        assert (
+            "ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}" in checkout_step
+        ), lane
+        assert "persist-credentials: false" in checkout_step, lane
+        assert checkout_step.count(secret_ref) == 1, lane
+        # One reference in each of those two steps and two in the whole
+        # block: the key provably reaches no other step in this job. With
+        # the file total pinned to 4, it reaches no other job either.
+        assert block.count(secret_ref) == 2, lane
 
-    # An untested image can never reach ECR: the build job waits on the full
-    # gate, run against the exact commit `prepare` resolved. Branch protection
-    # is unavailable on this repository's plan, so this workflow-internal
-    # dependency is the only enforceable gate and must not be loosened.
+    # The BUILD job cannot publish an untested image: it waits on the full
+    # gate, run against the exact commit `prepare` resolved. Branch
+    # protection is unavailable on this repository's plan, so this
+    # workflow-internal dependency is what enforces that for build, and must
+    # not be loosened. It says nothing about the warm job; see the
+    # limitation block below.
     assert "uses: ./.github/workflows/test-gate.yml" in text
     assert "needs: [prepare, test]" in text
 
-    # The matrix isolates all five images and does not cancel siblings after
-    # one failure. A failed matrix entry still blocks the verification job.
-    assert re.search(r"image:\s*\[app, broker, canonical-worker, harness, web\]", text)
-    assert "fail-fast: false" in text
+    # BOTH image matrices (warm and build) carry all five images and do not
+    # cancel siblings after one failure. Warm covering canonical-worker is
+    # operator decision D1 (2026-08-05); silently dropping an image from
+    # either matrix reopens a cold post-gate build. The regex is anchored to
+    # the exact matrix mapping line and counted per job block, so a
+    # five-image list surviving only in a comment cannot satisfy it (sol-
+    # critic round 1 on PR #445). A failed build matrix entry still blocks
+    # the verification job.
+    # Membership, not line order: reordering the same five images is a
+    # legitimate edit (sol-critic round 11 false positive), dropping one is
+    # not. Exactly one matrix line per block, so a second cannot hide
+    # beside the pinned one.
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        matrices = [
+            l for l in block.splitlines() if re.match(r"^\s*image: \[", l)
+        ]
+        assert len(matrices) == 1, lane
+        members = [m.strip() for m in matrices[0].split("[", 1)[1].rstrip("]").split(",")]
+        assert sorted(members) == [
+            "app", "broker", "canonical-worker", "harness", "web",
+        ], (lane, members)
+    assert "fail-fast: false" in warm_block
+    assert "fail-fast: false" in build_block
     assert "needs: [prepare, build]" in text
 
     # ECR tags are immutable. Current and previous commits have distinct cache
@@ -152,6 +392,22 @@ def main() -> None:
     )
 
     handoff_body = text[text.index("  handoff:") :]
+    # The handoff guard is a CONJUNCTION, pinned whole: a dispatch that is
+    # not a promote, or a promote of a commit that is not on main, must not
+    # mint a production handoff candidate. Asserting the operands separately
+    # left `||` in place of either `&&` passing (sol-critic round 6), and
+    # asserting the block merely EXISTS somewhere let the live guard be
+    # weakened while a decoy copy sat in a later block scalar (round 7), so
+    # the block is pinned once in the file AND at the job's own `if:` key.
+    handoff_guard = (
+        "    if: >-\n"
+        "      github.event_name == 'workflow_dispatch' &&\n"
+        "      inputs.promote &&\n"
+        "      needs.prepare.outputs.source_mode == 'main'\n"
+    )
+    assert text.count(handoff_guard) == 1
+    assert handoff_body.index(handoff_guard) < handoff_body.index("    steps:")
+    assert [k for k in _keys_in(handoff_body) if k == "if"] == ["if"]
     assert "inputs.promote" in handoff_body
     assert "RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}" in handoff_body
     assert "RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}" in handoff_body
@@ -214,15 +470,16 @@ def main() -> None:
     assert "/app/.leaf-source-revision" in canonical
 
     # ------------------------------------------------------------------ #
-    # The warm/build split: layers may be prepared in parallel with the test
-    # gate, but NOTHING may reach ECR as an image before the gate is green.
-    # This repository has no branch protection, so `build: needs: [prepare,
-    # test]` is the entire enforcement — a warm job that ever learns to push,
-    # or a build job that stops needing `test`, silently removes it.
+    # The warm/build split: layers are prepared in parallel with the test
+    # gate, and the DECLARED intent is that no image reaches ECR before the
+    # gate is green. This repository has no branch protection, so
+    # `build: needs: [prepare, test]` is what enforces that for the build
+    # job. It does not constrain warm, which holds the same push role; the
+    # limitation block below says what that leaves unenforced. The
+    # assertions here pin warm's declared no-publish configuration, which
+    # catches drift in what the job is written to do, not what its
+    # credentials would permit.
     # ------------------------------------------------------------------ #
-    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
-    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
-
     assert "needs: prepare" in warm_block
     assert "continue-on-error: true" in warm_block, (
         "a warm failure must degrade to a cold build, never redden the run")
@@ -246,7 +503,7 @@ def main() -> None:
         try:
             start = next(i for i, l in enumerate(lines) if l == "        with:")
         except StopIteration:
-            raise AssertionError("the warm build step carries no with: mapping")
+            raise AssertionError("a build-push-action step carries no with: mapping")
         body = []
         for line in lines[start + 1:]:
             if line.strip() and not line.startswith("          "):
@@ -257,19 +514,110 @@ def main() -> None:
     warm_with = _with_mapping(warm_build_step)
     assert re.search(r"^          push: false$", warm_with, re.M), (
         "the warm build step's with: mapping must set the literal input push: false")
-    for banned in ("push: true", "tags:", "outputs:", "provenance:", "sbom:", "attests:"):
-        assert banned not in warm_build_step, (
-            "the warm build step must not carry %r: every publication channel "
-            "of build-push-action stays closed in the warm lane" % banned)
-    # And no publish path outside that step either.
-    assert "docker push" not in warm_block
-    assert "aws ecr put-image" not in warm_block
-    assert "push: true" not in warm_block
-    assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
+    # Key-level, not substring: `"outputs":` parses as the outputs input
+    # while evading a literal `outputs:` scan (sol-critic round 7).
+    for banned in ("tags", "outputs", "provenance", "sbom", "attests"):
+        assert banned not in _keys_in(warm_build_step), (
+            "the warm build step must not carry the %r input: every "
+            "publication channel of build-push-action stays closed in the "
+            "warm lane" % banned)
+    # Value-level, not substring: a comment mentioning push: true inside the
+    # step is harmless text (sol-critic round 12 false positive), while the
+    # real input is already pinned to false by the with:-mapping assertion
+    # above. This catches a second push key sneaking in beside it.
+    assert [
+        _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "push"
+    ] == ["false"]
 
-    assert "needs: [prepare, test]" in build_block, (
-        "the gate edge is this repository's only enforcement that an untested "
-        "image never reaches ECR")
+    # A warmed layer only matches the gated build if both builds hash the
+    # same inputs. Any drift between the two steps' context, Dockerfile,
+    # build-args, or extra build-contexts makes warm burn runners while the
+    # post-gate build silently goes cold again — the exact regression this
+    # job exists to prevent — so the cache-key-bearing inputs must stay
+    # byte-identical.
+    gated_builds = [
+        s
+        for s in re.split(r"\n      - ", build_block)
+        if "uses: docker/build-push-action" in s
+    ]
+    assert len(gated_builds) == 1, "build holds exactly one build-push-action step"
+    build_with = _with_mapping(gated_builds[0])
+
+    def _with_input(body: str, key: str) -> str:
+        lines = body.splitlines()
+        try:
+            start = next(
+                i for i, l in enumerate(lines) if l.startswith("          " + key)
+            )
+        except StopIteration:
+            raise AssertionError("a build step's with: mapping lacks %r" % key)
+        taken = [lines[start]]
+        for line in lines[start + 1:]:
+            if line.strip() and not line.startswith("            "):
+                break
+            taken.append(line)
+        return "\n".join(taken)
+
+    for key in ("context:", "file:", "build-args:", "build-contexts:"):
+        assert _with_input(warm_with, key) == _with_input(build_with, key), (
+            "warm and build must carry a byte-identical %s input, or the "
+            "warmed cache never matches the gated build" % key)
+
+    # Warm may only use these actions. Adding one is a conscious act in a
+    # job that holds the solver deploy key, so it should cost a test edit.
+    allowed_uses = {
+        "actions/checkout@v4",
+        "docker/setup-buildx-action@v3",
+        "aws-actions/configure-aws-credentials@v6.1.0",
+        "aws-actions/amazon-ecr-login@v2",
+        "docker/build-push-action@v6",
+    }
+    warm_uses = [
+        _value_of(l) for l in warm_block.splitlines() if _key_of(l) == "uses"
+    ]
+    assert set(warm_uses) <= allowed_uses, sorted(set(warm_uses) - allowed_uses)
+    assert "tags" not in _keys_in(warm_block), (
+        "a cache warmer publishes no image tag")
+
+    # ------------------------------------------------------------------ #
+    # WHAT THIS TEST DOES NOT PROVE, stated plainly so nobody mistakes a
+    # green run for a guarantee (sol-critic rounds 8 to 10 on PR #445).
+    #
+    # Warm holds the same ECR push role the gated build does, because it
+    # reads and writes the registry layer cache. Any shell it runs can
+    # therefore publish an image before the gate is green. Three attempts
+    # to forbid that by inspection all failed: a command denylist was
+    # beaten by `docker buildx build --push`, then by `docker image push`,
+    # `podman push`, and `buildctl ... push=true`; and a structural rule
+    # tight enough to try (an exact list of permitted shell steps) still
+    # admitted `ctr images push`, `cosign copy`, and any helper script or
+    # make target, while rejecting five ordinary maintenance edits —
+    # a third diagnostic step, `aws ecr describe-images`, `docker
+    # version`, and renaming or reordering the permitted steps.
+    #
+    # A text check cannot prove the absence of a publishing command in
+    # arbitrary shell. State the consequence without softening it: there
+    # is currently NO enforceable boundary preventing the warm job from
+    # publishing a release image before the gate is green. The gate edge
+    # asserted below constrains the BUILD job only; it says nothing about
+    # warm, which holds the same push role. The boundary would come from
+    # narrowing AWS_ECR_PUSH_ROLE so warm can write buildcache-* and
+    # nothing else — infrastructure rather than workflow, filed as a
+    # follow-up rather than faked here.
+    #
+    # What the warm assertions below DO buy: they pin the job's declared
+    # configuration, so drift in what it is written to do is caught.
+    # ------------------------------------------------------------------ #
+
+    # The gate edge, pinned as an EFFECTIVE job key at its exact
+    # indentation. A bare substring search was satisfied by
+    # `needs: [prepare] # needs: [prepare, test]` (sol-critic round 6),
+    # which drops the gate dependency while reading as intact.
+    assert re.search(r"(?m)^    needs: \[prepare, test\]$", build_block), (
+        "the gate edge is what stops the BUILD job publishing an untested "
+        "image; nothing else in this repository does")
+    assert len(re.findall(r"(?m)^    needs:", build_block)) == 1, (
+        "the build job declares exactly one needs: list")
     assert "push: true" in build_block
 
     # The warmed cache is what makes the post-gate build cheap; without this
@@ -280,9 +628,43 @@ def main() -> None:
     # Both writers race on the same immutable tag by design, and ECR refuses
     # the loser with ImageTagAlreadyExistsException. The registry cache
     # exporter must therefore tolerate export errors in BOTH jobs, or a lost
-    # race fails the gated build.
-    assert warm_block.count("ignore-error=true") == 1
-    assert build_block.count("ignore-error=true") == 1
+    # race fails the gated build. Bound to the EFFECTIVE cache_to assignment,
+    # not to any occurrence: a shell comment carrying the option satisfied a
+    # plain count while the real export lost it (sol-critic round 6).
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        live = [l for l in block.splitlines() if not l.strip().startswith("#")]
+        exports = [l for l in live if 'cache_to="type=registry' in l]
+        assert len(exports) == 1, lane
+        assert exports[0].rstrip().endswith('ignore-error=true"'), lane
+        assert len([l for l in live if "ignore-error=true" in l]) == 1, lane
+        # And nothing rewrites the variable afterwards: a later
+        # `cache_to="${cache_to%,*}"` strips the option back off while every
+        # assertion above still passes (sol-critic round 7, finding 4). The
+        # only assignments allowed are the empty initialiser and the pinned
+        # export line.
+        # Direct assignments: the empty initialiser, then the pinned
+        # export, optionally hardened with `readonly` or `declare`. This
+        # catches DRIFT in how the variable is set. It is not a proof that
+        # nothing later rewrites it — shell offers too many spellings, and
+        # `declare cache_to="${cache_to%,*}"` slipped past the previous
+        # attempt (sol-critic round 11). The named rewrites below are the
+        # ones seen in review, not an exhaustive set. Reads are
+        # unrestricted, so a debug echo does not redden the gate.
+        writes = [
+            l for l in live
+            if re.match(r"^\s*(?:readonly\s+|declare\s+)?cache_to=", _comment_cut(l))
+        ]
+        assert len(writes) == 2, (lane, writes)
+        # The same prefixes the regex accepts are accepted here, or
+        # `declare cache_to=""` would match as a write and then fail the
+        # literal comparison (sol-critic round 12).
+        assert re.sub(r"^(?:readonly|declare)\s+", "", writes[0].strip()) == (
+            'cache_to=""'), lane
+        assert writes[1] == exports[0], lane
+        for rewrite in (r"\bunset\s+cache_to\b", r"\bexport\s+cache_to\b",
+                        r"\bprintf\s+-v\s+cache_to\b", r"\bread\s+cache_to\b"):
+            assert not re.search(rewrite, "\n".join(_comment_cut(l) for l in live)), (
+                lane, rewrite)
 
     # ------------------------------------------------------------------ #
     # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
@@ -304,6 +686,18 @@ def main() -> None:
     assert build_block.count("refusing to push images") == 2, (
         "both refusal arms — no proven tree at all, and a foreign tree — "
         "must stay fail-closed")
+    # A step that carries an `if:` can be switched off without being
+    # removed, so neither the tree binding nor the push may carry one at
+    # all (sol-critic round 6: `if: ${{ false }}` on the binding step left
+    # the push enabled while every literal stayed green). The two solver
+    # steps are the only conditional steps in this job, and their condition
+    # is pinned to the canonical-worker matrix entry above.
+    for step in re.split(r"\n      - ", build_block):
+        conditional = "if" in _keys_in(step)
+        if "Require the green gate verdict to bind" in step:
+            assert not conditional, "the tree binding must not be conditional"
+        if "uses: docker/build-push-action" in step:
+            assert not conditional, "the image push must not be conditional"
     bind_at = build_block.index("Require the green gate verdict to bind")
     push_at = build_block.index("uses: docker/build-push-action")
     assert bind_at < push_at, "the tree binding must precede the push step"
