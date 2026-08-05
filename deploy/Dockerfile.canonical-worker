@@ -6,9 +6,6 @@
 # it stays owned by its repository and its exact bytes are hashed at runtime.
 FROM python:3.12-slim AS canonical-worker
 
-ARG AUTOFILL_SOLVER_REVISION
-ARG LEAF_SOURCE_SHA
-
 WORKDIR /app
 
 COPY platform/requirements.txt /app/platform/requirements.txt
@@ -19,6 +16,14 @@ COPY platform/ /app/platform/
 COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke.py
 COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
+
+# Declared below every non-consuming instruction, deliberately: LEAF_SOURCE_SHA
+# is a new commit sha on every build, and a changed in-scope ARG is a buildx
+# cache miss for everything after it — declared at the top it made the pip
+# layer uncacheable across commits (run 30983842725: predecessor cache
+# imported, 1 layer CACHED).
+ARG AUTOFILL_SOLVER_REVISION
+ARG LEAF_SOURCE_SHA
 
 # The named context may be a mutable local checkout. Do not trust the revision
 # argument by itself. Hash the copied Python source, require the checked-in

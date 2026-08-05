@@ -79,6 +79,51 @@ def _folded(value) -> str:
     return " ".join(str(value).split())
 
 
+_PER_COMMIT_ARGS = ("LEAF_SOURCE_SHA", "AUTOFILL_SOLVER_REVISION")
+
+
+def _runs_after_per_commit_arg(dockerfile: str) -> list:
+    """RUN instructions that follow a per-commit ARG in the same stage
+    without consuming one.
+
+    LEAF_SOURCE_SHA is a new commit sha on every build, and a changed
+    in-scope ARG is a buildx cache miss for every instruction after it.
+    Declared at the top of a stage it silently disables cross-commit layer
+    caching for the whole file (run 30983842725: harness imported its
+    predecessor cache and hit 0 layers; apt + npm ci reran on every merge).
+    The contract: every RUN below the per-commit ARG declarations must
+    reference one of them; cacheable RUNs stay above. ARG goes out of
+    scope at the end of its stage, so tracking resets on FROM.
+    """
+    offending = []
+    arg_seen = False
+    logical = []
+    buf = ""
+    for raw in dockerfile.splitlines():
+        line = raw.rstrip()
+        if not buf:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            buf = line
+        else:
+            buf += "\n" + line
+        if buf.endswith("\\"):
+            continue
+        logical.append(buf)
+        buf = ""
+    for inst in logical:
+        head = inst.split(None, 1)[0].upper()
+        if head == "FROM":
+            arg_seen = False
+        elif head == "ARG" and any(name in inst for name in _PER_COMMIT_ARGS):
+            arg_seen = True
+        elif head == "RUN" and arg_seen and not any(
+            name in inst for name in _PER_COMMIT_ARGS
+        ):
+            offending.append(inst.splitlines()[0])
+    return offending
+
+
 WORKFLOW = (
     Path(__file__).resolve().parents[1]
     / ".github"
@@ -854,6 +899,13 @@ def main() -> None:
         )
         assert "ARG LEAF_SOURCE_SHA" in dockerfile
         assert "LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}" in dockerfile
+        # Cross-commit layer-cache contract: cacheable RUNs stay above the
+        # per-commit ARG declarations (see _runs_after_per_commit_arg).
+        offending = _runs_after_per_commit_arg(dockerfile)
+        assert offending == [], (
+            f"Dockerfile.{image}: RUN below a per-commit ARG without "
+            f"consuming it re-runs on every merge: {offending}"
+        )
     canonical = (ROOT / "deploy" / "Dockerfile.canonical-worker").read_text(
         encoding="utf-8"
     )

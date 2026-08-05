@@ -16,16 +16,23 @@ ARG VITE_MOCK=0
 ARG VITE_AUTH0_DOMAIN=leafautomation.us.auth0.com
 ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
 ARG VITE_AUTH0_AUDIENCE=https://api.leafdesign.ai
-ARG LEAF_SOURCE_SHA=unknown
 ENV VITE_API_BASE=${VITE_API_BASE} \
     VITE_MOCK=${VITE_MOCK} \
     VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN} \
     VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID} \
-    VITE_AUTH0_AUDIENCE=${VITE_AUTH0_AUDIENCE} \
-    LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}
+    VITE_AUTH0_AUDIENCE=${VITE_AUTH0_AUDIENCE}
 
 COPY web/package.json web/package-lock.json /web/
 RUN npm ci
+
+# Declared below npm ci, deliberately: this value is a new commit sha on every
+# build, and a changed in-scope ARG/ENV is a buildx cache miss for everything
+# after it — declared above npm ci it made the dependency layer uncacheable
+# across commits (run 30983842725: predecessor cache imported, 0 layers CACHED).
+# The VITE_* args above are commit-stable, so they may stay at the top.
+ARG LEAF_SOURCE_SHA=unknown
+ENV LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}
+
 COPY web/ /web/
 RUN npm run build && \
     printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
