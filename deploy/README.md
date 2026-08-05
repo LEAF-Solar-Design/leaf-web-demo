@@ -371,7 +371,19 @@ The release path is a staged, receipt-bound chain:
 
 1. **Build (this repo)**: `.github/workflows/build-platform-images.yml` runs on
    every push to `main` and builds app, broker, canonical-worker, harness, and
-   web from one full application commit. The canonical-worker build also checks
+   web from one full application commit — unless its `noop` gate job proves
+   from the real push diff that every changed file is documentation (under
+   `docs/`, or root-level `*.md`; nested markdown such as `server/README.md`
+   is copied into images and always builds). A docs-only run skips the whole
+   build graph, publishes a `docs-noop-<sha>-attempt-<n>` marker artifact,
+   and the staging relay skips cleanly on that marker; staging stays on the
+   previous build. The gate fails open by construction — an unusable
+   before-sha, unfetchable commit, failed diff, or unexpected filter output
+   builds normally (deliberately NOT a native path filter, which GitHub
+   evaluates over a truncated ~300-file window). A skipped commit has no
+   `prod-<shortsha>` supply set of its own — the promote path is unaffected
+   because it pins an explicit earlier build run ID and only requires its
+   source to be an ancestor of `main`, not the tip. The canonical-worker build also checks
    out the exact solver commit attested by `deploy/autofill-solver-sources.json`.
    After all five immutable ECR digests resolve, the workflow uploads one
    `leaf.staging-supply-set.v1` manifest. It binds every digest to the full

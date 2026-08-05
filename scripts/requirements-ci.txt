@@ -1,0 +1,6 @@
+# Gate-venv-only dependencies for the scripts/test_*.py harnesses.
+# Never installed into a shipped image (no deploy/Dockerfile.* reads this).
+# test_build_platform_images_workflow.py parses the workflow YAML and
+# executes the extracted docs-noop decide script instead of substring-
+# matching the file, so the gate venv needs a real YAML parser.
+PyYAML>=6

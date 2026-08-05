@@ -15,7 +15,12 @@ name: Build platform images
 # source SHA, and the deterministic web artifact hash. A partial push can never
 # produce a production handoff candidate.
 #
-# Auto-build, MANUAL handoff: every push to main builds and pushes images.
+# Auto-build, MANUAL handoff: every push to main that touches a build input
+# builds and pushes images. A docs-only push (all changed files under docs/
+# or root-level *.md — the audited set outside every image build context)
+# no-ops after the `noop` gate job and publishes a docs-noop marker artifact
+# so the staging relay skips cleanly instead of alarming on a missing
+# supply set. The gate fails open: any uncertainty builds normally.
 # promote=true now requires an accepted staging execution receipt and emits a
 # digest-bound handoff artifact. This workflow never dispatches production.
 #
@@ -28,6 +33,12 @@ name: Build platform images
 
 on:
   push:
+    # NO native path filtering on this trigger, deliberately: GitHub
+    # evaluates such filters over a truncated changed-file window (its own
+    # docs cite a 300-file limit), so a large mixed push could hide a code
+    # file past the window and silently skip a build that mattered. The
+    # docs-only no-op decision lives in the `noop` job below, where every
+    # abnormal path fails OPEN to building.
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -72,7 +83,78 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Docs-only no-op gate. Decides from the REAL push diff (local git, no
+  # truncated API window) whether any changed file is a build input. Every
+  # abnormal path — non-push event, unusable before-sha, unfetchable
+  # before commit (force push), failed diff, unexpected script output —
+  # lands on build=true; only a fully computed docs-only diff may skip.
+  # On skip it publishes a docs-noop marker artifact so the staging relay
+  # (dispatch-staging-deploys.yml) can tell a deliberate no-op from a
+  # partial run that lost its supply set, which must stay a loud failure.
+  # Gating `prepare` gates the whole graph: every other job needs it.
+  # Cost: one small serial job (~20-30s) ahead of every real build; fold
+  # it into `prepare` later if that tax matters more than job isolation.
+  noop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+
+    steps:
+      # persist-credentials stays ON (contents: read only): the decide
+      # step must fetch the push's before-commit, and an auth failure
+      # there would fail this gate open forever, silently rebuilding
+      # every docs push.
+      - uses: actions/checkout@v4
+
+      - name: Decide whether this push touched any build input
+        id: decide
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          build() {
+            echo "::notice::docs-noop gate: building ($1)."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          [ "$EVENT_NAME" = "push" ] || build "event=$EVENT_NAME"
+          [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || build "unusable before-sha"
+          [[ "$BEFORE_SHA" =~ ^0{40}$ ]] && build "branch-creation push"
+          git fetch --no-tags --depth=1 origin "$BEFORE_SHA" \
+            || build "before-sha unfetchable"
+          # --no-renames: detected renames report only their DESTINATION
+          # path, so server/app.py -> docs/app.py would arrive here as
+          # docs/app.py alone and skip a build that just lost an input.
+          # Disabling detection surfaces both sides as delete+add; either
+          # side that is a build input forces a build.
+          FILES=$(git diff --no-renames --name-only "$BEFORE_SHA" "$GITHUB_SHA") \
+            || build "diff failed"
+          VERDICT=$(printf '%s\n' "$FILES" | python3 scripts/docs_noop_filter.py) \
+            || VERDICT=build
+          [ "$VERDICT" = "skip" ] || build "diff includes build inputs"
+          echo "::notice::docs-noop gate: push touches documentation only; skipping the build and staging train."
+          echo "build=false" >> "$GITHUB_OUTPUT"
+
+      - name: Write the docs-noop marker for the staging relay
+        if: steps.decide.outputs.build == 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/docs-noop"
+          printf '{"schema":"leaf.docs-noop.v1","source_revision":"%s"}\n' \
+            "$GITHUB_SHA" > "$RUNNER_TEMP/docs-noop/docs-noop.json"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.decide.outputs.build == 'false'
+        with:
+          name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docs-noop/docs-noop.json
+
   prepare:
+    needs: noop
+    if: needs.noop.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -200,7 +282,11 @@ jobs:
           echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate image workflow invariants
-        run: python scripts/test_build_platform_images_workflow.py
+        # The harness parses this workflow's YAML; the runner's system
+        # python does not ship PyYAML, so install the harness deps first.
+        run: |
+          python -m pip install --quiet -r scripts/requirements-ci.txt
+          python scripts/test_build_platform_images_workflow.py
 
       - name: Derive immutable image tag
         id: tag

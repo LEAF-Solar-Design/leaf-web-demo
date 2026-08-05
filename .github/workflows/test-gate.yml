@@ -266,6 +266,7 @@ jobs:
             server/requirements-auth.txt
             da/requirements.txt
             platform/requirements.txt
+            scripts/requirements-ci.txt
 
       - name: Install Python dependencies
         run: |
@@ -274,7 +275,8 @@ jobs:
             -r server/requirements.txt \
             -r server/requirements-auth.txt \
             -r da/requirements.txt \
-            -r platform/requirements.txt
+            -r platform/requirements.txt \
+            -r scripts/requirements-ci.txt
 
       - uses: actions/setup-node@v4
         with:

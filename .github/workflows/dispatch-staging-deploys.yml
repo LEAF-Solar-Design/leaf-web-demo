@@ -14,6 +14,12 @@ name: Dispatch staging deploys
 # roll staging backwards; if the newer commit's own build fails, staging stays
 # on its previous deploy until the next successful main build.
 #
+# Docs-only no-op: a docs-only push's build run succeeds without building
+# (its noop gate skips the graph) and publishes a docs-noop marker artifact
+# instead of a supply set. This relay treats marker-without-manifest as a
+# clean skip; manifest-and-marker both absent stays a hard error, because a
+# successful build with no supply set means a partial run.
+#
 # Rerun semantics: rerunning a successful build (or this relay) dispatches
 # both deploys again, deliberately. The deploys register a fresh task
 # definition revision of the same images; per-service concurrency in the
@@ -81,11 +87,30 @@ jobs:
         run: |
           set -euo pipefail
           ARTIFACT_NAME="staging-supply-set-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
+          NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100" \
             > artifacts.json
-          ARTIFACT_ID=$(jq -er --arg name "$ARTIFACT_NAME" '
-            first(.artifacts[] | select(.name == $name)) | .id
+          ARTIFACT_ID=$(jq -r --arg name "$ARTIFACT_NAME" '
+            first(.artifacts[] | select(.name == $name)).id // empty
           ' artifacts.json)
+          if [ -z "$ARTIFACT_ID" ]; then
+            # No supply set. A deliberate docs-only no-op run publishes a
+            # marker instead; that skips cleanly. Anything else is still a
+            # loud failure: a successful build without a manifest means a
+            # partial run and must never be silently swallowed.
+            if jq -e --arg name "$NOOP_NAME" \
+              'any(.artifacts[]; .name == $name)' artifacts.json >/dev/null; then
+              echo "::notice::Build run $BUILD_RUN_ID was a docs-only no-op; nothing to deploy."
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Supply-set artifact $ARTIFACT_NAME not found and no $NOOP_NAME marker present."
+            exit 1
+          fi
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || {
+            echo "::error::Supply-set artifact ID '$ARTIFACT_ID' is not numeric."
+            exit 1
+          }
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
             > supply-set.zip
           unzip -o supply-set.zip
@@ -104,10 +129,13 @@ jobs:
             echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
             exit 1
           }
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch the web and app staging deploys concurrently
-        if: steps.tip.outputs.current == 'true'
+        if: >-
+          steps.tip.outputs.current == 'true' &&
+          steps.manifest.outputs.deploy == 'true'
         env:
           GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
           IMAGE_TAG: ${{ steps.manifest.outputs.image_tag }}
