@@ -195,15 +195,15 @@ def main() -> None:
     assert 'git checkout --quiet "$PREVIEW_SHA"' in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
-    # SIX jobs hold the ECR push credential: warm, build, verify, and the
-    # speculative lane's speculate (pushes spec-<tree> images),
+    # SIX jobs hold an ECR credential: warm (the buildcache-scoped role,
+    # which reaches only the *-buildcache repositories), build, verify, and
+    # the speculative lane's speculate (pushes spec-<tree> images),
     # speculate-manifest (reads live digests to mint the tree-bound
-    # manifest), and adopt (aliases the release tag onto verified digests).
-    # Each provably needs registry access. Note what that means and what
-    # this count does NOT buy: six jobs can reach ECR with push rights, and
-    # no assertion in this file can prevent them from using them (see the
-    # limitation block below). Raising this number should mean a new job
-    # that provably needs registry access, not a convenience.
+    # manifest), and adopt (aliases the release tag onto verified digests)
+    # on the release role. Each provably needs registry access; the role
+    # split is pinned by the role-to-assume assertions below. Raising this
+    # number should mean a new job that provably needs registry access,
+    # not a convenience.
     # Counted by parsed key and value, not by exact text: `id-token : write`
     # or a quoted key grants OIDC while leaving a literal count short,
     # and a comment mentioning the grant inflates it (sol-critic round 8,
@@ -910,34 +910,125 @@ def main() -> None:
     assert "tags" not in _keys_in(warm_block), (
         "a cache warmer publishes no image tag")
 
+    # The warm job's ONLY credential is the buildcache-scoped role, bound to
+    # the role-to-assume VALUE of each lane's credentials step rather than
+    # raw text: a comment carrying the expected line while the live step
+    # assumed something else satisfied the substring form (sol-critic
+    # round 1 on this chip's PR). _key_of/_value_of are comment-cut, so a
+    # commented copy contributes nothing here.
+    def _assumed_roles(block: str):
+        return [
+            _value_of(l) for l in block.splitlines()
+            if _key_of(l) == "role-to-assume"
+        ]
+
+    release_role = "${{ secrets.AWS_ECR_PUSH_ROLE }}"
+    cache_role = "${{ secrets.AWS_ECR_BUILDCACHE_PUSH_ROLE }}"
+    assert _assumed_roles(warm_block) == [cache_role], (
+        "the warm job's single credentials step must assume the "
+        "buildcache-scoped role and nothing else")
+    assert _assumed_roles(build_block) == [release_role]
+    role_verify_block = text.split("\n  verify:\n", 1)[1].split(
+        "\n  speculate:\n", 1)[0]
+    assert _assumed_roles(role_verify_block) == [release_role]
+    assert _assumed_roles(text) == [
+        cache_role,
+        release_role,  # build
+        release_role,  # verify
+        release_role,  # speculate: pushes real spec-* images by design
+        release_role,  # speculate-manifest: reads live digests
+        release_role,  # adopt: aliases the release tag onto digests
+    ], ("exactly six role assumptions in the workflow, in job order "
+        "warm, build, verify, speculate, speculate-manifest, adopt")
+    # Substring bans stay as belt-and-braces: comment-inclusive is fine for
+    # a NEGATIVE. (Sound: AWS_ECR_BUILDCACHE_PUSH_ROLE does not contain the
+    # substring AWS_ECR_PUSH_ROLE.)
+    assert "AWS_ECR_PUSH_ROLE" not in warm_block
+    assert "AWS_ECR_BUILDCACHE_PUSH_ROLE" not in build_block
+
+    # ALL cache traffic lives in the dedicated *-buildcache repositories,
+    # asserted on comment-stripped executable shell lines with the exact
+    # permitted assignment. _comment_cut on every surviving line as well: a
+    # LIVE release probe with the expected text in a TRAILING comment
+    # defeated the whole-line scan while remaining valid shell (sol-critic
+    # rounds 1 and 2 on this chip's PR).
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        live = [
+            _comment_cut(l) for l in block.splitlines()
+            if not l.strip().startswith("#")
+        ]
+        assignments = [l.strip() for l in live if "cache_repo=" in l]
+        assert assignments == [
+            'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
+        ], lane
+        probes = [l for l in live if "--repository-name" in l]
+        assert len(probes) == 3, lane
+        for probe in probes:
+            assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
+                lane, probe)
+        assert not re.search(
+            r'--repository-name "\$IMAGE_NAME"(?!-)', "\n".join(live)
+        ), lane
+    # The speculative lane: its cache IMPORT reads the *-buildcache
+    # repository, while its image-existence probe reads the RELEASE
+    # repository (it asks whether the spec image tag itself is present).
+    cache_speculate_block = text.split("\n  speculate:\n", 1)[1].split(
+        "\n  speculate-manifest:\n", 1)[0]
+    speculate_live = [
+        _comment_cut(l) for l in cache_speculate_block.splitlines()
+        if not l.strip().startswith("#")
+    ]
+    assert [l.strip() for l in speculate_live if "cache_repo=" in l] == [
+        'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
+    ]
+    speculate_probes = [l for l in speculate_live if "--repository-name" in l]
+    assert len(speculate_probes) == 2
+    assert sorted(
+        '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
+    ) == [False, True], speculate_probes
+    tag_values = [
+        _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
+    ]
+    assert tag_values == [
+        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+    ], "the release push tag targets the release repository, never a cache"
+    assert "-buildcache:${{" not in text
+
     # ------------------------------------------------------------------ #
     # WHAT THIS TEST DOES NOT PROVE, stated plainly so nobody mistakes a
     # green run for a guarantee (sol-critic rounds 8 to 10 on PR #445).
     #
-    # Warm holds the same ECR push role the gated build does, because it
-    # reads and writes the registry layer cache. Any shell it runs can
-    # therefore publish an image before the gate is green. Three attempts
-    # to forbid that by inspection all failed: a command denylist was
-    # beaten by `docker buildx build --push`, then by `docker image push`,
-    # `podman push`, and `buildctl ... push=true`; and a structural rule
-    # tight enough to try (an exact list of permitted shell steps) still
-    # admitted `ctr images push`, `cosign copy`, and any helper script or
-    # make target, while rejecting five ordinary maintenance edits —
-    # a third diagnostic step, `aws ecr describe-images`, `docker
-    # version`, and renaming or reordering the permitted steps.
-    #
     # A text check cannot prove the absence of a publishing command in
-    # arbitrary shell. State the consequence without softening it: there
-    # is currently NO enforceable boundary preventing the warm job from
-    # publishing a release image before the gate is green. The gate edge
-    # asserted below constrains the BUILD job only; it says nothing about
-    # warm, which holds the same push role. The boundary would come from
-    # narrowing AWS_ECR_PUSH_ROLE so warm can write buildcache-* and
-    # nothing else — infrastructure rather than workflow, filed as a
-    # follow-up rather than faked here.
+    # arbitrary shell (the attempts and their failures are recorded in this
+    # block's git history). Since leaf-automation-aws-terraform's
+    # leaf_platform_buildcache.tf landed, the boundary for WARM is IAM
+    # rather than inspection: the warm job's configured credential reaches
+    # only the five *-buildcache repositories, so no shell step in warm can
+    # write a repository the deploy rail reads. ECR has no tag-level IAM
+    # condition (aws/containers-roadmap#230), which is why the split is
+    # per-repository. The assertions above pin the wiring that keeps that
+    # true IN THIS FILE: warm assumes only the cache-scoped role, and cache
+    # references point only at cache repositories.
     #
-    # What the warm assertions below DO buy: they pin the job's declared
-    # configuration, so drift in what it is written to do is caught.
+    # Still true and deliberately unfaked:
+    #  * the gate edge asserted below constrains the BUILD job only;
+    #  * the speculative lane (speculate, speculate-manifest, adopt) holds
+    #    the RELEASE role by design -- it pushes real spec-* images from PR
+    #    merge previews; its fence is the tag namespace no deploy accepts
+    #    plus adopt's tree-bound proof, not IAM;
+    #  * the gated build IMPORTS the cache warm wrote, so an attacker with
+    #    code execution inside warm could still poison layers that flow
+    #    through the gate into a release image (inherent to remote layer
+    #    cache reuse, and present before warm existed via the predecessor
+    #    cache);
+    #  * both roles trust the SAME OIDC subject, so code executing in warm
+    #    could mint a fresh job token and assume the release role directly.
+    #    Closing that needs a GitHub-environment-scoped subject on the
+    #    gated jobs — filed as a follow-up, not faked here.
+    #
+    # What the warm assertions above and below DO buy: they pin the job's
+    # declared configuration, so drift in what it is written to do is
+    # caught.
     # ------------------------------------------------------------------ #
 
     # The gate edge, pinned as an EFFECTIVE job key at its exact

@@ -3,14 +3,17 @@ name: Build platform images
 # ---------------------------------------------------------------------------
 # Builds the five leaf-platform release images (app / broker / canonical-worker /
 # harness / web) in parallel from ONE commit and pushes all five to ECR at ONE tag:
-# prod-<shortsha>. Each image has its own registry-backed Buildx cache.
+# prod-<shortsha>. Each image has its own registry-backed Buildx cache in a
+# DEDICATED <image>-buildcache ECR repository -- never the release repository.
 # ECR tags are immutable, so cache publication uses buildcache-<shortsha> and
 # never overwrites a tag. A push imports only its immediate predecessor's cache.
 # Workflow dispatches and missing predecessor caches build without cache input.
 #
-# Cache retention contract: the AWS repository must expire buildcache-* tags
-# after 14 days or retain no more than the latest 20 per repository. The same
-# bounded-retention contract covers spec-* tags (speculative PR builds, below).
+# Cache retention contract: the AWS *-buildcache repositories must
+# expire buildcache-* tags after 14 days or retain no more than the latest 20
+# per repository (leaf-automation-aws-terraform, leaf_platform_buildcache.tf).
+# The same bounded-retention contract covers spec-* tags in the release
+# repositories (speculative PR builds, below).
 # Production prod-* tags use a separate lifecycle and are never cache inputs
 # or outputs. A staging supply-set manifest records all five immutable
 # digests, the full source SHA, and the deterministic web artifact hash. A
@@ -41,9 +44,16 @@ name: Build platform images
 # promote=true now requires an accepted staging execution receipt and emits a
 # digest-bound handoff artifact. This workflow never dispatches production.
 #
-# Auth: OIDC via leaf-github-web-demo-ecr-push-role (AWS_ECR_PUSH_ROLE repo
-# secret). That role must be limited to the five leaf-platform release ECR
-# repositories and cannot touch ECS, IAM, or secrets.
+# Auth, TWO OIDC roles: build, verify, and the speculative lane assume
+# leaf-github-web-demo-ecr-push-role (AWS_ECR_PUSH_ROLE repo secret), limited
+# to the five leaf-platform release ECR repositories plus their *-buildcache
+# counterparts, no ECS, IAM, or secrets. The pre-gate warm job assumes ONLY
+# leaf-github-web-demo-buildcache-push-role (AWS_ECR_BUILDCACHE_PUSH_ROLE repo
+# secret), which can reach nothing but the five *-buildcache repositories --
+# IAM, not convention, is what keeps warm's configured credential away from
+# every tag the deploy rail consumes. (speculate pushes real spec-* images by
+# design, so it genuinely needs the release role; that namespace is fenced
+# from deploys as described above.)
 # TERRAFORM_REPO_TOKEN (PAT with Actions read access to both repositories) is
 # only needed for the optional promote step.
 # ---------------------------------------------------------------------------
@@ -494,8 +504,8 @@ jobs:
     # so this workflow-internal dependency is what enforces that FOR THE BUILD
     # JOB: build cannot start until the full run-all-gates.py scoreboard is
     # green for the exact commit `prepare` resolved -- not merely for the
-    # branch tip. It does not constrain the `warm` job, which holds the same
-    # push role; see warm's header below.
+    # branch tip. It does not constrain the `warm` job, which is instead
+    # boxed in by IAM: its role reaches only the *-buildcache repositories.
     needs: prepare
     # Speculative runs never gate here: the PR's own standalone Test gate run
     # is what mints the tree-bound proof, and spec-* images are unreachable
@@ -516,12 +526,15 @@ jobs:
   # the buildcache-<sha> layer tag the real build then reuses, turning a cold
   # ~100s post-gate build into a cache hit.
   #
-  # Be precise about what enforces that, because the contract test cannot:
-  # `build: needs: [prepare, test]` constrains the BUILD job only. This job
-  # holds the same ECR push role, since it reads and writes the registry
-  # layer cache, so nothing prevents a future shell step here from publishing
-  # a release image before the gate is green. The boundary would come from
-  # narrowing that role to buildcache-* writes; see the limitation block in
+  # What enforces that is IAM, not this file: the job assumes
+  # leaf-github-web-demo-buildcache-push-role, whose resource scope is the
+  # five *-buildcache repositories and nothing else (ECR has no tag-level
+  # IAM condition, so the boundary is repository-level; see
+  # leaf-automation-aws-terraform's leaf_platform_buildcache.tf). A future
+  # shell step here, or a compromised action running with this job's
+  # credentials, still cannot write a repository the deploy rail reads.
+  # The pinned no-publish configuration below remains drift detection, not
+  # the boundary; see the limitation block in
   # scripts/test_build_platform_images_workflow.py.
   #
   # canonical-worker IS warmed since operator decision D1 (2026-08-05). Its
@@ -597,10 +610,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC, buildcache-scoped role)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ECR_BUILDCACHE_PUSH_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GHA-WarmPlatform-${{ matrix.image }}-${{ github.run_id }}
 
@@ -611,7 +624,7 @@ jobs:
         id: cache
         run: |
           set -euo pipefail
-          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
           cache_from=""
           cache_to=""
 
@@ -623,7 +636,7 @@ jobs:
           # simply has not finished — it is never a hard dependency, so a warm
           # failure costs seconds, not a red build.
           current_warm="$(aws ecr batch-get-image \
-            --repository-name "$IMAGE_NAME" \
+            --repository-name "$IMAGE_NAME-buildcache" \
             --image-ids "imageTag=$CURRENT_CACHE_TAG" \
             --query 'length(images)' \
             --output text 2>/dev/null || true)"
@@ -632,7 +645,7 @@ jobs:
             echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
           elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
             found="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME" \
+              --repository-name "$IMAGE_NAME-buildcache" \
               --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
               --query 'length(images)' \
               --output text 2>/dev/null || true)"
@@ -644,7 +657,7 @@ jobs:
           fi
 
           if current_exists="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME" \
+              --repository-name "$IMAGE_NAME-buildcache" \
               --image-ids "imageTag=$CURRENT_CACHE_TAG" \
               --query 'length(images)' \
               --output text 2>/dev/null)"; then
@@ -782,7 +795,7 @@ jobs:
         id: cache
         run: |
           set -euo pipefail
-          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
           cache_from=""
           cache_to=""
 
@@ -794,7 +807,7 @@ jobs:
           # simply has not finished — it is never a hard dependency, so a warm
           # failure costs seconds, not a red build.
           current_warm="$(aws ecr batch-get-image \
-            --repository-name "$IMAGE_NAME" \
+            --repository-name "$IMAGE_NAME-buildcache" \
             --image-ids "imageTag=$CURRENT_CACHE_TAG" \
             --query 'length(images)' \
             --output text 2>/dev/null || true)"
@@ -803,7 +816,7 @@ jobs:
             echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
           elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
             found="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME" \
+              --repository-name "$IMAGE_NAME-buildcache" \
               --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
               --query 'length(images)' \
               --output text 2>/dev/null || true)"
@@ -815,7 +828,7 @@ jobs:
           fi
 
           if current_exists="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME" \
+              --repository-name "$IMAGE_NAME-buildcache" \
               --image-ids "imageTag=$CURRENT_CACHE_TAG" \
               --query 'length(images)' \
               --output text 2>/dev/null)"; then
@@ -1096,11 +1109,11 @@ jobs:
           # polluting the immutable buildcache-* namespace, and no export
           # means no cache_to race to tolerate.
           set -euo pipefail
-          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
           cache_from=""
           if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
             found="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME" \
+              --repository-name "$IMAGE_NAME-buildcache" \
               --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
               --query 'length(images)' \
               --output text 2>/dev/null || true)"
