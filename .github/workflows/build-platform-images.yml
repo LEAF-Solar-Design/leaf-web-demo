@@ -282,7 +282,11 @@ jobs:
           echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate image workflow invariants
-        run: python scripts/test_build_platform_images_workflow.py
+        # The harness parses this workflow's YAML; the runner's system
+        # python does not ship PyYAML, so install the harness deps first.
+        run: |
+          python -m pip install --quiet -r scripts/requirements-ci.txt
+          python scripts/test_build_platform_images_workflow.py
 
       - name: Derive immutable image tag
         id: tag
