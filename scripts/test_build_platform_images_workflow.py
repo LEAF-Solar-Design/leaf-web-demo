@@ -68,6 +68,13 @@ def main() -> None:
     # mean a new job that provably needs registry access, not a convenience.
     assert text.count("id-token: write") == 3
 
+    # The two image-building job blocks. Everything the warm/build contract
+    # asserts below is bound INSIDE these slices: per sol-critic round 1 on
+    # PR #445, a global positional search accepted the key steps relocated
+    # into `prepare` and a five-image list surviving only in a comment.
+    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
+    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
+
     # The private key is scoped to the canonical-worker lane of BOTH image
     # jobs: `build`, and `warm` since operator decision D1 (2026-08-05) let
     # the deploy key into the warm lane so canonical-worker stops being the
@@ -82,27 +89,32 @@ def main() -> None:
     # message, ssh-key) and none anywhere else: a new reference to the key
     # in any other step or comment must consciously bump this count.
     assert text.count("AUTOFILL_SOLVER_DEPLOY_KEY") == 10
-    lane_search = 0
-    for lane in ("warm", "build"):
-        require_start = text.index(
-            "      - name: Require the read-only canonical solver deploy key",
-            lane_search,
+    require_name = "      - name: Require the read-only canonical solver deploy key"
+    checkout_name = "      - name: Check out the exact canonical solver source"
+    # Exactly one presence-check and one solver-checkout step per image job,
+    # and none anywhere else in the workflow: with the global total pinned to
+    # 2, a key step relocated into any other job cannot go unnoticed.
+    assert text.count(require_name) == 2
+    assert text.count(checkout_name) == 2
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        assert block.count(require_name) == 1, lane
+        assert block.count(checkout_name) == 1, lane
+        require_start = block.index(require_name)
+        checkout_start = block.index(checkout_name, require_start)
+        buildx_start = block.index(
+            "      - name: Set up Docker Buildx", checkout_start
         )
-        checkout_start = text.index(
-            "      - name: Check out the exact canonical solver source", require_start
-        )
-        buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
-        require_body = text[require_start:checkout_start]
-        checkout_body = text[checkout_start:buildx_start]
+        require_body = block[require_start:checkout_start]
+        checkout_body = block[checkout_start:buildx_start]
         assert "if: matrix.image == 'canonical-worker'" in require_body, lane
         assert "if: matrix.image == 'canonical-worker'" in checkout_body, lane
         assert "persist-credentials: false" in checkout_body, lane
         # One env reference for the presence check and one ssh-key input per
-        # lane: with the total pinned at 4 above, the secret provably
-        # appears nowhere outside these two step bodies.
+        # lane, two per block, four in the file: the secret provably appears
+        # nowhere outside these two step bodies in these two jobs.
         assert require_body.count(secret_ref) == 1, lane
         assert checkout_body.count(secret_ref) == 1, lane
-        lane_search = buildx_start
+        assert block.count(secret_ref) == 2, lane
 
     # An untested image can never reach ECR: the build job waits on the full
     # gate, run against the exact commit `prepare` resolved. Branch protection
@@ -114,17 +126,22 @@ def main() -> None:
     # BOTH image matrices (warm and build) carry all five images and do not
     # cancel siblings after one failure. Warm covering canonical-worker is
     # operator decision D1 (2026-08-05); silently dropping an image from
-    # either matrix reopens a cold post-gate build. A failed build matrix
-    # entry still blocks the verification job.
-    assert (
-        len(
-            re.findall(
-                r"image:\s*\[app, broker, canonical-worker, harness, web\]", text
-            )
-        )
-        == 2
+    # either matrix reopens a cold post-gate build. The regex is anchored to
+    # the exact matrix mapping line and counted per job block, so a
+    # five-image list surviving only in a comment cannot satisfy it (sol-
+    # critic round 1 on PR #445). A failed build matrix entry still blocks
+    # the verification job.
+    five_image_matrix = (
+        r"^        image: \[app, broker, canonical-worker, harness, web\]$"
     )
-    assert "fail-fast: false" in text
+    assert len(re.findall(five_image_matrix, warm_block, re.M)) == 1
+    assert len(re.findall(five_image_matrix, build_block, re.M)) == 1
+    # And no OTHER image matrix line survives in either block: four-image
+    # lists or duplicates fail here rather than hiding beside the pinned one.
+    assert len(re.findall(r"^\s*image: \[", warm_block, re.M)) == 1
+    assert len(re.findall(r"^\s*image: \[", build_block, re.M)) == 1
+    assert "fail-fast: false" in warm_block
+    assert "fail-fast: false" in build_block
     assert "needs: [prepare, build]" in text
 
     # ECR tags are immutable. Current and previous commits have distinct cache
@@ -244,9 +261,6 @@ def main() -> None:
     # test]` is the entire enforcement — a warm job that ever learns to push,
     # or a build job that stops needing `test`, silently removes it.
     # ------------------------------------------------------------------ #
-    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
-    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
-
     assert "needs: prepare" in warm_block
     assert "continue-on-error: true" in warm_block, (
         "a warm failure must degrade to a cold build, never redden the run")
