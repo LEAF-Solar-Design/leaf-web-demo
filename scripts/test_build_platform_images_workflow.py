@@ -22,6 +22,31 @@ import tempfile
 import yaml  # gate venv + prepare job: installed from scripts/requirements-ci.txt
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate mapping keys.
+
+    yaml.safe_load silently keeps the LAST duplicate key, so a hostile
+    file could show these assertions a healthy final value while an
+    earlier duplicate carries the payload (whichever one another parser
+    honors). Ambiguity fails loud here instead.
+    """
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise ValueError(
+                    f"duplicate YAML mapping key {key!r} at {key_node.start_mark}"
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)
+
+
+def _strict_yaml(text: str):
+    return yaml.load(text, Loader=_StrictLoader)
+
+
 _BASH_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$")
 
 
@@ -368,7 +393,7 @@ def check_docs_noop_filter(text: str) -> None:
 
     # Structural invariants read from the PARSED workflow, so a guard that
     # drifts into a comment or another step key stops satisfying them.
-    wf = yaml.safe_load(text)
+    wf = _strict_yaml(text)
     on_block = wf.get("on") or wf.get(True)  # YAML 1.1 reads bare `on` as a bool
     assert on_block["push"] == {"branches": ["main"]}, (
         "the push trigger must carry branches only — no native path filter")
@@ -389,7 +414,7 @@ def check_docs_noop_filter(text: str) -> None:
     )
     for label, parsed in (
         ("build-platform-images.yml", wf),
-        ("dispatch-staging-deploys.yml", yaml.safe_load(relay_text)),
+        ("dispatch-staging-deploys.yml", _strict_yaml(relay_text)),
     ):
         for job_name, job in parsed["jobs"].items():
             conditions = [str(job.get("if", ""))]
@@ -486,10 +511,24 @@ def check_docs_noop_filter(text: str) -> None:
     # must break this harness and force a deliberate co-review. Guards are
     # compared with EXACT equality, never substring: a guard weakened to
     # `X == 'true' || true` still contains the healthy text and must fail.
-    relay_wf = yaml.safe_load(relay_text)
+    relay_wf = _strict_yaml(relay_text)
     # Workflow shape is frozen top to bottom (PyYAML reads the bare `on`
     # key as True). A new trigger, job, or permission grant must land here.
     assert set(relay_wf) == {"name", True, "permissions", "concurrency", "jobs"}
+    assert relay_wf["name"] == "Dispatch staging deploys"
+    assert relay_wf[True] == {
+        "workflow_run": {
+            "workflows": ["Build platform images"],
+            "types": ["completed"],
+        }
+    }, "the relay trigger is frozen: broadening it re-reviews here"
+    assert relay_wf["concurrency"] == {
+        "group": (
+            "dispatch-staging-deploys-"
+            "${{ github.event.workflow_run.head_sha }}"
+        ),
+        "cancel-in-progress": False,
+    }
     # CAPABILITY WALL: dispatching the infra repo requires the PAT, and the
     # workflow's own token is pinned read-only, so an assembled command in
     # an unguarded script has nothing to dispatch WITH. The token-denial
@@ -562,20 +601,21 @@ def check_docs_noop_filter(text: str) -> None:
     manifest_code = _executable_bash(manifest_step["run"])
     dispatch_code = _executable_bash(dispatch_step["run"])
 
-    # The UNGUARDED scripts are content-frozen: any edit to their
-    # executable text (comments excluded) must update this hash in the
-    # same PR, so the change is visible to review — an assembled dispatch
-    # smuggled into tip or manifest cannot land silently. The guarded
-    # dispatch script stays property-checked (its exact guard above is
-    # the contract), and the capability wall means the frozen scripts
-    # hold no credential able to dispatch even if edited.
+    # ALL THREE scripts are content-frozen: any edit to their executable
+    # text (comments excluded) must update this hash in the same PR, so
+    # neither an assembled dispatch in an unguarded step nor an extra
+    # PAT-backed command under the guarded step's healthy-looking guard
+    # can land silently. The property checks around this stay for
+    # readable failures; the hash is the contract, and the capability
+    # wall means the unguarded scripts hold no credential able to
+    # dispatch even if edited.
     frozen = hashlib.sha256(
-        (tip_code + "\n===\n" + manifest_code).encode("utf-8")
+        "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
     assert frozen == (
-        "ce04a9766bfdf5af80a33fc61c7002fbaa35f735e55ecf6816d0fd5f99e88872"
+        "f4cfca76c7de56ff0a1a7b99dfd04039d74a2fccc08be9a227d18f0f589caa13"
     ), (
-        "tip/manifest relay scripts changed: review the diff for dispatch "
+        "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
     )
 
