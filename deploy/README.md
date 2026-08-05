@@ -371,7 +371,8 @@ The release path is a staged, receipt-bound chain:
 
 1. **Build (this repo)**: `.github/workflows/build-platform-images.yml` runs on
    every push to `main` and builds app, broker, canonical-worker, harness, and
-   web from one full application commit — unless its `noop` gate job proves
+   web from one full application commit — unless the docs-noop decide step
+   in its `prepare` job (a standalone `noop` job until 2026-08-05) proves
    from the real push diff that every changed file is documentation (under
    `docs/`, or root-level `*.md`; nested markdown such as `server/README.md`
    is copied into images and always builds). A docs-only run skips the whole

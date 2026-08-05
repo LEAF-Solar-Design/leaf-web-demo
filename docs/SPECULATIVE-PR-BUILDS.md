@@ -59,8 +59,13 @@ not minutes.
    `prod-<shortsha>` onto those digests (`ecr put-image` with three
    attempts per image, idempotent: an existing release tag must already
    equal the speculative digest, anything else stands down), re-verifies
-   all five, and declares `adopted=true`. The build matrix skips; `verify`
-   runs as always and stamps the supply set.
+   all five, and declares `adopted=true`. The build matrix skips, and
+   since the 2026-08-05 tail-compression fold the SAME `adopt` job then
+   stamps and uploads the supply set in place (byte-identical steps to
+   the `verify` job's, pinned by the contract test) instead of handing
+   off to a fresh `verify` runner; `verify` still owns the full-build
+   path. A failure in that half is post-commit by construction, so it
+   reddens the run and a rerun resumes idempotently through adopt.
 5. **Degrade before the first write, fail closed after it.** Up to the
    moment the first release tag is written, every anomaly in adopt — no
    artifact, foreign tree, missing digest, even an unexpected script death
@@ -91,9 +96,16 @@ speculative run's provenance. v1 stays accepted everywhere (relay,
 production handoff): a rerun of a pre-v2 build run regenerates its artifact
 from the old workflow text and must keep dispatching.
 
-The deterministic web `dist/` artifact is unaffected: `verify` always
+The deterministic web `dist/` artifact is unaffected: whichever supply-set
+writer runs (`adopt` on the adopted path, `verify` on the full-build path)
 rebuilds and hashes it from the merge checkout, so the production web path
-carries the merge commit's identity on both build paths.
+carries the merge commit's identity on both build paths. That rebuild is
+deliberately NOT replaced by the speculative run's output: `dist/` bakes
+the merge commit's `LEAF_SOURCE_SHA` (at minimum `health.json`), which the
+preview run cannot know, so no earlier run can produce the byte-identical
+artifact the manifest's `web_artifact_sha256` attests — the fresh
+`npm ci` + Vite build is what makes the hash provable, and the production
+handoff audit chain consumes exactly that hash.
 
 ## Retention and cost
 

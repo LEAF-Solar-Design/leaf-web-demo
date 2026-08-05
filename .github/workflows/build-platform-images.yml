@@ -38,7 +38,10 @@ name: Build platform images
 # Auto-build, MANUAL handoff: every push to main that touches a build input
 # builds and pushes images. A docs-only push (all changed files under docs/
 # or root-level *.md — the audited set outside every image build context)
-# no-ops after the `noop` gate job and publishes a docs-noop marker artifact
+# no-ops after `prepare`'s docs-noop decide step (folded from the former
+# standalone `noop` gate job on 2026-08-05: the separate job cost ~8s of
+# work plus ~12s of runner scheduling ahead of every real build, measured
+# on run 30992431627) and publishes a docs-noop marker artifact
 # so the staging relay skips cleanly instead of alarming on a missing
 # supply set. The gate fails open: any uncertainty builds normally.
 # promote=true now requires an accepted staging execution receipt and emits a
@@ -72,8 +75,8 @@ on:
     # evaluates such filters over a truncated changed-file window (its own
     # docs cite a 300-file limit), so a large mixed push could hide a code
     # file past the window and silently skip a build that mattered. The
-    # docs-only no-op decision lives in the `noop` job below, where every
-    # abnormal path fails OPEN to building.
+    # docs-only no-op decision lives in prepare's decide step below, where
+    # every abnormal path fails OPEN to building.
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -132,36 +135,69 @@ concurrency:
   cancel-in-progress: ${{ inputs.speculative || false }}
 
 jobs:
-  # Docs-only no-op gate. Decides from the REAL push diff (local git, no
-  # truncated API window) whether any changed file is a build input. Every
-  # abnormal path — non-push event, unusable before-sha, unfetchable
-  # before commit (force push), failed diff, unexpected script output —
-  # lands on build=true; only a fully computed docs-only diff may skip.
-  # On skip it publishes a docs-noop marker artifact so the staging relay
-  # (dispatch-staging-deploys.yml) can tell a deliberate no-op from a
-  # partial run that lost its supply set, which must stay a loud failure.
-  # Gating `prepare` gates the whole graph: every other job needs it.
-  # Cost: one small serial job (~20-30s) ahead of every real build; fold
-  # it into `prepare` later if that tax matters more than job isolation.
-  noop:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Job-level permissions REPLACE the workflow-level set, so the two
+    # workflow-level grants are restated. actions:read backs one step:
+    # the warm-skip hint's gate-proof artifact listing. Read-only.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
 
     outputs:
       build: ${{ steps.decide.outputs.build }}
+      tag: ${{ steps.tag.outputs.value }}
+      cache_tag: ${{ steps.tag.outputs.cache_value }}
+      previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
+      source_sha: ${{ steps.source.outputs.sha }}
+      source_mode: ${{ steps.source.outputs.mode }}
+      source_tree: ${{ steps.tag.outputs.tree }}
+      solver_revision: ${{ steps.solver.outputs.revision }}
+      solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
+      gate_reuse_expected: ${{ steps.reuse-hint.outputs.expected }}
 
     steps:
-      # persist-credentials stays ON (contents: read only): the decide
-      # step must fetch the push's before-commit, and an auth failure
-      # there would fail this gate open forever, silently rebuilding
-      # every docs push.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
 
+      # Docs-only no-op gate, folded into prepare from the former
+      # standalone `noop` job (2026-08-05; the separate job cost ~8s of
+      # work plus ~12s of runner scheduling ahead of every real build).
+      # Decides from the REAL push diff (local git, no truncated API
+      # window) whether any changed file is a build input. Every
+      # abnormal path — non-push event, unusable before-sha, unfetchable
+      # before commit (force push), failed diff, unexpected script
+      # output — lands on build=true; only a fully computed docs-only
+      # diff may skip. On skip it publishes a docs-noop marker artifact
+      # so the staging relay (dispatch-staging-deploys.yml) can tell a
+      # deliberate no-op from a partial run that lost its supply set,
+      # which must stay a loud failure. Every later step in this job and
+      # the test / warm / adopt guards gate on build == 'true'; build
+      # and verify follow through their result checks.
+      #
+      # Credential reconciliation with this job's checkout, explicitly:
+      # the checkout persists NO credentials because later prepare steps
+      # execute preview-authored scripts on speculative dispatches, while
+      # this decide step needs a credentialed fetch of the push's
+      # before-commit. Neither posture widens: the fetch carries its own
+      # scoped, non-persisted auth header (the merge-preview fetch idiom
+      # below), and this step executes NO checkout content on non-push
+      # events — it exits at the event arm before python3 runs, so a
+      # preview-authored tree never executes in this token-bearing step;
+      # on push events the tree is main's own trusted commit. An auth
+      # failure lands on the fail-open arm: the push builds, it never
+      # silently skips.
       - name: Decide whether this push touched any build input
         id: decide
         env:
           BEFORE_SHA: ${{ github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           build() {
@@ -172,7 +208,8 @@ jobs:
           [ "$EVENT_NAME" = "push" ] || build "event=$EVENT_NAME"
           [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || build "unusable before-sha"
           [[ "$BEFORE_SHA" =~ ^0{40}$ ]] && build "branch-creation push"
-          git fetch --no-tags --depth=1 origin "$BEFORE_SHA" \
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:$GH_TOKEN" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "$BEFORE_SHA" \
             || build "before-sha unfetchable"
           # --no-renames: detected renames report only their DESTINATION
           # path, so server/app.py -> docs/app.py would arrive here as
@@ -201,38 +238,8 @@ jobs:
           name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/docs-noop/docs-noop.json
 
-  prepare:
-    needs: noop
-    if: needs.noop.outputs.build == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Job-level permissions REPLACE the workflow-level set, so the two
-    # workflow-level grants are restated. actions:read is new and backs one
-    # step: the warm-skip hint's gate-proof artifact listing. Read-only.
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: read
-
-    outputs:
-      tag: ${{ steps.tag.outputs.value }}
-      cache_tag: ${{ steps.tag.outputs.cache_value }}
-      previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
-      source_sha: ${{ steps.source.outputs.sha }}
-      source_mode: ${{ steps.source.outputs.mode }}
-      source_tree: ${{ steps.tag.outputs.tree }}
-      solver_revision: ${{ steps.solver.outputs.revision }}
-      solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
-      gate_reuse_expected: ${{ steps.reuse-hint.outputs.expected }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_sha || github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-
       - name: Require exact source to be reviewed
+        if: steps.decide.outputs.build == 'true'
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -388,6 +395,7 @@ jobs:
 
       - name: Resolve canonical solver provenance
         id: solver
+        if: steps.decide.outputs.build == 'true'
         run: |
           set -euo pipefail
           SOURCES=deploy/autofill-solver-sources.json
@@ -402,6 +410,7 @@ jobs:
           echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate image workflow invariants
+        if: steps.decide.outputs.build == 'true'
         # The harness parses this workflow's YAML; the runner's system
         # python does not ship PyYAML, so install the harness deps first.
         run: |
@@ -410,6 +419,7 @@ jobs:
 
       - name: Derive immutable image tag
         id: tag
+        if: steps.decide.outputs.build == 'true'
         env:
           BEFORE_SHA: ${{ github.event.before }}
           SOURCE_MODE: ${{ steps.source.outputs.mode }}
@@ -477,6 +487,7 @@ jobs:
       # pins exactly that.
       - name: Probe for an expected gate reuse (warm-skip hint)
         id: reuse-hint
+        if: steps.decide.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -527,8 +538,11 @@ jobs:
     needs: prepare
     # Speculative runs never gate here: the PR's own standalone Test gate run
     # is what mints the tree-bound proof, and spec-* images are unreachable
-    # by any deploy until `adopt` sees that proof on the merge run.
-    if: ${{ !inputs.promote && !inputs.speculative }}
+    # by any deploy until `adopt` sees that proof on the merge run. The
+    # build check carries the docs-noop gate: prepare SUCCEEDS on a
+    # docs-only push (it publishes the marker), so without it this job's
+    # implicit success() would run the full gate on every docs push.
+    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
     uses: ./.github/workflows/test-gate.yml
     permissions:
       contents: read
@@ -577,7 +591,7 @@ jobs:
   # itself whenever warm did not.
   warm:
     needs: prepare
-    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.gate_reuse_expected != 'true' }}
+    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' && needs.prepare.outputs.gate_reuse_expected != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -886,17 +900,23 @@ jobs:
           cache-to: ${{ steps.cache.outputs.to }}
 
   verify:
-    # Two green paths feed this job: the full build matrix succeeded, or the
-    # matrix was skipped because `adopt` aliased a verified speculative
-    # supply set onto the release tag. Every other combination skips verify
-    # and the run carries whatever failure caused it.
+    # The FULL-BUILD path's fan-in: the matrix succeeded, and the five
+    # release-tag digests plus the deterministic web artifact become the
+    # immutable staging supply set. The run's other green path — the
+    # matrix skipped because `adopt` aliased a verified speculative
+    # supply set — writes the same supply set INSIDE the adopt job since
+    # the 2026-08-05 fold (byte-identical steps, contract-test-pinned),
+    # so this job must not also run there: the two writers are mutually
+    # exclusive by construction (build runs only when adopted != 'true'),
+    # and upload-artifact would refuse the duplicate names anyway. Every
+    # other combination skips verify and the run carries whatever
+    # failure caused it. `adopt` stays in needs for the byte-identical
+    # env sources, not for gating.
     needs: [prepare, adopt, build]
     if: >-
       ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
           needs.prepare.result == 'success' &&
-          (needs.build.result == 'success' ||
-           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&
-            needs.adopt.outputs.adopted == 'true')) }}
+          needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ecr-release
@@ -1287,9 +1307,26 @@ jobs:
   # main), never from the file's own claims, and the content re-verifies
   # against the gate's proven tree plus the live registry digests before a
   # single tag is written.
+  #
+  # ADOPTED-PATH VERIFY (folded 2026-08-05): when the decide step ends
+  # with adopted=true the whole build matrix skips, so this job finishes
+  # the run's verify leg in place instead of handing it to the verify
+  # job's fresh runner (~11s scheduling gap plus ~10s of duplicated
+  # checkout/OIDC/node setup, measured on run 30992431627). The steps
+  # after decide are byte-identical copies of the verify job's — the
+  # contract test pins them identical, the same idiom that keeps warm's
+  # and build's cache steps aligned — and the verify JOB still owns the
+  # full-build path. Every such step is conditional on adopted=true and
+  # deliberately NOT absorbed: any failure there is post-commit by
+  # construction (adopted=true means every alias re-verified), so it must
+  # redden the run, and a RERUN resumes idempotently — decide re-confirms
+  # the existing aliases and the verify steps run again. This adds no
+  # credential reach: the job already held the release role for aliasing
+  # and actions:read for the artifact listing; the supply-set write uses
+  # only ECR reads the role already had.
   adopt:
     needs: [prepare, test]
-    if: ${{ !inputs.promote && github.event_name == 'push' }}
+    if: ${{ !inputs.promote && github.event_name == 'push' && needs.prepare.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ecr-release
@@ -1311,6 +1348,9 @@ jobs:
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
       PROD_TAG: ${{ needs.prepare.outputs.tag }}
       PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}
+      # Same value as PROD_TAG, under the name the byte-identical
+      # verify-half scripts read (the verify job calls it TAG).
+      TAG: ${{ needs.prepare.outputs.tag }}
 
     # Every setup step is individually absorbed (continue-on-error at STEP
     # level): a checkout, python, OIDC, or ECR login failure happens before
@@ -1548,6 +1588,120 @@ jobs:
             echo "All five images aliased to \`$PROD_TAG\` with zero rebuild."
           } >> "$GITHUB_STEP_SUMMARY"
           finish true "aliased $PROD_TAG onto the speculative digests of tree $tree"
+
+      # ----- Adopted-path verify half. Byte-identical to the verify
+      # job's steps (contract-test-pinned); see the job comment above
+      # for the fold rationale and failure semantics. -----
+      - uses: actions/setup-node@v4
+        if: steps.decide.outputs.adopted == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and hash the exact web deployment artifact
+        if: steps.decide.outputs.adopted == 'true'
+        id: web-artifact
+        working-directory: web
+        env:
+          VITE_API_BASE: ""
+          VITE_MOCK: "0"
+          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
+          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
+          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
+            "$LEAF_SOURCE_SHA" > dist/health.json
+          artifact_sha256=$(python ../scripts/platform_release_manifest.py \
+            digest-web-dist --root dist)
+          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Write the immutable five-service staging supply set
+        if: steps.decide.outputs.adopted == 'true'
+        env:
+          ADOPTED: ${{ steps.decide.outputs.adopted }}
+          ADOPTED_BUILT_FROM: ${{ steps.decide.outputs.built_from }}
+          ADOPTED_PR_NUMBER: ${{ steps.decide.outputs.pr_number }}
+          ADOPTED_SPEC_RUN_ID: ${{ steps.decide.outputs.spec_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
+            echo "::error::Refusing to verify an unapproved immutable tag: $TAG"
+            exit 1
+          fi
+          declare -A digests
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            digest="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$TAG" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text)"
+            if [[ -z "$digest" || "$digest" == "None" ]]; then
+              echo "::error::$repository does not contain $TAG"
+              exit 1
+            fi
+            digests["$image"]="$digest"
+          done
+          # Adopted digests get the v2 schema: same deployable fields, plus
+          # the tree identity and the speculative run that built them. The
+          # generator fails closed on a partial provenance set.
+          SPECULATIVE_ARGS=()
+          if [ "$ADOPTED" = "true" ]; then
+            SPECULATIVE_ARGS+=(
+              --source-tree "$(git rev-parse 'HEAD^{tree}')"
+              --speculative-built-from "$ADOPTED_BUILT_FROM"
+              --speculative-pr-number "$ADOPTED_PR_NUMBER"
+              --speculative-run-id "$ADOPTED_SPEC_RUN_ID"
+            )
+          fi
+          python scripts/platform_release_manifest.py generate \
+            --source-revision "${{ needs.prepare.outputs.source_sha }}" \
+            --build-tag "$TAG" \
+            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
+            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
+            --web-artifact-sha256 "${{ steps.web-artifact.outputs.sha256 }}" \
+            --image "app=${digests[app]}" \
+            --image "broker=${digests[broker]}" \
+            --image "canonical-worker=${digests[canonical-worker]}" \
+            --image "harness=${digests[harness]}" \
+            --image "web=${digests[web]}" \
+            ${SPECULATIVE_ARGS[@]+"${SPECULATIVE_ARGS[@]}"} \
+            --output "$RUNNER_TEMP/staging-supply-set.json"
+          {
+            echo "## Five-service staging supply set verified"
+            echo ""
+            echo "Source: \`${{ needs.prepare.outputs.source_sha }}\`"
+            echo "Tag: \`$TAG\`"
+            if [ "$ADOPTED" = "true" ]; then
+              echo "Adopted from speculative run \`$ADOPTED_SPEC_RUN_ID\` (PR #$ADOPTED_PR_NUMBER) with zero rebuild."
+            fi
+            for image in app broker canonical-worker harness web; do
+              echo "- \`leaf-platform-$image@${digests[$image]}\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable staging supply-set manifest
+        if: steps.decide.outputs.adopted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-supply-set.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload deterministic web deployment artifact
+        if: steps.decide.outputs.adopted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 30
 
   handoff:
     needs: [prepare]
