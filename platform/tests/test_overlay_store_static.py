@@ -10,6 +10,7 @@ Run:  cd platform && python -m pytest tests/test_overlay_store_static.py -q
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -264,3 +265,46 @@ def test_no_transaction_reaches_for_a_second_connection():
         segment = src.split(fn, 1)[1].split("\ndef ", 1)[0]
         assert "document(current[" not in segment, (
             f"{fn} calls the connection-opening document() inside a transaction")
+
+
+def test_row_conversion_stringifies_uuids_like_the_fakes_do():
+    """The gap that let a 500 reach staging (PR #441).
+
+    psycopg returns uuid columns as uuid.UUID objects; every consumer
+    JSON-serializes what the store returns (the decide route puts proposal_id
+    into an SSE envelope AND its own response body). A UUID raises "Object of
+    type UUID is not JSON serializable" — approve 500'd on real Postgres while
+    every unit test passed, because the fake stores return strings.
+
+    Asserted against the real function with a row shaped like psycopg's, so
+    this fails if the coercion is removed — not against a copy of the rule.
+    """
+    import importlib.util
+    import uuid as _uuid
+    from pathlib import Path as _Path
+
+    spec = importlib.util.spec_from_file_location(
+        "leaf_platform_store_probe", _Path(__file__).resolve().parent.parent / "overlay_store.py")
+    # The module imports `from . import db`, so load it as part of its package.
+    import sys
+    pkg_dir = _Path(__file__).resolve().parent.parent
+    if "leaf_platform_probe" not in sys.modules:
+        pkg_spec = importlib.util.spec_from_file_location(
+            "leaf_platform_probe", pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)])
+        pkg = importlib.util.module_from_spec(pkg_spec)
+        sys.modules["leaf_platform_probe"] = pkg
+        pkg_spec.loader.exec_module(pkg)
+    store = importlib.import_module("leaf_platform_probe.overlay_store")
+
+    pid, tid = _uuid.uuid4(), _uuid.uuid4()
+    row = {"proposal_id": pid, "tenant_id": tid, "session_id": "s-1",
+           "state": "approved", "revision": 2, "tokens": {"color.accent": "#123456"}}
+    out = store._row_to_dict(row)
+
+    assert out["proposal_id"] == str(pid) and isinstance(out["proposal_id"], str)
+    assert out["tenant_id"] == str(tid) and isinstance(out["tenant_id"], str)
+    assert out["state"] == "approved"          # non-uuid values pass through
+    assert out["revision"] == 2
+    assert out["tokens"] == {"color.accent": "#123456"}
+    json.dumps(out)                            # the operation that used to raise

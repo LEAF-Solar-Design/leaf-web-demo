@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import uuid
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import db  # noqa: F401  (package-relative, matches store.py's idiom)
@@ -52,9 +53,25 @@ _PROPOSAL_COLS = (
 
 
 def _row_to_dict(row: Any) -> Optional[Dict[str, Any]]:
+    """One row as a plain dict, with identifiers as STRINGS.
+
+    psycopg returns uuid columns as uuid.UUID objects, and every consumer of
+    this store JSON-serializes what it gets: the decide route puts
+    proposal_id into an SSE envelope (json.dumps in append_event) and into its
+    own response body. A UUID kills both with "Object of type UUID is not
+    JSON serializable" — a 500 on approve, found only by driving real staging
+    (PR #441). Every unit test missed it because the fake stores return
+    strings, which is exactly the shape this coercion now guarantees for the
+    real one.
+
+    Coerced here rather than at each call site because the boundary is where
+    the store stops owning the type: one conversion covers approve, deny,
+    revert, the reads, and anything added later.
+    """
     if row is None:
         return None
-    return dict(row)
+    return {key: (str(value) if isinstance(value, uuid.UUID) else value)
+            for key, value in dict(row).items()}
 
 
 # --------------------------------------------------------------------------- #
