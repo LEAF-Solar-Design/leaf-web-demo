@@ -227,7 +227,7 @@ HINT_SCRIPT = """\
           fi
           echo "expected=$expected" >> "$GITHUB_OUTPUT"
           if [[ "$expected" == "true" ]]; then
-            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+            echo "::notice::a same-repo gate proof already names tree $tree; warm legs with a fresh cache chain exit early (the gate's own probe still verifies the proof before any shard skip)"
           else
             echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
           fi
@@ -538,11 +538,20 @@ def main() -> None:
         # The condition is pinned by parsed VALUE: `if: true # if: matrix...`
         # keeps the literal while presenting the key and checking out the
         # solver on every matrix entry (sol-critic round 8, finding 2).
+        # In warm the pair is additionally gated on the chain-keeper skip
+        # (2026-08-05): a leg that exits early never fetches the deploy
+        # key — the same posture speculate's existence-skip holds.
+        expected_solver_condition = (
+            "matrix.image == 'canonical-worker' && "
+            "steps.chain.outputs.skip != 'true'"
+            if lane == "warm"
+            else "matrix.image == 'canonical-worker'"
+        )
         for step in (require_step, checkout_step):
             conditions = [
                 _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
             ]
-            assert conditions == ["matrix.image == 'canonical-worker'"], (
+            assert conditions == [expected_solver_condition], (
                 lane, conditions)
         # The presence check carries the key as its own step env and nothing
         # more; the solver checkout is the pinned repository with the key as
@@ -717,40 +726,41 @@ def main() -> None:
     # counted here.
     assert text.count("if: ${{ !inputs.promote }}") == 0
     assert text.count("if: ${{ !inputs.promote && !inputs.speculative }}") == 0
+    # TWO carriers of this exact guard: the test job and, since the
+    # 2026-08-05 chain-keeper change, the warm job — warm always schedules
+    # and each leg decides IN-JOB whether to exit early (prepare holds no
+    # AWS credential, so only a warm leg can probe ECR for the predecessor
+    # tag). The docs-gate clause stays polar CLOSED on purpose: == 'true'
+    # skips warm on an empty build output, because on a docs-only push warm
+    # would otherwise burn five runners on a tree nothing ships.
     assert text.count(
         "if: ${{ !inputs.promote && !inputs.speculative && "
         "needs.prepare.outputs.build == 'true' }}"
-    ) == 1
-    # Warm's guard, whole and at the job's own if: key. Warm is also skipped
-    # when a same-repo gate proof already names this exact tree: the gate leg
-    # then reuses the verdict in ~30s, the build job starts before any warm
-    # leg could publish its cache, and warm burns five runners for nothing
-    # (measured: zero of nine warm legs contributed across the first two
-    # reuse-path runs, 30978164812 and 30983842725). `!= 'true'` keeps the
-    # hint fail-open: an empty, missing, or failed hint output runs warm.
-    # The docs-gate check is polar OPPOSITE on purpose: == 'true' fails
-    # CLOSED (an empty build output skips warm), because on a docs-only
-    # push warm would otherwise burn five runners on a tree nothing ships.
+    ) == 2
     warm_job_header = warm_block[: warm_block.index("    steps:")]
     warm_guards = [
         _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
     ]
     assert warm_guards == [
         "${{ !inputs.promote && !inputs.speculative && "
-        "needs.prepare.outputs.build == 'true' && "
-        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+        "needs.prepare.outputs.build == 'true' }}"
     ], warm_guards
     # The hint is an ECONOMIC signal with a deliberately narrow blast
-    # radius: it may gate warm and NOTHING else. Skipping the GATE stays the
-    # sole business of the called gate's verified reuse probe and fan-in
-    # re-verification, and the build job's own tree binding is what refuses
-    # an unproven push — a hint defect must never widen past a colder
-    # build. Exactly two occurrences: the prepare output that mints it and
-    # the warm guard that consumes it.
+    # radius: it may feed warm's per-leg chain-keeper decision and NOTHING
+    # else. Skipping the GATE stays the sole business of the called gate's
+    # verified reuse probe and fan-in re-verification, and the build job's
+    # own tree binding is what refuses an unproven push — a hint defect
+    # must never widen past a colder build. Exactly two occurrences: the
+    # prepare output that mints it and the chain step env that consumes it.
+    # The warm job HEADER no longer reads it: a header-level skip cannot
+    # see ECR, and skipping on the hint alone starved the cache chain on
+    # every adopted merge (nothing published a buildcache tag across the
+    # four adopted merges through run 31006482947).
     assert text.count("gate_reuse_expected") == 2
     prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
     assert prepare_block.count("gate_reuse_expected") == 1
-    assert warm_job_header.count("gate_reuse_expected") == 1
+    assert warm_job_header.count("gate_reuse_expected") == 0
+    assert warm_block.count("gate_reuse_expected") == 1
     # BOUND, not merely counted (sol-critic round 1 on PR #449): a
     # hard-coded `gate_reuse_expected: true` in prepare's outputs kept every
     # assertion above green while skipping warm on every non-promote push.
@@ -1054,6 +1064,63 @@ def main() -> None:
         _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "push"
     ] == ["false"]
 
+    # The chain-keeper step (2026-08-05): warm always schedules; each leg
+    # exits early ONLY when prepare's reuse hint fired AND that image's
+    # exact predecessor buildcache tag exists in its own cache repository.
+    # Pinned: the decide step is unconditional (a foreign if: could leave
+    # a stale/empty skip output gating the build steps), fail-open (set
+    # +e, skip="false" initialiser, exit 0 — every probe failure warms),
+    # reads the hint through its own step env, and its skip output gates
+    # warm's OWN later steps and nothing else — a chain defect can cost a
+    # redundant warm or a colder gated build, never redden a run or reach
+    # another job.
+    chain_steps = [
+        s for s in warm_steps
+        if s.startswith("name: Decide whether the cache chain needs this warm build")
+    ]
+    assert len(chain_steps) == 1, "warm holds exactly one chain-keeper step"
+    chain_step = chain_steps[0]
+    assert [
+        _value_of(l) for l in chain_step.splitlines() if _key_of(l) == "id"
+    ] == ["chain"]
+    assert "if" not in _keys_in(chain_step), (
+        "the chain decide step itself must always run")
+    assert [
+        _value_of(l) for l in chain_step.splitlines()
+        if _key_of(l) == "GATE_REUSE_EXPECTED"
+    ] == ["${{ needs.prepare.outputs.gate_reuse_expected }}"]
+    chain_code = "\n".join(
+        _comment_cut(l) for l in chain_step.splitlines()
+        if not l.strip().startswith("#")
+    )
+    assert "set +e" in chain_code
+    assert 'skip="false"' in chain_code
+    assert '--image-ids "imageTag=$PREVIOUS_CACHE_TAG"' in chain_code
+    assert '"$GATE_REUSE_EXPECTED" == "true"' in chain_code
+    assert 'echo "skip=$skip"' in chain_code
+    assert chain_code.rstrip().endswith("exit 0"), (
+        "the chain decide step must degrade internally, never redden warm")
+    # Every warm step after the decide carries exactly the skip condition
+    # (the solver pair additionally carries the canonical-worker arm,
+    # pinned with build's above), and the output reaches nothing outside
+    # the warm job.
+    chain_skip = "steps.chain.outputs.skip != 'true'"
+    for step_prefix in (
+        "name: Set up Docker Buildx",
+        "name: Select immutable cache references",
+    ):
+        gated = [s for s in warm_steps if s.startswith(step_prefix)]
+        assert len(gated) == 1, step_prefix
+        assert [
+            _value_of(l) for l in gated[0].splitlines() if _key_of(l) == "if"
+        ] == [chain_skip], step_prefix
+    assert [
+        _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "if"
+    ] == [chain_skip]
+    assert text.count("steps.chain.") == warm_block.count("steps.chain."), (
+        "the chain-keeper's skip output must gate warm's own steps and "
+        "nothing else")
+
     # A warmed layer only matches the gated build if both builds hash the
     # same inputs. Any drift between the two steps' context, Dockerfile,
     # build-args, or extra build-contexts makes warm burn runners while the
@@ -1155,8 +1222,13 @@ def main() -> None:
         assert assignments == [
             'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
         ], lane
+        # build: the current-warm probe, the predecessor probe, the
+        # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
+        # batch-get-image, never an ECR listing — the roles are not granted
+        # one), and the existence check before export. warm adds the
+        # chain-keeper decide step's predecessor probe.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == 3, lane
+        assert len(probes) == {"warm": 5, "build": 4}[lane], (lane, probes)
         for probe in probes:
             assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
                 lane, probe)
@@ -1176,10 +1248,13 @@ def main() -> None:
         'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
     ]
     speculate_probes = [l for l in speculate_live if "--repository-name" in l]
-    assert len(speculate_probes) == 2
+    # One release-repository existence probe; the predecessor import probe
+    # and the nearest-ancestor fallback batch probe both read the cache
+    # repository.
+    assert len(speculate_probes) == 3
     assert sorted(
         '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
-    ) == [False, True], speculate_probes
+    ) == [False, True, True], speculate_probes
     tag_values = [
         _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
     ]
@@ -1814,10 +1889,14 @@ def check_docs_noop_filter(text: str) -> None:
         "${{ !inputs.promote && !inputs.speculative && "
         "needs.prepare.outputs.build == 'true' }}"
     )
+    # Since the 2026-08-05 chain-keeper change warm carries the same guard
+    # as test: the gate-reuse skip moved into warm's per-leg decide step,
+    # which can probe ECR for the predecessor buildcache tag before
+    # skipping (a header-level skip cannot, and starved the cache chain on
+    # adopted merges).
     assert jobs["warm"]["if"] == (
         "${{ !inputs.promote && !inputs.speculative && "
-        "needs.prepare.outputs.build == 'true' && "
-        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+        "needs.prepare.outputs.build == 'true' }}"
     )
     assert jobs["adopt"]["if"] == (
         "${{ !inputs.promote && github.event_name == 'push' && "

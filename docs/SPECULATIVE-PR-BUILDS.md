@@ -42,7 +42,13 @@ not minutes.
    earlier run built, and a crashed run could leave a mixed-bake set. So
    only a rerun of the SAME preview skips by existence; a new preview of an
    identical tree rebuilds under its own tag. Cache is import-only (the
-   merged-onto main tip's `buildcache-*`); nothing is exported.
+   merged-onto main tip's `buildcache-*`, else the nearest first-parent
+   ancestor's tag still published — cache keys are commit-stable since
+   #458, so a few-commits-old cache still hits the heavy layers); nothing
+   is exported. The supply side of that chain is the warm job's per-leg
+   chain keeper: on merges where the gated build would be skipped by
+   adoption, warm republishes the cache unless the exact predecessor tag
+   already exists.
 3. **Mint the invariant.** `speculate-manifest` re-reads all five digests
    from the registry and uploads a `spec-supply-set-<tree>` artifact ONLY
    when every one is present. This is the partial-push invariant redefined
