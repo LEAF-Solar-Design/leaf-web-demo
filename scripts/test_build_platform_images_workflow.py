@@ -66,7 +66,12 @@ def main() -> None:
     # keeps an untested IMAGE out is the assertion below that warm's build step
     # sets push:false and publishes no tag. Raising this number again should
     # mean a new job that provably needs registry access, not a convenience.
-    assert text.count("id-token: write") == 3
+    # Counted by parsed key and value, not by exact text: `id-token : write`
+    # or a quoted key grants OIDC while leaving a literal count at three,
+    # and a comment mentioning the grant inflates it (sol-critic round 8,
+    # findings 3 and 6). The structural line list is built below, so this
+    # count is taken once it exists.
+    oidc_grants = None  # set immediately after the lexical gate
 
     # ------------------------------------------------------------------ #
     # Lexical gate. This contract is enforced by TEXT extraction (stdlib
@@ -99,14 +104,26 @@ def main() -> None:
         # as YAML syntax, while an anchor placed OUTSIDE them stays visible.
         # The double-quote pattern honours backslash escapes so an escaped
         # quote inside a legitimate scalar cannot end the mask early
-        # (sol-critic round 7 false positive).
-        masked = re.sub(r"\$\{\{.*?\}\}", "", line)
-        masked = re.sub(r"'(?:[^'])*'", "''", masked)
-        masked = re.sub(r'"(?:\\.|[^"\\])*"', '""', masked)
+        # (sol-critic round 7 false positive). Masking is LENGTH-PRESERVING
+        # so offsets still index the original line.
+        def fill(match: "re.Match[str]") -> str:
+            return "x" * (match.end() - match.start())
+
+        masked = re.sub(r"\$\{\{.*?\}\}", fill, line)
+        masked = re.sub(r"'(?:[^'])*'", fill, masked)
+        masked = re.sub(r'"(?:\\.|[^"\\])*"', fill, masked)
         return masked
 
+    def _comment_cut(line: str) -> str:
+        # The line with any trailing comment removed, quotes intact. A `#`
+        # inside a quoted scalar or an expression is not a comment.
+        cut = _mask_opaque(line).find("#")
+        return line if cut < 0 else line[:cut]
+
     def _uncommented(line: str) -> str:
-        return _mask_opaque(line).split("#", 1)[0]
+        # Comment-free AND masked: for scans that must not see YAML
+        # indicator characters that are really scalar text.
+        return _mask_opaque(_comment_cut(line))
 
     # A block scalar header may carry an explicit indentation indicator and
     # a chomping indicator in EITHER order (|2-, >-2, |+, ...), and a
@@ -137,19 +154,35 @@ def main() -> None:
         if block_header.search(_uncommented(line)):
             block_scalar_indent = indent
 
+    # &, *, and ! are YAML indicators ONLY at the start of a node. Inside a
+    # plain scalar they are ordinary text, so `run: true && echo ok` and
+    # `name: Build & verify` are perfectly legal and must not redden the
+    # gate (sol-critic round 8 false positives). The scan therefore looks
+    # at node-START positions only: after `key:`, after `- `, after a flow
+    # delimiter, or the first character of a continuation line.
+    node_start = re.compile(r"(?:^\s*|:\s|-\s|[\[{,]\s*)([&*!])")
     for line in structural:
         masked = _uncommented(line)
-        for banned in ("&", "*", "!", "<<"):
-            assert banned not in masked, (
-                "YAML anchor/alias/tag/merge syntax is banned in structural "
-                "positions: %r in %r" % (banned, line))
+        found = node_start.search(masked)
+        assert not found, (
+            "YAML anchor/alias/tag at a node start is banned in this "
+            "workflow: %r in %r" % (found.group(1) if found else "", line))
+        assert "<<" not in masked, (
+            "YAML merge keys are banned in this workflow: %r" % line)
+        # Explicit-key syntax (`? key`) is another way to spell a mapping
+        # key that no literal key scan would see.
+        assert not re.match(r"^\s*\?\s", masked), (
+            "explicit-key syntax is banned in this workflow: %r" % line)
 
     # Keys may be quoted (`"if":` parses as `if`), so every key-level check
     # in this file reads normalised keys rather than raw text: a quoted key
     # otherwise slips past a literal scan while GitHub honours it
     # (sol-critic round 7, findings 2 and 3).
     def _key_of(line: str):
-        match = re.match(r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:(?:\s|$)', line)
+        match = re.match(
+            r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:(?:\s|$)',
+            _comment_cut(line),
+        )
         if not match:
             return None
         key = match.group(1).strip()
@@ -159,6 +192,39 @@ def main() -> None:
 
     def _keys_in(block: str):
         return [k for k in (_key_of(l) for l in block.splitlines()) if k]
+
+    def _value_of(line: str):
+        # The comment-stripped value text after `key:`, unquoted. Used where
+        # the VALUE carries the invariant (a step condition, a permission
+        # grant): `if: true # if: matrix.image == ...` presents the real key
+        # with a neutered value while a substring scan stays green
+        # (sol-critic round 8, finding 2).
+        raw = _comment_cut(line)
+        match = re.match(r'^\s*(?:-\s+)?(?:"(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:\s*(.*)$', raw)
+        if not match:
+            return None
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+
+    # A YAML escape inside a quoted key decodes to a different key than the
+    # literal text shows (`"\u0069f"` is `if`), which no text-level
+    # normalisation can follow. Keys in this workflow are plain (sol-critic
+    # round 8, finding 5).
+    for line in structural:
+        raw_key = re.match(r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\')\s*:', line)
+        assert not raw_key or "\\" not in raw_key.group(1), (
+            "escape sequences in a mapping key are banned: %r" % line)
+
+    # THREE jobs hold the ECR push credential: warm, build, verify. See the
+    # note above the deferred assignment for why this is parsed, not
+    # text-matched.
+    oidc_grants = [
+        l for l in structural
+        if _key_of(l) == "id-token" and _value_of(l) == "write"
+    ]
+    assert len(oidc_grants) == 3, oidc_grants
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
@@ -213,8 +279,15 @@ def main() -> None:
         assert len(checkout_steps) == 1, lane
         require_step = require_steps[0]
         checkout_step = checkout_steps[0]
-        assert "if: matrix.image == 'canonical-worker'" in require_step, lane
-        assert "if: matrix.image == 'canonical-worker'" in checkout_step, lane
+        # The condition is pinned by parsed VALUE: `if: true # if: matrix...`
+        # keeps the literal while presenting the key and checking out the
+        # solver on every matrix entry (sol-critic round 8, finding 2).
+        for step in (require_step, checkout_step):
+            conditions = [
+                _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
+            ]
+            assert conditions == ["matrix.image == 'canonical-worker'"], (
+                lane, conditions)
         # The presence check carries the key as its own step env and nothing
         # more; the solver checkout is the pinned repository with the key as
         # its ssh-key input and no persisted credentials.
@@ -473,11 +546,30 @@ def main() -> None:
             "warm and build must carry a byte-identical %s input, or the "
             "warmed cache never matches the gated build" % key)
 
-    # And no publish path outside that step either.
-    assert "docker push" not in warm_block
-    assert "aws ecr put-image" not in warm_block
+    # And no publish path outside that step either. This is an ALLOWLIST,
+    # not a command denylist: a plain `docker buildx build --push ...` in a
+    # newly added run step published an image before the gate while a
+    # denylist of known commands stayed green (sol-critic round 8, finding
+    # 1). Warm may only use these actions, and its shell may not mention a
+    # registry-writing tool at all.
+    allowed_uses = {
+        "actions/checkout@v4",
+        "docker/setup-buildx-action@v3",
+        "aws-actions/configure-aws-credentials@v6.1.0",
+        "aws-actions/amazon-ecr-login@v2",
+        "docker/build-push-action@v6",
+    }
+    warm_uses = [
+        _value_of(l) for l in warm_block.splitlines() if _key_of(l) == "uses"
+    ]
+    assert set(warm_uses) <= allowed_uses, sorted(set(warm_uses) - allowed_uses)
+    for token in ("docker build", "docker buildx", "docker push", "--push",
+                  "aws ecr put-image", "aws ecr batch-import", "crane ", "skopeo "):
+        assert token not in warm_block, (
+            "the warm lane must not carry a registry-writing command: %r" % token)
     assert "push: true" not in warm_block
-    assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
+    assert "tags" not in _keys_in(warm_block), (
+        "a cache warmer publishes no image tag")
 
     # The gate edge, pinned as an EFFECTIVE job key at its exact
     # indentation. A bare substring search was satisfied by
@@ -512,10 +604,15 @@ def main() -> None:
         # assertion above still passes (sol-critic round 7, finding 4). The
         # only assignments allowed are the empty initialiser and the pinned
         # export line.
-        assignments = [l for l in live if re.search(r"(?m)^\s*cache_to=", l)]
-        assert len(assignments) == 2, (lane, assignments)
-        assert assignments[0].strip() == 'cache_to=""', lane
-        assert assignments[1] == exports[0], lane
+        # Every mention of the variable is accounted for, not just lines
+        # that begin with an assignment: `unset cache_to`, `export
+        # cache_to=...`, and `printf -v cache_to ...` all rewrite it after
+        # the pinned line (sol-critic round 8, finding 4).
+        mentions = [l for l in live if "cache_to" in l]
+        assert len(mentions) == 3, (lane, mentions)
+        assert mentions[0].strip() == 'cache_to=""', lane
+        assert mentions[1] == exports[0], lane
+        assert mentions[2].strip() == 'echo "to=$cache_to" >> "$GITHUB_OUTPUT"', lane
 
     # ------------------------------------------------------------------ #
     # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
