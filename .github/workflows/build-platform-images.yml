@@ -1729,6 +1729,12 @@ jobs:
           persist-credentials: false
 
       - name: Consume the release manifest and accepted staging execution receipt
+        env:
+          # The job-level GH_TOKEN is the cross-repo PAT for the
+          # acceptance-repo API reads. The same-repo main fetch needs only
+          # a same-repo read, so it gets the workflow's own token under a
+          # separate name and the PAT never enters the git header.
+          MAIN_FETCH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           RELEASE_WORKFLOW_PATH=.github/workflows/build-platform-images.yml
@@ -1799,7 +1805,12 @@ jobs:
             echo "::error::The accepted staging artifact must contain exactly one JSON receipt."
             exit 1
           }
-          git fetch --no-tags origin main
+          # The checkout persisted no credentials and the repository is
+          # private, so a bare fetch dies on auth. The main fetch carries
+          # its own scoped, non-persisted header (the decide/merge-preview
+          # fetch idiom) on the workflow's own token.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:$MAIN_FETCH_TOKEN" | base64 -w0)" \
+            fetch --no-tags origin main
           python scripts/platform_release_manifest.py verify-staging \
             --manifest "$RUNNER_TEMP/release/staging-supply-set.json" \
             --receipt "${receipts[0]}" \
