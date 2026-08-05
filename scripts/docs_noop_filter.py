@@ -17,6 +17,12 @@ Nested markdown IS an image input: server/README.md lands in the app and
 broker images byte-for-byte, so it builds. Never grow this set into a
 per-service dependency closure; the contract is deploy-nothing-or-
 everything.
+
+The caller must compute the file list with rename detection DISABLED
+(git diff --no-renames): a detected rename reports only its destination,
+so a file moved out of a build-input tree (server/app.py -> docs/app.py)
+would classify here as docs-only. With --no-renames both sides arrive as
+delete+add, and either non-docs side builds.
 """
 
 import sys

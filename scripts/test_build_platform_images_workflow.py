@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Static regression checks for the production image build workflow."""
+"""Regression checks for the production image build workflow.
+
+Mostly static text invariants, plus two stronger bindings for the
+docs-noop gate: its structure is asserted against the PARSED workflow
+YAML (a guard that drifts into a comment stops counting), and its
+decide script is extracted from that YAML and EXECUTED against a real
+git history, including the rename vector that rename detection would
+disguise as a docs-only diff.
+"""
 
 from pathlib import Path
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import yaml  # gate venv: scripts/requirements-ci.txt; runner python: preinstalled
 
 
 WORKFLOW = (
@@ -327,18 +342,57 @@ def check_docs_noop_filter(text: str) -> None:
     assert "paths-ignore" not in text, (
         "native path filtering is fail-closed on truncated diffs; the "
         "noop job owns the docs-only decision")
-    on_at = text.index("\non:\n")
-    push_block = text[on_at:text.index("  workflow_dispatch:", on_at)]
-    assert "paths:" not in push_block
 
-    # The gate job gates the whole graph through prepare, and only an
-    # explicit build=true opens it (a missing/skipped output stays shut
-    # for the build path but can never push an image: everything needs
-    # prepare).
-    noop_block = text.split("\n  noop:\n", 1)[1].split("\n  prepare:\n", 1)[0]
-    prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
-    assert "needs: noop" in prepare_block
-    assert "if: needs.noop.outputs.build == 'true'" in prepare_block
+    # Structural invariants read from the PARSED workflow, so a guard that
+    # drifts into a comment or another step key stops satisfying them.
+    wf = yaml.safe_load(text)
+    on_block = wf.get("on") or wf.get(True)  # YAML 1.1 reads bare `on` as a bool
+    assert on_block["push"] == {"branches": ["main"]}, (
+        "the push trigger must carry branches only — no native path filter")
+
+    jobs = wf["jobs"]
+    noop_job = jobs["noop"]
+    assert jobs["prepare"]["needs"] == "noop"
+    assert jobs["prepare"]["if"] == "needs.noop.outputs.build == 'true'"
+    assert noop_job["outputs"]["build"] == "${{ steps.decide.outputs.build }}"
+
+    # No always() anywhere downstream of the gate: it would run a train job
+    # even after the noop skip (or a failed upstream) shut its needs off.
+    # test-gate.yml legitimately uses always() for its fan-in; when noop
+    # skips, that called workflow never starts, so the scope is exactly the
+    # build workflow and the staging relay.
+    relay_text = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+        encoding="utf-8"
+    )
+    for label, parsed in (
+        ("build-platform-images.yml", wf),
+        ("dispatch-staging-deploys.yml", yaml.safe_load(relay_text)),
+    ):
+        for job_name, job in parsed["jobs"].items():
+            conditions = [str(job.get("if", ""))]
+            conditions += [str(s.get("if", "")) for s in job.get("steps", [])]
+            for condition in conditions:
+                assert "always(" not in condition, (
+                    f"{label} job {job_name}: always() bypasses the "
+                    "docs-noop gate and failure propagation"
+                )
+
+    # The decide step, extracted from the parsed YAML. Every assertion from
+    # here down binds to the text bash actually runs.
+    decide = next(s for s in noop_job["steps"] if s.get("id") == "decide")
+    decide_src = decide["run"]
+    assert decide["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    assert decide["env"]["BEFORE_SHA"] == "${{ github.event.before }}"
+    # Match the full command, not the bare flag: the script's own comment
+    # mentions --no-renames, so a flag-only substring would survive the
+    # flag's removal from the command. The rehearsal below catches that
+    # drift too, by executing the rename vector.
+    assert "git diff --no-renames --name-only" in decide_src, (
+        "rename detection reports only a rename's destination, so a file "
+        "moved out of a build-input tree would classify as docs-only; the "
+        "decide diff must disable it"
+    )
+    assert "scripts/docs_noop_filter.py" in decide_src
 
     # Fail-open arms: every abnormal path must land on build=true before
     # the docs-only verdict is even consulted.
@@ -351,18 +405,30 @@ def check_docs_noop_filter(text: str) -> None:
         "|| VERDICT=build",
         '[ "$VERDICT" = "skip" ] || build',
     ):
-        assert arm in noop_block, f"missing fail-open arm: {arm}"
-    assert "scripts/docs_noop_filter.py" in noop_block
+        assert arm in decide_src, f"missing fail-open arm: {arm}"
 
     # The relay tells a deliberate no-op from a broken run by this marker;
-    # its name must mirror the supply-set naming (sha + attempt).
+    # its name must mirror the supply-set naming (sha + attempt), and it is
+    # published only on an actual skip.
+    marker_uploads = [
+        s
+        for s in noop_job["steps"]
+        if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    assert len(marker_uploads) == 1
     assert (
-        "name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}"
-    ) in noop_block
+        marker_uploads[0]["with"]["name"]
+        == "docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}"
+    )
+    assert marker_uploads[0]["if"] == "steps.decide.outputs.build == 'false'"
+
+    # Both handoff artifact listings stay pinned above GitHub's default
+    # page size (30): today's builds publish ~11 artifacts, and an unpinned
+    # listing would silently drop the newest artifact past a growth spurt.
+    handoff_runs = "\n".join(s.get("run", "") for s in jobs["handoff"]["steps"])
+    assert handoff_runs.count("artifacts?per_page=100") == 2
 
     # Decision vectors run against the SHIPPED module.
-    import sys
-
     scripts_dir = str(Path(__file__).resolve().parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
@@ -390,9 +456,7 @@ def check_docs_noop_filter(text: str) -> None:
     assert dnf.decide(['"docs/\\303\\251.md"']) == "build"
 
     # The relay must skip cleanly on the marker and stay loud otherwise.
-    relay = (
-        WORKFLOW.parent / "dispatch-staging-deploys.yml"
-    ).read_text(encoding="utf-8")
+    relay = relay_text
     assert 'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"' in relay
     assert relay.count('echo "deploy=false"') == 1
     assert relay.count('echo "deploy=true"') == 1
@@ -401,6 +465,147 @@ def check_docs_noop_filter(text: str) -> None:
         "successful build without a supply set is a partial run")
     dispatch_at = relay.index("Dispatch the web and app staging deploys")
     assert "steps.manifest.outputs.deploy == 'true'" in relay[dispatch_at:]
+
+    # Finally, run the extracted decide script for real.
+    _rehearse_decide_script(decide_src, dnf)
+
+
+def _rehearse_decide_script(decide_src: str, dnf) -> None:
+    """Execute the workflow's ACTUAL decide script (extracted from the
+    parsed YAML, never re-typed here) against a real git history.
+
+    A docs-only push must skip; a code push must build; and the rename
+    vector server/app.py -> docs/app.py — which rename detection would
+    disguise as a docs-only diff — must build. The abnormal arms
+    (foreign event, branch creation, unfetchable before-sha) must fail
+    open to building.
+    """
+    bash = shutil.which("bash")
+    git = shutil.which("git")
+    assert bash and git, "the decide rehearsal needs bash and git on PATH"
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+
+        def run(cmd, cwd, env=None):
+            proc = subprocess.run(
+                cmd, cwd=str(cwd), env=env, text=True, capture_output=True
+            )
+            assert proc.returncode == 0, (
+                f"{cmd} rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+            )
+            return proc
+
+        # A local origin the script's before-sha fetch can really hit.
+        origin = tmp / "origin"
+        origin.mkdir()
+        run([git, "init", "-q", "-b", "main"], origin)
+        for key, value in (
+            ("user.name", "rehearsal"),
+            ("user.email", "rehearsal@invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+            ("uploadpack.allowAnySHA1InWant", "true"),
+        ):
+            run([git, "config", key, value], origin)
+
+        def commit(message):
+            run([git, "add", "-A"], origin)
+            run([git, "commit", "-q", "--no-verify", "-m", message], origin)
+            return run([git, "rev-parse", "HEAD"], origin).stdout.strip()
+
+        (origin / "server").mkdir()
+        (origin / "docs").mkdir()
+        (origin / "server" / "app.py").write_text("print('v1')\n", encoding="utf-8")
+        (origin / "README.md").write_text("v1\n", encoding="utf-8")
+        (origin / "docs" / "guide.md").write_text("v1\n", encoding="utf-8")
+        base = commit("base")
+        (origin / "README.md").write_text("v2\n", encoding="utf-8")
+        (origin / "docs" / "guide.md").write_text("v2\n", encoding="utf-8")
+        docs_head = commit("docs-only")
+        (origin / "server" / "app.py").write_text("print('v2')\n", encoding="utf-8")
+        code_head = commit("code")
+        run([git, "mv", "server/app.py", "docs/app.py"], origin)
+        rename_head = commit("rename server/app.py -> docs/app.py")
+
+        # The workflow-checkout equivalent, with the SHIPPED filter beside it.
+        work = tmp / "work"
+        run([git, "clone", "-q", str(origin), str(work)], tmp)
+        (work / "scripts").mkdir()
+        shutil.copyfile(
+            Path(__file__).resolve().parent / "docs_noop_filter.py",
+            work / "scripts" / "docs_noop_filter.py",
+        )
+
+        # Rename output at the unit level: --no-renames lists BOTH sides and
+        # the shipped filter builds; detection-on lists only the destination
+        # and would skip — the exact miss --no-renames exists to prevent.
+        both_sides = run(
+            [git, "diff", "--no-renames", "--name-only", code_head, rename_head],
+            work,
+        ).stdout.split()
+        assert sorted(both_sides) == ["docs/app.py", "server/app.py"]
+        assert dnf.decide(both_sides) == "build"
+        destination_only = run(
+            [git, "diff", "--find-renames", "--name-only", code_head, rename_head],
+            work,
+        ).stdout.split()
+        assert destination_only == ["docs/app.py"]
+        assert dnf.decide(destination_only) == "skip", (
+            "if this stops skipping, the filter grew rename awareness and "
+            "the --no-renames rationale needs revisiting"
+        )
+
+        # The script invokes python3; pin that name to THIS interpreter
+        # (Windows has no python3, and the Store stub that answers to it
+        # is a trap).
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        shim = bindir / "python3"
+        shim.write_text(
+            '#!/bin/sh\nexec "%s" "$@"\n'
+            % str(Path(sys.executable)).replace("\\", "/"),
+            encoding="utf-8",
+            newline="\n",
+        )
+        shim.chmod(0o755)
+
+        script = tmp / "decide.sh"
+        script.write_text(decide_src, encoding="utf-8", newline="\n")
+        out_path = tmp / "github-output.txt"
+
+        def decide_run(event, before, head):
+            out_path.write_text("", encoding="utf-8")
+            env = dict(os.environ)
+            env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+            env["EVENT_NAME"] = event
+            env["BEFORE_SHA"] = before
+            env["GITHUB_SHA"] = head
+            env["GITHUB_OUTPUT"] = str(out_path).replace("\\", "/")
+            proc = subprocess.run(
+                [bash, str(script)], cwd=str(work), env=env,
+                text=True, capture_output=True,
+            )
+            assert proc.returncode == 0, (
+                f"decide script rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+            )
+            verdicts = re.findall(
+                r"^build=(true|false)$",
+                out_path.read_text(encoding="utf-8"),
+                re.M,
+            )
+            assert len(verdicts) == 1, f"expected one verdict, got {verdicts!r}"
+            return verdicts[0]
+
+        assert decide_run("push", base, docs_head) == "false"
+        assert decide_run("push", docs_head, code_head) == "true"
+        assert decide_run("push", code_head, rename_head) == "true", (
+            "the rename vector must build: with rename detection on, the "
+            "diff arrives as docs/app.py alone and the train silently skips"
+        )
+        assert decide_run("workflow_dispatch", base, docs_head) == "true"
+        assert decide_run("push", "0" * 40, docs_head) == "true"
+        assert decide_run("push", "deadbeef" * 5, docs_head) == "true"
 
 
 def test_build_platform_images_workflow_invariants() -> None:

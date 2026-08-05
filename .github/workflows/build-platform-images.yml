@@ -125,7 +125,12 @@ jobs:
           [[ "$BEFORE_SHA" =~ ^0{40}$ ]] && build "branch-creation push"
           git fetch --no-tags --depth=1 origin "$BEFORE_SHA" \
             || build "before-sha unfetchable"
-          FILES=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA") \
+          # --no-renames: detected renames report only their DESTINATION
+          # path, so server/app.py -> docs/app.py would arrive here as
+          # docs/app.py alone and skip a build that just lost an input.
+          # Disabling detection surfaces both sides as delete+add; either
+          # side that is a build input forces a build.
+          FILES=$(git diff --no-renames --name-only "$BEFORE_SHA" "$GITHUB_SHA") \
             || build "diff failed"
           VERDICT=$(printf '%s\n' "$FILES" | python3 scripts/docs_noop_filter.py) \
             || VERDICT=build
