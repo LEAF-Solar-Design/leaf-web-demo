@@ -539,6 +539,19 @@ def main() -> None:
         if _key_of(l) == "gate_reuse_expected"
     ]
     assert hint_outputs == ["${{ steps.reuse-hint.outputs.expected }}"], hint_outputs
+    # No structural line ANYWHERE in this workflow may declare `defaults`
+    # or `shell`: jobs.<id>.defaults.run.shell (or the workflow-scoped
+    # form) redefines the interpreter of every run step in scope and can
+    # selectively skip a pinned script by matching its content — a
+    # `bash -c 'grep -Fq <hint marker> "$1" || bash -e "$1"' _ {0}` on
+    # prepare passed every step-level pin while the hint emitted nothing
+    # (sol-critic round 6 on PR #449); a step-level shell: is already
+    # excluded by the hint step's exact key set below. This workflow uses
+    # neither key anywhere; introducing one is a conscious contract edit.
+    for line in structural:
+        assert _key_of(line) not in ("defaults", "shell"), (
+            "defaults/shell are banned in this workflow: %r" % line)
+
     # The hint STEP is located on STRUCTURAL lines only, using the same
     # block-scalar classifier as the lexical gate above: raw-text slicing
     # let a `- run: |` outer step swallow an apparent id:, env:, and a
