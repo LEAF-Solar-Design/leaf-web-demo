@@ -248,6 +248,10 @@ jobs:
     uses: ./.github/workflows/test-gate.yml
     permissions:
       contents: read
+      # actions:read flows to the called gate's reuse probe and fan-in so
+      # they can read tree-bound gate-proof artifacts minted by earlier runs
+      # (a called workflow's permissions are capped by this grant). Read-only.
+      actions: read
     with:
       ref: ${{ needs.prepare.outputs.source_sha }}
 
@@ -403,6 +407,27 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
+
+      # `needs: test` guarantees a green gate ran in this workflow run; this
+      # additionally requires that verdict to name THIS checkout's exact tree,
+      # whichever path produced it (the full 8-shard run, or the tree-identity
+      # reuse of a PR-green proof — operator decision D3, 2026-08-05). Fail
+      # closed: an empty or foreign tree means no image is pushed.
+      - name: Require the green gate verdict to bind to this exact tree
+        env:
+          PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVEN_TREE" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::The test gate reported no proven tree; refusing to push images."
+            exit 1
+          }
+          built_tree="$(git rev-parse 'HEAD^{tree}')"
+          if [ "$built_tree" != "$PROVEN_TREE" ]; then
+            echo "::error::Gate verdict binds tree $PROVEN_TREE but this build checkout is tree $built_tree; refusing to push images."
+            exit 1
+          fi
+          echo "gate verdict bound to tree $PROVEN_TREE == build tree"
 
       - name: Require the read-only canonical solver deploy key
         if: matrix.image == 'canonical-worker'
