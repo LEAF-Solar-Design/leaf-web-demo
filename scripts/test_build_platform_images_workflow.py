@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Regression checks for the production image build workflow.
 
-Mostly static text invariants, plus two stronger bindings for the
-docs-noop gate: its structure is asserted against the PARSED workflow
-YAML (a guard that drifts into a comment stops counting), and its
-decide script is extracted from that YAML and EXECUTED against a real
-git history, including the rename vector that rename detection would
-disguise as a docs-only diff.
+Mostly static text invariants, plus stronger bindings for the docs-noop
+gate and its staging relay: their structure is asserted against the
+PARSED workflow YAML, textual assertions run against comment-stripped
+executable bash (a guard that drifts into a comment stops counting),
+and the decide script is extracted from the parsed YAML and EXECUTED
+against a real git history, including the rename vector that rename
+detection would disguise as a docs-only diff.
 """
 
 from pathlib import Path
@@ -17,7 +18,25 @@ import subprocess
 import sys
 import tempfile
 
-import yaml  # gate venv: scripts/requirements-ci.txt; runner python: preinstalled
+import yaml  # gate venv + prepare job: installed from scripts/requirements-ci.txt
+
+
+_BASH_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$")
+
+
+def _executable_bash(script: str) -> str:
+    """Strip bash comments (full-line and trailing) from a run scalar.
+
+    Text assertions run against this so they bind to executable lines
+    only: a guard that drifts into a comment stops counting. The hash
+    survives when glued to non-space (e.g. ${#array[@]}, "## heading").
+    """
+    lines = []
+    for line in script.splitlines():
+        code = _BASH_COMMENT.sub("", line).rstrip()
+        if code.strip():
+            lines.append(code)
+    return "\n".join(lines)
 
 
 WORKFLOW = (
@@ -377,22 +396,21 @@ def check_docs_noop_filter(text: str) -> None:
                     "docs-noop gate and failure propagation"
                 )
 
-    # The decide step, extracted from the parsed YAML. Every assertion from
-    # here down binds to the text bash actually runs.
+    # The decide step, extracted from the parsed YAML, then stripped to
+    # executable bash. Every assertion from here down binds to text that
+    # actually runs; the rehearsal below additionally executes the raw
+    # scalar verbatim.
     decide = next(s for s in noop_job["steps"] if s.get("id") == "decide")
     decide_src = decide["run"]
+    decide_code = _executable_bash(decide_src)
     assert decide["env"]["EVENT_NAME"] == "${{ github.event_name }}"
     assert decide["env"]["BEFORE_SHA"] == "${{ github.event.before }}"
-    # Match the full command, not the bare flag: the script's own comment
-    # mentions --no-renames, so a flag-only substring would survive the
-    # flag's removal from the command. The rehearsal below catches that
-    # drift too, by executing the rename vector.
-    assert "git diff --no-renames --name-only" in decide_src, (
+    assert "git diff --no-renames --name-only" in decide_code, (
         "rename detection reports only a rename's destination, so a file "
         "moved out of a build-input tree would classify as docs-only; the "
         "decide diff must disable it"
     )
-    assert "scripts/docs_noop_filter.py" in decide_src
+    assert "scripts/docs_noop_filter.py" in decide_code
 
     # Fail-open arms: every abnormal path must land on build=true before
     # the docs-only verdict is even consulted.
@@ -405,7 +423,7 @@ def check_docs_noop_filter(text: str) -> None:
         "|| VERDICT=build",
         '[ "$VERDICT" = "skip" ] || build',
     ):
-        assert arm in decide_src, f"missing fail-open arm: {arm}"
+        assert arm in decide_code, f"missing fail-open arm: {arm}"
 
     # The relay tells a deliberate no-op from a broken run by this marker;
     # its name must mirror the supply-set naming (sha + attempt), and it is
@@ -425,8 +443,12 @@ def check_docs_noop_filter(text: str) -> None:
     # Both handoff artifact listings stay pinned above GitHub's default
     # page size (30): today's builds publish ~11 artifacts, and an unpinned
     # listing would silently drop the newest artifact past a growth spurt.
-    handoff_runs = "\n".join(s.get("run", "") for s in jobs["handoff"]["steps"])
-    assert handoff_runs.count("artifacts?per_page=100") == 2
+    # Counted over executable text only, so a comment cannot stand in for
+    # the pin.
+    handoff_code = "\n".join(
+        _executable_bash(s.get("run", "")) for s in jobs["handoff"]["steps"]
+    )
+    assert handoff_code.count("artifacts?per_page=100") == 2
 
     # Decision vectors run against the SHIPPED module.
     scripts_dir = str(Path(__file__).resolve().parent)
@@ -456,15 +478,53 @@ def check_docs_noop_filter(text: str) -> None:
     assert dnf.decide(['"docs/\\303\\251.md"']) == "build"
 
     # The relay must skip cleanly on the marker and stay loud otherwise.
-    relay = relay_text
-    assert 'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"' in relay
-    assert relay.count('echo "deploy=false"') == 1
-    assert relay.count('echo "deploy=true"') == 1
-    assert "no $NOOP_NAME marker present" in relay, (
+    # Everything here binds to parsed step structure or comment-stripped
+    # executable text: the drift class where a guard moves into a comment
+    # while raw-text assertions stay green cannot satisfy these.
+    relay_wf = yaml.safe_load(relay_text)
+    assert set(relay_wf["jobs"]) == {"dispatch"}
+    dispatch_job = relay_wf["jobs"]["dispatch"]
+    job_guard = str(dispatch_job["if"])
+    for clause in (
+        "github.event.workflow_run.conclusion == 'success'",
+        "github.event.workflow_run.event == 'push'",
+        "github.event.workflow_run.head_branch == 'main'",
+    ):
+        assert clause in job_guard, f"relay job guard lost: {clause}"
+
+    manifest_step = next(
+        s for s in dispatch_job["steps"] if s.get("id") == "manifest"
+    )
+    assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
+    manifest_code = _executable_bash(manifest_step["run"])
+    assert (
+        'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
+        in manifest_code
+    )
+    assert manifest_code.count('echo "deploy=false"') == 1
+    assert manifest_code.count('echo "deploy=true"') == 1
+    assert manifest_code.count("artifacts?per_page=100") == 1
+    assert "no $NOOP_NAME marker present" in manifest_code, (
         "manifest-and-marker both absent must stay a hard error: a "
         "successful build without a supply set is a partial run")
-    dispatch_at = relay.index("Dispatch the web and app staging deploys")
-    assert "steps.manifest.outputs.deploy == 'true'" in relay[dispatch_at:]
+
+    # Find the dispatching step by what it EXECUTES, not by its name, so
+    # renaming or duplicating it cannot dodge the guard assertions.
+    dispatching = [
+        s
+        for s in dispatch_job["steps"]
+        if "gh workflow run" in _executable_bash(s.get("run", ""))
+    ]
+    assert len(dispatching) == 1, "exactly one relay step may dispatch deploys"
+    dispatch_guard = str(dispatching[0]["if"])
+    assert "steps.tip.outputs.current == 'true'" in dispatch_guard
+    assert "steps.manifest.outputs.deploy == 'true'" in dispatch_guard, (
+        "without this step-level guard a docs-only run would dispatch "
+        "with an empty image tag")
+    assert (
+        dispatching[0]["env"]["IMAGE_TAG"]
+        == "${{ steps.manifest.outputs.image_tag }}"
+    )
 
     # Finally, run the extracted decide script for real.
     _rehearse_decide_script(decide_src, dnf)
