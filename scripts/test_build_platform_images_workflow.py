@@ -468,6 +468,40 @@ def main() -> None:
     prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
     assert prepare_block.count("gate_reuse_expected") == 1
     assert warm_job_header.count("gate_reuse_expected") == 1
+    # BOUND, not merely counted (sol-critic round 1 on PR #449): a
+    # hard-coded `gate_reuse_expected: true` in prepare's outputs kept every
+    # assertion above green while skipping warm on every non-promote push.
+    # The output must carry exactly the hint step's expression, that step
+    # must exist in prepare under the referenced id and key its listing on
+    # this exact tree's proof-artifact name, and prepare must hold the
+    # actions:read grant the listing depends on. A job-level permissions
+    # block REPLACES the workflow-level set, so the two standing grants are
+    # pinned beside it: dropping either breaks the draft-PR source check or
+    # the checkout, and dropping actions:read 403s the hint into a
+    # permanent expected=false — warm silently runs on every reuse path
+    # again.
+    prepare_header = prepare_block[: prepare_block.index("    steps:")]
+    hint_outputs = [
+        _value_of(l) for l in prepare_header.splitlines()
+        if _key_of(l) == "gate_reuse_expected"
+    ]
+    assert hint_outputs == ["${{ steps.reuse-hint.outputs.expected }}"], hint_outputs
+    hint_ids = [
+        l for l in prepare_block.splitlines()
+        if _key_of(l) == "id" and _value_of(l) == "reuse-hint"
+    ]
+    assert len(hint_ids) == 1, "prepare must hold exactly one reuse-hint step"
+    assert prepare_block.count("artifacts?name=gate-proof-$tree") == 1, (
+        "the hint must key its listing on this exact tree's proof name")
+    assert 'echo "expected=$expected" >> "$GITHUB_OUTPUT"' in prepare_block
+    prepare_perms = sorted(
+        (_key_of(l), _value_of(l))
+        for l in prepare_header.splitlines()
+        if _key_of(l) in ("contents", "pull-requests", "actions")
+    )
+    assert prepare_perms == [
+        ("actions", "read"), ("contents", "read"), ("pull-requests", "read"),
+    ], prepare_perms
     assert "Production handoff requires the exact release source_sha input" in text
     assert "Production handoff requires the successful release workflow run ID" in text
     assert "Production handoff requires the exact release run attempt" in text
