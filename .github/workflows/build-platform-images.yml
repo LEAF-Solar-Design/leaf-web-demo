@@ -1026,7 +1026,16 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           push: true
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          # The app image of a release (prod-*) build additionally carries
+          # src-<full-commit>: a CI build-identity stamp consumed only by
+          # the staging migration source diff (its fast path recovers the
+          # exact candidate commit from the prod tag's digest). It is never
+          # a release or review tag — every deploy rail and production
+          # review gate stays sha-/prod- only — and the spec-* and
+          # draft-pr sha-* namespaces stay single-tagged.
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha) || '' }}
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
 
@@ -1518,6 +1527,9 @@ jobs:
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
       PROD_TAG: ${{ needs.prepare.outputs.tag }}
       PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}
+      # The merge commit whose tree the adopted digests realize — the
+      # identity the src- stamp below records.
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       # Same value as PROD_TAG, under the name the byte-identical
       # verify-half scripts read (the verify job calls it TAG).
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -1743,6 +1755,38 @@ jobs:
               exit 1
             fi
           done
+          # Stamp the adopted app image with its src-<full-commit>
+          # identity tag, mirroring the full build's second app tag. The
+          # adopted digests realize this exact merge commit's tree, so the
+          # merge commit is the correct identity for migration-source
+          # comparisons. src- is a CI build-identity namespace consumed
+          # only by the staging migration source diff — never a release or
+          # review tag, no deploy rail accepts it — so a failed stamp only
+          # costs the fast path: loud warning, never a red run, and the
+          # immutable-tag refusal below means a conflicting src- tag can
+          # never be repointed.
+          if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            src_tag="src-$SOURCE_SHA"
+            src_existing="$(aws ecr batch-get-image \
+              --repository-name leaf-platform-app \
+              --image-ids "imageTag=$src_tag" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ "$src_existing" == "${spec_digest[app]}" ]]; then
+              echo "::notice::adopt: leaf-platform-app:$src_tag already stamped"
+            elif [[ -n "$src_existing" && "$src_existing" != "None" ]]; then
+              echo "::warning::adopt: leaf-platform-app:$src_tag already names a different digest; leaving it alone (the staging migdiff fast path keeps the probe)"
+            elif aws ecr put-image \
+              --repository-name leaf-platform-app \
+              --image-tag "$src_tag" \
+              --image-manifest "${spec_manifest[app]}" >/dev/null 2>&1; then
+              echo "::notice::adopt: stamped leaf-platform-app:$src_tag"
+            else
+              echo "::warning::adopt: could not stamp leaf-platform-app:$src_tag; the staging migdiff fast path keeps the probe"
+            fi
+          else
+            echo "::warning::adopt: SOURCE_SHA is not one full commit; skipping the src- identity stamp"
+          fi
           spec_run_id="$(jq -r '.workflow_run_id' "$verified")"
           built_from="$(jq -r '.built_from_revision' "$verified")"
           pr_number="$(jq -r '.pr_number' "$verified")"
