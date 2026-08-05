@@ -63,6 +63,14 @@ HINT_SCRIPT = """\
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
+    # Newline discipline at the BYTE level (sol-critic round 4 on PR #449;
+    # the regression class from round 1): read_text() and splitlines()
+    # erase CR bytes, so a wholesale CRLF rewrite of this workflow would
+    # sail through every text assertion below, including the byte-exact
+    # hint pin. Pin the bytes before trusting the text.
+    assert b"\r" not in WORKFLOW.read_bytes(), (
+        "build-platform-images.yml must be LF-only")
+
     # One tag is derived once and passed to every image build and later job.
     assert 'image_tag="prod-$current_short"' in text
     assert 'image_tag="sha-$current_sha"' in text
@@ -531,45 +539,65 @@ def main() -> None:
         if _key_of(l) == "gate_reuse_expected"
     ]
     assert hint_outputs == ["${{ steps.reuse-hint.outputs.expected }}"], hint_outputs
-    # The hint STEP is sliced as a step and identified by its STEP-level id
-    # key at its exact indentation, not by a floating `id:` match: an
-    # `id: reuse-hint` parked inside another step's env satisfied the
-    # previous spelling while the real step id changed (sol-critic round 2
-    # on PR #449, finding 2). Content pins then read the step's LIVE lines
-    # only — the pinned text surviving in a comment kept the round-1
-    # skip-every-push defect green (round 2, finding 1).
-    prepare_steps = re.split(r"\n      - ", prepare_block)
-    hint_steps = [
-        s for s in prepare_steps
-        if any(re.match(r"^        id: reuse-hint\s*$", l) for l in s.splitlines())
+    # The hint STEP is located on STRUCTURAL lines only, using the same
+    # block-scalar classifier as the lexical gate above: raw-text slicing
+    # let a `- run: |` outer step swallow an apparent id:, env:, and a
+    # canonical-looking inner script as shell TEXT while its real first
+    # lines emitted expected=true (sol-critic round 4 on PR #449, finding
+    # 1). A floating id: in another step's env (round 2) and trailing-
+    # comment pin carriers (round 3) are the same family: only what YAML
+    # PARSES as the step's own keys and the run block's own content may
+    # satisfy a pin.
+    annotated = []
+    scalar_indent = None
+    for line in prepare_block.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if scalar_indent is not None:
+            if not stripped or indent > scalar_indent:
+                annotated.append((line, False))
+                continue
+            scalar_indent = None
+        annotated.append((line, True))
+        if block_header.search(_uncommented(line)):
+            scalar_indent = indent
+    step_starts = [
+        i for i, (l, s) in enumerate(annotated) if s and l.startswith("      - ")
     ]
-    assert len(hint_steps) == 1, "prepare must hold exactly one reuse-hint step"
-    # The step's run block must equal the canonical module-level copy:
-    # inline comments spoofed the previous live-line substring pins
-    # (round 3, finding 1 — the pinned text survived in a trailing
-    # comment while the live query was broadened and the output write
-    # hard-coded), and unreachable no-op carriers of the pinned text are
-    # the same class. Byte-equality has no text left to hide in.
-    hint_lines = hint_steps[0].splitlines()
-    run_headers = [i for i, l in enumerate(hint_lines) if l == "        run: |"]
-    assert len(run_headers) == 1, "the hint step carries exactly one run block"
-    hint_script = []
-    for line in hint_lines[run_headers[0] + 1:]:
-        if line.strip() and not line.startswith("          "):
-            break
-        hint_script.append(line)
-    assert "\n".join(hint_script).rstrip("\n") == HINT_SCRIPT.rstrip("\n"), (
+    hint_ranges = []
+    for n, start in enumerate(step_starts):
+        end = step_starts[n + 1] if n + 1 < len(step_starts) else len(annotated)
+        if any(
+            s and re.match(r"^        id: reuse-hint\s*$", l)
+            for l, s in annotated[start:end]
+        ):
+            hint_ranges.append((start, end))
+    assert len(hint_ranges) == 1, "prepare must hold exactly one reuse-hint step"
+    hint_seg = annotated[hint_ranges[0][0]:hint_ranges[0][1]]
+    hint_structural = [l for l, s in hint_seg if s]
+    # Exactly one run key, spelled exactly as the one plain literal header
+    # (a folded, chomped, quoted, or comment-carrying header is a
+    # different spelling and fails), and the run block must END the step:
+    # nothing structural may follow it, so no second header or stray key
+    # can hide behind the canonical content.
+    run_keys = [l for l, s in hint_seg if s and _key_of(l) == "run"]
+    assert run_keys == ["        run: |"], run_keys
+    run_at = next(
+        i for i, (l, s) in enumerate(hint_seg) if s and l == "        run: |"
+    )
+    tail = hint_seg[run_at + 1:]
+    assert all(not s for l, s in tail), "the run block must end the hint step"
+    assert "\n".join(l for l, s in tail).rstrip("\n") == HINT_SCRIPT.rstrip("\n"), (
         "the warm-skip hint script must equal its canonical pinned copy in "
         "this file; edit both together, consciously")
     # And the step must actually RUN, with the workflow token: an if: on
     # the step (or an emptied GH_TOKEN) silently restores permanent
-    # expected=false — warm runs on every reuse path again with nothing
-    # red anywhere (round 3, finding 2). Same idiom as the build job's
-    # "must not be conditional" pins.
-    assert "if" not in _keys_in(hint_steps[0]), (
+    # expected=false - warm runs on every reuse path again with nothing
+    # red anywhere (round 3, finding 2). Pinned on structural lines.
+    assert "if" not in [k for k in (_key_of(l) for l in hint_structural) if k], (
         "the reuse hint must not be conditional")
     hint_tokens = [
-        _value_of(l) for l in hint_lines if _key_of(l) == "GH_TOKEN"
+        _value_of(l) for l in hint_structural if _key_of(l) == "GH_TOKEN"
     ]
     assert hint_tokens == ["${{ github.token }}"], hint_tokens
     # The grant backing the listing must sit in prepare's own job-level
