@@ -1,0 +1,77 @@
+name: Speculate platform images
+
+# ---------------------------------------------------------------------------
+# Dispatches a speculative image build for every update of a same-repository
+# PR targeting main (lane L5, operator decision D3, 2026-08-05). The real
+# build runs in build-platform-images.yml as a workflow_dispatch on the MAIN
+# ref, for two load-bearing reasons:
+#
+#   * the ECR push role's OIDC trust policy admits exactly one subject —
+#     this repository at ref:refs/heads/main — so a pull_request-event build
+#     could never authenticate;
+#   * a dispatch on main runs MAIN's workflow text, so a PR cannot edit the
+#     build that handles the push role and the solver deploy key. This
+#     dispatcher itself needs no secret at all.
+#
+# The dispatched run builds the PR's MERGE PREVIEW and pushes spec-<tree>
+# tags no deploy workflow accepts; the push-to-main run adopts them only
+# after the gate's tree-bound proof matches. See
+# docs/SPECULATIVE-PR-BUILDS.md.
+#
+# Fork PRs are skipped: they cannot be speculatively built (no OIDC, no
+# adoption trust) and the build workflow re-validates same-repo origin
+# against the pulls API anyway. Failures here cost only the speculation —
+# the merge run falls back to the full build.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  # Lets github.token dispatch build-platform-images.yml in this repository.
+  actions: write
+
+concurrency:
+  group: speculate-platform-images-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Dispatch the speculative build on the main ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::PR head is not an exact commit."
+            exit 1
+          }
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || {
+            echo "::error::PR number is invalid."
+            exit 1
+          }
+          # Soft-fail: speculation is an optimization. A failed dispatch
+          # (e.g. main's workflow predates the speculative inputs while this
+          # PR introduces them) must not redden the PR; the merge run simply
+          # falls back to the full build.
+          if gh workflow run build-platform-images.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "source_sha=$HEAD_SHA" \
+            -f "speculative=true" \
+            -f "speculative_pr_number=$PR_NUMBER"; then
+            echo "Dispatched a speculative build of PR #$PR_NUMBER at $HEAD_SHA."
+          else
+            echo "::warning::Speculative dispatch failed; the merge run will fall back to a full build."
+          fi
