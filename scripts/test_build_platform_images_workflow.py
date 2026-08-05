@@ -546,12 +546,15 @@ def main() -> None:
             "warm and build must carry a byte-identical %s input, or the "
             "warmed cache never matches the gated build" % key)
 
-    # And no publish path outside that step either. This is an ALLOWLIST,
-    # not a command denylist: a plain `docker buildx build --push ...` in a
-    # newly added run step published an image before the gate while a
-    # denylist of known commands stayed green (sol-critic round 8, finding
-    # 1). Warm may only use these actions, and its shell may not mention a
-    # registry-writing tool at all.
+    # And no publish path outside that step either. Enumerating publishing
+    # COMMANDS is a losing game — `docker buildx build --push` beat the
+    # first list (sol-critic round 8), then `docker image push`, `podman
+    # push`, and `buildctl ... push=true` beat the second (round 9). So the
+    # contract is structural instead: warm may only run the five pinned
+    # actions, and it may contain exactly ONE shell step, the cache
+    # selector. A publishing command needs somewhere to live, and in this
+    # job there is nowhere: any added run step fails outright, whatever it
+    # contains.
     allowed_uses = {
         "actions/checkout@v4",
         "docker/setup-buildx-action@v3",
@@ -563,10 +566,30 @@ def main() -> None:
         _value_of(l) for l in warm_block.splitlines() if _key_of(l) == "uses"
     ]
     assert set(warm_uses) <= allowed_uses, sorted(set(warm_uses) - allowed_uses)
-    for token in ("docker build", "docker buildx", "docker push", "--push",
-                  "aws ecr put-image", "aws ecr batch-import", "crane ", "skopeo "):
-        assert token not in warm_block, (
-            "the warm lane must not carry a registry-writing command: %r" % token)
+    warm_run_steps = [s for s in warm_steps if "run" in _keys_in(s)]
+    assert [s.splitlines()[0] for s in warm_run_steps] == [
+        "name: Require the read-only canonical solver deploy key",
+        "name: Select immutable cache references",
+    ], "warm carries exactly these two shell steps; a third is where a " \
+       "pre-gate publish would live"
+
+    # Those two steps talk to ECR only to READ tags. Comments are stripped
+    # first, so a comment naming a banned tool is fine (round-9 false
+    # positive); an actual invocation is not. Container tooling has no
+    # business in either, which is why the ban is on the tool name rather
+    # than on a verb list that keeps growing.
+    warm_script = "\n".join(
+        _comment_cut(l) for s in warm_run_steps for l in s.splitlines()
+    )
+    forbidden_tool = re.search(
+        r"\b(docker|podman|nerdctl|buildctl|buildah|crane|skopeo|oras|regctl)\b",
+        warm_script,
+    )
+    assert not forbidden_tool, (
+        "the warm shell steps must not invoke container tooling: %r"
+        % (forbidden_tool.group(1) if forbidden_tool else ""))
+    for call in re.findall(r"aws ecr [a-z-]+", warm_script):
+        assert call == "aws ecr batch-get-image", call
     assert "push: true" not in warm_block
     assert "tags" not in _keys_in(warm_block), (
         "a cache warmer publishes no image tag")
@@ -608,7 +631,7 @@ def main() -> None:
         # that begin with an assignment: `unset cache_to`, `export
         # cache_to=...`, and `printf -v cache_to ...` all rewrite it after
         # the pinned line (sol-critic round 8, finding 4).
-        mentions = [l for l in live if "cache_to" in l]
+        mentions = [l for l in live if "cache_to" in _comment_cut(l)]
         assert len(mentions) == 3, (lane, mentions)
         assert mentions[0].strip() == 'cache_to=""', lane
         assert mentions[1] == exports[0], lane
