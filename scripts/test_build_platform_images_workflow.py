@@ -92,6 +92,31 @@ def main() -> None:
     # item must use the canonical "- " marker so the step splitter used
     # throughout this file provably sees every step.
     # ------------------------------------------------------------------ #
+    def _mask_opaque(line: str) -> str:
+        # ${{ ... }} expressions and quoted scalars are text to YAML: an
+        # anchor inside one is not a node. Masking them keeps GitHub
+        # expression operators (&&, ||, !) and quoted content from reading
+        # as YAML syntax, while an anchor placed OUTSIDE them stays visible.
+        # The double-quote pattern honours backslash escapes so an escaped
+        # quote inside a legitimate scalar cannot end the mask early
+        # (sol-critic round 7 false positive).
+        masked = re.sub(r"\$\{\{.*?\}\}", "", line)
+        masked = re.sub(r"'(?:[^'])*'", "''", masked)
+        masked = re.sub(r'"(?:\\.|[^"\\])*"', '""', masked)
+        return masked
+
+    def _uncommented(line: str) -> str:
+        return _mask_opaque(line).split("#", 1)[0]
+
+    # A block scalar header may carry an explicit indentation indicator and
+    # a chomping indicator in EITHER order (|2-, >-2, |+, ...), and a
+    # trailing comment. Content is always indented deeper than the header
+    # line, whatever the indicator says, so the indicator does not change
+    # the scan below — but an unrecognised header used to leave shell text
+    # classified as structure and redden the run (round-7 false positive).
+    # The header is matched on the COMMENT-STRIPPED line, so a `# run: |`
+    # inline comment cannot spoof one (round-7 finding 1).
+    block_header = re.compile(r"(?::|^\s*-)\s*[|>](?:[-+][0-9]?|[0-9][-+]?)?\s*$")
     structural = []
     block_scalar_indent = None
     for line in text.splitlines():
@@ -109,25 +134,31 @@ def main() -> None:
             "YAML document markers are banned in this workflow: %r" % line)
         if not stripped.startswith("#"):
             structural.append(line)
-        if re.search(r"(?::|^\s*-)\s*[|>][-+]?[0-9]*\s*(?:#.*)?$", line):
+        if block_header.search(_uncommented(line)):
             block_scalar_indent = indent
 
-    def _mask_opaque(line: str) -> str:
-        # ${{ ... }} expressions and quoted scalars are text to YAML: an
-        # anchor inside one is not a node. Masking them keeps GitHub
-        # expression operators (&&, ||, !) and quoted content from reading
-        # as YAML syntax, while an anchor placed OUTSIDE them stays visible.
-        masked = re.sub(r"\$\{\{.*?\}\}", "", line)
-        masked = re.sub(r"'[^']*'", "''", masked)
-        masked = re.sub(r'"[^"]*"', '""', masked)
-        return masked.split("#", 1)[0]
-
     for line in structural:
-        masked = _mask_opaque(line)
+        masked = _uncommented(line)
         for banned in ("&", "*", "!", "<<"):
             assert banned not in masked, (
                 "YAML anchor/alias/tag/merge syntax is banned in structural "
                 "positions: %r in %r" % (banned, line))
+
+    # Keys may be quoted (`"if":` parses as `if`), so every key-level check
+    # in this file reads normalised keys rather than raw text: a quoted key
+    # otherwise slips past a literal scan while GitHub honours it
+    # (sol-critic round 7, findings 2 and 3).
+    def _key_of(line: str):
+        match = re.match(r'^\s*(?:-\s+)?("(?:\\.|[^"\\])*"|\'[^\']*\'|[^\s:#][^:#]*?)\s*:(?:\s|$)', line)
+        if not match:
+            return None
+        key = match.group(1).strip()
+        if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+            key = key[1:-1]
+        return key
+
+    def _keys_in(block: str):
+        return [k for k in (_key_of(l) for l in block.splitlines()) if k]
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
@@ -284,13 +315,19 @@ def main() -> None:
     # The handoff guard is a CONJUNCTION, pinned whole: a dispatch that is
     # not a promote, or a promote of a commit that is not on main, must not
     # mint a production handoff candidate. Asserting the operands separately
-    # left `||` in place of either `&&` passing (sol-critic round 6).
-    assert (
+    # left `||` in place of either `&&` passing (sol-critic round 6), and
+    # asserting the block merely EXISTS somewhere let the live guard be
+    # weakened while a decoy copy sat in a later block scalar (round 7), so
+    # the block is pinned once in the file AND at the job's own `if:` key.
+    handoff_guard = (
         "    if: >-\n"
         "      github.event_name == 'workflow_dispatch' &&\n"
         "      inputs.promote &&\n"
         "      needs.prepare.outputs.source_mode == 'main'\n"
-    ) in handoff_body
+    )
+    assert text.count(handoff_guard) == 1
+    assert handoff_body.index(handoff_guard) < handoff_body.index("    steps:")
+    assert [k for k in _keys_in(handoff_body) if k == "if"] == ["if"]
     assert "inputs.promote" in handoff_body
     assert "RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}" in handoff_body
     assert "RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}" in handoff_body
@@ -393,10 +430,14 @@ def main() -> None:
     warm_with = _with_mapping(warm_build_step)
     assert re.search(r"^          push: false$", warm_with, re.M), (
         "the warm build step's with: mapping must set the literal input push: false")
-    for banned in ("push: true", "tags:", "outputs:", "provenance:", "sbom:", "attests:"):
-        assert banned not in warm_build_step, (
-            "the warm build step must not carry %r: every publication channel "
-            "of build-push-action stays closed in the warm lane" % banned)
+    # Key-level, not substring: `"outputs":` parses as the outputs input
+    # while evading a literal `outputs:` scan (sol-critic round 7).
+    for banned in ("tags", "outputs", "provenance", "sbom", "attests"):
+        assert banned not in _keys_in(warm_build_step), (
+            "the warm build step must not carry the %r input: every "
+            "publication channel of build-push-action stays closed in the "
+            "warm lane" % banned)
+    assert "push: true" not in warm_build_step
 
     # A warmed layer only matches the gated build if both builds hash the
     # same inputs. Any drift between the two steps' context, Dockerfile,
@@ -461,17 +502,20 @@ def main() -> None:
     # not to any occurrence: a shell comment carrying the option satisfied a
     # plain count while the real export lost it (sol-critic round 6).
     for lane, block in (("warm", warm_block), ("build", build_block)):
-        exports = [
-            l for l in block.splitlines()
-            if 'cache_to="type=registry' in l and not l.strip().startswith("#")
-        ]
+        live = [l for l in block.splitlines() if not l.strip().startswith("#")]
+        exports = [l for l in live if 'cache_to="type=registry' in l]
         assert len(exports) == 1, lane
         assert exports[0].rstrip().endswith('ignore-error=true"'), lane
-        effective = [
-            l for l in block.splitlines()
-            if "ignore-error=true" in l and not l.strip().startswith("#")
-        ]
-        assert len(effective) == 1, lane
+        assert len([l for l in live if "ignore-error=true" in l]) == 1, lane
+        # And nothing rewrites the variable afterwards: a later
+        # `cache_to="${cache_to%,*}"` strips the option back off while every
+        # assertion above still passes (sol-critic round 7, finding 4). The
+        # only assignments allowed are the empty initialiser and the pinned
+        # export line.
+        assignments = [l for l in live if re.search(r"(?m)^\s*cache_to=", l)]
+        assert len(assignments) == 2, (lane, assignments)
+        assert assignments[0].strip() == 'cache_to=""', lane
+        assert assignments[1] == exports[0], lane
 
     # ------------------------------------------------------------------ #
     # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
@@ -500,7 +544,7 @@ def main() -> None:
     # steps are the only conditional steps in this job, and their condition
     # is pinned to the canonical-worker matrix entry above.
     for step in re.split(r"\n      - ", build_block):
-        conditional = re.search(r"(?m)^        if:", step)
+        conditional = "if" in _keys_in(step)
         if "Require the green gate verdict to bind" in step:
             assert not conditional, "the tree binding must not be conditional"
         if "uses: docker/build-push-action" in step:
