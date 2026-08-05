@@ -227,12 +227,253 @@ HINT_SCRIPT = """\
           fi
           echo "expected=$expected" >> "$GITHUB_OUTPUT"
           if [[ "$expected" == "true" ]]; then
-            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+            echo "::notice::a same-repo gate proof already names tree $tree; warm legs with a fresh cache chain exit early (the gate's own probe still verifies the proof before any shard skip)"
           else
             echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
           fi
           exit 0
 """
+
+# The warm chain-keeper script, pinned BYTE-EXACT for the same reason as
+# HINT_SCRIPT above: no substring set proves the absence of a rewrite.
+# Sol-critic round 1 on this PR showed the concrete defeat — inverting the
+# probe polarity (`"$found" != "1"`) satisfied every targeted pin while
+# recreating the exact chain-starvation defect this step exists to close
+# (a missing predecessor or failed probe would SKIP warm instead of
+# running it). Any edit to the chain script is a conscious edit of this
+# copy too. Raw string: the script carries backslash continuations.
+CHAIN_SCRIPT = r"""
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must land on skip=false — warm
+          # runs and republishes the chain; a redundant warm costs about a
+          # runner-minute, while a false skip starves every later cache
+          # consumer (warm, gated build, and speculative imports alike).
+          set -uo pipefail
+          set +e
+          skip="false"
+          if [[ "$GATE_REUSE_EXPECTED" == "true" && -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"
+            if [[ "$found" == "1" ]]; then
+              skip="true"
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [[ "$skip" == "true" ]]; then
+            echo "::notice::$IMAGE_NAME: gate reuse is expected and the predecessor cache $PREVIOUS_CACHE_TAG exists; this warm leg exits early"
+          else
+            echo "::notice::$IMAGE_NAME: warming (gate reuse expected: ${GATE_REUSE_EXPECTED:-false}; predecessor cache tag: ${PREVIOUS_CACHE_TAG:-<none>})"
+          fi
+          exit 0
+""".lstrip("\n")
+
+# The nearest-ancestor fallback's EXECUTABLE lines, one canonical copy for
+# all three cache-selection lanes (warm, build, speculate — their comments
+# differ, their code must not). Binds the walk's exact flags
+# (--first-parent --skip=1 --max-count=15: the checkouts fetch 20 commits
+# for precisely this), the single batch-get-image probe (deliberately not
+# an ECR listing: neither workflow role is granted one, so a
+# describe-images variant would AccessDenied and silently run cold —
+# sol-critic round 1 on this PR), the nearest-first selection order, and
+# the fail-open tail. Raw string: backslash continuations again.
+FALLBACK_SCRIPT = r"""
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+""".lstrip("\n")
+
+# The warm/build cache-select script, pinned BYTE-EXACT (sol-critic
+# round 3 on this PR): a contains-once count over the parsed run value
+# still accepted the canonical fallback bytes wrapped dead inside
+# `if false; then ... fi`. As HINT_SCRIPT's history records, no
+# substring set proves the absence of a rewrite — only whole-script
+# equality does. One copy serves both lanes (their byte-identity is
+# separately asserted). Raw string: backslash continuations.
+WARM_BUILD_CACHE_SCRIPT = r"""
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
+          cache_from=""
+          cache_to=""
+
+          # THIS commit's cache first. The `warm` job builds the same tree in
+          # parallel with the test gate and publishes exactly this tag, so by
+          # the time the gate is green the layers already exist and this build
+          # is a near-total cache hit rather than a cold rebuild. The fallback
+          # keeps the previous behaviour whenever warm was skipped, failed, or
+          # simply has not finished — it is never a hard dependency, so a warm
+          # failure costs seconds, not a red build.
+          current_warm="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME-buildcache" \
+            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+            --query 'length(images)' \
+            --output text 2>/dev/null || true)"
+          if [[ "$current_warm" == "1" ]]; then
+            cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"
+            echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+          elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            fi
+          fi
+
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): under the
+          # adoption path a fully green merge run skips both cache writers,
+          # so the exact predecessor tag can be several commits stale. The
+          # cache keys are commit-stable below the per-commit ARGs (#458),
+          # so a near-ancestor cache still hits the heavy toolchain layers.
+          # Candidates come from the checkout's own first-parent history
+          # (fetch-depth: 20 above exists for exactly this walk) and are
+          # probed in ONE batch-get-image call — deliberately not an ECR
+          # listing, which neither workflow role is granted
+          # (leaf-automation-aws-terraform pins both to BatchGetImage plus
+          # push actions). Every failure lands on the uncached build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+
+          if current_exists="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"; then
+            if [[ "$current_exists" == "1" ]]; then
+              echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
+            else
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
+            fi
+          else
+            echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
+          fi
+
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+          echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+""".lstrip("\n")
+
+# The speculative lane's cache-select script, pinned BYTE-EXACT for the
+# same reason. Import-only by construction: the canonical copy itself
+# is the proof that no cache_to/export path exists in this lane.
+# Raw string: backslash continuations.
+SPECULATE_CACHE_SCRIPT = r"""
+          # Import the cache of the main tip this preview merged onto and
+          # export nothing: speculative trees churn too fast to be worth
+          # polluting the immutable buildcache-* namespace, and no export
+          # means no cache_to race to tolerate.
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
+          cache_from=""
+          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            fi
+          fi
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): the
+          # merged-onto main tip's exact tag can be several commits stale
+          # when adopted merges published nothing, and the commit-stable
+          # keys (#458) make a near-ancestor cache nearly as good. The
+          # preview's first-parent chain IS main's history, so the same
+          # walk warm/build use works here (fetch-depth: 20 above), probed
+          # in ONE batch-get-image call — deliberately not an ECR listing,
+          # which neither workflow role is granted. IMPORT stays the only
+          # direction in this lane; every failure lands on the uncached
+          # build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+""".lstrip("\n")
 
 
 def main() -> None:
@@ -538,11 +779,20 @@ def main() -> None:
         # The condition is pinned by parsed VALUE: `if: true # if: matrix...`
         # keeps the literal while presenting the key and checking out the
         # solver on every matrix entry (sol-critic round 8, finding 2).
+        # In warm the pair is additionally gated on the chain-keeper skip
+        # (2026-08-05): a leg that exits early never fetches the deploy
+        # key — the same posture speculate's existence-skip holds.
+        expected_solver_condition = (
+            "matrix.image == 'canonical-worker' && "
+            "steps.chain.outputs.skip != 'true'"
+            if lane == "warm"
+            else "matrix.image == 'canonical-worker'"
+        )
         for step in (require_step, checkout_step):
             conditions = [
                 _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
             ]
-            assert conditions == ["matrix.image == 'canonical-worker'"], (
+            assert conditions == [expected_solver_condition], (
                 lane, conditions)
         # The presence check carries the key as its own step env and nothing
         # more; the solver checkout is the pinned repository with the key as
@@ -727,40 +977,41 @@ def main() -> None:
     # counted here.
     assert text.count("if: ${{ !inputs.promote }}") == 0
     assert text.count("if: ${{ !inputs.promote && !inputs.speculative }}") == 0
+    # TWO carriers of this exact guard: the test job and, since the
+    # 2026-08-05 chain-keeper change, the warm job — warm always schedules
+    # and each leg decides IN-JOB whether to exit early (prepare holds no
+    # AWS credential, so only a warm leg can probe ECR for the predecessor
+    # tag). The docs-gate clause stays polar CLOSED on purpose: == 'true'
+    # skips warm on an empty build output, because on a docs-only push warm
+    # would otherwise burn five runners on a tree nothing ships.
     assert text.count(
         "if: ${{ !inputs.promote && !inputs.speculative && "
         "needs.prepare.outputs.build == 'true' }}"
-    ) == 1
-    # Warm's guard, whole and at the job's own if: key. Warm is also skipped
-    # when a same-repo gate proof already names this exact tree: the gate leg
-    # then reuses the verdict in ~30s, the build job starts before any warm
-    # leg could publish its cache, and warm burns five runners for nothing
-    # (measured: zero of nine warm legs contributed across the first two
-    # reuse-path runs, 30978164812 and 30983842725). `!= 'true'` keeps the
-    # hint fail-open: an empty, missing, or failed hint output runs warm.
-    # The docs-gate check is polar OPPOSITE on purpose: == 'true' fails
-    # CLOSED (an empty build output skips warm), because on a docs-only
-    # push warm would otherwise burn five runners on a tree nothing ships.
+    ) == 2
     warm_job_header = warm_block[: warm_block.index("    steps:")]
     warm_guards = [
         _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
     ]
     assert warm_guards == [
         "${{ !inputs.promote && !inputs.speculative && "
-        "needs.prepare.outputs.build == 'true' && "
-        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+        "needs.prepare.outputs.build == 'true' }}"
     ], warm_guards
     # The hint is an ECONOMIC signal with a deliberately narrow blast
-    # radius: it may gate warm and NOTHING else. Skipping the GATE stays the
-    # sole business of the called gate's verified reuse probe and fan-in
-    # re-verification, and the build job's own tree binding is what refuses
-    # an unproven push — a hint defect must never widen past a colder
-    # build. Exactly two occurrences: the prepare output that mints it and
-    # the warm guard that consumes it.
+    # radius: it may feed warm's per-leg chain-keeper decision and NOTHING
+    # else. Skipping the GATE stays the sole business of the called gate's
+    # verified reuse probe and fan-in re-verification, and the build job's
+    # own tree binding is what refuses an unproven push — a hint defect
+    # must never widen past a colder build. Exactly two occurrences: the
+    # prepare output that mints it and the chain step env that consumes it.
+    # The warm job HEADER no longer reads it: a header-level skip cannot
+    # see ECR, and skipping on the hint alone starved the cache chain on
+    # every adopted merge (nothing published a buildcache tag across the
+    # four adopted merges through run 31006482947).
     assert text.count("gate_reuse_expected") == 2
     prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
     assert prepare_block.count("gate_reuse_expected") == 1
-    assert warm_job_header.count("gate_reuse_expected") == 1
+    assert warm_job_header.count("gate_reuse_expected") == 0
+    assert warm_block.count("gate_reuse_expected") == 1
     # BOUND, not merely counted (sol-critic round 1 on PR #449): a
     # hard-coded `gate_reuse_expected: true` in prepare's outputs kept every
     # assertion above green while skipping warm on every non-promote push.
@@ -1108,6 +1359,76 @@ def main() -> None:
         _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "push"
     ] == ["false"]
 
+    # The chain-keeper step (2026-08-05): warm always schedules; each leg
+    # exits early ONLY when prepare's reuse hint fired AND that image's
+    # exact predecessor buildcache tag exists in its own cache repository.
+    # Pinned: the decide step is unconditional (a foreign if: could leave
+    # a stale/empty skip output gating the build steps), fail-open (set
+    # +e, skip="false" initialiser, exit 0 — every probe failure warms),
+    # reads the hint through its own step env, and its skip output gates
+    # warm's OWN later steps and nothing else — a chain defect can cost a
+    # redundant warm or a colder gated build, never redden a run or reach
+    # another job.
+    chain_steps = [
+        s for s in warm_steps
+        if s.startswith("name: Decide whether the cache chain needs this warm build")
+    ]
+    assert len(chain_steps) == 1, "warm holds exactly one chain-keeper step"
+    chain_step = chain_steps[0]
+    assert [
+        _value_of(l) for l in chain_step.splitlines() if _key_of(l) == "id"
+    ] == ["chain"]
+    assert "if" not in _keys_in(chain_step), (
+        "the chain decide step itself must always run")
+    assert [
+        _value_of(l) for l in chain_step.splitlines()
+        if _key_of(l) == "GATE_REUSE_EXPECTED"
+    ] == ["${{ needs.prepare.outputs.gate_reuse_expected }}"]
+    chain_code = "\n".join(
+        _comment_cut(l) for l in chain_step.splitlines()
+        if not l.strip().startswith("#")
+    )
+    assert "set +e" in chain_code
+    assert 'skip="false"' in chain_code
+    assert chain_code.rstrip().endswith("exit 0"), (
+        "the chain decide step must degrade internally, never redden warm")
+    # BYTE-EXACT script pin (sol-critic round 1 on this PR): the targeted
+    # substring pins above allowed a polarity inversion ("$found" != "1")
+    # that skipped warm exactly when the chain was starving — the defect
+    # this step exists to close. One plain run header, nothing structural
+    # after it, and the content equals the canonical copy.
+    chain_lines = chain_step.splitlines()
+    chain_run_keys = [l for l in chain_lines if _key_of(l) == "run"]
+    assert chain_run_keys == ["        run: |"], chain_run_keys
+    chain_run_at = chain_lines.index("        run: |")
+    chain_tail = chain_lines[chain_run_at + 1:]
+    for line in chain_tail:
+        assert not line.strip() or line.startswith("          "), (
+            "the run block must end the chain step: %r" % line)
+    assert "\n".join(chain_tail).rstrip("\n") == CHAIN_SCRIPT.rstrip("\n"), (
+        "the chain-keeper script must equal its canonical pinned copy in "
+        "this file; edit both together, consciously")
+    # Every warm step after the decide carries exactly the skip condition
+    # (the solver pair additionally carries the canonical-worker arm,
+    # pinned with build's above), and the output reaches nothing outside
+    # the warm job.
+    chain_skip = "steps.chain.outputs.skip != 'true'"
+    for step_prefix in (
+        "name: Set up Docker Buildx",
+        "name: Select immutable cache references",
+    ):
+        gated = [s for s in warm_steps if s.startswith(step_prefix)]
+        assert len(gated) == 1, step_prefix
+        assert [
+            _value_of(l) for l in gated[0].splitlines() if _key_of(l) == "if"
+        ] == [chain_skip], step_prefix
+    assert [
+        _value_of(l) for l in warm_build_step.splitlines() if _key_of(l) == "if"
+    ] == [chain_skip]
+    assert text.count("steps.chain.") == warm_block.count("steps.chain."), (
+        "the chain-keeper's skip output must gate warm's own steps and "
+        "nothing else")
+
     # A warmed layer only matches the gated build if both builds hash the
     # same inputs. Any drift between the two steps' context, Dockerfile,
     # build-args, or extra build-contexts makes warm burn runners while the
@@ -1209,11 +1530,24 @@ def main() -> None:
         assert assignments == [
             'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
         ], lane
+        # build: the current-warm probe, the predecessor probe, the
+        # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
+        # batch-get-image, never an ECR listing — the roles are not granted
+        # one), and the existence check before export. warm adds the
+        # chain-keeper decide step's predecessor probe.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == 3, lane
+        assert len(probes) == {"warm": 5, "build": 4}[lane], (lane, probes)
         for probe in probes:
             assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
                 lane, probe)
+        # The fallback's executable lines equal the one canonical copy
+        # (sol-critic round 1 on this PR: probe counts alone bound neither
+        # the walk's flags nor the batch probe, so dropping fetch-depth or
+        # swapping in an ungranted listing call passed unnoticed).
+        assert "\n".join(live).count(FALLBACK_SCRIPT.rstrip("\n")) == 1, (
+            "the %s lane must carry exactly the canonical nearest-ancestor "
+            "fallback; edit FALLBACK_SCRIPT and every lane together, "
+            "consciously" % lane)
         assert not re.search(
             r'--repository-name "\$IMAGE_NAME"(?!-)', "\n".join(live)
         ), lane
@@ -1230,10 +1564,23 @@ def main() -> None:
         'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
     ]
     speculate_probes = [l for l in speculate_live if "--repository-name" in l]
-    assert len(speculate_probes) == 2
+    # One release-repository existence probe; the predecessor import probe
+    # and the nearest-ancestor fallback batch probe both read the cache
+    # repository.
+    assert len(speculate_probes) == 3
     assert sorted(
         '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
-    ) == [False, True], speculate_probes
+    ) == [False, True, True], speculate_probes
+    # Same canonical fallback bytes as warm/build (their comments differ,
+    # their code must not), and no lane anywhere may reach for an ECR
+    # listing: neither workflow role is granted one, so a describe-images
+    # variant would AccessDenied and silently run every build cold
+    # (sol-critic round 1 on this PR).
+    assert "\n".join(speculate_live).count(FALLBACK_SCRIPT.rstrip("\n")) == 1, (
+        "the speculative lane must carry exactly the canonical "
+        "nearest-ancestor fallback")
+    assert "describe-images" not in text
+    assert "list-images" not in text
     tag_values = [
         _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
     ]
@@ -1646,6 +1993,19 @@ def main() -> None:
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
     assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
 
+    # The cache fallback's ancestor walk reads real history: the three
+    # image-building jobs' checkouts must fetch 20 commits (the walk's
+    # --max-count is 15). actions/checkout defaults to depth 1, which
+    # would make every walk silently empty while the fallback pins stayed
+    # green (sol-critic round 1 on this PR). Parsed, not text-matched.
+    for job_name in ("warm", "build", "speculate"):
+        first_step = wf_jobs[job_name]["steps"][0]
+        assert str(first_step.get("uses", "")).startswith(
+            "actions/checkout@"), job_name
+        assert first_step["with"].get("fetch-depth") == 20, (
+            "%s's checkout must declare fetch-depth: 20 for the "
+            "nearest-ancestor walk" % job_name)
+
     # The release role is reachable only through the ecr-release GitHub
     # environment (main-only deployment branch policy): every job that
     # assumes AWS_ECR_PUSH_ROLE declares it as a plain scalar, so its OIDC
@@ -1798,6 +2158,80 @@ def main() -> None:
     assert len(verify_nodes) == 1
     assert adopt_nodes[0]["with"] == verify_nodes[0]["with"]
 
+    # warm's and build's cache-select scripts are byte-identical, the same
+    # idiom that binds their build-push inputs: drift would let one lane's
+    # fallback rot while the other lane's pins stayed green.
+    cache_step_name = "Select immutable cache references"
+    warm_cache_run = _sole_named(wf_jobs["warm"]["steps"], cache_step_name)["run"]
+    build_cache_run = _sole_named(wf_jobs["build"]["steps"], cache_step_name)["run"]
+    assert warm_cache_run == build_cache_run, (
+        "warm and build must carry byte-identical cache-select scripts")
+    # The cache-select scripts bind WHOLE and BYTE-EXACT to the parsed
+    # run value of each named step. The escalation history on this PR:
+    # whole-job live-line counts admitted an env-value decoy at matching
+    # columns (sol-critic round 2), and a contains-once count over the
+    # parsed run value still admitted the canonical bytes wrapped dead
+    # inside `if false; then ... fi` (round 3). Only equality of the
+    # entire executable content proves the fallback executes — the same
+    # conclusion HINT_SCRIPT's history reached. The parser strips the
+    # scalar's ten-column base indentation, so the canonical copies are
+    # dedented before comparing.
+    def _dedent_run(script):
+        return "\n".join(
+            l[10:] for l in script.rstrip("\n").splitlines()
+        )
+
+    assert warm_cache_run.rstrip("\n") == _dedent_run(WARM_BUILD_CACHE_SCRIPT), (
+        "the warm/build cache-select script must equal its canonical "
+        "pinned copy in this file; edit both together, consciously")
+    speculate_cache_run = _sole_named(
+        wf_jobs["speculate"]["steps"],
+        "Select the merged-onto main tip's cache, import-only")["run"]
+    assert speculate_cache_run.rstrip("\n") == _dedent_run(SPECULATE_CACHE_SCRIPT), (
+        "the speculative cache-select script must equal its canonical "
+        "pinned copy in this file; edit both together, consciously")
+    # Self-consistency of the canonical copies: both must carry the
+    # canonical fallback exactly once, so FALLBACK_SCRIPT cannot rot into
+    # a decoy of its own while the whole-script pins stay green.
+    assert WARM_BUILD_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
+    assert SPECULATE_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
+    # Identity binding, name -> id -> consumer (sol-critic round 4 on
+    # this PR): the name-pinned step must BE the `id: cache` step, that
+    # id must be unique in its job, its condition must be exactly the
+    # lane's legitimate gate (none in build), and the lane's build-push
+    # step must consume exactly steps.cache's outputs — otherwise a
+    # canonical-script decoy under the pinned NAME could sit unreferenced
+    # while a renamed hollow step feeds the consumers empty outputs.
+    cache_expr_from = "${{ steps.cache.outputs.from }}"
+    cache_expr_to = "${{ steps.cache.outputs.to }}"
+    for job_name, step_name, expected_if in (
+        ("warm", cache_step_name, "steps.chain.outputs.skip != 'true'"),
+        ("build", cache_step_name, None),
+        ("speculate", "Select the merged-onto main tip's cache, import-only",
+         "steps.exists.outputs.present != 'true'"),
+    ):
+        cache_step_parsed = _sole_named(wf_jobs[job_name]["steps"], step_name)
+        assert cache_step_parsed.get("id") == "cache", (
+            "%s's cache-select step must carry id: cache — the id the "
+            "lane's build-push step consumes" % job_name)
+        same_id = [
+            s for s in wf_jobs[job_name]["steps"] if s.get("id") == "cache"
+        ]
+        assert len(same_id) == 1, job_name
+        assert cache_step_parsed.get("if") == expected_if, (
+            job_name, cache_step_parsed.get("if"))
+        build_push_steps = [
+            s for s in wf_jobs[job_name]["steps"]
+            if str(s.get("uses", "")).startswith("docker/build-push-action")
+        ]
+        assert len(build_push_steps) == 1, job_name
+        push_with = build_push_steps[0]["with"]
+        assert push_with.get("cache-from") == cache_expr_from, job_name
+        if job_name == "speculate":
+            assert "cache-to" not in push_with
+        else:
+            assert push_with.get("cache-to") == cache_expr_to, job_name
+
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
     relay_text = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
@@ -1868,10 +2302,14 @@ def check_docs_noop_filter(text: str) -> None:
         "${{ !inputs.promote && !inputs.speculative && "
         "needs.prepare.outputs.build == 'true' }}"
     )
+    # Since the 2026-08-05 chain-keeper change warm carries the same guard
+    # as test: the gate-reuse skip moved into warm's per-leg decide step,
+    # which can probe ECR for the predecessor buildcache tag before
+    # skipping (a header-level skip cannot, and starved the cache chain on
+    # adopted merges).
     assert jobs["warm"]["if"] == (
         "${{ !inputs.promote && !inputs.speculative && "
-        "needs.prepare.outputs.build == 'true' && "
-        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+        "needs.prepare.outputs.build == 'true' }}"
     )
     assert jobs["adopt"]["if"] == (
         "${{ !inputs.promote && github.event_name == 'push' && "
