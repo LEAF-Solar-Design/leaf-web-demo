@@ -80,6 +80,15 @@ def _folded(value) -> str:
 
 
 _PER_COMMIT_ARGS = ("LEAF_SOURCE_SHA", "AUTOFILL_SOLVER_REVISION")
+# A RUN "consumes" a per-commit ARG only through an actual shell expansion
+# ($NAME or ${NAME...}); a bare name in an echo or comment is not consumption
+# (sol-critic round 1 on PR #458).
+_PER_COMMIT_REF = re.compile(
+    r"\$\{?(?:%s)\b" % "|".join(_PER_COMMIT_ARGS)
+)
+_PER_COMMIT_DECL = re.compile(
+    r"ARG\s+(?:%s)\b" % "|".join(_PER_COMMIT_ARGS)
+)
 
 
 def _runs_after_per_commit_arg(dockerfile: str) -> list:
@@ -101,9 +110,11 @@ def _runs_after_per_commit_arg(dockerfile: str) -> list:
     buf = ""
     for raw in dockerfile.splitlines():
         line = raw.rstrip()
+        # The Dockerfile parser removes comment lines even inside a continued
+        # instruction, so a comment can never satisfy (or break) a RUN check.
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
         if not buf:
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
             buf = line
         else:
             buf += "\n" + line
@@ -115,10 +126,13 @@ def _runs_after_per_commit_arg(dockerfile: str) -> list:
         head = inst.split(None, 1)[0].upper()
         if head == "FROM":
             arg_seen = False
-        elif head == "ARG" and any(name in inst for name in _PER_COMMIT_ARGS):
+        elif head == "ARG" and _PER_COMMIT_DECL.match(inst):
             arg_seen = True
-        elif head == "RUN" and arg_seen and not any(
-            name in inst for name in _PER_COMMIT_ARGS
+        elif head == "RUN" and arg_seen and not _PER_COMMIT_REF.search(
+            # Comments cannot consume: the fold above drops Dockerfile
+            # comment lines, and _executable_bash drops trailing shell
+            # comments, so only an expansion in executable text counts.
+            _executable_bash(inst)
         ):
             offending.append(inst.splitlines()[0])
     return offending
