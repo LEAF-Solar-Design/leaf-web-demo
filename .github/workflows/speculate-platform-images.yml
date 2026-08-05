@@ -84,10 +84,20 @@ jobs:
           # same basis the merge-side noop gate uses, with rename detection
           # disabled for the same reason (a rename reports only its
           # destination). Every abnormal path leaves DISPATCH=true.
+          #
+          # The filter EXECUTES from the TRUSTED first parent (the main tip
+          # the preview merged onto), never from the PR-controlled preview
+          # checkout: this step's env carries GH_TOKEN with actions:write,
+          # so running preview-authored code here would hand a same-repo PR
+          # that token before merge — the exact boundary the dispatch
+          # indirection exists to hold. Only the FILE LIST is PR-derived,
+          # and the filter treats stdin strictly as data.
           DISPATCH=true
-          if git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1; then
+          if git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1 \
+            && git show 'HEAD^1:scripts/docs_noop_filter.py' \
+              > "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null; then
             if FILES=$(git diff --no-renames --name-only HEAD^1 HEAD 2>/dev/null); then
-              if VERDICT=$(printf '%s\n' "$FILES" | python3 scripts/docs_noop_filter.py 2>/dev/null); then
+              if VERDICT=$(printf '%s\n' "$FILES" | python3 "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null); then
                 if [ "$VERDICT" = "skip" ]; then
                   echo "::notice::PR #$PR_NUMBER changes documentation only; its merge will no-op the build train, so there is nothing worth speculating."
                   DISPATCH=false
