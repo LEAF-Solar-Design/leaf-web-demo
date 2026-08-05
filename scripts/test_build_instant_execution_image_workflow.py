@@ -59,6 +59,13 @@ def main() -> None:
     assert "immutable tag will not be overwritten" in text
     assert "expire buildcache-* tags after 14 days" in text
 
+    # The cache probes must surface stderr and fail the job on a nonzero exit
+    # (AccessDenied-class) rather than reading a probe failure as an absent tag.
+    assert "2>/dev/null" not in build_body
+    assert "a probe failure is not an absent tag" in build_body
+    assert "refusing to skip cache publication on a failed probe" in build_body
+    assert "Unable to verify" not in build_body
+
     print("instant execution image workflow invariants: PASS")
 
 

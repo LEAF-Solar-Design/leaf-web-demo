@@ -6,8 +6,11 @@ name: Build platform images
 # prod-<shortsha>. Each image has its own registry-backed Buildx cache in a
 # DEDICATED <image>-buildcache ECR repository -- never the release repository.
 # ECR tags are immutable, so cache publication uses buildcache-<shortsha> and
-# never overwrites a tag. A push imports only its immediate predecessor's cache.
-# Workflow dispatches and missing predecessor caches build without cache input.
+# never overwrites a tag. A build imports its immediate predecessor's cache
+# when that exact tag exists, else the nearest first-parent ancestor's tag
+# still published: the cache keys are commit-stable below the per-commit
+# ARGs (#458), so a few-commits-old cache still hits the heavy toolchain
+# layers. Every cache lookup fails open to building without cache input.
 #
 # Cache retention contract: the AWS *-buildcache repositories must
 # expire buildcache-* tags after 14 days or retain no more than the latest 20
@@ -124,7 +127,7 @@ permissions:
 concurrency:
   # Serial main builds make the previous push's cache the normal input. GitHub
   # can replace an older pending run, so a missing predecessor remains valid
-  # and falls back to an uncached build.
+  # and falls back to the nearest ancestor's cache, else an uncached build.
   #
   # Speculative runs live in their own PER-PR group: they are dispatched on
   # the main ref, so without this split they would queue INSIDE the release
@@ -480,11 +483,11 @@ jobs:
       # artifact name, un-expired, same-repo workflow_run provenance) but
       # deliberately not its download-and-verify, because both divergence
       # directions are benign: a false "expected" costs one full-gate run its
-      # warm (build falls back to the predecessor cache), a missed one costs
+      # warm (build falls back to an older cache), a missed one costs
       # today's redundant warm. Skipping the GATE stays the sole business of
       # test-gate.yml's verified probe and fan-in re-verification; this
-      # output gates the warm job and nothing else, and the contract test
-      # pins exactly that.
+      # output feeds warm's per-leg chain-keeper decision and nothing else,
+      # and the contract test pins exactly that.
       - name: Probe for an expected gate reuse (warm-skip hint)
         id: reuse-hint
         if: steps.decide.outputs.build == 'true'
@@ -521,7 +524,7 @@ jobs:
           fi
           echo "expected=$expected" >> "$GITHUB_OUTPUT"
           if [[ "$expected" == "true" ]]; then
-            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+            echo "::notice::a same-repo gate proof already names tree $tree; warm legs with a fresh cache chain exit early (the gate's own probe still verifies the proof before any shard skip)"
           else
             echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
           fi
@@ -582,16 +585,24 @@ jobs:
   # continue-on-error is deliberate: a warm failure must degrade to today's
   # behaviour (a cold build off the predecessor cache), never redden a run.
   #
-  # SKIPPED when prepare's reuse hint expects the gate verdict to be reused
-  # (this exact tree already carries a same-repo gate proof): the gate leg is
-  # then ~30s instead of ~220s, the build job starts before any warm leg
-  # could publish, and warming cannot pay off. The guard is fail-open — an
-  # empty or failed hint output runs warm — and skipping warm never starves
-  # the cache chain, because the build job publishes buildcache-<shortsha>
-  # itself whenever warm did not.
+  # CHAIN KEEPER (2026-08-05, the #456/#458 follow-up): warm always
+  # schedules, and each leg decides IN-JOB whether to exit early — prepare
+  # holds no AWS credential, so it cannot probe ECR for this decision. A
+  # leg exits early only when prepare's reuse hint expects the gate verdict
+  # to be reused (the gate leg is then ~30s, the build job starts before
+  # any warm leg could publish, and warming cannot pay off) AND that
+  # image's exact predecessor buildcache tag exists. The second clause is
+  # what keeps the cache chain alive: on a fully adopted merge the build
+  # matrix skips too, so a warm skipped on the hint alone left NOTHING
+  # publishing a buildcache tag — the four adopted merges through run
+  # 31006482947 published no tag, and every speculative build ran fully
+  # cold (~99s). Steady state under green adoption: warm builds on roughly
+  # every other merge; a skipping merge costs five short probe legs
+  # (~2 runner-minutes). Every probe failure lands on skip=false — warm
+  # runs, never starving the chain.
   warm:
     needs: prepare
-    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' && needs.prepare.outputs.gate_reuse_expected != 'true' }}
+    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -616,31 +627,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          # Deep enough for the cache step's first-parent ancestor walk
+          # (its --max-count is 15); nothing here reads further back.
+          fetch-depth: 20
           persist-credentials: false
-
-      - name: Require the read-only canonical solver deploy key
-        if: matrix.image == 'canonical-worker'
-        env:
-          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
-            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
-            exit 1
-          }
-
-      - name: Check out the exact canonical solver source
-        if: matrix.image == 'canonical-worker'
-        uses: actions/checkout@v4
-        with:
-          repository: LEAF-Solar-Design/autofill-solver
-          ref: ${{ needs.prepare.outputs.solver_revision }}
-          path: autofill-solver
-          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS credentials (OIDC, buildcache-scoped role)
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -652,8 +642,69 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      # The chain-keeper decision, per leg: each image has its own cache
+      # repository, so each leg probes its own chain. It runs before the
+      # solver steps so a skipping canonical-worker leg never fetches the
+      # deploy key — the same posture speculate's existence-skip holds.
+      - name: Decide whether the cache chain needs this warm build
+        id: chain
+        env:
+          GATE_REUSE_EXPECTED: ${{ needs.prepare.outputs.gate_reuse_expected }}
+        run: |
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must land on skip=false — warm
+          # runs and republishes the chain; a redundant warm costs about a
+          # runner-minute, while a false skip starves every later cache
+          # consumer (warm, gated build, and speculative imports alike).
+          set -uo pipefail
+          set +e
+          skip="false"
+          if [[ "$GATE_REUSE_EXPECTED" == "true" && -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"
+            if [[ "$found" == "1" ]]; then
+              skip="true"
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [[ "$skip" == "true" ]]; then
+            echo "::notice::$IMAGE_NAME: gate reuse is expected and the predecessor cache $PREVIOUS_CACHE_TAG exists; this warm leg exits early"
+          else
+            echo "::notice::$IMAGE_NAME: warming (gate reuse expected: ${GATE_REUSE_EXPECTED:-false}; predecessor cache tag: ${PREVIOUS_CACHE_TAG:-<none>})"
+          fi
+          exit 0
+
+      - name: Require the read-only canonical solver deploy key
+        if: matrix.image == 'canonical-worker' && steps.chain.outputs.skip != 'true'
+        env:
+          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
+            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
+            exit 1
+          }
+
+      - name: Check out the exact canonical solver source
+        if: matrix.image == 'canonical-worker' && steps.chain.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: LEAF-Solar-Design/autofill-solver
+          ref: ${{ needs.prepare.outputs.solver_revision }}
+          path: autofill-solver
+          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        if: steps.chain.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
       - name: Select immutable cache references
         id: cache
+        if: steps.chain.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
@@ -683,7 +734,45 @@ jobs:
               --output text 2>/dev/null || true)"
             if [[ "$found" == "1" ]]; then
               cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
-            else
+            fi
+          fi
+
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): under the
+          # adoption path a fully green merge run skips both cache writers,
+          # so the exact predecessor tag can be several commits stale. The
+          # cache keys are commit-stable below the per-commit ARGs (#458),
+          # so a near-ancestor cache still hits the heavy toolchain layers.
+          # Candidates come from the checkout's own first-parent history
+          # (fetch-depth: 20 above exists for exactly this walk) and are
+          # probed in ONE batch-get-image call — deliberately not an ECR
+          # listing, which neither workflow role is granted
+          # (leaf-automation-aws-terraform pins both to BatchGetImage plus
+          # push actions). Every failure lands on the uncached build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
               echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
             fi
           fi
@@ -711,6 +800,7 @@ jobs:
           echo "to=$cache_to" >> "$GITHUB_OUTPUT"
 
       - name: Warm the layer cache for ${{ matrix.image }}
+        if: steps.chain.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -770,6 +860,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          # Deep enough for the cache step's first-parent ancestor walk
+          # (its --max-count is 15); nothing here reads further back.
+          fetch-depth: 20
           persist-credentials: false
 
       # `needs: test` guarantees a green gate ran in this workflow run; this
@@ -858,7 +951,45 @@ jobs:
               --output text 2>/dev/null || true)"
             if [[ "$found" == "1" ]]; then
               cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
-            else
+            fi
+          fi
+
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): under the
+          # adoption path a fully green merge run skips both cache writers,
+          # so the exact predecessor tag can be several commits stale. The
+          # cache keys are commit-stable below the per-commit ARGs (#458),
+          # so a near-ancestor cache still hits the heavy toolchain layers.
+          # Candidates come from the checkout's own first-parent history
+          # (fetch-depth: 20 above exists for exactly this walk) and are
+          # probed in ONE batch-get-image call — deliberately not an ECR
+          # listing, which neither workflow role is granted
+          # (leaf-automation-aws-terraform pins both to BatchGetImage plus
+          # push actions). Every failure lands on the uncached build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
               echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
             fi
           fi
@@ -1090,6 +1221,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
+          # Deep enough for the cache step's first-parent ancestor walk
+          # (its --max-count is 15); nothing here reads further back.
+          fetch-depth: 20
           persist-credentials: false
 
       - name: Require the same merge preview prepare resolved
@@ -1172,7 +1306,43 @@ jobs:
               --output text 2>/dev/null || true)"
             if [[ "$found" == "1" ]]; then
               cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
-            else
+            fi
+          fi
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): the
+          # merged-onto main tip's exact tag can be several commits stale
+          # when adopted merges published nothing, and the commit-stable
+          # keys (#458) make a near-ancestor cache nearly as good. The
+          # preview's first-parent chain IS main's history, so the same
+          # walk warm/build use works here (fetch-depth: 20 above), probed
+          # in ONE batch-get-image call — deliberately not an ECR listing,
+          # which neither workflow role is granted. IMPORT stays the only
+          # direction in this lane; every failure lands on the uncached
+          # build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
               echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
             fi
           fi
