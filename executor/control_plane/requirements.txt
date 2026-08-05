@@ -1,4 +1,4 @@
-cryptography>=48.0.1,<49
+cryptography>=50.0.0,<51
 gunicorn>=22,<24
 psycopg[binary]>=3.2,<4
 redis>=5,<7

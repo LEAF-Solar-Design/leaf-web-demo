@@ -81,16 +81,21 @@ class ControlPlane:
         create for two simultaneous app requests in one control-plane worker.
         """
         session_id = str(request.get("session_id", ""))
-        with self._assignment_lock(session_id):
+        holder = self._assignment_lock(session_id)
+        with holder.lock:
             return self._assign(request, binding_epoch)
 
-    def _assignment_lock(self, session_id: str):
+    def _assignment_lock(self, session_id: str) -> _SessionAssignmentLock:
+        # Callers must bind the returned holder to a local for the whole
+        # locked region: the WeakValueDictionary entry lives only while a
+        # strong reference to the holder exists, and holding just .lock lets
+        # the entry vanish so a concurrent caller mints a second lock.
         with self._assignment_locks_guard:
             holder = self._assignment_locks.get(session_id)
             if holder is None:
                 holder = _SessionAssignmentLock()
                 self._assignment_locks[session_id] = holder
-        return holder.lock
+        return holder
 
     def _assign(self, request: dict, binding_epoch: int = 1) -> dict:
         self._require(request)
@@ -230,7 +235,8 @@ class ControlPlane:
 
     def rebind(self, request: dict) -> dict:
         session_id = str(request.get("session_id", ""))
-        with self._assignment_lock(session_id):
+        holder = self._assignment_lock(session_id)
+        with holder.lock:
             old = self.store.get_session(request["session_id"])
             next_epoch = (old.binding_epoch + 1) if old else 1
             if old:
