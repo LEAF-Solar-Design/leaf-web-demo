@@ -45,7 +45,7 @@ import {
   config, getSession, getTools, getCapabilities, runTool, runToolAsync,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
-  createOrg, listProjects, createProject, openProject,
+  createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -217,6 +217,7 @@ export default function App() {
   // null in mock, or when the endpoint isn't deployed -> treated as full access.
   // Version-history browser (§ version chain) + read-only preview state.
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
+  const [signedIn, setSignedIn] = useState(() => isSignedIn())
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
@@ -479,6 +480,7 @@ export default function App() {
   // keeps the drawer unreachable in mock and on tiers below admin even with
   // ?customize=1 in the URL (the server enforces the same gate regardless).
   const platformCustomizeEntitled = entitlements?.entitlements?.platform_customize === true
+  const canOpenCustomize = !mock && signedIn && platformCustomizeEntitled
   // Build routes through the SHARED helper (platformTrustModel) so every
   // surface — this legacy /app shell and ToolCast's /try — applies the same
   // entitlement-AND-availability rule: a tier may hold `build` while the R5
@@ -706,6 +708,14 @@ export default function App() {
     if (mock) return
     handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A 401 clears leaf.jwt in api.js. Mirror that transport event into render
+  // state so privileged browser surfaces disappear in the same turn, including
+  // when the rejected request originated inside the customization drawer.
+  useEffect(() => subscribeUnauthorized(() => {
+    setSignedIn(false)
+    setCustomizeOpen(false)
+  }), [])
 
   // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
@@ -2116,7 +2126,7 @@ export default function App() {
   // The internal ops / tenant kill-switch drawer must never be reachable from a
   // public demo build — `?ops=1` is a no-op in mock.
   const opsExit = useExit(opsFlag && !mock && !opsDismissed)
-  const customizeExit = useExit(customizeOpen && !mock && platformCustomizeEntitled)
+  const customizeExit = useExit(customizeOpen && canOpenCustomize)
 
   return (
     <div className="app">
@@ -2147,7 +2157,7 @@ export default function App() {
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
-          {!mock && platformCustomizeEntitled && (
+          {canOpenCustomize && (
             <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>

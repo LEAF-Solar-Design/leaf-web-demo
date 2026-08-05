@@ -50,9 +50,12 @@ for (const file of await walk(srcDir)) {
 // a visible header entry so platform self-edit is discoverable.
 assert(app.includes("entitlements?.entitlements?.platform_customize === true"), 'panel mount must gate on a STRICT platform_customize grant')
 assert(app.includes("get('customize') === '1'"), 'panel must preserve the ?customize=1 deep link')
-assert(app.includes('customizeOpen && !mock && platformCustomizeEntitled'), 'panel mount must require open state, live mode, and strict entitlement')
-assert(app.includes('platformCustomizeEntitled && (') && app.includes('>Customize</button>'), 'an entitled admin must get a visible Customize entry')
+assert(app.includes('const canOpenCustomize = !mock && signedIn && platformCustomizeEntitled'), 'the shared gate must require live mode, an active token, and strict entitlement')
+const exitGuard = app.match(/const customizeExit = useExit\(([^)\n]+)\)/)
+assert(exitGuard?.[1].trim() === 'customizeOpen && canOpenCustomize', 'panel mount must use only the fail-closed open-and-authorized guard')
+assert(app.includes('{canOpenCustomize && (') && app.includes('>Customize</button>'), 'an authorized admin must get a visible Customize entry')
 assert(app.includes('onClick={() => setCustomizeOpen(true)}'), 'the visible Customize entry must open the guarded panel')
+assert(app.includes('subscribeUnauthorized(() => {') && app.includes('setCustomizeOpen(false)'), 'a 401 must close the privileged drawer immediately')
 
 // Guard strings alone cannot prove the mount is gated: a SECOND unconditional
 // <CustomizePanel /> would keep every assert above green. Pin the mount count
