@@ -22,6 +22,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Contents/LeafWriteTools.cs" />
+    <Compile Include="Contents/MutationPlan.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- Managed AutoCAD refs are Private=false: the engine supplies them at

@@ -1,31 +1,8 @@
-// ===========================================================================
-// LeafWriteTools.cs  -  Leaf drawing.write COMPILED productization path (skeleton)
-// ---------------------------------------------------------------------------
-// The C# / ObjectARX equivalent of the LISP mutate spike in da/write_lisp.py.
-// The LISP spike (da/write_spike.py + LeafWriteProbe Activity) is the PROOF of
-// capability; this bundle is the later productization path for when a write tool
-// wants real .NET / full ObjectARX access (transactions, geometry libs, error
-// handling) instead of a headless .scr.
-//
-// One CommandMethod: LEAFWRITEPROBE. Same load-bearing order as the LISP recipe:
-//   1. Erase() one pre-existing model-space Polyline (the DELETE).
-//   2. Ensure layer LEAF_WRITE_PROBE exists (the LayerTable Make).
-//   3. Append a closed Polyline on LEAF_WRITE_PROBE (the ADD).
-//   4. Database.SaveAs("output.dwg") — the Activity's Result localName.
-// Re-extracting output.dwg then shows the probe layer + polyline (ADD) and
-// exactly one original polyline handle gone (DELETE) — identical assertions to
-// the LISP spike.
-//
-// Pattern mirrors ../appbundle/Contents/LeafDaTools.cs (assembly attrs,
-// Transaction / BlockTable / ModelSpace idioms). Managed AutoCAD refs are
-// Private=false: the DA engine supplies acdbmgd/accoremgd at runtime.
-//
-// SKELETON: deliberately NOT built here (no guarantee the AutoCAD refs resolve
-// on this host). The LISP spike is the demonstrated capability — see BUILD.md.
-// ===========================================================================
 using System;
-using System.Diagnostics;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text.Json;
 using Autodesk.AutoCAD.ApplicationServices.Core;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
@@ -36,84 +13,244 @@ using Autodesk.AutoCAD.Runtime;
 
 namespace LeafWriteTools
 {
-    public class LeafWriteApp : IExtensionApplication
+    public sealed class LeafWriteApp : IExtensionApplication
     {
-        public void Initialize() { LeafWriteCommands.Log("LeafWriteTools loaded"); }
+        public void Initialize() { }
         public void Terminate() { }
     }
 
-    public class LeafWriteCommands
+    public sealed class LeafWriteCommands
     {
-        private const string ProbeLayer = "LEAF_WRITE_PROBE";
-        private const string OutFile = "output.dwg";   // Activity Result localName
-        private const string LogFile = "LeafWriteTools.log";
+        private const string PlanFile = "mutation-plan.json";
+        private const string OutputFile = "output.dwg";
+        private const string ReceiptFile = "receipt.json";
+        private const int MaximumReceiptBytes = 262_144;
 
-        internal static void Log(string msg)
+        [CommandMethod("LEAFAPPLYMUTATIONS", CommandFlags.Session)]
+        public void ApplyMutations()
         {
-            try { File.AppendAllText(LogFile, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\r\n"); } catch { }
-        }
+            DeleteIfPresent(OutputFile);
+            DeleteIfPresent(ReceiptFile);
+            DeleteIfPresent(ReceiptFile + ".tmp");
 
-        // ---- drawing.write probe (engine_op: write_probe) ------------------
-        [CommandMethod("LEAFWRITEPROBE")]
-        public void WriteProbe()
-        {
-            var sw = Stopwatch.StartNew();
-            var db = Application.DocumentManager.MdiActiveDocument.Database;
-            using (var tr = db.TransactionManager.StartTransaction())
+            byte[] planBytes = File.ReadAllBytes(PlanFile);
+            ValidatedMutationPlan plan = MutationPlanParser.Parse(planBytes);
+            Database database = Application.DocumentManager.MdiActiveDocument.Database;
+            Dictionary<string, string> addedHandles = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            using (Transaction transaction = database.TransactionManager.StartTransaction())
             {
-                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-                var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace],
-                                                        OpenMode.ForWrite);
+                BlockTable blockTable = (BlockTable)transaction.GetObject(
+                    database.BlockTableId, OpenMode.ForRead);
+                BlockTableRecord modelSpace = (BlockTableRecord)transaction.GetObject(
+                    blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-                // 1) DELETE one pre-existing model-space polyline.
-                foreach (ObjectId id in ms)
+                Dictionary<string, Entity> removals = ResolveEntities(
+                    database, transaction, modelSpace, plan.Removed);
+                Dictionary<string, Entity> transforms = ResolveEntities(
+                    database, transaction, modelSpace, TransformHandles(plan.Transforms));
+
+                foreach (string handle in plan.Removed)
+                    removals[handle].UpgradeOpen();
+                foreach (PolylineTransform transform in plan.Transforms)
                 {
-                    if (tr.GetObject(id, OpenMode.ForRead) is Polyline pl)
-                    {
-                        var w = (Polyline)tr.GetObject(id, OpenMode.ForWrite);
-                        w.Erase();
-                        Log($"deleted polyline handle {pl.Handle}");
-                        break;   // exactly one
-                    }
+                    Entity entity = transforms[transform.Handle];
+                    if (!(entity is Polyline) && !(entity is Polyline3d))
+                        throw new MutationPlanException(
+                            $"transform handle {transform.Handle} is not a Polyline or Polyline3d");
+                    entity.UpgradeOpen();
                 }
 
-                // 2) Ensure the probe layer exists.
-                var lt = (LayerTable)tr.GetObject(db.LayerTableId, OpenMode.ForRead);
-                ObjectId layerId;
-                if (lt.Has(ProbeLayer))
-                {
-                    layerId = lt[ProbeLayer];
-                }
-                else
-                {
-                    var wlt = (LayerTable)tr.GetObject(db.LayerTableId, OpenMode.ForWrite);
-                    using (var ltr = new LayerTableRecord { Name = ProbeLayer })
-                    {
-                        layerId = wlt.Add(ltr);
-                        tr.AddNewlyCreatedDBObject(ltr, true);
-                    }
-                }
+                Dictionary<string, ObjectId> layers = EnsureLayers(
+                    database, transaction, plan.Added);
 
-                // 3) ADD a closed 4-vertex polyline on the probe layer.
-                using (var probe = new Polyline())
+                foreach (PolylineTransform transform in plan.Transforms)
+                    ApplyTransform(transaction, transforms[transform.Handle], transform);
+                foreach (string handle in plan.Removed)
+                    removals[handle].Erase();
+                foreach (AddedPolyline addition in plan.Added)
                 {
-                    probe.AddVertexAt(0, new Point2d(0.0, 0.0), 0, 0, 0);
-                    probe.AddVertexAt(1, new Point2d(10.0, 0.0), 0, 0, 0);
-                    probe.AddVertexAt(2, new Point2d(10.0, 10.0), 0, 0, 0);
-                    probe.AddVertexAt(3, new Point2d(0.0, 10.0), 0, 0, 0);
-                    probe.Closed = true;
-                    probe.LayerId = layerId;
-                    ms.AppendEntity(probe);
-                    tr.AddNewlyCreatedDBObject(probe, true);
-                    Log($"added probe polyline handle {probe.Handle}");
+                    Entity entity = CreatePolyline(addition);
+                    entity.LayerId = layers[addition.Layer];
+                    modelSpace.AppendEntity(entity);
+                    transaction.AddNewlyCreatedDBObject(entity, true);
+                    addedHandles.Add(addition.LogicalHandle, entity.Handle.ToString());
                 }
-
-                tr.Commit();
+                transaction.Commit();
             }
 
-            // 4) SAVEAS output.dwg (keep current DWG version).
-            db.SaveAs(OutFile, DwgVersion.Current);
-            Log($"saved {OutFile} in {sw.ElapsedMilliseconds} ms");
+            database.SaveAs(OutputFile, DwgVersion.Current);
+            WriteReceipt(plan, addedHandles);
+        }
+
+        private static Dictionary<string, Entity> ResolveEntities(
+            Database database,
+            Transaction transaction,
+            BlockTableRecord modelSpace,
+            IEnumerable<string> handles)
+        {
+            Dictionary<string, Entity> result = new Dictionary<string, Entity>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string handleText in handles)
+            {
+                long value = long.Parse(handleText, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+                ObjectId objectId;
+                try
+                {
+                    objectId = database.GetObjectId(false, new Handle(value), 0);
+                }
+                catch (Autodesk.AutoCAD.Runtime.Exception)
+                {
+                    throw new MutationPlanException($"unknown AutoCAD handle {handleText}");
+                }
+                Entity entity = transaction.GetObject(objectId, OpenMode.ForRead, false) as Entity;
+                if (entity == null || entity.OwnerId != modelSpace.ObjectId || entity.IsErased)
+                    throw new MutationPlanException(
+                        $"handle {handleText} does not name a live model-space entity");
+                result.Add(handleText, entity);
+            }
+            return result;
+        }
+
+        private static IEnumerable<string> TransformHandles(IEnumerable<PolylineTransform> transforms)
+        {
+            foreach (PolylineTransform transform in transforms)
+                yield return transform.Handle;
+        }
+
+        private static Dictionary<string, ObjectId> EnsureLayers(
+            Database database,
+            Transaction transaction,
+            IEnumerable<AddedPolyline> additions)
+        {
+            LayerTable layerTable = (LayerTable)transaction.GetObject(
+                database.LayerTableId, OpenMode.ForRead);
+            Dictionary<string, ObjectId> result = new Dictionary<string, ObjectId>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (AddedPolyline addition in additions)
+            {
+                if (result.ContainsKey(addition.Layer))
+                    continue;
+                if (layerTable.Has(addition.Layer))
+                {
+                    result.Add(addition.Layer, layerTable[addition.Layer]);
+                    continue;
+                }
+                if (!layerTable.IsWriteEnabled)
+                    layerTable.UpgradeOpen();
+                using (LayerTableRecord layer = new LayerTableRecord { Name = addition.Layer })
+                {
+                    ObjectId layerId = layerTable.Add(layer);
+                    transaction.AddNewlyCreatedDBObject(layer, true);
+                    result.Add(addition.Layer, layerId);
+                }
+            }
+            return result;
+        }
+
+        private static Entity CreatePolyline(AddedPolyline addition)
+        {
+            if (addition.IsThreeDimensional)
+            {
+                Point3dCollection points = new Point3dCollection();
+                foreach (MutationPoint point in addition.Points)
+                    points.Add(new Point3d(point.X, point.Y, point.Z));
+                return new Polyline3d(Poly3dType.SimplePoly, points, true);
+            }
+
+            Polyline polyline = new Polyline(addition.Points.Count);
+            polyline.SetDatabaseDefaults();
+            polyline.Elevation = addition.Points[0].Z;
+            for (int index = 0; index < addition.Points.Count; index++)
+            {
+                MutationPoint point = addition.Points[index];
+                polyline.AddVertexAt(index, new Point2d(point.X, point.Y), 0.0, 0.0, 0.0);
+            }
+            polyline.Closed = true;
+            return polyline;
+        }
+
+        private static void ApplyTransform(
+            Transaction transaction,
+            Entity entity,
+            PolylineTransform transform)
+        {
+            Point3d centroid = VertexCentroid(transaction, entity);
+            if (Math.Abs(transform.RotationDegrees) > 1e-12)
+            {
+                entity.TransformBy(Matrix3d.Rotation(
+                    transform.RotationDegrees * Math.PI / 180.0,
+                    Vector3d.ZAxis,
+                    centroid));
+            }
+            if (Math.Abs(transform.Dx) > 1e-12 || Math.Abs(transform.Dy) > 1e-12)
+            {
+                entity.TransformBy(Matrix3d.Displacement(
+                    new Vector3d(transform.Dx, transform.Dy, 0.0)));
+            }
+        }
+
+        private static Point3d VertexCentroid(Transaction transaction, Entity entity)
+        {
+            List<Point3d> points = new List<Point3d>();
+            if (entity is Polyline polyline)
+            {
+                for (int index = 0; index < polyline.NumberOfVertices; index++)
+                    points.Add(polyline.GetPoint3dAt(index));
+            }
+            else if (entity is Polyline3d polyline3d)
+            {
+                foreach (ObjectId vertexId in polyline3d)
+                {
+                    PolylineVertex3d vertex = (PolylineVertex3d)transaction.GetObject(
+                        vertexId, OpenMode.ForRead);
+                    points.Add(vertex.Position);
+                }
+            }
+            if (points.Count < 2)
+                throw new MutationPlanException($"handle {entity.Handle} has too few vertices");
+            double x = 0.0, y = 0.0, z = 0.0;
+            foreach (Point3d point in points)
+            {
+                x += point.X;
+                y += point.Y;
+                z += point.Z;
+            }
+            return new Point3d(x / points.Count, y / points.Count, z / points.Count);
+        }
+
+        private static void WriteReceipt(
+            ValidatedMutationPlan plan,
+            IReadOnlyDictionary<string, string> addedHandles)
+        {
+            object receipt = new
+            {
+                schema = "leaf.mutation-receipt.v1",
+                ok = true,
+                plan_sha256 = plan.Sha256,
+                counts = new
+                {
+                    added = plan.Added.Count,
+                    removed = plan.Removed.Count,
+                    transformed = plan.Transforms.Count,
+                },
+                logical_to_dwg_handles = addedHandles,
+            };
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(receipt, new JsonSerializerOptions
+            {
+                WriteIndented = false,
+            });
+            if (bytes.Length > MaximumReceiptBytes)
+                throw new MutationPlanException("mutation receipt exceeds the byte limit");
+            string temporary = ReceiptFile + ".tmp";
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, ReceiptFile, true);
+        }
+
+        private static void DeleteIfPresent(string path)
+        {
+            if (File.Exists(path))
+                File.Delete(path);
         }
     }
 }
