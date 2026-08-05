@@ -220,15 +220,33 @@ def main() -> None:
     # test]` is the entire enforcement — a warm job that ever learns to push,
     # or a build job that stops needing `test`, silently removes it.
     # ------------------------------------------------------------------ #
-    warm_block = text.split("  warm:", 1)[1].split("\n  build:", 1)[0]
-    build_block = text.split("\n  build:", 1)[1].split("\n  verify:", 1)[0]
+    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
+    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
 
     assert "needs: prepare" in warm_block
-    assert "push: false" in warm_block, "the warm job must never push an image"
-    assert "push: true" not in warm_block
-    assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
     assert "continue-on-error: true" in warm_block, (
         "a warm failure must degrade to a cold build, never redden the run")
+
+    # The no-publish contract binds to the actual build step, not the job
+    # text: a `push: false` in a comment or an unrelated field must not
+    # satisfy it. Steps are split on the step-list marker at its exact
+    # indentation, so the slice below is one step's uses:/with: mapping and
+    # nothing else.
+    warm_steps = re.split(r"\n      - ", warm_block)
+    warm_builds = [s for s in warm_steps if "uses: docker/build-push-action" in s]
+    assert len(warm_builds) == 1, "warm holds exactly one build-push-action step"
+    warm_build_step = warm_builds[0]
+    assert re.search(r"^          push: false$", warm_build_step, re.M), (
+        "the warm build step must set the literal input push: false")
+    for banned in ("push: true", "tags:", "outputs:", "provenance:", "sbom:", "attests:"):
+        assert banned not in warm_build_step, (
+            "the warm build step must not carry %r: every publication channel "
+            "of build-push-action stays closed in the warm lane" % banned)
+    # And no publish path outside that step either.
+    assert "docker push" not in warm_block
+    assert "aws ecr put-image" not in warm_block
+    assert "push: true" not in warm_block
+    assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
 
     assert "needs: [prepare, test]" in build_block, (
         "the gate edge is this repository's only enforcement that an untested "
@@ -239,6 +257,13 @@ def main() -> None:
     # preference the warm job burns five runners and saves nothing.
     assert "current_warm" in build_block
     assert 'cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"' in build_block
+
+    # Both writers race on the same immutable tag by design, and ECR refuses
+    # the loser with ImageTagAlreadyExistsException. The registry cache
+    # exporter must therefore tolerate export errors in BOTH jobs, or a lost
+    # race fails the gated build.
+    assert warm_block.count("ignore-error=true") == 1
+    assert build_block.count("ignore-error=true") == 1
 
     print("build-platform-images workflow invariants: PASS")
 

@@ -351,7 +351,12 @@ jobs:
             if [[ "$current_exists" == "1" ]]; then
               echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
             else
-              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true"
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
             fi
           else
             echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
@@ -477,7 +482,12 @@ jobs:
             if [[ "$current_exists" == "1" ]]; then
               echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
             else
-              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true"
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
             fi
           else
             echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
