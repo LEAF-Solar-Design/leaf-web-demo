@@ -310,6 +310,171 @@ FALLBACK_SCRIPT = r"""
           fi
 """.lstrip("\n")
 
+# The warm/build cache-select script, pinned BYTE-EXACT (sol-critic
+# round 3 on this PR): a contains-once count over the parsed run value
+# still accepted the canonical fallback bytes wrapped dead inside
+# `if false; then ... fi`. As HINT_SCRIPT's history records, no
+# substring set proves the absence of a rewrite — only whole-script
+# equality does. One copy serves both lanes (their byte-identity is
+# separately asserted). Raw string: backslash continuations.
+WARM_BUILD_CACHE_SCRIPT = r"""
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
+          cache_from=""
+          cache_to=""
+
+          # THIS commit's cache first. The `warm` job builds the same tree in
+          # parallel with the test gate and publishes exactly this tag, so by
+          # the time the gate is green the layers already exist and this build
+          # is a near-total cache hit rather than a cold rebuild. The fallback
+          # keeps the previous behaviour whenever warm was skipped, failed, or
+          # simply has not finished — it is never a hard dependency, so a warm
+          # failure costs seconds, not a red build.
+          current_warm="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME-buildcache" \
+            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+            --query 'length(images)' \
+            --output text 2>/dev/null || true)"
+          if [[ "$current_warm" == "1" ]]; then
+            cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"
+            echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+          elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            fi
+          fi
+
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): under the
+          # adoption path a fully green merge run skips both cache writers,
+          # so the exact predecessor tag can be several commits stale. The
+          # cache keys are commit-stable below the per-commit ARGs (#458),
+          # so a near-ancestor cache still hits the heavy toolchain layers.
+          # Candidates come from the checkout's own first-parent history
+          # (fetch-depth: 20 above exists for exactly this walk) and are
+          # probed in ONE batch-get-image call — deliberately not an ECR
+          # listing, which neither workflow role is granted
+          # (leaf-automation-aws-terraform pins both to BatchGetImage plus
+          # push actions). Every failure lands on the uncached build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+
+          if current_exists="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"; then
+            if [[ "$current_exists" == "1" ]]; then
+              echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
+            else
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
+            fi
+          else
+            echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
+          fi
+
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+          echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+""".lstrip("\n")
+
+# The speculative lane's cache-select script, pinned BYTE-EXACT for the
+# same reason. Import-only by construction: the canonical copy itself
+# is the proof that no cache_to/export path exists in this lane.
+# Raw string: backslash continuations.
+SPECULATE_CACHE_SCRIPT = r"""
+          # Import the cache of the main tip this preview merged onto and
+          # export nothing: speculative trees churn too fast to be worth
+          # polluting the immutable buildcache-* namespace, and no export
+          # means no cache_to race to tolerate.
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
+          cache_from=""
+          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME-buildcache" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            fi
+          fi
+          # Nearest-ancestor fallback (chain keeper, 2026-08-05): the
+          # merged-onto main tip's exact tag can be several commits stale
+          # when adopted merges published nothing, and the commit-stable
+          # keys (#458) make a near-ancestor cache nearly as good. The
+          # preview's first-parent chain IS main's history, so the same
+          # walk warm/build use works here (fetch-depth: 20 above), probed
+          # in ONE batch-get-image call — deliberately not an ECR listing,
+          # which neither workflow role is granted. IMPORT stays the only
+          # direction in this lane; every failure lands on the uncached
+          # build.
+          if [[ -z "$cache_from" ]]; then
+            ids=()
+            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                continue
+              fi
+              ids+=("imageTag=buildcache-$short")
+            done
+            if [[ "${#ids[@]}" -gt 0 ]]; then
+              found_tags="$(aws ecr batch-get-image \
+                --repository-name "$IMAGE_NAME-buildcache" \
+                --image-ids "${ids[@]}" \
+                --query 'images[].imageId.imageTag' \
+                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
+              for id in "${ids[@]}"; do
+                tag="${id#imageTag=}"
+                if [[ " $found_tags " == *" $tag "* ]]; then
+                  cache_from="type=registry,ref=$cache_repo:$tag"
+                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$cache_from" ]]; then
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+""".lstrip("\n")
+
 
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
@@ -1947,28 +2112,35 @@ def main() -> None:
     build_cache_run = _sole_named(wf_jobs["build"]["steps"], cache_step_name)["run"]
     assert warm_cache_run == build_cache_run, (
         "warm and build must carry byte-identical cache-select scripts")
-    # The canonical fallback binds to the PARSED run value of each named
-    # cache-selection step (sol-critic round 2 on this PR): the live-line
-    # counts earlier scan whole job blocks, so canonical bytes parked in
-    # an unused multiline env value (an indentation indicator can place
-    # scalar content at the run blocks' exact columns) could stand in for
-    # scripts that lost the fallback — and the decoy would even carry the
-    # probe line the per-lane probe counts look for. Only what YAML parses
-    # as the step's own run content executes. The scalar's base
-    # indentation (ten columns) is stripped by the parser, so the
-    # canonical copy is dedented before comparing.
-    fallback_dedented = "\n".join(
-        l[10:] for l in FALLBACK_SCRIPT.rstrip("\n").splitlines()
-    )
-    for job_name, fallback_step_name in (
-        ("warm", cache_step_name),
-        ("build", cache_step_name),
-        ("speculate", "Select the merged-onto main tip's cache, import-only"),
-    ):
-        run_value = _sole_named(wf_jobs[job_name]["steps"], fallback_step_name)["run"]
-        assert run_value.count(fallback_dedented) == 1, (
-            "%s's %r step must execute the canonical nearest-ancestor "
-            "fallback exactly once" % (job_name, fallback_step_name))
+    # The cache-select scripts bind WHOLE and BYTE-EXACT to the parsed
+    # run value of each named step. The escalation history on this PR:
+    # whole-job live-line counts admitted an env-value decoy at matching
+    # columns (sol-critic round 2), and a contains-once count over the
+    # parsed run value still admitted the canonical bytes wrapped dead
+    # inside `if false; then ... fi` (round 3). Only equality of the
+    # entire executable content proves the fallback executes — the same
+    # conclusion HINT_SCRIPT's history reached. The parser strips the
+    # scalar's ten-column base indentation, so the canonical copies are
+    # dedented before comparing.
+    def _dedent_run(script):
+        return "\n".join(
+            l[10:] for l in script.rstrip("\n").splitlines()
+        )
+
+    assert warm_cache_run.rstrip("\n") == _dedent_run(WARM_BUILD_CACHE_SCRIPT), (
+        "the warm/build cache-select script must equal its canonical "
+        "pinned copy in this file; edit both together, consciously")
+    speculate_cache_run = _sole_named(
+        wf_jobs["speculate"]["steps"],
+        "Select the merged-onto main tip's cache, import-only")["run"]
+    assert speculate_cache_run.rstrip("\n") == _dedent_run(SPECULATE_CACHE_SCRIPT), (
+        "the speculative cache-select script must equal its canonical "
+        "pinned copy in this file; edit both together, consciously")
+    # Self-consistency of the canonical copies: both must carry the
+    # canonical fallback exactly once, so FALLBACK_SCRIPT cannot rot into
+    # a decoy of its own while the whole-script pins stay green.
+    assert WARM_BUILD_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
+    assert SPECULATE_CACHE_SCRIPT.count(FALLBACK_SCRIPT.rstrip("\n")) == 1
 
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
