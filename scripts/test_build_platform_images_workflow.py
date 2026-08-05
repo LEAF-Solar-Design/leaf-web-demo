@@ -1416,6 +1416,28 @@ def main() -> None:
         if job_name not in release_env_jobs:
             assert "environment" not in job, (
                 "%s must not declare a GitHub environment" % job_name)
+
+    # The fail-fast main-ref guard in prepare. workflow_dispatch can target
+    # any branch or tag; on a non-main ref the five release-role jobs would
+    # otherwise only die at the ecr-release environment's main-only
+    # deployment branch policy AFTER burning the full gate (sol-critic on
+    # PR #454, round 1). Bound to the comment-stripped executable line so a
+    # commented copy cannot satisfy it.
+    env_prepare_block = text.split("\n  prepare:\n", 1)[1].split(
+        "\n  test:\n", 1)[0]
+    env_prepare_live = [
+        _comment_cut(l) for l in env_prepare_block.splitlines()
+        if not l.strip().startswith("#")
+    ]
+    guard_lines = [
+        l for l in env_prepare_live
+        if 'if [ "$GITHUB_REF" != "refs/heads/main" ]; then' in l
+    ]
+    assert len(guard_lines) == 1, (
+        "prepare must fail fast exactly once when not on refs/heads/main")
+    assert any(
+        "may only run on refs/heads/main" in l for l in env_prepare_live
+    ), "the main-ref guard must fail with an actionable error message"
     assert wf_jobs["adopt"]["permissions"] == {
         "id-token": "write",
         "contents": "read",
