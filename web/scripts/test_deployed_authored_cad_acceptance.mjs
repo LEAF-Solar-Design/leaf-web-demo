@@ -24,10 +24,13 @@ import {
   requireDistinctStagedResults,
   runApiPreflight,
   scrubbedDetail,
+  safeFailureDetails,
+  safeFailureRecord,
   takeEditingCheckout,
   validateConfig,
   validateStagedAuthorResponse,
   waitForTerminalJob,
+  waitForJobOutcome,
 } from './deployed_authored_cad_acceptance.mjs'
 
 const REVISION = 'f'.repeat(40)
@@ -532,12 +535,216 @@ describe('deployed authored CAD acceptance checks', () => {
       status: 'failed',
       error: { error_code: 'BAD_PARAMS', message: 'unknown drawing' },
     })
+    const jobId = '11111111-1111-4111-8111-111111111111'
     await assert.rejects(
-      () => waitForTerminalJob(config, tenant, 'job-one', { fetchImpl, waitImpl: async () => {} }),
+      () => waitForTerminalJob(config, tenant, jobId, { fetchImpl, waitImpl: async () => {} }),
       (error) => error instanceof AcceptanceError
         && error.check === 'authored_job'
-        && error.message === 'BAD_PARAMS: unknown drawing',
+        && error.message === 'the authored write job failed'
+        && error.details.job_id === jobId
+        && error.details.terminal_status === 'failed'
+        && error.details.error_code === 'BAD_PARAMS',
     )
+  })
+
+  it('emits only bounded token-free job correlation details', () => {
+    const safe = safeFailureDetails(new AcceptanceError('authored_job', 'failed', {
+      job_id: '11111111-1111-4111-8111-111111111111',
+      terminal_status: 'failed',
+      error_code: 'BAD_PARAMS',
+      backend_body: { authorization: `Bearer ${TOKEN_A}` },
+    }))
+    assert.deepEqual(safe, {
+      job_id: '11111111-1111-4111-8111-111111111111',
+      terminal_status: 'failed',
+      error_code: 'BAD_PARAMS',
+    })
+    assert.equal(safeFailureDetails(new AcceptanceError('authored_job', 'failed', {
+      job_id: TOKEN_A,
+      terminal_status: 'unknown',
+      error_code: TOKEN_A,
+    })), undefined)
+    assert.deepEqual(safeFailureDetails(new AcceptanceError('authored_job', 'failed', {
+      job_id: '22222222-2222-4222-8222-222222222222',
+      terminal_status: 'http_error',
+      http_status: 503,
+    })), {
+      job_id: '22222222-2222-4222-8222-222222222222',
+      terminal_status: 'http_error',
+      http_status: 503,
+    })
+  })
+
+  it('scrubs the complete one-line failure record and drops credential-shaped job ids', () => {
+    const jwtish = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY2NlcHRhbmNlIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ'
+    const record = safeFailureRecord(new AcceptanceError(
+      'authored_job',
+      `backend returned ${jwtish}`,
+      {
+        job_id: `sk_live_${'x'.repeat(48)}`,
+        terminal_status: 'failed',
+        error_code: jwtish,
+        backend_body: { authorization: `Bearer ${jwtish}` },
+      },
+    ), 'browser_execute_A')
+    const serialized = JSON.stringify(record)
+    assert.ok(!serialized.includes(jwtish))
+    assert.ok(!serialized.includes('sk_live_'))
+    assert.equal(record.message, 'authored job did not complete successfully')
+    assert.ok(!Object.hasOwn(record, 'detail'))
+    assert.deepEqual(record.details, { terminal_status: 'failed' })
+  })
+
+  it('drops every backend secret from a terminal authored-job record', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY2NlcHRhbmNlIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ'
+    const apiKey = `sk_live_${'x'.repeat(48)}`
+    const githubToken = `github_pat_${'y'.repeat(48)}`
+    const bearer = `Bearer ${'z'.repeat(64)}`
+    const opaque = `opaque-${'q'.repeat(64)}`
+    const fetchImpl = async () => response(200, {
+      status: 'failed',
+      error: {
+        error_code: apiKey,
+        message: `${jwt} ${githubToken} ${bearer} ${opaque}`,
+      },
+    })
+    let failure
+    try {
+      await waitForTerminalJob(
+        config,
+        tenant,
+        '33333333-3333-4333-8333-333333333333',
+        { fetchImpl, waitImpl: async () => {} },
+      )
+    } catch (error) {
+      failure = error
+    }
+    const serialized = JSON.stringify(safeFailureRecord(failure, 'browser_execute_A'))
+    for (const secret of [jwt, apiKey, githubToken, bearer, opaque]) {
+      assert.ok(!serialized.includes(secret))
+    }
+    assert.deepEqual(JSON.parse(serialized), {
+      ok: false,
+      check: 'authored_job',
+      error: 'AcceptanceError',
+      message: 'authored job did not complete successfully',
+      step: 'browser_execute_A',
+      details: {
+        job_id: '33333333-3333-4333-8333-333333333333',
+        terminal_status: 'failed',
+      },
+    })
+  })
+
+  it('rejects secret-shaped job ids before request paths or records can expose them', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const secrets = [
+      'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY2NlcHRhbmNlIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ',
+      `sk_live_${'x'.repeat(48)}`,
+      `github_pat_${'y'.repeat(48)}`,
+      `Bearer ${'z'.repeat(64)}`,
+      `opaque-${'q'.repeat(64)}`,
+    ]
+    let fetchCalls = 0
+    const fetchImpl = async () => {
+      fetchCalls += 1
+      return { status: 200, json: async () => { throw new Error('malformed') } }
+    }
+    for (const jobId of secrets) {
+      let failure
+      try {
+        await waitForTerminalJob(config, tenant, jobId, { fetchImpl, waitImpl: async () => {} })
+      } catch (error) {
+        failure = error
+      }
+      const serialized = JSON.stringify(safeFailureRecord(failure, 'authored_job_A'))
+      assert.ok(!serialized.includes(jobId))
+      assert.equal(JSON.parse(serialized).check, 'authored_job')
+    }
+    assert.equal(fetchCalls, 0)
+  })
+
+  it('maps a malformed status response to a constant authored-job failure', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const fetchImpl = async () => ({
+      status: 200,
+      json: async () => { throw new Error(`opaque-${'q'.repeat(64)}`) },
+    })
+    let failure
+    try {
+      await waitForTerminalJob(
+        config,
+        tenant,
+        '44444444-4444-4444-8444-444444444444',
+        { fetchImpl, waitImpl: async () => {} },
+      )
+    } catch (error) {
+      failure = error
+    }
+    const record = safeFailureRecord(failure, 'authored_job_A')
+    assert.equal(record.check, 'authored_job')
+    assert.equal(record.message, 'authored job did not complete successfully')
+    assert.ok(!Object.hasOwn(record, 'detail'))
+  })
+
+  it('rejects secret-shaped replay job ids without fetching or exposing them', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const secrets = [
+      `sk_live_${'x'.repeat(48)}`,
+      `github_pat_${'y'.repeat(48)}`,
+      `opaque-${'q'.repeat(64)}`,
+    ]
+    let fetchCalls = 0
+    const fetchImpl = async () => {
+      fetchCalls += 1
+      throw new Error('transport failed')
+    }
+    for (const jobId of secrets) {
+      let failure
+      try {
+        await waitForJobOutcome(config, tenant, jobId, { fetchImpl, waitImpl: async () => {} })
+      } catch (error) {
+        failure = error
+      }
+      const serialized = JSON.stringify(safeFailureRecord(failure, 'stale_head_replay_A'))
+      assert.ok(!serialized.includes(jobId))
+      assert.equal(JSON.parse(serialized).check, 'authored_job')
+    }
+    assert.equal(fetchCalls, 0)
+  })
+
+  it('maps replay transport and malformed JSON failures to safe authored-job records', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const jobId = '55555555-5555-4555-8555-555555555555'
+    const secret = `opaque-${'q'.repeat(64)}`
+    const fetchers = [
+      async () => { throw new Error(secret) },
+      async () => ({ status: 200, json: async () => { throw new Error(secret) } }),
+    ]
+    for (const fetchImpl of fetchers) {
+      let failure
+      try {
+        await waitForJobOutcome(config, tenant, jobId, { fetchImpl, waitImpl: async () => {} })
+      } catch (error) {
+        failure = error
+      }
+      const record = safeFailureRecord(failure, 'stale_head_replay_A')
+      const serialized = JSON.stringify(record)
+      assert.ok(!serialized.includes(secret))
+      assert.equal(record.check, 'authored_job')
+      assert.equal(record.message, 'authored job did not complete successfully')
+      assert.ok(!Object.hasOwn(record, 'detail'))
+      assert.deepEqual(record.details, {
+        job_id: jobId,
+        terminal_status: 'http_error',
+      })
+    }
   })
 
   it('proves forged tenant headers cannot override either JWT identity', async () => {
@@ -853,7 +1060,9 @@ describe('deployed authored CAD acceptance checks', () => {
     const landingReplay = async (url) => {
       const path = new URL(url).pathname
       if (path.endsWith('/versions')) return response(200, { head: 2 })
-      if (path === '/api/run') return response(202, { job_id: 'landed-job' })
+      if (path === '/api/run') {
+        return response(202, { job_id: '66666666-6666-4666-8666-666666666666' })
+      }
       if (path.startsWith('/api/jobs/')) return response(200, { status: 'complete', result: { ok: true } })
       return response(500, {})
     }
@@ -896,7 +1105,11 @@ describe('deployed authored CAD acceptance checks', () => {
         if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
           return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again' } })
         }
-        return response(202, { job_id: `replay-${body.tool}` })
+        return response(202, {
+          job_id: body.tool.startsWith('a_')
+            ? '77777777-7777-4777-8777-777777777777'
+            : '88888888-8888-4888-8888-888888888888',
+        })
       }
       return response(500, {})
     }
@@ -923,7 +1136,7 @@ describe('deployed authored CAD acceptance checks', () => {
         if (body.catalog_digest === `sha256:${'0'.repeat(64)}`) {
           return response(409, { error: { error_code: 'BAD_PARAMS', message: 'catalog tool changed' } })
         }
-        return response(202, { job_id: 'landed' })
+        return response(202, { job_id: '99999999-9999-4999-8999-999999999999' })
       }
       return response(500, {})
     }
