@@ -77,9 +77,62 @@ WORKFLOW = (
 ROOT = WORKFLOW.parents[2]
 DEPLOY_DOC = (ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
 
+# The warm-skip hint script, pinned BYTE-EXACT (sol-critic round 3 on
+# PR #449): substring pins over "live" lines were spoofed by TRAILING
+# comments carrying the pinned text while the code beside them was
+# rewritten, and no substring set proves the absence of a rewrite. Any
+# edit to the hint script is therefore a conscious edit of this copy
+# too. The same idiom already binds warm's and build's cache-bearing
+# inputs byte-identical.
+HINT_SCRIPT = """\
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): every failure below must degrade to expected=false —
+          # warm runs, the pre-hint behaviour — never redden the build.
+          set -uo pipefail
+          set +e
+          expected="false"
+          tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null)"
+          if [[ "$tree" =~ ^[0-9a-f]{40}$ ]]; then
+            repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null)"
+            listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=gate-proof-$tree&per_page=30" 2>/dev/null)"
+            if [[ -n "$repo_id" && -n "$listing" ]]; then
+              # Same-repo provenance comes from the artifact's workflow_run
+              # metadata, exactly as in the gate's probe: a fork's
+              # pull_request run can upload an artifact with any name. The
+              # probe's per-candidate minting-workflow check is skipped here
+              # on purpose — it costs one API call per candidate, and a
+              # same-repo actor gaming a warm SKIP is outside the threat
+              # model (they hold push and could edit this workflow).
+              hits="$(jq -r --argjson repo_id "$repo_id" '
+                [.artifacts[]
+                 | select(.expired | not)
+                 | select(.workflow_run.head_repository_id == $repo_id)]
+                | length' <<<"$listing" 2>/dev/null)"
+              if [[ "$hits" =~ ^[1-9][0-9]*$ ]]; then
+                expected="true"
+              fi
+            fi
+          fi
+          echo "expected=$expected" >> "$GITHUB_OUTPUT"
+          if [[ "$expected" == "true" ]]; then
+            echo "::notice::a same-repo gate proof already names tree $tree; the warm job is skipped (the gate's own probe still verifies the proof before any shard skip)"
+          else
+            echo "::notice::no same-repo gate proof names tree ${tree:-<unknown>}; the warm job runs beside the gate"
+          fi
+          exit 0
+"""
+
 
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
+
+    # Newline discipline at the BYTE level (sol-critic round 4 on PR #449;
+    # the regression class from round 1): read_text() and splitlines()
+    # erase CR bytes, so a wholesale CRLF rewrite of this workflow would
+    # sail through every text assertion below, including the byte-exact
+    # hint pin. Pin the bytes before trusting the text.
+    assert b"\r" not in WORKFLOW.read_bytes(), (
+        "build-platform-images.yml must be LF-only")
 
     # One tag is derived once and passed to every image build and later job.
     assert 'image_tag="prod-$current_short"' in text
@@ -500,11 +553,192 @@ def main() -> None:
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
-    # FOUR build-lane jobs now carry the promote guard (test, warm, build,
+    # THREE build-lane jobs carry the bare promote guard (test, build,
     # verify): a promote run reuses already-published digests and must never
-    # rebuild, so the cache warmer is skipped on that path exactly like the
-    # jobs it feeds.
-    assert text.count("if: ${{ !inputs.promote }}") == 4
+    # rebuild. The cache warmer is skipped on that path too, but its guard
+    # is compound — promote AND prepare's gate-reuse hint — so it is pinned
+    # by exact parsed value below rather than counted here.
+    assert text.count("if: ${{ !inputs.promote }}") == 3
+    # Warm's guard, whole and at the job's own if: key. Warm is also skipped
+    # when a same-repo gate proof already names this exact tree: the gate leg
+    # then reuses the verdict in ~30s, the build job starts before any warm
+    # leg could publish its cache, and warm burns five runners for nothing
+    # (measured: zero of nine warm legs contributed across the first two
+    # reuse-path runs, 30978164812 and 30983842725). `!= 'true'` keeps the
+    # hint fail-open: an empty, missing, or failed hint output runs warm.
+    warm_job_header = warm_block[: warm_block.index("    steps:")]
+    warm_guards = [
+        _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
+    ]
+    assert warm_guards == [
+        "${{ !inputs.promote && needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+    ], warm_guards
+    # The hint is an ECONOMIC signal with a deliberately narrow blast
+    # radius: it may gate warm and NOTHING else. Skipping the GATE stays the
+    # sole business of the called gate's verified reuse probe and fan-in
+    # re-verification, and the build job's own tree binding is what refuses
+    # an unproven push — a hint defect must never widen past a colder
+    # build. Exactly two occurrences: the prepare output that mints it and
+    # the warm guard that consumes it.
+    assert text.count("gate_reuse_expected") == 2
+    prepare_block = text.split("\n  prepare:\n", 1)[1].split("\n  test:\n", 1)[0]
+    assert prepare_block.count("gate_reuse_expected") == 1
+    assert warm_job_header.count("gate_reuse_expected") == 1
+    # BOUND, not merely counted (sol-critic round 1 on PR #449): a
+    # hard-coded `gate_reuse_expected: true` in prepare's outputs kept every
+    # assertion above green while skipping warm on every non-promote push.
+    # The output must carry exactly the hint step's expression, that step
+    # must exist in prepare under the referenced id and key its listing on
+    # this exact tree's proof-artifact name, and prepare must hold the
+    # actions:read grant the listing depends on. A job-level permissions
+    # block REPLACES the workflow-level set, so the two standing grants are
+    # pinned beside it: dropping either breaks the draft-PR source check or
+    # the checkout, and dropping actions:read 403s the hint into a
+    # permanent expected=false — warm silently runs on every reuse path
+    # again.
+    prepare_header = prepare_block[: prepare_block.index("    steps:")]
+    hint_outputs = [
+        _value_of(l) for l in prepare_header.splitlines()
+        if _key_of(l) == "gate_reuse_expected"
+    ]
+    assert hint_outputs == ["${{ steps.reuse-hint.outputs.expected }}"], hint_outputs
+    # No structural line ANYWHERE in this workflow may declare `defaults`
+    # or `shell`: jobs.<id>.defaults.run.shell (or the workflow-scoped
+    # form) redefines the interpreter of every run step in scope and can
+    # selectively skip a pinned script by matching its content — a
+    # `bash -c 'grep -Fq <hint marker> "$1" || bash -e "$1"' _ {0}` on
+    # prepare passed every step-level pin while the hint emitted nothing
+    # (sol-critic round 6 on PR #449); a step-level shell: is already
+    # excluded by the hint step's exact key set below. This workflow uses
+    # neither key anywhere; introducing one is a conscious contract edit.
+    for line in structural:
+        assert _key_of(line) not in ("defaults", "shell"), (
+            "defaults/shell are banned in this workflow: %r" % line)
+
+    # The hint STEP is located on STRUCTURAL lines only, using the same
+    # block-scalar classifier as the lexical gate above: raw-text slicing
+    # let a `- run: |` outer step swallow an apparent id:, env:, and a
+    # canonical-looking inner script as shell TEXT while its real first
+    # lines emitted expected=true (sol-critic round 4 on PR #449, finding
+    # 1). A floating id: in another step's env (round 2) and trailing-
+    # comment pin carriers (round 3) are the same family: only what YAML
+    # PARSES as the step's own keys and the run block's own content may
+    # satisfy a pin.
+    annotated = []
+    scalar_indent = None
+    for line in prepare_block.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if scalar_indent is not None:
+            if not stripped or indent > scalar_indent:
+                annotated.append((line, False))
+                continue
+            scalar_indent = None
+        annotated.append((line, True))
+        if block_header.search(_uncommented(line)):
+            scalar_indent = indent
+    step_starts = [
+        i for i, (l, s) in enumerate(annotated) if s and l.startswith("      - ")
+    ]
+    # prepare's step LIST is pinned, first key and value per step, in
+    # order: a step inserted ahead of the hint can poison the environment
+    # of every later step (round 7 on PR #449 exported
+    # BASH_ENV=/tmp/... via GITHUB_ENV, so the next bash step exited 0
+    # before the byte-pinned script ran — empty output, warm silently
+    # runs on every reuse path). Adding a step to this job is a conscious
+    # contract edit.
+    #
+    # WHAT THIS PIN DOES NOT PROVE, plainly, in the tradition of the
+    # limitation block above the gate-edge assertions: a text contract
+    # cannot prove the hint step will EXECUTE its pinned script in an
+    # unpoisoned environment — an edit to an EXISTING step's free-text
+    # run block can still export BASH_ENV, rewrite PATH, or shadow
+    # gh/jq, and no enumerable ban closes arbitrary shell. Every defeat
+    # of that kind leaves the hint's output empty or false, and the warm
+    # guard's `!= 'true'` polarity maps exactly that to RUNNING warm —
+    # the pre-#449 behaviour, slower and never wrong. The enforceable
+    # boundary, pinned throughout this section, is blast radius: the
+    # hint's output reaches the warm guard and nothing else, so no
+    # defeat of the hint can redden a build, skip a gate, or publish an
+    # image.
+    prepare_step_heads = []
+    for n, start in enumerate(step_starts):
+        first = annotated[start][0]
+        prepare_step_heads.append((_key_of(first), _value_of(first)))
+    assert prepare_step_heads == [
+        ("uses", "actions/checkout@v4"),
+        ("name", "Require exact source to be reviewed"),
+        ("name", "Resolve canonical solver provenance"),
+        ("name", "Validate image workflow invariants"),
+        ("name", "Derive immutable image tag"),
+        ("name", "Probe for an expected gate reuse (warm-skip hint)"),
+    ], prepare_step_heads
+    hint_ranges = []
+    for n, start in enumerate(step_starts):
+        end = step_starts[n + 1] if n + 1 < len(step_starts) else len(annotated)
+        if any(
+            s and re.match(r"^        id: reuse-hint\s*$", l)
+            for l, s in annotated[start:end]
+        ):
+            hint_ranges.append((start, end))
+    assert len(hint_ranges) == 1, "prepare must hold exactly one reuse-hint step"
+    hint_seg = annotated[hint_ranges[0][0]:hint_ranges[0][1]]
+    hint_structural = [l for l, s in hint_seg if s]
+    # The step's structural key set is EXACT and ordered: pinning the run
+    # block, the condition, and the token still permitted an extra key,
+    # and `shell: bash -c true {0}` before the run block returns success
+    # without ever executing the pinned script — empty output, warm runs
+    # on every reuse path again (sol-critic round 5 on PR #449). Any new
+    # key on this step (shell, with, working-directory, continue-on-error,
+    # a second env entry, ...) is a conscious contract edit.
+    hint_keys = [k for k in (_key_of(l) for l in hint_structural) if k]
+    assert hint_keys == ["name", "id", "env", "GH_TOKEN", "run"], hint_keys
+    # Exactly one run key, spelled exactly as the one plain literal header
+    # (a folded, chomped, quoted, or comment-carrying header is a
+    # different spelling and fails), and the run block must END the step:
+    # nothing structural may follow it, so no second header or stray key
+    # can hide behind the canonical content.
+    run_keys = [l for l, s in hint_seg if s and _key_of(l) == "run"]
+    assert run_keys == ["        run: |"], run_keys
+    run_at = next(
+        i for i, (l, s) in enumerate(hint_seg) if s and l == "        run: |"
+    )
+    tail = hint_seg[run_at + 1:]
+    assert all(not s for l, s in tail), "the run block must end the hint step"
+    assert "\n".join(l for l, s in tail).rstrip("\n") == HINT_SCRIPT.rstrip("\n"), (
+        "the warm-skip hint script must equal its canonical pinned copy in "
+        "this file; edit both together, consciously")
+    # And the step must actually RUN, with the workflow token: an if: on
+    # the step (or an emptied GH_TOKEN) silently restores permanent
+    # expected=false - warm runs on every reuse path again with nothing
+    # red anywhere (round 3, finding 2). Pinned on structural lines.
+    assert "if" not in [k for k in (_key_of(l) for l in hint_structural) if k], (
+        "the reuse hint must not be conditional")
+    hint_tokens = [
+        _value_of(l) for l in hint_structural if _key_of(l) == "GH_TOKEN"
+    ]
+    assert hint_tokens == ["${{ github.token }}"], hint_tokens
+    # The grant backing the listing must sit in prepare's own job-level
+    # permissions MAPPING, sliced as a mapping: an `actions: read` parked
+    # under a job env satisfied the previous header-wide scan while the
+    # real grant vanished and the hint 403'd into a permanent
+    # expected=false (round 2, finding 3). A job-level block REPLACES the
+    # workflow-level set, so the two standing grants are pinned with it.
+    header_lines = prepare_header.splitlines()
+    assert header_lines.count("    permissions:") == 1, (
+        "prepare declares exactly one job-level permissions block")
+    perm_start = header_lines.index("    permissions:")
+    perm_lines = []
+    for line in header_lines[perm_start + 1:]:
+        if line.strip() and not line.startswith("      "):
+            break
+        perm_lines.append(line)
+    prepare_perms = sorted(
+        (_key_of(l), _value_of(l)) for l in perm_lines if _key_of(l)
+    )
+    assert prepare_perms == [
+        ("actions", "read"), ("contents", "read"), ("pull-requests", "read"),
+    ], prepare_perms
     assert "Production handoff requires the exact release source_sha input" in text
     assert "Production handoff requires the successful release workflow run ID" in text
     assert "Production handoff requires the exact release run attempt" in text
