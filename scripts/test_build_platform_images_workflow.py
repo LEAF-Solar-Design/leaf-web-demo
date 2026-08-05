@@ -81,14 +81,47 @@ def _folded(value) -> str:
 
 _PER_COMMIT_ARGS = ("LEAF_SOURCE_SHA", "AUTOFILL_SOLVER_REVISION")
 # A RUN "consumes" a per-commit ARG only through an actual shell expansion
-# ($NAME or ${NAME...}); a bare name in an echo or comment is not consumption
-# (sol-critic round 1 on PR #458).
+# ($NAME or ${NAME...}) that the shell would perform (sol-critic rounds 1-2
+# on PR #458: a bare name, a comment mention, a single-quoted or
+# backslash-escaped dollar, and exec-form RUN all reach the shell literal
+# or bypass it entirely, so none of them consumes).
 _PER_COMMIT_REF = re.compile(
     r"\$\{?(?:%s)\b" % "|".join(_PER_COMMIT_ARGS)
 )
 _PER_COMMIT_DECL = re.compile(
     r"ARG\s+(?:%s)\b" % "|".join(_PER_COMMIT_ARGS)
 )
+
+
+def _consumes_per_commit_arg(run_body: str) -> bool:
+    """True only where the shell would actually expand a per-commit ARG.
+
+    Exec-form RUN (a JSON array) never invokes a shell, so nothing
+    expands. In shell form, a $NAME / ${NAME} reference expands except
+    inside single quotes or with a backslash-escaped dollar; double
+    quotes (including apostrophes nested inside them) do expand. Known
+    scope boundary, named here on purpose: heredoc RUN bodies and $$
+    self-escapes are not modeled — no checked Dockerfile uses them, and
+    a false trip fails loud, never silently green.
+    """
+    body = run_body.strip()
+    if body.startswith("["):
+        return False
+    in_single = in_double = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and not in_single:
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "$" and not in_single and _PER_COMMIT_REF.match(body, i):
+            return True
+        i += 1
+    return False
 
 
 def _runs_after_per_commit_arg(dockerfile: str) -> list:
@@ -128,11 +161,11 @@ def _runs_after_per_commit_arg(dockerfile: str) -> list:
             arg_seen = False
         elif head == "ARG" and _PER_COMMIT_DECL.match(inst):
             arg_seen = True
-        elif head == "RUN" and arg_seen and not _PER_COMMIT_REF.search(
+        elif head == "RUN" and arg_seen and not _consumes_per_commit_arg(
             # Comments cannot consume: the fold above drops Dockerfile
             # comment lines, and _executable_bash drops trailing shell
             # comments, so only an expansion in executable text counts.
-            _executable_bash(inst)
+            _executable_bash(inst[len("RUN"):])
         ):
             offending.append(inst.splitlines()[0])
     return offending
@@ -919,6 +952,29 @@ def main() -> None:
         assert offending == [], (
             f"Dockerfile.{image}: RUN below a per-commit ARG without "
             f"consuming it re-runs on every merge: {offending}"
+        )
+
+    # The consumption scanner is itself pinned: every evasion class from
+    # the PR #458 reviews (bare name, comment mention, single-quoted or
+    # backslash-escaped dollar, exec-form RUN) must offend, and the real
+    # expansion forms the five Dockerfiles use must stay clean. A checker
+    # edit that silently widens or narrows the rule fails here first.
+    probe_header = "FROM x AS y\nARG LEAF_SOURCE_SHA=unknown\n"
+    for probe_run, must_offend in (
+        ("RUN echo LEAF_SOURCE_SHA", True),
+        ("RUN apt-get update  # uses $LEAF_SOURCE_SHA", True),
+        ("RUN echo '$LEAF_SOURCE_SHA'", True),
+        ("RUN echo \\$LEAF_SOURCE_SHA", True),
+        ('RUN ["echo", "$LEAF_SOURCE_SHA"]', True),
+        ('RUN printf "%s" "$LEAF_SOURCE_SHA" > /tmp/sha', False),
+        ("RUN test -n $LEAF_SOURCE_SHA", False),
+        ("RUN seal ${LEAF_SOURCE_SHA}", False),
+        ("RUN python -c \"attest('${LEAF_SOURCE_SHA}')\"", False),
+    ):
+        offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
+        assert offended == must_offend, (
+            f"consumption scanner drift on: {probe_run!r} "
+            f"(offended={offended}, expected {must_offend})"
         )
     canonical = (ROOT / "deploy" / "Dockerfile.canonical-worker").read_text(
         encoding="utf-8"
