@@ -14,7 +14,7 @@ import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
-import { handleRedirectCallback, isSignedIn } from '../auth.js'
+import { handleRedirectCallback, isAuthRedirectCallback, isSignedIn } from '../auth.js'
 import { liveDrawingId, rememberLiveDrawingId } from './workbenchId.js'
 import {
   getDrawingIntake,
@@ -36,7 +36,7 @@ function bootWantsApp(search, path = window.location.pathname) {
     if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
     if (q.has('demo') && path !== '/try') return true
     if (q.has('ops') && path !== '/try') return true
-    if (q.has('code') && q.has('state') && path !== '/try') return true
+    if (isAuthRedirectCallback(search) && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }
   return false
 }
@@ -68,10 +68,8 @@ const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingI
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
   const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
-  const [authCallbackPending, setAuthCallbackPending] = useState(() => {
-    const query = new URLSearchParams(window.location.search)
-    return window.location.pathname === '/try' && query.has('code') && query.has('state')
-  })
+  const [authCallbackPending, setAuthCallbackPending] = useState(() =>
+    window.location.pathname === '/try' && isAuthRedirectCallback())
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)

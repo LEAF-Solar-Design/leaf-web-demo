@@ -10,7 +10,10 @@
 import {
   getSessionHolderId, claimHolderId, isLegacyHolder, lockState,
   HOLDER_STORAGE_KEY, CHECKOUT_RELOAD_HANDOFF_KEY,
+  CHECKOUT_AUTH_RETURN_KEY, CHECKOUT_AUTH_COMPLETE_KEY, CHECKOUT_AUTH_RETURN_MAX_AGE_MS,
   stageCheckoutReloadHandoff, consumeCheckoutReloadHandoff,
+  stageCheckoutAuthReturn, clearCheckoutAuthReturn, consumeCheckoutAuthReturn,
+  completeCheckoutAuthReturn, consumeCheckoutAuthComplete,
   bootstrapCheckoutReloadHandoff, holdCheckoutReloadAuthority, remintSessionHolderId,
 } from '../src/checkoutIdentity.js'
 
@@ -167,8 +170,81 @@ const TENANTS = ['demo-tenant', 'demo', 'acme', 'acme-corp', 'leaf', 'tenant-1',
     holder: 'sess-duplicate-nav', drawingId: 'duplicate-nav-drawing',
     storage: duplicatedStorage, now: () => 40_010, navigationType: 'navigate',
   })
-  if (duplicateBootstrap !== null) fail('(c1) a non-reload navigation restored copied authority')
-  else pass('(c1) only a real reload may restore checkout authority')
+  if (duplicateBootstrap !== null) fail('(c1) an unmarked navigation restored copied authority')
+  else pass('(c1) unmarked navigation cannot restore checkout authority')
+
+  const callbackNavigationStorage = makeStorage()
+  stageCheckoutAuthReturn({ storage: callbackNavigationStorage, now: () => 50_000 })
+  stageCheckoutReloadHandoff({
+    capability, holder: 'sess-callback-nav', drawingId: 'callback-nav-drawing',
+    storage: callbackNavigationStorage, now: () => 50_010,
+  })
+  const callbackNavigation = bootstrapCheckoutReloadHandoff({
+    holder: 'sess-callback-nav', drawingId: 'default-drawing',
+    storage: callbackNavigationStorage, now: () => 50_020,
+    navigationType: 'navigate',
+    deferForAuthCallback: true,
+  })
+  if (callbackNavigation !== null) fail('(c1) Auth0 callback redeemed authority before validation')
+  else if (callbackNavigationStorage.getItem(CHECKOUT_AUTH_RETURN_KEY) === null) {
+    fail('(c1) Auth0 callback destroyed its login marker before validation')
+  } else if (callbackNavigationStorage.getItem(CHECKOUT_RELOAD_HANDOFF_KEY) === null) {
+    fail('(c1) Auth0 callback destroyed authority before restoring the exact returnTo drawing')
+  } else if (!completeCheckoutAuthReturn({ storage: callbackNavigationStorage, now: () => 50_030 })) {
+    fail('(c1) validated Auth0 callback did not mint its clean-reload marker')
+  } else {
+    const restoredCustomDrawing = bootstrapCheckoutReloadHandoff({
+      holder: 'sess-callback-nav', drawingId: 'callback-nav-drawing',
+      storage: callbackNavigationStorage, now: () => 50_040,
+      navigationType: 'reload',
+    })
+    if (restoredCustomDrawing?.capability !== capability) {
+      fail('(c1) clean Auth0 reload did not restore authority for the exact returnTo drawing')
+    } else pass('(c1) Auth0 callback defers authority until the exact returnTo drawing reloads')
+  }
+
+  const markerOnly = makeStorage()
+  stageCheckoutAuthReturn({ storage: markerOnly, now: () => 80_000 })
+  if (!consumeCheckoutAuthReturn({
+    eligible: true, storage: markerOnly, now: () => 80_001,
+  })) fail('(c1) a valid intentional-login marker was rejected')
+  else if (consumeCheckoutAuthReturn({
+    eligible: true, storage: markerOnly, now: () => 80_002,
+  })) fail('(c1) intentional-login marker could be replayed')
+  else pass('(c1) intentional-login marker is valid once and then deleted')
+
+  stageCheckoutAuthReturn({ storage: markerOnly, now: () => 81_000 })
+  clearCheckoutAuthReturn(markerOnly)
+  if (markerOnly.getItem(CHECKOUT_AUTH_RETURN_KEY) !== null) {
+    fail('(c1) failed Auth0 launch left its return marker behind')
+  } else pass('(c1) failed Auth0 launch clears its return marker')
+
+  const callbackReloadStorage = makeStorage()
+  stageCheckoutAuthReturn({ storage: callbackReloadStorage, now: () => 90_000 })
+  stageCheckoutReloadHandoff({
+    capability, holder: 'sess-callback-reload', drawingId: 'callback-reload-drawing',
+    storage: callbackReloadStorage, now: () => 90_010,
+  })
+  if (!completeCheckoutAuthReturn({ storage: callbackReloadStorage, now: () => 90_100 })) {
+    fail('(c1) successful Auth0 callback did not mint its reload marker')
+  }
+  const callbackReload = bootstrapCheckoutReloadHandoff({
+    holder: 'sess-callback-reload', drawingId: 'callback-reload-drawing',
+    storage: callbackReloadStorage, now: () => 90_150,
+    navigationType: 'reload',
+  })
+  if (callbackReload?.capability !== capability ||
+      callbackReload?.authorityMaxAgeMs !== CHECKOUT_AUTH_RETURN_MAX_AGE_MS) {
+    fail('(c1) successful Auth0 callback reload did not recover checkout authority')
+  } else if (callbackReloadStorage.getItem(CHECKOUT_AUTH_COMPLETE_KEY) !== null) {
+    fail('(c1) successful Auth0 callback reload marker could be replayed')
+  } else pass('(c1) successful Auth0 callback carries authority through its clean reload once')
+
+  const invalidCompletion = makeStorage()
+  if (completeCheckoutAuthReturn({ storage: invalidCompletion, now: () => 91_000 }) ||
+      consumeCheckoutAuthComplete({ eligible: true, storage: invalidCompletion, now: () => 91_001 })) {
+    fail('(c1) Auth0 completion existed without an intentional login marker')
+  } else pass('(c1) Auth0 completion cannot be minted without an intentional login')
 
   const waiters = []
   let held = false
@@ -290,7 +366,13 @@ async function runTabs(ages, seedId) {
     })
     return t
   })
-  await settle(120)
+  // Busy Windows runners can delay a zero-delay BroadcastChannel task well
+  // beyond a fixed 120 ms sleep. Poll the actual convergence condition so the
+  // oracle measures the protocol instead of scheduler luck.
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline && new Set(tabs.map((t) => t.liveId)).size < tabs.length) {
+    await settle(20)
+  }
   for (const t of tabs) t.claim.stop()
   return tabs
 }
@@ -506,6 +588,49 @@ async function runTabs(ages, seedId) {
   } else if (/useRef\(reloadHandoffRef\.current\?\.capability/.test(app)) {
     fail('App.jsx installs the provisional handoff capability before lock ownership')
   } else pass('App.jsx installs reload authority only inside an exclusive Web Lock')
+
+  const authSource = await fs.readFile(new URL('../src/auth.js', import.meta.url), 'utf8')
+  const loginBody = (authSource.match(/export async function login\(\)[\s\S]*?\n}/) || [null])[0]
+  const callbackBody = (authSource.match(/export async function handleRedirectCallback\(\)[\s\S]*?\n}/) || [''])[0]
+  if (!/query\.has\(['"]state['"]\)[\s\S]*query\.has\(['"]code['"]\)[\s\S]*query\.has\(['"]error['"]\)/.test(authSource)) {
+    fail('Auth0 callback detection does not include both success and error responses')
+  } else if (!loginBody) {
+    fail('could not find the Auth0 login body')
+  } else if (loginBody.indexOf('stageCheckoutAuthReturn()') < 0 ||
+             loginBody.indexOf('stageCheckoutAuthReturn()') > loginBody.indexOf('loginWithRedirect')) {
+    fail('Auth0 login does not stage the one-use return marker before redirect')
+  } else if (loginBody.indexOf('clearCheckoutAuthReturn()') < loginBody.indexOf('loginWithRedirect')) {
+    fail('Auth0 launch failure does not clear its return marker')
+  } else if (callbackBody.indexOf('completeCheckoutAuthReturn()') < callbackBody.indexOf('getTokenSilently')) {
+    fail('Auth0 callback marks completion before it has a token')
+  } else if (!/recoverableAuthError[\s\S]*completeCheckoutAuthReturn\(\)/.test(callbackBody)) {
+    fail('Auth0 error callback cannot preserve its checkout fallback for a clean reload')
+  } else pass('Auth0 login marks only its intentional redirect and clears a failed launch')
+
+  const authLoginBody = (app.match(/const onLogin = useCallback\(async[\s\S]*?\n  }, \[[^\]]*\]\)/) || [null])[0]
+  if (!authLoginBody) {
+    fail('App.jsx does not define the checkout-aware Auth0 login path')
+  } else if (authLoginBody.indexOf('releaseCheckout(') < 0 ||
+             authLoginBody.indexOf('releaseCheckout(') > authLoginBody.indexOf('await login()')) {
+    fail('App.jsx leaves checkout authority live before Auth0 login')
+  } else pass('App.jsx releases checkout authority before Auth0 and keeps the return handoff as fallback')
+
+  const checkoutHook = await fs.readFile(new URL('../src/controllers/checkout/useCheckoutController.js', import.meta.url), 'utf8')
+  for (const required of [
+    'bootstrapCheckoutReloadHandoff(',
+    'holdCheckoutReloadAuthority(',
+    'stageCheckoutReloadHandoff(',
+    'controller.restoreCapability(',
+    'secureTakenCheckoutAuthority(',
+  ]) {
+    if (!checkoutHook.includes(required)) fail(`ToolCast checkout hook is missing ${required}`)
+  }
+  const toolCast = await fs.readFile(new URL('../src/site/ToolCast.jsx', import.meta.url), 'utf8')
+  const toolLoginBody = (toolCast.match(/const signInWithCheckoutRelease = useCallback\(async[\s\S]*?\n  }, \[[^\]]*\]\)/) || [null])[0]
+  if (!toolLoginBody || toolLoginBody.indexOf('checkout.actions.release()') < 0 ||
+      toolLoginBody.indexOf('checkout.actions.release()') > toolLoginBody.indexOf('await login()')) {
+    fail('/try does not release checkout authority before Auth0 login')
+  } else pass('/try releases checkout authority first and wires the guarded callback-reload fallback')
 
   // CAPTURE the initial value instead of testing whether `useState(true)` appears
   // anywhere. The loose form matched an unrelated `tourLanded` hook, so flipping

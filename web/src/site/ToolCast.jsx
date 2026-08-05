@@ -551,6 +551,10 @@ export default function ToolCast({
     if (!sessionReady) return undefined
     return checkout.actions.release(...args)
   }, [checkout.actions, sessionReady])
+  const signInWithCheckoutRelease = useCallback(async () => {
+    if (checkout.actions.getCapability()) await checkout.actions.release()
+    await login()
+  }, [checkout.actions])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
   const currentProjectName = selectCurrentProjectName(workspace)
   const activeDrawingId = drawing.drawingState?.drawing_id || null
@@ -1122,7 +1126,7 @@ export default function ToolCast({
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
-            <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} canSignIn={authConfigured} onSignIn={() => login()} />
+            <DemoConversationPanel turns={demoTurns} onSuggestion={dispatchRequest} canSignIn={authConfigured} onSignIn={signInWithCheckoutRelease} />
           ) : workspaceBootstrapRequired ? (
             <WorkspaceBootstrapGate
               busy={workspace.orgBusy}
@@ -1138,7 +1142,7 @@ export default function ToolCast({
               )}
               <SessionGate
                 configured={authConfigured}
-                onSignIn={login}
+                onSignIn={signInWithCheckoutRelease}
                 onDemo={() => { window.location.href = '/try?demo=1' }}
               />
             </>
