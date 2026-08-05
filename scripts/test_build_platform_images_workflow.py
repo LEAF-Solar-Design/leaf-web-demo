@@ -1361,17 +1361,38 @@ def main() -> None:
         "github.event.pull_request.head.repo.fork == false"
     )
     dispatch_steps = dispatch_job["steps"]
-    assert len(dispatch_steps) == 1
-    assert set(dispatch_steps[0]) <= {"name", "env", "run"}, (
+    assert len(dispatch_steps) == 2
+    # Step 0 feeds the docs-only decision: an absorbed, credential-free
+    # preview checkout. Absorption matters (a conflicted preview must not
+    # redden the PR) and so does the credential posture (nothing later in
+    # this job may find a persisted token).
+    checkout_step = dispatch_steps[0]
+    assert checkout_step["uses"] == "actions/checkout@v4"
+    assert checkout_step["continue-on-error"] is True
+    assert checkout_step["with"]["persist-credentials"] is False
+    assert checkout_step["with"]["fetch-depth"] == 2
+    assert checkout_step["with"]["ref"] == (
+        "refs/pull/${{ github.event.pull_request.number }}/merge"
+    )
+    assert set(dispatch_steps[1]) <= {"name", "env", "run"}, (
         "the dispatch step runs plain bash with github.token only"
     )
-    dispatch_script = _executable_bash(dispatch_steps[0]["run"])
+    dispatch_script = _executable_bash(dispatch_steps[1]["run"])
     assert "gh workflow run build-platform-images.yml" in dispatch_script
     assert "--ref main" in dispatch_script
     assert '-f "speculative=true"' in dispatch_script
     assert '-f "source_sha=$HEAD_SHA"' in dispatch_script
     assert '-f "speculative_pr_number=$PR_NUMBER"' in dispatch_script
-    assert dispatch_job["env"] if "env" in dispatch_job else True
+    # Docs-only skip, fail-open: the default is DISPATCH=true, the diff is
+    # rename-disabled, the verdict must be the filter's exact "skip" word,
+    # and the skip path exits BEFORE the dispatch command.
+    assert "DISPATCH=true" in dispatch_script
+    assert "git diff --no-renames --name-only HEAD^1 HEAD" in dispatch_script
+    assert "python3 scripts/docs_noop_filter.py" in dispatch_script
+    assert '[ "$VERDICT" = "skip" ]' in dispatch_script
+    assert dispatch_script.index("DISPATCH=false") < dispatch_script.index(
+        "gh workflow run build-platform-images.yml"
+    )
 
     # Cache growth for the speculative namespace has the same explicit
     # bounded-retention infrastructure contract buildcache-* carries.
