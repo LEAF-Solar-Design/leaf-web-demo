@@ -99,21 +99,48 @@ def main() -> None:
     for lane, block in (("warm", warm_block), ("build", build_block)):
         assert block.count(require_name) == 1, lane
         assert block.count(checkout_name) == 1, lane
-        require_start = block.index(require_name)
-        checkout_start = block.index(checkout_name, require_start)
-        buildx_start = block.index(
-            "      - name: Set up Docker Buildx", checkout_start
-        )
-        require_body = block[require_start:checkout_start]
-        checkout_body = block[checkout_start:buildx_start]
-        assert "if: matrix.image == 'canonical-worker'" in require_body, lane
-        assert "if: matrix.image == 'canonical-worker'" in checkout_body, lane
-        assert "persist-credentials: false" in checkout_body, lane
-        # One env reference for the presence check and one ssh-key input per
-        # lane, two per block, four in the file: the secret provably appears
-        # nowhere outside these two step bodies in these two jobs.
-        assert require_body.count(secret_ref) == 1, lane
-        assert checkout_body.count(secret_ref) == 1, lane
+        assert block.index(require_name) < block.index(checkout_name), lane
+        # Bind to the individual STEP slices, not the span between step
+        # names: per sol-critic round 2 on PR #445, a span swallows any
+        # intervening step, so the key env or the ssh-key input could move
+        # into an inserted unrelated step while the span counts stayed
+        # green. Steps are split on the step-list marker at its exact
+        # indentation, so each slice below is one step and nothing else.
+        steps = re.split(r"\n      - ", block)
+        require_steps = [
+            s
+            for s in steps
+            if s.startswith("name: Require the read-only canonical solver deploy key")
+        ]
+        checkout_steps = [
+            s
+            for s in steps
+            if s.startswith("name: Check out the exact canonical solver source")
+        ]
+        assert len(require_steps) == 1, lane
+        assert len(checkout_steps) == 1, lane
+        require_step = require_steps[0]
+        checkout_step = checkout_steps[0]
+        assert "if: matrix.image == 'canonical-worker'" in require_step, lane
+        assert "if: matrix.image == 'canonical-worker'" in checkout_step, lane
+        # The presence check carries the key as its own step env and nothing
+        # more; the solver checkout is the pinned repository with the key as
+        # its ssh-key input and no persisted credentials.
+        assert (
+            "AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}"
+            in require_step
+        ), lane
+        assert require_step.count(secret_ref) == 1, lane
+        assert "uses: actions/checkout@v4" in checkout_step, lane
+        assert "repository: LEAF-Solar-Design/autofill-solver" in checkout_step, lane
+        assert (
+            "ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}" in checkout_step
+        ), lane
+        assert "persist-credentials: false" in checkout_step, lane
+        assert checkout_step.count(secret_ref) == 1, lane
+        # One reference in each of those two steps and two in the whole
+        # block: the key provably reaches no other step in this job. With
+        # the file total pinned to 4, it reaches no other job either.
         assert block.count(secret_ref) == 2, lane
 
     # An untested image can never reach ECR: the build job waits on the full
