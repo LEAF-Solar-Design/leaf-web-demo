@@ -69,59 +69,65 @@ def main() -> None:
     assert text.count("id-token: write") == 3
 
     # ------------------------------------------------------------------ #
-    # This contract is enforced by TEXT extraction (stdlib only, no YAML
-    # parser), so YAML constructs that change parse-time meaning without
-    # changing the asserted literals are banned outright (sol-critic round 3
-    # on PR #445):
-    # * every step-list item must use the one canonical marker "- " at step
-    #   indentation. A bare "-" line starts a valid YAML step the
-    #   marker-based splitter cannot see, so an inserted step's content
-    #   would ride inside the previous step's slice;
-    # * anchors, aliases, and merge keys (&x, *x, <<:) can graft the
-    #   key-bearing env or with mapping into an unrelated step without a
-    #   second literal secret reference appearing anywhere.
-    # With these banned, the "\n      - " splitter used throughout this file
-    # sees every step, and literal-count scoping is sound.
+    # Lexical gate. This contract is enforced by TEXT extraction (stdlib
+    # only, no YAML parser), so a construct that changes what YAML PARSES
+    # while leaving the asserted literals intact would silently void every
+    # assertion below it. Rounds 3 through 6 of sol-critic on PR #445 each
+    # found another one (bare-dash step markers, anchors, exotic anchor
+    # names, tag-fronted anchors, adjacent-value aliases, and finally an
+    # anchor on the line AFTER its key), so the position-by-position bans
+    # they produced are replaced here by one rule that does not enumerate:
+    #
+    #   * every line is classified as structural YAML or block-scalar
+    #     content. Inside a block scalar (run: |, if: >-) YAML parses
+    #     nothing, so shell operators and expression text are free;
+    #   * on a structural line, expression spans (${{ ... }}) and quoted
+    #     scalars are masked out, since both are opaque text to YAML;
+    #   * what remains is pure structure, and there the anchor, alias, tag,
+    #     and merge characters may not appear AT ALL. No position analysis,
+    #     so no position left to hide in.
+    #
+    # Document markers are banned for the same reason (a second document
+    # could carry its own copy of the asserted literals), and every step
+    # item must use the canonical "- " marker so the step splitter used
+    # throughout this file provably sees every step.
     # ------------------------------------------------------------------ #
+    structural = []
+    block_scalar_indent = None
     for line in text.splitlines():
-        assert line.strip() != "-", "bare sequence-dash line: %r" % line
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block_scalar_indent is not None:
+            if not stripped or indent > block_scalar_indent:
+                continue
+            block_scalar_indent = None
+        assert stripped != "-", "bare sequence-dash line: %r" % line
         if re.match(r"^      -", line):
             assert re.match(r"^      - \S", line), (
                 "non-canonical step marker: %r" % line)
-    # Anchor names admit nearly any character: YAML 1.2.2 section 6.9.2
-    # excludes only flow indicators and whitespace, so `&-x` is as legal as
-    # `&x` (sol-critic round 4 on PR #445). The name class below is
-    # therefore "anything but whitespace and flow indicators", not a word
-    # class.
-    anchor_name = r"[^\s,\[\]{}]"
-    assert "<<:" not in text, "YAML merge keys are banned in this workflow"
-    assert re.search(r"(?m):[ \t]+[&*]" + anchor_name, text) is None, (
-        "YAML anchor/alias in value position is banned in this workflow")
-    assert re.search(r"(?m)-[ \t]+[&*]" + anchor_name, text) is None, (
-        "YAML anchor/alias in sequence position is banned in this workflow")
-    # Trailing &/* tokens are banned with NO exceptions. The handoff job's
-    # `if: >-` expression continuations lead with && instead of ending with
-    # it precisely so this ban can stay absolute: sol-critic round 5 on PR
-    # #445 composed the old && allowance with a !!map tag and a JSON-style
-    # adjacent-value alias into a working graft of the key env.
-    assert re.search(
-        r"(?m)(?:^|[ \t])[&*]" + anchor_name + r"*[ \t]*$", text
-    ) is None, ("trailing YAML anchor/alias is banned in this workflow")
-    # Tags can front an anchor (`env: !!map &x`) and hide it from the
-    # value-position scan, and adjacent values after quoted flow keys
-    # (`"env":*x`) evade the whitespace-separated scans, so tags, adjacent
-    # anchors/aliases, and document markers are banned too. GitHub's parser
-    # accepts core-schema !! tags, so their absence must be pinned, and no
-    # second YAML document may relocate the asserted literals.
-    assert "!!" not in text, "YAML tags are banned in this workflow"
-    assert re.search(r":[&*]", text) is None, (
-        "adjacent-value YAML anchor/alias is banned in this workflow")
-    assert re.search(r"(?m):[ \t]+!", text) is None, (
-        "YAML tag in value position is banned in this workflow")
-    assert re.search(r"(?m)-[ \t]+!", text) is None, (
-        "YAML tag in sequence position is banned in this workflow")
-    assert re.search(r"(?m)^\s*(---|\.\.\.)", text) is None, (
-        "YAML document markers are banned in this workflow")
+        assert not re.match(r"^\s*(---|\.\.\.)(\s|$)", line), (
+            "YAML document markers are banned in this workflow: %r" % line)
+        if not stripped.startswith("#"):
+            structural.append(line)
+        if re.search(r"(?::|^\s*-)\s*[|>][-+]?[0-9]*\s*(?:#.*)?$", line):
+            block_scalar_indent = indent
+
+    def _mask_opaque(line: str) -> str:
+        # ${{ ... }} expressions and quoted scalars are text to YAML: an
+        # anchor inside one is not a node. Masking them keeps GitHub
+        # expression operators (&&, ||, !) and quoted content from reading
+        # as YAML syntax, while an anchor placed OUTSIDE them stays visible.
+        masked = re.sub(r"\$\{\{.*?\}\}", "", line)
+        masked = re.sub(r"'[^']*'", "''", masked)
+        masked = re.sub(r'"[^"]*"', '""', masked)
+        return masked.split("#", 1)[0]
+
+    for line in structural:
+        masked = _mask_opaque(line)
+        for banned in ("&", "*", "!", "<<"):
+            assert banned not in masked, (
+                "YAML anchor/alias/tag/merge syntax is banned in structural "
+                "positions: %r in %r" % (banned, line))
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
@@ -275,6 +281,16 @@ def main() -> None:
     )
 
     handoff_body = text[text.index("  handoff:") :]
+    # The handoff guard is a CONJUNCTION, pinned whole: a dispatch that is
+    # not a promote, or a promote of a commit that is not on main, must not
+    # mint a production handoff candidate. Asserting the operands separately
+    # left `||` in place of either `&&` passing (sol-critic round 6).
+    assert (
+        "    if: >-\n"
+        "      github.event_name == 'workflow_dispatch' &&\n"
+        "      inputs.promote &&\n"
+        "      needs.prepare.outputs.source_mode == 'main'\n"
+    ) in handoff_body
     assert "inputs.promote" in handoff_body
     assert "RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}" in handoff_body
     assert "RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}" in handoff_body
@@ -422,9 +438,15 @@ def main() -> None:
     assert "push: true" not in warm_block
     assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
 
-    assert "needs: [prepare, test]" in build_block, (
+    # The gate edge, pinned as an EFFECTIVE job key at its exact
+    # indentation. A bare substring search was satisfied by
+    # `needs: [prepare] # needs: [prepare, test]` (sol-critic round 6),
+    # which drops the gate dependency while reading as intact.
+    assert re.search(r"(?m)^    needs: \[prepare, test\]$", build_block), (
         "the gate edge is this repository's only enforcement that an untested "
         "image never reaches ECR")
+    assert len(re.findall(r"(?m)^    needs:", build_block)) == 1, (
+        "the build job declares exactly one needs: list")
     assert "push: true" in build_block
 
     # The warmed cache is what makes the post-gate build cheap; without this
@@ -435,9 +457,21 @@ def main() -> None:
     # Both writers race on the same immutable tag by design, and ECR refuses
     # the loser with ImageTagAlreadyExistsException. The registry cache
     # exporter must therefore tolerate export errors in BOTH jobs, or a lost
-    # race fails the gated build.
-    assert warm_block.count("ignore-error=true") == 1
-    assert build_block.count("ignore-error=true") == 1
+    # race fails the gated build. Bound to the EFFECTIVE cache_to assignment,
+    # not to any occurrence: a shell comment carrying the option satisfied a
+    # plain count while the real export lost it (sol-critic round 6).
+    for lane, block in (("warm", warm_block), ("build", build_block)):
+        exports = [
+            l for l in block.splitlines()
+            if 'cache_to="type=registry' in l and not l.strip().startswith("#")
+        ]
+        assert len(exports) == 1, lane
+        assert exports[0].rstrip().endswith('ignore-error=true"'), lane
+        effective = [
+            l for l in block.splitlines()
+            if "ignore-error=true" in l and not l.strip().startswith("#")
+        ]
+        assert len(effective) == 1, lane
 
     # ------------------------------------------------------------------ #
     # Tree-bound gate verdict (operator decision D3, 2026-08-05): the called
@@ -459,6 +493,18 @@ def main() -> None:
     assert build_block.count("refusing to push images") == 2, (
         "both refusal arms — no proven tree at all, and a foreign tree — "
         "must stay fail-closed")
+    # A step that carries an `if:` can be switched off without being
+    # removed, so neither the tree binding nor the push may carry one at
+    # all (sol-critic round 6: `if: ${{ false }}` on the binding step left
+    # the push enabled while every literal stayed green). The two solver
+    # steps are the only conditional steps in this job, and their condition
+    # is pinned to the canonical-worker matrix entry above.
+    for step in re.split(r"\n      - ", build_block):
+        conditional = re.search(r"(?m)^        if:", step)
+        if "Require the green gate verdict to bind" in step:
+            assert not conditional, "the tree binding must not be conditional"
+        if "uses: docker/build-push-action" in step:
+            assert not conditional, "the image push must not be conditional"
     bind_at = build_block.index("Require the green gate verdict to bind")
     push_at = build_block.index("uses: docker/build-push-action")
     assert bind_at < push_at, "the tree binding must precede the push step"
