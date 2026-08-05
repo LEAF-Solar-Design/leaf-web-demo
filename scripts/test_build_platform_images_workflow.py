@@ -368,7 +368,8 @@ def main() -> None:
         "      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&\n"
         "          needs.prepare.result == 'success' &&\n"
         "          (needs.build.result == 'success' ||\n"
-        "           (needs.build.result == 'skipped' && needs.adopt.outputs.adopted == 'true')) }}\n"
+        "           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&\n"
+        "            needs.adopt.outputs.adopted == 'true')) }}\n"
     )
     assert text.count(verify_guard) == 1
 
@@ -661,7 +662,8 @@ def main() -> None:
         "      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&\n"
         "          needs.prepare.result == 'success' &&\n"
         "          needs.test.result == 'success' &&\n"
-        "          (needs.adopt.result == 'skipped' || needs.adopt.outputs.adopted != 'true') }}\n"
+        "          (needs.adopt.result == 'skipped' ||\n"
+        "           (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}\n"
     )
     assert text.count(build_guard) == 1
     assert build_guard in build_block
@@ -780,17 +782,21 @@ def main() -> None:
 
     # The spec tag IS the tree, derived in prepare, and the derivation
     # exports the tree for the manifest and adopt jobs.
-    assert 'image_tag="spec-$current_tree"' in text
+    assert 'image_tag="spec-$current_tree-$current_spec_short"' in text
     assert "current_tree=\"$(git rev-parse 'HEAD^{tree}')\"" in text
     assert 'echo "tree=$current_tree"' in text
     assert "source_tree: ${{ steps.tag.outputs.tree }}" in text
 
     # speculate runs ONLY as a speculative dispatch, carries the same
     # five-image matrix as warm/build, and never cancels siblings early.
-    assert (
-        "if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
-        in speculate_block
-    )
+    speculate_guards = [
+        _value_of(l)
+        for l in speculate_block.splitlines()
+        if _key_of(l) == "if" and l.startswith("    if")
+    ]
+    assert speculate_guards == [
+        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
+    ], speculate_guards
     assert "fail-fast: false" in speculate_block
     speculate_matrices = [
         l for l in speculate_block.splitlines() if re.match(r"^\s*image: \[", l)
@@ -869,6 +875,13 @@ def main() -> None:
     # The partial-push invariant over tree identity: no artifact without all
     # five digests, and the mint is gated on the SAME step output the upload
     # is. if-no-files-found stays error so an empty upload cannot pass.
+    manifest_guard = (
+        "    if: >-\n"
+        "      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&\n"
+        "          inputs.speculative && needs.prepare.result == 'success' }}\n"
+    )
+    assert text.count(manifest_guard) == 1
+    assert manifest_guard in manifest_block
     assert "complete=false" in manifest_block
     assert "the speculative set is incomplete and no manifest will be minted" in (
         manifest_block
@@ -899,9 +912,28 @@ def main() -> None:
     # verifies via verify-speculative BEFORE any tag is written, only the
     # release prod- namespace may be aliased, and every alias re-verifies
     # before adopted=true is declared.
-    assert "if: ${{ !inputs.promote && github.event_name == 'push' }}" in adopt_block
-    assert "continue-on-error: true" in adopt_block
-    assert "actions: read" in adopt_block
+    adopt_guards = [
+        _value_of(l)
+        for l in adopt_block.splitlines()
+        if _key_of(l) == "if" and l.startswith("    if")
+    ]
+    assert adopt_guards == [
+        "${{ !inputs.promote && github.event_name == 'push' }}"
+    ], adopt_guards
+    # NO continue-on-error: before the first tag write the EXIT trap absorbs
+    # every failure to adopted=false, and after it adoption is committed —
+    # a deliberate exit 1 must fail the run, because the fallback rebuild
+    # would collide with the half-aliased immutable release tag. The build
+    # guard above refuses to run when adopt FAILED for the same reason.
+    assert "continue-on-error" not in _keys_in(adopt_block)
+    assert "trap on_exit EXIT" in adopt_block
+    assert "COMMITTED=false" in adopt_block
+    assert adopt_block.count("RERUN THIS RUN") == 2
+    assert [
+        _value_of(l)
+        for l in adopt_block.splitlines()
+        if _key_of(l) == "actions"
+    ] == ["read"]
     assert "PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}" in adopt_block
     assert ".workflow_run.head_repository_id == $repo_id" in adopt_block
     assert 'path="${path%%@*}"' in adopt_block
@@ -910,6 +942,10 @@ def main() -> None:
     assert '"main" ]] || continue' in adopt_block
     assert "verify-speculative" in adopt_block
     assert "--expect-tree" in adopt_block
+    # The spec tag comes from the verified manifest (tree + baking preview,
+    # sol-critic round 1 finding 1), never re-derived from the tree alone.
+    assert "spec_tag=\"$(jq -r '.spec_tag' \"$verified\")\"" in adopt_block
+    assert "spec-[0-9a-f]{40}-[0-9a-f]{12}" in adopt_block
     assert adopt_block.index("verify-speculative") < adopt_block.index(
         "aws ecr put-image"
     ), "no tag may be written before the manifest verifies"
@@ -946,16 +982,62 @@ def main() -> None:
     dispatcher_text = (WORKFLOW.parent / "speculate-platform-images.yml").read_text(
         encoding="utf-8"
     )
+    # Same lexical gate as the main workflow, scaled to this small file: no
+    # anchors/aliases/tags at node starts, no document markers, no merge
+    # keys — so the parsed pins below cannot be voided by YAML constructs.
+    dispatcher_scalar_indent = None
+    dispatcher_structural = []
+    for line in dispatcher_text.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if dispatcher_scalar_indent is not None:
+            if not stripped or indent > dispatcher_scalar_indent:
+                continue
+            dispatcher_scalar_indent = None
+        assert not re.match(r"^\s*(---|\.\.\.)(\s|$)", line), line
+        if not stripped.startswith("#"):
+            dispatcher_structural.append(line)
+        if block_header.search(_uncommented(line)):
+            dispatcher_scalar_indent = indent
+    for line in dispatcher_structural:
+        masked = _uncommented(line)
+        assert not node_start.search(masked), line
+        assert "<<" not in masked, line
+    # secrets: ABSENCE is checked over the raw text — a comment mentioning
+    # secrets fails too, which is the safe direction.
     assert "secrets." not in dispatcher_text
-    assert "pull_request:" in dispatcher_text
-    assert "actions: write" in dispatcher_text
-    assert (
-        "github.event.pull_request.head.repo.full_name == github.repository"
-        in dispatcher_text
+    # Exactly one trigger (pull_request) and exactly two permissions, parsed
+    # by key/value: contents stays read, actions:write is what lets
+    # github.token dispatch the build workflow.
+    dispatcher_keys = [
+        k for k in (_key_of(l) for l in dispatcher_structural) if k
+    ]
+    assert dispatcher_keys.count("pull_request") == 1
+    assert "workflow_dispatch" not in dispatcher_keys
+    permission_pairs = [
+        (_key_of(l), _value_of(l))
+        for l in dispatcher_structural
+        if _key_of(l) in ("contents", "actions")
+    ]
+    assert permission_pairs == [("contents", "read"), ("actions", "write")], (
+        permission_pairs
     )
-    assert "github.event.pull_request.head.repo.fork == false" in dispatcher_text
-    assert "--ref main" in dispatcher_text
-    assert '-f "speculative=true"' in dispatcher_text
+    # The same-repo/non-fork job guard, pinned whole at its if: key.
+    dispatcher_guard = (
+        "    if: >-\n"
+        "      github.event.pull_request.head.repo.full_name == github.repository &&\n"
+        "      github.event.pull_request.head.repo.fork == false\n"
+    )
+    assert dispatcher_text.count(dispatcher_guard) == 1
+    # Dispatch shape, bound to LIVE lines (comments cannot satisfy these).
+    dispatcher_live = [
+        l for l in dispatcher_text.splitlines() if not l.strip().startswith("#")
+    ]
+    assert [l for l in dispatcher_live if l.strip() == "--ref main \\"], (
+        "the dispatch must target the main ref"
+    )
+    assert [l for l in dispatcher_live if '-f "speculative=true"' in l]
+    assert [l for l in dispatcher_live if '-f "source_sha=$HEAD_SHA"' in l]
 
     # Cache growth for the speculative namespace has the same explicit
     # bounded-retention infrastructure contract buildcache-* carries.

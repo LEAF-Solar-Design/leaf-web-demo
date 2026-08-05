@@ -30,7 +30,11 @@ _TREE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SOURCE_HASH = re.compile(r"^[0-9a-f]{64}$")
 _TAG = re.compile(r"^(?:prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$")
-_SPEC_TAG = re.compile(r"^spec-[0-9a-f]{40}$")
+# tree + the merge-preview commit that baked the images: two previews can
+# realize the SAME tree while baking different LEAF_SOURCE_SHA values, so a
+# tree-only tag would let a later run mint provenance for images an earlier
+# run built (sol-critic round 1 on PR #450, finding 1).
+_SPEC_TAG = re.compile(r"^spec-[0-9a-f]{40}-[0-9a-f]{12}$")
 _RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
 _RUN_ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _RECEIPT_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{5,49}$")
@@ -243,7 +247,7 @@ def build_speculative_manifest(
     return {
         "schema": SPECULATIVE_SCHEMA,
         "source_tree": source_tree,
-        "spec_tag": f"spec-{source_tree}",
+        "spec_tag": f"spec-{source_tree}-{built_from_revision[:12]}",
         "built_from_revision": built_from_revision,
         "pr_number": int(pr_number),
         "workflow_run_id": int(workflow_run_id),
@@ -279,13 +283,16 @@ def validate_speculative_manifest(
         raise ContractError("speculative source tree is not a full git tree hash")
     if expect_tree is not None and tree != expect_tree:
         raise ContractError("speculative manifest binds a different source tree")
-    if manifest["spec_tag"] != f"spec-{tree}" or not _SPEC_TAG.fullmatch(
-        manifest["spec_tag"]
-    ):
-        raise ContractError("speculative tag does not derive from the source tree")
     built_from = manifest["built_from_revision"]
     if not isinstance(built_from, str) or not _SHA.fullmatch(built_from):
         raise ContractError("speculative built-from revision is invalid")
+    if manifest["spec_tag"] != f"spec-{tree}-{built_from[:12]}" or not (
+        _SPEC_TAG.fullmatch(manifest["spec_tag"])
+    ):
+        raise ContractError(
+            "speculative tag does not derive from the source tree and the"
+            " built-from revision"
+        )
     pr_number = manifest["pr_number"]
     if not isinstance(pr_number, int) or not _PR_NUMBER.fullmatch(str(pr_number)):
         raise ContractError("speculative PR number is invalid")

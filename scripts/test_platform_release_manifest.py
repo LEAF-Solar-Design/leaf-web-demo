@@ -460,7 +460,7 @@ def test_speculative_manifest_round_trips_and_binds_its_tag():
     validate_speculative_manifest(manifest, expect_tree=TREE)
 
     assert manifest["schema"] == "leaf.speculative-supply-set.v1"
-    assert manifest["spec_tag"] == f"spec-{TREE}"
+    assert manifest["spec_tag"] == f"spec-{TREE}-{PREVIEW_SHA[:12]}"
     assert set(manifest["services"]) == set(SERVICES)
     assert all(
         set(entry) == {"repository", "image_digest"}
@@ -471,7 +471,8 @@ def test_speculative_manifest_round_trips_and_binds_its_tag():
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda value: value.update(spec_tag="spec-" + "0" * 40),
+        lambda value: value.update(spec_tag="spec-" + "0" * 40 + "-" + "0" * 12),
+        lambda value: value.update(spec_tag="spec-" + "e" * 40),
         lambda value: value.update(source_tree="0" * 40),
         lambda value: value["services"].pop("harness"),
         lambda value: value["services"]["app"].update(image_digest="prod-latest"),
@@ -579,7 +580,7 @@ def test_verify_speculative_cli_round_trip(tmp_path: Path):
         check=True,
     )
     assert json.loads(verified.read_text(encoding="utf-8"))["spec_tag"] == (
-        "spec-" + TREE
+        "spec-" + TREE + "-" + PREVIEW_SHA[:12]
     )
 
     mismatched = subprocess.run(

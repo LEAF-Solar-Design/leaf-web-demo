@@ -33,12 +33,16 @@ not minutes.
    `refs/pull/<n>/merge`, proves the preview still merges that head, and
    checks it out. The five-image matrix (`speculate`) builds that tree with
    inputs byte-identical to the gated build's and pushes each image as
-   `spec-<tree>` — a namespace no deploy workflow accepts (the staging
-   deploy validates tags against `sha-*`/`prod-*` only), so untested content
-   stays unreachable however long it sits in ECR. A tree already pushed
-   skips its build: the tag is immutable and the bytes are the same by
-   construction. Cache is import-only (the merged-onto main tip's
-   `buildcache-*`); nothing is exported.
+   `spec-<tree>-<preview12>` — a namespace no deploy workflow accepts (the
+   staging deploy validates tags against `sha-*`/`prod-*` only), so
+   untested content stays unreachable however long it sits in ECR. The tag
+   carries the preview commit alongside the tree because two previews can
+   realize the SAME tree while baking different `LEAF_SOURCE_SHA` values: a
+   tree-only tag would let a later run mint provenance for images an
+   earlier run built, and a crashed run could leave a mixed-bake set. So
+   only a rerun of the SAME preview skips by existence; a new preview of an
+   identical tree rebuilds under its own tag. Cache is import-only (the
+   merged-onto main tip's `buildcache-*`); nothing is exported.
 3. **Mint the invariant.** `speculate-manifest` re-reads all five digests
    from the registry and uploads a `spec-supply-set-<tree>` artifact ONLY
    when every one is present. This is the partial-push invariant redefined
@@ -50,17 +54,25 @@ not minutes.
    artifact's `workflow_run` metadata, this workflow's bare path, a main-ref
    `workflow_dispatch` run; the file's self-reported content is never
    trusted for provenance. Content then verifies (`verify-speculative`
-   schema + exact tree) and every manifest digest must equal what the
-   immutable `spec-<tree>` tag carries live. Only then does adopt alias
-   `prod-<shortsha>` onto those digests (`ecr put-image`, idempotent: an
-   existing release tag must already equal the speculative digest, anything
-   else stands down), re-verifies all five, and declares `adopted=true`. The
-   build matrix skips; `verify` runs as always and stamps the supply set.
-5. **Degrade, never break.** Every anomaly in adopt — no artifact, foreign
-   tree, missing digest, alias failure — lands on `adopted=false` and the
-   full build runs exactly as before. The fail-closed direction of this
-   feature is "build the images"; the fail-closed direction of identity is
-   "no deployable tag without the gate's proven tree".
+   schema + exact tree) and every digest must equal what the manifest's own
+   immutable spec tag carries live. Only then does adopt alias
+   `prod-<shortsha>` onto those digests (`ecr put-image` with three
+   attempts per image, idempotent: an existing release tag must already
+   equal the speculative digest, anything else stands down), re-verifies
+   all five, and declares `adopted=true`. The build matrix skips; `verify`
+   runs as always and stamps the supply set.
+5. **Degrade before the first write, fail closed after it.** Up to the
+   moment the first release tag is written, every anomaly in adopt — no
+   artifact, foreign tree, missing digest, even an unexpected script death
+   (an EXIT trap catches those) — lands on `adopted=false` and the full
+   build runs exactly as before. Once a `prod-*` tag carries a speculative
+   digest, adoption is COMMITTED: a fallback rebuild would only collide
+   with the immutable tag, so a persistent failure past that point fails
+   the run with a rerun-to-resume instruction (the alias loop accepts
+   equal digests, so a rerun finishes the job). The build matrix refuses
+   to run after a FAILED adopt for the same reason. The fail-closed
+   direction of identity is unchanged: "no deployable tag without the
+   gate's proven tree".
 
 ## Identity and the supply set
 

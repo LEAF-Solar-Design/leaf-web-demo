@@ -382,12 +382,14 @@ The release path is a staged, receipt-bound chain:
 
    Since lane L5 (operator decision D3, 2026-08-05) a PR update also
    dispatches a speculative build of the PR's merge preview, pushed under
-   non-deployable `spec-<tree>` tags. When the eventual merge commit's tree
-   matches the gate's proven tree, the push run adopts those digests instead
-   of rebuilding and uploads a `leaf.staging-supply-set.v2` manifest: the
-   same deployable fields, plus the source tree and the speculative run
-   provenance. Consumers accept v1 and v2 alike; `spec-*` tags carry the
-   same bounded-retention infrastructure contract as `buildcache-*`. See
+   non-deployable `spec-<tree>-<preview12>` tags (tree plus the preview
+   commit that baked the images, so provenance is exact per push). When the
+   eventual merge commit's tree matches the gate's proven tree, the push
+   run adopts those digests instead of rebuilding and uploads a
+   `leaf.staging-supply-set.v2` manifest: the same deployable fields, plus
+   the source tree and the speculative run provenance. Consumers accept v1
+   and v2 alike; `spec-*` tags carry the same bounded-retention
+   infrastructure contract as `buildcache-*`. See
    `docs/SPECULATIVE-PR-BUILDS.md`.
 2. **Accept staging (terraform repo)**: run the protected staging authored-CAD
    acceptance in `execute` mode. Its successful artifact must name the same

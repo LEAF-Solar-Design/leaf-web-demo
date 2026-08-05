@@ -299,10 +299,15 @@ jobs:
           current_cache_tag="buildcache-$current_short"
           previous_cache_tag=""
           if [ "$SOURCE_MODE" = "speculative" ]; then
-            # The tag IS the tree: adoption keys on it, deploys refuse it
-            # (the staging deploy validates tags against sha-*/prod-* only),
-            # and a rebuild of the same tree lands on the same immutable tag.
-            image_tag="spec-$current_tree"
+            # The tag is the tree PLUS the preview commit that bakes the
+            # images: two previews can realize the same tree while baking
+            # different LEAF_SOURCE_SHA values, so a tree-only tag would let
+            # a later run claim provenance for images an earlier run built,
+            # and a crashed run could leave a mixed-bake five-image set.
+            # Deploys refuse the whole spec-* namespace either way (the
+            # staging deploy validates tags against sha-*/prod-* only).
+            current_spec_short="$(git rev-parse HEAD | cut -c1-12)"
+            image_tag="spec-$current_tree-$current_spec_short"
             # Import the cache of the main tip the preview merged onto (its
             # first parent) and export nothing: speculative runs churn too
             # fast to be worth polluting the buildcache-* namespace.
@@ -524,11 +529,17 @@ jobs:
     # (needs.test.result == 'success') remains the only thing that lets an
     # image reach ECR.
     needs: [prepare, test, adopt]
+    # A FAILED adopt run is not a fall-through: it means tags were already
+    # written (the pre-write path can only end skipped or successful), so
+    # building would collide with the half-aliased release tag. Only a
+    # skipped adopt (dispatch runs) or a successful adopt that declined
+    # (adopted != true) lets the matrix run.
     if: >-
       ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
           needs.prepare.result == 'success' &&
           needs.test.result == 'success' &&
-          (needs.adopt.result == 'skipped' || needs.adopt.outputs.adopted != 'true') }}
+          (needs.adopt.result == 'skipped' ||
+           (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -691,7 +702,8 @@ jobs:
       ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
           needs.prepare.result == 'success' &&
           (needs.build.result == 'success' ||
-           (needs.build.result == 'skipped' && needs.adopt.outputs.adopted == 'true')) }}
+           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&
+            needs.adopt.outputs.adopted == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1067,19 +1079,23 @@ jobs:
           retention-days: 30
 
   # Tree-identity adoption (the merge-run half of the speculative lane).
-  # Same posture as the gate-reuse probe: every failure to adopt degrades to
-  # adopted=false and the full build runs — the fail-closed direction of
-  # this feature is "build the images". Provenance comes from the artifact
-  # listing's workflow_run metadata (same-repo origin, this workflow's path,
-  # a workflow_dispatch run on main), never from the file's own claims, and
-  # the content re-verifies against the gate's proven tree plus the live
-  # registry digests before a single tag is written.
+  # BEFORE the first release-tag write this job has the gate-reuse probe's
+  # posture: every failure degrades to adopted=false and the full build
+  # runs (an EXIT trap converts even unexpected script deaths into that).
+  # AFTER the first write, adoption is COMMITTED: the immutable prod-* tag
+  # already points at a speculative digest, a fallback rebuild would only
+  # collide with it, so a persistent alias failure fails THIS run with a
+  # rerun-to-resume instruction instead (the alias loop is idempotent).
+  # Provenance comes from the artifact listing's workflow_run metadata
+  # (same-repo origin, this workflow's path, a workflow_dispatch run on
+  # main), never from the file's own claims, and the content re-verifies
+  # against the gate's proven tree plus the live registry digests before a
+  # single tag is written.
   adopt:
     needs: [prepare, test]
     if: ${{ !inputs.promote && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     permissions:
       id-token: write
       contents: read
@@ -1126,10 +1142,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
-          # wrapper): every failure below must degrade to adopted=false (the
-          # full build runs), never redden the push run.
+          # wrapper): before the first release-tag write, every failure —
+          # including an unexpected script death, via the EXIT trap — must
+          # degrade to adopted=false (the full build runs). Once COMMITTED
+          # flips, a failure propagates and fails the run instead: building
+          # over a half-aliased release tag can only collide.
           set -uo pipefail
           set +e
+          COMMITTED=false
+          on_exit() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ "$COMMITTED" != "true" ]; then
+              echo "adopted=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::adopt: unexpected failure (exit $rc) before any tag write; the full build runs"
+              exit 0
+            fi
+          }
+          trap on_exit EXIT
           finish() {
             echo "adopted=$1" >> "$GITHUB_OUTPUT"
             if [ -n "${2:-}" ]; then echo "::notice::adopt: $2"; fi
@@ -1139,7 +1168,6 @@ jobs:
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || finish false "checkout has no tree"
           [[ "$PROVEN_TREE" == "$tree" ]] || finish false "gate verdict binds tree ${PROVEN_TREE:-<none>}, not $tree"
           [[ "$PROD_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || finish false "refusing to alias non-release tag $PROD_TAG"
-          spec_tag="spec-$tree"
           repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null || true)"
           listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=spec-supply-set-$tree&per_page=30" 2>/dev/null || true)"
           if [[ -z "$repo_id" || -z "$listing" ]]; then
@@ -1183,6 +1211,11 @@ jobs:
             break
           done
           [[ -n "$verified" ]] || finish false "no verified speculative supply set binds tree $tree"
+          # The spec tag comes from the VERIFIED manifest (validated to
+          # derive from this tree plus the preview that baked the images),
+          # so digests, tag, and provenance always describe one build.
+          spec_tag="$(jq -r '.spec_tag' "$verified")"
+          [[ "$spec_tag" =~ ^spec-[0-9a-f]{40}-[0-9a-f]{12}$ ]] || finish false "verified manifest carries a malformed spec tag"
           # The registry is the ground truth: every manifest digest must be
           # exactly what the immutable spec tag carries right now.
           declare -A spec_digest spec_manifest
@@ -1204,8 +1237,11 @@ jobs:
           # Alias phase, idempotent per image: an existing release tag must
           # already be the speculative digest (a rerun of an adopted run),
           # anything else means a full build owns this tag and adoption must
-          # stand down. put-image losing the immutable-tag race re-reads and
-          # accepts an equal digest.
+          # stand down — but ONLY while nothing has been written. After the
+          # first confirmed alias, COMMITTED flips: from here a fallback
+          # rebuild would collide with the immutable tag, so a persistent
+          # failure (three attempts per image) fails the run with a
+          # rerun-to-resume instruction instead of degrading.
           for image in app broker canonical-worker harness web; do
             repository="leaf-platform-$image"
             existing="$(aws ecr batch-get-image \
@@ -1214,25 +1250,51 @@ jobs:
               --query 'images[0].imageId.imageDigest' \
               --output text 2>/dev/null || true)"
             if [[ -n "$existing" && "$existing" != "None" ]]; then
-              [[ "$existing" == "${spec_digest[$image]}" ]] || finish false "$repository:$PROD_TAG already points at a foreign digest"
+              if [[ "$existing" != "${spec_digest[$image]}" ]]; then
+                if [ "$COMMITTED" = "true" ]; then
+                  echo "::error::adopt: $repository:$PROD_TAG holds a foreign digest after adoption began; rerun this run to diagnose."
+                  exit 1
+                fi
+                finish false "$repository:$PROD_TAG already points at a foreign digest"
+              fi
+              COMMITTED=true
               continue
             fi
-            aws ecr put-image \
-              --repository-name "$repository" \
-              --image-tag "$PROD_TAG" \
-              --image-manifest "${spec_manifest[$image]}" >/dev/null 2>&1
-            rc=$?
-            if [[ "$rc" -ne 0 ]]; then
+            aliased=false
+            for attempt in 1 2 3; do
+              aws ecr put-image \
+                --repository-name "$repository" \
+                --image-tag "$PROD_TAG" \
+                --image-manifest "${spec_manifest[$image]}" >/dev/null 2>&1
+              rc=$?
+              if [[ "$rc" -eq 0 ]]; then
+                aliased=true
+                break
+              fi
               raced="$(aws ecr batch-get-image \
                 --repository-name "$repository" \
                 --image-ids "imageTag=$PROD_TAG" \
                 --query 'images[0].imageId.imageDigest' \
                 --output text 2>/dev/null || true)"
-              [[ "$raced" == "${spec_digest[$image]}" ]] || finish false "$repository:$PROD_TAG alias failed (exit $rc)"
+              if [[ "$raced" == "${spec_digest[$image]}" ]]; then
+                aliased=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$aliased" != "true" ]; then
+              if [ "$COMMITTED" = "true" ]; then
+                echo "::error::adopt: adoption is committed (earlier images already aliased to $PROD_TAG) but $repository failed after 3 attempts; RERUN THIS RUN to resume — the alias loop is idempotent."
+                exit 1
+              fi
+              finish false "$repository:$PROD_TAG alias failed after 3 attempts"
             fi
+            COMMITTED=true
           done
           # Re-verify every alias before declaring adoption: the verdict
-          # below is what skips the entire build matrix.
+          # below is what skips the entire build matrix. Tags are written by
+          # now, so a disagreement here fails the run (a fallback rebuild
+          # could only collide), and a rerun resumes idempotently.
           for image in app broker canonical-worker harness web; do
             repository="leaf-platform-$image"
             final="$(aws ecr batch-get-image \
@@ -1240,7 +1302,10 @@ jobs:
               --image-ids "imageTag=$PROD_TAG" \
               --query 'images[0].imageId.imageDigest' \
               --output text 2>/dev/null || true)"
-            [[ "$final" == "${spec_digest[$image]}" ]] || finish false "$repository:$PROD_TAG re-verification failed"
+            if [[ "$final" != "${spec_digest[$image]}" ]]; then
+              echo "::error::adopt: $repository:$PROD_TAG re-verification failed after aliasing; RERUN THIS RUN to resume."
+              exit 1
+            fi
           done
           spec_run_id="$(jq -r '.workflow_run_id' "$verified")"
           built_from="$(jq -r '.built_from_revision' "$verified")"
