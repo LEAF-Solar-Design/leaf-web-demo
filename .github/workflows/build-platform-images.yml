@@ -258,10 +258,13 @@ jobs:
   # publishes is the buildcache-<sha> layer tag the real build then reuses,
   # turning a cold ~100s post-gate build into a cache hit.
   #
-  # canonical-worker is deliberately NOT warmed: it is the only image whose
-  # build needs the private autofill-solver deploy key, and spreading that
-  # credential to a job that exists purely as an optimisation is a bad trade
-  # for ~25s. It builds cold post-gate and sets the build job's wall time.
+  # canonical-worker warms too. Its original exclusion was a deliberate
+  # security call (its build is the only one needing the private
+  # autofill-solver deploy key, and #442 kept that credential out of a job
+  # that exists purely as an optimisation); operator decision D1 (2026-08-05)
+  # lifted it for ~25s off the build wall. The key stays scoped exactly as in
+  # `build`: a fail-closed presence check plus the one exact solver checkout,
+  # never a job-level env or a Docker argument.
   #
   # continue-on-error is deliberate: a warm failure must degrade to today's
   # behaviour (a cold build off the predecessor cache), never redden a run.
@@ -278,7 +281,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [app, broker, harness, web]
+        image: [app, broker, canonical-worker, harness, web]
 
     env:
       AWS_REGION: us-east-1
@@ -292,6 +295,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Require the read-only canonical solver deploy key
+        if: matrix.image == 'canonical-worker'
+        env:
+          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
+            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
+            exit 1
+          }
+
+      - name: Check out the exact canonical solver source
+        if: matrix.image == 'canonical-worker'
+        uses: actions/checkout@v4
+        with:
+          repository: LEAF-Solar-Design/autofill-solver
+          ref: ${{ needs.prepare.outputs.solver_revision }}
+          path: autofill-solver
+          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -372,6 +396,8 @@ jobs:
           file: deploy/Dockerfile.${{ matrix.image }}
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
+            ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           push: false
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}

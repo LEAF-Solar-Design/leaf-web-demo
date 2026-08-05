@@ -68,27 +68,33 @@ def main() -> None:
     # mean a new job that provably needs registry access, not a convenience.
     assert text.count("id-token: write") == 3
 
-    # The private key is scoped to the canonical-worker lane. It is used only
-    # for a fail-closed presence check and the one exact solver checkout. It is
-    # never passed to Docker as an argument or inherited by the whole job.
+    # The private key is scoped to the canonical-worker lane in BOTH jobs that
+    # hold it: the gated build, and the cache warmer (operator decision D1,
+    # 2026-08-05, lifted the warm-lane exclusion). In each job it is used
+    # only for a fail-closed presence check and the one exact solver checkout.
+    # It is never passed to Docker as an argument or inherited by a whole job.
     secret_ref = "secrets.AUTOFILL_SOLVER_DEPLOY_KEY"
-    assert text.count(secret_ref) == 2
-    require_start = text.index(
-        "      - name: Require the read-only canonical solver deploy key"
-    )
-    checkout_start = text.index(
-        "      - name: Check out the exact canonical solver source"
-    )
-    buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
-    require_body = text[require_start:checkout_start]
-    checkout_body = text[checkout_start:buildx_start]
-    assert "if: matrix.image == 'canonical-worker'" in require_body
-    assert "if: matrix.image == 'canonical-worker'" in checkout_body
-    assert "persist-credentials: false" in checkout_body
-    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 1
+    assert text.count(secret_ref) == 4
+    require_marker = "      - name: Require the read-only canonical solver deploy key"
+    require_starts = [m.start() for m in re.finditer(re.escape(require_marker), text)]
+    assert len(require_starts) == 2, (
+        "exactly two jobs (warm, build) may carry the solver deploy key")
+    outside = text
+    for require_start in require_starts:
+        checkout_start = text.index(
+            "      - name: Check out the exact canonical solver source", require_start
+        )
+        buildx_start = text.index("      - name: Set up Docker Buildx", checkout_start)
+        require_body = text[require_start:checkout_start]
+        checkout_body = text[checkout_start:buildx_start]
+        assert "if: matrix.image == 'canonical-worker'" in require_body
+        assert "if: matrix.image == 'canonical-worker'" in checkout_body
+        assert "persist-credentials: false" in checkout_body
+        outside = outside.replace(text[require_start:buildx_start], "")
+    assert text.count("ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}") == 2
     assert "AUTOFILL_SOLVER_DEPLOY_KEY=" not in text
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY:" not in text[:require_start]
-    assert "AUTOFILL_SOLVER_DEPLOY_KEY" not in text[buildx_start:]
+    assert "AUTOFILL_SOLVER_DEPLOY_KEY" not in outside, (
+        "the deploy key must never appear outside the require/checkout step pairs")
 
     # An untested image can never reach ECR: the build job waits on the full
     # gate, run against the exact commit `prepare` resolved. Branch protection
@@ -226,6 +232,16 @@ def main() -> None:
     assert "needs: prepare" in warm_block
     assert "continue-on-error: true" in warm_block, (
         "a warm failure must degrade to a cold build, never redden the run")
+
+    # Operator decision D1 (2026-08-05) admits canonical-worker to the warm
+    # lane, so warm covers all five images. Warm layers only hit when the warm
+    # build's inputs match the gated build's byte for byte, so the solver
+    # revision build-arg and the solver build context must mirror `build`.
+    assert re.search(
+        r"image:\s*\[app, broker, canonical-worker, harness, web\]", warm_block
+    ), "the warm matrix covers all five images (operator decision D1)"
+    assert "AUTOFILL_SOLVER_REVISION={0}" in warm_block
+    assert "autofill_solver=./autofill-solver" in warm_block
 
     # The no-publish contract binds to the actual build step, not the job
     # text: a `push: false` in a comment or an unrelated field must not
