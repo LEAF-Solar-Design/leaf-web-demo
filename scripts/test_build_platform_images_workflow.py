@@ -99,18 +99,29 @@ def main() -> None:
         "YAML anchor/alias in value position is banned in this workflow")
     assert re.search(r"(?m)-[ \t]+[&*]" + anchor_name, text) is None, (
         "YAML anchor/alias in sequence position is banned in this workflow")
-    # Trailing tokens: the one legitimate trailing &/* form in this file is
-    # the literal `&&` ending the multi-line GitHub expression continuations
-    # inside the handoff job's `if: >-` block scalar (scalar TEXT, not a
-    # YAML node). Everything else trailing is banned. `&&` itself is inert:
-    # its only alias spelling `*&` stays banned in value, sequence, and
-    # trailing position alike.
-    for match in re.finditer(
-        r"(?m)(?:^|[ \t])([&*]" + anchor_name + r"*)[ \t]*$", text
-    ):
-        assert match.group(1) == "&&", (
-            "trailing YAML anchor/alias is banned in this workflow: %r"
-            % match.group(1))
+    # Trailing &/* tokens are banned with NO exceptions. The handoff job's
+    # `if: >-` expression continuations lead with && instead of ending with
+    # it precisely so this ban can stay absolute: sol-critic round 5 on PR
+    # #445 composed the old && allowance with a !!map tag and a JSON-style
+    # adjacent-value alias into a working graft of the key env.
+    assert re.search(
+        r"(?m)(?:^|[ \t])[&*]" + anchor_name + r"*[ \t]*$", text
+    ) is None, ("trailing YAML anchor/alias is banned in this workflow")
+    # Tags can front an anchor (`env: !!map &x`) and hide it from the
+    # value-position scan, and adjacent values after quoted flow keys
+    # (`"env":*x`) evade the whitespace-separated scans, so tags, adjacent
+    # anchors/aliases, and document markers are banned too. GitHub's parser
+    # accepts core-schema !! tags, so their absence must be pinned, and no
+    # second YAML document may relocate the asserted literals.
+    assert "!!" not in text, "YAML tags are banned in this workflow"
+    assert re.search(r":[&*]", text) is None, (
+        "adjacent-value YAML anchor/alias is banned in this workflow")
+    assert re.search(r"(?m):[ \t]+!", text) is None, (
+        "YAML tag in value position is banned in this workflow")
+    assert re.search(r"(?m)-[ \t]+!", text) is None, (
+        "YAML tag in sequence position is banned in this workflow")
+    assert re.search(r"(?m)^\s*(---|\.\.\.)", text) is None, (
+        "YAML document markers are banned in this workflow")
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on

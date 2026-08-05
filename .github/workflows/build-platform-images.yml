@@ -677,10 +677,14 @@ jobs:
 
   handoff:
     needs: [prepare]
+    # Continuations lead with && instead of ending with it: the invariants
+    # test bans every line-trailing &/* token so YAML anchors can never hide
+    # at end of line, and this folded scalar is the one place the old style
+    # would have needed an exception. The folded expression is identical.
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.promote &&
-      needs.prepare.outputs.source_mode == 'main'
+      github.event_name == 'workflow_dispatch'
+      && inputs.promote
+      && needs.prepare.outputs.source_mode == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
