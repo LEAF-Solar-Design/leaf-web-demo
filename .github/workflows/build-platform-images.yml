@@ -9,11 +9,28 @@ name: Build platform images
 # Workflow dispatches and missing predecessor caches build without cache input.
 #
 # Cache retention contract: the AWS repository must expire buildcache-* tags
-# after 14 days or retain no more than the latest 20 per repository. Production
-# prod-* tags use a separate lifecycle and are never cache inputs or outputs.
-# A staging supply-set manifest records all five immutable digests, the full
-# source SHA, and the deterministic web artifact hash. A partial push can never
-# produce a production handoff candidate.
+# after 14 days or retain no more than the latest 20 per repository. The same
+# bounded-retention contract covers spec-* tags (speculative PR builds, below).
+# Production prod-* tags use a separate lifecycle and are never cache inputs
+# or outputs. A staging supply-set manifest records all five immutable
+# digests, the full source SHA, and the deterministic web artifact hash. A
+# partial push can never produce a production handoff candidate.
+#
+# SPECULATIVE PR BUILDS (lane L5, operator decision D3, 2026-08-05): a PR
+# update dispatches this workflow (speculate-platform-images.yml, --ref main,
+# so main's workflow text runs under the main-ref OIDC subject) with
+# speculative=true. That run builds all five images from the PR's MERGE
+# PREVIEW -- the tree a clean squash-merge lands on main -- and pushes them
+# under spec-<tree> tags, a namespace no deploy workflow accepts (the staging
+# deploy validates tags against sha-*/prod-* only), then mints a
+# spec-supply-set-<tree> artifact ONLY after all five digests verify present.
+# The push-to-main run's `adopt` job then aliases prod-<shortsha> onto those
+# digests when its gate-proven tree matches, skipping the whole build matrix;
+# any anomaly degrades to the full build. Identity is the git TREE: an
+# adopted image bakes the preview commit's LEAF_SOURCE_SHA, the supply-set
+# manifest (schema v2) carries the merge commit plus the speculative
+# provenance, and the deploy path never verifies live source_sha outside
+# mode=build. See docs/SPECULATIVE-PR-BUILDS.md.
 #
 # Auto-build, MANUAL handoff: every push to main that touches a build input
 # builds and pushes images. A docs-only push (all changed files under docs/
@@ -70,6 +87,14 @@ on:
         description: "Required with promote: exact staging-authored-execute-*-run-<id>-attempt-<attempt> artifact name."
         type: string
         required: false
+      speculative:
+        description: "Build the merge preview of an open same-repository PR and push spec-<tree> images. Never tags a deployable name."
+        type: boolean
+        default: false
+      speculative_pr_number:
+        description: "Required with speculative: the open PR whose head is source_sha."
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -79,8 +104,14 @@ concurrency:
   # Serial main builds make the previous push's cache the normal input. GitHub
   # can replace an older pending run, so a missing predecessor remains valid
   # and falls back to an uncached build.
-  group: build-platform-images-${{ github.ref }}
-  cancel-in-progress: false
+  #
+  # Speculative runs live in their own PER-PR group: they are dispatched on
+  # the main ref, so without this split they would queue INSIDE the release
+  # group ahead of real merge builds. Within one PR, newest-wins: a stale
+  # preview's images can never be adopted (the tree moved), so cancelling the
+  # older run only saves runners.
+  group: build-platform-images-${{ inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
+  cancel-in-progress: ${{ inputs.speculative || false }}
 
 jobs:
   # Docs-only no-op gate. Decides from the REAL push diff (local git, no
@@ -171,6 +202,7 @@ jobs:
       previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_mode: ${{ steps.source.outputs.mode }}
+      source_tree: ${{ steps.tag.outputs.tree }}
       solver_revision: ${{ steps.solver.outputs.revision }}
       solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
       gate_reuse_expected: ${{ steps.reuse-hint.outputs.expected }}
@@ -188,6 +220,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PROMOTE_INPUT: ${{ inputs.promote }}
           SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          SPECULATIVE_INPUT: ${{ inputs.speculative }}
+          SPECULATIVE_PR_NUMBER: ${{ inputs.speculative_pr_number }}
           STAGING_ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
           STAGING_ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
           RELEASE_WORKFLOW_RUN_ID: ${{ inputs.release_workflow_run_id }}
@@ -218,6 +252,56 @@ jobs:
               echo "::error::Checkout did not resolve to source_sha."
               exit 1
             fi
+          fi
+
+          if [ "$SPECULATIVE_INPUT" = "true" ]; then
+            if [ "$PROMOTE_INPUT" = "true" ]; then
+              echo "::error::A speculative run can never promote."
+              exit 1
+            fi
+            if [ -z "$SOURCE_SHA_INPUT" ]; then
+              echo "::error::Speculative builds require the exact PR head as source_sha."
+              exit 1
+            fi
+            if [[ ! "$SPECULATIVE_PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              echo "::error::Speculative builds require the open PR number."
+              exit 1
+            fi
+            PULL=$(api_get "repos/$GITHUB_REPOSITORY/pulls/$SPECULATIVE_PR_NUMBER")
+            if ! jq -e --arg sha "$CURRENT_SHA" --arg repo "$GITHUB_REPOSITORY" '
+              .state == "open"
+              and .base.ref == "main"
+              and .head.repo.full_name == $repo
+              and .head.repo.fork == false
+              and (.head.sha | ascii_downcase) == $sha
+            ' <<<"$PULL" >/dev/null; then
+              echo "::error::Speculative source must be the exact current head of the open same-repository PR."
+              exit 1
+            fi
+            # Build the MERGE PREVIEW, not the head: its tree is what a clean
+            # squash-merge lands on main, so only that tree can ever be
+            # adopted (operator decision D3). A conflicted or still-computing
+            # preview has nothing worth building. The checkout deliberately
+            # persisted no credentials (later prepare steps execute
+            # preview-authored scripts), so this one fetch carries its own
+            # scoped auth header and persists nothing.
+            if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:$GH_TOKEN" | base64 -w0)" \
+              fetch --no-tags --depth=2 origin "refs/pull/$SPECULATIVE_PR_NUMBER/merge"; then
+              echo "::error::The PR has no fetchable merge preview; nothing to speculate on."
+              exit 1
+            fi
+            PREVIEW_SHA=$(git rev-parse FETCH_HEAD)
+            # The preview must merge THIS dispatched head. If the PR moved
+            # between dispatch and fetch, a newer speculative run owns it and
+            # this one would silently build the wrong bytes.
+            if [ "$(git rev-parse --verify --quiet "$PREVIEW_SHA^2" || true)" != "$CURRENT_SHA" ]; then
+              echo "::error::The merge preview no longer merges the dispatched head; a newer speculative dispatch owns this PR."
+              exit 1
+            fi
+            git checkout --quiet "$PREVIEW_SHA"
+            echo "sha=$PREVIEW_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=speculative" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           RESPONSE=$(api_get "repos/$GITHUB_REPOSITORY/compare/$CURRENT_SHA...main")
@@ -305,9 +389,25 @@ jobs:
           set -euo pipefail
           current_sha="$(git rev-parse HEAD)"
           current_short="$(git rev-parse --short HEAD)"
+          current_tree="$(git rev-parse 'HEAD^{tree}')"
           current_cache_tag="buildcache-$current_short"
           previous_cache_tag=""
-          if [ "$SOURCE_MODE" = "draft-pr" ]; then
+          if [ "$SOURCE_MODE" = "speculative" ]; then
+            # The tag is the tree PLUS the preview commit that bakes the
+            # images: two previews can realize the same tree while baking
+            # different LEAF_SOURCE_SHA values, so a tree-only tag would let
+            # a later run claim provenance for images an earlier run built,
+            # and a crashed run could leave a mixed-bake five-image set.
+            # Deploys refuse the whole spec-* namespace either way (the
+            # staging deploy validates tags against sha-*/prod-* only).
+            current_spec_short="$(git rev-parse HEAD | cut -c1-12)"
+            image_tag="spec-$current_tree-$current_spec_short"
+            # Import the cache of the main tip the preview merged onto (its
+            # first parent) and export nothing: speculative runs churn too
+            # fast to be worth polluting the buildcache-* namespace.
+            current_cache_tag=""
+            previous_cache_tag="buildcache-$(git rev-parse --short 'HEAD^1')"
+          elif [ "$SOURCE_MODE" = "draft-pr" ]; then
             image_tag="sha-$current_sha"
           else
             image_tag="prod-$current_short"
@@ -330,6 +430,7 @@ jobs:
           echo "value=$image_tag" >> "$GITHUB_OUTPUT"
           echo "cache_value=$current_cache_tag" >> "$GITHUB_OUTPUT"
           echo "previous_cache_value=$previous_cache_tag" >> "$GITHUB_OUTPUT"
+          echo "tree=$current_tree" >> "$GITHUB_OUTPUT"
 
       # Warm-skip hint. When a same-repo gate proof already names this exact
       # tree, the called gate's reuse probe is expected to skip the shards
@@ -396,7 +497,10 @@ jobs:
     # branch tip. It does not constrain the `warm` job, which holds the same
     # push role; see warm's header below.
     needs: prepare
-    if: ${{ !inputs.promote }}
+    # Speculative runs never gate here: the PR's own standalone Test gate run
+    # is what mints the tree-bound proof, and spec-* images are unreachable
+    # by any deploy until `adopt` sees that proof on the merge run.
+    if: ${{ !inputs.promote && !inputs.speculative }}
     uses: ./.github/workflows/test-gate.yml
     permissions:
       contents: read
@@ -442,7 +546,7 @@ jobs:
   # itself whenever warm did not.
   warm:
     needs: prepare
-    if: ${{ !inputs.promote && needs.prepare.outputs.gate_reuse_expected != 'true' }}
+    if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.gate_reuse_expected != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -575,8 +679,25 @@ jobs:
           cache-to: ${{ steps.cache.outputs.to }}
 
   build:
-    needs: [prepare, test]
-    if: ${{ !inputs.promote }}
+    # `adopt` joined the dependency list for ORDERING, not gating: when it
+    # verified and aliased a speculative supply set for this exact tree the
+    # whole matrix below is redundant and skips; on ANY other outcome —
+    # adopt skipped (dispatch runs), absorbed failure, no artifact, foreign
+    # digests — this full build runs exactly as before. The gate edge
+    # (needs.test.result == 'success') remains the only thing that lets an
+    # image reach ECR.
+    needs: [prepare, test, adopt]
+    # A FAILED adopt run is not a fall-through: it means tags were already
+    # written (the pre-write path can only end skipped or successful), so
+    # building would collide with the half-aliased release tag. Only a
+    # skipped adopt (dispatch runs) or a successful adopt that declined
+    # (adopted != true) lets the matrix run.
+    if: >-
+      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
+          needs.prepare.result == 'success' &&
+          needs.test.result == 'success' &&
+          (needs.adopt.result == 'skipped' ||
+           (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -730,8 +851,17 @@ jobs:
           cache-to: ${{ steps.cache.outputs.to }}
 
   verify:
-    needs: [prepare, build]
-    if: ${{ !inputs.promote }}
+    # Two green paths feed this job: the full build matrix succeeded, or the
+    # matrix was skipped because `adopt` aliased a verified speculative
+    # supply set onto the release tag. Every other combination skips verify
+    # and the run carries whatever failure caused it.
+    needs: [prepare, adopt, build]
+    if: >-
+      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
+          needs.prepare.result == 'success' &&
+          (needs.build.result == 'success' ||
+           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&
+            needs.adopt.outputs.adopted == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -783,6 +913,11 @@ jobs:
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
 
       - name: Write the immutable five-service staging supply set
+        env:
+          ADOPTED: ${{ needs.adopt.outputs.adopted }}
+          ADOPTED_BUILT_FROM: ${{ needs.adopt.outputs.built_from }}
+          ADOPTED_PR_NUMBER: ${{ needs.adopt.outputs.pr_number }}
+          ADOPTED_SPEC_RUN_ID: ${{ needs.adopt.outputs.spec_run_id }}
         run: |
           set -euo pipefail
           if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
@@ -803,6 +938,18 @@ jobs:
             fi
             digests["$image"]="$digest"
           done
+          # Adopted digests get the v2 schema: same deployable fields, plus
+          # the tree identity and the speculative run that built them. The
+          # generator fails closed on a partial provenance set.
+          SPECULATIVE_ARGS=()
+          if [ "$ADOPTED" = "true" ]; then
+            SPECULATIVE_ARGS+=(
+              --source-tree "$(git rev-parse 'HEAD^{tree}')"
+              --speculative-built-from "$ADOPTED_BUILT_FROM"
+              --speculative-pr-number "$ADOPTED_PR_NUMBER"
+              --speculative-run-id "$ADOPTED_SPEC_RUN_ID"
+            )
+          fi
           python scripts/platform_release_manifest.py generate \
             --source-revision "${{ needs.prepare.outputs.source_sha }}" \
             --build-tag "$TAG" \
@@ -814,12 +961,16 @@ jobs:
             --image "canonical-worker=${digests[canonical-worker]}" \
             --image "harness=${digests[harness]}" \
             --image "web=${digests[web]}" \
+            ${SPECULATIVE_ARGS[@]+"${SPECULATIVE_ARGS[@]}"} \
             --output "$RUNNER_TEMP/staging-supply-set.json"
           {
             echo "## Five-service staging supply set verified"
             echo ""
             echo "Source: \`${{ needs.prepare.outputs.source_sha }}\`"
             echo "Tag: \`$TAG\`"
+            if [ "$ADOPTED" = "true" ]; then
+              echo "Adopted from speculative run \`$ADOPTED_SPEC_RUN_ID\` (PR #$ADOPTED_PR_NUMBER) with zero rebuild."
+            fi
             for image in app broker canonical-worker harness web; do
               echo "- \`leaf-platform-$image@${digests[$image]}\`"
             done
@@ -840,6 +991,524 @@ jobs:
           path: web/dist
           if-no-files-found: error
           retention-days: 30
+
+  # Speculative image builds (operator decision D3). Dispatched per PR update
+  # by speculate-platform-images.yml on the MAIN ref, so this text and the
+  # main-branch OIDC subject are what run — a PR cannot edit its own
+  # speculative build. Builds the merge preview `prepare` checked out and
+  # pushes each image under the non-deployable spec-<tree> tag. A tree that
+  # is already pushed (rerun, sibling PR with identical bytes) skips its
+  # build: the tag is immutable and the content is the same by construction.
+  speculate:
+    needs: prepare
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      id-token: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, broker, canonical-worker, harness, web]
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      IMAGE_NAME: leaf-platform-${{ matrix.image }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+      PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
+          persist-credentials: false
+
+      - name: Require the same merge preview prepare resolved
+        env:
+          PREPARED_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          if [ "$checked_out" != "$PREPARED_SHA" ]; then
+            echo "::error::The merge preview moved to $checked_out since prepare resolved $PREPARED_SHA; a newer speculative dispatch owns this PR."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-SpeculatePlatform-${{ matrix.image }}-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Skip when this tree is already speculatively pushed
+        id: exists
+        run: |
+          set -euo pipefail
+          found="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            --query 'length(images)' \
+            --output text 2>/dev/null || true)"
+          if [[ "$found" == "1" ]]; then
+            echo "::notice::$IMAGE_NAME already carries $IMAGE_TAG; adoption can use it as-is"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require the read-only canonical solver deploy key
+        if: matrix.image == 'canonical-worker' && steps.exists.outputs.present != 'true'
+        env:
+          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
+            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
+            exit 1
+          }
+
+      - name: Check out the exact canonical solver source
+        if: matrix.image == 'canonical-worker' && steps.exists.outputs.present != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: LEAF-Solar-Design/autofill-solver
+          ref: ${{ needs.prepare.outputs.solver_revision }}
+          path: autofill-solver
+          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Select the merged-onto main tip's cache, import-only
+        id: cache
+        if: steps.exists.outputs.present != 'true'
+        run: |
+          # Import the cache of the main tip this preview merged onto and
+          # export nothing: speculative trees churn too fast to be worth
+          # polluting the immutable buildcache-* namespace, and no export
+          # means no cache_to race to tolerate.
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_from=""
+          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            else
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push speculative ${{ matrix.image }}
+        if: steps.exists.outputs.present != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.image }}
+          build-args: |
+            LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
+            ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: ${{ steps.cache.outputs.from }}
+
+  # The speculative fan-in and the partial-push invariant, redefined over
+  # tree identity: a spec-supply-set-<tree> artifact exists ONLY when all
+  # five digests verify present under the tree's immutable tag. `adopt` on
+  # the merge run refuses anything less, so a partial speculative push can
+  # never become a deployable supply set. Runs even when a matrix leg lost
+  # an immutable-tag race to a sibling run — the digests decide, not the
+  # leg's conclusion.
+  speculate-manifest:
+    needs: [prepare, speculate]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
+          inputs.speculative && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      SPEC_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
+          persist-credentials: false
+
+      - name: Require the same merge preview prepare resolved
+        env:
+          PREPARED_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          if [ "$checked_out" != "$PREPARED_SHA" ]; then
+            echo "::error::The merge preview moved to $checked_out since prepare resolved $PREPARED_SHA; a newer speculative dispatch owns this PR."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-SpeculateManifest-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Verify all five speculative digests before minting a manifest
+        id: digests
+        run: |
+          set -euo pipefail
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          declare -A digests
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            digest="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$SPEC_TAG" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ -z "$digest" || "$digest" == "None" ]]; then
+              echo "::notice::$repository does not carry $SPEC_TAG; the speculative set is incomplete and no manifest will be minted."
+              exit 0
+            fi
+            digests["$image"]="$digest"
+          done
+          {
+            echo "app=${digests[app]}"
+            echo "broker=${digests[broker]}"
+            echo "canonical_worker=${digests[canonical-worker]}"
+            echo "harness=${digests[harness]}"
+            echo "web=${digests[web]}"
+            echo "complete=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint the tree-bound speculative supply set
+        if: steps.digests.outputs.complete == 'true'
+        run: |
+          set -euo pipefail
+          python scripts/platform_release_manifest.py generate-speculative \
+            --source-tree "$SOURCE_TREE" \
+            --built-from-revision "${{ needs.prepare.outputs.source_sha }}" \
+            --pr-number "${{ inputs.speculative_pr_number }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
+            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
+            --image "app=${{ steps.digests.outputs.app }}" \
+            --image "broker=${{ steps.digests.outputs.broker }}" \
+            --image "canonical-worker=${{ steps.digests.outputs.canonical_worker }}" \
+            --image "harness=${{ steps.digests.outputs.harness }}" \
+            --image "web=${{ steps.digests.outputs.web }}" \
+            --output "$RUNNER_TEMP/spec-supply-set.json"
+
+      - name: Upload the speculative supply set
+        if: steps.digests.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-supply-set-${{ needs.prepare.outputs.source_tree }}
+          path: ${{ runner.temp }}/spec-supply-set.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Tree-identity adoption (the merge-run half of the speculative lane).
+  # BEFORE the first release-tag write this job has the gate-reuse probe's
+  # posture: every failure degrades to adopted=false and the full build
+  # runs (an EXIT trap converts even unexpected script deaths into that).
+  # AFTER the first write, adoption is COMMITTED: the immutable prod-* tag
+  # already points at a speculative digest, a fallback rebuild would only
+  # collide with it, so a persistent alias failure fails THIS run with a
+  # rerun-to-resume instruction instead (the alias loop is idempotent).
+  # Provenance comes from the artifact listing's workflow_run metadata
+  # (same-repo origin, this workflow's path, a workflow_dispatch run on
+  # main), never from the file's own claims, and the content re-verifies
+  # against the gate's proven tree plus the live registry digests before a
+  # single tag is written.
+  adopt:
+    needs: [prepare, test]
+    if: ${{ !inputs.promote && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+      # Read-only: lists and downloads spec-supply-set artifacts minted by
+      # speculative runs through the Actions API.
+      actions: read
+
+    outputs:
+      adopted: ${{ steps.decide.outputs.adopted }}
+      spec_run_id: ${{ steps.decide.outputs.spec_run_id }}
+      built_from: ${{ steps.decide.outputs.built_from }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      PROD_TAG: ${{ needs.prepare.outputs.tag }}
+      PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}
+
+    # Every setup step is individually absorbed (continue-on-error at STEP
+    # level): a checkout, python, OIDC, or ECR login failure happens before
+    # any tag write is even possible, so it must degrade through the decide
+    # step's internal absorption (its aws/python calls fail, adopted=false,
+    # the full build runs) — a red adopt job here would wrongly veto the
+    # fallback build. The decide step itself is NOT absorbed: its only
+    # deliberate nonzero exit is the post-write committed path, which must
+    # fail the run.
+    steps:
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      # verify-speculative is stdlib-only: no pip.
+      - uses: actions/setup-python@v5
+        continue-on-error: true
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-AdoptPlatform-${{ github.run_id }}
+
+      - name: Login to ECR
+        continue-on-error: true
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Adopt a verified speculative supply set for this exact tree
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Deliberately NOT errexit (set +e overrides the runner's `bash -e`
+          # wrapper): before the first release-tag write, every failure —
+          # including an unexpected script death, via the EXIT trap — must
+          # degrade to adopted=false (the full build runs). Once COMMITTED
+          # flips, a failure propagates and fails the run instead: building
+          # over a half-aliased release tag can only collide.
+          set -uo pipefail
+          set +e
+          COMMITTED=false
+          on_exit() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ "$COMMITTED" != "true" ]; then
+              echo "adopted=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::adopt: unexpected failure (exit $rc) before any tag write; the full build runs"
+              exit 0
+            fi
+          }
+          trap on_exit EXIT
+          finish() {
+            echo "adopted=$1" >> "$GITHUB_OUTPUT"
+            if [ -n "${2:-}" ]; then echo "::notice::adopt: $2"; fi
+            exit 0
+          }
+          tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || finish false "checkout has no tree"
+          [[ "$PROVEN_TREE" == "$tree" ]] || finish false "gate verdict binds tree ${PROVEN_TREE:-<none>}, not $tree"
+          [[ "$PROD_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || finish false "refusing to alias non-release tag $PROD_TAG"
+          repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null || true)"
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=spec-supply-set-$tree&per_page=30" 2>/dev/null || true)"
+          if [[ -z "$repo_id" || -z "$listing" ]]; then
+            finish false "artifact listing unavailable"
+          fi
+          # Newest first, un-expired, minted by a run of THIS repository: a
+          # fork's pull_request run can upload an artifact with ANY name and
+          # content, so same-repo origin is checked on the artifact's
+          # workflow_run metadata before the file is even opened.
+          mapfile -t candidates < <(jq -r --argjson repo_id "$repo_id" '
+            .artifacts
+            | sort_by(.created_at) | reverse | .[]
+            | select(.expired | not)
+            | select(.workflow_run.head_repository_id == $repo_id)
+            | [.id, .workflow_run.id] | @tsv' <<<"$listing" 2>/dev/null || true)
+          verified=""
+          for row in "${candidates[@]:-}"; do
+            [[ -n "$row" ]] || continue
+            candidate_id="${row%%$'\t'*}"; candidate_run="${row##*$'\t'}"
+            # Only a main-ref dispatch of THIS workflow may mint a
+            # speculative supply set. `path`/`event`/`head_branch` come from
+            # the run record, not from anything inside the artifact; the
+            # @ref strip mirrors the gate-reuse probe's defensive posture.
+            run_record="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" 2>/dev/null || true)"
+            [[ -n "$run_record" ]] || continue
+            path="$(jq -r '.path // empty' <<<"$run_record")"
+            path="${path%%@*}"
+            [[ "$path" == ".github/workflows/build-platform-images.yml" ]] || continue
+            [[ "$(jq -r '.event // empty' <<<"$run_record")" == "workflow_dispatch" ]] || continue
+            [[ "$(jq -r '.head_branch // empty' <<<"$run_record")" == "main" ]] || continue
+            rm -rf spec-candidate && mkdir -p spec-candidate
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
+              > spec-candidate/spec.zip 2>/dev/null || continue
+            unzip -o -q spec-candidate/spec.zip -d spec-candidate || continue
+            [[ -f spec-candidate/spec-supply-set.json ]] || continue
+            python scripts/platform_release_manifest.py verify-speculative \
+              --manifest spec-candidate/spec-supply-set.json \
+              --expect-tree "$tree" \
+              --output spec-candidate/verified.json || continue
+            verified="spec-candidate/verified.json"
+            break
+          done
+          [[ -n "$verified" ]] || finish false "no verified speculative supply set binds tree $tree"
+          # The spec tag comes from the VERIFIED manifest (validated to
+          # derive from this tree plus the preview that baked the images),
+          # so digests, tag, and provenance always describe one build.
+          spec_tag="$(jq -r '.spec_tag' "$verified")"
+          [[ "$spec_tag" =~ ^spec-[0-9a-f]{40}-[0-9a-f]{12}$ ]] || finish false "verified manifest carries a malformed spec tag"
+          # The registry is the ground truth: every manifest digest must be
+          # exactly what the immutable spec tag carries right now.
+          declare -A spec_digest spec_manifest
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            record="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$spec_tag" \
+              --output json 2>/dev/null || true)"
+            digest="$(jq -r '.images[0].imageId.imageDigest // empty' <<<"$record")"
+            manifest_doc="$(jq -r '.images[0].imageManifest // empty' <<<"$record")"
+            claimed="$(jq -r --arg image "$image" '.services[$image].image_digest' "$verified")"
+            if [[ -z "$digest" || -z "$manifest_doc" || "$digest" != "$claimed" ]]; then
+              finish false "$repository digest under $spec_tag does not match the verified manifest"
+            fi
+            spec_digest["$image"]="$digest"
+            spec_manifest["$image"]="$manifest_doc"
+          done
+          # Alias phase, idempotent per image: an existing release tag must
+          # already be the speculative digest (a rerun of an adopted run),
+          # anything else means a full build owns this tag and adoption must
+          # stand down — but ONLY while nothing has been written. After the
+          # first confirmed alias, COMMITTED flips: from here a fallback
+          # rebuild would collide with the immutable tag, so a persistent
+          # failure (three attempts per image) fails the run with a
+          # rerun-to-resume instruction instead of degrading.
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            existing="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$PROD_TAG" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ -n "$existing" && "$existing" != "None" ]]; then
+              if [[ "$existing" != "${spec_digest[$image]}" ]]; then
+                if [ "$COMMITTED" = "true" ]; then
+                  echo "::error::adopt: $repository:$PROD_TAG holds a foreign digest after adoption began; rerun this run to diagnose."
+                  exit 1
+                fi
+                finish false "$repository:$PROD_TAG already points at a foreign digest"
+              fi
+              COMMITTED=true
+              continue
+            fi
+            aliased=false
+            for attempt in 1 2 3; do
+              aws ecr put-image \
+                --repository-name "$repository" \
+                --image-tag "$PROD_TAG" \
+                --image-manifest "${spec_manifest[$image]}" >/dev/null 2>&1
+              rc=$?
+              if [[ "$rc" -eq 0 ]]; then
+                aliased=true
+                break
+              fi
+              raced="$(aws ecr batch-get-image \
+                --repository-name "$repository" \
+                --image-ids "imageTag=$PROD_TAG" \
+                --query 'images[0].imageId.imageDigest' \
+                --output text 2>/dev/null || true)"
+              if [[ "$raced" == "${spec_digest[$image]}" ]]; then
+                aliased=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$aliased" != "true" ]; then
+              # A write was ATTEMPTED, so unconfirmed state counts as
+              # committed: ECR may have applied a put whose response was
+              # lost, and during the same outage the raced re-reads fail
+              # too. Degrading to the full build is safe only when one
+              # SUCCESSFUL probe positively proves the tag absent; a probe
+              # error cannot tell the difference and must fail toward
+              # rerun-to-resume instead of a guaranteed tag collision.
+              absent=false
+              if probe="$(aws ecr batch-get-image \
+                --repository-name "$repository" \
+                --image-ids "imageTag=$PROD_TAG" \
+                --query 'images[0].imageId.imageDigest' \
+                --output text 2>/dev/null)"; then
+                if [[ -z "$probe" || "$probe" == "None" ]]; then
+                  absent=true
+                fi
+              fi
+              if [ "$COMMITTED" != "true" ] && [ "$absent" = "true" ]; then
+                finish false "$repository:$PROD_TAG alias failed after 3 attempts and the tag is positively absent"
+              fi
+              echo "::error::adopt: $repository:$PROD_TAG state is unconfirmed after a write attempt (or adoption was already committed); RERUN THIS RUN to resume — the alias loop is idempotent."
+              exit 1
+            fi
+            COMMITTED=true
+          done
+          # Re-verify every alias before declaring adoption: the verdict
+          # below is what skips the entire build matrix. Tags are written by
+          # now, so a disagreement here fails the run (a fallback rebuild
+          # could only collide), and a rerun resumes idempotently.
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            final="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$PROD_TAG" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ "$final" != "${spec_digest[$image]}" ]]; then
+              echo "::error::adopt: $repository:$PROD_TAG re-verification failed after aliasing; RERUN THIS RUN to resume."
+              exit 1
+            fi
+          done
+          spec_run_id="$(jq -r '.workflow_run_id' "$verified")"
+          built_from="$(jq -r '.built_from_revision' "$verified")"
+          pr_number="$(jq -r '.pr_number' "$verified")"
+          {
+            echo "spec_run_id=$spec_run_id"
+            echo "built_from=$built_from"
+            echo "pr_number=$pr_number"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Speculative supply set adopted"
+            echo ""
+            echo "Tree: \`$tree\` (speculative run $spec_run_id, PR #$pr_number)"
+            echo "All five images aliased to \`$PROD_TAG\` with zero rebuild."
+          } >> "$GITHUB_STEP_SUMMARY"
+          finish true "aliased $PROD_TAG onto the speculative digests of tree $tree"
 
   handoff:
     needs: [prepare]
