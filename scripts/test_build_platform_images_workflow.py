@@ -59,7 +59,14 @@ def main() -> None:
     assert "exact head of an open same-repository draft PR" in source_body
     assert "Only a source commit on main may request production promotion" in text
     assert "needs.prepare.outputs.source_mode == 'main'" in text
-    assert text.count("id-token: write") == 2
+    # THREE jobs hold the ECR push credential, not two: `warm` joined build and
+    # verify when layer warming moved beside the test gate. It genuinely needs
+    # the role — it reads and writes the registry-backed layer cache — so the
+    # honest statement is that a third job can reach ECR, and the thing that
+    # keeps an untested IMAGE out is the assertion below that warm's build step
+    # sets push:false and publishes no tag. Raising this number again should
+    # mean a new job that provably needs registry access, not a convenience.
+    assert text.count("id-token: write") == 3
 
     # The private key is scoped to the canonical-worker lane. It is used only
     # for a fail-closed presence check and the one exact solver checkout. It is
@@ -174,7 +181,11 @@ def main() -> None:
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
-    assert text.count("if: ${{ !inputs.promote }}") == 3
+    # FOUR build-lane jobs now carry the promote guard (test, warm, build,
+    # verify): a promote run reuses already-published digests and must never
+    # rebuild, so the cache warmer is skipped on that path exactly like the
+    # jobs it feeds.
+    assert text.count("if: ${{ !inputs.promote }}") == 4
     assert "Production handoff requires the exact release source_sha input" in text
     assert "Production handoff requires the successful release workflow run ID" in text
     assert "Production handoff requires the exact release run attempt" in text
@@ -201,6 +212,77 @@ def main() -> None:
     assert "ARG AUTOFILL_SOLVER_REVISION" in canonical
     assert "/opt/leaf/autofill-solver/.leaf-source-revision" in canonical
     assert "/app/.leaf-source-revision" in canonical
+
+    # ------------------------------------------------------------------ #
+    # The warm/build split: layers may be prepared in parallel with the test
+    # gate, but NOTHING may reach ECR as an image before the gate is green.
+    # This repository has no branch protection, so `build: needs: [prepare,
+    # test]` is the entire enforcement — a warm job that ever learns to push,
+    # or a build job that stops needing `test`, silently removes it.
+    # ------------------------------------------------------------------ #
+    warm_block = text.split("\n  warm:\n", 1)[1].split("\n  build:\n", 1)[0]
+    build_block = text.split("\n  build:\n", 1)[1].split("\n  verify:\n", 1)[0]
+
+    assert "needs: prepare" in warm_block
+    assert "continue-on-error: true" in warm_block, (
+        "a warm failure must degrade to a cold build, never redden the run")
+
+    # The no-publish contract binds to the actual build step, not the job
+    # text: a `push: false` in a comment or an unrelated field must not
+    # satisfy it. Steps are split on the step-list marker at its exact
+    # indentation, so the slice below is one step's uses:/with: mapping and
+    # nothing else.
+    warm_steps = re.split(r"\n      - ", warm_block)
+    warm_builds = [s for s in warm_steps if "uses: docker/build-push-action" in s]
+    assert len(warm_builds) == 1, "warm holds exactly one build-push-action step"
+    warm_build_step = warm_builds[0]
+
+    def _with_mapping(step: str) -> str:
+        # The action only reads inputs from the step's with: mapping. A
+        # push: false parked under env: (or any other step key) satisfies an
+        # indentation-only regex while the action input is gone, so the
+        # assertion below must scan the with: body and nothing else.
+        lines = step.splitlines()
+        try:
+            start = next(i for i, l in enumerate(lines) if l == "        with:")
+        except StopIteration:
+            raise AssertionError("the warm build step carries no with: mapping")
+        body = []
+        for line in lines[start + 1:]:
+            if line.strip() and not line.startswith("          "):
+                break
+            body.append(line)
+        return "\n".join(body)
+
+    warm_with = _with_mapping(warm_build_step)
+    assert re.search(r"^          push: false$", warm_with, re.M), (
+        "the warm build step's with: mapping must set the literal input push: false")
+    for banned in ("push: true", "tags:", "outputs:", "provenance:", "sbom:", "attests:"):
+        assert banned not in warm_build_step, (
+            "the warm build step must not carry %r: every publication channel "
+            "of build-push-action stays closed in the warm lane" % banned)
+    # And no publish path outside that step either.
+    assert "docker push" not in warm_block
+    assert "aws ecr put-image" not in warm_block
+    assert "push: true" not in warm_block
+    assert "tags:" not in warm_block, "a cache warmer publishes no image tag"
+
+    assert "needs: [prepare, test]" in build_block, (
+        "the gate edge is this repository's only enforcement that an untested "
+        "image never reaches ECR")
+    assert "push: true" in build_block
+
+    # The warmed cache is what makes the post-gate build cheap; without this
+    # preference the warm job burns five runners and saves nothing.
+    assert "current_warm" in build_block
+    assert 'cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"' in build_block
+
+    # Both writers race on the same immutable tag by design, and ECR refuses
+    # the loser with ImageTagAlreadyExistsException. The registry cache
+    # exporter must therefore tolerate export errors in BOTH jobs, or a lost
+    # race fails the gated build.
+    assert warm_block.count("ignore-error=true") == 1
+    assert build_block.count("ignore-error=true") == 1
 
     print("build-platform-images workflow invariants: PASS")
 

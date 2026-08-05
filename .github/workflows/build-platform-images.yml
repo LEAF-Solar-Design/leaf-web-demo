@@ -251,6 +251,131 @@ jobs:
     with:
       ref: ${{ needs.prepare.outputs.source_sha }}
 
+  # Layer-cache warmer. Runs BESIDE the test gate, not after it, and pushes
+  # NOTHING: the gate stays the only thing standing between a commit and an
+  # image in ECR (this repository has no branch protection, so
+  # `build: needs: [prepare, test]` is the whole enforcement). All this job
+  # publishes is the buildcache-<sha> layer tag the real build then reuses,
+  # turning a cold ~100s post-gate build into a cache hit.
+  #
+  # canonical-worker is deliberately NOT warmed: it is the only image whose
+  # build needs the private autofill-solver deploy key, and spreading that
+  # credential to a job that exists purely as an optimisation is a bad trade
+  # for ~25s. It builds cold post-gate and sets the build job's wall time.
+  #
+  # continue-on-error is deliberate: a warm failure must degrade to today's
+  # behaviour (a cold build off the predecessor cache), never redden a run.
+  warm:
+    needs: prepare
+    if: ${{ !inputs.promote }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      id-token: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, broker, harness, web]
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      IMAGE_NAME: leaf-platform-${{ matrix.image }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+      CURRENT_CACHE_TAG: ${{ needs.prepare.outputs.cache_tag }}
+      PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-WarmPlatform-${{ matrix.image }}-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Select immutable cache references
+        id: cache
+        run: |
+          set -euo pipefail
+          cache_repo="$ECR_REGISTRY/$IMAGE_NAME"
+          cache_from=""
+          cache_to=""
+
+          # THIS commit's cache first. The `warm` job builds the same tree in
+          # parallel with the test gate and publishes exactly this tag, so by
+          # the time the gate is green the layers already exist and this build
+          # is a near-total cache hit rather than a cold rebuild. The fallback
+          # keeps the previous behaviour whenever warm was skipped, failed, or
+          # simply has not finished — it is never a hard dependency, so a warm
+          # failure costs seconds, not a red build.
+          current_warm="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+            --query 'length(images)' \
+            --output text 2>/dev/null || true)"
+          if [[ "$current_warm" == "1" ]]; then
+            cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"
+            echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+          elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+            found="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null || true)"
+            if [[ "$found" == "1" ]]; then
+              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+            else
+              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+            fi
+          fi
+
+          if current_exists="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+              --query 'length(images)' \
+              --output text 2>/dev/null)"; then
+            if [[ "$current_exists" == "1" ]]; then
+              echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
+            else
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
+            fi
+          else
+            echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
+          fi
+
+          echo "from=$cache_from" >> "$GITHUB_OUTPUT"
+          echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+
+      - name: Warm the layer cache for ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.image }}
+          build-args: |
+            LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
+          push: false
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
+
   build:
     needs: [prepare, test]
     if: ${{ !inputs.promote }}
@@ -321,7 +446,22 @@ jobs:
           cache_from=""
           cache_to=""
 
-          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
+          # THIS commit's cache first. The `warm` job builds the same tree in
+          # parallel with the test gate and publishes exactly this tag, so by
+          # the time the gate is green the layers already exist and this build
+          # is a near-total cache hit rather than a cold rebuild. The fallback
+          # keeps the previous behaviour whenever warm was skipped, failed, or
+          # simply has not finished — it is never a hard dependency, so a warm
+          # failure costs seconds, not a red build.
+          current_warm="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
+            --query 'length(images)' \
+            --output text 2>/dev/null || true)"
+          if [[ "$current_warm" == "1" ]]; then
+            cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"
+            echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+          elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
             found="$(aws ecr batch-get-image \
               --repository-name "$IMAGE_NAME" \
               --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
@@ -342,7 +482,12 @@ jobs:
             if [[ "$current_exists" == "1" ]]; then
               echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
             else
-              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true"
+              # ignore-error: the existence check above cannot exclude the
+              # other writer of this immutable tag finishing in between (warm
+              # and the gated build race by design, and ECR refuses the second
+              # manifest with ImageTagAlreadyExistsException). Losing that race
+              # must cost only the cache export, never the build.
+              cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
             fi
           else
             echo "::warning::Unable to verify $CURRENT_CACHE_TAG; skipping cache publication"
