@@ -211,10 +211,16 @@ def main() -> None:
     # the speculative lane's speculate (pushes spec-<tree> images),
     # speculate-manifest (reads live digests to mint the tree-bound
     # manifest), and adopt (aliases the release tag onto verified digests)
-    # on the release role. Each provably needs registry access; the role
-    # split is pinned by the role-to-assume assertions below. Raising this
-    # number should mean a new job that provably needs registry access,
-    # not a convenience.
+    # on the release role. Since the 2026-08-05 adopt/verify fold, adopt
+    # also writes the ADOPTED path's supply set with that same credential:
+    # its grant set is exactly the union of the two pre-fold jobs
+    # (id-token:write + contents:read from both, actions:read from adopt's
+    # artifact listing), and the verify half adds only ECR READS the
+    # release role already had — no job gained a permission or a role it
+    # did not hold before the fold. Each provably needs registry access;
+    # the role split is pinned by the role-to-assume assertions below.
+    # Raising this number should mean a new job that provably needs
+    # registry access, not a convenience.
     # Counted by parsed key and value, not by exact text: `id-token : write`
     # or a quoted key grants OIDC while leaving a literal count short,
     # and a comment mentioning the grant inflates it (sol-critic round 8,
@@ -490,13 +496,16 @@ def main() -> None:
     assert "fail-fast: false" in warm_block
     assert "fail-fast: false" in build_block
     assert "needs: [prepare, adopt, build]" in text
+    # Since the 2026-08-05 adopt/verify fold the verify JOB owns only the
+    # full-build path; the adopted path's supply set is written inside
+    # adopt (byte-identity pinned below). The two writers are mutually
+    # exclusive: build runs only when adopted != 'true', and this guard
+    # requires build's success.
     verify_guard = (
         "    if: >-\n"
         "      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&\n"
         "          needs.prepare.result == 'success' &&\n"
-        "          (needs.build.result == 'success' ||\n"
-        "           (needs.build.result == 'skipped' && needs.adopt.result == 'success' &&\n"
-        "            needs.adopt.outputs.adopted == 'true')) }}\n"
+        "          needs.build.result == 'success' }}\n"
     )
     assert text.count(verify_guard) == 1
 
@@ -595,14 +604,22 @@ def main() -> None:
     assert "gh workflow run deploy-service-production.yml" not in text
     assert "aws ecr put-image" not in handoff_body
     assert "docker/build-push-action" not in handoff_body
-    # test carries the promote guard AND the speculative guard (a
-    # speculative dispatch must not run the gate: its PR's standalone gate
-    # run mints the proof). build and verify moved to compound whole-pinned
-    # guards (see build_guard/verify_guard), and warm's guard is compound —
-    # promote, speculative, and prepare's gate-reuse hint — pinned by exact
-    # parsed value below rather than counted here.
+    # test carries the promote guard, the speculative guard (a speculative
+    # dispatch must not run the gate: its PR's standalone gate run mints
+    # the proof), AND the docs-noop build gate: since the 2026-08-05 fold
+    # prepare SUCCEEDS on a docs-only push (it publishes the marker), so
+    # without the build check test's implicit success() would run the full
+    # gate on every docs push. build and verify moved to compound
+    # whole-pinned guards (see build_guard/verify_guard), and warm's guard
+    # is compound — promote, speculative, the docs gate, and prepare's
+    # gate-reuse hint — pinned by exact parsed value below rather than
+    # counted here.
     assert text.count("if: ${{ !inputs.promote }}") == 0
-    assert text.count("if: ${{ !inputs.promote && !inputs.speculative }}") == 1
+    assert text.count("if: ${{ !inputs.promote && !inputs.speculative }}") == 0
+    assert text.count(
+        "if: ${{ !inputs.promote && !inputs.speculative && "
+        "needs.prepare.outputs.build == 'true' }}"
+    ) == 1
     # Warm's guard, whole and at the job's own if: key. Warm is also skipped
     # when a same-repo gate proof already names this exact tree: the gate leg
     # then reuses the verdict in ~30s, the build job starts before any warm
@@ -610,12 +627,16 @@ def main() -> None:
     # (measured: zero of nine warm legs contributed across the first two
     # reuse-path runs, 30978164812 and 30983842725). `!= 'true'` keeps the
     # hint fail-open: an empty, missing, or failed hint output runs warm.
+    # The docs-gate check is polar OPPOSITE on purpose: == 'true' fails
+    # CLOSED (an empty build output skips warm), because on a docs-only
+    # push warm would otherwise burn five runners on a tree nothing ships.
     warm_job_header = warm_block[: warm_block.index("    steps:")]
     warm_guards = [
         _value_of(l) for l in warm_job_header.splitlines() if _key_of(l) == "if"
     ]
     assert warm_guards == [
         "${{ !inputs.promote && !inputs.speculative && "
+        "needs.prepare.outputs.build == 'true' && "
         "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
     ], warm_guards
     # The hint is an ECONOMIC signal with a deliberately narrow blast
@@ -712,12 +733,35 @@ def main() -> None:
         prepare_step_heads.append((_key_of(first), _value_of(first)))
     assert prepare_step_heads == [
         ("uses", "actions/checkout@v4"),
+        ("name", "Decide whether this push touched any build input"),
+        ("name", "Write the docs-noop marker for the staging relay"),
+        ("uses", "actions/upload-artifact@v4"),
         ("name", "Require exact source to be reviewed"),
         ("name", "Resolve canonical solver provenance"),
         ("name", "Validate image workflow invariants"),
         ("name", "Derive immutable image tag"),
         ("name", "Probe for an expected gate reuse (warm-skip hint)"),
     ], prepare_step_heads
+    # The folded docs-noop gate's step conditions, pinned per step by
+    # parsed value (Codex trap, 2026-08-05 fold: folded job-level if:
+    # logic can silently change skip/failure semantics). The checkout and
+    # the decide step run unconditionally; the marker pair runs exactly on
+    # the docs-only verdict; every later step runs exactly on its
+    # negation, so a docs-only push ends prepare green with only the
+    # marker published and every downstream job gated off.
+    step_ifs = []
+    for n, start in enumerate(step_starts):
+        end = step_starts[n + 1] if n + 1 < len(step_starts) else len(annotated)
+        seg_structural = [l for l, s in annotated[start:end] if s]
+        step_ifs.append(
+            [_value_of(l) for l in seg_structural if _key_of(l) == "if"]
+        )
+    docs_gate = "steps.decide.outputs.build == 'true'"
+    docs_skip = "steps.decide.outputs.build == 'false'"
+    assert step_ifs == [
+        [], [], [docs_skip], [docs_skip],
+        [docs_gate], [docs_gate], [docs_gate], [docs_gate], [docs_gate],
+    ], step_ifs
     hint_ranges = []
     for n, start in enumerate(step_starts):
         end = step_starts[n + 1] if n + 1 < len(step_starts) else len(annotated)
@@ -737,7 +781,7 @@ def main() -> None:
     # key on this step (shell, with, working-directory, continue-on-error,
     # a second env entry, ...) is a conscious contract edit.
     hint_keys = [k for k in (_key_of(l) for l in hint_structural) if k]
-    assert hint_keys == ["name", "id", "env", "GH_TOKEN", "run"], hint_keys
+    assert hint_keys == ["name", "id", "if", "env", "GH_TOKEN", "run"], hint_keys
     # Exactly one run key, spelled exactly as the one plain literal header
     # (a folded, chomped, quoted, or comment-carrying header is a
     # different spelling and fails), and the run block must END the step:
@@ -753,12 +797,18 @@ def main() -> None:
     assert "\n".join(l for l, s in tail).rstrip("\n") == HINT_SCRIPT.rstrip("\n"), (
         "the warm-skip hint script must equal its canonical pinned copy in "
         "this file; edit both together, consciously")
-    # And the step must actually RUN, with the workflow token: an if: on
-    # the step (or an emptied GH_TOKEN) silently restores permanent
+    # And the step must actually RUN, with the workflow token: a foreign
+    # if: on the step (or an emptied GH_TOKEN) silently restores permanent
     # expected=false - warm runs on every reuse path again with nothing
-    # red anywhere (round 3, finding 2). Pinned on structural lines.
-    assert "if" not in [k for k in (_key_of(l) for l in hint_structural) if k], (
-        "the reuse hint must not be conditional")
+    # red anywhere (round 3, finding 2). Since the 2026-08-05 fold the
+    # step carries exactly ONE permitted condition — the docs-noop gate,
+    # already pinned per step above — and no other: when build == 'false'
+    # the warm job itself is gated off, so this condition can never starve
+    # a live warm; any OTHER condition could. Pinned by exact value.
+    hint_conditions = [
+        _value_of(l) for l in hint_structural if _key_of(l) == "if"
+    ]
+    assert hint_conditions == [docs_gate], hint_conditions
     hint_tokens = [
         _value_of(l) for l in hint_structural if _key_of(l) == "GH_TOKEN"
     ]
@@ -1324,7 +1374,8 @@ def main() -> None:
         if _key_of(l) == "if" and l.startswith("    if")
     ]
     assert adopt_guards == [
-        "${{ !inputs.promote && github.event_name == 'push' }}"
+        "${{ !inputs.promote && github.event_name == 'push' && "
+        "needs.prepare.outputs.build == 'true' }}"
     ], adopt_guards
     # NO JOB-level continue-on-error: before the first tag write the EXIT
     # trap (and the individually absorbed SETUP steps — see the parsed
@@ -1385,7 +1436,8 @@ def main() -> None:
         "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
     )
     assert wf_jobs["adopt"]["if"] == (
-        "${{ !inputs.promote && github.event_name == 'push' }}"
+        "${{ !inputs.promote && github.event_name == 'push' && "
+        "needs.prepare.outputs.build == 'true' }}"
     )
     assert _folded(wf_jobs["speculate-manifest"]["if"]) == (
         "${{ !cancelled() && github.event_name == 'workflow_dispatch' && "
@@ -1401,9 +1453,7 @@ def main() -> None:
     assert _folded(wf_jobs["verify"]["if"]) == (
         "${{ !cancelled() && !inputs.promote && !inputs.speculative && "
         "needs.prepare.result == 'success' && "
-        "(needs.build.result == 'success' || "
-        "(needs.build.result == 'skipped' && needs.adopt.result == 'success' && "
-        "needs.adopt.outputs.adopted == 'true')) }}"
+        "needs.build.result == 'success' }}"
     )
     assert wf_jobs["build"]["needs"] == ["prepare", "test", "adopt"]
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
@@ -1446,23 +1496,120 @@ def main() -> None:
     assert any(
         "may only run on refs/heads/main" in l for l in env_prepare_live
     ), "the main-ref guard must fail with an actionable error message"
+    # The merged adopt job's grant set is exactly the UNION of the two
+    # pre-fold jobs (2026-08-05 adopt/verify fold): id-token:write +
+    # contents:read were held by both, actions:read by adopt's artifact
+    # listing alone. The verify half added no grant and no role — its ECR
+    # digest reads ride the release role adopt already assumed for
+    # aliasing. verify keeps the smaller pre-fold pair: it never lists
+    # artifacts, so it must not hold actions:read.
     assert wf_jobs["adopt"]["permissions"] == {
         "id-token": "write",
         "contents": "read",
         "actions": "read",
     }
+    assert wf_jobs["verify"]["permissions"] == {
+        "id-token": "write",
+        "contents": "read",
+    }
     assert "continue-on-error" not in wf_jobs["adopt"]
     # adopt's SETUP steps are individually absorbed (a pre-write failure
     # must degrade through decide, not veto the fallback build); the decide
     # step is the deliberate exception — its only nonzero exit is the
-    # post-write committed path, which must fail the run.
+    # post-write committed path, which must fail the run. The steps AFTER
+    # decide are the adopted-path verify half: each runs exactly on
+    # adopted == 'true', and none is absorbed — any failure there is
+    # post-commit by construction (adopted=true means every alias
+    # re-verified), so it must redden the run; a rerun resumes
+    # idempotently through decide's existing-alias arm.
     adopt_steps = wf_jobs["adopt"]["steps"]
-    assert len(adopt_steps) == 5
-    assert adopt_steps[-1].get("id") == "decide"
-    for step in adopt_steps[:-1]:
+    assert len(adopt_steps) == 10
+    assert adopt_steps[4].get("id") == "decide"
+    for step in adopt_steps[:4]:
         assert step.get("continue-on-error") is True, step
-    assert "continue-on-error" not in adopt_steps[-1]
-    assert "if" not in adopt_steps[-1]
+    assert "continue-on-error" not in adopt_steps[4]
+    assert "if" not in adopt_steps[4]
+    for step in adopt_steps[5:]:
+        assert step.get("if") == "steps.decide.outputs.adopted == 'true'", step
+        assert "continue-on-error" not in step, step
+
+    # The two supply-set writers are byte-identical where bytes matter,
+    # the same idiom that keeps warm's and build's cache-bearing inputs
+    # aligned: drift between them would make the adopted path attest a
+    # different artifact than the full-build path for the same tag. The
+    # env SOURCES differ by construction — verify reads the adopt job's
+    # outputs across the needs edge, adopt reads its own decide step —
+    # and are pinned exactly.
+    verify_steps = wf_jobs["verify"]["steps"]
+
+    def _sole_named(steps, name):
+        found = [s for s in steps if s.get("name") == name]
+        assert len(found) == 1, name
+        return found[0]
+
+    web_step_name = "Build and hash the exact web deployment artifact"
+    write_step_name = "Write the immutable five-service staging supply set"
+    for step_name in (web_step_name, write_step_name):
+        adopt_copy = _sole_named(adopt_steps, step_name)
+        verify_copy = _sole_named(verify_steps, step_name)
+        assert adopt_copy["run"] == verify_copy["run"], step_name
+        for job_name, job in wf_jobs.items():
+            if job_name in ("adopt", "verify"):
+                continue
+            for step in job.get("steps", []):
+                assert step.get("name") != step_name, (job_name, step_name)
+    adopt_web = _sole_named(adopt_steps, web_step_name)
+    verify_web = _sole_named(verify_steps, web_step_name)
+    assert adopt_web["env"] == verify_web["env"]
+    assert adopt_web.get("working-directory") == "web"
+    assert verify_web.get("working-directory") == "web"
+    assert adopt_web.get("id") == "web-artifact" == verify_web.get("id")
+    adopt_write = _sole_named(adopt_steps, write_step_name)
+    verify_write = _sole_named(verify_steps, write_step_name)
+    assert verify_write["env"] == {
+        "ADOPTED": "${{ needs.adopt.outputs.adopted }}",
+        "ADOPTED_BUILT_FROM": "${{ needs.adopt.outputs.built_from }}",
+        "ADOPTED_PR_NUMBER": "${{ needs.adopt.outputs.pr_number }}",
+        "ADOPTED_SPEC_RUN_ID": "${{ needs.adopt.outputs.spec_run_id }}",
+    }
+    assert adopt_write["env"] == {
+        "ADOPTED": "${{ steps.decide.outputs.adopted }}",
+        "ADOPTED_BUILT_FROM": "${{ steps.decide.outputs.built_from }}",
+        "ADOPTED_PR_NUMBER": "${{ steps.decide.outputs.pr_number }}",
+        "ADOPTED_SPEC_RUN_ID": "${{ steps.decide.outputs.spec_run_id }}",
+    }
+    # Both writers' scripts read $TAG, so adopt must alias PROD_TAG and
+    # TAG to the same prepare output the verify job uses.
+    assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["verify"]["env"]["TAG"]
+    assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["adopt"]["env"]["PROD_TAG"]
+    # Upload pairs: identical with: mappings, so either writer publishes
+    # the same artifact names with if-no-files-found: error — an adopted
+    # run can never conclude green without a supply set, and if both
+    # writers ever ran (they cannot: build gates verify off when adopted)
+    # upload-artifact would refuse the duplicate names loudly.
+    adopt_uploads = [
+        s for s in adopt_steps
+        if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    verify_uploads = [
+        s for s in verify_steps
+        if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    assert len(adopt_uploads) == 2
+    assert len(verify_uploads) == 2
+    for adopt_upload, verify_upload in zip(adopt_uploads, verify_uploads):
+        assert adopt_upload["with"] == verify_upload["with"], adopt_upload
+    adopt_nodes = [
+        s for s in adopt_steps
+        if str(s.get("uses", "")).startswith("actions/setup-node")
+    ]
+    verify_nodes = [
+        s for s in verify_steps
+        if str(s.get("uses", "")).startswith("actions/setup-node")
+    ]
+    assert len(adopt_nodes) == 1
+    assert len(verify_nodes) == 1
+    assert adopt_nodes[0]["with"] == verify_nodes[0]["with"]
 
     # The staging relay accepts exactly the two supply-set schemas; the
     # deployable fields are the same shape in both.
@@ -1497,13 +1644,16 @@ def check_docs_noop_filter(text: str) -> None:
     # changed-file window (its docs cite 300 files), so a large mixed
     # push could hide a code file past the window and silently skip a
     # build — fail-closed in exactly the direction this repo cannot
-    # afford. The decision lives in the `noop` job (real git diff, no
-    # window) and scripts/docs_noop_filter.py (imported and exercised
-    # below — the shipped logic, not a re-implementation).
+    # afford. The decision lives in prepare's decide step (real git diff,
+    # no window; folded from the former standalone noop job on 2026-08-05
+    # — the separate job cost ~8s of work plus ~12s of runner scheduling
+    # ahead of every real build, run 30992431627) and
+    # scripts/docs_noop_filter.py (imported and exercised below — the
+    # shipped logic, not a re-implementation).
     # ------------------------------------------------------------------ #
     assert "paths-ignore" not in text, (
         "native path filtering is fail-closed on truncated diffs; the "
-        "noop job owns the docs-only decision")
+        "decide step in prepare owns the docs-only decision")
 
     # Structural invariants read from the PARSED workflow, so a guard that
     # drifts into a comment or another step key stops satisfying them.
@@ -1513,16 +1663,39 @@ def check_docs_noop_filter(text: str) -> None:
         "the push trigger must carry branches only — no native path filter")
 
     jobs = wf["jobs"]
-    noop_job = jobs["noop"]
-    assert jobs["prepare"]["needs"] == "noop"
-    assert jobs["prepare"]["if"] == "needs.noop.outputs.build == 'true'"
-    assert noop_job["outputs"]["build"] == "${{ steps.decide.outputs.build }}"
+    # The decide step lives INSIDE prepare since the 2026-08-05 fold; a
+    # reintroduced standalone noop job would mean two docs-only deciders
+    # (and would silently stop gating anything, since every guard reads
+    # prepare's output).
+    assert "noop" not in jobs
+    prepare_job = jobs["prepare"]
+    assert "needs" not in prepare_job, "prepare is the graph's root job"
+    assert "if" not in prepare_job
+    assert prepare_job["outputs"]["build"] == "${{ steps.decide.outputs.build }}"
+    # prepare SUCCEEDS on a docs-only push (it must: it publishes the
+    # marker artifact), so the docs gate is enforced by the three guards
+    # below plus build/verify's needs-result checks — a docs-only push
+    # runs NOTHING downstream. Pinned as parsed values; the folded
+    # step-level conditions inside prepare are pinned in main().
+    assert jobs["test"]["if"] == (
+        "${{ !inputs.promote && !inputs.speculative && "
+        "needs.prepare.outputs.build == 'true' }}"
+    )
+    assert jobs["warm"]["if"] == (
+        "${{ !inputs.promote && !inputs.speculative && "
+        "needs.prepare.outputs.build == 'true' && "
+        "needs.prepare.outputs.gate_reuse_expected != 'true' }}"
+    )
+    assert jobs["adopt"]["if"] == (
+        "${{ !inputs.promote && github.event_name == 'push' && "
+        "needs.prepare.outputs.build == 'true' }}"
+    )
 
     # No always() anywhere downstream of the gate: it would run a train job
-    # even after the noop skip (or a failed upstream) shut its needs off.
-    # test-gate.yml legitimately uses always() for its fan-in; when noop
-    # skips, that called workflow never starts, so the scope is exactly the
-    # build workflow and the staging relay.
+    # even after the docs-noop skip (or a failed upstream) shut its needs
+    # off. test-gate.yml legitimately uses always() for its fan-in; on a
+    # docs-only push the test guard above gates that called workflow off,
+    # so the scope is exactly the build workflow and the staging relay.
     relay_text = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
         encoding="utf-8"
     )
@@ -1543,11 +1716,23 @@ def check_docs_noop_filter(text: str) -> None:
     # executable bash. Every assertion from here down binds to text that
     # actually runs; the rehearsal below additionally executes the raw
     # scalar verbatim.
-    decide = next(s for s in noop_job["steps"] if s.get("id") == "decide")
+    decide = next(s for s in prepare_job["steps"] if s.get("id") == "decide")
     decide_src = decide["run"]
     decide_code = _executable_bash(decide_src)
     assert decide["env"]["EVENT_NAME"] == "${{ github.event_name }}"
     assert decide["env"]["BEFORE_SHA"] == "${{ github.event.before }}"
+    assert decide["env"]["GH_TOKEN"] == "${{ github.token }}"
+    # Credential reconciliation (2026-08-05 fold): prepare's checkout
+    # persists NO credentials — later prepare steps execute
+    # preview-authored scripts on speculative dispatches — while the
+    # before-sha fetch needs auth, so the fetch carries its own scoped,
+    # non-persisted header (the merge-preview fetch idiom). Without it an
+    # unauthenticated fetch would fail this gate open forever, silently
+    # rebuilding every docs push; with it, an auth failure still lands on
+    # the fail-open arm. The decide step also executes no checkout
+    # content on non-push events (the event arm exits first), so a
+    # preview tree never runs in this token-bearing step.
+    assert "http.https://github.com/.extraheader" in decide_code
     assert "git diff --no-renames --name-only" in decide_code, (
         "rename detection reports only a rename's destination, so a file "
         "moved out of a build-input tree would classify as docs-only; the "
@@ -1573,7 +1758,7 @@ def check_docs_noop_filter(text: str) -> None:
     # published only on an actual skip.
     marker_uploads = [
         s
-        for s in noop_job["steps"]
+        for s in prepare_job["steps"]
         if str(s.get("uses", "")).startswith("actions/upload-artifact")
     ]
     assert len(marker_uploads) == 1
@@ -1894,6 +2079,11 @@ def _rehearse_decide_script(decide_src: str, dnf) -> None:
             env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
             env["EVENT_NAME"] = event
             env["BEFORE_SHA"] = before
+            # The decide script's credentialed-fetch header targets
+            # https://github.com/ only; against this local file-path
+            # origin the config is inert, so the rehearsal exercises the
+            # same code path without needing a real token value.
+            env["GH_TOKEN"] = "rehearsal-token"
             env["GITHUB_SHA"] = head
             env["GITHUB_OUTPUT"] = str(out_path).replace("\\", "/")
             proc = subprocess.run(
