@@ -15,7 +15,8 @@ name: Build platform images
 # source SHA, and the deterministic web artifact hash. A partial push can never
 # produce a production handoff candidate.
 #
-# Auto-build, MANUAL handoff: every push to main builds and pushes images.
+# Auto-build, MANUAL handoff: every push to main that touches a build input
+# builds and pushes images (docs-only pushes are skipped; see paths-ignore).
 # promote=true now requires an accepted staging execution receipt and emits a
 # digest-bound handoff artifact. This workflow never dispatches production.
 #
@@ -29,6 +30,22 @@ name: Build platform images
 on:
   push:
     branches: [main]
+    # Docs-only no-op filter: a push whose every changed file matches this
+    # set can alter no image input, so the whole build → staging-relay →
+    # deploy train is skipped. GitHub evaluates this natively and FAILS
+    # OPEN to building: when it cannot compute the push diff (>1,000
+    # commits, timeout, unreachable before-sha) the run always starts.
+    # `**.md` is deliberate — `**/*.md` would NOT match root files like
+    # README.md (filter `*` never crosses `/`; `**` does). Keep the set
+    # conservative: markdown and docs/ only, never a per-service
+    # dependency closure. A skipped push emits no workflow_run event, so
+    # dispatch-staging-deploys.yml never fires and staging stays on the
+    # previous build — the state its latest-main-only guard already
+    # treats as normal. Applies to the push trigger only; PR gates live
+    # in test-gate.yml and workflow_dispatch below stays unfiltered.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       source_sha:

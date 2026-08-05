@@ -308,7 +308,78 @@ def main() -> None:
     push_at = build_block.index("uses: docker/build-push-action")
     assert bind_at < push_at, "the tree binding must precede the push step"
 
+    check_docs_noop_filter(text)
+
     print("build-platform-images workflow invariants: PASS")
+
+
+def _github_filter_matches(pattern: str, path: str) -> bool:
+    # GitHub Actions path-filter semantics (filter pattern cheat sheet):
+    # `*` matches zero or more characters but never `/`; `**` matches zero
+    # or more of ANY character. The pattern must cover the whole path.
+    parts = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(parts), path) is not None
+
+
+def check_docs_noop_filter(text: str) -> None:
+    # ------------------------------------------------------------------ #
+    # Docs-only no-op filter. A push whose every changed file is markdown
+    # or under docs/ can change no image input, so the push trigger skips
+    # the run — and with no run there is no workflow_run event, so the
+    # staging relay (dispatch-staging-deploys.yml) never fires. The
+    # decision is GitHub-native and fails OPEN: an uncomputable diff
+    # always builds. The set below is deliberately deploy-nothing-or-
+    # everything; never grow it into a per-service dependency closure.
+    # ------------------------------------------------------------------ #
+    on_at = text.index("\non:\n")
+    push_block = text[on_at:text.index("  workflow_dispatch:", on_at)]
+    ignore = re.findall(r'^      - "([^"]+)"$', push_block, flags=re.M)
+    assert ignore == ["**.md", "docs/**"], (
+        "the docs-only ignore set is pinned; the vectors below must be "
+        "re-proven against any change to it")
+    assert text.count("paths-ignore:") == 1, (
+        "the filter belongs to the push trigger only — a paths filter on "
+        "any other trigger could weaken the PR test gate")
+
+    def push_skipped(changed):
+        # GitHub skips the run only when the changed-file list is known and
+        # every entry matches the ignore set; an uncomputable diff (None)
+        # runs. An empty diff skips vacuously — zero files touch no image.
+        if changed is None:
+            return False
+        return all(
+            any(_github_filter_matches(p, f) for p in ignore) for f in changed
+        )
+
+    # The motivating shape (6e73747: root README edit) must skip, as must
+    # nested markdown and non-markdown assets under docs/.
+    assert push_skipped(["README.md"])
+    assert push_skipped(["docs/design/tree-bound-gate.md", "web/README.md"])
+    assert push_skipped(["docs/img/staging-train.png"])
+    # A synthetic MIXED diff builds: one code file beside any docs.
+    assert not push_skipped(["README.md", "web/src/App.jsx"])
+    # Code-only, workflow, and dependency changes always build.
+    assert not push_skipped(["server/app.py"])
+    assert not push_skipped([".github/workflows/build-platform-images.yml"])
+    assert not push_skipped(["web/package-lock.json"])
+    # Unknown diff fails open to building.
+    assert not push_skipped(None)
+    # Pattern-spelling guard: `**.md` reaches root-level files; the naive
+    # `**/*.md` would NOT (its `/` is literal), silently unfiltering the
+    # single most common docs commit. Keep `**.md`.
+    assert _github_filter_matches("**.md", "README.md")
+    assert not _github_filter_matches("**/*.md", "README.md")
 
 
 def test_build_platform_images_workflow_invariants() -> None:
