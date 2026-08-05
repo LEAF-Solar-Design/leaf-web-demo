@@ -253,7 +253,7 @@ def main() -> None:
     assert "IMAGE_TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert "TAG: ${{ needs.prepare.outputs.tag }}" in text
     assert (
-        "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
     ) in text
 
     # A trusted main workflow may build an exact reviewed source without
@@ -1237,10 +1237,44 @@ def main() -> None:
     tag_values = [
         _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
     ]
-    assert tag_values == [
+    assert tag_values == ["|"], (
+        "the release push tags are one block scalar: the release tag plus "
+        "the app-only src- identity stamp")
+    tags_lines = build_block[build_block.index("tags: |"):].splitlines()[1:3]
+    assert tags_lines[0].strip() == (
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-    ], "the release push tag targets the release repository, never a cache"
+    ), "the release push tag targets the release repository, never a cache"
+    assert tags_lines[1].strip() == (
+        "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
+        "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
+        "needs.prepare.outputs.source_sha) || '' }}"
+    ), "the src- identity stamp is app-only and rides release prod-* builds only"
     assert "-buildcache:${{" not in text
+
+    # ------------------------------------------------------------------ #
+    # The src-<full-commit> identity namespace: a CI build-identity stamp
+    # for the staging migration source diff, NEVER a release or review
+    # tag. It is minted in exactly two places (the build push's
+    # conditional second tag above, and adopt's post-verify stamp), and
+    # nowhere else — the warm, speculate, and handoff arms never touch it.
+    assert text.count("src-{2}") == 1
+    assert text.count('src_tag="src-$SOURCE_SHA"') == 1
+    # Adopt stamps only AFTER every release alias re-verified, only with a
+    # full-commit identity, and only best-effort: a failed stamp warns and
+    # costs the fast path, it never reddens an adoption that already
+    # committed.
+    adopt_stamp = text.index('src_tag="src-$SOURCE_SHA"')
+    assert text.index("re-verification failed after aliasing") < adopt_stamp
+    stamp_block = text[
+        text.index('if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then'):
+        text.index('spec_run_id="$(jq -r')
+    ]
+    assert 'src_tag="src-$SOURCE_SHA"' in stamp_block
+    assert "exit" not in stamp_block, (
+        "the src- stamp is best-effort; it must never exit the decide step")
+    assert "::warning::adopt: could not stamp leaf-platform-app:$src_tag" in text
+    assert "already names a different digest" in stamp_block
+    assert 'SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}' in text
 
     # ------------------------------------------------------------------ #
     # WHAT THIS TEST DOES NOT PROVE, stated plainly so nobody mistakes a
@@ -1597,7 +1631,14 @@ def main() -> None:
     assert adopt_block.index("verify-speculative") < adopt_block.index(
         "aws ecr put-image"
     ), "no tag may be written before the manifest verifies"
-    assert adopt_block.count("aws ecr put-image") == 1
+    # Exactly two writers: the release-tag alias loop, and the post-verify
+    # app src- identity stamp (best-effort, pinned in the src- section
+    # above). Both write manifests the registry already verified against
+    # the adopted supply set.
+    assert adopt_block.count("aws ecr put-image") == 2
+    assert adopt_block.index('--image-tag "$PROD_TAG"') < adopt_block.index(
+        '--image-tag "$src_tag"'
+    ), "the src- stamp never precedes the release alias loop"
     assert "refusing to alias non-release tag" in adopt_block
     assert "re-verification failed" in adopt_block
     assert 'echo "adopted=$1"' in adopt_block
