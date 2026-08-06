@@ -62,8 +62,6 @@ def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     assert "(entmod out)" in script and "(entupd e)" in script
     assert '"mutation-plan.txt"' in script
     assert '"output.dwg"' in script
-    assert '"output-intake.txt"' in script
-    assert "LAYER|" in script and "PL|" in script and "PV|" in script
     lowered = script.lower()
     assert "(eval " not in lowered
     assert "(read " not in lowered
@@ -85,7 +83,11 @@ def test_activity_spec_pins_pure_script_contract():
     assert spec["id"] == "LeafApplyMutations"
     assert spec["engine"] == "Autodesk.AutoCAD+26_0"
     assert "appbundles" not in spec
-    assert spec["commandLine"] == [subject.COMMAND_LINE]
+    assert spec["commandLine"] == [
+        subject.COMMAND_LINE, subject.INSPECTION_COMMAND_LINE,
+    ]
+    assert "$(args[Result].path)" in subject.INSPECTION_COMMAND_LINE
+    assert "$(args[HostDwg].path)" not in subject.INSPECTION_COMMAND_LINE
     assert spec["parameters"] == {
         "HostDwg": {"verb": "get", "required": True, "localName": "host.dwg"},
         "Plan": {"verb": "get", "required": True, "localName": "mutation-plan.txt"},
@@ -96,6 +98,7 @@ def test_activity_spec_pins_pure_script_contract():
         },
     }
     assert spec["settings"]["script"]["value"] == apply_lisp.build_apply_scr()
+    assert '"output-intake.txt"' in spec["settings"]["inspectScript"]["value"]
 
 
 def test_409_advances_version_and_patches_alias(monkeypatch):

@@ -807,7 +807,7 @@ def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
     def run(tenant):
         backend = store.InMemoryBackend()
         drawing = "demo"
-        raw = (tenant + "-dwg").encode()
+        raw = b"AC1032" + (tenant + "-dwg").encode()
         backend.put(store.drawing_version_key(tenant, drawing, 1), raw)
         backend.put(
             store.manifest_key(tenant, drawing),

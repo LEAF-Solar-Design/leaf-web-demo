@@ -17,6 +17,7 @@ import requests
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import client  # noqa: E402
+from lisp import build_scr  # noqa: E402
 from apply_lisp import (  # noqa: E402
     INTAKE_LOCALNAME,
     OUT_LOCALNAME,
@@ -32,6 +33,10 @@ COMMAND_LINE = (
     r'$(engine.path)\accoreconsole.exe /i "$(args[HostDwg].path)" '
     r'/s "$(settings[script].path)"'
 )
+INSPECTION_COMMAND_LINE = (
+    r'$(engine.path)\accoreconsole.exe /i "$(args[Result].path)" '
+    r'/s "$(settings[inspectScript].path)"'
+)
 _TIMEOUT = 60
 
 
@@ -40,7 +45,10 @@ def activity_spec() -> dict[str, Any]:
     return {
         "id": ACTIVITY_ID,
         "engine": ENGINE,
-        "commandLine": [COMMAND_LINE],
+        # The second command reopens the exact saved Result bytes before it
+        # emits verification intake. This preserves the prior closed-file proof
+        # while paying one APS queue and one WorkItem.
+        "commandLine": [COMMAND_LINE, INSPECTION_COMMAND_LINE],
         "parameters": {
             "HostDwg": {
                 "verb": "get", "required": True,
@@ -62,7 +70,10 @@ def activity_spec() -> dict[str, Any]:
                 "localName": INTAKE_LOCALNAME,
             },
         },
-        "settings": {"script": {"value": build_apply_scr()}},
+        "settings": {
+            "script": {"value": build_apply_scr()},
+            "inspectScript": {"value": build_scr(INTAKE_LOCALNAME)},
+        },
         "description": (
             "Leaf fixed closed-format drawing mutation interpreter with "
             "same-WorkItem output inspection."

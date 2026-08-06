@@ -1684,6 +1684,9 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         out_bytes = _scratch_download_bytes(da, out_key, upload_key)
         if not out_bytes:
             raise LiveMutationEffectMismatch("write produced 0-byte output.dwg")
+        if not out_bytes.startswith(b"AC10"):
+            raise LiveMutationEffectMismatch(
+                "write produced an invalid output.dwg header")
         try:
             intake_bytes = _scratch_download_bytes(
                 da, intake_key, intake_upload_key)
@@ -1695,8 +1698,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                     "output inspection intake exceeds the size limit")
             from intake_parse import parse_text
             output_intake = parse_text(
-                intake_bytes.decode("utf-8"), drawing_id)
-        except (UnicodeDecodeError, ValueError) as exc:
+                intake_bytes.decode("utf-8", "replace"), drawing_id)
+        except ValueError as exc:
             raise LiveMutationEffectMismatch(
                 "output inspection intake is malformed") from exc
         if not isinstance(output_intake, dict):

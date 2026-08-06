@@ -15,8 +15,10 @@ existing result-envelope keys unchanged.
 | `task_start` | APS download start until instructions start | APS lifecycle timestamps |
 | `image_pull` | Container image pull inside APS | Unavailable from the current APS status contract |
 | `drawing_fetch` | Manifest, intake, and source drawing fetch before planning | Server monotonic clock |
+| `planner` | Sandboxed authored planner execution before APS submission | Server monotonic clock |
 | `engine` | AutoCAD instruction execution | APS lifecycle timestamps |
 | `output_upload` | APS instruction end until output upload end | APS lifecycle timestamps |
+| `output_inspection` | Download, parse, and effect verification of the intake produced by reopening the saved DWG inside the mutation WorkItem | Server monotonic clock |
 | `version_write` | Immutable drawing version write | Server monotonic clock |
 | `publish` | Intake-cache publication and read-back proof | Server monotonic clock |
 | `client_delivery` | Terminal result delivery to the browser | Unavailable until the job-status route records first delivery |

@@ -46,9 +46,5 @@ _LISP_LINES = (
 
 
 def build_apply_scr() -> str:
-    """Return one fixed mutation plus output-inspection AutoCAD script."""
-    from lisp import build_extract_body
-
-    mutation = "\r\n".join(_LISP_LINES[:-1]) + "\r\n"
-    inspection = build_extract_body(INTAKE_LOCALNAME)
-    return mutation + inspection + _LISP_LINES[-1] + "\r\n"
+    """Return the fixed CRLF AutoCAD mutation script."""
+    return "\r\n".join(_LISP_LINES) + "\r\n"

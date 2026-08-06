@@ -298,6 +298,11 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert env["execution_provenance"]["provider"] == "e2b"
     timing = env["execution_provenance"]["cad_timing"]
     assert timing["contract"] == "leaf.cad-timing.v1"
+    assert set(timing["spans_ms"]) == {
+        "planner", "submit", "queue", "task_start", "image_pull",
+        "drawing_fetch", "engine", "output_upload", "output_inspection",
+        "version_write", "publish", "client_delivery",
+    }
     assert timing["spans_ms"]["submit"] == 1
     assert timing["spans_ms"]["queue"] == 2
     assert timing["spans_ms"]["task_start"] == 3
@@ -421,6 +426,48 @@ def test_live_rejects_oversize_same_workitem_inspection(tmp_path, monkeypatch):
     assert status == 502
     assert "size limit" in env["error"]["message"]
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_live_rejects_nonempty_corrupt_dwg_with_valid_inspection(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+
+    class CorruptDwgDa(FakeDa):
+        def download_scratch_object(self, key):
+            if key.endswith(".txt"):
+                return _families_text(self.output_intake)
+            return b"nonempty but not a DWG"
+
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=CorruptDwgDa(_actual_success()),
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 502
+    assert "invalid output.dwg header" in env["error"]["message"]
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_live_accepts_legacy_mbcs_inspection_bytes(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+
+    class MbcsInspectionDa(FakeDa):
+        def download_scratch_object(self, key):
+            if key.endswith(".txt"):
+                return b"LAYER|Caf\xe9\n" + _families_text(self.output_intake)
+            return super().download_scratch_object(key)
+
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=MbcsInspectionDa(_actual_success()),
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 200, env
+    _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
+    assert "Caf\ufffd" in intake["layers"]
 
 
 def test_live_workitem_failure_never_returns_report_url(tmp_path):
