@@ -154,6 +154,29 @@ def test_alias_state_captures_version_or_absence(monkeypatch):
     }
 
 
+def test_readiness_accepts_aps_omission_of_optional_required_false(monkeypatch):
+    spec = subject.activity_spec()
+    spec["parameters"]["Intake"].pop("required")
+    http = Http(get=[Response(200, {"version": 7}), Response(200, spec)])
+    monkeypatch.setattr(subject, "requests", http)
+
+    assert subject.readiness() == {
+        "ready": True, "mismatches": [],
+        "activity": {"alias": "prod", "version": 7},
+    }
+
+
+def test_readiness_rejects_aps_omission_of_required_true(monkeypatch):
+    spec = subject.activity_spec()
+    spec["parameters"]["Result"].pop("required")
+    http = Http(get=[Response(200, {"version": 7}), Response(200, spec)])
+    monkeypatch.setattr(subject, "requests", http)
+
+    result = subject.readiness()
+    assert result["ready"] is False
+    assert "activity parameters mismatch" in result["mismatches"]
+
+
 def test_restore_alias_repoints_or_removes_exact_alias(monkeypatch):
     http = Http(
         patch=[Response(200)], delete=[Response(204)],
