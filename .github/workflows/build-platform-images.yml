@@ -1046,7 +1046,9 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           push: true
-          # The app image of a release (prod-*) build additionally carries
+          # Every full-build image carries sha-<full-commit>, the baked
+          # identity witness required by blue/green deployment. The app image
+          # of a release (prod-*) build additionally carries
           # src-<full-commit>: a CI build-identity stamp consumed only by
           # the staging migration source diff (its fast path recovers the
           # exact candidate commit from the prod tag's digest). It is never
@@ -1055,6 +1057,7 @@ jobs:
           # draft-pr sha-* namespaces stay single-tagged.
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha) || '' }}
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
