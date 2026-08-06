@@ -53,6 +53,7 @@ $env:LEAF_SOURCE_COMMIT = $env:LEAF_SOURCE_SHA
 $env:LEAF_AUTH_LIVE = if ($Mode -eq 'guest') { '1' } else { '0' }
 $env:LEAF_AGENT_MOCK = '1'
 $env:LEAF_GUEST_UPLOADS_ENABLED = '1'
+$env:LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED = '1'
 $env:LEAF_GUEST_SECRET = [Guid]::NewGuid().ToString('N')
 $env:LEAF_CUSTOMIZATION_R5_MODE = 'off'
 $env:LEAF_CUSTOMIZATION_R6_MODE = 'off'

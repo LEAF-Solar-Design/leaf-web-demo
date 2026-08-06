@@ -216,6 +216,21 @@ Risks:
 - Default CAD viewers must retain their top-down pan and zoom controls.
 - Camera interaction must remain available without covering the operator controls.
 
+# Cross-drawing operator state isolation
+
+- [x] Reset the active job result when a new drawing becomes the workspace target.
+- [x] Clear conversation, route, retry, and selected-tool state when the drawing identity changes.
+- [x] Reject delayed completion and failure updates from a run owned by the prior drawing.
+- [x] Prove an uploaded drawing cannot display or act on the prior drawing's result.
+- [x] Hold an old write refresh open and prove it cannot replace the newly uploaded drawing.
+- [x] Run focused checks, the production build, and the browser regression.
+
+Risks:
+
+- Recent job history can remain tenant-scoped, but the active result must always match the active drawing.
+- Initial drawing load must keep the seeded request used by the explicit proof surface.
+- A drawing switch must invalidate pending write confirmation state.
+
 # Authored CAD production readiness
 
 - [x] Reconcile the recovered cat branch with current application main.

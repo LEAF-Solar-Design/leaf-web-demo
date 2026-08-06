@@ -12,7 +12,7 @@ test('real local operator flow preserves unified accessibility, keyboard, respon
   await requireLocalReady(request, test, API_BASE)
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
 
   await expect(page.getByRole('main', { name: 'Leaf operator workspace' })).toHaveCount(1)
@@ -119,7 +119,7 @@ test('real local operator flow preserves unified accessibility, keyboard, respon
   await page.keyboard.press('Escape')
   await expect(confirm).toHaveCount(0)
   await expect(command).toBeFocused()
-  await expect(page).toHaveURL(/\/try$/)
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
 
   writeProofReceipt(join(PROOF_DIR, 'standards-surface-receipt.json'), {
     capability_ids: ['AX-01', 'AX-02', 'KB-01', 'RS-01', 'MO-01', 'MO-02', 'MO-03'],

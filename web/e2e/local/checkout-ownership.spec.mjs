@@ -14,13 +14,20 @@ test('checkout conflict, expiry, take, and release stay authoritative in the uni
 
   const seed = await request.post(`${API_BASE}/api/drawings/${DRAWING_ID}/checkout`, {
     headers: TENANT_HEADERS,
-    data: { holder: OTHER_HOLDER, ttl_s: 0.5 },
+    data: { holder: OTHER_HOLDER, ttl_s: 30 },
   })
   expect(seed.status()).toBe(200)
-  await expect(seed.json()).resolves.toMatchObject({
+  const seedBody = await seed.json()
+  expect(seedBody).toMatchObject({
     acquired: true,
     checkout: { holder: OTHER_HOLDER },
   })
+
+  const deniedRelease = await request.delete(
+    `${API_BASE}/api/drawings/${DRAWING_ID}/checkout`,
+    { headers: { ...TENANT_HEADERS, 'X-Checkout-Capability': `lco1.${'b'.repeat(64)}` } },
+  )
+  expect(deniedRelease.status()).toBe(403)
 
   const observed = []
   page.on('response', (response) => {
@@ -29,7 +36,7 @@ test('checkout conflict, expiry, take, and release stay authoritative in the uni
     observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
 
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByText(`Editing locked by ${OTHER_HOLDER}`)).toBeVisible()
 
@@ -39,11 +46,11 @@ test('checkout conflict, expiry, take, and release stay authoritative in the uni
   await expect(writeTool.getByRole('button', { name: 'Review & run' })).toBeDisabled()
   expect(observed.filter((entry) => entry.startsWith('POST /api/run '))).toHaveLength(0)
 
-  const deniedRelease = await request.delete(
-    `${API_BASE}/api/drawings/${DRAWING_ID}/checkout`,
-    { headers: { ...TENANT_HEADERS, 'X-Checkout-Capability': `lco1.${'b'.repeat(64)}` } },
-  )
-  expect(deniedRelease.status()).toBe(403)
+  const shortenLease = await request.post(`${API_BASE}/api/drawings/${DRAWING_ID}/checkout`, {
+    headers: { ...TENANT_HEADERS, 'X-Checkout-Capability': seedBody.checkout_capability },
+    data: { holder: OTHER_HOLDER, ttl_s: 0.5 },
+  })
+  expect(shortenLease.status()).toBe(200)
 
   await page.waitForTimeout(600)
   await page.reload()

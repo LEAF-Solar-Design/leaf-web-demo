@@ -11,7 +11,7 @@ async function requireReady(request) {
   await requireLocalReady(request, test, API_BASE)
 }
 
-async function submitSlowJob(request, seconds = 6) {
+async function submitSlowJob(request, seconds = 15) {
   const toolsResponse = await request.get(`${API_BASE}/api/tools`, { headers: TENANT_HEADERS })
   expect(toolsResponse.ok()).toBe(true)
   const tool = (await toolsResponse.json()).tools.find((candidate) => candidate.name === 'count-by-layer')
@@ -39,7 +39,7 @@ async function openWithInflightPointer(page, jobId) {
       ts: Date.now(),
     }))
   }, { id: jobId })
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
 }
 
@@ -47,7 +47,7 @@ async function waitForComplete(request, jobId) {
   await expect.poll(async () => {
     const response = await request.get(`${API_BASE}/api/jobs/${jobId}`, { headers: TENANT_HEADERS })
     return response.ok() ? (await response.json()).status : response.status()
-  }, { timeout: 20_000 }).toBe('complete')
+  }, { timeout: 30_000 }).toBe('complete')
 }
 
 test('the unified surface reattaches to one real running job and renders its result', async ({ page, request }) => {
@@ -91,7 +91,7 @@ test('the unified surface reattaches to one real running job and renders its res
 
 test('Escape detaches from a real running job without closing or duplicating it', async ({ page, request }) => {
   await requireReady(request)
-  const jobId = await submitSlowJob(request, 8)
+  const jobId = await submitSlowJob(request, 15)
   const closeRequests = []
   const browserRuns = []
   page.on('request', (next) => {
@@ -147,7 +147,7 @@ test('Escape detaches from a real running job without closing or duplicating it'
 test('leaving the page sends the reap beacon and fails the abandoned job once', async ({ page, request }) => {
   test.setTimeout(60_000)
   await requireReady(request)
-  const jobId = await submitSlowJob(request, 20)
+  const jobId = await submitSlowJob(request, 30)
   const closeRequests = []
   page.on('request', (next) => {
     const url = new URL(next.url())

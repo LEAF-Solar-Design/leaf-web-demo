@@ -37,7 +37,7 @@ test('natural language routes through real catalog review, dispatch, and result'
     }
   })
 
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   const command = page.getByRole('textbox', { name: 'Command bar' })
   await command.fill(REQUEST)
