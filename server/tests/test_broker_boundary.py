@@ -36,7 +36,8 @@ class _Response:
         return self._body
 
 
-def test_live_session_extracts_through_broker_only(monkeypatch):
+@pytest.mark.parametrize("requested", ["rooftop_demo", "rooftop-demo", "demo"])
+def test_live_session_extracts_curated_alias_through_broker_only(monkeypatch, requested):
     calls = []
 
     def fake_post(url, *, json, headers, timeout):
@@ -49,8 +50,9 @@ def test_live_session_extracts_through_broker_only(monkeypatch):
     monkeypatch.setattr(session_router.broker_client, "broker_headers",
                         lambda: {"X-Broker-Secret": "test-secret"})
     monkeypatch.setattr(session_router.requests, "post", fake_post)
+    monkeypatch.setattr(session_router, "_stored_drawing_intake", lambda *_args: None)
 
-    body = session_router.session(dwg="rooftop_demo", tenant="tenant-a")
+    body = session_router.session(dwg=requested, tenant="tenant-a")
 
     assert body["intake"] == {"polylines": []}
     assert calls == [("http://broker:8140/broker/extract",
@@ -463,6 +465,16 @@ def test_live_dwg_resolver_rejects_paths_separators_and_suffixes(dwg):
 def test_live_dwg_resolver_accepts_registered_store_name():
     resolved = broker._resolve_live_dwg("rooftop_demo")
     assert resolved == (broker.DATA_DIR / "rooftop_demo.dwg").resolve()
+
+
+def test_live_dwg_resolver_maps_store_demo_alias_to_registered_source():
+    """The version store calls the curated drawing ``demo``, while the APS
+    source registry calls the same drawing ``rooftop_demo``. Both public ids
+    must resolve to the same source instead of making live instant tools look
+    for a nonexistent ``demo.dwg`` file.
+    """
+    canonical = broker._resolve_live_dwg("rooftop_demo")
+    assert broker._resolve_live_dwg("demo") == canonical
 
 
 def test_live_dwg_resolver_rejects_symlink_even_when_target_is_inside(tmp_path, monkeypatch):

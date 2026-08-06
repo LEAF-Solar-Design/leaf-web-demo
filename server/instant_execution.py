@@ -28,6 +28,7 @@ import requests
 
 import deps
 import customization_service
+import drawing_identity
 from instant_artifact_registry import (
     ArtifactResolutionError,
     FilesystemTrustedPlatformArtifactRegistry,
@@ -121,7 +122,8 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
     proof. Until then, any non-demo drawing fails closed for instant execution
     and remains available through the existing batch path.
     """
-    if drawing_id not in ("rooftop_demo", "rooftop-demo"):
+    identity = drawing_identity.curated_identity(drawing_id)
+    if identity is None:
         raise ValueError("instant drawing context is not available for this drawing")
     source = deps.load_cached_intake()
     sanitized = {key: source[key] for key in _DRAWING_FIELDS if key in source}
@@ -133,8 +135,9 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
         raise ValueError("instant drawing context exceeds the assignment limit")
     digest = _sha256(encoded)
     reference = {
-        "drawing_id": drawing_id,
-        "version_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{drawing_id}:{digest}")),
+        "drawing_id": identity.store_id,
+        "source_id": identity.source_id,
+        "version_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{identity.store_id}:{digest}")),
         "content_digest": digest,
         "geometry_ref": f"drawing-context:{digest.removeprefix(_DIGEST)}",
     }
