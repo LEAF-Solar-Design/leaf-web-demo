@@ -134,6 +134,38 @@ def test_test_gate_workflow_shards_and_fans_in():
     assert "needs.shards.result" in workflow
 
 
+def test_test_gate_browser_install_makes_no_apt_call():
+    """The chromium step must never shell out to apt again.
+
+    `playwright install-deps` / `install --with-deps` runs apt-get against
+    azure.archive.ubuntu.com, and across runs 31053425827, 31058750214 and
+    31058651157 (2026-08-05) that mirror served 7 of 24 shard-jobs at
+    35-100 kB/s. Every shard fetched the SAME 21.1 MB, so an unlucky draw
+    cost that one shard 3.5 to 10 minutes for bytes its siblings got in
+    under 3 seconds: gate-shard-3 ran 730s against siblings at 109-181s
+    while its actual suites took 60s, the same 60s gate-shard-4 spent. It
+    read as a shard-assignment imbalance and was not one; the slow index
+    moved run to run (3, then 0, then 2 and 6).
+
+    The 21.1 MB is 9 FONT packages (CJK, Thai, Cyrillic, X bitmap). Every
+    library chromium needs to LAUNCH is already on the ubuntu-latest image,
+    and the two suites that launch it assert on English DOM text with no
+    pixel comparison, so the fonts buy this gate nothing. Restoring either
+    flag restores the tail latency, so pin their absence from the step.
+    """
+    workflow = (REPO / ".github" / "workflows" / "test-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    # Slice the STEP, not the file: the comment above it names both flags on
+    # purpose (it tells the next reader when restoring them is right).
+    step = workflow.index("name: Install Chromium for browser proofs")
+    end = workflow.index("name: Upload shard result and logs")
+    browser_step = workflow[step:end]
+    assert "npx playwright install chromium" in browser_step
+    assert "--with-deps" not in browser_step
+    assert "install-deps" not in browser_step
+
+
 def test_test_gate_workflow_tree_identity_reuse_shape():
     """Pins the tree-identity skip's fail-closed seams (operator decision D3,
     2026-08-05). The probe may only run for exact-ref workflow_call runs and
