@@ -14,9 +14,11 @@ Two representations of a stored version (documented in CONTRACT-ADDENDUM §11):
     `removed`, and/or first-class `transforms`; the chain applies them to the
     CURRENT version's intake -> new intake -> put_drawing.
   * APS_LIVE=1 (live): a version's payload is real DWG bytes; a sibling
-    `*.intake.json` cache key holds the re-extracted intake. The chain executes
+    `*.intake.json` cache key holds its source-bound intake. The chain executes
     the authored planner in the sandbox, validates and lowers its mutation data,
     and sends only that closed plan to the fixed LeafApplyMutations Activity.
+    That same WorkItem emits the DWG and an inspection intake, so verification
+    never starts a second paid AutoCAD process.
 
 Credential discipline: this module NEVER imports da.* at top level. The live
 path receives the credential-holding `da` client from the broker (the only
@@ -76,6 +78,7 @@ GUEST_TENANT_PREFIX = "guest-"
 # Fixed reviewed Activity. Tenant-authored code can produce data only; it can
 # never select an Activity or supply executable input to Design Automation.
 WRITE_ACTIVITY = "LeafApplyMutations"
+MAX_OUTPUT_INTAKE_BYTES = 64 * 1024 * 1024
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
 
@@ -1491,6 +1494,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     timing_started = time.perf_counter()
     drawing_fetch_started = timing_started
     drawing_fetch_ms = None
+    planner_ms = None
+    output_inspection_ms = None
     version_write_ms = None
     publish_ms = None
     aps_timing = None
@@ -1547,10 +1552,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
         if run_tool_dynamic_fn is None:
             raise ValueError("live authored write requires a sandboxed planner")
+        planner_started = time.perf_counter()
         planner_env = run_tool_dynamic_fn(
             tool, base_intake, dict(params or {}), aps_live=False, da=None,
             t0=t0, tenant_id=tenant_id,
         )
+        planner_ms = int((time.perf_counter() - planner_started) * 1000)
         if not isinstance(planner_env, dict) or not planner_env.get("ok"):
             if isinstance(planner_env, dict):
                 return planner_env, _status_for(planner_env)
@@ -1641,10 +1648,20 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         )
         scratch_keys.append(out_key)
         upload_key, out_url = _scratch_upload_url(da, out_key)
+        intake_key = (
+            da.ephemeral_output_key(
+                f"{output_name}_intake", tenant_id=tenant_id, ts=ts,
+                suffix=".txt")
+            if hasattr(da, "ephemeral_output_key")
+            else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}_intake.txt"
+        )
+        scratch_keys.append(intake_key)
+        intake_upload_key, intake_url = _scratch_upload_url(da, intake_key)
         arguments = {
             "HostDwg": {"url": in_url, "verb": "get"},
             "Plan": {"url": plan_url, "verb": "get"},
             "Result": {"url": out_url, "verb": "put"},
+            "Intake": {"url": intake_url, "verb": "put"},
         }
         submit_kwargs: Dict[str, Any] = {
             "dry_run": False, "poll": True, "tenant_id": tenant_id,
@@ -1663,22 +1680,31 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 "APS write WorkItem did not succeed", retryable=True,
                 tool=name, version=tool_version,
             ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+        output_inspection_started = time.perf_counter()
         out_bytes = _scratch_download_bytes(da, out_key, upload_key)
         if not out_bytes:
             raise LiveMutationEffectMismatch("write produced 0-byte output.dwg")
-
-        fd, temp_output = tempfile.mkstemp(suffix=".dwg")
         try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(out_bytes)
-            output_intake = da.extract(temp_output)
-        finally:
-            try:
-                os.remove(temp_output)
-            except OSError:
-                pass
+            intake_bytes = _scratch_download_bytes(
+                da, intake_key, intake_upload_key)
+            if not intake_bytes:
+                raise LiveMutationEffectMismatch(
+                    "write produced no output inspection intake")
+            if len(intake_bytes) > MAX_OUTPUT_INTAKE_BYTES:
+                raise LiveMutationEffectMismatch(
+                    "output inspection intake exceeds the size limit")
+            from intake_parse import parse_text
+            output_intake = parse_text(
+                intake_bytes.decode("utf-8"), drawing_id)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise LiveMutationEffectMismatch(
+                "output inspection intake is malformed") from exc
         if not isinstance(output_intake, dict):
-            raise LiveMutationEffectMismatch("re-extracted output is not an intake object")
+            raise LiveMutationEffectMismatch(
+                "output inspection is not an intake object")
+        if output_intake.get("parseErrors"):
+            raise LiveMutationEffectMismatch(
+                "output inspection intake contains malformed records")
         output_intake["dwg"] = drawing_id
         normalized_base = copy.deepcopy(base_intake)
         normalized_base["dwg"] = drawing_id
@@ -1686,6 +1712,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             verify_live_mutation_effects(normalized_base, output_intake, canonical)
         except ValueError as exc:
             raise LiveMutationEffectMismatch(str(exc)) from exc
+        output_inspection_ms = int(
+            (time.perf_counter() - output_inspection_started) * 1000)
 
         engine_seconds = da._engine_seconds(status)
         cost = None if engine_seconds is None else {
@@ -1740,6 +1768,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             if isinstance(aps_timing, dict) else {}
         )
         cad_spans = {
+            "planner": planner_ms,
             "submit": aps_spans.get("submit"),
             "queue": aps_spans.get("queue"),
             "task_start": aps_spans.get("task_start"),
@@ -1747,6 +1776,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             "drawing_fetch": drawing_fetch_ms,
             "engine": aps_spans.get("engine"),
             "output_upload": aps_spans.get("output_upload"),
+            "output_inspection": output_inspection_ms,
             "version_write": version_write_ms,
             "publish": publish_ms,
             "client_delivery": None,

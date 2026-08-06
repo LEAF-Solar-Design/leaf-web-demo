@@ -52,6 +52,18 @@ QUIT_SAVED = ('(vl-load-com)'
               '(command "_.QUIT")')
 
 
+def build_extract_body(out_localname: str = OUT_LOCALNAME) -> str:
+    """Return only the extraction statements, with no QUIT command.
+
+    The mutation Activity embeds this body after SAVEAS so the same paid
+    AutoCAD process emits both the closed-format DWG and the exact intake used
+    to verify it. Keeping the body here prevents the inline proof from drifting
+    from the standalone extractor.
+    """
+    return _LISP.replace("{OUT}", out_localname).replace("{QUIT}", "").replace(
+        "\n", "\r\n")
+
+
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.
 
@@ -59,6 +71,6 @@ def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAU
     script is byte-identical to what is live today. DXF input REQUIRES
     QUIT_SAVED (see the table above) or the WorkItem hangs to timeout.
     """
-    body = _LISP.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
+    body = build_extract_body(out_localname) + quit_form
     # accoreconsole scripts are CRLF; join every progn-line with \r\n and a trailing newline
-    return body.replace("\n", "\r\n") + "\r\n"
+    return body + "\r\n"

@@ -17,7 +17,12 @@ import requests
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import client  # noqa: E402
-from apply_lisp import PLAN_LOCALNAME, OUT_LOCALNAME, build_apply_scr  # noqa: E402
+from apply_lisp import (  # noqa: E402
+    INTAKE_LOCALNAME,
+    OUT_LOCALNAME,
+    PLAN_LOCALNAME,
+    build_apply_scr,
+)
 
 ACTIVITY_ID = "LeafApplyMutations"
 ALIAS = "prod"
@@ -49,9 +54,19 @@ def activity_spec() -> dict[str, Any]:
                 "verb": "put", "required": True,
                 "localName": OUT_LOCALNAME,
             },
+            # Optional keeps the alias backward-compatible while the app rolls:
+            # an older caller can omit it, while the new caller fails closed if
+            # its requested inspection output is absent or malformed.
+            "Intake": {
+                "verb": "put", "required": False,
+                "localName": INTAKE_LOCALNAME,
+            },
         },
         "settings": {"script": {"value": build_apply_scr()}},
-        "description": "Leaf fixed closed-format drawing mutation interpreter.",
+        "description": (
+            "Leaf fixed closed-format drawing mutation interpreter with "
+            "same-WorkItem output inspection."
+        ),
     }
 
 

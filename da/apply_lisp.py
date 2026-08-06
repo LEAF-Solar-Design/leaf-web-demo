@@ -11,6 +11,7 @@ additions to planar OCS coordinates, so this interpreter does no projection.
 
 PLAN_LOCALNAME = "mutation-plan.txt"
 OUT_LOCALNAME = "output.dwg"
+INTAKE_LOCALNAME = "output-intake.txt"
 
 _LISP_LINES = (
     '(setvar "CMDECHO" 0)',
@@ -45,5 +46,9 @@ _LISP_LINES = (
 
 
 def build_apply_scr() -> str:
-    """Return the fixed CRLF AutoCAD script, including its trailing newline."""
-    return "\r\n".join(_LISP_LINES) + "\r\n"
+    """Return one fixed mutation plus output-inspection AutoCAD script."""
+    from lisp import build_extract_body
+
+    mutation = "\r\n".join(_LISP_LINES[:-1]) + "\r\n"
+    inspection = build_extract_body(INTAKE_LOCALNAME)
+    return mutation + inspection + _LISP_LINES[-1] + "\r\n"

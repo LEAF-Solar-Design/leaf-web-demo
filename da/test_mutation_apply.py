@@ -62,6 +62,8 @@ def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     assert "(entmod out)" in script and "(entupd e)" in script
     assert '"mutation-plan.txt"' in script
     assert '"output.dwg"' in script
+    assert '"output-intake.txt"' in script
+    assert "LAYER|" in script and "PL|" in script and "PV|" in script
     lowered = script.lower()
     assert "(eval " not in lowered
     assert "(read " not in lowered
@@ -88,6 +90,10 @@ def test_activity_spec_pins_pure_script_contract():
         "HostDwg": {"verb": "get", "required": True, "localName": "host.dwg"},
         "Plan": {"verb": "get", "required": True, "localName": "mutation-plan.txt"},
         "Result": {"verb": "put", "required": True, "localName": "output.dwg"},
+        "Intake": {
+            "verb": "put", "required": False,
+            "localName": "output-intake.txt",
+        },
     }
     assert spec["settings"]["script"]["value"] == apply_lisp.build_apply_scr()
 

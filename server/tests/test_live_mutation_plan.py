@@ -62,6 +62,23 @@ def _store(tmp_path):
     return backend
 
 
+def _families_text(intake):
+    """Encode the subset emitted by the fixed same-WorkItem inspection."""
+    lines = [f"LAYER|{layer}" for layer in intake.get("layers", [])]
+    for polyline in intake.get("polylines", []):
+        lowered = world_to_ocs(polyline["pts"])
+        normal = ",".join(f"{value:.6f}" for value in lowered["normal"])
+        lines.append(
+            f"PL|{polyline['layer']}|{1 if polyline.get('closed') else 0}|"
+            f"{lowered['elevation']:.3f}|{normal}|{polyline.get('handle', '')}"
+        )
+        lines.extend(
+            f"PV|{point[0]:.3f},{point[1]:.3f}"
+            for point in lowered["points"]
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 class FakeDa:
     def __init__(self, output_intake):
         self.output_intake = output_intake
@@ -94,10 +111,12 @@ class FakeDa:
         assert token == "upload-token"
 
     def download_scratch_object(self, key):
+        if key.endswith(".txt"):
+            return _families_text(self.output_intake)
         return b"AC1032" + b"\x01" * 64
 
     def extract(self, path):
-        return copy.deepcopy(self.output_intake)
+        raise AssertionError("live writes must not launch a second extraction")
 
     def delete_scratch_object(self, key):
         pass
@@ -268,10 +287,11 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert status == 200 and len(calls) == 1
     activity, arguments, kwargs = da.submissions[0]
     assert activity == "owner.LeafApplyMutations+prod"
-    assert set(arguments) == {"HostDwg", "Plan", "Result"}
+    assert set(arguments) == {"HostDwg", "Plan", "Result", "Intake"}
     assert arguments["HostDwg"]["verb"] == "get"
     assert arguments["Plan"]["verb"] == "get"
     assert arguments["Result"]["verb"] == "put"
+    assert arguments["Intake"]["verb"] == "put"
     assert kwargs["dry_run"] is False and kwargs["poll"] is True
     assert env["result"]["planner_value"] == "preserved"
     assert env["overlay"] == {"kind": "preserved"}
@@ -282,6 +302,8 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert timing["spans_ms"]["queue"] == 2
     assert timing["spans_ms"]["task_start"] == 3
     assert timing["spans_ms"]["engine"] == 2000
+    assert timing["spans_ms"]["planner"] >= 0
+    assert timing["spans_ms"]["output_inspection"] >= 0
     assert timing["spans_ms"]["drawing_fetch"] >= 0
     assert timing["spans_ms"]["version_write"] >= 0
     assert timing["spans_ms"]["publish"] >= 0
@@ -356,6 +378,49 @@ def test_live_rejects_full_extractor_quantum_geometry_drift(tmp_path):
     assert "added polyline" in env["error"]["message"]
     manifest = store.load_manifest(backend, "tenant", "drawing")
     assert manifest["head"] == 1 and manifest["latest"] == 1
+
+
+def test_live_rejects_malformed_same_workitem_inspection(tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+
+    class MalformedInspectionDa(FakeDa):
+        def download_scratch_object(self, key):
+            if key.endswith(".txt"):
+                return b"LAYER|Panels\nPL|broken\n"
+            return super().download_scratch_object(key)
+
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=MalformedInspectionDa(_actual_success()),
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 502
+    assert "malformed records" in env["error"]["message"]
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_live_rejects_oversize_same_workitem_inspection(tmp_path, monkeypatch):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+
+    class OversizeInspectionDa(FakeDa):
+        def download_scratch_object(self, key):
+            if key.endswith(".txt"):
+                return b"LAYER|Panels\n"
+            return super().download_scratch_object(key)
+
+    monkeypatch.setattr(write_loop, "MAX_OUTPUT_INTAKE_BYTES", 4)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool"}, {"drawing_id": "drawing"}, "tenant",
+        backend=backend, da=OversizeInspectionDa(_actual_success()),
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+
+    assert status == 502
+    assert "size limit" in env["error"]["message"]
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
 
 
 def test_live_workitem_failure_never_returns_report_url(tmp_path):
