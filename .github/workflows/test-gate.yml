@@ -305,8 +305,7 @@ jobs:
       # The browser download was the single biggest uncached setup step
       # (~28s per job, now ×8 jobs). The cache key follows web/package-lock.json
       # because that lockfile pins the playwright version whose browser build
-      # gets downloaded. System libraries are NOT in the cached directory, so a
-      # cache hit still runs install-deps (apt, a few seconds on this image).
+      # gets downloaded.
       - name: Restore Playwright browser cache
         id: playwright-cache
         uses: actions/cache@v4
@@ -314,14 +313,45 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
 
+      # Deliberately NO --with-deps / install-deps. That apt call was this
+      # workflow's entire tail-latency problem and it bought nothing here.
+      #
+      # Measured on runs 31053425827, 31058750214 and 31058651157 (2026-08-05):
+      # all 8 shards ran `playwright install-deps chromium` and all 8 fetched
+      # the SAME 21.1 MB. On a healthy runner that took 0-3s (up to 111 MB/s);
+      # on an unlucky one the azure.archive.ubuntu.com mirror collapsed to
+      # ~35-100 kB/s and the identical 21.1 MB took 3.5 to 10 minutes. 7 of
+      # those 24 shard-jobs drew a slow mirror, so with 8 shards rolling
+      # independently nearly every run had one.
+      #
+      # THAT was the shard imbalance, not the suite partition. On run
+      # 31053425827 gate-shard-3 took 730s against siblings at 109-181s, but
+      # its suites accounted for only 60s of that, the same 60s gate-shard-4
+      # spent. The slow shard was a different index almost every run (3, then
+      # 0, then 2 and 6), which is what a per-runner network lottery looks
+      # like and what a mis-weighted suite does not. partition_suites() was
+      # already balanced to within 2% (weights 100/84/84/83.7/83.6/85.5/
+      # 83.5/83.5).
+      #
+      # install-deps installed exactly 9 packages, every one a font:
+      # fonts-{ipafont-gothic,freefont-ttf,tlwg-loma-otf,unifont,wqy-zenhei}
+      # and xfonts-{cyrillic,encodings,scalable,utils}. All 26 libraries
+      # chromium needs to LAUNCH (libnss3, libgbm1, libatk*, libcups2t64,
+      # libdrm2, libxkbcommon0, ...) already reported "the newest version" on
+      # the ubuntu-latest image, so dropping apt cannot stop the browser
+      # starting; it only drops CJK, Thai and Cyrillic glyph coverage. The two
+      # suites that launch chromium (web-version-restore-proof,
+      # web-author-quota-gate) assert on English DOM text and compare no
+      # pixels (no toHaveScreenshot / toMatchSnapshot anywhere under web/e2e),
+      # so no assertion can rest on those fonts.
+      #
+      # If a future runner image ever drops one of those libraries, chromium
+      # fails to launch and both browser suites go RED. That is loud rather
+      # than silent, which is the failure direction to want here; restore
+      # --with-deps on this step if it ever happens.
       - name: Install Chromium for browser proofs
         working-directory: web
-        run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            npx playwright install-deps chromium
-          else
-            npx playwright install --with-deps chromium
-          fi
+        run: npx playwright install chromium
 
       - name: Run gate shard ${{ matrix.shard }}
         env:

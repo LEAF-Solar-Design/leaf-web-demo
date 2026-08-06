@@ -873,9 +873,13 @@ def build_suites() -> List[Suite]:
         # wiring, and the test-gate.yml reuse-shape pin), measured 2026-08-05;
         # plus the executor-suite registration pin (floor mirror, cwd/-P
         # shape, opt-in Postgres allowlist, and the two collision-breaking
-        # package anchors), measured 2026-08-05.
+        # package anchors), measured 2026-08-05; plus the no-apt pin on the
+        # workflow's chromium step (the shard-makespan fix, 2026-08-05).
+        # Every test here is a pure in-process file/behaviour check with no DB,
+        # network or platform gate, so this floor IS the count in every
+        # environment, not a lowest-common-denominator across them.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 58),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 59),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
