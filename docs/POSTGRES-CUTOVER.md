@@ -177,12 +177,39 @@ The deploy therefore destroys the database the backfill exists to read, and
 every PostgreSQL row afterwards classifies as an expected target-only row, so
 the command passes cleanly having recovered nothing.
 
-**Decision: do not preserve or export it. Deploy and let it go.** This is the
-deliberate record the backfill note asks for, so that a later clean parity run
-on staging is never mistaken for a successful recovery.
+**Decision: do not preserve or export it. Deploy and let it go, accepting the
+loss described below.** This is the deliberate record the backfill note asks
+for, so that a later clean parity run on staging is never mistaken for a
+successful recovery.
 
-The decision is not "staging does not matter". The file provably holds no row
-PostgreSQL lacks:
+**Discard accepts real, if small, loss. It is not lossless, and an earlier draft
+of this record wrongly claimed it was.** Two things are actually at risk.
+
+*Source-only rows from the unmirrored window.* Dual-write is **not** an atomic
+two-phase commit, and the inventory's own `rollback_mode` says so: "The two
+stores have no atomic transaction." What the code provides is a **pre-flight
+check that narrows the window, not a fail-closed write**. Before mutating the
+legacy store, `get_or_create_session` calls `_pg_ensure_started()` ("Do not
+mutate the legacy authority when its required mirror is already known to be
+unavailable"), `append_event` raises when the parent mirror row is missing, and
+`create_approval` raises when the mirror already exists. But the legacy write
+still **commits first** (`session_store.py` legacy at `:1260`, `:1295`, `:1447`;
+mirror at `:1262`, `:1298`, `:1455`), and an unwrapped mirror exception cannot
+roll it back. `test_reconcile_sessions_authority.py` documents exactly this:
+"The app can commit a legacy write ... and fail before its PostgreSQL mirror,
+leaving a source-only row." Turn acquisition, turn release, approval decision
+and approval consumption share the shape.
+
+*Tables with no PostgreSQL home at all.* `server/checkpoints.py` and
+`server/session_policy.py` resolve `SESSIONS_DB` the same way and put
+`session_checkpoints` and `session_policies` in the **same file**. Neither is
+mirrored, and neither is among the reconciler's three table pairs. Preserving
+the file would therefore not let the backfill recover them; that would need
+migration work which does not exist. These tables are already destroyed by every
+app task replacement and always have been, so this deploy is not special for
+them.
+
+What bounds the loss, and why discard is still right for staging:
 
 1. `deploy/Dockerfile.app` ships no `sessions.db`, and `server/session_store.py`
    resolves `SESSIONS_DB` to the task-local `server/sessions.db` by default, so
@@ -190,26 +217,21 @@ PostgreSQL lacks:
 2. Task `48b23717a06a4d3b9af71f685ca396d3` started 2026-08-06T14:29:48Z on
    `leaf-platform-app-alt:27` and runs that revision for its whole life; a task
    cannot change task definition mid-life.
-3. That revision sets `LEAF_SESSIONS_STORE=dual_write_shadow` on the
-   `leaf-platform-app` container.
-4. Dual-write is **fail-closed**, so a legacy row cannot exist without its
-   mirror: `get_or_create_session` calls `_pg_ensure_started()` before the
-   legacy write ("Do not mutate the legacy authority when its required mirror is
-   already known to be unavailable"), `append_event` raises
-   `RuntimeError("PostgreSQL session mirror is missing")` before the legacy
-   write, and the `_pg_*` writes are not wrapped, so a mirror failure
-   propagates instead of being swallowed.
+3. That revision sets `LEAF_SESSIONS_STORE=dual_write_shadow`, so mirroring was
+   active for the file's entire existence and the mirror is the common case.
 
-So every row written into that file was mirrored to PostgreSQL synchronously at
-write time. Discarding it loses nothing recoverable.
-
-**Stated honestly, this is an argument from the code and the task definition,
-not from reading the file.** There is no route to read it:
-`enableExecuteCommand` is false on both app families, and
+So the exposure is one task-lifetime of staging traffic, and within that only
+rows that hit the post-commit/pre-mirror window, plus checkpoints and policies
+that no deploy has ever preserved. The alternative costs a new access path into
+a running task: `enableExecuteCommand` is false on both app families, and
 `aws ecs run-task` is refused by the deploy workflow because it would start
-`init-drawing-mutations-fence` and disturb the drawing-mutation fence. The
-residual risk is a defect in the fail-closed path leaving legacy-only rows, and
-it is accepted for staging rather than eliminated.
+`init-drawing-mutations-fence` and disturb the drawing-mutation fence that
+sibling lanes depend on. That path would itself need review. For staging, the
+loss is not worth that.
+
+**None of this was checked against the file.** It is an argument from the code
+and the task definition; nobody read the database, and after the deploy nobody
+can.
 
 **What a clean staging parity run does and does not prove.** After this deploy,
 `--mode parity` on staging compares only rows written since the NEW task
@@ -218,6 +240,13 @@ evidence that history was recovered, and it is **not** a cutover certificate:
 the two stores are snapshotted separately and the app holds no lock across its
 dual write, so quiescing legacy writes remains a prerequisite of the flip
 transaction itself.
+
+Sharpen that one step further, because it is the trap this record exists to
+disarm. Source-only rows are precisely what the pre-deploy window could have
+produced, and the deploy destroys the only store that could still reveal them.
+So the first backfill run on staging is expected to insert nothing, and that
+expected-empty result is **indistinguishable from the false-clean**. Read it as
+"there was nothing left to read", never as "there was nothing to recover".
 
 **Production is unaffected by this decision.** Production sets
 `SESSIONS_DB=/data/state/sessions.db` on the durable EFS volume, so its legacy
