@@ -29,8 +29,11 @@ test('two real writes support two undos and two redos in the unified scene', asy
     observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
 
+  await page.addInitScript(() => {
+    sessionStorage.setItem('leaf.cat.workbench.id.v1', 'demo')
+  })
   await page.goto('/try')
-  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
   await page.getByRole('tab', { name: /Catalog/ }).click()
   const toolCard = page.locator('.tool-card').filter({ hasText: 'delete-marked-panel' })
   await expect(toolCard).toBeVisible()

@@ -84,7 +84,7 @@ test('internal Operations uses real local authority without leaking its credenti
       && url.pathname === '/api/ops/tenants'
       && response.status() === 403
   })
-  await drawer.getByRole('button', { name: 'Refresh' }).click()
+  await drawer.getByRole('button', { name: 'Refresh', exact: true }).click()
   await deniedRefresh
   await expect(page.getByText(/ops role required/)).toBeVisible()
   await expect(drawer.locator('tbody tr')).toHaveCount(0)

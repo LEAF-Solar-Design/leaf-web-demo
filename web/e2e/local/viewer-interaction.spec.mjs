@@ -52,7 +52,7 @@ test('resident viewer uses the real local drawing for layers, navigation, and pi
     observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
 
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   const viewer = page.getByRole('region', { name: 'Drawing viewer' })
   const stage = viewer.locator('.stage-viewer')

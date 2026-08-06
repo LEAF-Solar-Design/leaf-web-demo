@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   getCapabilities,
   createOrg,
@@ -263,6 +263,10 @@ export default function ToolCast({
   const catalogDecisionRef = useRef(null)
   const openedCatalogKeyRef = useRef('')
   const authorPendingRef = useRef(false)
+  const scopedDrawingIdRef = useRef(null)
+  const activeDrawingIdRef = useRef(null)
+  const catalogRunScopeRef = useRef(0)
+  const resetJobRef = useRef(() => {})
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
     const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -429,20 +433,25 @@ export default function ToolCast({
   }, [])
 
   const onCompleteVersion = useCallback(async (newVersion, envelope) => {
-    const drawingId = newVersion?.drawing_id || 'cat-panels'
+    const scopeAtStart = activeDrawingIdRef.current
+    const drawingId = newVersion?.drawing_id || scopeAtStart || 'cat-panels'
+    if (scopeAtStart && drawingId !== scopeAtStart) return
     try {
       if (PUBLIC_DEMO) {
         if (!mockVersions.isSeeded() && drawing.shown) mockVersions.seedBase(drawing.shown)
         mockVersions.applyDelete(envelope?.result?.removed)
       }
       if (envelope?.result?.new_version_readable === false) {
+        if (activeDrawingIdRef.current !== scopeAtStart) return
         drawing.actions.recordCommittedUnreadableHead(newVersion)
         showToast({ text: `Version ${newVersion?.version || 'created'} created` })
         return
       }
       const view = await getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
+      if (activeDrawingIdRef.current !== scopeAtStart) return
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
     } catch {
+      if (activeDrawingIdRef.current !== scopeAtStart) return
       drawing.actions.markRefreshFailure({ drawing_id: drawingId, version: newVersion?.version })
       showToast({ text: `Version ${newVersion?.version || 'created'} created` })
     }
@@ -453,6 +462,20 @@ export default function ToolCast({
   }, [showToast])
 
   const onUploadReady = useCallback(async ({ receipt, view }) => {
+    const previousDrawingId = activeDrawingIdRef.current
+    if (previousDrawingId && previousDrawingId !== receipt.drawing_id) {
+      activeDrawingIdRef.current = receipt.drawing_id
+      catalogRunScopeRef.current += 1
+      setPrompt('')
+      setSelectedCatalogTool(null)
+      setLinkedJobId(null)
+      setBusy(false)
+      resetJobRef.current({ clearPointer: true })
+      lastConfirmedRunRef.current = null
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+      clearConverse()
+      resetCached()
+    }
     seatVersion(view, { drawingId: receipt.drawing_id, source: 'upload', event: 'upload' })
     onDrawingReady?.(receipt)
     setTenantId(receipt.tenant_id || tenantId)
@@ -464,7 +487,7 @@ export default function ToolCast({
     setError(null)
     if (receipt.tenant_kind === 'account') platformSession.actions.activate(receipt)
     showToast({ text: `Drawing ready, ${view?.intake?.dwg || receipt.drawing_id}`, action: { label: 'View', onClick: () => setRightView('view') } })
-  }, [onDrawingReady, platformSession.actions, seatVersion, showToast, tenantId])
+  }, [clearConverse, onDrawingReady, platformSession.actions, resetCached, seatVersion, showToast, tenantId])
 
   const drawingUpload = useDrawingUploadController({ onReady: onUploadReady })
 
@@ -491,6 +514,7 @@ export default function ToolCast({
     runJob: runTrackedJob,
     attachJob: attachTrackedJob,
     detachJob,
+    reset: resetJob,
     adoptEnvelope,
   } = useJobController({
     mock: transportMock,
@@ -499,6 +523,7 @@ export default function ToolCast({
     onAuthRequired: (required) => { if (required) requireAuth('jobs') },
     formatError: () => 'The panel run did not produce a readable result.',
   })
+  resetJobRef.current = resetJob
 
   const authorStage = useAuthorStageController({
     mock: PUBLIC_DEMO,
@@ -601,6 +626,26 @@ export default function ToolCast({
       agentDisabled: transportMock || !platform.isEntitled('converse'),
     },
   })
+
+  useLayoutEffect(() => {
+    if (!activeDrawingId) return
+    const previousDrawingId = scopedDrawingIdRef.current
+    scopedDrawingIdRef.current = activeDrawingId
+    activeDrawingIdRef.current = activeDrawingId
+    if (!previousDrawingId || previousDrawingId === activeDrawingId) return
+
+    catalogRunScopeRef.current += 1
+    setPrompt('')
+    setSelectedCatalogTool(null)
+    setLinkedJobId(null)
+    setBusy(false)
+    resetJob({ clearPointer: true })
+    lastConfirmedRunRef.current = null
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    catalog.actions.dismissRoute()
+    clearConverse()
+    resetCached()
+  }, [activeDrawingId, catalog.actions, clearConverse, resetCached, resetJob])
 
   useEffect(() => {
     if (!sessionAuthRequired) return
@@ -722,6 +767,8 @@ export default function ToolCast({
       params: { ...confirmed.execution.params },
     }
     setSelectedCatalogTool(tool)
+    const runScope = ++catalogRunScopeRef.current
+    const runDrawingId = confirmed.execution.context.drawingId
     setBusy(true)
     setError(null)
     setPhase('running')
@@ -746,6 +793,10 @@ export default function ToolCast({
           },
         ),
     })
+    if (
+      catalogRunScopeRef.current !== runScope ||
+      activeDrawingIdRef.current !== runDrawingId
+    ) return
     if (envelope?.ok) setPhase(envelope.result?.new_version ? 'complete' : 'tool-complete')
     else if (envelope) {
       setPhase('failed')

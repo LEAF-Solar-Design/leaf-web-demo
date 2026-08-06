@@ -17,7 +17,7 @@ test('conversation proposal and approval resume share the unified scene', async 
     observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
   })
 
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
 
   await page.getByRole('textbox', { name: 'Command bar' }).fill(REQUEST)

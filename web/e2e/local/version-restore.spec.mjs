@@ -319,7 +319,7 @@ test('/try skips deltas and hides recovery controls while its head is readable',
     })
   })
 
-  await page.goto('/try')
+  await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
   await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
   expect(versionQueries.length).toBeGreaterThan(0)

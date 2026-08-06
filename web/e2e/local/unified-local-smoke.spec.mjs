@@ -37,8 +37,8 @@ test('real local stack runs a catalog tool and restores its durable receipt', as
     expect(request.url()).not.toContain('leaf-proof.invalid')
   })
 
-  await page.goto('/try')
-  await expect(page).toHaveURL(/\/try$/)
+  await page.goto('/try?proof=1')
+  await expect(page).toHaveURL(/\/try\?proof=1$/)
   await expect(page.getByTestId('operator-surface')).toBeVisible()
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByText('Panels preserved').locator('..')).not.toContainText('pending', { timeout: 15_000 })

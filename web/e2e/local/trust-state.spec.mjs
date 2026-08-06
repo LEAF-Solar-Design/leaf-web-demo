@@ -38,7 +38,12 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
     }
   })
 
-  await page.goto('/try')
+  const surfacedUsageResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/usage' && response.status() === 200
+  })
+  await page.goto('/try?proof=1')
+  const surfacedUsage = await (await surfacedUsageResponse).json()
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await page.getByRole('tab', { name: 'Trust' }).click()
 
@@ -46,8 +51,8 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   const expectedHealth = health.degraded_mode === true || health.ok === false ? 'degraded' : 'healthy'
   await expect(panel.getByText('Backend', { exact: true }).locator('..')).toContainText(expectedHealth)
   await expect(panel.getByText('Claude account', { exact: true }).first().locator('..')).toContainText('not linked')
-  await expect(panel.getByText('Runs today').locator('..')).toContainText(String(usage.today?.runs ?? 'unknown'))
-  const spend = typeof usage.cap?.remaining === 'number' ? `$${usage.cap.remaining.toFixed(2)}` : 'unknown'
+  await expect(panel.getByText('Runs today').locator('..')).toContainText(String(surfacedUsage.today?.runs ?? 'unknown'))
+  const spend = typeof surfacedUsage.cap?.remaining === 'number' ? `$${surfacedUsage.cap.remaining.toFixed(2)}` : 'unknown'
   await expect(panel.getByText('Spend remaining').locator('..')).toContainText(spend)
 
   const entitlementPanel = panel.getByRole('region', { name: 'Entitlements' })
@@ -70,6 +75,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   }
 
   await panel.locator('.claude-trigger').click()
+  await page.getByRole('radio', { name: 'Pro', exact: true }).check()
   await page.getByLabel('Claude token').fill(DUMMY_TOKEN)
   const linkResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -77,8 +83,9 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   })
   await page.getByRole('button', { name: 'Link Claude account' }).click()
   expect((await linkResponse).status()).toBe(200)
-  await expect(panel.locator('.claude-trigger')).toContainText('linked')
-  await expect(panel.locator('.claude-trigger')).toContainText('subscription')
+  await expect(panel.locator('.claude-trigger')).toContainText('1 mounted')
+  const accountDialog = page.getByRole('dialog', { name: 'Claude accounts' })
+  await expect(accountDialog).toContainText(/pro subscription/i)
 
   const linkedRead = await request.get(`${API_BASE}/api/tenant/claude-grant`, { headers: TENANT_HEADERS })
   expect(linkedRead.status()).toBe(200)
@@ -86,12 +93,12 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   expect(linkedGrant).toMatchObject({ linked: true, kind: 'oauth' })
   expect(JSON.stringify(linkedGrant)).not.toContain(DUMMY_TOKEN)
 
-  await page.locator('.chip-danger.ca-act').click()
+  await accountDialog.locator('.chip-danger').click()
   const unlinkResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'DELETE' && url.pathname === '/api/tenant/claude-grant'
   })
-  await page.locator('.chip-danger-confirm').click()
+  await accountDialog.locator('.chip-danger-confirm').click()
   expect((await unlinkResponse).status()).toBe(200)
   await expect(panel.locator('.claude-trigger')).toContainText('not linked')
 
@@ -120,8 +127,8 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
       verdict: 'pass',
       health: expectedHealth,
       tier: entitlements.tier,
-      runs_today: usage.today?.runs ?? null,
-      spend_remaining: usage.cap?.remaining ?? null,
+      runs_today: surfacedUsage.today?.runs ?? null,
+      spend_remaining: surfacedUsage.cap?.remaining ?? null,
       linked_kind: linkedGrant.kind,
       final_grant_linked: false,
     },
