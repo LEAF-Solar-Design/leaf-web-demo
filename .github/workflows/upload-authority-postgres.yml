@@ -166,9 +166,12 @@ jobs:
           # unwritten: `bash -e` catches the skip, `bash -eo pipefail` misses it.
           #
           # The trap is that `shell: bash`, or a `defaults.run.shell: bash`
-          # block, adds `-eo pipefail` -- a routine hardening edit that would
-          # silently invert this assertion into always-passing. The string match
-          # cannot invert under any shell configuration.
+          # block, adds `-eo pipefail` -- a routine hardening edit that could
+          # then silently cause this assertion to MISS a skip. Not always: it
+          # needs the producer to actually take SIGPIPE, so a short or trailing
+          # match still returns 0 and still catches. That conditional, invisible
+          # failure is the point; the string match removes the pipefail/SIGPIPE
+          # failure mode outright rather than leaving it to output shape.
           #
           # `${out,,}` lowercases first, so it is exactly as case-insensitive as
           # the `grep -qi` it replaces. Same shape as the sessions reconciler
@@ -216,10 +219,10 @@ jobs:
           printf '%s\n' "$out" | tail -5
           # A bash string match rather than `... | grep -q`, for the reason
           # written out at the overlay skip-check above: `grep -q` can SIGPIPE a
-          # still-writing producer, which inverts the check into always-passing
-          # IF pipefail is on. It is not on here (no `shell:` and no
-          # `defaults.run.shell`, so GitHub uses `bash -e {0}`), so this is
-          # defensive against a future `shell: bash`, not a live fix.
+          # still-writing producer, which IF pipefail is on can silently cause
+          # this assertion to miss a skip. Pipefail is not on here (no `shell:`
+          # and no `defaults.run.shell`, so GitHub uses `bash -e {0}`), so this
+          # is defensive against a future `shell: bash`, not a live fix.
           # `${out,,}` keeps it as case-insensitive as `grep -qi`.
           if [[ "${out,,}" == *skipped* ]]; then
             echo 'FAIL: sessions reconciler live tests skipped — DATABASE_URL not reaching pytest'
