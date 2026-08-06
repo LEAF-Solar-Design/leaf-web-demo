@@ -29,6 +29,7 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { cadTimingRows } from './cadTimingPresentation.js'
 import {
   getSessionHolderId, claimHolderId, lockState,
   stageCheckoutReloadHandoff, bootstrapCheckoutReloadHandoff,
@@ -1867,6 +1868,7 @@ export default function App() {
       if (env?.error) rows.push(typeof env.error === 'string'
         ? `error ${env.error}`
         : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+      rows.push(...cadTimingRows(env))
       setDrawer({
         title: `${rec.tool || job.tool || 'job'} · provenance`,
         rows,
@@ -1906,6 +1908,7 @@ export default function App() {
     if (env.error) rows.push(typeof env.error === 'string'
       ? `error ${env.error}`
       : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+    rows.push(...cadTimingRows(env))
     setDrawer({
       title: 'Run · provenance',
       rows,
