@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(
-  new URL("../src/agent/authorLoop.ts", import.meta.url),
+  new URL("../src/vendor/mushy-author/agent/authorLoop.ts", import.meta.url),
   "utf8",
 );
 

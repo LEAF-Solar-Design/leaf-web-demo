@@ -119,7 +119,7 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
   };
 
   it("ConverseSdkRunner passes only the spine server, and never touches the bridge", async () => {
-    const source = await read("../src/ports/impl/converseSdkRunner.ts");
+    const source = await read("../src/vendor/mushy-author/ports/impl/converseSdkRunner.ts");
     expect(source).toMatch(/mcpServers:\s*\{\s*spine:\s*server\s*\}/);
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
   });
@@ -145,7 +145,7 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
     // The positive half: if this stops being true, the bridge either went live
     // (the held #322 ruling) or went dead. Either way this PR's framing must
     // be revisited, and the DNS-rebinding residual re-triaged.
-    const dead = await read("../src/ports/impl/agentSdkTurnRunner.ts");
+    const dead = await read("../src/vendor/mushy-author/ports/impl/agentSdkTurnRunner.ts");
     expect(dead).toMatch(/resolveEnvMcpAttachment/);
   });
 });

@@ -855,6 +855,12 @@ def build_suites() -> List[Suite]:
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
+        # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
+        # must be a CI fact, not a manual command. Registered with its suite the
+        # day it shipped — no fix-then-register debt. 2 = verify READY + the
+        # prove-the-checker-can-fail case.
+        Suite("vendor-pin-verify", "scripts test_vendor_pin.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),

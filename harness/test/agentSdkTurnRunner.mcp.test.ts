@@ -36,7 +36,7 @@ describe("AgentSdkTurnRunner tenant MCP bridge", () => {
   it("wires a non-null attachment into executable SDK query options", async () => {
     const esbuild = await import("esbuild");
     const source = readFileSync(
-      new URL("../src/ports/impl/agentSdkTurnRunner.ts", import.meta.url), "utf8",
+      new URL("../src/vendor/mushy-author/ports/impl/agentSdkTurnRunner.ts", import.meta.url), "utf8",
     );
     const stripped = esbuild.transformSync(source, { loader: "ts" }).code;
 
