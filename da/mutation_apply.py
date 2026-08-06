@@ -207,6 +207,21 @@ def _read_json(path: str, operation: str) -> dict[str, Any]:
     return value
 
 
+def _canonical_parameters(value: Any) -> Any:
+    """Restore APS defaults before comparing an Activity parameter map."""
+    if not isinstance(value, dict):
+        return value
+    canonical = {}
+    for name, parameter in value.items():
+        if not isinstance(parameter, dict):
+            canonical[name] = parameter
+            continue
+        normalized = dict(parameter)
+        normalized.setdefault("required", False)
+        canonical[name] = normalized
+    return canonical
+
+
 def readiness() -> dict[str, Any]:
     """Resolve prod and compare its immutable Activity version to the fixed spec."""
     try:
@@ -223,9 +238,13 @@ def readiness() -> dict[str, Any]:
 
     expected = activity_spec()
     mismatches = []
-    for key in ("engine", "commandLine", "parameters", "settings"):
+    for key in ("engine", "commandLine", "settings"):
         if deployed.get(key) != expected[key]:
             mismatches.append(f"activity {key} mismatch")
+    if _canonical_parameters(deployed.get("parameters")) != _canonical_parameters(
+        expected["parameters"]
+    ):
+        mismatches.append("activity parameters mismatch")
     if deployed.get("appbundles") not in (None, []):
         mismatches.append("activity appbundles mismatch")
     return {
