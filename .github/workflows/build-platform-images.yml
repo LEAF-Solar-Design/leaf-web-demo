@@ -129,13 +129,33 @@ concurrency:
   # can replace an older pending run, so a missing predecessor remains valid
   # and falls back to the nearest ancestor's cache, else an uncached build.
   #
+  # Push runs are newest-wins too (merge-burst coalescing, 2026-08-06): the
+  # staging relay is latest-main-only, so once a newer merge enters this
+  # group the in-progress build's images can never dispatch. Letting it
+  # finish anyway paid ~24 runner-minutes per superseded build, and the
+  # winning run then queued HERE behind the doomed one (run 31059550767
+  # waited 278s and started 1s after its predecessor completed; the first
+  # organic burst wasted ~100 runner-minutes across runs 30979773615,
+  # 31058884757, 31059053864, 31059285091). Cancelling creates no deploy
+  # path: the relay dispatches only a run whose conclusion is success, and
+  # manual promotion's verifier requires a completed successful release
+  # run. It CAN leave inert residue behind: a run cancelled after its
+  # verify/adopt leg uploaded the supply set leaves that artifact minted
+  # (nothing consumes an artifact of a non-successful run), and a run
+  # cancelled mid-matrix or mid-adopt leaves partial prod-*/adopt tags no
+  # deploy rail accepts, plus a thinner buildcache chain the
+  # nearest-ancestor fallback already covers.
+  # Accepted residual: a push can cancel an in-progress NON-push run in
+  # this group (promote, draft-PR build); both are rare, operator-attended,
+  # and cheap to re-dispatch, which beats splitting the group they share.
+  #
   # Speculative runs live in their own PER-PR group: they are dispatched on
   # the main ref, so without this split they would queue INSIDE the release
   # group ahead of real merge builds. Within one PR, newest-wins: a stale
   # preview's images can never be adopted (the tree moved), so cancelling the
   # older run only saves runners.
   group: build-platform-images-${{ inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
-  cancel-in-progress: ${{ inputs.speculative || false }}
+  cancel-in-progress: ${{ inputs.speculative || github.event_name == 'push' }}
 
 jobs:
   prepare:
