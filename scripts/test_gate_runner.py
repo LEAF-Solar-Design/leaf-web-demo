@@ -80,15 +80,15 @@ def test_executor_suite_is_registered_with_its_measured_floor():
     WeakValueDictionary assignment-lock no-op fixed in #455 sat undetected for
     exactly that reason). This pin mirrors the floor in run-all-gates.py the
     same way the platform-static pin does: BOTH must move together, and only
-    alongside a re-measured run. Floor 109 is the Windows executed count
-    (115 collected - 2 opt-in Postgres skips - 4 Windows-only environment
-    skips, re-measured 2026-08-06 after the three SlotRebindObservabilityTests
-    cases); Linux CI executes 113 and reports upward drift, the
+    alongside a re-measured run. Floor 111 is the Windows executed count
+    (117 collected - 2 opt-in Postgres skips - 4 Windows-only environment
+    skips, re-measured 2026-08-06 after the five SlotRebindObservabilityTests
+    cases); Linux CI executes 115 and reports upward drift, the
     min-across-environments convention."""
     g = _load_runner()
     executor = {s.id: s for s in g.build_suites()}["executor"]
 
-    assert executor.expected == 109
+    assert executor.expected == 111
     # cwd is the REPO ROOT (test_control_plane.py opens
     # executor/contracts/schemas/*.json relative to it) and -P keeps that cwd
     # OFF sys.path so the repo's platform/ package cannot shadow the stdlib

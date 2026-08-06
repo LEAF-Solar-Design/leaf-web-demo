@@ -98,6 +98,16 @@ rejects the reloaded source) through `runtime_event_sink` as a
 default when that counter or that log line shows a real breach, which is now
 possible to see.
 
+`runtime_event_sink` is injectable, so the sink call is wrapped: this runs
+inside `invoke()`'s own failure handling, and an escaping exception would cost
+the caller its `DEADLINE_EXCEEDED` response and skip terminal accounting and
+idempotency recording. Telemetry must not break the path it observes. The
+counter is incremented before the sink runs, so even a sink that throws leaves
+the failure visible on `/metrics`. The record is a fixed identifier-only
+allowlist, held to the same payload-free discipline as the accounting emitter
+and asserted against the fixture's real source, lease token, geometry ref,
+content digest, and params.
+
 **Known gap, outside this repo.** The four `Leaf/InstantExecution` CloudWatch
 alarms defined in the terraform repo have no emitter: the namespace has never
 received a datapoint, and all four sit in `OK` solely because

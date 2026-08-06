@@ -377,3 +377,65 @@ class SlotRebindObservabilityTests(unittest.TestCase):
         self.assertEqual(1, self.supervisor.health()["bound_slots"])
         self.assertEqual([], self.failures())
         self.assertIn("instant_executor_rebind_failures_total 0", self.supervisor.metrics())
+
+    def test_a_raising_sink_cannot_break_the_invocation_it_observes(self) -> None:
+        """Telemetry must never cost the caller its response.
+
+        _record_rebind_failure runs inside invoke()'s own failure handling, so
+        a sink exception escaping through _replace() would lose the caller's
+        DEADLINE_EXCEEDED answer and skip terminal accounting and idempotency
+        recording.  The sink is injectable, so this is reachable by config.
+        """
+        def hostile(_record):
+            raise RuntimeError("telemetry backend is down")
+
+        self.supervisor.close()
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=hostile,
+        )
+        docs = self.assigned()
+
+        # Patch AFTER assign, so the assign path uses the real transport. Now
+        # every _receive fails: invoke times out, then its rebind fails too,
+        # which is exactly the state that reaches the hostile sink.
+        def refuse(_slot, _timeout):
+            raise TimeoutError("child did not answer")
+
+        with patch.object(self.supervisor, "_receive", refuse):
+            response = self.supervisor.invoke(
+                docs["invocation"], "Bearer " + lease(docs["invocation"]))
+
+        self.assertEqual("failed", response["status"])
+        self.assertEqual("DEADLINE_EXCEEDED", response["error"]["code"])
+        self.assertEqual("unknown", response["error"]["execution_disposition"])
+        self.assertEqual(0, self.supervisor.health()["bound_slots"])
+        # The sink blew up, but the failure is still visible on /metrics.
+        self.assertIn("instant_executor_rebind_failures_total 1", self.supervisor.metrics())
+
+    def test_the_reported_record_carries_no_payload(self) -> None:
+        """Same discipline the accounting emitter is held to: identifiers only,
+        never tool input, source, or drawing geometry."""
+        docs = self.assigned()
+        slot = self.supervisor._find_assignment(docs["assignment"]["assignment_id"])
+        poisoned = "raise ValueError('artifact no longer loads')"
+        slot.source = poisoned
+        self.supervisor._replace(slot, restore=True)
+
+        [record] = self.failures()
+        self.assertEqual(
+            {"event_type", "executor_id", "slot_id", "assignment_id", "tenant_id",
+             "session_id", "reason", "child_load_timeout_seconds", "occurred_at"},
+            set(record),
+        )
+        # Assert the real secret-bearing values are absent, not merely that
+        # certain words are: "source" legitimately appears inside the
+        # source_rejected reason, so a word scan would be a false positive.
+        encoded = str(record)
+        for forbidden in (poisoned,
+                          docs["assignment"]["lease_token"],
+                          docs["drawing_context"]["geometry_ref"],
+                          docs["drawing_context"]["content_digest"],
+                          str(docs["invocation"]["params"])):
+            self.assertNotIn(forbidden, encoded)

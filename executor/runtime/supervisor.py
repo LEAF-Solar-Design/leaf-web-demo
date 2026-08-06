@@ -136,9 +136,10 @@ class WarmExecutorSupervisor:
         self._child_load_timeout_seconds = child_load_timeout_seconds
         self._runtime_event_sink = runtime_event_sink
         self._rebind_failures = 0
-        # A leaf lock, acquired with nothing else held.  The rebind path runs
-        # under slot.lock alone, and _state_lock is taken BEFORE slot.lock
-        # elsewhere, so counting under _state_lock here would invert the order.
+        # A leaf lock: nothing is acquired WHILE it is held.  The rebind path
+        # reaches it holding slot.lock, and _state_lock is taken BEFORE
+        # slot.lock elsewhere (release), so counting under _state_lock here
+        # would invert that order.
         self._telemetry_lock = threading.Lock()
         self._state_lock = threading.RLock()
         for index in range(pool_size):
@@ -493,17 +494,27 @@ class WarmExecutorSupervisor:
         """
         with self._telemetry_lock:
             self._rebind_failures += 1
-        self._runtime_event_sink({
-            "event_type": "slot_rebind_failed",
-            "executor_id": self.executor_id,
-            "slot_id": slot.slot_id,
-            "assignment_id": assignment["assignment_id"],
-            "tenant_id": assignment["tenant_id"],
-            "session_id": assignment["session_id"],
-            "reason": reason,
-            "child_load_timeout_seconds": self._child_load_timeout_seconds,
-            "occurred_at": _now(),
-        })
+        try:
+            self._runtime_event_sink({
+                "event_type": "slot_rebind_failed",
+                "executor_id": self.executor_id,
+                "slot_id": slot.slot_id,
+                "assignment_id": assignment["assignment_id"],
+                "tenant_id": assignment["tenant_id"],
+                "session_id": assignment["session_id"],
+                "reason": reason,
+                "child_load_timeout_seconds": self._child_load_timeout_seconds,
+                "occurred_at": _now(),
+            })
+        except Exception:  # noqa: BLE001 - see below
+            # The default sink cannot raise, but the sink is injectable, so an
+            # unguarded call would let a caller's telemetry break the very path
+            # it observes: this runs inside invoke()'s failure handling, and an
+            # escaping exception would cost the caller its DEADLINE_EXCEEDED or
+            # TOOL_FAILED response and skip terminal accounting and idempotency
+            # recording.  The counter above is already incremented, so a
+            # swallowed sink still leaves the failure visible on /metrics.
+            pass
 
     def _purge_idempotency(self) -> None:
         now = time.monotonic()
