@@ -153,17 +153,20 @@ jobs:
           out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs)
           printf '%s\n' "$out" | tail -5
           # A bash string match, NOT `echo "$out" | grep -qi`. grep -q exits at
-          # its FIRST match and SIGPIPEs the producer; this shell runs with
-          # pipefail, so the pipeline reports 141 exactly when a skip IS
-          # present, the `if` reads false, and the check inverts into silence.
-          # Measured: with the match early and ~1.6MB still unwritten, the old
-          # form exits 141 while this one exits 0.
-          # It has not bitten here because pytest prints "skipped" in its
-          # trailing summary, so grep reads to the end and the producer
-          # finishes. That is a property of where pytest happens to put the
-          # word, not of the check. Same shape as the sessions reconciler step
-          # below.
-          if [[ "$out" == *skipped* || "$out" == *SKIPPED* ]]; then
+          # its FIRST match; if the producer is still writing at that moment it
+          # takes SIGPIPE, and under pipefail the pipeline reports 141 -- so the
+          # `if` reads false and the check inverts into silence precisely when a
+          # skip IS present. It is timing-dependent, not certain: short or fully
+          # buffered output still returns 0. Measured both ways -- match early
+          # with ~1.6MB unwritten gives 141, match in a trailing summary gives 0.
+          # This step has survived on the latter, because pytest prints
+          # "skipped" near the end and the output is small. That is a property
+          # of where pytest happens to put the word, not of the check, and the
+          # string match removes the timing-dependent pipeline outright.
+          # `${out,,}` lowercases, so this is exactly as case-insensitive as the
+          # `grep -qi` it replaces rather than only catching the two spellings
+          # pytest emits today. Same shape as the sessions reconciler step below.
+          if [[ "${out,,}" == *skipped* ]]; then
             echo 'FAIL: overlay live tests skipped — OVERLAY_PG_URL not reaching pytest'
             exit 1
           fi
@@ -205,9 +208,10 @@ jobs:
           out=$(python -m pytest -q tests/test_reconcile_sessions_authority.py -rs)
           printf '%s\n' "$out" | tail -5
           # Deliberately a bash string match, NOT `... | grep -q`: grep -q exits
-          # on its first match and SIGPIPEs the producer, which under pipefail
-          # makes the whole pipeline non-zero and inverts this very check.
-          if [[ "$out" == *skipped* || "$out" == *SKIPPED* ]]; then
+          # on its first match and can SIGPIPE a still-writing producer, which
+          # under pipefail makes the pipeline non-zero and inverts this very
+          # check. `${out,,}` keeps it as case-insensitive as `grep -qi`.
+          if [[ "${out,,}" == *skipped* ]]; then
             echo 'FAIL: sessions reconciler live tests skipped — DATABASE_URL not reaching pytest'
             exit 1
           fi
