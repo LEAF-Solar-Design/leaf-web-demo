@@ -275,12 +275,22 @@ def test_every_reconciled_table_is_owned_by_the_sessions_migration():
 
 
 def test_json_columns_are_compared_parsed_not_as_text():
-    """TRAP 1: data_json is TEXT in SQLite and JSONB in PostgreSQL."""
-    text = '{"b": 1, "a": 2}'
-    reordered = {"a": 2, "b": 1}
-    assert RECONCILE._normalize(RECONCILE.JSON, text) == reordered
-    # A raw string comparison would never match the dict PostgreSQL hands back.
-    assert text != reordered
+    """TRAP 1: data_json is TEXT in SQLite and JSONB in PostgreSQL.
+
+    JSONB does not preserve key order, so the two stores hand the same value
+    back as differently ordered text. The COMPARISON must parse; _normalize
+    deliberately keeps the raw text, because the insert path writes it through
+    verbatim rather than re-serializing it.
+    """
+    def compare(text):
+        return RECONCILE._comparable_row("app_session_events", {
+            "session_id": "s", "seq": 1, "turn_id": None, "type": "message",
+            "data_json": text, "created_at": 1.0,
+        })
+
+    assert compare('{"b": 1, "a": 2}') == compare('{"a": 2, "b": 1}')
+    assert compare('{"b": 1, "a": 2}') != compare('{"b": 1, "a": 3}')
+    assert RECONCILE._normalize(RECONCILE.JSON, '{"b": 1, "a": 2}') == '{"b": 1, "a": 2}'
 
 
 def test_float_columns_are_compared_exactly_with_no_tolerance():
@@ -753,11 +763,27 @@ def test_comparable_values_keep_distinguishable_states_apart():
     # Compare the ENCODED form, which is what _comparable_row actually uses:
     # the tagged structures still contain Python values, where 1 == True.
     def encode(kind, value):
-        return json.dumps(RECONCILE._comparable_value(kind, value), sort_keys=True)
+        return json.dumps(
+            RECONCILE._comparable_value(kind, value),
+            sort_keys=True, default=RECONCILE._encode_exact,
+        )
 
     assert encode(RECONCILE.JSON, None) != encode(RECONCILE.JSON, "null")
     assert encode(RECONCILE.JSON, '{"f": 1}') != encode(RECONCILE.JSON, '{"f": true}')
     assert encode(RECONCILE.BOOL, 1) != encode(RECONCILE.INT, 1)
+    # JSON numbers are parsed losslessly: json.loads would make both 0.1.
+    assert encode(RECONCILE.JSON, "0.1") != \
+        encode(RECONCILE.JSON, "0.10000000000000001")
+    # ... but trailing-zero noise is the SAME jsonb number, not a conflict.
+    assert encode(RECONCILE.JSON, "0.10") == encode(RECONCILE.JSON, "0.1")
+    # Nested, not only scalar.
+    assert encode(RECONCILE.JSON, '{"a":[{"b":0.1}]}') != \
+        encode(RECONCILE.JSON, '{"a":[{"b":0.10000000000000001}]}')
+    # The JSON literal null is the text "null" and stays distinct from SQL NULL.
+    assert RECONCILE._normalize(RECONCILE.JSON, "null") == "null"
+    assert RECONCILE._normalize(RECONCILE.JSON, None) is None
+    assert RECONCILE._insert_value(RECONCILE.JSON, "null") == "null"
+    assert RECONCILE._insert_value(RECONCILE.JSON, None) is None
     # And the row-level encoder, which is the real comparison surface.
     left = RECONCILE._comparable_row("app_session_events", {
         "session_id": "s", "seq": 1, "turn_id": None, "type": "message",
@@ -768,11 +794,7 @@ def test_comparable_values_keep_distinguishable_states_apart():
         "data_json": '{"f": true}', "created_at": 1.0,
     })
     assert left != right
-    # The JSON literal null is a value, not SQL NULL, and satisfies NOT NULL.
-    assert RECONCILE._normalize(RECONCILE.JSON, "null") is RECONCILE.JSON_NULL
-    assert RECONCILE._normalize(RECONCILE.JSON, None) is None
-    assert RECONCILE._insert_value(RECONCILE.JSON, RECONCILE.JSON_NULL) == "null"
-    assert RECONCILE._insert_value(RECONCILE.JSON, None) is None
+    assert left != right
 
 
 @requires_database
@@ -891,6 +913,57 @@ def test_a_jsonb_string_is_not_certified_equal_to_a_jsonb_boolean(source, target
         )
     receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
     assert receipt["tables"]["app_session_events"]["conflicting_count"] == 1
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+@pytest.mark.parametrize(
+    "source_json,target_json",
+    [
+        ("0.10000000000000001", "0.1"),
+        ('{"a": [{"b": 0.10000000000000001}]}', '{"a": [{"b": 0.1}]}'),
+    ],
+    ids=["scalar", "nested"],
+)
+def test_json_numeric_precision_is_not_collapsed(
+    source, target, source_json, target_json
+):
+    """PostgreSQL stores JSONB numbers as arbitrary-precision numeric.
+
+    json.loads decodes every JSON number to a binary float, so 0.1 and
+    0.10000000000000001 both become Python 0.1 and would certify equal.
+    """
+    session = source.session()
+    source.event(session["session_id"], seq=1, data_json=source_json)
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+
+    # The backfill itself must not have rewritten the number.
+    stored = _rows(target, "app_session_events", session_id=session["session_id"])[0]
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True, f"round-tripped away from {source_json}: {stored}"
+
+    with target.transaction() as conn:
+        conn.execute(
+            "UPDATE app_session_events SET data_json = %s::jsonb WHERE session_id = %s",
+            (target_json, session["session_id"]),
+        )
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["tables"]["app_session_events"]["conflicting_count"] == 1
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+def test_unparseable_json_is_reported_not_thrown(source, target):
+    """The insert passes JSON text through verbatim, so a non-JSON source value
+    would fail at INSERT time. Report it as unbackfillable instead."""
+    session = source.session()
+    source.event(session["session_id"], seq=1, data_json="{not json at all")
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert receipt["tables"]["app_session_events"]["blocked_reasons"] == {
+        "invalid_json:data_json": 1
+    }
+    assert receipt["inserted"]["app_session_events"] == 0
     assert receipt["reconciled"] is False
 
 

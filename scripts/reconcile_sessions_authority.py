@@ -40,6 +40,7 @@ import sqlite3
 import sys
 import time
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -193,16 +194,29 @@ def _is_locked_error(error: sqlite3.OperationalError) -> bool:
     return "locked" in message or "busy" in message
 
 
-class _JsonNull:
-    """The JSON literal ``null``, which is a value, not SQL NULL."""
+def _json_scalars(text: str) -> Any:
+    """Parse JSON without losing numeric precision.
 
-    __slots__ = ()
+    ``json.loads`` decodes every JSON number to a binary float, so the JSONB
+    values ``0.1`` and ``0.10000000000000001`` both become Python ``0.1`` and
+    compare equal. PostgreSQL stores JSONB numbers as arbitrary-precision
+    ``numeric`` and keeps them distinct, so that collapse lets ``reconcile()``
+    exit 0 while the stores genuinely differ. ``Decimal`` preserves the exact
+    value.
+    """
+    return json.loads(text, parse_float=Decimal)
 
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "JSON_NULL"
 
+def _encode_exact(value: Any) -> Any:
+    """JSON-encode a Decimal by its canonical numeric form.
 
-JSON_NULL = _JsonNull()
+    ``normalize()`` strips trailing-zero noise (``0.10`` and ``0.1`` are the
+    same JSONB number and must not read as a conflict) while keeping genuinely
+    different values apart.
+    """
+    if isinstance(value, Decimal):
+        return ["num", str(value.normalize())]
+    raise TypeError(f"cannot encode {type(value).__name__} for comparison")
 
 
 def _normalize(kind: str, value: Any) -> Any:
@@ -224,15 +238,17 @@ def _normalize(kind: str, value: Any) -> Any:
     if value is None:
         return None
     if kind == JSON:
-        # TEXT in SQLite, JSONB in PostgreSQL. A string comparison always fails
-        # and JSONB does not preserve key order, so compare parsed values.
+        # Deliberately returns the RAW TEXT, unparsed. Both stores hand JSON in
+        # as text (SQLite natively, PostgreSQL via ::text), and the insert path
+        # writes that text straight back to ``%s::jsonb``. Round-tripping
+        # through Python would rewrite the value -- notably it would rewrite
+        # every JSON number through a binary float, so a backfill could silently
+        # store 0.1 where the source held 0.10000000000000001.
         #
-        # The JSON literal `null` is NOT SQL NULL: `'null'::jsonb` satisfies
-        # app_session_events.data_json's NOT NULL. Collapsing both to Python
-        # None would wrongly report such a row as unbackfillable and would
-        # insert SQL NULL in its place, so keep them distinct.
-        parsed = _session_store()._json_value(value)
-        return JSON_NULL if parsed is None else parsed
+        # It also keeps the JSON literal `null` (the text "null", which
+        # satisfies data_json's NOT NULL) distinct from SQL NULL (None), with no
+        # sentinel needed.
+        return value
     if kind == FLOAT:
         return float(value)
     if kind == INT:
@@ -267,8 +283,14 @@ def _comparable_value(kind: str, value: Any) -> Any:
         if value is None:
             return ["sql_null"]
         # Both sides arrive as text here (SQLite natively, PostgreSQL via
-        # ::text), so this parses once and compares like with like.
-        return ["json", _session_store()._json_value(value)]
+        # ::text), so this parses once and compares like with like. Parsed
+        # losslessly: see _json_scalars.
+        try:
+            return ["json", _json_scalars(value)]
+        except (ValueError, TypeError):
+            # Not valid JSON at all. Tag it verbatim so it can never compare
+            # equal to a parsed value, and let _invalid_json_defects report it.
+            return ["invalid_json", repr(value)]
     if value is None:
         return None
     if kind == FLOAT:
@@ -300,7 +322,9 @@ def _comparable_row(table: str, row: Mapping[str, Any]) -> str:
         column: _comparable_value(kind, row[column])
         for column, kind in columns.items()
     }
-    return json.dumps(tagged, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        tagged, sort_keys=True, separators=(",", ":"), default=_encode_exact
+    )
 
 
 @contextmanager
@@ -557,6 +581,24 @@ def _non_integral_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> lis
     return defects
 
 
+def _invalid_json_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> list[str]:
+    """Flag a JSON column whose source text will not cast to jsonb.
+
+    The insert passes the text through verbatim, so an unparseable value would
+    fail at INSERT time. Report it as an unbackfillable row instead.
+    """
+    defects = []
+    for column in columns:
+        value = raw[column]
+        if value is None:
+            continue
+        try:
+            _json_scalars(value)
+        except (ValueError, TypeError):
+            defects.append(f"invalid_json:{column}")
+    return defects
+
+
 def _session_defects(
     key: tuple[Any, ...],
     row: Mapping[str, Any],
@@ -597,6 +639,7 @@ def _event_defects(
         if row[column] is None
     ]
     defects.extend(_non_integral_defects(raw, ("seq",)))
+    defects.extend(_invalid_json_defects(raw, ("data_json",)))
     seq = row["seq"]
     if seq is not None and seq <= 0:
         # app_session_events.seq carries CHECK (seq > 0); SQLite has no such
@@ -617,6 +660,7 @@ def _approval_defects(row: Mapping[str, Any], raw: Mapping[str, Any]) -> list[st
         for column in _TARGET_NOT_NULL["app_approvals"]
         if row[column] is None
     ]
+    defects.extend(_invalid_json_defects(raw, ("params_json", "payload_json")))
     if row["consumed"] and not row["decided"]:
         # app_approvals carries CHECK (NOT consumed OR decided); SQLite does not.
         defects.append("consumed_without_decision")
@@ -888,18 +932,17 @@ def _target_only_counts(
 def _insert_value(kind: str, value: Any) -> Any:
     """Render one normalized value for the parameterized INSERT.
 
+    JSON columns carry their ORIGINAL TEXT straight through to ``%s::jsonb``.
+    Re-serializing a parsed object here would rewrite the value: every JSON
+    number would pass through a binary float, so a source holding
+    ``0.10000000000000001`` would be backfilled as ``0.1``.
+
     A JSON column holding SQL NULL is inserted as SQL NULL, exactly as
     session_store's own ``_pg_create_approval`` does (``json.dumps(params) if
     params is not None else None``); the two must not disagree. The JSON literal
-    ``null`` is a value and is inserted as ``'null'::jsonb``.
+    ``null`` is the text ``"null"`` and inserts as ``'null'::jsonb``.
     """
-    if kind != JSON:
-        return value
-    if value is None:
-        return None
-    if value is JSON_NULL:
-        return "null"
-    return json.dumps(value)
+    return value
 
 
 def _insert_snapshot(
