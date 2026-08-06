@@ -1587,7 +1587,7 @@ def main() -> None:
     assert tag_values == ["|"], (
         "the release push tags are one block scalar: release tag, baked "
         "identity witness, and the app-only src- stamp")
-    tags_lines = build_block[build_block.index("tags: |"):].splitlines()[1:4]
+    tags_lines = build_block[build_block.index("tags: |"):].splitlines()[1:5]
     assert tags_lines[0].strip() == (
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
     ), "the release push tag targets the release repository, never a cache"
@@ -1596,6 +1596,12 @@ def main() -> None:
         "needs.prepare.outputs.source_sha }}"
     ), "every full-build digest carries the sha-<40> blue/green identity witness"
     assert tags_lines[2].strip() == (
+        "${{ matrix.image == 'canonical-worker' && "
+        "format('{0}/{1}:sha-{2}-solver-{3}', env.ECR_REGISTRY, "
+        "env.IMAGE_NAME, needs.prepare.outputs.source_sha, "
+        "needs.prepare.outputs.solver_revision) || '' }}"
+    ), "canonical-worker also carries the compound app and solver deploy tag"
+    assert tags_lines[3].strip() == (
         "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
         "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
         "needs.prepare.outputs.source_sha) || '' }}"
@@ -1967,7 +1973,7 @@ def main() -> None:
     assert "continue-on-error" not in _keys_in(adopt_header)
     assert "trap on_exit EXIT" in adopt_block
     assert "COMMITTED=false" in adopt_block
-    assert adopt_block.count("RERUN THIS RUN") == 2
+    assert adopt_block.count("RERUN THIS RUN") == 4
     assert "positively absent" in adopt_block
     assert [
         _value_of(l)
@@ -1989,12 +1995,17 @@ def main() -> None:
     assert adopt_block.index("verify-speculative") < adopt_block.index(
         "aws ecr put-image"
     ), "no tag may be written before the manifest verifies"
-    # Exactly two writers: the release-tag alias loop, and the post-verify
-    # app src- identity stamp (best-effort, pinned in the src- section
-    # above). Both write manifests the registry already verified against
-    # the adopted supply set.
-    assert adopt_block.count("aws ecr put-image") == 2
+    # Exactly three writers: the release-tag alias loop, the exact deploy-tag
+    # alias loop, and the post-verify app src- identity stamp. Each writes a
+    # manifest the registry already verified against the adopted supply set.
+    assert adopt_block.count("aws ecr put-image") == 3
+    assert 'deploy_tag="sha-$SOURCE_SHA"' in adopt_block
+    assert 'deploy_tag="sha-$SOURCE_SHA-solver-$SOLVER_SHA"' in adopt_block
+    assert 'SOLVER_SHA: ${{ needs.prepare.outputs.solver_revision }}' in adopt_block
+    assert 're-verification failed for exact deploy tag' in adopt_block
     assert adopt_block.index('--image-tag "$PROD_TAG"') < adopt_block.index(
+        '--image-tag "$deploy_tag"'
+    ) < adopt_block.index(
         '--image-tag "$src_tag"'
     ), "the src- stamp never precedes the release alias loop"
     assert "refusing to alias non-release tag" in adopt_block
@@ -2064,6 +2075,10 @@ def main() -> None:
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}",
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ "
         "needs.prepare.outputs.source_sha }}",
+        "${{ matrix.image == 'canonical-worker' && "
+        "format('{0}/{1}:sha-{2}-solver-{3}', env.ECR_REGISTRY, "
+        "env.IMAGE_NAME, needs.prepare.outputs.source_sha, "
+        "needs.prepare.outputs.solver_revision) || '' }}",
         "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
         "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
         "needs.prepare.outputs.source_sha) || '' }}",

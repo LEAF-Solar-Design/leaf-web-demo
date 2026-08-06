@@ -1058,6 +1058,7 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare.outputs.source_sha }}
+            ${{ matrix.image == 'canonical-worker' && format('{0}/{1}:sha-{2}-solver-{3}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha, needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha) || '' }}
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
@@ -1553,6 +1554,7 @@ jobs:
       # The merge commit whose tree the adopted digests realize — the
       # identity the src- stamp below records.
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      SOLVER_SHA: ${{ needs.prepare.outputs.solver_revision }}
       # Same value as PROD_TAG, under the name the byte-identical
       # verify-half scripts read (the verify job calls it TAG).
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -1775,6 +1777,75 @@ jobs:
               --output text 2>/dev/null || true)"
             if [[ "$final" != "${spec_digest[$image]}" ]]; then
               echo "::error::adopt: $repository:$PROD_TAG re-verification failed after aliasing; RERUN THIS RUN to resume."
+              exit 1
+            fi
+          done
+          # The protected support-service deploy rail accepts only exact
+          # sha-<full-commit> tags. Canonical-worker additionally binds the
+          # reviewed solver commit in its tag. A speculative adoption must
+          # mint these aliases onto the same verified digests as PROD_TAG;
+          # otherwise app and web can deploy while broker, harness, and the
+          # worker remain on an older release. This phase starts only after
+          # every prod alias re-verifies, so any failure is committed and
+          # fails loud. A rerun resumes each immutable alias idempotently.
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::adopt: SOURCE_SHA is not a full commit; refusing exact deploy tags."
+            exit 1
+          fi
+          if [[ ! "$SOLVER_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::adopt: SOLVER_SHA is not a full commit; refusing the canonical-worker deploy tag."
+            exit 1
+          fi
+          for image in app broker canonical-worker harness web; do
+            repository="leaf-platform-$image"
+            deploy_tag="sha-$SOURCE_SHA"
+            if [ "$image" = "canonical-worker" ]; then
+              deploy_tag="sha-$SOURCE_SHA-solver-$SOLVER_SHA"
+            fi
+            existing="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$deploy_tag" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ -n "$existing" && "$existing" != "None" && "$existing" != "${spec_digest[$image]}" ]]; then
+              echo "::error::adopt: $repository:$deploy_tag already points at a foreign digest."
+              exit 1
+            fi
+            if [ "$existing" != "${spec_digest[$image]}" ]; then
+              aliased=false
+              for attempt in 1 2 3; do
+                aws ecr put-image \
+                  --repository-name "$repository" \
+                  --image-tag "$deploy_tag" \
+                  --image-manifest "${spec_manifest[$image]}" >/dev/null 2>&1
+                rc=$?
+                if [[ "$rc" -eq 0 ]]; then
+                  aliased=true
+                  break
+                fi
+                raced="$(aws ecr batch-get-image \
+                  --repository-name "$repository" \
+                  --image-ids "imageTag=$deploy_tag" \
+                  --query 'images[0].imageId.imageDigest' \
+                  --output text 2>/dev/null || true)"
+                if [ "$raced" = "${spec_digest[$image]}" ]; then
+                  aliased=true
+                  break
+                fi
+                sleep $((attempt * 3))
+              done
+              if [ "$aliased" != "true" ]; then
+                echo "::error::adopt: could not attach $repository:$deploy_tag after 3 attempts; RERUN THIS RUN to resume."
+                exit 1
+              fi
+            fi
+            final="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$deploy_tag" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [ "$final" != "${spec_digest[$image]}" ]; then
+              echo "::error::adopt: $repository:$deploy_tag re-verification failed for exact deploy tag; RERUN THIS RUN to resume."
               exit 1
             fi
           done
