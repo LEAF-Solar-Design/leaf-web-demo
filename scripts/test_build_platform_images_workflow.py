@@ -1973,7 +1973,7 @@ def main() -> None:
     assert "continue-on-error" not in _keys_in(adopt_header)
     assert "trap on_exit EXIT" in adopt_block
     assert "COMMITTED=false" in adopt_block
-    assert adopt_block.count("RERUN THIS RUN") == 4
+    assert adopt_block.count("RERUN THIS RUN") == 2
     assert "positively absent" in adopt_block
     assert [
         _value_of(l)
@@ -1995,17 +1995,15 @@ def main() -> None:
     assert adopt_block.index("verify-speculative") < adopt_block.index(
         "aws ecr put-image"
     ), "no tag may be written before the manifest verifies"
-    # Exactly three writers: the release-tag alias loop, the exact deploy-tag
-    # alias loop, and the post-verify app src- identity stamp. Each writes a
-    # manifest the registry already verified against the adopted supply set.
-    assert adopt_block.count("aws ecr put-image") == 3
-    assert 'deploy_tag="sha-$SOURCE_SHA"' in adopt_block
-    assert 'deploy_tag="sha-$SOURCE_SHA-solver-$SOLVER_SHA"' in adopt_block
-    assert 'SOLVER_SHA: ${{ needs.prepare.outputs.solver_revision }}' in adopt_block
-    assert 're-verification failed for exact deploy tag' in adopt_block
+    # Exactly two writers: the release-tag alias loop and the post-verify app
+    # src- identity stamp. An adopted digest keeps its spec-* baked-identity
+    # witness. It must never receive sha-* because that namespace asserts the
+    # tag's commit was baked into the image, which is false for adoption.
+    assert adopt_block.count("aws ecr put-image") == 2
+    assert 'deploy_tag="sha-$SOURCE_SHA"' not in adopt_block
+    assert 'deploy_tag="sha-$SOURCE_SHA-solver-$SOLVER_SHA"' not in adopt_block
+    assert 're-verification failed for exact deploy tag' not in adopt_block
     assert adopt_block.index('--image-tag "$PROD_TAG"') < adopt_block.index(
-        '--image-tag "$deploy_tag"'
-    ) < adopt_block.index(
         '--image-tag "$src_tag"'
     ), "the src- stamp never precedes the release alias loop"
     assert "refusing to alias non-release tag" in adopt_block
