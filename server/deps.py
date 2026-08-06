@@ -174,9 +174,15 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
     file / bad JSON -> [] (never raises).
 
     The call-time read itself is the vendored mushy-fold core (mushy-code
-    extraction, 2026-08-06); tenant resolution above it stays this repo's."""
+    extraction, 2026-08-06); tenant resolution above it stays this repo's, and
+    so does the malformed-registry stderr diagnostic (injected via on_error so
+    operational log classification is unchanged — PR #474 review, P2)."""
     from _vendor.mushy_fold.registry import load_repo_registry_tools
-    return load_repo_registry_tools(tenant_repo_dir(tenant_id))
+
+    def _bad_registry(reg: Path, exc: Exception) -> None:
+        print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
+
+    return load_repo_registry_tools(tenant_repo_dir(tenant_id), on_error=_bad_registry)
 
 
 # in-memory authored registry (seeded from disk at startup).

@@ -35,9 +35,10 @@ WORKDIR /app
 COPY harness/package.json harness/package-lock.json /app/
 RUN npm ci
 
-# Source. scripts/git-worker.cjs is NOT compiled by tsc; gitWorker.js resolves it
-# at ../../../../scripts/git-worker.cjs relative to dist/src/ports/impl, i.e.
-# /app/scripts/git-worker.cjs — so it must live at the harness root.
+# Source. scripts/git-worker.cjs is NOT compiled by tsc; the vendored
+# gitWorker.js walks UPWARD from its own dist location until it finds a
+# scripts/git-worker.cjs, which from dist/src/vendor/... exits at /app —
+# so the worker script must live at the harness root (/app/scripts/).
 COPY harness/tsconfig.json harness/tsconfig.build.json /app/
 COPY harness/src/     /app/src/
 COPY harness/scripts/ /app/scripts/

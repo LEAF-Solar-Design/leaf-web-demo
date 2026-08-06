@@ -50,9 +50,13 @@ def sha256(path: Path) -> str:
 
 
 def tree_manifest(root: Path) -> dict[str, str]:
+    # Interpreter bytecode is a LOCAL, gitignored artifact: any process that
+    # imports the vendored package writes __pycache__ here. It is not vendored
+    # content, so it is neither pinned nor counted as drift.
     return {
         p.relative_to(root).as_posix(): sha256(p)
-        for p in sorted(root.rglob("*")) if p.is_file()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
     }
 
 
