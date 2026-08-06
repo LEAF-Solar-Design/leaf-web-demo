@@ -759,6 +759,58 @@ def test_json_integer_is_not_certified_equal_to_json_true(source, target):
     assert receipt["reconciled"] is False
 
 
+def _encode_json(text):
+    return json.dumps(
+        RECONCILE._comparable_value(RECONCILE.JSON, text),
+        sort_keys=True, default=RECONCILE._encode_exact,
+    )
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("0.10", "0.1"), ("1e2", "100"), ("100.0", "100"), ("1E+2", "100"),
+        ("-0", "0"), ("-0.0", "0"), ("0.0", "0"), ("1.000", "1"),
+        ('{"a":1e2}', '{"a":100}'),
+    ],
+)
+def test_equivalent_json_numbers_never_read_as_a_conflict(left, right):
+    """A gate that cries wolf gets overridden.
+
+    parse_float alone leaves JSON integers as Python int, so 100 and 1e2 -- the
+    SAME jsonb number written two ways -- would encode differently and report a
+    conflict that does not exist. Every number goes through Decimal and one
+    canonical form; -0 is folded to 0 because normalize() keeps the sign.
+    """
+    assert _encode_json(left) == _encode_json(right)
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("0.1", "0.10000000000000001"),
+        ("1", "1.0000000000000000000000001"),
+        ("100", "1000"),
+        ('{"a":0.1}', '{"a":0.10000000000000001}'),
+        ("1", '"1"'),
+        ("true", '"true"'),
+        ("null", '"null"'),
+    ],
+)
+def test_different_json_values_never_certify_equal(left, right):
+    assert _encode_json(left) != _encode_json(right)
+
+
+def test_nan_and_infinity_are_refused_as_invalid_json():
+    """jsonb rejects them; Python's json.loads accepts them by default."""
+    for text in ("NaN", "Infinity", "-Infinity", '{"a": NaN}'):
+        with pytest.raises(ValueError):
+            RECONCILE._json_scalars(text)
+    assert RECONCILE._invalid_json_defects({"data_json": "NaN"}, ("data_json",)) == [
+        "invalid_json:data_json"
+    ]
+
+
 def test_comparable_values_keep_distinguishable_states_apart():
     # Compare the ENCODED form, which is what _comparable_row actually uses:
     # the tagged structures still contain Python values, where 1 == True.

@@ -194,6 +194,15 @@ def _is_locked_error(error: sqlite3.OperationalError) -> bool:
     return "locked" in message or "busy" in message
 
 
+def _reject_json_constant(name: str) -> Any:
+    """JSON has no NaN or Infinity, and jsonb rejects them.
+
+    Python's ``json.loads`` accepts them anyway, which would let text through
+    here that then fails at INSERT. Refuse it so it is reported as invalid.
+    """
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def _json_scalars(text: str) -> Any:
     """Parse JSON without losing numeric precision.
 
@@ -201,20 +210,35 @@ def _json_scalars(text: str) -> Any:
     values ``0.1`` and ``0.10000000000000001`` both become Python ``0.1`` and
     compare equal. PostgreSQL stores JSONB numbers as arbitrary-precision
     ``numeric`` and keeps them distinct, so that collapse lets ``reconcile()``
-    exit 0 while the stores genuinely differ. ``Decimal`` preserves the exact
-    value.
+    exit 0 while the stores genuinely differ.
+
+    ``parse_int`` matters as much as ``parse_float``, and for the opposite
+    reason. ``parse_float`` alone leaves JSON integers as Python ``int``, so
+    ``100`` and ``1e2`` -- the SAME jsonb number, written differently by the two
+    stores -- would encode as ``100`` and ``"1E+2"`` and be reported as a
+    conflict that does not exist. A gate that cries wolf gets overridden, so
+    every number goes to ``Decimal`` and through one canonical form.
     """
-    return json.loads(text, parse_float=Decimal)
+    return json.loads(
+        text,
+        parse_float=Decimal,
+        parse_int=Decimal,
+        parse_constant=_reject_json_constant,
+    )
 
 
 def _encode_exact(value: Any) -> Any:
     """JSON-encode a Decimal by its canonical numeric form.
 
-    ``normalize()`` strips trailing-zero noise (``0.10`` and ``0.1`` are the
-    same JSONB number and must not read as a conflict) while keeping genuinely
-    different values apart.
+    ``normalize()`` collapses the ways one number can be written -- ``0.10``,
+    ``100.0``, ``1e2`` -- so equivalent values do not read as conflicts, while
+    keeping genuinely different values apart. Zero is special-cased because
+    ``Decimal('-0').normalize()`` keeps its sign, and ``-0`` and ``0`` are the
+    same jsonb number.
     """
     if isinstance(value, Decimal):
+        if value == 0:
+            return ["num", "0"]
         return ["num", str(value.normalize())]
     raise TypeError(f"cannot encode {type(value).__name__} for comparison")
 
