@@ -325,6 +325,32 @@ def test_cloud_failure_with_explicit_local_fallback_records_provenance(monkeypat
     assert rec["result"]["execution_provenance"] == rec["provenance"]
 
 
+def test_cloud_success_preserves_broker_cad_timing_in_durable_provenance(monkeypatch):
+    job_id = _submit(aps_live=True)
+    timing = {
+        "contract": "leaf.cad-timing.v1",
+        "total_ms": 42,
+        "spans_ms": {"engine": 6},
+        "unavailable_spans": ["client_delivery"],
+    }
+    monkeypatch.setattr(
+        broker_client,
+        "run_via_broker",
+        lambda *a, **k: {
+            "ok": True,
+            "result": {"new_version": {"version": 2}},
+            "execution_provenance": {"cad_timing": timing},
+        },
+    )
+
+    jobs._run_job(job_id, "tenant-marathon", TOOL, {}, "demo", True)
+
+    rec = jobs.get_job(job_id)
+    assert rec["status"] == "complete"
+    assert rec["provenance"]["cad_timing"] == timing
+    assert rec["result"]["execution_provenance"] == rec["provenance"]
+
+
 def test_response_loss_never_invokes_local_fallback(monkeypatch):
     tool = dict(TOOL, allow_local_fallback=True)
     job_id = _submit(aps_live=True, tool=tool)

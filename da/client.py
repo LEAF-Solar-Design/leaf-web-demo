@@ -662,6 +662,77 @@ def _engine_seconds(status: dict) -> float | None:
     return None
 
 
+def _workitem_timing(status: dict, submitted_at: float | None = None) -> dict:
+    """Return the stable APS portion of the CAD timing record.
+
+    APS exposes aggregate lifecycle timestamps, but it does not split the
+    download-to-instructions interval into image pull and drawing fetch. Keep
+    those names explicit and unavailable so an operator never mistakes an
+    inferred value for a measured span.
+    """
+    stats = status.get("stats") if isinstance(status, dict) else None
+    stats = stats if isinstance(stats, dict) else {}
+
+    def _instant(name: str):
+        value = stats.get(name)
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+    instants = {
+        name: _instant(name)
+        for name in (
+            "timeQueued", "timeDownloadStarted", "timeInstructionsStarted",
+            "timeInstructionsEnded", "timeUploadEnded",
+        )
+    }
+    submitted = None
+    if isinstance(submitted_at, (int, float)):
+        try:
+            submitted = datetime.fromtimestamp(submitted_at, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            submitted = None
+
+    def _elapsed(start: str, end: str):
+        a, b = instants[start], instants[end]
+        if a is None or b is None or b < a:
+            return None
+        return int(round((b - a).total_seconds() * 1000))
+
+    spans = {
+        "submit": (
+            int(round((instants["timeQueued"] - submitted).total_seconds() * 1000))
+            if submitted is not None and instants["timeQueued"] is not None
+            and instants["timeQueued"] >= submitted else None
+        ),
+        "queue": _elapsed("timeQueued", "timeDownloadStarted"),
+        "task_start": _elapsed("timeDownloadStarted", "timeInstructionsStarted"),
+        "engine": _elapsed("timeInstructionsStarted", "timeInstructionsEnded"),
+        "output_upload": _elapsed("timeInstructionsEnded", "timeUploadEnded"),
+    }
+    unavailable = []
+    for name in (
+        "submit", "queue", "task_start", "image_pull", "drawing_fetch", "engine",
+        "output_upload",
+    ):
+        if name in {"image_pull", "drawing_fetch"} or spans.get(name) is None:
+            unavailable.append(name)
+    return {
+        "contract": "leaf.cad-timing.aps.v1",
+        "spans_ms": spans,
+        "accounted_ms": (
+            int(round((instants["timeUploadEnded"] - submitted).total_seconds() * 1000))
+            if submitted is not None and instants["timeUploadEnded"] is not None
+            and instants["timeUploadEnded"] >= submitted
+            else _elapsed("timeQueued", "timeUploadEnded")
+        ),
+        "unavailable_spans": unavailable,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # High-level §5 interface
 # --------------------------------------------------------------------------- #

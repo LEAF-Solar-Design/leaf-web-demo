@@ -1134,6 +1134,12 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     env = holder.get("env") or {}
     if env.get("ok"):
         provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local"}
+        embedded = env.get("execution_provenance")
+        cad_timing = embedded.get("cad_timing") if isinstance(embedded, dict) else None
+        if (isinstance(cad_timing, dict)
+                and cad_timing.get("contract") == "leaf.cad-timing.v1"
+                and isinstance(cad_timing.get("spans_ms"), dict)):
+            provenance["cad_timing"] = cad_timing
         env = dict(env)
         env["execution_provenance"] = provenance
         _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
