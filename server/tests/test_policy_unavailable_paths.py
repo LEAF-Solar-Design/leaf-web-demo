@@ -46,6 +46,9 @@ def _assert_policy_unavailable(response, required: str) -> None:
             "error_code": "INTERNAL",
             "message": "entitlement policy is unavailable; request refused (fail closed).",
             "retryable": True,
+            "retry_class": "backoff",
+            "actor": "service",
+            "next_action": "Wait a short time, then retry the request.",
         },
         "degraded_mode": False,
     }
