@@ -56,6 +56,7 @@ COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
+COPY scripts/reconcile_sessions_authority.py /app/scripts/reconcile_sessions_authority.py
 COPY server/start-app.sh /app/server/start-app.sh
 RUN chmod 0500 /app/server/start-app.sh
 
