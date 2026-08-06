@@ -67,6 +67,7 @@ for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
 
 import tools_fallback as fb  # noqa: E402,F401  (compat: builtins delegate here)
 import entitlements  # noqa: E402  (F10: broker-side tier re-check; IMPORT/CALL only)
+import drawing_identity  # noqa: E402
 from envelopes import (  # noqa: E402
     DEFAULT_HTTP_STATUS,
     ErrorCode,
@@ -1268,7 +1269,8 @@ def _resolve_live_dwg(dwg: str) -> Path:
         raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
 
     root = DATA_DIR.resolve(strict=True)
-    candidate = DATA_DIR / f"{dwg}.dwg"
+    registry_dwg = drawing_identity.source_id(dwg)
+    candidate = DATA_DIR / f"{registry_dwg}.dwg"
     if candidate.is_symlink():
         raise ValueError("dwg symlinks are not allowed")
     try:
@@ -2633,7 +2635,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # Now an uploaded/extracted drawing runs on ITS real intake, and an
     # unknown/unextracted one fails closed (ensure_demo_drawing's guards
     # raise -> honest BAD_PARAMS).
-    store_dwg = (write_loop.DEMO_DRAWING_ID if req.dwg == "rooftop_demo" else req.dwg)
+    store_dwg = drawing_identity.store_id(req.dwg)
     if req.dwg_version is not None or store_dwg != write_loop.DEMO_DRAWING_ID:
         # VERSION-PINNED read, or a NON-DEFAULT drawing at head: load through
         # the SAME versioned store the write branch uses (da/store.py) —

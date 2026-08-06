@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 import broker_client
 import deps
+import drawing_identity
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -44,11 +45,14 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
     APS_LIVE=1 extraction crosses the same internal broker boundary as tool
     runs. The app process never calls the APS client or reads its credential.
     """
+    identity = drawing_identity.curated_identity(dwg)
+    store_dwg = drawing_identity.store_id(dwg)
+    source_dwg = drawing_identity.source_id(dwg)
     if deps.APS_LIVE:
         import write_loop  # noqa: PLC0415 - lazy, keeps module import surface
 
         try:
-            intake = _stored_drawing_intake(str(tenant), dwg)
+            intake = _stored_drawing_intake(str(tenant), store_dwg)
         except write_loop.ProofStateUnreadable as exc:
             return error_response(
                 ErrorCode.INTERNAL, str(exc), retryable=True,
@@ -68,9 +72,9 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
                 f"{broker_client.broker_url()}/broker/extract",
                 json={
                     "tenant_id": str(tenant),
-                    "dwg": dwg,
+                    "dwg": source_dwg,
                     "ledger_event_key": broker_client.extract_event_key(
-                        str(tenant), dwg),
+                        str(tenant), source_dwg),
                 },
                 headers=broker_client.broker_headers(),
                 timeout=600,
@@ -86,7 +90,7 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
         if response.status_code >= 400:
             return JSONResponse(status_code=response.status_code, content=body)
         return deps.tenant_echo(body, tenant)
-    if dwg != "rooftop_demo":
+    if identity is None:
         # §19 (review round 1, BLOCKER): this offline branch used to IGNORE
         # `dwg` and serve the cached DEMO intake for ANY name — for an
         # uploaded drawing id that is fabricated data labeled as the user's
