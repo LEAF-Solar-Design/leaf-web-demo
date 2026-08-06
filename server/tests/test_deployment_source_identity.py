@@ -117,6 +117,7 @@ def test_app_manifest_requires_durable_runtime_and_build_identity():
         "LEAF_BUILD_REVISION_REQUIRED",
         "LEAF_GUEST_CAP_STORE",
         "LEAF_GUEST_STORE_DIR",
+        "LEAF_JOBS_STORE",
         "LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED",
     } <= required
     broker_manifest = json.loads(
