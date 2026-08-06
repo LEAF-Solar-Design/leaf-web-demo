@@ -100,20 +100,22 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     assert output.exists() and output.stat().st_size > 0, (
         applied.stdout + applied.stderr
     )
-
-    (tmp_path / "extract.scr").write_text(
-        build_scr("families.txt"), encoding="ascii", newline="",
+    (tmp_path / "inspect.scr").write_text(
+        build_scr("output-intake.txt"), encoding="ascii", newline="",
     )
-    extracted = subprocess.run(
-        [str(ACCORECONSOLE), "/i", str(output), "/s", str(tmp_path / "extract.scr")],
+    inspected = subprocess.run(
+        [
+            str(ACCORECONSOLE), "/i", str(output),
+            "/s", str(tmp_path / "inspect.scr"),
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=90,
         check=False,
     )
-    families = tmp_path / "families.txt"
-    assert extracted.returncode == 0, extracted.stdout + extracted.stderr
+    families = tmp_path / "output-intake.txt"
+    assert inspected.returncode == 0, inspected.stdout + inspected.stderr
     assert families.exists() and families.stat().st_size > 0
 
     intake = parse(families, "canary")

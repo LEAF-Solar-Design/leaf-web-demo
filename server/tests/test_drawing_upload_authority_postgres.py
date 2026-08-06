@@ -226,15 +226,16 @@ class _LiveWriteDa:
     def finalize_scratch_upload(self, _object_key, upload_key):
         assert upload_key == "upload-key"
 
-    def download_scratch_object(self, _object_key):
+    def download_scratch_object(self, object_key):
+        if object_key.endswith(".txt"):
+            return b"LAYER|Updated\n"
         return self.source + b"-updated"
 
     def delete_scratch_object(self, _object_key):
         pass
 
     def extract(self, local_path):
-        assert Path(local_path).read_bytes() == self.source + b"-updated"
-        return {"layers": ["Updated"], "polylines": []}
+        raise AssertionError("live writes must not launch a second extraction")
 
     def _engine_seconds(self, _status):
         return 1.0

@@ -679,14 +679,15 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
             assert upload_key == "upload-key"
 
         def download_scratch_object(self, object_key):
+            if object_key.endswith(".txt"):
+                return b"LAYER|Updated\n"
             return raw + b"updated"
 
         def delete_scratch_object(self, object_key):
             self.deleted.append(object_key)
 
         def extract(self, local_path):
-            assert Path(local_path).read_bytes() == raw + b"updated"
-            return {"layers": ["Updated"], "polylines": []}
+            raise AssertionError("live writes must not launch a second extraction")
 
         def _engine_seconds(self, status):
             return 1.0
@@ -705,7 +706,7 @@ def test_live_write_stages_filesystem_blob_in_broker_owned_aps_scratch():
     assert status == 200
     assert env["result"]["new_version"]["version"] == 2
     assert backend.get(store.drawing_version_key(tenant, drawing, 2)) == raw + b"updated"
-    assert len(da.deleted) == 3
+    assert len(da.deleted) == 4
     assert all(key.startswith(f"t/{tenant}/") for key in da.deleted)
 
 
@@ -763,9 +764,11 @@ def test_live_write_publication_failure_reports_committed_truth(fault, readable)
             self.submissions += 1
             return {"id": "wi-publication", "status": "success"}
         def finalize_scratch_upload(self, *_args): pass
-        def download_scratch_object(self, _key): return raw + b"-updated"
+        def download_scratch_object(self, key):
+            return b"LAYER|Updated\n" if key.endswith(".txt") else raw + b"-updated"
         def delete_scratch_object(self, _key): pass
-        def extract(self, _path): return {"layers": ["Updated"], "polylines": []}
+        def extract(self, _path):
+            raise AssertionError("live writes must not launch a second extraction")
         def _engine_seconds(self, _status): return 1.0
 
     da = DA()
@@ -804,7 +807,7 @@ def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
     def run(tenant):
         backend = store.InMemoryBackend()
         drawing = "demo"
-        raw = (tenant + "-dwg").encode()
+        raw = b"AC1032" + (tenant + "-dwg").encode()
         backend.put(store.drawing_version_key(tenant, drawing, 1), raw)
         backend.put(
             store.manifest_key(tenant, drawing),
@@ -847,10 +850,12 @@ def test_live_write_scratch_keys_are_unique_within_one_second(monkeypatch):
                 pass
 
             def download_object(self, key):
+                if key.endswith(".txt"):
+                    return b"LAYER|Updated\n"
                 return raw + b"-out"
 
             def extract(self, path):
-                return {"layers": [], "polylines": []}
+                raise AssertionError("live writes must not launch a second extraction")
 
             def _engine_seconds(self, status):
                 return 0
