@@ -136,11 +136,15 @@ concurrency:
   # winning run then queued HERE behind the doomed one (run 31059550767
   # waited 278s and started 1s after its predecessor completed; the first
   # organic burst wasted ~100 runner-minutes across runs 30979773615,
-  # 31058884757, 31059053864, 31059285091). Cancelling changes nothing
-  # that ships: a cancelled run never triggers the relay dispatch (its
-  # conclusion is not success) and mints no supply set, so at worst it
-  # leaves inert partial prod-*/adopt tags no deploy rail accepts, plus a
-  # thinner buildcache chain the nearest-ancestor fallback already covers.
+  # 31058884757, 31059053864, 31059285091). Cancelling creates no deploy
+  # path: the relay dispatches only a run whose conclusion is success, and
+  # manual promotion's verifier requires a completed successful release
+  # run. It CAN leave inert residue behind: a run cancelled after its
+  # verify/adopt leg uploaded the supply set leaves that artifact minted
+  # (nothing consumes an artifact of a non-successful run), and a run
+  # cancelled mid-matrix or mid-adopt leaves partial prod-*/adopt tags no
+  # deploy rail accepts, plus a thinner buildcache chain the
+  # nearest-ancestor fallback already covers.
   # Accepted residual: a push can cancel an in-progress NON-push run in
   # this group (promote, draft-PR build); both are rare, operator-attended,
   # and cheap to re-dispatch, which beats splitting the group they share.
