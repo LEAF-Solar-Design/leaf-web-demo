@@ -708,11 +708,12 @@ def build_suites() -> List[Suite]:
         # keeps that cwd OFF sys.path, so the repo's platform/ package cannot
         # shadow the stdlib during pytest plugin import — the window before
         # executor/conftest.py runs and appends the repo root for `executor.*`.
-        # Floor 106 is the Windows executed count (112 collected − 2 opt-in
-        # Postgres skips − 4 Windows-only environment skips), measured
-        # 2026-08-05. Linux CI executes 110 (the POSIX/chmod/symlink probes
-        # run there) and reports upward drift — the same min-across-
-        # environments convention as server-customization-adversarial.
+        # Floor 109 is the Windows executed count (115 collected − 2 opt-in
+        # Postgres skips − 4 Windows-only environment skips), re-measured
+        # 2026-08-06 after the three SlotRebindObservabilityTests cases.
+        # Linux CI executes 113 (the POSIX/chmod/symlink probes run there) and
+        # reports upward drift — the same min-across-environments convention
+        # as server-customization-adversarial.
         # The two PostgreSQL adapter integration tests gate on the suite's own
         # POSTGRES_CONTROL_PLANE_TEST_URL opt-in (never a general
         # DATABASE_URL), so they skip on the hermetic gate by design:
@@ -721,7 +722,7 @@ def build_suites() -> List[Suite]:
         Suite("executor", "executor unit tests (bootstrap+control-plane+runtime+registry+bench)",
               "pytest", REPO,
               [sys.executable, "-P", "-m", "pytest", "executor", "-q", "--color=no",
-               "-r", "s", "-p", "no:cacheprovider"], 106,
+               "-r", "s", "-p", "no:cacheprovider"], 109,
               allowed_skip_reasons=(
                   r"set POSTGRES_CONTROL_PLANE_TEST_URL to run the PostgreSQL "
                   r"integration test",

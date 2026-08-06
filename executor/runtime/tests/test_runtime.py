@@ -5,6 +5,7 @@ import os
 import signal
 import time
 import unittest
+from unittest.mock import patch
 
 from executor.runtime import child
 from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
@@ -300,3 +301,79 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotEqual(before["slot-1"], after["slot-1"])
         self.assertEqual(before["slot-2"], after["slot-2"])
         self.assertEqual("succeeded", self.invoke(healthy)["status"])
+
+
+class SlotRebindObservabilityTests(unittest.TestCase):
+    """A rebind failing after the caller was answered must never be silent.
+
+    invoke() replaces a slot on DEADLINE_EXCEEDED and on a child that died
+    mid-invocation, then rebinds the assignment synchronously.  Both are
+    ordinary production events.  If that rebind fails the session is gone for
+    good, so the loss has to reach the container log plane.
+    """
+
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=self.events.append,
+        )
+
+    def tearDown(self) -> None:
+        self.supervisor.close()
+
+    def assigned(self, source: str = COUNTER_SOURCE):
+        docs = documents(source)
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        return docs
+
+    def failures(self) -> list[dict]:
+        return [item for item in self.events if item["event_type"] == "slot_rebind_failed"]
+
+    def test_rebind_timeout_is_reported_instead_of_silently_dropping_the_binding(self) -> None:
+        docs = self.assigned()
+        assignment_id = docs["assignment"]["assignment_id"]
+        slot = self.supervisor._find_assignment(assignment_id)
+        self.assertEqual(1, self.supervisor.health()["bound_slots"])
+
+        def refuse(_slot, _timeout):
+            raise TimeoutError("child did not answer")
+
+        with patch.object(self.supervisor, "_receive", refuse):
+            self.supervisor._replace(slot, restore=True)
+
+        # The binding really is lost; that unrecoverable state is the thing
+        # being reported, not a transient the caller could retry through.
+        self.assertEqual(0, self.supervisor.health()["bound_slots"])
+        self.assertIsNone(self.supervisor._find_assignment(assignment_id))
+        [record] = self.failures()
+        self.assertEqual("TimeoutError", record["reason"])
+        self.assertEqual(assignment_id, record["assignment_id"])
+        self.assertEqual(docs["assignment"]["tenant_id"], record["tenant_id"])
+        self.assertEqual("slot-1", record["slot_id"])
+        self.assertIn("instant_executor_rebind_failures_total 1", self.supervisor.metrics())
+
+    def test_rebind_rejected_by_the_child_is_reported_as_its_own_reason(self) -> None:
+        docs = self.assigned()
+        assignment_id = docs["assignment"]["assignment_id"]
+        slot = self.supervisor._find_assignment(assignment_id)
+        # The replacement child re-runs the captured source.  Make that load
+        # fail the way a poisoned artifact would, with the real transport.
+        slot.source = "raise ValueError('artifact no longer loads')"
+
+        self.supervisor._replace(slot, restore=True)
+
+        self.assertEqual(0, self.supervisor.health()["bound_slots"])
+        [record] = self.failures()
+        self.assertEqual("source_rejected", record["reason"])
+        self.assertEqual(assignment_id, record["assignment_id"])
+        self.assertIn("instant_executor_rebind_failures_total 1", self.supervisor.metrics())
+
+    def test_a_successful_rebind_keeps_the_binding_and_reports_nothing(self) -> None:
+        docs = self.assigned()
+        slot = self.supervisor._find_assignment(docs["assignment"]["assignment_id"])
+        self.supervisor._replace(slot, restore=True)
+        self.assertEqual(1, self.supervisor.health()["bound_slots"])
+        self.assertEqual([], self.failures())
+        self.assertIn("instant_executor_rebind_failures_total 0", self.supervisor.metrics())

@@ -57,3 +57,50 @@ This is a trusted, read-only code profile. It is not hostile-code isolation and
 does not claim live SLO evidence. The prototype does not use Redis, PostgreSQL,
 broker, Docker, queues, object storage, or any credential-bearing client on the
 direct invocation path.
+
+## Contention timeouts: reviewed 2026-08-06, deliberately unchanged
+
+PR #468 turned three hardcoded waits into constructor knobs and widened them
+**for tests only**, leaving every deployed default alone. This is the review of
+whether the deployed path needed the same headroom. It did not, and the knobs
+keep their production defaults:
+
+- `DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0` (child boot + source-load ack)
+- `HttpRuntimeClient.request_timeout_seconds = 5.0`
+- `HostRegistrationConfig.request_timeout_seconds = 5.0`
+
+Measured, not assumed: the exact `_replace(restore=True)` rebind (cold CPython
+spawn, then an immediate load with no warm-up grace) runs **0.199-0.400s,
+median 0.304s** over 12 iterations at `pool_size=8` on a quiet 20-core host.
+That is roughly 5x headroom under 2.0s. An attempt to reproduce a breach under
+host saturation did **not** succeed and is reported as unproven rather than as
+absence of risk: the harness's own positive control slowed only x1.12, so it was
+not creating real contention.
+
+Two things argue against widening anyway:
+
+1. The deployed task is small (staging Fargate `cpu=512`, i.e. 0.5 vCPU,
+   running `--pool-size 8`), so headroom there is genuinely tighter than the
+   measurement above. That is an inference from task sizing, not an observed
+   breach; nothing in production has ever reported one.
+2. The two paths have opposite failure economics, and only one is a problem.
+   On `assign`, a timeout **raises**, the control plane sees the failure and
+   can place the session elsewhere: failing fast is correct, and widening would
+   turn a fast failure into a slow one and mask a genuinely wedged child. On
+   the post-replacement rebind, a timeout used to be **swallowed** and the
+   binding lost for good.
+
+So the fix is to the silence, not to the number. `_replace` now reports both
+abandoned-rebind paths (the transport/timeout exception, and a child that
+rejects the reloaded source) through `runtime_event_sink` as a
+`slot_rebind_failed` JSON line on the container log plane, and counts them in
+`instant_executor_rebind_failures_total` on `/metrics`. Revisit the 2.0s
+default when that counter or that log line shows a real breach, which is now
+possible to see.
+
+**Known gap, outside this repo.** The four `Leaf/InstantExecution` CloudWatch
+alarms defined in the terraform repo have no emitter: the namespace has never
+received a datapoint, and all four sit in `OK` solely because
+`treat_missing_data = "notBreaching"`. Nothing here publishes CloudWatch
+metrics, so `slot_rebind_failed` is **discoverable in CloudWatch Logs, not
+alarmed**. Closing that needs a metric emitter and is infrastructure work.
