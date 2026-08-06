@@ -16,6 +16,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
+from envelopes import ErrorCode, error_obj
+
 
 router = APIRouter()
 
@@ -227,9 +229,19 @@ def _clean_input(payload: DemandCaptureInput) -> tuple[str, str, Optional[str]]:
 
 
 def _error(status_code: int, message: str, *, retryable: bool = False) -> JSONResponse:
+    if status_code == 429:
+        error_code = ErrorCode.QUOTA_EXCEEDED
+    elif status_code >= 500:
+        error_code = ErrorCode.INTERNAL
+    else:
+        error_code = ErrorCode.BAD_PARAMS
     return JSONResponse(
         status_code=status_code,
-        content={"ok": False, "error": {"message": message, "retryable": retryable}},
+        content={
+            "ok": False,
+            "error": error_obj(error_code, message, retryable),
+            "degraded_mode": False,
+        },
     )
 
 

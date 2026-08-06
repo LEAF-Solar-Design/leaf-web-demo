@@ -72,6 +72,7 @@ from envelopes import (  # noqa: E402
     DEFAULT_HTTP_STATUS,
     ErrorCode,
     err_envelope,
+    error_obj,
     install_error_handlers,
     ok_envelope,
     with_envelope_fields,
@@ -1815,9 +1816,12 @@ def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
         # The failure branch carried NO attempt at all, so a stale attempt's failure
         # callback could fail a newer attempt with no record of which attempt failed.
         # It runs through the same guard and the same provenance builder.
-        return jobs.complete_callback(job_id, "failed", error={
-            "error_code": ErrorCode.WORKITEM_FAILED, "message": message, "retryable": False,
-        }, provenance=_provenance(callback_status=raw_status))
+        return jobs.complete_callback(
+            job_id,
+            "failed",
+            error=error_obj(ErrorCode.WORKITEM_FAILED, message, retryable=False),
+            provenance=_provenance(callback_status=raw_status),
+        )
     raise ValueError("callback status must be a terminal Design Automation status")
 
 
@@ -2601,9 +2605,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                     entry["engine_seconds"] = cost.get("engine_seconds")
                     entry["usd_est"] = cost.get("usd_est")
                 if not env.get("ok"):
-                    env["error"] = env.get("error") or {
-                        "error_code": ErrorCode.WORKITEM_FAILED,
-                        "message": "WorkItem did not succeed", "retryable": True}
+                    env["error"] = env.get("error") or error_obj(
+                        ErrorCode.WORKITEM_FAILED,
+                        "WorkItem did not succeed",
+                        retryable=True,
+                    )
                     return env, DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED]
                 return env, 200
             except EgressBlocked as exc:

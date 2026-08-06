@@ -2,7 +2,7 @@
 Extended result/error envelope (server CONTRACT-ADDENDUM section 10).
 
 Every server response body carries at minimum:
-    error: null | {error_code, message, retryable}
+    error: null | {error_code, message, retryable, retry_class, actor, next_action}
     degraded_mode: bool
 
 The section-3 run envelope is EXTENDED (existing success fields unchanged):
@@ -93,9 +93,75 @@ DEFAULT_HTTP_STATUS: Dict[str, int] = {
 }
 
 
+_NON_RETRY_GUIDANCE: Dict[str, tuple[str, str, str]] = {
+    ErrorCode.UNKNOWN_TOOL: (
+        "user", "after_action", "Choose an available tool and submit again."),
+    ErrorCode.BAD_PARAMS: (
+        "user", "after_action", "Review the inputs, correct them, and submit again."),
+    ErrorCode.APS_UNAVAILABLE: (
+        "operator", "never", "Contact support so the CAD service can be restored."),
+    ErrorCode.BROKER_UNREACHABLE: (
+        "operator", "never", "Contact support so the execution broker can be restored."),
+    ErrorCode.WORKITEM_FAILED: (
+        "operator", "never", "Contact support with the job details for review."),
+    ErrorCode.TIMEOUT: (
+        "operator", "never", "Contact support with the timed-out job details."),
+    ErrorCode.TENANT_DISABLED: (
+        "workspace_admin", "after_action", "Enable the workspace before trying again."),
+    ErrorCode.UNAUTHENTICATED: (
+        "user", "after_action", "Sign in, then repeat the request."),
+    ErrorCode.FORBIDDEN: (
+        "workspace_admin", "after_action", "Ask a workspace admin to grant the required access."),
+    ErrorCode.GRANT_REQUIRED: (
+        "user", "after_action", "Connect an approved assistant account, then retry."),
+    ErrorCode.ENTITLEMENT_REQUIRED: (
+        "workspace_admin", "after_action", "Enable this capability for the workspace, then retry."),
+    ErrorCode.QUOTA_EXCEEDED: (
+        "workspace_admin", "after_action", "Raise the workspace limit or wait for it to reset."),
+    ErrorCode.INTERNAL: (
+        "operator", "never", "Contact support with the displayed error identifier."),
+    ErrorCode.TURN_IN_PROGRESS: (
+        "user", "after_action", "Wait for the active turn to finish, then retry."),
+    ErrorCode.SESSION_NOT_FOUND: (
+        "user", "after_action", "Refresh the workspace to start a new session."),
+    ErrorCode.LLM_QUOTA_EXHAUSTED: (
+        "workspace_admin", "after_action", "Restore assistant quota for the workspace, then retry."),
+    ErrorCode.LLM_RATE_LIMITED: (
+        "service", "after_action", "Wait a short time, then retry the request."),
+    ErrorCode.CONFIRMATION_EXPIRED: (
+        "user", "after_action", "Request a new confirmation and approve it."),
+}
+
+_RETRY_GUIDANCE: Dict[str, tuple[str, str, str]] = {
+    ErrorCode.QUOTA_EXCEEDED: (
+        "user", "backoff", "Wait for the workspace limit to reset, then retry."),
+    ErrorCode.TURN_IN_PROGRESS: (
+        "user", "backoff", "Wait for the active turn to finish, then retry."),
+    ErrorCode.LLM_QUOTA_EXHAUSTED: (
+        "workspace_admin", "after_action", "Restore assistant quota for the workspace, then retry."),
+    ErrorCode.CONFIRMATION_EXPIRED: (
+        "user", "after_action", "Request a new confirmation and approve it."),
+}
+
+
 def error_obj(error_code: str, message: str, retryable: bool) -> Dict[str, Any]:
     assert error_code in ErrorCode.ALL, f"unknown error_code {error_code!r}"
-    return {"error_code": error_code, "message": str(message), "retryable": bool(retryable)}
+    can_retry = bool(retryable)
+    if can_retry:
+        actor, retry_class, next_action = _RETRY_GUIDANCE.get(
+            error_code,
+            ("service", "backoff", "Wait a short time, then retry the request."),
+        )
+    else:
+        actor, retry_class, next_action = _NON_RETRY_GUIDANCE[error_code]
+    return {
+        "error_code": error_code,
+        "message": str(message),
+        "retryable": can_retry,
+        "retry_class": retry_class,
+        "actor": actor,
+        "next_action": next_action,
+    }
 
 
 def ok_envelope(

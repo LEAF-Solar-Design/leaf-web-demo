@@ -838,18 +838,16 @@ def test_the_correlation_id_is_opaque_and_cannot_carry_content():
     assert _ROUTE_BOOM not in response.text
 
 
-def test_the_id_bearing_envelope_is_still_contract_legal():
-    """Mechanical proof the ID needed no additive field.
+def test_the_id_bearing_envelope_keeps_the_actionable_error_contract():
+    """Mechanical proof the ID stays in the message while guidance is additive.
 
     contract/CONTRACT.md §10 REQUIRES {error_code, message, retryable} and freezes
     the error_code ENUM; `message` is declared only as `{"type": "string"}`, so
-    carrying the id inside it leaves the key set byte-identical.
+    carrying the id inside it leaves the original fields unchanged.
 
-    The schema check alone is necessary but NOT sufficient: envelope_schema.json
-    has no `additionalProperties: false`, and §10 explicitly permits additive
-    extension, so validation would accept extra keys. The key-by-key assertions
-    below are what actually pin the surface, so a future widening of what the
-    client sees fails here rather than passing validation quietly.
+    Section 10 permits additive extension. The key assertion below pins the
+    deliberate action-owner, retry-class, and next-action fields so any further
+    widening still fails here instead of passing validation quietly.
     """
     import jsonschema  # lazy: the local platform/ package shadows what it imports
 
@@ -859,7 +857,10 @@ def test_the_id_bearing_envelope_is_still_contract_legal():
     jsonschema.Draft202012Validator(schema).validate(body)
 
     assert set(body) == set(err_envelope(ErrorCode.INTERNAL, "x", False))
-    assert set(body["error"]) == {"error_code", "message", "retryable"}
+    assert set(body["error"]) == {
+        "error_code", "message", "retryable",
+        "retry_class", "actor", "next_action",
+    }
     assert body["error"]["error_code"] == ErrorCode.INTERNAL
     assert isinstance(body["error"]["message"], str)
     assert body["error"]["retryable"] is False
