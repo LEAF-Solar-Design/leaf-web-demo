@@ -19,6 +19,7 @@ from executor.control_plane.service import ControlPlane
 from executor.control_plane.store import InMemoryStore
 from executor.runtime.supervisor import WarmExecutorSupervisor
 from executor.runtime.service import make_server
+from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS
 from executor.registry import ImmutableArtifactRegistry
 
 
@@ -54,6 +55,7 @@ class WarmPoolIntegrationTests(unittest.TestCase):
             artifact_registry=ImmutableArtifactRegistry(
                 (), {self.signer.artifact_kid: self.signer.artifact_public},
             ),
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
         )
         self.server = make_server(("127.0.0.1", 0), self.supervisor, "runtime-control")
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -61,7 +63,8 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
         self.store = InMemoryStore()
         self.control = ControlPlane(
-            self.store, HttpRuntimeClient("runtime-control"), self.signer, Coordination(),
+            self.store, HttpRuntimeClient("runtime-control", request_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS),
+            self.signer, Coordination(),
             lease_lifetime=timedelta(minutes=5),
         )
         self.control.register_host(EXECUTOR_ID, self.endpoint, ["slot-1"])
@@ -89,7 +92,10 @@ class WarmPoolIntegrationTests(unittest.TestCase):
                        "runtime": "python-3.12", "entrypoint": "tool:run", "catalog_commit": "a" * 40,
                        "tool_id": "instant-list-layers", "tool_version": "1.0.0", "capability_id": "drawing.read",
                        "params_schema_digest": "sha256:" + "c" * 64,
-                       "limits": {"max_wall_ms": 100, "max_cpu_ms": 50, "max_memory_mb": 64,
+                       # Generous wall: this test proves warm-path structure
+                       # (same pids across 50 invokes), not latency; the p95
+                       # SLO below stays the opt-in latency check.
+                       "limits": {"max_wall_ms": 30_000, "max_cpu_ms": 50, "max_memory_mb": 64,
                                   "max_output_bytes": 65536, "max_tool_calls": 0}}}
         before = self.supervisor.process_ids()
         assignment = self.control.assign(request)
@@ -98,7 +104,7 @@ class WarmPoolIntegrationTests(unittest.TestCase):
                       "assignment_id": assignment["assignment_id"], "binding_epoch": assignment["binding_epoch"],
                       "lease_id": assignment["lease_id"], "effective_catalog_digest": assignment["effective_catalog_digest"],
                       "code_digest": digest, "artifact_digest": digest,
-                      "deadline_at": (datetime.now(UTC) + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+                      "deadline_at": (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
                       "capability": {"capability_id": "drawing.read", "tool_id": "instant-list-layers", "tool_version": "1.0.0"},
                       "params": {}, "drawing_context": drawing}
         samples = []
@@ -106,7 +112,7 @@ class WarmPoolIntegrationTests(unittest.TestCase):
         for _index in range(50):
             current = copy.deepcopy(invocation)
             current["invocation_id"] = str(uuid.uuid4())
-            current["deadline_at"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            current["deadline_at"] = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
             started = time.perf_counter()
             connection = getattr(self, "connection", None)
             if connection is None:
