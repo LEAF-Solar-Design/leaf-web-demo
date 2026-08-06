@@ -228,19 +228,36 @@ def _json_scalars(text: str) -> Any:
 
 
 def _encode_exact(value: Any) -> Any:
-    """JSON-encode a Decimal by its canonical numeric form.
+    """JSON-encode a Decimal in a canonical form, built WITHOUT rounding.
 
-    ``normalize()`` collapses the ways one number can be written -- ``0.10``,
-    ``100.0``, ``1e2`` -- so equivalent values do not read as conflicts, while
-    keeping genuinely different values apart. Zero is special-cased because
-    ``Decimal('-0').normalize()`` keeps its sign, and ``-0`` and ``0`` are the
-    same jsonb number.
+    The obvious spelling, ``str(value.normalize())``, is wrong here.
+    ``normalize()`` rounds to the active decimal context first, and the default
+    context precision is 28 significant digits, so
+    ``1.00000000000000000000000000001`` and
+    ``1.00000000000000000000000000002`` -- two valid, unequal jsonb numbers --
+    both come back as ``1``. PostgreSQL ``numeric`` holds far more than 28
+    digits, so that is a false pass in the one direction this gate exists to
+    prevent.
+
+    Building the form from ``as_tuple()`` touches no context: strip trailing
+    zero digits by hand (so ``0.10``, ``100.0`` and ``1e2`` still fold onto
+    their equivalents) and fold every zero, signed or not, onto ``"0"``.
     """
-    if isinstance(value, Decimal):
-        if value == 0:
-            return ["num", "0"]
-        return ["num", str(value.normalize())]
-    raise TypeError(f"cannot encode {type(value).__name__} for comparison")
+    if not isinstance(value, Decimal):
+        raise TypeError(f"cannot encode {type(value).__name__} for comparison")
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        # NaN / Infinity. _reject_json_constant keeps these out of a parsed
+        # document, so reaching here means a caller built one directly.
+        raise ValueError("cannot encode a non-finite number for comparison")
+    kept = list(digits)
+    while len(kept) > 1 and kept[-1] == 0:
+        kept.pop()
+        exponent += 1
+    if kept == [0]:
+        return ["num", "0"]
+    mantissa = "".join(str(digit) for digit in kept)
+    return ["num", f"{'-' if sign else ''}{mantissa}E{exponent}"]
 
 
 def _normalize(kind: str, value: Any) -> Any:

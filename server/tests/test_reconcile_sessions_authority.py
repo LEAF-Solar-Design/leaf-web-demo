@@ -772,6 +772,11 @@ def _encode_json(text):
         ("0.10", "0.1"), ("1e2", "100"), ("100.0", "100"), ("1E+2", "100"),
         ("-0", "0"), ("-0.0", "0"), ("0.0", "0"), ("1.000", "1"),
         ('{"a":1e2}', '{"a":100}'),
+        # Equivalence must still hold BEYOND the context precision, where the
+        # canonical form is built by hand rather than by normalize().
+        ("1.00000000000000000000000000001000",
+         "1.00000000000000000000000000001"),
+        ("0.00000000000000000000000000000000000000", "0"),
     ],
 )
 def test_equivalent_json_numbers_never_read_as_a_conflict(left, right):
@@ -791,6 +796,13 @@ def test_equivalent_json_numbers_never_read_as_a_conflict(left, right):
         ("0.1", "0.10000000000000001"),
         ("1", "1.0000000000000000000000001"),
         ("100", "1000"),
+        # More than 28 significant digits: Decimal.normalize() rounds to the
+        # active context precision before stripping zeros, so both of these
+        # come back as "1" and would certify equal.
+        ("1.00000000000000000000000000001", "1.00000000000000000000000000002"),
+        ('{"n":1.00000000000000000000000000001}',
+         '{"n":1.00000000000000000000000000002}'),
+        ("-1.00000000000000000000000000001", "1.00000000000000000000000000001"),
         ('{"a":0.1}', '{"a":0.10000000000000001}'),
         ("1", '"1"'),
         ("true", '"true"'),
