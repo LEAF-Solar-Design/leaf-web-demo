@@ -1585,13 +1585,17 @@ def main() -> None:
         _value_of(l) for l in build_block.splitlines() if _key_of(l) == "tags"
     ]
     assert tag_values == ["|"], (
-        "the release push tags are one block scalar: the release tag plus "
-        "the app-only src- identity stamp")
-    tags_lines = build_block[build_block.index("tags: |"):].splitlines()[1:3]
+        "the release push tags are one block scalar: release tag, baked "
+        "identity witness, and the app-only src- stamp")
+    tags_lines = build_block[build_block.index("tags: |"):].splitlines()[1:4]
     assert tags_lines[0].strip() == (
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
     ), "the release push tag targets the release repository, never a cache"
     assert tags_lines[1].strip() == (
+        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ "
+        "needs.prepare.outputs.source_sha }}"
+    ), "every full-build digest carries the sha-<40> blue/green identity witness"
+    assert tags_lines[2].strip() == (
         "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
         "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
         "needs.prepare.outputs.source_sha) || '' }}"
@@ -2058,6 +2062,8 @@ def main() -> None:
     ]
     assert src_tag_lines == [
         "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}",
+        "${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ "
+        "needs.prepare.outputs.source_sha }}",
         "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
         "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
         "needs.prepare.outputs.source_sha) || '' }}",
