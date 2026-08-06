@@ -26,7 +26,7 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
+import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import {
@@ -239,6 +239,7 @@ export default function App() {
     reloadHandoffRef.current = bootstrapCheckoutReloadHandoff({
       holder: initialHolderRef.current,
       drawingId: REQUESTED_DRAWING_ID,
+      deferForAuthCallback: isAuthRedirectCallback(),
     })
   }
   // The server returns this bearer proof once when the session takes the lock.
@@ -875,6 +876,25 @@ export default function App() {
       setCheckoutBusy(false)
     }
   }, [mock, drawingState, loadCheckout])
+
+  // Prefer ending checkout authority before leaving this origin for Auth0. If
+  // the release cannot complete, login still proceeds and the marked, one-use
+  // auth-return handoff above preserves the capability behind the Web Lock.
+  const onLogin = useCallback(async () => {
+    if (!mock && capabilityRef.current) {
+      const did = resolveCheckoutDrawingId({
+        drawingState,
+        requestedDrawingId: REQUESTED_DRAWING_ID,
+      })
+      try {
+        await releaseCheckout(did, capabilityRef.current)
+        capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
+      } catch { /* the auth-return handoff remains the fail-closed fallback */ }
+    }
+    await login()
+  }, [mock, drawingState])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -2311,7 +2331,7 @@ export default function App() {
             onSignIn={() => {
               // The redirect to Auth0 follows; the pagehide beacon carries this.
               track('gate.choice', { choice: 'sign_in' })
-              login()
+              onLogin()
             }}
           />
         )}

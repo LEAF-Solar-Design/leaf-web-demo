@@ -33,6 +33,9 @@ export const HOLDER_STORAGE_KEY = 'leaf.checkout_holder'
 export const HOLDER_CHANNEL_NAME = 'leaf.checkout_holder_claim'
 export const CHECKOUT_RELOAD_HANDOFF_KEY = 'leaf.checkout_reload_handoff'
 export const CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS = 30_000
+export const CHECKOUT_AUTH_RETURN_KEY = 'leaf.checkout_auth_return'
+export const CHECKOUT_AUTH_COMPLETE_KEY = 'leaf.checkout_auth_complete'
+export const CHECKOUT_AUTH_RETURN_MAX_AGE_MS = 15 * 60 * 1000
 
 // Last-resort id for when there is no usable storage at all (SSR, or a browser
 // with storage disabled). Module-level so repeated calls in one runtime agree
@@ -86,6 +89,96 @@ export function stageCheckoutReloadHandoff({
   }
 }
 
+// Auth0 leaves this origin and may keep the user on its account chooser long
+// enough for the ordinary 30-second reload handoff to expire. Mark only an
+// intentional login redirect. The callback consumes this marker once, and the
+// checkout capability still has to pass the holder, drawing, age, and Web Lock
+// checks before App.jsx installs it.
+export function stageCheckoutAuthReturn({
+  storage = defaultStorage(),
+  now = () => Date.now(),
+} = {}) {
+  if (!storage) return false
+  try {
+    storage.setItem(CHECKOUT_AUTH_RETURN_KEY, JSON.stringify({
+      v: 1,
+      created_at_ms: now(),
+    }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearCheckoutAuthReturn(storage = defaultStorage()) {
+  if (!storage) return
+  try { storage.removeItem(CHECKOUT_AUTH_RETURN_KEY) } catch { /* already unavailable */ }
+}
+
+export function completeCheckoutAuthReturn({
+  storage = defaultStorage(),
+  now = () => Date.now(),
+} = {}) {
+  if (!consumeCheckoutAuthReturn({ eligible: true, storage, now })) return false
+  try {
+    storage.setItem(CHECKOUT_AUTH_COMPLETE_KEY, JSON.stringify({
+      v: 1,
+      created_at_ms: now(),
+    }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function consumeCheckoutAuthComplete({
+  eligible = false,
+  storage = defaultStorage(),
+  now = () => Date.now(),
+  maxAgeMs = CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS,
+} = {}) {
+  if (!storage) return false
+  let raw = null
+  try {
+    raw = storage.getItem(CHECKOUT_AUTH_COMPLETE_KEY)
+    storage.removeItem(CHECKOUT_AUTH_COMPLETE_KEY)
+  } catch {
+    return false
+  }
+  if (!eligible || !raw) return false
+  try {
+    const marker = JSON.parse(raw)
+    const age = now() - Number(marker?.created_at_ms)
+    return marker?.v === 1 && Number.isFinite(age) && age >= 0 && age <= maxAgeMs
+  } catch {
+    return false
+  }
+}
+
+export function consumeCheckoutAuthReturn({
+  eligible = false,
+  storage = defaultStorage(),
+  now = () => Date.now(),
+  maxAgeMs = CHECKOUT_AUTH_RETURN_MAX_AGE_MS,
+} = {}) {
+  if (!storage) return false
+  let raw = null
+  try {
+    raw = storage.getItem(CHECKOUT_AUTH_RETURN_KEY)
+    clearCheckoutAuthReturn(storage)
+  } catch {
+    return false
+  }
+  if (!eligible || !raw) return false
+  try {
+    const marker = JSON.parse(raw)
+    const age = now() - Number(marker?.created_at_ms)
+    return marker?.v === 1 && Number.isFinite(age) && age >= 0 && age <= maxAgeMs
+  } catch {
+    return false
+  }
+}
+
 export function consumeCheckoutReloadHandoff({
   holder,
   drawingId,
@@ -132,19 +225,42 @@ export function bootstrapCheckoutReloadHandoff({
   storage = defaultStorage(),
   now = () => Date.now(),
   navigationType = null,
+  deferForAuthCallback = false,
 } = {}) {
   const navType = navigationType || (() => {
     try { return performance.getEntriesByType('navigation')?.[0]?.type || 'navigate' } catch { return 'navigate' }
   })()
-  const scope = `${String(holder || '')}\u0000${String(drawingId || '')}\u0000${navType}`
+  const scope = `${String(holder || '')}\u0000${String(drawingId || '')}\u0000${navType}\u0000${deferForAuthCallback ? 'auth' : 'normal'}`
   if (runtimeReloadHandoff !== undefined && runtimeReloadHandoffScope === scope) {
     return runtimeReloadHandoff
   }
   runtimeReloadHandoffScope = scope
-  const consumed = consumeCheckoutReloadHandoff({ holder, drawingId, storage, now })
+  // The callback URL does not yet carry the validated appState.returnTo drawing.
+  // Leave both markers untouched until Auth0 validates the callback and the app
+  // reloads at the exact restored URL.
+  if (deferForAuthCallback && navType !== 'reload') {
+    runtimeReloadHandoff = null
+    return runtimeReloadHandoff
+  }
+  const authReloadAllowed = consumeCheckoutAuthComplete({
+    eligible: navType === 'reload',
+    storage,
+    now,
+  })
+  const maxAgeMs = authReloadAllowed
+    ? CHECKOUT_AUTH_RETURN_MAX_AGE_MS
+    : CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS
+  const consumed = consumeCheckoutReloadHandoff({
+    holder, drawingId, storage, now, maxAgeMs,
+  })
   // A duplicated/new tab reports "navigate", not "reload". Its cloned storage
   // must never transfer checkout authority, even if it copied a valid handoff.
-  runtimeReloadHandoff = navType === 'reload' ? consumed : null
+  // Auth0 authority is not redeemed on its callback navigation. The callback
+  // first validates the token and restores appState.returnTo, then marks its
+  // clean reload. That reload reaches this branch with the exact drawing id.
+  runtimeReloadHandoff = navType === 'reload'
+    ? (consumed ? { ...consumed, authorityMaxAgeMs: maxAgeMs } : null)
+    : null
   return runtimeReloadHandoff
 }
 
@@ -166,8 +282,13 @@ export function holdCheckoutReloadAuthority({
   onAcquired = null,
   onError = null,
   now = () => Date.now(),
-  maxAgeMs = CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS,
+  maxAgeMs = null,
 } = {}) {
+  const authorityMaxAgeMs = Number.isFinite(maxAgeMs)
+    ? maxAgeMs
+    : (Number.isFinite(handoff?.authorityMaxAgeMs)
+        ? handoff.authorityMaxAgeMs
+        : CHECKOUT_RELOAD_HANDOFF_MAX_AGE_MS)
   if (!handoff?.capability || !handoff?.holder || !handoff?.drawingId ||
       !locks || typeof locks.request !== 'function') {
     return { active: false, stop() {}, acquired: Promise.resolve(false), done: Promise.resolve() }
@@ -188,7 +309,7 @@ export function holdCheckoutReloadAuthority({
       if (stopped) { settleAcquired(false); return }
       if (Number.isFinite(handoff.createdAtMs)) {
         const age = now() - handoff.createdAtMs
-        if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) {
+        if (!Number.isFinite(age) || age < 0 || age > authorityMaxAgeMs) {
           settleAcquired(false)
           if (typeof onError === 'function') onError(new Error('checkout reload handoff expired while waiting'))
           return

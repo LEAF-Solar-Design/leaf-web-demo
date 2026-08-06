@@ -50,6 +50,7 @@ test('shortcut focus and roving tab arrows operate the visible controls', async 
   await installFixture(page)
   await page.goto('/try')
   await expect(page.getByTestId('operator-surface')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   const operator = page.getByRole('tab', { name: 'Operator' })
   await operator.focus()
   await page.keyboard.press('ArrowRight')

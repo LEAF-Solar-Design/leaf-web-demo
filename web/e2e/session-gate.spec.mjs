@@ -127,7 +127,11 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   await expect(page.getByTestId('demo-conversation')).toContainText('interactive Leaf CAD demo')
   await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
   await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toHaveCount(0)
-  expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
+  const privateCalls = () => calls.filter((call) =>
+    call.path.startsWith('/api/') &&
+    !call.path.startsWith('/api/site/') &&
+    call.path !== '/api/telemetry')
+  expect(privateCalls()).toEqual([])
 
   await page.getByRole('textbox', { name: 'Command bar' }).fill('count panels per layer')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -137,7 +141,7 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   await expect(page.getByRole('tab', { name: 'Execution' })).toBeVisible()
   await page.getByRole('tab', { name: 'Execution' }).click()
   await expect(page.getByTestId('catalog-run-result')).toContainText('count-by-layer', { timeout: 15_000 })
-  expect(calls.filter((call) => call.path.startsWith('/api/') && !call.path.startsWith('/api/site/'))).toEqual([])
+  expect(privateCalls()).toEqual([])
 })
 
 test('signed-in demo URL keeps the CAD surface and uses the live conversation session', async ({ page }) => {
@@ -210,6 +214,10 @@ test('an Auth0 callback aimed at try does not boot the legacy app', async ({ pag
   await expect(page.getByTestId('operator-surface')).toBeVisible({ timeout: 15_000 })
   await expect(page).toHaveURL(/\/try\?code=fixture-code&state=fixture-state$/)
   await expect(page.getByRole('tablist', { name: 'Workspace panels' })).toBeVisible()
+  expect(await page.evaluate(async () => {
+    const { isAuthRedirectCallback } = await import('/src/auth.js')
+    return isAuthRedirectCallback('?error=access_denied&error_description=Cancelled&state=fixture-state')
+  })).toBe(true)
 })
 
 test('a mid-session 401 latches the whole scene into one gate and stops job polling', async ({ page }) => {

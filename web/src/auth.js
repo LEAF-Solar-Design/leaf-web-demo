@@ -14,6 +14,11 @@
 // http://localhost:8080 callback.
 
 import { track, flushNow } from './telemetry.js'
+import {
+  stageCheckoutAuthReturn,
+  clearCheckoutAuthReturn,
+  completeCheckoutAuthReturn,
+} from './checkoutIdentity.js'
 
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
@@ -69,7 +74,22 @@ export async function login() {
   const c = await client()
   if (c) {
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
-    await c.loginWithRedirect({ appState: { returnTo } })
+    stageCheckoutAuthReturn()
+    try {
+      await c.loginWithRedirect({ appState: { returnTo } })
+    } catch (error) {
+      clearCheckoutAuthReturn()
+      throw error
+    }
+  }
+}
+
+export function isAuthRedirectCallback(search = window.location.search) {
+  try {
+    const query = new URLSearchParams(search)
+    return query.has('state') && (query.has('code') || query.has('error'))
+  } catch {
+    return false
   }
 }
 
@@ -91,7 +111,7 @@ export function safeLocalReturnTo(value, fallback = '/') {
 export async function handleRedirectCallback() {
   if (!authConfigured) return false
   const q = window.location.search
-  if (!/[?&]code=/.test(q) || !/[?&]state=/.test(q)) return false
+  if (!isAuthRedirectCallback(q)) return false
   const c = await client()
   if (!c) return false
   let returnTo = window.location.pathname
@@ -101,13 +121,22 @@ export async function handleRedirectCallback() {
     returnTo = result?.appState?.returnTo || returnTo
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
     if (token) localStorage.setItem(JWT_KEY, token)
+    if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)
     return !!token
-  } catch {
+  } catch (error) {
+    // Auth0's authentication error type carries the transaction appState. Restore
+    // its exact local target and permit one clean reload so a checkout fallback
+    // is not stranded when the user cancels Universal Login.
+    const recoverableAuthError =
+      typeof error?.state === 'string' && !!error.state &&
+      error?.appState && typeof error.appState === 'object'
+    if (recoverableAuthError) returnTo = error.appState.returnTo || returnTo
+    const reloadForCheckout = recoverableAuthError && completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(false)
-    return false
+    return reloadForCheckout
   }
 }
 

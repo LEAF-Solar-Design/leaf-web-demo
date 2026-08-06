@@ -112,7 +112,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     }
   }
 
-  const mutate = async (operation) => {
+  const mutate = async (operation, { installCapability = true } = {}) => {
     if (state.mock || !state.drawingId || mutationBusy) return null
     mutationBusy = true
     const drawing = state.drawingId
@@ -123,7 +123,9 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         ? await services.take(drawing, holderAtStart, capability)
         : await services.release(drawing, capability)
       if (operation === 'take') {
-        if (result?.acquired && result.checkout_capability) capability = result.checkout_capability
+        if (result?.acquired && result.checkout_capability) {
+          capability = installCapability ? result.checkout_capability : null
+        }
         else if (!result?.acquired) capability = null
       } else {
         capability = null
@@ -164,8 +166,20 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     },
     refresh,
     take: () => mutate('take'),
+    takeDeferred: () => mutate('take', { installCapability: false }),
     release: () => mutate('release'),
     getCapability: () => capability,
+    restoreCapability(nextCapability) {
+      if (state.mock || !state.drawingId || !state.holder ||
+          typeof nextCapability !== 'string' || !nextCapability) return false
+      capability = nextCapability
+      publish({})
+      return true
+    },
+    clearCapability() {
+      capability = null
+      publish({})
+    },
   }
 }
 

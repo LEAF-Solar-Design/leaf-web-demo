@@ -5,6 +5,7 @@ import {
   resolveCheckoutDrawingId,
   storeDrawingIdForSource,
 } from '../../../src/controllers/checkout/createCheckoutController.js'
+import { secureTakenCheckoutAuthority } from '../../../src/controllers/checkout/useCheckoutController.js'
 
 test('resolves checkout reads against the active drawing identity', () => {
   expect(storeDrawingIdForSource('rooftop_demo')).toBe('demo')
@@ -137,4 +138,96 @@ test('the opaque capability is used for refresh and release but never enters sna
   ])
   expect(controller.getCapability()).toBeNull()
   expect(JSON.stringify(controller.getSnapshot())).not.toContain('opaque-proof')
+})
+
+test('an Auth0 return can restore exact authority without exposing it in state', () => {
+  const controller = createCheckoutController({
+    drawingId: 'drawing', holder: 'ours',
+    services: {
+      loadVersions: async () => ({ checkout: { holder: 'ours' } }),
+      take: async () => null,
+      release: async () => null,
+    },
+  })
+  expect(controller.restoreCapability('opaque-auth-return')).toBe(true)
+  expect(controller.getCapability()).toBe('opaque-auth-return')
+  expect(JSON.stringify(controller.getSnapshot())).not.toContain('opaque-auth-return')
+  controller.clearCapability()
+  expect(controller.getCapability()).toBeNull()
+  controller.setScope({ drawingId: null, holder: 'ours', mock: false })
+  expect(controller.restoreCapability('must-not-install')).toBe(false)
+})
+
+test('a post-take Web Lock failure clears and releases authority', async () => {
+  for (const { active, releaseSucceeds } of [
+    { active: false, releaseSucceeds: true },
+    { active: true, releaseSucceeds: true },
+    { active: true, releaseSucceeds: false },
+  ]) {
+    let checkout = null
+    const released = []
+    const services = {
+      loadVersions: async () => ({ checkout }),
+      take: async () => {
+        checkout = { holder: 'ours' }
+        return { acquired: true, checkout_capability: `proof-${active}-${releaseSucceeds}` }
+      },
+      release: async (_drawingId, capability) => {
+        released.push(capability)
+        if (!releaseSucceeds) throw new Error('release unavailable')
+        checkout = null
+        return { released: true }
+      },
+    }
+    const controller = createCheckoutController({ drawingId: 'drawing', holder: 'ours', services })
+    const snapshots = []
+    const unsubscribe = controller.subscribe(() => snapshots.push(controller.getSnapshot()))
+    const result = await controller.takeDeferred()
+    expect(controller.getCapability()).toBeNull()
+    expect(snapshots.some((snapshot) => snapshot.heldByUs && !snapshot.writeLocked)).toBe(false)
+    const authority = await secureTakenCheckoutAuthority({
+      controller, result, drawingId: 'drawing', holder: 'ours', services,
+      holdAuthority: () => ({
+        active,
+        acquired: Promise.resolve(false),
+        stop() {},
+      }),
+    })
+    expect(authority).toBeNull()
+    expect(released).toEqual([`proof-${active}-${releaseSucceeds}`])
+    expect(controller.getCapability()).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ heldByUs: false, writeLocked: !releaseSucceeds })
+    expect(snapshots.some((snapshot) => snapshot.heldByUs && !snapshot.writeLocked)).toBe(false)
+    unsubscribe()
+  }
+})
+
+test('a deferred take publishes authority only from the Web Lock callback', async () => {
+  let checkout = null
+  const services = {
+    loadVersions: async () => ({ checkout }),
+    take: async () => {
+      checkout = { holder: 'ours' }
+      return { acquired: true, checkout_capability: 'deferred-proof' }
+    },
+    release: async () => null,
+  }
+  const controller = createCheckoutController({ drawingId: 'drawing', holder: 'ours', services })
+  const snapshots = []
+  controller.subscribe(() => snapshots.push(controller.getSnapshot()))
+  const result = await controller.takeDeferred()
+  expect(controller.getCapability()).toBeNull()
+  expect(snapshots.some((snapshot) => snapshot.heldByUs && !snapshot.writeLocked)).toBe(false)
+
+  const authority = await secureTakenCheckoutAuthority({
+    controller, result, drawingId: 'drawing', holder: 'ours', services,
+    holdAuthority: ({ handoff, onAcquired }) => {
+      onAcquired(handoff)
+      return { active: true, acquired: Promise.resolve(true), stop() {} }
+    },
+  })
+  expect(authority).not.toBeNull()
+  expect(controller.getCapability()).toBe('deferred-proof')
+  expect(controller.getSnapshot()).toMatchObject({ heldByUs: true, writeLocked: false })
+  expect(snapshots.filter((snapshot) => snapshot.heldByUs && !snapshot.writeLocked)).toHaveLength(1)
 })
