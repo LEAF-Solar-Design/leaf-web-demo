@@ -3,17 +3,39 @@
  *
  * The deep behavior (dedupe key, timeout, secret scrubbing) is tested
  * upstream in mushy-code; tests are not vendored. What THIS repo owns is the
- * wiring: the strangler-shim path resolves after a vendor sync, the sink
- * stays unwired without its env pair (authoring identical), and a dead queue
- * can never reject into the authoring path (fire-and-forget).
+ * wiring, and the defect this file exists to catch is a sink wired into a
+ * composition root the deployment never calls: `startReal()` in server.ts is
+ * NOT the production path. The container runs `scripts/start-harness.sh`,
+ * which execs `node dist/scripts/serve.js`, whose `buildPorts()` is the real
+ * composition root. A sink wired only into `startReal()` reads as correct in
+ * every unit test and captures nothing in production.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
-import type { UpstreamCapture } from "../src/ports/index.js";
+import { AuthorLoop } from "../src/agent/authorLoop.js";
+import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
+import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
+import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
+import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
+import type { HarnessPorts, UpstreamCapture } from "../src/ports/index.js";
 import {
   HttpUpstreamSink,
   upstreamSinkFromEnv,
 } from "../src/ports/impl/httpUpstreamSink.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const HARNESS_ROOT = join(HERE, "..");
+const FIXTURE = join(HERE, "fixtures", "tenant-repo");
+
+/** Every file that composes a live harness. Adding a launcher adds a row. */
+const COMPOSITION_ROOTS = [
+  join(HARNESS_ROOT, "scripts", "serve.ts"), // the CANONICAL production path
+  join(HARNESS_ROOT, "src", "server.ts"),
+];
 
 function event(): UpstreamCapture {
   return {
@@ -26,6 +48,41 @@ function event(): UpstreamCapture {
     captured_at: new Date().toISOString(),
   };
 }
+
+function makePorts(overrides: Partial<HarnessPorts> = {}): HarnessPorts {
+  return {
+    oauth: new FakeOAuthGrantProvider(),
+    tenantRepo: new FakeTenantRepoProvider(FIXTURE),
+    broker: new FakeBrokerApsClient(),
+    agentRunner: new FakeAgentRunner(),
+    ...overrides,
+  };
+}
+
+describe("upstream sink is wired into the path the deployment actually runs", () => {
+  it("the container entrypoint leads to serve.ts, not server.ts", () => {
+    const startScript = readFileSync(
+      join(HARNESS_ROOT, "scripts", "start-harness.sh"),
+      "utf8",
+    );
+    expect(startScript).toContain("dist/scripts/serve.js");
+    // If this ever stops being true, the composition-root list below is stale.
+    expect(startScript).not.toContain("dist/src/server.js");
+  });
+
+  it("every composition root wires the sink", () => {
+    for (const root of COMPOSITION_ROOTS) {
+      const source = readFileSync(root, "utf8");
+      expect(source, `${root} composes a harness`).toContain("createHarness(");
+      expect(source, `${root} must wire upstreamSinkFromEnv`).toContain(
+        "upstreamSinkFromEnv",
+      );
+      expect(source, `${root} must pass the port through`).toContain(
+        "upstreamSink",
+      );
+    }
+  });
+});
 
 describe("upstream sink wiring", () => {
   it("stays unwired without the URL+token pair", () => {
@@ -73,5 +130,53 @@ describe("upstream sink wiring", () => {
     const body = JSON.parse(String(calls[0].init.body)) as UpstreamCapture;
     expect(body.platform).toBe("leaf-web-demo");
     expect(body.dedupe_key).toBeTruthy();
+  });
+});
+
+describe("authoring is unobservable to sink health", () => {
+  it("a sink that NEVER settles does not delay or fail authoring", async () => {
+    let released!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    const loop = new AuthorLoop(
+      makePorts({ upstreamSink: { capture: () => pending } }),
+    );
+    // If capture were awaited anywhere on the authoring path, this never
+    // resolves and the test times out.
+    const response = await loop.buildLegacyAuthOff(
+      "tenant-a",
+      "count panels by layer",
+    );
+    expect(response.tool.name).toBeTruthy();
+    released();
+  });
+
+  it("a sink that THROWS synchronously does not fail authoring", async () => {
+    const loop = new AuthorLoop(
+      makePorts({
+        upstreamSink: {
+          capture: () => {
+            throw new Error("sink exploded");
+          },
+        },
+      }),
+    );
+    const response = await loop.buildLegacyAuthOff(
+      "tenant-a",
+      "count panels by layer",
+    );
+    expect(response.tool.name).toBeTruthy();
+  });
+
+  it("the ports object is unchanged when the env is unset", () => {
+    const base = makePorts();
+    const sink = upstreamSinkFromEnv({});
+    const composed: HarnessPorts = {
+      ...base,
+      ...(sink ? { upstreamSink: sink } : {}),
+    };
+    expect(Object.keys(composed).sort()).toEqual(Object.keys(base).sort());
+    expect(composed).not.toHaveProperty("upstreamSink");
   });
 });

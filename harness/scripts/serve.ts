@@ -70,6 +70,7 @@ import {
   type SessionStoreHandle,
 } from "../src/ports/impl/sessionStoreFactory.js";
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
@@ -186,11 +187,21 @@ function buildPorts(): HarnessPorts {
     autoProvisionFrom: TENANT_FIXTURE,
   });
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
+  // Optional platform-improvement capture. Requires UPSTREAM_SINK_URL +
+  // UPSTREAM_SINK_TOKEN (UPSTREAM_SINK_PLATFORM labels the events); absent
+  // either one the port stays unwired and this object is unchanged. The sink
+  // is fire-and-forget by contract, so a slow or dead queue is unobservable
+  // from the authoring path.
+  const upstreamSink = upstreamSinkFromEnv();
+  log(upstreamSink
+    ? "[harness] upstream capture: ON (authoring events pushed fire-and-forget to the operator queue)"
+    : "[harness] upstream capture: off (UPSTREAM_SINK_URL/UPSTREAM_SINK_TOKEN unset)");
   return {
     oauth,
     grantAdmin: grantStore,
     tenantRepo,
     broker,
+    ...(upstreamSink ? { upstreamSink } : {}),
     agentRunner: authorRunnerMode() === "fake"
       ? new FakeAgentRunner()
       : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
