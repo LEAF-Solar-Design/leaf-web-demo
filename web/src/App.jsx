@@ -29,6 +29,7 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { cadTimingRows } from './cadTimingPresentation.js'
 import {
   getSessionHolderId, claimHolderId, lockState,
   stageCheckoutReloadHandoff, bootstrapCheckoutReloadHandoff,
@@ -53,7 +54,9 @@ import DemoTour from './demo/DemoTour.jsx'
 import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
-import { THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills } from './converse.js'
+import {
+  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+} from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
 import useJobController from './controllers/useJobController.js'
@@ -305,6 +308,33 @@ export default function App() {
   // without a build or a deploy. LIVE only, like the agent tier: mock mode has
   // no tenant to read for, and applying a theme there would be theatre.
   const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
+  const [pendingApprovalsUnavailable, setPendingApprovalsUnavailable] = useState(false)
+  useEffect(() => {
+    if (mock || !agentSessionId) {
+      setPendingApprovalCount(0)
+      setPendingApprovalsUnavailable(false)
+      return undefined
+    }
+    let closed = false
+    const refresh = async () => {
+      try {
+        const approvals = await listPendingApprovals(agentSessionId)
+        if (!closed) {
+          setPendingApprovalCount(approvals.length)
+          setPendingApprovalsUnavailable(false)
+        }
+      } catch {
+        if (!closed) setPendingApprovalsUnavailable(true)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(refresh, 5000)
+    return () => {
+      closed = true
+      window.clearInterval(timer)
+    }
+  }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
   const drawingErrorRef = useRef(null)
@@ -546,6 +576,7 @@ export default function App() {
     toggleFamily,
     openTool: setOpenTool,
     resetTransient: resetCatalogTransient,
+    openAgentMode,
     clearAgentMode,
     clearAgentBanner,
     setPrompt: onPromptChange,
@@ -1837,6 +1868,7 @@ export default function App() {
       if (env?.error) rows.push(typeof env.error === 'string'
         ? `error ${env.error}`
         : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+      rows.push(...cadTimingRows(env))
       setDrawer({
         title: `${rec.tool || job.tool || 'job'} · provenance`,
         rows,
@@ -1876,6 +1908,7 @@ export default function App() {
     if (env.error) rows.push(typeof env.error === 'string'
       ? `error ${env.error}`
       : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+    rows.push(...cadTimingRows(env))
     setDrawer({
       title: 'Run · provenance',
       rows,
@@ -2186,6 +2219,21 @@ export default function App() {
               behind Details -> the DT2 session drawer, per the standard. */}
           {canOpenCustomize && (
             <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+          )}
+          {!mock && agentSessionId && (
+            <button
+              type="button"
+              className="chip-act"
+              onClick={openAgentMode}
+              aria-label={`Pending approvals ${pendingApprovalCount}`}
+              title={pendingApprovalsUnavailable
+                ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
+                : 'Open pending approvals'}
+            >
+              Approvals
+              {pendingApprovalCount > 0 && <span className="key">{pendingApprovalCount}</span>}
+              {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
+            </button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
           {devControls && (
