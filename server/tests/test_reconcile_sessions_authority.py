@@ -713,7 +713,7 @@ def test_events_under_a_conflicting_session_are_never_inserted(source, target):
 
 
 @requires_database
-def test_last_seq_behind_its_event_stream_is_reported(source, target):
+def test_last_seq_out_of_step_with_its_event_stream_is_reported(source, target):
     """The eighth invariant: seq is allocated as last_seq+1, so last_seq must
     dominate the stream. Backfilling a stale last_seq makes both stores agree
     on a broken state that collides on the first turn after the flip."""
@@ -721,7 +721,7 @@ def test_last_seq_behind_its_event_stream_is_reported(source, target):
     source.event(session["session_id"], seq=1, advance_last_seq=False)
     receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
     sessions = receipt["tables"]["app_sessions"]
-    assert sessions["blocked_reasons"] == {"last_seq_behind_events": 1}
+    assert sessions["blocked_reasons"] == {"last_seq_mismatch": 1}
     assert receipt["inserted"]["app_sessions"] == 0
     assert receipt["reconciled"] is False
     assert _rows(target, "app_sessions", session_id=session["session_id"]) == []
@@ -838,6 +838,112 @@ def test_a_source_that_moves_mid_run_is_detected_not_certified(source, monkeypat
 
 
 @requires_database
+def test_an_event_whose_parent_exists_only_in_the_target_is_not_inserted(
+    source, target
+):
+    """A matching opaque session_id is not proof of ownership.
+
+    If SQLite holds an event for session `s` but no session row for `s`, and
+    PostgreSQL holds a target-only session `s` belonging to another tenant,
+    filing the event under it would invent a parent the source never claimed.
+    """
+    orphan_parent = _unique("target-only-session")
+    other_tenant = _unique("other-tenant")
+    with target.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_sessions (session_id, tenant_id, drawing_id, status,"
+            " created_at, updated_at, last_seq) VALUES (%s,%s,%s,'active',1.0,1.0,0)",
+            (orphan_parent, other_tenant, _unique("other-drawing")),
+        )
+    source.raw(
+        "INSERT INTO session_events (session_id,seq,turn_id,type,data_json,created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (orphan_parent, 1, "turn-x", "message", json.dumps({"a": 1}), 1.0),
+    )
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert receipt["tables"]["app_session_events"]["blocked_reasons"] == {
+        "orphan_event": 1
+    }
+    assert receipt["inserted"]["app_session_events"] == 0
+    assert receipt["reconciled"] is False
+    assert _rows(target, "app_session_events", session_id=orphan_parent) == []
+
+
+@requires_database
+def test_a_jsonb_string_is_not_certified_equal_to_a_jsonb_boolean(source, target):
+    """psycopg decodes JSONB '"true"' to the Python str "true".
+
+    Feeding that back through _json_value -- which exists to parse SQLite TEXT --
+    re-parses it into the boolean True, collapsing two different JSONB values.
+    """
+    session = source.session()
+    source.event(session["session_id"], seq=1, data_json=json.dumps(True))
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    with target.transaction() as conn:
+        # The JSON *string* "true", not the JSON boolean true.
+        conn.execute(
+            "UPDATE app_session_events SET data_json = %s::jsonb WHERE session_id = %s",
+            (json.dumps("true"), session["session_id"]),
+        )
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["tables"]["app_session_events"]["conflicting_count"] == 1
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+def test_type_drift_on_a_row_present_in_both_stores_is_a_conflict(source, target):
+    """The raw-type defect codes only run over source-only rows, so the
+    COMPARISON itself must not coerce, or a shared row drifts undetected."""
+    session = source.session()
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    # SQLite is dynamically typed; the target holds BIGINT 0.
+    source.raw("UPDATE sessions SET last_seq = 0.5 WHERE session_id = ?",
+               (session["session_id"],))
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["tables"]["app_sessions"]["conflicting_count"] == 1
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+def test_a_shared_session_violating_the_last_seq_invariant_fails_parity(
+    source, target
+):
+    """Both stores holding the SAME broken state is still broken.
+
+    seq is allocated as last_seq+1 in one transaction, so a consistent store
+    satisfies last_seq == max(seq, 0). A shared session that violates it
+    reconciles happily and then collides on the first turn after the flip.
+    """
+    session = source.session()
+    source.event(session["session_id"], seq=1)
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    # Drift BOTH stores to the same wrong value, so nothing else can catch it.
+    source.raw("UPDATE sessions SET last_seq = 0 WHERE session_id = ?",
+               (session["session_id"],))
+    with target.transaction() as conn:
+        conn.execute("UPDATE app_sessions SET last_seq = 0 WHERE session_id = %s",
+                     (session["session_id"],))
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["tables"]["app_sessions"]["conflicting_count"] == 0
+    assert receipt["tables"]["app_sessions"]["invariant_reasons"] == {
+        "last_seq_mismatch": 1
+    }
+    assert receipt["reconciled"] is False
+
+
+@requires_database
 def test_a_fractional_integer_is_reported_never_truncated(source, target):
     """SQLite is dynamically typed. int(3.5) is 3, which would compare equal to
     a target BIGINT 3 and certify a genuine difference as clean."""
@@ -845,9 +951,7 @@ def test_a_fractional_integer_is_reported_never_truncated(source, target):
     source.raw("UPDATE sessions SET last_seq = 3.5 WHERE session_id = ?",
                (session["session_id"],))
     receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
-    assert receipt["tables"]["app_sessions"]["blocked_reasons"] == {
-        "non_integral:last_seq": 1
-    }
+    assert "non_integral:last_seq" in receipt["tables"]["app_sessions"]["blocked_reasons"]
     assert receipt["inserted"]["app_sessions"] == 0
     assert _rows(target, "app_sessions", session_id=session["session_id"]) == []
 

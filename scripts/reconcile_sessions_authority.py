@@ -266,6 +266,8 @@ def _comparable_value(kind: str, value: Any) -> Any:
     if kind == JSON:
         if value is None:
             return ["sql_null"]
+        # Both sides arrive as text here (SQLite natively, PostgreSQL via
+        # ::text), so this parses once and compares like with like.
         return ["json", _session_store()._json_value(value)]
     if value is None:
         return None
@@ -273,9 +275,22 @@ def _comparable_value(kind: str, value: Any) -> Any:
         # repr round-trips a binary64 float exactly in Python 3.
         return ["f", repr(float(value))]
     if kind == INT:
-        return ["i", int(value)]
+        # NEVER int(value) here. int(3.5) is 3, so a SQLite REAL 3.5 would
+        # certify equal to a target BIGINT 3 -- and unlike the source-only
+        # defect codes, this path also covers rows present in BOTH stores,
+        # where nothing else would catch it. An unrepresentable value is
+        # tagged verbatim so it cannot collide with any clean integer.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return ["i", value]
+        return ["raw", repr(value)]
     if kind == BOOL:
-        return ["b", bool(value)]
+        # Same reasoning: bool(2) is True, which would certify equal to a
+        # target TRUE forever.
+        if isinstance(value, bool):
+            return ["b", value]
+        if isinstance(value, int) and value in (0, 1):
+            return ["b", bool(value)]
+        return ["raw", repr(value)]
     return ["t", value]
 
 
@@ -451,37 +466,39 @@ def _assert_target_columns(connection: Any) -> None:
             )
 
 
-_SQL_NULL_PROBE = "__sql_null__"
-
-
 def _postgres_snapshot(connection: Any) -> dict[str, list[dict[str, Any]]]:
-    """Snapshot the target, keeping JSONB ``null`` distinct from SQL NULL.
+    """Snapshot the target, reading every JSON column as ``::text``.
 
-    psycopg decodes ``'null'::jsonb`` and SQL NULL to the SAME Python ``None``,
-    so a plain SELECT cannot tell them apart, and treating them as equal would
-    let a genuinely different column certify clean. Ask the database directly
-    with ``IS NULL`` and re-render a JSONB null as the text ``"null"``, which is
-    exactly how SQLite stores it, so both sides reach ``_normalize`` in one
-    representation. The rendered row still contains only the declared columns
-    and stays JSON-serializable for ``authority_digest``.
+    Letting psycopg decode JSONB is wrong for a comparison, in two ways that
+    both certify differing rows as equal:
+
+    * It decodes ``'null'::jsonb`` and SQL NULL to the SAME Python ``None``,
+      although only the former satisfies a NOT NULL column.
+    * It decodes the JSONB *string* ``'"true"'`` to the Python ``str``
+      ``"true"``. Passing that back through ``_json_value`` -- which exists to
+      parse SQLite's TEXT -- re-parses it into the boolean ``True``, so a JSONB
+      string and a JSONB boolean become indistinguishable. The same collapse
+      hits ``"null"``, numeric strings, and strings holding serialized objects.
+
+    ``::text`` sidesteps both: it yields PostgreSQL's own canonical JSONB text,
+    which is exactly the shape SQLite stores, so ONE parse on each side compares
+    like with like. SQL NULL casts to SQL NULL and JSONB null casts to the text
+    ``'null'``, so the two stay distinct with no separate probe. Key order and
+    whitespace differences do not matter because both sides are parsed.
     """
     snapshot: dict[str, list[dict[str, Any]]] = {}
     for table, columns in TABLE_COLUMNS.items():
-        json_columns = [name for name, kind in columns.items() if kind == JSON]
-        selected = list(columns) + [
-            f"({name} IS NULL) AS {_SQL_NULL_PROBE}{name}" for name in json_columns
+        selected = ",".join(
+            f"{name}::text AS {name}" if kind == JSON else name
+            for name, kind in columns.items()
+        )
+        snapshot[table] = [
+            dict(row)
+            for row in connection.execute(
+                f"SELECT {selected} FROM {table} "
+                f"ORDER BY {','.join(_PRIMARY_KEYS[table])}"
+            ).fetchall()
         ]
-        rows = []
-        for raw in connection.execute(
-            f"SELECT {','.join(selected)} FROM {table} "
-            f"ORDER BY {','.join(_PRIMARY_KEYS[table])}"
-        ).fetchall():
-            row = {name: raw[name] for name in columns}
-            for name in json_columns:
-                if row[name] is None and not raw[f"{_SQL_NULL_PROBE}{name}"]:
-                    row[name] = "null"
-            rows.append(row)
-        snapshot[table] = rows
     return snapshot
 
 
@@ -692,6 +709,24 @@ def _analyze(
         if seq > highest_source_seq.get(session_id, 0):
             highest_source_seq[session_id] = seq
 
+    # The last_seq invariant is checked over EVERY source session, not only the
+    # source-only ones. append_event allocates seq as last_seq+1 and writes both
+    # in one transaction, so a consistent store always satisfies
+    # last_seq == max(seq, 0). A SHARED session violating it reconciles happily
+    # -- both stores hold the same broken state -- and then collides on the
+    # first turn after the flip, which is exactly the case a parity gate has to
+    # catch rather than bless.
+    invariant_violations: dict[str, dict[tuple[Any, ...], list[str]]] = {
+        table: {} for table in TABLE_COLUMNS
+    }
+    for key, entry in source_index["app_sessions"].items():
+        last_seq = entry["values"]["last_seq"]
+        if last_seq is None:
+            continue
+        expected = highest_source_seq.get(key[0], 0)
+        if last_seq != expected:
+            invariant_violations["app_sessions"][key] = ["last_seq_mismatch"]
+
     session_blocked: dict[tuple[Any, ...], list[str]] = {}
     for key, entry in session_only.items():
         row = entry["values"]
@@ -700,24 +735,31 @@ def _analyze(
             duplicated_identities=duplicated_identities,
             target_identities=target_identities,
         )
-        last_seq = row["last_seq"]
-        if last_seq is not None and highest_source_seq.get(key[0], 0) > last_seq:
-            defects.append("last_seq_behind_events")
+        if key in invariant_violations["app_sessions"]:
+            defects.append("last_seq_mismatch")
         if defects:
             session_blocked[key] = defects
     insertable["app_sessions"] = [
         entry["values"] for key, entry in session_only.items()
         if key not in session_blocked
     ]
-    # A session that will exist in the target once this run finishes. Used only
-    # to decide orphan events. Conflicting sessions are NOT subtracted here:
-    # their events are blocked by the explicit conflicting_parent_session check
-    # below, over exactly the same population, and mutation testing showed a
-    # subtraction here to be dead weight that only blurred which guard does the
-    # work.
+    # A parent this run can CORROBORATE FROM THE SOURCE: either a source session
+    # being inserted, or one present in both stores and agreeing.
+    #
+    # Trusting bare target session ids was wrong. If SQLite holds an event for
+    # session `s` but no session row for `s`, and PostgreSQL holds a target-only
+    # session `s` belonging to a different tenant, the event would be filed under
+    # that tenant's session on nothing more than a matching opaque id. The source
+    # never claimed that parent, so this command must not invent the link.
+    shared_agreeing_session_ids = {
+        key[0]
+        for key, entry in source_index["app_sessions"].items()
+        if key in target_index["app_sessions"]
+        and entry["compare"] == target_index["app_sessions"][key]["compare"]
+    }
     available_session_ids = (
-        {key[0] for key in target_index["app_sessions"]}
-        | {row["session_id"] for row in insertable["app_sessions"]}
+        {row["session_id"] for row in insertable["app_sessions"]}
+        | shared_agreeing_session_ids
     )
 
     blocked_by_table = {"app_sessions": session_blocked}
@@ -782,7 +824,14 @@ def _analyze(
         for defects in blocked.values():
             for defect in defects:
                 reasons[defect] = reasons.get(defect, 0) + 1
+        invariant = invariant_violations[table]
+        invariant_reasons: dict[str, int] = {}
+        for defects in invariant.values():
+            for defect in defects:
+                invariant_reasons[defect] = invariant_reasons.get(defect, 0) + 1
         tables[table] = {
+            "invariant_violation_count": len(invariant),
+            "invariant_reasons": dict(sorted(invariant_reasons.items())),
             "source_count": len(source_index[table]),
             "target_count": len(target_index[table]),
             "source_only_count": len(source_only_by_table[table]),
@@ -936,7 +985,9 @@ def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
         source_stable = authority_digest(source_after) == source_digest
         tables = analysis["tables"]
         reconciled = source_stable and all(
-            entry["source_only_count"] == 0 and entry["conflicting_count"] == 0
+            entry["source_only_count"] == 0
+            and entry["conflicting_count"] == 0
+            and entry["invariant_violation_count"] == 0
             for entry in tables.values()
         )
         return {
