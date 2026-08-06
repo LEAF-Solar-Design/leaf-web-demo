@@ -12,6 +12,13 @@ from executor.runtime.ed25519 import public_key, sign
 
 SEED = bytes(range(32))
 EXECUTOR_ID = "executor-local-001"
+# Child boot + source load acknowledgement window for test supervisors and
+# control clients. The production defaults (2s pipe, 5s HTTP) assume a quiet
+# host; under 100%-CPU contention a fresh CPython child can take several
+# seconds to boot, which surfaced as TimeoutError("child did not answer") /
+# ASSIGNMENT_FAILED flakes. No test asserts on load latency, so generosity
+# here weakens nothing.
+CHILD_LOAD_WINDOW_SECONDS = 30.0
 
 
 def digest(source: str) -> str:
@@ -44,21 +51,30 @@ def documents(source: str, *, assignment_id: str | None = None, lease_id: str | 
             "artifact_digest": source_digest, "runtime": "python-3.12", "entrypoint": "tool:run"}
     catalog = {"contract": "leaf.instant-execution/v1", "catalog_commit": "0" * 40, "capability": capability,
                "execution_class": "instant", "runtime": "python-3.12",
+               # Shared budgets are GENEROUS; tests that prove a limit pin it
+               # tight locally, so nothing is weakened by the headroom.
                # max_memory_mb becomes a real RLIMIT_AS on POSIX (child.py), and a
                # warm CPython child's address space sits near 32MB there: at 32 the
                # high-water accounting test's ~1MB tool allocation tipped the child
                # into MemoryError on Linux CI (run 31052822849) while every
                # Windows run sailed (no RLIMIT on nt). 256 is headroom for tools
-               # that must SUCCEED; tests that prove limit ENFORCEMENT pin their
-               # own tight limit locally (test_linux_memory_limit_* sets 32
-               # against a 64MB allocation), so nothing is weakened here.
-               "limits": {"max_wall_ms": 200, "max_cpu_ms": 200, "max_memory_mb": 256, "max_output_bytes": 4096, "max_tool_calls": 0},
+               # that must SUCCEED; test_linux_memory_limit_* pins 32 against a
+               # 64MB allocation. max_wall_ms/max_cpu_ms sit at the schema
+               # ceiling (30000) because a 100%-CPU host turned the old shared
+               # 200ms wall into spurious DEADLINE_EXCEEDED for tools that must
+               # merely COMPLETE; test_timeout_replaces_slot_and_batch_is_rejected
+               # pins its own 200ms wall and test_linux_cpu_limit_* pins 50ms
+               # CPU, so limit enforcement stays proven tight.
+               "limits": {"max_wall_ms": 30_000, "max_cpu_ms": 30_000, "max_memory_mb": 256, "max_output_bytes": 4096, "max_tool_calls": 0},
                "code_digest": source_digest, "artifact_digest": source_digest, "entrypoint": "tool:run",
                "params_schema_digest": "sha256:" + "c" * 64}
     invocation = {"contract": "leaf.instant-execution/v1", "invocation_id": str(uuid.uuid4()), "tenant_id": "tenant-demo",
                   "session_id": session_id, "assignment_id": assignment_id, "binding_epoch": 1, "lease_id": lease_id,
                   "effective_catalog_digest": catalog_digest, "code_digest": source_digest, "artifact_digest": source_digest,
-                  "deadline_at": (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"), "capability": capability,
+                  # Generous for the same reason as the shared limits: the
+                  # clock starts at fixture creation, and assigns on a
+                  # contended host can eat a small deadline before invoke runs.
+                  "deadline_at": (now + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"), "capability": capability,
                   "params": {"layer": "Panels"}, "drawing_context": drawing_context}
     return {"assignment": assignment, "code_load": load, "catalog": catalog, "source": source,
             "drawing_context": drawing_context, "invocation": invocation}

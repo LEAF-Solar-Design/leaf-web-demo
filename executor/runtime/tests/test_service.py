@@ -24,12 +24,13 @@ from executor.runtime.service import (
     serve_registered,
 )
 from executor.runtime.supervisor import WarmExecutorSupervisor
-from executor.runtime.tests.helpers import EXECUTOR_ID, documents, keys, lease
+from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS, EXECUTOR_ID, documents, keys, lease
 
 
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+                                                 child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
         self.server = make_server(("127.0.0.1", 0), self.supervisor, "test-runtime-control")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -95,6 +96,7 @@ class ServiceTests(unittest.TestCase):
                     "test-runtime-control", ca_file=certificates["ca_cert"],
                     client_cert_file=certificates["trusted_client_cert"], client_key_file=certificates["trusted_client_key"],
                     tls_server_name="localhost",
+                    request_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
                 )
                 docs = documents("def run(intake, params):\n return {'ok': True}\n")
                 assignment = {key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")}

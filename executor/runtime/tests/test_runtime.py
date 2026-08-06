@@ -11,7 +11,7 @@ from executor.registry import ArtifactReference, ImmutableArtifactRegistry, Sign
 from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
 from executor.runtime.ed25519 import sign
 from executor.runtime.supervisor import WarmExecutorSupervisor
-from executor.runtime.tests.helpers import EXECUTOR_ID, documents, keys, lease
+from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS, EXECUTOR_ID, documents, keys, lease
 
 
 COUNTER_SOURCE = "counter = [0]\ndef run(intake, params):\n    counter[0] += 1\n    return {'count': counter[0], 'drawing': intake['drawing_context']['drawing_id']}\n"
@@ -19,7 +19,8 @@ COUNTER_SOURCE = "counter = [0]\ndef run(intake, params):\n    counter[0] += 1\n
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
 
     def tearDown(self) -> None:
         self.supervisor.close()
@@ -56,6 +57,7 @@ class RuntimeTests(unittest.TestCase):
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, keys(), pool_size=1,
             trusted_development_fixtures=True, accounting_emitter=emitter,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
         )
         docs = self.assigned()
         first = self.invoke(docs)
@@ -81,6 +83,7 @@ class RuntimeTests(unittest.TestCase):
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, keys(), pool_size=1,
             trusted_development_fixtures=True, accounting_emitter=emitter,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
         )
         docs = self.assigned(
             "def run(intake, params):\n"
@@ -113,6 +116,7 @@ class RuntimeTests(unittest.TestCase):
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, keys(), pool_size=1,
             artifact_registry=ImmutableArtifactRegistry((artifact,), {"registry-key": keys()["test-key"]}),
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
         )
         normal_request = {key: docs[key] for key in ("assignment", "code_load", "catalog", "drawing_context")}
         self.supervisor.assign(normal_request)
@@ -153,13 +157,18 @@ class RuntimeTests(unittest.TestCase):
             other = self.assigned(source) if False else documents(source)
             # Use a fresh warm pool because this test has one fixed slot.
             self.supervisor.close()
-            self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
+            self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
             self.supervisor.assign({key: other[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
             failed = self.invoke(other)
             self.assertEqual("TOOL_FAILED", failed["error"]["code"])
 
     def test_timeout_replaces_slot_and_batch_is_rejected(self) -> None:
         docs = documents("def run(intake, params):\n while True:\n  pass\n")
+        # This test PROVES the wall timeout, so it pins the tight wall the
+        # generous shared fixture no longer carries; CPU stays high so the
+        # POSIX CPU limit cannot preempt the wall expiry under test.
+        docs["catalog"]["limits"]["max_wall_ms"] = 200
         docs["catalog"]["limits"]["max_cpu_ms"] = 30_000
         self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
         before = self.supervisor.process_ids()
@@ -181,7 +190,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("output exceeds", output["error"]["message"])
 
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
         calls_docs = documents("def run(intake, params):\n intake['tool_call']()\n intake['tool_call']()\n return {}\n")
         calls_docs["catalog"]["limits"]["max_tool_calls"] = 1
         self.supervisor.assign({key: calls_docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
@@ -191,7 +201,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_child_failure_replaces_only_the_failed_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
         failing = documents("def run(intake, params):\n raise MemoryError()\n")
         healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
         self.supervisor.assign({key: failing[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
@@ -210,6 +221,7 @@ class RuntimeTests(unittest.TestCase):
         self.supervisor = WarmExecutorSupervisor(
             EXECUTOR_ID, keys(), pool_size=1, idempotency_ttl_seconds=0.02, idempotency_max_entries=2,
             trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
         )
         docs = self.assigned()
         first = self.invoke(docs)
@@ -255,7 +267,8 @@ class RuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "POSIX resource limits are unavailable on Windows")
     def test_linux_memory_limit_replaces_only_the_allocation_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
         allocation = documents("def run(intake, params):\n return {'data': 'x' * (64 * 1024 * 1024)}\n")
         allocation["catalog"]["limits"]["max_memory_mb"] = 32
         healthy = documents("def run(intake, params):\n return {'healthy': True}\n")
@@ -272,7 +285,8 @@ class RuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix" and hasattr(signal, "ITIMER_PROF"), "POSIX CPU timers are unavailable")
     def test_linux_cpu_limit_replaces_only_the_busy_slot(self) -> None:
         self.supervisor.close()
-        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True)
+        self.supervisor = WarmExecutorSupervisor(EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True,
+                                                child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS)
         busy = documents("def run(intake, params):\n while True:\n  pass\n")
         busy["catalog"]["limits"]["max_wall_ms"] = 30_000
         busy["catalog"]["limits"]["max_cpu_ms"] = 50

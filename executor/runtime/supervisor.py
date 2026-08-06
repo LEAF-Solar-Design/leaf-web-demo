@@ -26,6 +26,7 @@ SECRET_WORDS = re.compile(r"(?:secret|password|credential|authorization|api[_-]?
 MAX_INPUT_BYTES = 1_048_576
 DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
+DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
 
 
 class ExecutorError(ValueError):
@@ -80,13 +81,16 @@ class WarmExecutorSupervisor:
                  idempotency_max_entries: int = DEFAULT_IDEMPOTENCY_MAX_ENTRIES,
                  artifact_registry: ImmutableArtifactRegistry | None = None,
                  trusted_development_fixtures: bool = False,
-                 accounting_emitter: Any | None = None) -> None:
+                 accounting_emitter: Any | None = None,
+                 child_load_timeout_seconds: float = DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS) -> None:
         if pool_size < 1:
             raise ValueError("pool_size must be positive")
         if idempotency_ttl_seconds <= 0:
             raise ValueError("idempotency_ttl_seconds must be positive")
         if idempotency_max_entries < 1:
             raise ValueError("idempotency_max_entries must be positive")
+        if child_load_timeout_seconds <= 0:
+            raise ValueError("child_load_timeout_seconds must be positive")
         self.executor_id = executor_id
         self.public_keys = dict(public_keys)
         self._ctx = multiprocessing.get_context("spawn")
@@ -97,6 +101,11 @@ class WarmExecutorSupervisor:
         self._artifact_registry = artifact_registry
         self._trusted_development_fixtures = trusted_development_fixtures
         self._accounting_emitter = accounting_emitter
+        # Bounds how long a (possibly still-booting) child may take to
+        # acknowledge a source load, on both the assign path and the
+        # post-replacement rebind; a contended host needs more than the
+        # production default, so tests pass a generous value.
+        self._child_load_timeout_seconds = child_load_timeout_seconds
         self._state_lock = threading.RLock()
         for index in range(pool_size):
             self._slots.append(self._start_slot(f"slot-{index + 1}"))
@@ -181,7 +190,7 @@ class WarmExecutorSupervisor:
                 slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
                                 "source": source, "drawing_context": drawing_context,
                                 "limits": catalog["limits"]})
-                reply = self._receive(slot, 2.0)
+                reply = self._receive(slot, self._child_load_timeout_seconds)
         except Exception:
             with self._state_lock:
                 self._replace(slot, restore=False)
@@ -425,7 +434,7 @@ class WarmExecutorSupervisor:
             try:
                 slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
                                 "source": source, "drawing_context": drawing_context, "limits": catalog["limits"]})
-                reply = self._receive(slot, 2.0)
+                reply = self._receive(slot, self._child_load_timeout_seconds)
             except (BrokenPipeError, EOFError, OSError, TimeoutError):
                 return
             if reply.get("ok"):
