@@ -147,9 +147,14 @@ default. It is not evidence of a staging or production cutover.
    before a selector changes.
 4. Rehearse each authority alone. Prove retries, task replacement, lease
    expiry, stale-owner fencing, and duplicate-charge prevention.
-5. For app sessions, progress through dual-write and shadow modes while the
-   service is still single-task. SQLite and PostgreSQL cannot share one atomic
-   transaction.
+5. For app sessions, progress through the dual-write modes while the service is
+   still single-task. SQLite and PostgreSQL cannot share one atomic
+   transaction. Do **not** route the promotion through `shadow`: `shadow` is
+   absent from `session_store._DUAL_WRITE_MODES`, so it stops mirroring to
+   PostgreSQL entirely and every write made while it is selected is missing
+   from the store the flip then promotes. `shadow` is on the return path.
+   Promote `dual_write_shadow` straight to `postgres`, as
+   `platform/authority-inventory.json` `rollback_mode` already records.
 6. Prove rollback for each authority. A selector rollback without a reverse
    backfill can lose writes made after cutover, so it is not a complete
    rollback.
@@ -161,3 +166,61 @@ default. It is not evidence of a staging or production cutover.
    approved production work.
 9. Keep the one-task deployment and 300-second drain until every mutable
    single-writer authority is removed or accepted with written evidence.
+
+## Staging app-sessions pre-deploy source data: DISCARD (decided 2026-08-06)
+
+`scripts/reconcile_sessions_authority.py` (PR #488) reaches a container only
+through an app image build, and deploying that image replaces the ECS task.
+Staging's `leaf-platform-app` container sets no `SESSIONS_DB`, so its legacy
+source is the task-local `server/sessions.db`, which the image does not carry.
+The deploy therefore destroys the database the backfill exists to read, and
+every PostgreSQL row afterwards classifies as an expected target-only row, so
+the command passes cleanly having recovered nothing.
+
+**Decision: do not preserve or export it. Deploy and let it go.** This is the
+deliberate record the backfill note asks for, so that a later clean parity run
+on staging is never mistaken for a successful recovery.
+
+The decision is not "staging does not matter". The file provably holds no row
+PostgreSQL lacks:
+
+1. `deploy/Dockerfile.app` ships no `sessions.db`, and `server/session_store.py`
+   resolves `SESSIONS_DB` to the task-local `server/sessions.db` by default, so
+   the file is created empty when the task starts.
+2. Task `48b23717a06a4d3b9af71f685ca396d3` started 2026-08-06T14:29:48Z on
+   `leaf-platform-app-alt:27` and runs that revision for its whole life; a task
+   cannot change task definition mid-life.
+3. That revision sets `LEAF_SESSIONS_STORE=dual_write_shadow` on the
+   `leaf-platform-app` container.
+4. Dual-write is **fail-closed**, so a legacy row cannot exist without its
+   mirror: `get_or_create_session` calls `_pg_ensure_started()` before the
+   legacy write ("Do not mutate the legacy authority when its required mirror is
+   already known to be unavailable"), `append_event` raises
+   `RuntimeError("PostgreSQL session mirror is missing")` before the legacy
+   write, and the `_pg_*` writes are not wrapped, so a mirror failure
+   propagates instead of being swallowed.
+
+So every row written into that file was mirrored to PostgreSQL synchronously at
+write time. Discarding it loses nothing recoverable.
+
+**Stated honestly, this is an argument from the code and the task definition,
+not from reading the file.** There is no route to read it:
+`enableExecuteCommand` is false on both app families, and
+`aws ecs run-task` is refused by the deploy workflow because it would start
+`init-drawing-mutations-fence` and disturb the drawing-mutation fence. The
+residual risk is a defect in the fail-closed path leaving legacy-only rows, and
+it is accepted for staging rather than eliminated.
+
+**What a clean staging parity run does and does not prove.** After this deploy,
+`--mode parity` on staging compares only rows written since the NEW task
+started. Exit 0 there certifies agreement over that window. It is **not**
+evidence that history was recovered, and it is **not** a cutover certificate:
+the two stores are snapshotted separately and the app holds no lock across its
+dual write, so quiescing legacy writes remains a prerequisite of the flip
+transaction itself.
+
+**Production is unaffected by this decision.** Production sets
+`SESSIONS_DB=/data/state/sessions.db` on the durable EFS volume, so its legacy
+source survives task replacement and the backfill has real value there. None of
+the ephemerality above applies. Do not reuse this record to justify skipping
+preservation in production.
