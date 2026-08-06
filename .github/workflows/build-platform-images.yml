@@ -906,27 +906,6 @@ jobs:
           fi
           echo "gate verdict bound to tree $PROVEN_TREE == build tree"
 
-      - name: Require the read-only canonical solver deploy key
-        if: matrix.image == 'canonical-worker'
-        env:
-          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
-            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
-            exit 1
-          }
-
-      - name: Check out the exact canonical solver source
-        if: matrix.image == 'canonical-worker'
-        uses: actions/checkout@v4
-        with:
-          repository: LEAF-Solar-Design/autofill-solver
-          ref: ${{ needs.prepare.outputs.solver_revision }}
-          path: autofill-solver
-          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
-          persist-credentials: false
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -940,8 +919,118 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      # A cancelled five-way matrix can leave a complete immutable output for
+      # some images and no output for others. Resume only at that image
+      # boundary. The finite BatchGetImage probe preserves the release role's
+      # least-privilege contract: it does not list the repository. A complete
+      # set is trusted only because sha-*/prod-* are protected full-build
+      # namespaces and the recovery cleanup removed the known foreign spec-*
+      # witness before this run. Any mixed state fails before a write rather
+      # than asking Buildx to collide with an immutable tag.
+      - name: Inspect exact full-build outputs
+        id: resume
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
+        run: |
+          set -euo pipefail
+          required_tags=("$IMAGE_TAG")
+          add_required_tag() {
+            local candidate="$1"
+            local existing
+            for existing in "${required_tags[@]}"; do
+              [ "$existing" = "$candidate" ] && return 0
+            done
+            required_tags+=("$candidate")
+          }
+          add_required_tag "sha-$SOURCE_SHA"
+          if [ "${{ matrix.image }}" = "canonical-worker" ]; then
+            add_required_tag "sha-$SOURCE_SHA-solver-$SOLVER_REVISION"
+          fi
+          if [ "${{ matrix.image }}" = "app" ] && [[ "$IMAGE_TAG" == prod-* ]]; then
+            add_required_tag "src-$SOURCE_SHA"
+          fi
+
+          image_ids=()
+          for tag in "${required_tags[@]}"; do
+            image_ids+=("imageTag=$tag")
+          done
+          response="$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "${image_ids[@]}" \
+            --output json)" || {
+              echo "::error::Could not inspect the exact immutable output tags for $IMAGE_NAME."
+              exit 1
+            }
+
+          unexpected_failures="$(jq '[.failures[]? | select(.failureCode != "ImageNotFound")] | length' <<<"$response")"
+          if [ "$unexpected_failures" != "0" ]; then
+            echo "::error::The exact-tag probe returned a failure other than ImageNotFound for $IMAGE_NAME."
+            jq -c '.failures' <<<"$response"
+            exit 1
+          fi
+
+          present=0
+          digests=()
+          for tag in "${required_tags[@]}"; do
+            matches="$(jq --arg tag "$tag" '[.images[]? | select(.imageId.imageTag == $tag)] | length' <<<"$response")"
+            if [ "$matches" = "0" ]; then
+              continue
+            fi
+            if [ "$matches" != "1" ]; then
+              echo "::error::Exact output tag $IMAGE_NAME:$tag returned $matches image records."
+              exit 1
+            fi
+            digest="$(jq -r --arg tag "$tag" '.images[] | select(.imageId.imageTag == $tag) | .imageId.imageDigest' <<<"$response")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Exact output tag $IMAGE_NAME:$tag returned a malformed digest."
+              exit 1
+            }
+            present=$((present + 1))
+            digests+=("$digest")
+          done
+
+          if [ "$present" = "0" ]; then
+            echo "::notice::$IMAGE_NAME has no exact full-build outputs; building normally."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$present" != "${#required_tags[@]}" ]; then
+            echo "::error::$IMAGE_NAME has only $present of ${#required_tags[@]} exact full-build output tags; refusing an immutable partial overwrite."
+            exit 1
+          fi
+          unique_digests="$(printf '%s\n' "${digests[@]}" | sort -u | wc -l | tr -d ' ')"
+          if [ "$unique_digests" != "1" ]; then
+            echo "::error::$IMAGE_NAME exact full-build output tags resolve to different digests; refusing to continue."
+            exit 1
+          fi
+          echo "::notice::$IMAGE_NAME already has the complete exact output set at ${digests[0]}; skipping its build."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+
+      - name: Require the read-only canonical solver deploy key
+        if: matrix.image == 'canonical-worker' && steps.resume.outputs.skip != 'true'
+        env:
+          AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$AUTOFILL_SOLVER_DEPLOY_KEY" ] || {
+            echo "::error::AUTOFILL_SOLVER_DEPLOY_KEY is required for the private canonical solver checkout."
+            exit 1
+          }
+
+      - name: Check out the exact canonical solver source
+        if: matrix.image == 'canonical-worker' && steps.resume.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: LEAF-Solar-Design/autofill-solver
+          ref: ${{ needs.prepare.outputs.solver_revision }}
+          path: autofill-solver
+          ssh-key: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
+          persist-credentials: false
+
       - name: Select immutable cache references
         id: cache
+        if: steps.resume.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
@@ -1037,6 +1126,7 @@ jobs:
           echo "to=$cache_to" >> "$GITHUB_OUTPUT"
 
       - name: Build and push ${{ matrix.image }}
+        if: steps.resume.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
