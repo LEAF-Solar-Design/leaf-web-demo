@@ -899,6 +899,7 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
+  const { upstreamSinkFromEnv } = await import("./ports/impl/httpUpstreamSink.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
@@ -925,6 +926,13 @@ export async function startReal(port = 8130): Promise<Server> {
       })
     : undefined;
 
+  // Optional platform-improvement capture (UPSTREAM_SINK_URL + UPSTREAM_SINK_TOKEN,
+  // plus the UPSTREAM_SINK_PLATFORM label): pushes every authoring event to the
+  // operator's upstream queue. Absent env = port unwired; the sink is
+  // fire-and-forget by contract, so authoring behavior is identical when the
+  // queue is slow, down, or absent.
+  const upstreamSink = upstreamSinkFromEnv();
+
   const ports: HarnessPorts = {
     agentRunner: new AgentSdkRunner(),
     broker: new BrokerApsClientHttp(),
@@ -939,6 +947,7 @@ export async function startReal(port = 8130): Promise<Server> {
       ? { customizationCoordination: new CustomizationCoordinationClient({ baseUrl: appUrl, dispatchSecret }) }
       : {}),
     ...(converseRunner ? { converseRunner } : {}),
+    ...(upstreamSink ? { upstreamSink } : {}),
   };
   const server = createHarness(ports).listen(port);
   if (sessionStore) {

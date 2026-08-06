@@ -33,6 +33,8 @@ export * from "./ports/impl/e2bAgentRunner.js";
 export * from "./ports/impl/converseSdkRunner.js";
 export * from "./ports/impl/mcpBridge.js";
 export * from "./ports/impl/mcpProxy.js";
+export * from "./ports/impl/repoEditRunner.js";
+export * from "./ports/impl/httpUpstreamSink.js";
 
 // Hermetic fakes (contract-test doubles; also the CI path for consumers)
 export * from "./ports/fakes/fakeAgentRunner.js";
@@ -42,6 +44,8 @@ export * from "./ports/fakes/fakeOAuthGrant.js";
 export * from "./ports/fakes/fakeSessionStore.js";
 export * from "./ports/fakes/fakeTenantRepo.js";
 export * from "./ports/fakes/fakeTurnRunner.js";
+export * from "./ports/fakes/fakeRepoEditor.js";
+export * from "./ports/fakes/fakeUpstreamSink.js";
 
 // Registry + author loop
 export * from "./registry/registerTool.js";
