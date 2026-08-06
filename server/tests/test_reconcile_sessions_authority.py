@@ -1103,6 +1103,43 @@ def test_a_shared_session_violating_the_last_seq_invariant_fails_parity(
 
 
 @requires_database
+def test_text_in_a_real_column_is_reported_never_coerced(source, target):
+    """SQLite is dynamically typed: a REAL column can hold the TEXT "1_0".
+
+    Python's float() accepts digit separators and returns 10.0, identical to a
+    target DOUBLE PRECISION 10.0 -- while the legacy runtime still reads a
+    string there and session_store._shadow_equal would reject the pair.
+    """
+    session = source.session()
+    source.raw("UPDATE sessions SET created_at = '1_0' WHERE session_id = ?",
+               (session["session_id"],))
+    stored = None
+    with RECONCILE._legacy_connection(source.path) as conn:
+        stored = conn.execute(
+            "SELECT typeof(created_at), created_at FROM sessions WHERE session_id = ?",
+            (session["session_id"],),
+        ).fetchone()
+    assert stored[0] == "text" and stored[1] == "1_0", stored
+
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert "non_numeric:created_at" in \
+        receipt["tables"]["app_sessions"]["blocked_reasons"]
+    assert receipt["inserted"]["app_sessions"] == 0
+    assert receipt["reconciled"] is False
+    assert _rows(target, "app_sessions", session_id=session["session_id"]) == []
+
+
+def test_a_string_never_encodes_as_a_float():
+    """The comparison half of the same defect, for a row present in both."""
+    numeric = RECONCILE._comparable_value(RECONCILE.FLOAT, 10.0)
+    assert RECONCILE._comparable_value(RECONCILE.FLOAT, "1_0") != numeric
+    assert RECONCILE._comparable_value(RECONCILE.FLOAT, "10.0") != numeric
+    assert RECONCILE._comparable_value(RECONCILE.FLOAT, True) != numeric
+    # An integer in a REAL column IS the same number and must still match.
+    assert RECONCILE._comparable_value(RECONCILE.FLOAT, 10) == numeric
+
+
+@requires_database
 def test_a_fractional_integer_is_reported_never_truncated(source, target):
     """SQLite is dynamically typed. int(3.5) is 3, which would compare equal to
     a target BIGINT 3 and certify a genuine difference as clean."""

@@ -370,8 +370,17 @@ def _comparable_value(kind: str, value: Any) -> Any:
     if value is None:
         return None
     if kind == FLOAT:
-        # repr round-trips a binary64 float exactly in Python 3.
-        return ["f", repr(float(value))]
+        # NEVER float(value) on an arbitrary value. SQLite is dynamically typed,
+        # so a REAL column can hold the TEXT "1_0", and Python's float() accepts
+        # digit separators and returns 10.0 -- identical to a target DOUBLE
+        # PRECISION 10.0, while the legacy runtime still reads a string there
+        # and _shadow_equal would reject the pair. Same erasure as the INT and
+        # BOOL branches below. repr round-trips a binary64 float exactly.
+        if isinstance(value, bool):
+            return ["raw", repr(value)]
+        if isinstance(value, (int, float)):
+            return ["f", repr(float(value))]
+        return ["raw", repr(value)]
     if kind == INT:
         # NEVER int(value) here. int(3.5) is 3, so a SQLite REAL 3.5 would
         # certify equal to a target BIGINT 3 -- and unlike the source-only
@@ -657,6 +666,25 @@ def _non_integral_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> lis
     return defects
 
 
+def _non_numeric_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> list[str]:
+    """Flag a timestamp column holding something that is not a number.
+
+    A SQLite REAL column can hold TEXT. ``float("1_0")`` is ``10.0``, so such a
+    value both compares equal to a real target float and would be silently
+    normalized into one on insert. The target column is DOUBLE PRECISION and
+    the app never wrote a string there, so report rather than coerce.
+    """
+    defects = []
+    for column in columns:
+        value = raw[column]
+        if value is None:
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            continue
+        defects.append(f"non_numeric:{column}")
+    return defects
+
+
 def _invalid_json_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> list[str]:
     """Flag a JSON column whose source text will not cast to jsonb.
 
@@ -689,6 +717,8 @@ def _session_defects(
         if row[column] is None
     ]
     defects.extend(_non_integral_defects(raw, ("last_seq",)))
+    defects.extend(_non_numeric_defects(
+        raw, ("created_at", "updated_at", "turn_started_at")))
     last_seq = row["last_seq"]
     if last_seq is not None and last_seq < 0:
         # app_sessions.last_seq carries CHECK (last_seq >= 0); SQLite has none.
@@ -715,6 +745,7 @@ def _event_defects(
         if row[column] is None
     ]
     defects.extend(_non_integral_defects(raw, ("seq",)))
+    defects.extend(_non_numeric_defects(raw, ("created_at",)))
     defects.extend(_invalid_json_defects(raw, ("data_json",)))
     seq = row["seq"]
     if seq is not None and seq <= 0:
@@ -737,6 +768,7 @@ def _approval_defects(row: Mapping[str, Any], raw: Mapping[str, Any]) -> list[st
         if row[column] is None
     ]
     defects.extend(_invalid_json_defects(raw, ("params_json", "payload_json")))
+    defects.extend(_non_numeric_defects(raw, ("created_at", "expires_at")))
     if row["consumed"] and not row["decided"]:
         # app_approvals carries CHECK (NOT consumed OR decided); SQLite does not.
         defects.append("consumed_without_decision")
