@@ -709,13 +709,16 @@ def _analyze(
         entry["values"] for key, entry in session_only.items()
         if key not in session_blocked
     ]
-    # A session that will exist in the target AND is not in dispute. A
-    # conflicting shared session is deliberately excluded: see
-    # conflicting_session_ids above.
+    # A session that will exist in the target once this run finishes. Used only
+    # to decide orphan events. Conflicting sessions are NOT subtracted here:
+    # their events are blocked by the explicit conflicting_parent_session check
+    # below, over exactly the same population, and mutation testing showed a
+    # subtraction here to be dead weight that only blurred which guard does the
+    # work.
     available_session_ids = (
         {key[0] for key in target_index["app_sessions"]}
         | {row["session_id"] for row in insertable["app_sessions"]}
-    ) - conflicting_session_ids
+    )
 
     blocked_by_table = {"app_sessions": session_blocked}
 
