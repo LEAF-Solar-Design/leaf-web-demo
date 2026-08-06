@@ -228,7 +228,8 @@ What bounds the loss, and why discard is still right for staging:
 
 So the exposure is one task-lifetime of staging traffic, and within that only
 rows that hit the post-commit/pre-mirror window, plus checkpoints and policies
-that no deploy has ever preserved. The alternative costs a new access path into
+that no task replacement preserves under the configuration measured here. The
+alternative costs a new access path into
 a running task: `enableExecuteCommand` is false on both app families, and
 `aws ecs run-task` is refused by the deploy workflow because it would start
 `init-drawing-mutations-fence` and disturb the drawing-mutation fence that
