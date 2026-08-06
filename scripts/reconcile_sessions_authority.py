@@ -358,9 +358,14 @@ def _comparable_value(kind: str, value: Any) -> Any:
         # losslessly: see _json_scalars.
         try:
             return ["json", _canonical_json(_json_scalars(value))]
-        except (ValueError, TypeError):
+        except ValueError:
             # Not valid JSON at all. Tag it verbatim so it can never compare
             # equal to a parsed value, and let _invalid_json_defects report it.
+            #
+            # ValueError ONLY. _canonical_json raises TypeError when it meets a
+            # type it does not tag, which means a bug in this file rather than
+            # bad data; swallowing that here would report the defect as
+            # "invalid_json" on both sides and quietly hide it.
             return ["invalid_json", repr(value)]
     if value is None:
         return None
