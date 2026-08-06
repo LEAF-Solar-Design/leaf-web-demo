@@ -151,8 +151,32 @@ jobs:
           # A skipped concurrency suite reports green and proves nothing.
           # This is the check the review's finding actually needs.
           out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs)
-          echo "$out" | tail -5
-          if echo "$out" | grep -qi 'skipped'; then
+          printf '%s\n' "$out" | tail -5
+          # A bash string match rather than `echo "$out" | grep -qi`. This is
+          # DEFENSIVE, not a bug fix: the pipeline form is correct as this
+          # workflow stands today, and the reason is worth writing down because
+          # it is easy to arm by accident.
+          #
+          # `grep -q` exits at its FIRST match and can SIGPIPE a producer that
+          # is still writing. Whether that matters depends entirely on pipefail.
+          # These steps declare no `shell:`, and no workflow- or job-level
+          # `defaults.run.shell` exists, so GitHub runs them as `bash -e {0}` --
+          # WITHOUT pipefail. The pipeline therefore reports grep's own status
+          # and the check works. Measured with the match early and ~1.6MB still
+          # unwritten: `bash -e` catches the skip, `bash -eo pipefail` misses it.
+          #
+          # The trap is that `shell: bash`, or a `defaults.run.shell: bash`
+          # block, adds `-eo pipefail` -- a routine hardening edit that could
+          # then silently cause this assertion to MISS a skip. Not always: it
+          # needs the producer to actually take SIGPIPE, so a short or trailing
+          # match still returns 0 and still catches. That conditional, invisible
+          # failure is the point; the string match removes the pipefail/SIGPIPE
+          # failure mode outright rather than leaving it to output shape.
+          #
+          # `${out,,}` lowercases first, so it is exactly as case-insensitive as
+          # the `grep -qi` it replaces. Same shape as the sessions reconciler
+          # step below.
+          if [[ "${out,,}" == *skipped* ]]; then
             echo 'FAIL: overlay live tests skipped — OVERLAY_PG_URL not reaching pytest'
             exit 1
           fi
@@ -193,10 +217,14 @@ jobs:
         run: |
           out=$(python -m pytest -q tests/test_reconcile_sessions_authority.py -rs)
           printf '%s\n' "$out" | tail -5
-          # Deliberately a bash string match, NOT `... | grep -q`: grep -q exits
-          # on its first match and SIGPIPEs the producer, which under pipefail
-          # makes the whole pipeline non-zero and inverts this very check.
-          if [[ "$out" == *skipped* || "$out" == *SKIPPED* ]]; then
+          # A bash string match rather than `... | grep -q`, for the reason
+          # written out at the overlay skip-check above: `grep -q` can SIGPIPE a
+          # still-writing producer, which IF pipefail is on can silently cause
+          # this assertion to miss a skip. Pipefail is not on here (no `shell:`
+          # and no `defaults.run.shell`, so GitHub uses `bash -e {0}`), so this
+          # is defensive against a future `shell: bash`, not a live fix.
+          # `${out,,}` keeps it as case-insensitive as `grep -qi`.
+          if [[ "${out,,}" == *skipped* ]]; then
             echo 'FAIL: sessions reconciler live tests skipped — DATABASE_URL not reaching pytest'
             exit 1
           fi
