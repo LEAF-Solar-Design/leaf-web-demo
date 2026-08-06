@@ -667,6 +667,17 @@ def build_suites() -> List[Suite]:
         # reports an explicit SKIP row until a DB is reachable, then executes.
         Suite("server-ops-metrics-pg", "server tests/test_ops_metrics_pg.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
+        # The gate a LEAF_SESSIONS_STORE promotion out of dual_write_shadow will
+        # rest on. Floor is the OFFLINE count (14, measured): the other 21 need
+        # a live database and are skip-gated, and a floor of 35 would red-fail
+        # every runner without DATABASE_URL. upload-authority-postgres.yml
+        # asserts separately that the live half did not skip THERE, so the two
+        # together cover both environments.
+        Suite("server-reconcile-sessions-authority",
+              "server tests/test_reconcile_sessions_authority.py", "pytest",
+              SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 14,
+              allowed_skip_reasons=(
+                  r"PostgreSQL integration test requires explicit DATABASE_URL",)),
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
               SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 6),

@@ -266,14 +266,14 @@
         "SESSIONS_DB SQLite sessions, session_events, and approvals tables"
       ],
       "backfill": {
-        "command": null,
-        "status": "new_writes_only",
-        "note": "Dual-write mirrors new mutations but no historical SQLite backfill command exists."
+        "command": "python scripts/reconcile_sessions_authority.py --mode backfill",
+        "status": "implemented_not_run",
+        "note": "Inserts SQLite-only rows into app_sessions, then app_session_events, then app_approvals, in that foreign-key order. Idempotent and insert-only: ON CONFLICT DO NOTHING, no update path and no delete path, so a row present in both stores but disagreeing is reported as a parity failure rather than overwritten, because PostgreSQL may hold the newer value. Rows the target schema cannot accept are reported with a reason code and never forced: seq <= 0 against CHECK (seq > 0), an event whose session row exists in neither store, a duplicate or already-held (tenant_id, drawing_id), a NULL in a target NOT NULL column, and a consumed-but-undecided approval against CHECK (NOT consumed OR decided). Not yet run against staging: the script reaches the container only through an app image build, and no deploy was dispatched by the lane that wrote it."
       },
       "parity": {
-        "command": null,
-        "status": "runtime_shadow_available",
-        "note": "dual_write_shadow and shadow compare reads during exercised workloads; no standalone full-data parity command exists."
+        "command": "python scripts/reconcile_sessions_authority.py --mode parity",
+        "status": "implemented_not_run",
+        "note": "Full-data comparison of all three table pairs, not a sampled read. Exits 0 only when every legacy row has a matching target row, 1 with a per-table breakdown when parity fails, and 2 when it could not run. Target-only rows are EXPECTED and never a failure, because staging dual-writes while the command runs. Read-only on both stores by enforcement, not by intention: SQLite is opened mode=ro and the PostgreSQL transaction is READ ONLY at repeatable read. Compares parsed JSON (TEXT vs JSONB), exact floats (REAL vs DOUBLE PRECISION, matching session_store._shadow_equal's bare !=), and INTEGER 0/1 against BOOLEAN. Not yet run against staging: same image-build reason as backfill."
       },
       "cutover_modes": [
         "legacy",
@@ -282,12 +282,12 @@
         "shadow",
         "postgres"
       ],
-      "rollback_mode": "Return through shadow or dual_write only while single-task, then select legacy after reverse reconciliation. The two stores have no atomic transaction.",
+      "rollback_mode": "Return through shadow or dual_write only while single-task, then select legacy after reverse reconciliation. The two stores have no atomic transaction. Note that shadow is on the RETURN path, not the way forward: shadow is absent from session_store._DUAL_WRITE_MODES, so it stops mirroring to PostgreSQL entirely. Promote dual_write_shadow straight to postgres and never through shadow.",
       "current_selection": {
         "staging": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Live staging app environment is not recorded."
+          "value": "dual_write_shadow",
+          "status": "measured",
+          "evidence": "Read-only from `aws ecs describe-task-definition --task-definition leaf-platform-app-alt:27` (account 807034087062, us-east-1) on 2026-08-06. That revision is the one live service leaf-platform-app-alt is running at desired 1 / running 1; sibling service leaf-platform-app is at desired 0 and carries the same selector on leaf-platform-app:548. The same revision leaves SESSIONS_DB unset, so the legacy source resolves to the task-local default server/sessions.db rather than the EFS /data/state volume that deploy/README.md documents."
         },
         "production": {
           "value": null,
