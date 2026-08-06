@@ -80,7 +80,7 @@ class Source:
         self._insert("sessions", row)
         return row
 
-    def event(self, session_id: str, **overrides):
+    def event(self, session_id: str, *, advance_last_seq: bool = True, **overrides):
         row = {
             "session_id": session_id,
             "seq": 1,
@@ -91,6 +91,15 @@ class Source:
         }
         row.update(overrides)
         self._insert("session_events", row)
+        if advance_last_seq and row["seq"] is not None:
+            # append_event allocates seq as last_seq+1 and writes both in one
+            # transaction, so a faithful source never has an event outrunning
+            # its session's last_seq. Tests that want that corruption pass
+            # advance_last_seq=False.
+            self.raw(
+                "UPDATE sessions SET last_seq = MAX(last_seq, ?) WHERE session_id = ?",
+                (row["seq"], session_id),
+            )
         return row
 
     def approval(self, session_id: str, **overrides):
@@ -302,11 +311,14 @@ def test_migration_gated_columns_name_their_migration():
     )
 
 
-def test_key_sample_is_bounded_and_carries_no_tenant_identifiers():
+def test_key_sample_is_bounded_and_hashed_never_raw():
+    """confirmation_id is caller-supplied and can carry identifying text."""
     keys = [(f"session-{index}", index) for index in range(100)]
     sample = RECONCILE._key_sample(keys)
     assert len(sample) == RECONCILE._KEY_SAMPLE_LIMIT
-    assert sample[0] == "session-0:0"
+    assert "session-0" not in " ".join(sample)
+    expected = hashlib.sha256(b"session-0:0").hexdigest()[:16]
+    assert sample[0] == expected
 
 
 def test_locked_error_detection_covers_both_sqlite_phrasings():
@@ -665,6 +677,241 @@ def test_trap7_a_target_behind_its_migration_names_the_migration(
     # The restore must leave the reconciler working again, which proves the
     # failure came from the missing column rather than a poisoned connection.
     assert RECONCILE.reconcile(sqlite_path=source.path, mode="parity")["tables"]
+
+
+# --------------------------------------------------------------------------- #
+# live: findings from the sol-critic review of PR #488
+# --------------------------------------------------------------------------- #
+@requires_database
+def test_events_under_a_conflicting_session_are_never_inserted(source, target):
+    """A disputed parent must not receive children.
+
+    If the source session row and the target row sharing its session_id
+    disagree about tenant_id, inserting the source's events would file one
+    tenant's events under another tenant's session.
+    """
+    session = source.session()
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    other_tenant = _unique("other-tenant")
+    with target.transaction() as conn:
+        conn.execute(
+            "UPDATE app_sessions SET tenant_id = %s, drawing_id = %s"
+            " WHERE session_id = %s",
+            (other_tenant, _unique("other-drawing"), session["session_id"]),
+        )
+    source.event(session["session_id"], seq=1)
+
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    events = receipt["tables"]["app_session_events"]
+    assert "conflicting_parent_session" in events["blocked_reasons"]
+    assert receipt["inserted"]["app_session_events"] == 0
+    assert receipt["reconciled"] is False
+    assert _rows(target, "app_session_events", session_id=session["session_id"]) == []
+    # The disputed session itself is still only reported, never rewritten.
+    survived = _rows(target, "app_sessions", session_id=session["session_id"])[0]
+    assert survived["tenant_id"] == other_tenant
+
+
+@requires_database
+def test_last_seq_behind_its_event_stream_is_reported(source, target):
+    """The eighth invariant: seq is allocated as last_seq+1, so last_seq must
+    dominate the stream. Backfilling a stale last_seq makes both stores agree
+    on a broken state that collides on the first turn after the flip."""
+    session = source.session(last_seq=0)
+    source.event(session["session_id"], seq=1, advance_last_seq=False)
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    sessions = receipt["tables"]["app_sessions"]
+    assert sessions["blocked_reasons"] == {"last_seq_behind_events": 1}
+    assert receipt["inserted"]["app_sessions"] == 0
+    assert receipt["reconciled"] is False
+    assert _rows(target, "app_sessions", session_id=session["session_id"]) == []
+
+
+@requires_database
+def test_json_integer_is_not_certified_equal_to_json_true(source, target):
+    """Python says 1 == True, so plain equality over parsed JSON would certify
+    two distinguishable JSONB states as equal and exit 0."""
+    session = source.session()
+    source.event(session["session_id"], seq=1, data_json=json.dumps({"flag": 1}))
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    with target.transaction() as conn:
+        conn.execute(
+            "UPDATE app_session_events SET data_json = %s::jsonb"
+            " WHERE session_id = %s",
+            (json.dumps({"flag": True}), session["session_id"]),
+        )
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["tables"]["app_session_events"]["conflicting_count"] == 1
+    assert receipt["reconciled"] is False
+
+
+def test_comparable_values_keep_distinguishable_states_apart():
+    # Compare the ENCODED form, which is what _comparable_row actually uses:
+    # the tagged structures still contain Python values, where 1 == True.
+    def encode(kind, value):
+        return json.dumps(RECONCILE._comparable_value(kind, value), sort_keys=True)
+
+    assert encode(RECONCILE.JSON, None) != encode(RECONCILE.JSON, "null")
+    assert encode(RECONCILE.JSON, '{"f": 1}') != encode(RECONCILE.JSON, '{"f": true}')
+    assert encode(RECONCILE.BOOL, 1) != encode(RECONCILE.INT, 1)
+    # And the row-level encoder, which is the real comparison surface.
+    left = RECONCILE._comparable_row("app_session_events", {
+        "session_id": "s", "seq": 1, "turn_id": None, "type": "message",
+        "data_json": '{"f": 1}', "created_at": 1.0,
+    })
+    right = RECONCILE._comparable_row("app_session_events", {
+        "session_id": "s", "seq": 1, "turn_id": None, "type": "message",
+        "data_json": '{"f": true}', "created_at": 1.0,
+    })
+    assert left != right
+    # The JSON literal null is a value, not SQL NULL, and satisfies NOT NULL.
+    assert RECONCILE._normalize(RECONCILE.JSON, "null") is RECONCILE.JSON_NULL
+    assert RECONCILE._normalize(RECONCILE.JSON, None) is None
+    assert RECONCILE._insert_value(RECONCILE.JSON, RECONCILE.JSON_NULL) == "null"
+    assert RECONCILE._insert_value(RECONCILE.JSON, None) is None
+
+
+@requires_database
+def test_a_non_boolean_legacy_flag_is_reported_never_coerced(source, target):
+    """bool(2) is True, so coercion alone would certify 2 equal to TRUE."""
+    session = source.session()
+    source.approval(session["session_id"], decided=2)
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert receipt["tables"]["app_approvals"]["blocked_reasons"] == {
+        "non_boolean_flag:decided": 1
+    }
+    assert receipt["inserted"]["app_approvals"] == 0
+
+
+@requires_database
+def test_json_null_data_is_backfillable_and_not_a_null_violation(source, target):
+    """'null'::jsonb satisfies data_json NOT NULL; SQL NULL does not."""
+    session = source.session()
+    source.event(session["session_id"], seq=1, data_json="null")
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert receipt["tables"]["app_session_events"]["blocked_reasons"] == {}
+    assert receipt["inserted"]["app_session_events"] == 1
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    source.raw("UPDATE session_events SET data_json = NULL WHERE session_id = ?",
+               (session["session_id"],))
+    blocked = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert blocked["tables"]["app_session_events"]["conflicting_count"] == 1
+
+
+@requires_database
+def test_a_source_that_moves_mid_run_is_detected_not_certified(source, monkeypatch):
+    """The two snapshots are not one atomic read.
+
+    The app can commit a legacy write after the SQLite snapshot and fail before
+    its PostgreSQL mirror, leaving a source-only row that neither half of the
+    comparison contains. Re-reading the source under the target transaction
+    turns that silent false pass into a reported failure.
+    """
+    session = source.session()
+    RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert RECONCILE.reconcile(
+        sqlite_path=source.path, mode="parity"
+    )["reconciled"] is True
+
+    original = RECONCILE._postgres_snapshot
+    fired = {"count": 0}
+
+    def snapshot_then_write(connection):
+        result = original(connection)
+        if fired["count"] == 0:
+            fired["count"] = 1
+            # Stands in for the live app committing to SQLite mid-run.
+            source.event(session["session_id"], seq=1)
+        return result
+
+    monkeypatch.setattr(RECONCILE, "_postgres_snapshot", snapshot_then_write)
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["source_stable"] is False
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+def test_a_fractional_integer_is_reported_never_truncated(source, target):
+    """SQLite is dynamically typed. int(3.5) is 3, which would compare equal to
+    a target BIGINT 3 and certify a genuine difference as clean."""
+    session = source.session()
+    source.raw("UPDATE sessions SET last_seq = 3.5 WHERE session_id = ?",
+               (session["session_id"],))
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+    assert receipt["tables"]["app_sessions"]["blocked_reasons"] == {
+        "non_integral:last_seq": 1
+    }
+    assert receipt["inserted"]["app_sessions"] == 0
+    assert _rows(target, "app_sessions", session_id=session["session_id"]) == []
+
+
+@requires_database
+def test_a_racing_target_write_is_never_reported_as_reconciled(source, target):
+    """A row that lands in PostgreSQL between the analysis and the INSERT.
+
+    ON CONFLICT DO NOTHING must leave the app's row exactly as written, and the
+    post-insert re-analysis must not then call the run clean when the two
+    disagree.
+    """
+    session = source.session(status="active")
+    original = RECONCILE._insert_snapshot
+    fired = {"count": 0}
+
+    def race_then_insert(connection, snapshot):
+        if fired["count"] == 0:
+            fired["count"] = 1
+            # A separate transaction, committed before ours inserts.
+            with target.transaction() as other:
+                other.execute(
+                    "INSERT INTO app_sessions (session_id, tenant_id, drawing_id,"
+                    " status, created_at, updated_at, last_seq)"
+                    " VALUES (%s,%s,%s,'closed',777.0,777.0,0)"
+                    " ON CONFLICT DO NOTHING",
+                    (session["session_id"], session["tenant_id"],
+                     session["drawing_id"]),
+                )
+        return original(connection, snapshot)
+
+    RECONCILE._insert_snapshot = race_then_insert
+    try:
+        try:
+            receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
+        except Exception:
+            # A serialization failure is an acceptable loud outcome; the
+            # forbidden outcome is a quiet success over a disagreeing row.
+            return
+    finally:
+        RECONCILE._insert_snapshot = original
+
+    stored = _rows(target, "app_sessions", session_id=session["session_id"])[0]
+    assert stored["status"] == "closed", "the racing writer's row was overwritten"
+    assert stored["created_at"] == 777.0
+    assert receipt["reconciled"] is False
+
+
+@requires_database
+def test_a_database_error_exits_two_not_one(source, tmp_path):
+    """Exit 1 means 'parity failed' and gates a flip, so a driver failure must
+    not borrow it. psycopg errors are not OSError/RuntimeError/sqlite3.Error."""
+    source.session()
+    environment = dict(os.environ)
+    environment["DATABASE_URL"] = (
+        "postgresql://postgres:postgres@127.0.0.1:59999/leaf_absent"
+    )
+    proc = subprocess.run(
+        [sys.executable, str(RECONCILE_PATH), "--mode", "parity",
+         "--sqlite", str(source.path)],
+        capture_output=True, text=True, env=environment,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "sessions authority reconciliation failed" in proc.stderr
 
 
 # --------------------------------------------------------------------------- #

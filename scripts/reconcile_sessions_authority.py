@@ -26,7 +26,7 @@ Exit codes:
 * ``2`` could not run (bad schema, missing migration, locked source, ...). The
   reason is on stderr.
 
-The command prints counts, reason tallies, opaque primary keys, and aggregate
+The command prints counts, reason tallies, hashed primary keys, and aggregate
 digests only. It never prints tenant identifiers, event payloads, approval
 params, approval payloads, or the database URL.
 """
@@ -172,8 +172,8 @@ _WRITE_FENCE = 0x4C454146534553
 _ENSURE_ATTEMPTS = 6
 _ENSURE_BACKOFF_SECONDS = 2.0
 
-# How many opaque primary keys to report per table per defect class. Enough to
-# act on, bounded so a badly drifted store cannot produce an unbounded receipt.
+# How many primary keys to report per table per defect class. Enough to act on,
+# bounded so a badly drifted store cannot produce an unbounded receipt.
 _KEY_SAMPLE_LIMIT = 20
 
 
@@ -193,8 +193,20 @@ def _is_locked_error(error: sqlite3.OperationalError) -> bool:
     return "locked" in message or "busy" in message
 
 
+class _JsonNull:
+    """The JSON literal ``null``, which is a value, not SQL NULL."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "JSON_NULL"
+
+
+JSON_NULL = _JsonNull()
+
+
 def _normalize(kind: str, value: Any) -> Any:
-    """Coerce one column to the single comparable form both stores share.
+    """Coerce one column to the single form both stores can be compared in.
 
     Float columns (``created_at``, ``updated_at``, ``turn_started_at``,
     ``expires_at``) are compared EXACTLY, with no tolerance. SQLite ``REAL`` and
@@ -205,13 +217,22 @@ def _normalize(kind: str, value: Any) -> Any:
     ``_shadow_equal``, which compares whole dicts with a bare ``!=``. The two
     definitions of "equal" must not disagree, or a shadow read would fail on a
     pair this command has already certified.
+
+    The result feeds INSERT. It is NOT sufficient for comparison on its own --
+    see ``_comparable_value``.
     """
     if value is None:
         return None
     if kind == JSON:
         # TEXT in SQLite, JSONB in PostgreSQL. A string comparison always fails
         # and JSONB does not preserve key order, so compare parsed values.
-        return _session_store()._json_value(value)
+        #
+        # The JSON literal `null` is NOT SQL NULL: `'null'::jsonb` satisfies
+        # app_session_events.data_json's NOT NULL. Collapsing both to Python
+        # None would wrongly report such a row as unbackfillable and would
+        # insert SQL NULL in its place, so keep them distinct.
+        parsed = _session_store()._json_value(value)
+        return JSON_NULL if parsed is None else parsed
     if kind == FLOAT:
         return float(value)
     if kind == INT:
@@ -225,6 +246,46 @@ def _normalize(kind: str, value: Any) -> Any:
 def _normalize_row(table: str, row: Mapping[str, Any]) -> dict[str, Any]:
     columns = TABLE_COLUMNS[table]
     return {column: _normalize(kind, row[column]) for column, kind in columns.items()}
+
+
+def _comparable_value(kind: str, value: Any) -> Any:
+    """Tag a column so equality cannot erase a distinguishable database state.
+
+    ``_normalize`` produces values to INSERT, and plain Python equality over
+    those is too weak to compare with: ``1 == True`` and ``0 == False``, so a
+    source ``data_json`` of ``{"flag": 1}`` would certify equal to a target
+    ``{"flag": true}``; and SQL NULL and the JSON literal ``null`` are different
+    states in the same column. Tagging the kind and distinguishing SQL NULL from
+    JSON null makes the comparison exact. The customization template compares
+    canonical JSON strings for the same reason.
+
+    Callers must compare the ENCODED form (``_comparable_row``), not these
+    structures: the parsed JSON payload still contains Python values, where
+    ``1 == True`` holds.
+    """
+    if kind == JSON:
+        if value is None:
+            return ["sql_null"]
+        return ["json", _session_store()._json_value(value)]
+    if value is None:
+        return None
+    if kind == FLOAT:
+        # repr round-trips a binary64 float exactly in Python 3.
+        return ["f", repr(float(value))]
+    if kind == INT:
+        return ["i", int(value)]
+    if kind == BOOL:
+        return ["b", bool(value)]
+    return ["t", value]
+
+
+def _comparable_row(table: str, row: Mapping[str, Any]) -> str:
+    columns = TABLE_COLUMNS[table]
+    tagged = {
+        column: _comparable_value(kind, row[column])
+        for column, kind in columns.items()
+    }
+    return json.dumps(tagged, sort_keys=True, separators=(",", ":"))
 
 
 @contextmanager
@@ -390,22 +451,47 @@ def _assert_target_columns(connection: Any) -> None:
             )
 
 
+_SQL_NULL_PROBE = "__sql_null__"
+
+
 def _postgres_snapshot(connection: Any) -> dict[str, list[dict[str, Any]]]:
-    return {
-        table: [
-            dict(row)
-            for row in connection.execute(
-                f"SELECT {','.join(columns)} FROM {table} "
-                f"ORDER BY {','.join(_PRIMARY_KEYS[table])}"
-            ).fetchall()
+    """Snapshot the target, keeping JSONB ``null`` distinct from SQL NULL.
+
+    psycopg decodes ``'null'::jsonb`` and SQL NULL to the SAME Python ``None``,
+    so a plain SELECT cannot tell them apart, and treating them as equal would
+    let a genuinely different column certify clean. Ask the database directly
+    with ``IS NULL`` and re-render a JSONB null as the text ``"null"``, which is
+    exactly how SQLite stores it, so both sides reach ``_normalize`` in one
+    representation. The rendered row still contains only the declared columns
+    and stays JSON-serializable for ``authority_digest``.
+    """
+    snapshot: dict[str, list[dict[str, Any]]] = {}
+    for table, columns in TABLE_COLUMNS.items():
+        json_columns = [name for name, kind in columns.items() if kind == JSON]
+        selected = list(columns) + [
+            f"({name} IS NULL) AS {_SQL_NULL_PROBE}{name}" for name in json_columns
         ]
-        for table, columns in TABLE_COLUMNS.items()
-    }
+        rows = []
+        for raw in connection.execute(
+            f"SELECT {','.join(selected)} FROM {table} "
+            f"ORDER BY {','.join(_PRIMARY_KEYS[table])}"
+        ).fetchall():
+            row = {name: raw[name] for name in columns}
+            for name in json_columns:
+                if row[name] is None and not raw[f"{_SQL_NULL_PROBE}{name}"]:
+                    row[name] = "null"
+            rows.append(row)
+        snapshot[table] = rows
+    return snapshot
 
 
 def _indexed_snapshot(
     snapshot: Mapping[str, Sequence[Mapping[str, Any]]], *, side: str
 ) -> dict[str, dict[tuple[Any, ...], dict[str, Any]]]:
+    """Index by primary key, carrying both the insertable values and a
+    type-exact comparison string. The two are separate on purpose: ``values``
+    feeds INSERT, ``compare`` decides equality, and plain equality over
+    ``values`` is too weak (see ``_comparable_value``)."""
     if set(snapshot) != set(TABLE_COLUMNS):
         raise RuntimeError(f"{side} sessions authority has an invalid table set")
     indexed: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {}
@@ -425,7 +511,10 @@ def _indexed_snapshot(
                 raise RuntimeError(
                     f"{side} sessions authority has a duplicate primary key in {table}"
                 )
-            rows[key] = _normalize_row(table, row)
+            rows[key] = {
+                "values": _normalize_row(table, row),
+                "compare": _comparable_row(table, row),
+            }
         indexed[table] = rows
     return indexed
 
@@ -434,9 +523,27 @@ def _identity(row: Mapping[str, Any]) -> tuple[Any, Any]:
     return (row["tenant_id"], row["drawing_id"])
 
 
+def _non_integral_defects(raw: Mapping[str, Any], columns: Sequence[str]) -> list[str]:
+    """Flag a source value that ``int()`` would silently truncate.
+
+    SQLite is dynamically typed, so an INTEGER column can hold 3.5 or "3".
+    ``int(3.5)`` is 3, which would compare equal to a target BIGINT 3 and
+    certify a genuine difference as clean. The app cannot write one, but this
+    command exists to judge a store rather than to trust it.
+    """
+    defects = []
+    for column in columns:
+        value = raw[column]
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            continue
+        defects.append(f"non_integral:{column}")
+    return defects
+
+
 def _session_defects(
     key: tuple[Any, ...],
     row: Mapping[str, Any],
+    raw: Mapping[str, Any],
     *,
     duplicated_identities: set[tuple[Any, Any]],
     target_identities: Mapping[tuple[Any, Any], Any],
@@ -446,6 +553,7 @@ def _session_defects(
         for column in _TARGET_NOT_NULL["app_sessions"]
         if row[column] is None
     ]
+    defects.extend(_non_integral_defects(raw, ("last_seq",)))
     last_seq = row["last_seq"]
     if last_seq is not None and last_seq < 0:
         # app_sessions.last_seq carries CHECK (last_seq >= 0); SQLite has none.
@@ -464,13 +572,14 @@ def _session_defects(
 
 
 def _event_defects(
-    row: Mapping[str, Any], *, available_sessions: set[Any]
+    row: Mapping[str, Any], raw: Mapping[str, Any], *, available_sessions: set[Any]
 ) -> list[str]:
     defects = [
         f"null_violation:{column}"
         for column in _TARGET_NOT_NULL["app_session_events"]
         if row[column] is None
     ]
+    defects.extend(_non_integral_defects(raw, ("seq",)))
     seq = row["seq"]
     if seq is not None and seq <= 0:
         # app_session_events.seq carries CHECK (seq > 0); SQLite has no such
@@ -485,7 +594,7 @@ def _event_defects(
     return defects
 
 
-def _approval_defects(row: Mapping[str, Any]) -> list[str]:
+def _approval_defects(row: Mapping[str, Any], raw: Mapping[str, Any]) -> list[str]:
     defects = [
         f"null_violation:{column}"
         for column in _TARGET_NOT_NULL["app_approvals"]
@@ -494,6 +603,14 @@ def _approval_defects(row: Mapping[str, Any]) -> list[str]:
     if row["consumed"] and not row["decided"]:
         # app_approvals carries CHECK (NOT consumed OR decided); SQLite does not.
         defects.append("consumed_without_decision")
+    for column in ("decided", "approved", "consumed"):
+        value = raw[column]
+        if value is None or (isinstance(value, int) and value in (0, 1)):
+            continue
+        # bool() would map any nonzero to TRUE, so a legacy 2 would silently
+        # certify equal to a target TRUE forever. The target column is BOOLEAN
+        # and cannot represent it, so report rather than coerce.
+        defects.append(f"non_boolean_flag:{column}")
     return defects
 
 
@@ -512,8 +629,8 @@ def _analyze(
     target_index = _indexed_snapshot(target, side="PostgreSQL")
 
     identity_counts: dict[tuple[Any, Any], int] = {}
-    for row in source_index["app_sessions"].values():
-        identity = _identity(row)
+    for entry in source_index["app_sessions"].values():
+        identity = _identity(entry["values"])
         if None in identity:
             continue
         identity_counts[identity] = identity_counts.get(identity, 0) + 1
@@ -521,9 +638,30 @@ def _analyze(
         identity for identity, count in identity_counts.items() if count > 1
     }
     target_identities = {
-        _identity(row): key[0]
-        for key, row in target_index["app_sessions"].items()
-        if None not in _identity(row)
+        _identity(entry["values"]): key[0]
+        for key, entry in target_index["app_sessions"].items()
+        if None not in _identity(entry["values"])
+    }
+
+    # Sessions present in BOTH stores whose rows disagree. Their identity is in
+    # dispute, so nothing may be written beneath them: if the source row is
+    # tenant A's and the target row with that session_id is tenant B's, then
+    # inserting the source's events would file tenant A's events under tenant
+    # B's session. Computed before events are classified, and removed from the
+    # availability set below.
+    conflicting_session_ids = {
+        key[0]
+        for key, target_entry in target_index["app_sessions"].items()
+        if key in source_index["app_sessions"]
+        and source_index["app_sessions"][key]["compare"] != target_entry["compare"]
+    }
+
+    raw_by_table = {
+        table: {
+            tuple(row[column] for column in _PRIMARY_KEYS[table]): row
+            for row in source[table]
+        }
+        for table in TABLE_COLUMNS
     }
 
     tables: dict[str, Any] = {}
@@ -531,56 +669,92 @@ def _analyze(
 
     # Sessions first: which sessions will exist decides which events are orphans.
     session_only = {
-        key: row
-        for key, row in source_index["app_sessions"].items()
+        key: entry
+        for key, entry in source_index["app_sessions"].items()
         if key not in target_index["app_sessions"]
     }
+
+    # last_seq must dominate the session's own event stream. seq is allocated in
+    # exactly one place, append_event's last_seq+1, so a source where an event
+    # outruns last_seq is already corrupt. It matters here and not only in the
+    # abstract: after the flip _pg_append_event sets last_seq = last_seq + 1 and
+    # inserts (session_id, that seq), so a stale last_seq collides with the
+    # backfilled event's primary key on the first turn after cutover. Both
+    # stores would hold the same broken state, so parity alone would never see
+    # it. Computed over the source's FULL event stream, not just source-only
+    # events.
+    highest_source_seq: dict[Any, int] = {}
+    for key, entry in source_index["app_session_events"].items():
+        seq = entry["values"]["seq"]
+        if seq is None:
+            continue
+        session_id = key[0]
+        if seq > highest_source_seq.get(session_id, 0):
+            highest_source_seq[session_id] = seq
+
     session_blocked: dict[tuple[Any, ...], list[str]] = {}
-    for key, row in session_only.items():
+    for key, entry in session_only.items():
+        row = entry["values"]
         defects = _session_defects(
-            key, row,
+            key, row, raw_by_table["app_sessions"][key],
             duplicated_identities=duplicated_identities,
             target_identities=target_identities,
         )
+        last_seq = row["last_seq"]
+        if last_seq is not None and highest_source_seq.get(key[0], 0) > last_seq:
+            defects.append("last_seq_behind_events")
         if defects:
             session_blocked[key] = defects
     insertable["app_sessions"] = [
-        row for key, row in session_only.items() if key not in session_blocked
+        entry["values"] for key, entry in session_only.items()
+        if key not in session_blocked
     ]
-    available_sessions = set(target_index["app_sessions"]) | {
-        (row["session_id"],) for row in insertable["app_sessions"]
-    }
-    available_session_ids = {key[0] for key in available_sessions}
+    # A session that will exist in the target AND is not in dispute. A
+    # conflicting shared session is deliberately excluded: see
+    # conflicting_session_ids above.
+    available_session_ids = (
+        {key[0] for key in target_index["app_sessions"]}
+        | {row["session_id"] for row in insertable["app_sessions"]}
+    ) - conflicting_session_ids
 
     blocked_by_table = {"app_sessions": session_blocked}
 
     event_only = {
-        key: row
-        for key, row in source_index["app_session_events"].items()
+        key: entry
+        for key, entry in source_index["app_session_events"].items()
         if key not in target_index["app_session_events"]
     }
     event_blocked: dict[tuple[Any, ...], list[str]] = {}
-    for key, row in event_only.items():
-        defects = _event_defects(row, available_sessions=available_session_ids)
+    for key, entry in event_only.items():
+        defects = _event_defects(
+            entry["values"], raw_by_table["app_session_events"][key],
+            available_sessions=available_session_ids,
+        )
+        if key[0] in conflicting_session_ids:
+            defects.append("conflicting_parent_session")
         if defects:
             event_blocked[key] = defects
     insertable["app_session_events"] = [
-        row for key, row in event_only.items() if key not in event_blocked
+        entry["values"] for key, entry in event_only.items()
+        if key not in event_blocked
     ]
     blocked_by_table["app_session_events"] = event_blocked
 
     approval_only = {
-        key: row
-        for key, row in source_index["app_approvals"].items()
+        key: entry
+        for key, entry in source_index["app_approvals"].items()
         if key not in target_index["app_approvals"]
     }
     approval_blocked: dict[tuple[Any, ...], list[str]] = {}
-    for key, row in approval_only.items():
-        defects = _approval_defects(row)
+    for key, entry in approval_only.items():
+        defects = _approval_defects(
+            entry["values"], raw_by_table["app_approvals"][key]
+        )
         if defects:
             approval_blocked[key] = defects
     insertable["app_approvals"] = [
-        row for key, row in approval_only.items() if key not in approval_blocked
+        entry["values"] for key, entry in approval_only.items()
+        if key not in approval_blocked
     ]
     blocked_by_table["app_approvals"] = approval_blocked
 
@@ -593,11 +767,13 @@ def _analyze(
     for table in TABLE_COLUMNS:
         blocked = blocked_by_table[table]
         conflicts: list[tuple[Any, ...]] = []
-        for key, target_row in target_index[table].items():
-            source_row = source_index[table].get(key)
-            if source_row is None:
+        for key, target_entry in target_index[table].items():
+            source_entry = source_index[table].get(key)
+            if source_entry is None:
                 continue
-            if source_row != target_row:
+            # Type-exact string comparison, NOT Python equality over the
+            # normalized values: see _comparable_value.
+            if source_entry["compare"] != target_entry["compare"]:
                 conflicts.append(key)
         reasons: dict[str, int] = {}
         for defects in blocked.values():
@@ -622,13 +798,19 @@ def _analyze(
 
 
 def _key_sample(keys: Sequence[tuple[Any, ...]]) -> list[str]:
-    """Opaque primary keys only, bounded.
+    """Bounded, HASHED primary keys.
 
-    ``session_id`` and ``confirmation_id`` are generated UUIDs and ``seq`` is a
-    counter, so this identifies rows to act on without disclosing ``tenant_id``,
-    ``drawing_id``, event payloads, or approval params.
+    The raw key is deliberately not printed. ``session_id`` is a durable
+    tenant-linked conversation identifier, and ``confirmation_id`` is
+    caller-supplied with no UUID enforcement, so it can carry identifying text.
+    A truncated SHA-256 still lets an operator locate a row (hash the candidate
+    id and match) while the receipt itself discloses nothing.
     """
-    return [":".join(str(part) for part in key) for key in list(keys)[:_KEY_SAMPLE_LIMIT]]
+    sample = []
+    for key in list(keys)[:_KEY_SAMPLE_LIMIT]:
+        joined = ":".join(str(part) for part in key)
+        sample.append(hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16])
+    return sample
 
 
 def _missing_source_rows(
@@ -651,6 +833,23 @@ def _target_only_counts(
     }
 
 
+def _insert_value(kind: str, value: Any) -> Any:
+    """Render one normalized value for the parameterized INSERT.
+
+    A JSON column holding SQL NULL is inserted as SQL NULL, exactly as
+    session_store's own ``_pg_create_approval`` does (``json.dumps(params) if
+    params is not None else None``); the two must not disagree. The JSON literal
+    ``null`` is a value and is inserted as ``'null'::jsonb``.
+    """
+    if kind != JSON:
+        return value
+    if value is None:
+        return None
+    if value is JSON_NULL:
+        return "null"
+    return json.dumps(value)
+
+
 def _insert_snapshot(
     connection: Any, snapshot: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> dict[str, int]:
@@ -662,9 +861,11 @@ def _insert_snapshot(
 
     ``ON CONFLICT DO NOTHING`` is what makes this safe against a live
     dual-writing service: a row that lands in PostgreSQL between the snapshot
-    and this insert is left exactly as the app wrote it. The post-insert
-    re-analysis then reports it as a conflict if its values disagree, so a
-    racing write is surfaced rather than overwritten.
+    and this insert is left exactly as the app wrote it, never overwritten.
+    Under SERIALIZABLE the transaction more often aborts loudly than swallows
+    such a row, and where it does swallow one the post-insert re-analysis leaves
+    it counted as source-only rather than reconciled. Either way the run does
+    not report success; it does not necessarily report it as a *conflict*.
     """
     inserted: dict[str, int] = {}
     for table, columns in TABLE_COLUMNS.items():
@@ -678,17 +879,8 @@ def _insert_snapshot(
         )
         count = 0
         for row in rows:
-            # A JSON column holding SQL NULL is inserted as SQL NULL, not as
-            # ``'null'::jsonb``. That is exactly what session_store's own
-            # _pg_create_approval does (``json.dumps(params) if params is not
-            # None else None``), and the two must not disagree. Where the target
-            # column is NOT NULL -- app_session_events.data_json -- a source NULL
-            # is reported as unbackfillable instead, rather than inventing '{}'.
             values = tuple(
-                (json.dumps(row[column]) if row[column] is not None else None)
-                if kind == JSON
-                else row[column]
-                for column, kind in columns.items()
+                _insert_value(kind, row[column]) for column, kind in columns.items()
             )
             count += connection.execute(statement, values).rowcount
         inserted[table] = count
@@ -726,15 +918,29 @@ def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
             target = _postgres_snapshot(connection)
             analysis = _analyze(source, target)
         target_digest = authority_digest(target)
+        # The two snapshots are NOT one atomic read: SQLite is snapshotted and
+        # released before PostgreSQL is locked, and the live app holds no
+        # advisory lock at all, so a legacy write that commits in between is
+        # invisible to both halves. Left undetected that is a FALSE PASS -- the
+        # app could commit a legacy approval and then fail before its PostgreSQL
+        # mirror, and neither snapshot would contain it. Re-read the source
+        # while still holding the target transaction: if its digest moved, the
+        # source changed under the run and the comparison certifies a pair that
+        # never coexisted. This narrows the window rather than closing it; only
+        # writer quiescence closes it, and this command deliberately does not
+        # quiesce a live service.
+        source_after = _sqlite_snapshot(sqlite_path)
+        source_stable = authority_digest(source_after) == source_digest
         tables = analysis["tables"]
-        reconciled = all(
+        reconciled = source_stable and all(
             entry["source_only_count"] == 0 and entry["conflicting_count"] == 0
             for entry in tables.values()
         )
         return {
-            "schema": "leaf.sessions-authority-reconciliation.v1",
+            "schema": "leaf.sessions-authority-reconciliation.v2",
             "mode": mode,
             "reconciled": reconciled,
+            "source_stable": source_stable,
             "parity": reconciled,
             "exact_equal": target_digest == source_digest,
             "inserted": inserted,
@@ -777,12 +983,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         sqlite_path = args.sqlite if args.sqlite is not None else default_sqlite_path()
         receipt = reconcile(sqlite_path=sqlite_path, mode=args.mode)
-    except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broad. Exit 1 means "ran to completion, parity failed"
+        # and a caller gates a data-authority flip on that distinction, so a
+        # driver error must NOT surface as 1. psycopg's exceptions derive from
+        # Exception and not from any of OSError/RuntimeError/sqlite3.Error, so
+        # a narrow clause let a connection failure exit 1 with a traceback.
         print(f"sessions authority reconciliation failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     if not receipt["reconciled"]:
-        print("sessions authority parity failed", file=sys.stderr)
+        if not receipt["source_stable"]:
+            print(
+                "sessions authority source changed during the run; re-run",
+                file=sys.stderr,
+            )
+        else:
+            print("sessions authority parity failed", file=sys.stderr)
         return 1
     return 0
 
