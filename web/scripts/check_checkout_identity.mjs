@@ -613,6 +613,13 @@ async function runTabs(ages, seedId) {
   } else if (authLoginBody.indexOf('releaseCheckout(') < 0 ||
              authLoginBody.indexOf('releaseCheckout(') > authLoginBody.indexOf('await login()')) {
     fail('App.jsx leaves checkout authority live before Auth0 login')
+  } else if (authLoginBody.indexOf('setCheckout(null)') < authLoginBody.indexOf('releaseCheckout(') ||
+             authLoginBody.indexOf('setCheckout(null)') > authLoginBody.indexOf('await login()') ||
+             authLoginBody.indexOf('setCheckoutUnknown(false)') < authLoginBody.indexOf('releaseCheckout(') ||
+             authLoginBody.indexOf('setCheckoutUnknown(false)') > authLoginBody.indexOf('await login()') ||
+             authLoginBody.indexOf('setCheckoutReadFailed(false)') < authLoginBody.indexOf('releaseCheckout(') ||
+             authLoginBody.indexOf('setCheckoutReadFailed(false)') > authLoginBody.indexOf('await login()')) {
+    fail('App.jsx does not converge released checkout state before Auth0 login can reject')
   } else pass('App.jsx releases checkout authority before Auth0 and keeps the return handoff as fallback')
 
   const checkoutHook = await fs.readFile(new URL('../src/controllers/checkout/useCheckoutController.js', import.meta.url), 'utf8')

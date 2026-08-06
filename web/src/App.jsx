@@ -891,6 +891,13 @@ export default function App() {
         capabilityRef.current = null
         reloadAuthorityRef.current?.stop()
         reloadAuthorityRef.current = null
+        // The server lease is already gone. Converge the rendered lock state
+        // before Auth0 navigation so a rejected redirect cannot leave a stale
+        // "You hold the edit lock" control with no bearer capability.
+        setCheckout(null)
+        setCheckoutUnknown(false)
+        setCheckoutReadFailed(false)
+        bumpCheckoutAuthority((version) => version + 1)
       } catch { /* the auth-return handoff remains the fail-closed fallback */ }
     }
     await login()
