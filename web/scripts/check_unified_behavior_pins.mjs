@@ -59,6 +59,16 @@ assert(
   'inflight jobs must retain the durable browser pointer used for reattach',
 )
 assert(
+  toolCast.includes('const previewLocked = drawing.previewing != null') &&
+    toolCast.includes('checkout.writeLocked || drawing.mutationsBlocked || previewLocked'),
+  'previewing an older version must lock drawing writes on /try',
+)
+assert(
+  toolCast.includes('data-testid="try-preview-write-lock"') &&
+    toolCast.includes('Back to head'),
+  'the preview write lock must say it is locked and name the way back to head',
+)
+assert(
   !styles.includes('animation: none !important') && !landing.includes('animation: none !important'),
   'reduced motion must complete filled animations instead of canceling them',
 )

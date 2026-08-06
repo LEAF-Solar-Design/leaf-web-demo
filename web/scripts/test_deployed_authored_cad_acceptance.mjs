@@ -1334,10 +1334,19 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.ok(!source.includes('.route('))
     assert.ok(!source.includes('leaf-proof.invalid/api/**'))
     assert.ok(!source.includes("getByRole('button', { name: 'Approve'"))
-    // /try's preview copy is "Viewing v1 read-only" (ToolCast.jsx:1330); the
-    // "…read-only preview" wording belongs to /app's VersionHistory, which
-    // this driver never opens.
+    // /try's preview copy is "Viewing v1 read-only" (ToolCast.jsx's
+    // `tc-preview-note`); the "…read-only preview" wording belongs to /app's
+    // VersionHistory, which this driver never opens.
     assert.ok(source.includes("getByText(/Viewing v1 read-only/)"))
+    // The read-only leg must prove the LOCK, not just that nothing happened to
+    // be written. PR #409 deleted the disabled-control check because the
+    // surface had no preview lock; it does now, so the check is pinned here —
+    // dropping it again fails this suite instead of passing quietly.
+    assert.ok(source.includes("getByTestId('try-preview-write-lock')"))
+    assert.ok(source.includes("{ name: 'Review & run', exact: true }"))
+    assert.ok(/stayed runnable while previewing an older version/.test(source))
+    // …and that the lock RELEASES, or preview strands the surface read-only.
+    assert.ok(/did not lift the preview write lock/.test(source))
     assert.ok(source.includes("expired_approval: 'requires_external_evidence'"))
     assert.ok(!source.includes("waitUntil: 'networkidle'"))
     assert.equal(source.match(/waitUntil: 'domcontentloaded'/g)?.length, 2)
