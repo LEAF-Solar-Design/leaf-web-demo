@@ -77,7 +77,7 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
   });
 
   it("the redactor stays leaf-pure, so admitting it into the lane imports nothing else", () => {
-    const source = readFileSync(join(SRC, "redact.ts"), "utf8");
+    const source = readFileSync(join(SRC, "vendor", "mushy-author", "redact.ts"), "utf8");
     expect([...source.matchAll(/from\s+"([^"]+)"/g)]).toHaveLength(0);
     expect(source).not.toMatch(/\bimport\b/);
   });

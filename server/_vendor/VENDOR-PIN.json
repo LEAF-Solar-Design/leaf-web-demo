@@ -1,0 +1,13 @@
+{
+  "contract": "leaf.vendor-pin.v1",
+  "files": {
+    "__init__.py": "71321bd64198ffa084693370c0a1235bf8bd89c2649c53d6a049e90c7d2a109e",
+    "entry.py": "b4f8948286cd5e52ee9e0be9c65974ec62d04cd03ee0c6676e8a0265b9bfbfdf",
+    "ids.py": "16f4820ae14cee12ca2b5e94e121b83fb916a2ecdfd7fa1dd5b787719dbbf206",
+    "paths.py": "b332223da548d20d2e6ba7b8813c1eec186fb762cef6a1f3af5aef5702366159",
+    "registry.py": "92d1b7c4bb2941d5a58d73334e57bf88cea4a35d72a0882c7d6b1b8326f2066a"
+  },
+  "surface": "packages/fold-py/src/mushy_fold",
+  "upstream": "LEAF-Solar-Design/mushy-code",
+  "upstream_commit": "40eb3ea3a536052b48a6967459d4c304fcfabfc3"
+}

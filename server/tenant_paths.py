@@ -21,12 +21,20 @@ crafted tenant_id can never escape ``$LEAF_TENANTS_DIR``.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
 from customization_flags import enabled
 from tenant_id_validator import is_valid_tenant_id  # F13: the ONE shared reject-don't-collapse rule
+
+# The generic env-resolution core moved to the vendored mushy-code library
+# (mushy-code extraction, 2026-08-06). This module keeps the platform-specific
+# authority layering (effective-pin override, rollout flags) and injects the
+# F13 validator + historical LEAF_* env names into the generic resolver.
+from _vendor.mushy_fold.paths import (
+    resolve_consumer_repo_dir as _resolve_consumer_repo_dir,
+    safe_component as _generic_safe_component,
+)
 
 DEFAULT_TENANT = "demo-tenant"
 
@@ -41,13 +49,7 @@ def _safe_component(tenant_id: str) -> Optional[str]:
     single store key. Now both accept exactly the same charset (``[a-z0-9_-]``).
     """
     tid = "" if tenant_id is None else str(tenant_id)
-    if not tid:
-        return None
-    # a well-formed tenant id is its own basename (no embedded separator).
-    basename = tid.replace("\\", "/").split("/")[-1]
-    if basename != tid or not is_valid_tenant_id(basename):
-        return None
-    return basename
+    return _generic_safe_component(tid, validator=is_valid_tenant_id)
 
 
 def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:
@@ -84,15 +86,13 @@ def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:
     if enabled(5, tid) or enabled(6, tid):
         return None
 
-    single = os.environ.get("LEAF_TENANT_REPO", "").strip()
-    base = os.environ.get("LEAF_TENANTS_DIR", "").strip()
-
-    if base:  # multi-tenant mode
-        if tid == DEFAULT_TENANT and single:
-            return Path(single)  # demo-tenant back-compat override
-        return Path(base) / tid
-
-    if single:  # legacy single-repo mode: one repo for all tenants (wave-3 back-compat)
-        return Path(single)
-
-    return None
+    # Generic core (vendored mushy-fold): multi-tenant / legacy-single-repo /
+    # off-by-default env resolution, read at CALL time, with the F13 validator
+    # and this repo's historical env names injected.
+    return _resolve_consumer_repo_dir(
+        tid,
+        consumers_dir_env="LEAF_TENANTS_DIR",
+        single_repo_env="LEAF_TENANT_REPO",
+        default_consumer=DEFAULT_TENANT,
+        validator=is_valid_tenant_id,
+    )

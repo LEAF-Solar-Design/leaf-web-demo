@@ -1,14 +1,5 @@
-/**
- * `validateTool` author tool - runs the CONTRACT.md section 2 oracle against a
- * candidate tool package and returns pass/fail + diagnostics. The design-time
- * session calls this before returning; the harness ALSO re-runs it after the
- * session (defense in depth) before registering.
- */
-
-import type { ToolPackage, ValidationResult } from "../../ports/index.js";
-import { validateToolPackage } from "../../registry/toolPackageSchema.js";
-
-export function validateTool(tool: ToolPackage): ValidationResult {
-  const diagnostics = validateToolPackage(tool);
-  return { ok: diagnostics.length === 0, diagnostics };
-}
+// STRANGLER SHIM (mushy-code extraction, 2026-08-06): this module moved to the
+// vendored mushy-code library. The path and every export stay stable for all
+// in-repo importers; the implementation lives at the re-exported location and
+// is synced by scripts/sync-mushy-code.py (pin: harness/src/vendor/VENDOR-PIN.json).
+export * from "../../vendor/mushy-author/agent/tools/validateTool.js";

@@ -68,7 +68,7 @@ describe("registryMcpAttachment", () => {
 describe("author-tool security envelope", () => {
   it("the author session's mutating surface stays exactly three in-process tools", async () => {
     const source = await import("node:fs/promises").then((fs) =>
-      fs.readFile(new URL("../src/ports/impl/agentSdkRunner.ts", import.meta.url), "utf8"),
+      fs.readFile(new URL("../src/vendor/mushy-author/ports/impl/agentSdkRunner.ts", import.meta.url), "utf8"),
     );
     const block = source.match(/const AUTHOR_TOOL_NAMES = \[([\s\S]*?)\];/)?.[1] ?? "";
     const names = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);

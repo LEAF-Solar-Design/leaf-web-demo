@@ -1,40 +1,5 @@
-/**
- * `apsTestRun` author tool - delegates to the BrokerApsClient (broker ONLY) to
- * test-run a candidate tool. Always `apsLive: false` (a design-time test run uses
- * the broker's pure-python mock path; the harness never touches the APS
- * credential - only the broker process holds it, per CONTRACT-ADDENDUM section 8).
- */
-
-import type { BrokerApsClient, ResultEnvelope, ToolPackage } from "../../ports/index.js";
-
-/** Bind an apsTestRun function to a broker client + tenant. */
-export function makeApsTestRun(
-  broker: BrokerApsClient,
-  tenantId: string,
-  dwg = "rooftop_demo",
-): (
-  tool: ToolPackage,
-  params?: Record<string, unknown>,
-  testSource?: string,
-  signal?: AbortSignal,
-) => Promise<ResultEnvelope> {
-  return (tool, params = {}, testSource, signal) => {
-    const capabilities = Array.isArray(tool.capabilities) ? tool.capabilities : [];
-    const safeParams = capabilities.includes("drawing.write")
-      ? {
-          ...params,
-          ...(params.drawing_id == null ? { drawing_id: dwg } : {}),
-          dry_run: true,
-        }
-      : params;
-    return broker.runTool({
-      tenantId,
-      tool,
-      params: safeParams,
-      dwg,
-      apsLive: false,
-      ...(testSource === undefined ? {} : { testSource }),
-      ...(signal === undefined ? {} : { signal }),
-    });
-  };
-}
+// STRANGLER SHIM (mushy-code extraction, 2026-08-06): this module moved to the
+// vendored mushy-code library. The path and every export stay stable for all
+// in-repo importers; the implementation lives at the re-exported location and
+// is synced by scripts/sync-mushy-code.py (pin: harness/src/vendor/VENDOR-PIN.json).
+export * from "../../vendor/mushy-author/agent/tools/apsTestRun.js";

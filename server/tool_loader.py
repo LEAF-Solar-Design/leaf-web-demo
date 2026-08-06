@@ -887,18 +887,11 @@ def _is_unsafe_ref(ref: Any) -> bool:
     Windows path semantics, it is absolute / drive- or root-anchored / home-relative
     (``~``) or contains a ``..`` parent component. Only plain relative references (joined
     onto an ALLOWED root and containment-checked below) are permitted."""
-    if not isinstance(ref, str) or not ref.strip():
-        return True
-    r = ref.strip()
-    if r.startswith("~"):
-        return True
-    for cls in (PurePosixPath, PureWindowsPath):
-        p = cls(r)
-        if p.is_absolute() or p.root or p.drive:
-            return True
-        if any(part == ".." for part in p.parts):
-            return True
-    return False
+    # Body = the vendored mushy-fold core (mushy-code extraction, 2026-08-06):
+    # the F4 rule moved to the library; this wrapper keeps the name and docstring
+    # every in-repo caller and test imports.
+    from _vendor.mushy_fold.entry import is_unsafe_ref
+    return is_unsafe_ref(ref)
 
 
 def _resolve_within(root: Path, rel: str) -> Optional[Path]:
@@ -907,20 +900,10 @@ def _resolve_within(root: Path, rel: str) -> Optional[Path]:
     None otherwise — a second, belt-and-suspenders containment gate behind
     ``_is_unsafe_ref`` (defeats a symlink inside the repo that points back out, and any
     residual traversal that slipped a per-OS parse)."""
-    try:
-        root_r = root.resolve()
-        cand = (root / rel).resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
-    if cand == root_r:
-        return None  # resolved to the root dir itself, not a file
-    try:
-        cand.relative_to(root_r)
-    except ValueError:
-        return None  # escaped the allowed root (traversal / symlink) -> reject
-    if cand.suffix == ".py" and cand.is_file():
-        return cand
-    return None
+    # Body = the vendored mushy-fold core (mushy-code extraction, 2026-08-06),
+    # same wrapper rationale as _is_unsafe_ref above.
+    from _vendor.mushy_fold.entry import resolve_within
+    return resolve_within(root, rel)
 
 
 def _declares_local_python(tool: Dict[str, Any]) -> bool:

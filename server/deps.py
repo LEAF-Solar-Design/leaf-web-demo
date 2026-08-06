@@ -171,22 +171,12 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
     ``tool_loader.resolve_local_file`` resolves it against the SAME per-tenant root,
     so the execution chain no longer depends on the broker's cwd (the M1 hack), and
     tenant A's authored tools never leak into tenant B's catalog. Missing env / dir /
-    file / bad JSON -> [] (never raises)."""
-    root = tenant_repo_dir(tenant_id)
-    if root is None:
-        return []
-    reg = root / "registry.json"
-    if not reg.exists():
-        return []
-    try:
-        data = json.loads(reg.read_text(encoding="utf-8"))
-        tools = data.get("tools") if isinstance(data, dict) else None
-        if not isinstance(tools, list):
-            return []
-        return [t for t in tools if isinstance(t, dict) and t.get("name")]
-    except Exception as exc:  # pragma: no cover - defensive
-        print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
-        return []
+    file / bad JSON -> [] (never raises).
+
+    The call-time read itself is the vendored mushy-fold core (mushy-code
+    extraction, 2026-08-06); tenant resolution above it stays this repo's."""
+    from _vendor.mushy_fold.registry import load_repo_registry_tools
+    return load_repo_registry_tools(tenant_repo_dir(tenant_id))
 
 
 # in-memory authored registry (seeded from disk at startup).
