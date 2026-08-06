@@ -268,6 +268,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         agentBanner: null,
       })
     },
+    openAgentMode() { publish({ agentMode: 'primary' }) },
     clearAgentMode() { publish({ agentMode: null }) },
     clearAgentBanner() { publish({ agentBanner: null }) },
     setPrompt,
