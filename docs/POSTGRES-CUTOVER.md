@@ -173,9 +173,13 @@ default. It is not evidence of a staging or production cutover.
 through an app image build, and deploying that image replaces the ECS task.
 Staging's `leaf-platform-app` container sets no `SESSIONS_DB`, so its legacy
 source is the task-local `server/sessions.db`, which the image does not carry.
-The deploy therefore destroys the database the backfill exists to read, and
-every PostgreSQL row afterwards classifies as an expected target-only row, so
-the command passes cleanly having recovered nothing.
+The deploy therefore destroys the database the backfill exists to read. Every
+row PostgreSQL retained from **before** the deploy then classifies as an
+expected target-only row, with no surviving source row to contradict it, so the
+command is expected to report success having recovered nothing. Rows written
+after the deploy land in both stores and match normally, and a fresh
+post-commit mirror failure would still be reported, so the clean result is the
+expected outcome rather than a guaranteed one.
 
 **Decision: do not preserve or export it. Deploy and let it go, accepting the
 loss described below.** This is the deliberate record the backfill note asks
@@ -205,9 +209,11 @@ and approval consumption share the shape.
 `session_checkpoints` and `session_policies` in the **same file**. Neither is
 mirrored, and neither is among the reconciler's three table pairs. Preserving
 the file would therefore not let the backfill recover them; that would need
-migration work which does not exist. These tables are already destroyed by every
-app task replacement and always have been, so this deploy is not special for
-them.
+migration work which does not exist. Under the task-local configuration measured
+here, any task replacement destroys them, so this deploy is not special for them
+and neither is the next one. Whether earlier staging revisions were also
+task-local was not checked, so read that as a property of the current
+configuration forward, not as a history.
 
 What bounds the loss, and why discard is still right for staging:
 
