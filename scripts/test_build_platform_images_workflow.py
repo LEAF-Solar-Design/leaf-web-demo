@@ -1796,13 +1796,20 @@ def main() -> None:
     adopt_block = text.split("\n  adopt:\n", 1)[1].split("\n  handoff:\n", 1)[0]
 
     # Speculative dispatches must never queue inside the release concurrency
-    # group (they are dispatched on the main ref), and only they may cancel
-    # a predecessor.
+    # group (they are dispatched on the main ref). Cancellation is
+    # newest-wins for speculative runs AND for main push runs (merge-burst
+    # coalescing: the latest-main-only relay discards a superseded build's
+    # images anyway, so completing them only burns runners and queues the
+    # winning run behind them). Non-push dispatches (promote, draft-PR
+    # builds) still cancel nothing.
     assert (
         "group: build-platform-images-${{ inputs.speculative && "
         "format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}"
     ) in text
-    assert "cancel-in-progress: ${{ inputs.speculative || false }}" in text
+    assert (
+        "cancel-in-progress: "
+        "${{ inputs.speculative || github.event_name == 'push' }}"
+    ) in text
 
     # The spec tag IS the tree, derived in prepare, and the derivation
     # exports the tree for the manifest and adopt jobs.
