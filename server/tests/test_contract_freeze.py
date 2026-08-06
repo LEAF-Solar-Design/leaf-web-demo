@@ -159,8 +159,12 @@ def _strip_ts_comments(source: str) -> str:
     return _re_mod.sub(r"//[^\n]*", "", source)
 
 
+# The wire-contract SOURCE moved to the vendored mushy-code library (mushy-code
+# extraction, 2026-08-06); harness/src/ports/converse.ts is now a bare re-export
+# shim, so the freeze parses the vendored implementation the shim points at.
 CONVERSE_TS = _strip_ts_comments(
-    (REPO_ROOT / "harness" / "src" / "ports" / "converse.ts").read_text(encoding="utf-8"))
+    (REPO_ROOT / "harness" / "src" / "vendor" / "mushy-author" / "ports" / "converse.ts")
+    .read_text(encoding="utf-8"))
 
 # The full §18.3 stream vocabulary (both hops), frozen.
 S18_STREAM_TYPES = {
