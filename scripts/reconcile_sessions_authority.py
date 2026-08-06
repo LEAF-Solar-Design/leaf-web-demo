@@ -227,8 +227,8 @@ def _json_scalars(text: str) -> Any:
     )
 
 
-def _encode_exact(value: Any) -> Any:
-    """JSON-encode a Decimal in a canonical form, built WITHOUT rounding.
+def _encode_exact(value: Decimal) -> str:
+    """Canonical string for one Decimal, built WITHOUT rounding.
 
     The obvious spelling, ``str(value.normalize())``, is wrong here.
     ``normalize()`` rounds to the active decimal context first, and the default
@@ -255,9 +255,39 @@ def _encode_exact(value: Any) -> Any:
         kept.pop()
         exponent += 1
     if kept == [0]:
-        return ["num", "0"]
+        return "0"
     mantissa = "".join(str(digit) for digit in kept)
-    return ["num", f"{'-' if sign else ''}{mantissa}E{exponent}"]
+    return f"{'-' if sign else ''}{mantissa}E{exponent}"
+
+
+def _canonical_json(value: Any) -> Any:
+    """Tag EVERY JSON type, recursively, so no tag can collide with the data.
+
+    Tagging only numbers was not enough. A marker like ``["num", "1E0"]`` is
+    itself an ordinary JSON array, so a document that literally CONTAINS the
+    array ``["num", "1E0"]`` encoded identically to the number ``1`` and the two
+    certified equal. Swapping the marker for a different array, object or string
+    just moves the collision.
+
+    The fix is that nothing reaches the encoder untagged: every node becomes a
+    two-element array whose first element is a type tag, so a real array is
+    ``["arr", [...]]`` and can never be mistaken for a tag. Object keys are
+    sorted, because JSONB does not preserve insertion order.
+    """
+    if value is None:
+        return ["null"]
+    # bool BEFORE any numeric check: bool is a subclass of int.
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, Decimal):
+        return ["num", _encode_exact(value)]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, list):
+        return ["arr", [_canonical_json(item) for item in value]]
+    if isinstance(value, dict):
+        return ["obj", [[key, _canonical_json(value[key])] for key in sorted(value)]]
+    raise TypeError(f"cannot encode {type(value).__name__} for comparison")
 
 
 def _normalize(kind: str, value: Any) -> Any:
@@ -327,7 +357,7 @@ def _comparable_value(kind: str, value: Any) -> Any:
         # ::text), so this parses once and compares like with like. Parsed
         # losslessly: see _json_scalars.
         try:
-            return ["json", _json_scalars(value)]
+            return ["json", _canonical_json(_json_scalars(value))]
         except (ValueError, TypeError):
             # Not valid JSON at all. Tag it verbatim so it can never compare
             # equal to a parsed value, and let _invalid_json_defects report it.
@@ -363,9 +393,9 @@ def _comparable_row(table: str, row: Mapping[str, Any]) -> str:
         column: _comparable_value(kind, row[column])
         for column, kind in columns.items()
     }
-    return json.dumps(
-        tagged, sort_keys=True, separators=(",", ":"), default=_encode_exact
-    )
+    # No `default=` hook: _canonical_json has already reduced every JSON value
+    # to plain, fully tagged types, so nothing exotic can reach the encoder.
+    return json.dumps(tagged, sort_keys=True, separators=(",", ":"))
 
 
 @contextmanager

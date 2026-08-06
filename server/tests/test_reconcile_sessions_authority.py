@@ -761,9 +761,31 @@ def test_json_integer_is_not_certified_equal_to_json_true(source, target):
 
 def _encode_json(text):
     return json.dumps(
-        RECONCILE._comparable_value(RECONCILE.JSON, text),
-        sort_keys=True, default=RECONCILE._encode_exact,
+        RECONCILE._comparable_value(RECONCILE.JSON, text), sort_keys=True
     )
+
+
+@pytest.mark.parametrize(
+    "document,marker",
+    [
+        ("1", '["num","1E0"]'),
+        ("0", '["num","0"]'),
+        ('"x"', '["str","x"]'),
+        ("true", '["bool",true]'),
+        ("null", '["null"]'),
+        ('{"a":1}', '["obj",[["a",["num","1E0"]]]]'),
+        ('[1]', '["arr",[["num","1E0"]]]'),
+        ('{"a":1}', '{"a":["num","1E0"]}'),
+    ],
+)
+def test_a_document_cannot_impersonate_the_type_tags(document, marker):
+    """The canonical form's own markers are ordinary JSON.
+
+    Tagging only numbers meant a document literally containing the array
+    ["num","1E0"] encoded identically to the number 1. Every JSON type is
+    tagged recursively so no payload can forge a tag.
+    """
+    assert _encode_json(document) != _encode_json(marker)
 
 
 @pytest.mark.parametrize(
