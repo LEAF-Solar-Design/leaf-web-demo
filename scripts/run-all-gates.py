@@ -1437,12 +1437,14 @@ _MEASURED_EST_S = {
     "server-sessions-router": 29.0,
     "web-author-quota-gate": 20.0,
     "server-turn-runner": 16.0,
-    # Local (Windows) measurement at registration, 2026-08-05: the suite boots
-    # warm-pool servers, so the default 2.0 would understate it badly.
-    # Re-baseline from a CI run like the entries above when convenient.
-    "executor": 15.0,
     "server-write-loop": 12.0,
     "server-sessions-e2e": 12.0,
+    # CI ubuntu-latest, runs 31058651157 / 31058750214 / 31059319371 /
+    # 31060256894 / 31060963722, 2026-08-06 — five shard-7 samples spanning
+    # 9.7-10.5s; the max is taken. Replaces the local (Windows) 15.0 measured
+    # at registration (PR #467): booting warm-pool servers costs a third less
+    # on a CI runner than it does locally. Still far above the default 2.0.
+    "executor": 10.5,
     "server-sessions-routes": 7.0,
     "server-wave5": 7.0,
     "server-hardening-3b": 6.6,
