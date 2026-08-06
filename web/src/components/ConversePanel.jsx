@@ -30,6 +30,7 @@ import {
 } from '../composer.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
+import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -164,15 +165,18 @@ const STOP_NOTES = {
 // Local send/approve failure -> the same calm degraded copy the App banner uses.
 function bannerFor(e) {
   const kind = classifyAgentError(e)
-  if (kind === 'quota') return { kind, message: 'AI paused — your built tools keep working.' }
-  if (kind === 'rate_limited') return { kind, message: 'AI rate-limited — retry shortly.' }
-  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
-  if (kind === 'busy') return { kind, message: 'A turn is already in flight — wait for it to finish.' }
-  if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan.' }
-  if (kind === 'approval_stale') return { kind, message: 'That request was already decided — ask the assistant to propose it again.' }
-  if (kind === 'confirmation_expired') return { kind, message: 'That confirmation expired — ask the assistant to propose it again.' }
-  if (kind === 'too_large') return { kind, message: 'That message is too large — try fewer or smaller images.' }
-  return { kind, message: 'Couldn’t reach the assistant — your built tools keep working.' }
+  const fallbacks = {
+    quota: 'AI paused — your built tools keep working.',
+    rate_limited: 'AI rate-limited — retry shortly.',
+    grant: 'Chat needs a linked Claude account.',
+    busy: 'A turn is already in flight — wait for it to finish.',
+    entitlement: 'Chat isn’t included in your plan.',
+    approval_stale: 'That request was already decided — ask the assistant to propose it again.',
+    confirmation_expired: 'That confirmation expired — ask the assistant to propose it again.',
+    too_large: 'That message is too large — try fewer or smaller images.',
+  }
+  const fallback = fallbacks[kind] || 'Couldn’t reach the assistant — your built tools keep working.'
+  return { kind, ...errorPresentation(e, fallback), message: fallback }
 }
 
 export default function ConversePanel({
@@ -825,7 +829,12 @@ export default function ConversePanel({
         </div>
       )}
       {showOtherErr && (
-        <div className="banner"><span>{sendErr.message}</span></div>
+        <div className="banner">
+          <span>{sendErr.message}</span>
+          {sendErr.code && <code className="dim">{sendErr.code}</code>}
+          {sendErr.nextAction && <span className="dim">Next: {sendErr.nextAction}</span>}
+          {sendErr.actor && <span className="key">{errorActorLabel(sendErr.actor)}</span>}
+        </div>
       )}
 
       {(pendingApprovals.length > 0 || pendingApprovalsError) && (

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { humanKey } from '../labels.js'
+import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
 // key/value), overlay summary, timing + cost receipt, and a normalized error
@@ -13,22 +14,7 @@ import { humanKey } from '../labels.js'
 // Split an error into a plain sentence + a demoted mono code (X1: the sentence
 // names what failed; the raw error_code never leads).
 function errParts(e) {
-  if (!e) return { message: '', code: '', nextAction: '', actor: '' }
-  if (typeof e === 'string') return { message: e, code: '', nextAction: '', actor: '' }
-  return {
-    message: e.message || 'error',
-    code: e.error_code || '',
-    nextAction: e.next_action || '',
-    actor: e.actor || '',
-  }
-}
-
-const ACTOR_LABELS = {
-  user: 'You',
-  workspace_admin: 'Workspace admin',
-  approver: 'Approver',
-  operator: 'Support',
-  service: 'Leaf service',
+  return errorPresentation(e, 'error')
 }
 
 function isRetryable(e) {
@@ -98,7 +84,7 @@ function ErrorLine({ err, onRetry, retry, quota, toolName }) {
         {!quota && code && <> <code className="dim">{code}</code></>}
       </span>
       {nextAction && <span className="dim">Next: {nextAction}</span>}
-      {actor && <span className="key">{ACTOR_LABELS[actor] || actor}</span>}
+      {actor && <span className="key">{errorActorLabel(actor)}</span>}
       {retry && onRetry && (
         <>
           <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>
