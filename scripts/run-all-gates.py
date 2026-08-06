@@ -604,9 +604,17 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-postgres-startup",
               "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
               _py_pytest("tests/test_platform_postgres_startup.py"), 13),
+        # Floor 41, re-measured 2026-08-06. It sat at 7 while the suite executed
+        # 41, which is the exact hazard the note at the top of this list
+        # describes: a low floor PASSes with an "(executed-count drift: ...)"
+        # note, so 34 of these could have vanished and the gate would still have
+        # reported green. 41 is safe on every runner because the suite is fully
+        # static -- it reads files and parses AST, and carries no skipif,
+        # pytest.skip or importorskip at all, so there is no environment where
+        # it executes fewer. That is also why it needs no allowed_skip_reasons.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 7),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 41),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
@@ -668,17 +676,17 @@ def build_suites() -> List[Suite]:
         Suite("server-ops-metrics-pg", "server tests/test_ops_metrics_pg.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         # The gate a LEAF_SESSIONS_STORE promotion out of dual_write_shadow will
-        # rest on. Floor is the OFFLINE EXECUTED count (45, measured): the other
-        # 37 need a live database and are skip-gated, and a floor of 82 would
-        # red-fail every runner without DATABASE_URL. Re-measured after five
+        # rest on. Floor is the OFFLINE EXECUTED count (46, measured): the other
+        # 38 need a live database and are skip-gated, and a floor of 84 would
+        # red-fail every runner without DATABASE_URL. Re-measured after six
         # review rounds added offline cases -- a floor left at the original 15
-        # would let two thirds of them vanish and still report green, which is
-        # the exact hazard the note at the top of this list describes.
+        # would let most of them vanish and still report green, which is the
+        # exact hazard the note at the top of this list describes.
         # upload-authority-postgres.yml asserts separately that the live half
         # did not skip THERE, so the two together cover both environments.
         Suite("server-reconcile-sessions-authority",
               "server tests/test_reconcile_sessions_authority.py", "pytest",
-              SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 45,
+              SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 46,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
         Suite("server-postgres-authority-inventory",
