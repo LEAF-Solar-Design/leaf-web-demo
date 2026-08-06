@@ -53,9 +53,8 @@ router = APIRouter()
 def _fail(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse(
         status_code=status,
-        # code rides in the message ("code: detail") because error_obj's shape
-        # is frozen (error_code/message/retryable only) and BAD_PARAMS is the
-        # envelope code the client classifies on; retryable=False because every
+        # The overlay reason rides in the message because BAD_PARAMS is the
+        # envelope code the client classifies on. retryable=False because every
         # refusal here needs a changed request, not a retry.
         content={"error": error_obj(ErrorCode.BAD_PARAMS, f"{code}: {message}",
                                     False),

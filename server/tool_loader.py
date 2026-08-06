@@ -34,7 +34,7 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from envelopes import ErrorCode, err_envelope, ok_envelope
+from envelopes import ErrorCode, err_envelope, error_obj, ok_envelope
 from tool_validate import validate_envelope, validate_params
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -1081,8 +1081,11 @@ def _normalize_aps_envelope(raw: Dict[str, Any], name: Optional[str], version: s
     raw.setdefault("error", None)
     raw.setdefault("degraded_mode", False)
     if not raw.get("ok") and raw.get("error") is None:
-        raw["error"] = {"error_code": ErrorCode.WORKITEM_FAILED,
-                        "message": "WorkItem did not succeed", "retryable": True}
+        raw["error"] = error_obj(
+            ErrorCode.WORKITEM_FAILED,
+            "WorkItem did not succeed",
+            retryable=True,
+        )
     return raw
 
 

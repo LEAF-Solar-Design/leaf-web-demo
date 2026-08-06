@@ -13,9 +13,22 @@ import { humanKey } from '../labels.js'
 // Split an error into a plain sentence + a demoted mono code (X1: the sentence
 // names what failed; the raw error_code never leads).
 function errParts(e) {
-  if (!e) return { message: '', code: '' }
-  if (typeof e === 'string') return { message: e, code: '' }
-  return { message: e.message || 'error', code: e.error_code || '' }
+  if (!e) return { message: '', code: '', nextAction: '', actor: '' }
+  if (typeof e === 'string') return { message: e, code: '', nextAction: '', actor: '' }
+  return {
+    message: e.message || 'error',
+    code: e.error_code || '',
+    nextAction: e.next_action || '',
+    actor: e.actor || '',
+  }
+}
+
+const ACTOR_LABELS = {
+  user: 'You',
+  workspace_admin: 'Workspace admin',
+  approver: 'Approver',
+  operator: 'Support',
+  service: 'Leaf service',
 }
 
 function isRetryable(e) {
@@ -77,13 +90,15 @@ function ResultBody({ result }) {
 // The calm quota/entitlement variants keep the broker's own sentence — a
 // budget/plan boundary is not a failure to re-phrase.
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
-  const { message, code } = errParts(err)
+  const { message, code, nextAction, actor } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`}>
       <span>
         {quota ? message : `Couldn't run ${toolName || 'the tool'} — ${message}`}
         {!quota && code && <> <code className="dim">{code}</code></>}
       </span>
+      {nextAction && <span className="dim">Next: {nextAction}</span>}
+      {actor && <span className="key">{ACTOR_LABELS[actor] || actor}</span>}
       {retry && onRetry && (
         <>
           <button type="button" className="btn ghost retry" onClick={onRetry}>Retry</button>

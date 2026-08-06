@@ -237,7 +237,12 @@ never includes catalog-seeded QA tools).
 Every server response body (app AND broker) carries at minimum:
 
 ```json
-{ "error": null | { "error_code", "message", "retryable" }, "degraded_mode": false }
+{
+  "error": null | {
+    "error_code", "message", "retryable", "retry_class", "actor", "next_action"
+  },
+  "degraded_mode": false
+}
 ```
 
 - `error_code` enum (frozen): `UNKNOWN_TOOL, BAD_PARAMS, APS_UNAVAILABLE,
@@ -246,6 +251,9 @@ Every server response body (app AND broker) carries at minimum:
   `degraded_mode`; other bodies (`/api/session`, `/api/tools`, `/api/author`,
   `/api/health`, jobs, capabilities) are extended ADDITIVELY — existing keys
   unchanged.
+- Every failure names its retry class, the actor who can resolve it, and one
+  plain next action. The legacy `retryable` boolean remains unchanged for
+  existing clients.
 - `degraded_mode: true` ⇔ APS_LIVE execution was requested but the run fell
   back to the pure-python path (UI: "used the local fallback, not the cloud
   solver").

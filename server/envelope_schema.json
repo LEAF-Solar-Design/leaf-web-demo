@@ -21,7 +21,10 @@
           "required": [
             "error_code",
             "message",
-            "retryable"
+            "retryable",
+            "retry_class",
+            "actor",
+            "next_action"
           ],
           "properties": {
             "error_code": {
@@ -38,7 +41,12 @@
                 "INTERNAL",
                 "quota_exceeded",
                 "GRANT_REQUIRED",
-                "ENTITLEMENT_REQUIRED"
+                "ENTITLEMENT_REQUIRED",
+                "turn_in_progress",
+                "session_not_found",
+                "llm_quota_exhausted",
+                "llm_rate_limited",
+                "confirmation_expired"
               ]
             },
             "message": {
@@ -46,6 +54,16 @@
             },
             "retryable": {
               "type": "boolean"
+            },
+            "retry_class": {
+              "enum": ["immediate", "backoff", "after_action", "never"]
+            },
+            "actor": {
+              "enum": ["user", "workspace_admin", "approver", "operator", "service"]
+            },
+            "next_action": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }

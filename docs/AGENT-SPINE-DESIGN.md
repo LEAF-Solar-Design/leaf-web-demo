@@ -465,7 +465,7 @@ SSE `data:` line; the SSE event name equals `type`. Envelope:
 | `turn_usage` | `{turns, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_tokens, total_cost_usd?, models?}` | `total_cost_usd` is an estimate (no balance API exists — `research/agentsdk-usage-visibility.md`). |
 | `turn_complete` | `{stop_reason}` | `stop_reason` ∈ `end_turn \| awaiting_approval \| cap_hit \| llm_quota_exhausted \| llm_rate_limited \| error \| timeout`. |
 | `session_state` | `{status, head_version?, checkout?}` | |
-| `error` | `{error:{error_code, message, retryable}, degraded_mode}` | The §10 error object, verbatim. |
+| `error` | `{error:{error_code, message, retryable, retry_class, actor, next_action}, degraded_mode}` | The §10 actionable error object, verbatim. |
 
 ### 18.4 New ErrorCode values (`server/envelopes.py`, additive)
 

@@ -99,7 +99,12 @@ def test_invalid_email_is_rejected_fail_closed(client, db_path, email):
     response = post(client, email=email)
 
     assert response.status_code == 422
-    assert response.json()["ok"] is False
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["error_code"] == "BAD_PARAMS"
+    assert body["error"]["actor"] == "user"
+    assert body["error"]["next_action"]
+    assert body["degraded_mode"] is False
     assert row_count(db_path) == 0
 
 
@@ -111,6 +116,8 @@ def test_rate_limit_is_enforced_and_rejected_email_is_not_written(client, db_pat
 
     assert response.status_code == 429
     assert response.json()["error"]["retryable"] is True
+    assert response.json()["error"]["actor"] == "user"
+    assert response.json()["error"]["retry_class"] == "backoff"
     assert row_count(db_path) == 1  # the rejected email left no row behind
 
 
