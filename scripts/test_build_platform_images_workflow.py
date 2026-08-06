@@ -786,7 +786,10 @@ def main() -> None:
             "matrix.image == 'canonical-worker' && "
             "steps.chain.outputs.skip != 'true'"
             if lane == "warm"
-            else "matrix.image == 'canonical-worker'"
+            else (
+                "matrix.image == 'canonical-worker' && "
+                "steps.resume.outputs.skip != 'true'"
+            )
         )
         for step in (require_step, checkout_step):
             conditions = [
@@ -1530,16 +1533,24 @@ def main() -> None:
         assert assignments == [
             'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
         ], lane
-        # build: the current-warm probe, the predecessor probe, the
+        # build: the exact release-output resume probe, the current-warm
+        # probe, the predecessor probe, the
         # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
         # batch-get-image, never an ECR listing — the roles are not granted
         # one), and the existence check before export. warm adds the
         # chain-keeper decide step's predecessor probe.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == {"warm": 5, "build": 4}[lane], (lane, probes)
+        assert len(probes) == {"warm": 5, "build": 5}[lane], (lane, probes)
+        release_probes = [
+            p for p in probes
+            if re.search(r'--repository-name "\$IMAGE_NAME"(?!-)', p)
+        ]
+        assert len(release_probes) == {"warm": 0, "build": 1}[lane], (
+            lane, release_probes)
         for probe in probes:
-            assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
-                lane, probe)
+            if probe not in release_probes:
+                assert '--repository-name "$IMAGE_NAME-buildcache"' in probe, (
+                    lane, probe)
         # The fallback's executable lines equal the one canonical copy
         # (sol-critic round 1 on this PR: probe counts alone bound neither
         # the walk's flags nor the batch probe, so dropping fetch-depth or
@@ -1548,9 +1559,9 @@ def main() -> None:
             "the %s lane must carry exactly the canonical nearest-ancestor "
             "fallback; edit FALLBACK_SCRIPT and every lane together, "
             "consciously" % lane)
-        assert not re.search(
+        assert len(re.findall(
             r'--repository-name "\$IMAGE_NAME"(?!-)', "\n".join(live)
-        ), lane
+        )) == {"warm": 0, "build": 1}[lane], lane
     # The speculative lane: its cache IMPORT reads the *-buildcache
     # repository, while its image-existence probe reads the RELEASE
     # repository (it asks whether the spec image tag itself is present).
@@ -1767,18 +1778,22 @@ def main() -> None:
     assert build_block.count("refusing to push images") == 2, (
         "both refusal arms — no proven tree at all, and a foreign tree — "
         "must stay fail-closed")
-    # A step that carries an `if:` can be switched off without being
-    # removed, so neither the tree binding nor the push may carry one at
-    # all (sol-critic round 6: `if: ${{ false }}` on the binding step left
-    # the push enabled while every literal stayed green). The two solver
-    # steps are the only conditional steps in this job, and their condition
-    # is pinned to the canonical-worker matrix entry above.
+    # The tree binding stays unconditional. The push has one permitted
+    # condition: the exact-output resume guard may skip a complete immutable
+    # image. Any other condition could bypass the gate (sol-critic round 6:
+    # `if: ${{ false }}` on the binding step left the push enabled while
+    # every literal stayed green).
     for step in re.split(r"\n      - ", build_block):
         conditional = "if" in _keys_in(step)
         if "Require the green gate verdict to bind" in step:
             assert not conditional, "the tree binding must not be conditional"
         if "uses: docker/build-push-action" in step:
-            assert not conditional, "the image push must not be conditional"
+            conditions = [
+                _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
+            ]
+            assert conditions == ["steps.resume.outputs.skip != 'true'"], (
+                "the image push may only be skipped by the exact-output guard"
+            )
     bind_at = build_block.index("Require the green gate verdict to bind")
     push_at = build_block.index("uses: docker/build-push-action")
     assert bind_at < push_at, "the tree binding must precede the push step"
@@ -2054,6 +2069,85 @@ def main() -> None:
     assert wf_jobs["verify"]["needs"] == ["prepare", "adopt", "build"]
     assert wf_jobs["adopt"]["needs"] == ["prepare", "test"]
 
+    # A cancelled full-build matrix may be resumed at the image boundary,
+    # but never at an individual tag boundary. This guard is parsed from the
+    # build job itself so a decoy in another job cannot satisfy the contract.
+    build_steps = wf_jobs["build"]["steps"]
+    resume_steps = [
+        s for s in build_steps
+        if s.get("name") == "Inspect exact full-build outputs"
+    ]
+    assert len(resume_steps) == 1
+    resume_step = resume_steps[0]
+    assert resume_step["id"] == "resume"
+    assert resume_step["env"] == {
+        "SOURCE_SHA": "${{ needs.prepare.outputs.source_sha }}",
+        "SOLVER_REVISION": "${{ needs.prepare.outputs.solver_revision }}",
+    }
+    resume_run = _executable_bash(resume_step["run"])
+    assert resume_run.count("aws ecr batch-get-image") == 1
+    assert "describe-images" not in resume_run
+    assert "list-images" not in resume_run
+    assert 'required_tags=("$IMAGE_TAG")' in resume_run
+    assert 'add_required_tag "sha-$SOURCE_SHA"' in resume_run
+    assert 'add_required_tag "sha-$SOURCE_SHA-solver-$SOLVER_REVISION"' in resume_run
+    assert 'add_required_tag "src-$SOURCE_SHA"' in resume_run
+    assert '--repository-name "$IMAGE_NAME"' in resume_run
+    assert '--image-ids "${image_ids[@]}"' in resume_run
+    assert 'select(.failureCode != "ImageNotFound")' in resume_run
+    assert 'if [ "$present" = "0" ]; then' in resume_run
+    assert 'echo "skip=false" >> "$GITHUB_OUTPUT"' in resume_run
+    assert 'if [ "$present" != "${#required_tags[@]}" ]; then' in resume_run
+    assert "refusing an immutable partial overwrite" in resume_run
+    # Load-bearing: without this exact accumulator a complete response with
+    # different tag digests leaves an empty array. Bash then counts the one
+    # blank printf line as one unique digest and can incorrectly skip.
+    def require_digest_accumulator(script: str) -> None:
+        assert script.count('digests+=("$digest")') == 1
+
+    require_digest_accumulator(resume_run)
+    assert "sort -u | wc -l" in resume_run
+    assert 'if [ "$unique_digests" != "1" ]; then' in resume_run
+    assert "resolve to different digests" in resume_run
+    assert 'echo "skip=true" >> "$GITHUB_OUTPUT"' in resume_run
+
+    # Mutation guard for the accumulator itself. Keep this next to the
+    # executable contract so removing the append cannot leave a green suite
+    # while all of the later comparison tokens remain present.
+    without_digest_accumulator = resume_run.replace(
+        'digests+=("$digest")', "", 1
+    )
+    try:
+        require_digest_accumulator(without_digest_accumulator)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("digest-accumulator mutation escaped the contract")
+    for forbidden_write in (
+        "aws ecr put-image", "docker push", "docker build", "buildx build",
+    ):
+        assert forbidden_write not in resume_run
+
+    step_names = [str(s.get("name", s.get("uses", ""))) for s in build_steps]
+    resume_at = step_names.index("Inspect exact full-build outputs")
+    assert step_names.index("Login to ECR") < resume_at
+    assert resume_at < step_names.index(
+        "Require the read-only canonical solver deploy key")
+    assert resume_at < step_names.index("Select immutable cache references")
+    build_push_at = next(
+        i for i, s in enumerate(build_steps)
+        if str(s.get("name", "")).startswith("Build and push")
+    )
+    assert resume_at < build_push_at
+    cache_step = next(
+        s for s in build_steps
+        if s.get("name") == "Select immutable cache references"
+    )
+    assert cache_step["if"] == "steps.resume.outputs.skip != 'true'"
+    assert build_steps[build_push_at]["if"] == (
+        "steps.resume.outputs.skip != 'true'"
+    )
+
     # src- identity stamp, bound to PARSED EXECUTABLE values (the raw-text
     # pins earlier are convenience; these are the load-bearing ones — a
     # commented decoy or a value smuggled into a name: scalar fails here).
@@ -2299,7 +2393,7 @@ def main() -> None:
     # Identity binding, name -> id -> consumer (sol-critic round 4 on
     # this PR): the name-pinned step must BE the `id: cache` step, that
     # id must be unique in its job, its condition must be exactly the
-    # lane's legitimate gate (none in build), and the lane's build-push
+    # lane's legitimate gate (the resume guard in build), and the lane's build-push
     # step must consume exactly steps.cache's outputs — otherwise a
     # canonical-script decoy under the pinned NAME could sit unreferenced
     # while a renamed hollow step feeds the consumers empty outputs.
@@ -2307,7 +2401,7 @@ def main() -> None:
     cache_expr_to = "${{ steps.cache.outputs.to }}"
     for job_name, step_name, expected_if in (
         ("warm", cache_step_name, "steps.chain.outputs.skip != 'true'"),
-        ("build", cache_step_name, None),
+        ("build", cache_step_name, "steps.resume.outputs.skip != 'true'"),
         ("speculate", "Select the merged-onto main tip's cache, import-only",
          "steps.exists.outputs.present != 'true'"),
     ):
