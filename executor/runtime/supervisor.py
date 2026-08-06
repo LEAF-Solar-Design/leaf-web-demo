@@ -13,7 +13,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from multiprocessing.connection import Connection
-from typing import Any
+from typing import Any, Callable
 
 from executor.registry import ArtifactReference, ArtifactRegistryError, ImmutableArtifactRegistry, SignedArtifact
 
@@ -27,6 +27,33 @@ MAX_INPUT_BYTES = 1_048_576
 DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
+
+
+_RUNTIME_EVENT_LOCK = threading.Lock()
+
+
+def emit_runtime_event(record: dict[str, Any]) -> None:
+    """Write one bounded JSON line to the container log plane, best effort.
+
+    Slot telemetry must never break the path it observes, so every failure
+    here is swallowed.  This is deliberately NOT the accounting emitter: an
+    accounting write that fails has to fail its invocation, while a lost
+    diagnostic line must not.
+
+    Bounded and locked for the same reason the accounting emitter is: several
+    slots can abandon a rebind at once, and two interleaved writes would
+    produce lines no log consumer can parse.
+    """
+    try:
+        encoded = json.dumps(
+            {"event": "leaf.instant.runtime", "record": record},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii") + b"\n"
+        if len(encoded) <= 4096:
+            with _RUNTIME_EVENT_LOCK:
+                os.write(2, encoded)
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 class ExecutorError(ValueError):
@@ -82,7 +109,8 @@ class WarmExecutorSupervisor:
                  artifact_registry: ImmutableArtifactRegistry | None = None,
                  trusted_development_fixtures: bool = False,
                  accounting_emitter: Any | None = None,
-                 child_load_timeout_seconds: float = DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS) -> None:
+                 child_load_timeout_seconds: float = DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS,
+                 runtime_event_sink: Callable[[dict[str, Any]], None] = emit_runtime_event) -> None:
         if pool_size < 1:
             raise ValueError("pool_size must be positive")
         if idempotency_ttl_seconds <= 0:
@@ -106,6 +134,13 @@ class WarmExecutorSupervisor:
         # post-replacement rebind; a contended host needs more than the
         # production default, so tests pass a generous value.
         self._child_load_timeout_seconds = child_load_timeout_seconds
+        self._runtime_event_sink = runtime_event_sink
+        self._rebind_failures = 0
+        # A leaf lock: nothing is acquired WHILE it is held.  The rebind path
+        # reaches it holding slot.lock, and _state_lock is taken BEFORE
+        # slot.lock elsewhere (release), so counting under _state_lock here
+        # would invert that order.
+        self._telemetry_lock = threading.Lock()
         self._state_lock = threading.RLock()
         for index in range(pool_size):
             self._slots.append(self._start_slot(f"slot-{index + 1}"))
@@ -147,6 +182,8 @@ class WarmExecutorSupervisor:
             f"instant_executor_slots{{state=\"bound\"}} {state['bound_slots']}",
             f"instant_executor_slots{{state=\"total\"}} {state['total_slots']}",
             f"instant_executor_idempotency_entries {len(self._idempotency)}",
+            "# TYPE instant_executor_rebind_failures_total counter",
+            f"instant_executor_rebind_failures_total {self._rebind_failures}",
             "",
         ))
 
@@ -435,11 +472,49 @@ class WarmExecutorSupervisor:
                 slot.conn.send({"action": "load", "assignment_id": assignment["assignment_id"],
                                 "source": source, "drawing_context": drawing_context, "limits": catalog["limits"]})
                 reply = self._receive(slot, self._child_load_timeout_seconds)
-            except (BrokenPipeError, EOFError, OSError, TimeoutError):
+            except (BrokenPipeError, EOFError, OSError, TimeoutError) as exc:
+                self._record_rebind_failure(slot, assignment, type(exc).__name__)
                 return
             if reply.get("ok"):
                 slot.assignment, slot.catalog, slot.load = assignment, catalog, load
                 slot.source, slot.drawing_context = source, drawing_context
+            else:
+                self._record_rebind_failure(slot, assignment, "source_rejected")
+
+    def _record_rebind_failure(self, slot: Slot, assignment: dict[str, Any], reason: str) -> None:
+        """Surface an abandoned post-replacement rebind.
+
+        Both failure paths above leave the slot unbound after the caller has
+        already been answered.  The session is then unreachable: every later
+        invocation answers EXECUTOR_NOT_READY with retryable=true, so a client
+        retries forever against a binding that will never come back.  Without
+        this line nothing on any surface says that happened -- bound_slots just
+        quietly drops, and the executor publishes no CloudWatch metric that any
+        alarm could see.
+        """
+        with self._telemetry_lock:
+            self._rebind_failures += 1
+        try:
+            self._runtime_event_sink({
+                "event_type": "slot_rebind_failed",
+                "executor_id": self.executor_id,
+                "slot_id": slot.slot_id,
+                "assignment_id": assignment["assignment_id"],
+                "tenant_id": assignment["tenant_id"],
+                "session_id": assignment["session_id"],
+                "reason": reason,
+                "child_load_timeout_seconds": self._child_load_timeout_seconds,
+                "occurred_at": _now(),
+            })
+        except Exception:  # noqa: BLE001 - see below
+            # The default sink cannot raise, but the sink is injectable, so an
+            # unguarded call would let a caller's telemetry break the very path
+            # it observes: this runs inside invoke()'s failure handling, and an
+            # escaping exception would cost the caller its DEADLINE_EXCEEDED or
+            # TOOL_FAILED response and skip terminal accounting and idempotency
+            # recording.  The counter above is already incremented, so a
+            # swallowed sink still leaves the failure visible on /metrics.
+            pass
 
     def _purge_idempotency(self) -> None:
         now = time.monotonic()
