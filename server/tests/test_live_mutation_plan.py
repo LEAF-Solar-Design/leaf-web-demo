@@ -105,6 +105,18 @@ class FakeDa:
     def _engine_seconds(self, status):
         return 2.0
 
+    def _workitem_timing(self, status, submitted_at=None):
+        assert submitted_at is not None
+        return {
+            "contract": "leaf.cad-timing.aps.v1",
+            "spans_ms": {
+                "submit": 1, "queue": 2, "task_start": 3,
+                "engine": 2000, "output_upload": 4,
+            },
+            "accounted_ms": 2010,
+            "unavailable_spans": ["image_pull", "drawing_fetch"],
+        }
+
 
 class FailedDa(FakeDa):
     def submit_workitem(self, activity, arguments, **kwargs):
@@ -264,6 +276,17 @@ def test_live_submits_exact_activity_args_and_preserves_planner_result(tmp_path)
     assert env["result"]["planner_value"] == "preserved"
     assert env["overlay"] == {"kind": "preserved"}
     assert env["execution_provenance"]["provider"] == "e2b"
+    timing = env["execution_provenance"]["cad_timing"]
+    assert timing["contract"] == "leaf.cad-timing.v1"
+    assert timing["spans_ms"]["submit"] == 1
+    assert timing["spans_ms"]["queue"] == 2
+    assert timing["spans_ms"]["task_start"] == 3
+    assert timing["spans_ms"]["engine"] == 2000
+    assert timing["spans_ms"]["drawing_fetch"] >= 0
+    assert timing["spans_ms"]["version_write"] >= 0
+    assert timing["spans_ms"]["publish"] >= 0
+    assert timing["spans_ms"]["image_pull"] is None
+    assert timing["spans_ms"]["client_delivery"] is None
     assert env["result"]["new_version"]["version"] == 2
     _, intake = write_loop.read_intake(backend, "tenant", "drawing", 2)
     assert intake["dwg"] == "drawing"

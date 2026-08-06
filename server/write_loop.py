@@ -1488,6 +1488,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     tool_version = tool.get("version", "1.0.0")
     drawing_id = _drawing_id(params)
     scratch_keys = []
+    timing_started = time.perf_counter()
+    drawing_fetch_started = timing_started
+    drawing_fetch_ms = None
+    version_write_ms = None
+    publish_ms = None
+    aps_timing = None
     try:
         try:
             store.load_manifest(backend, tenant_id, drawing_id)
@@ -1536,6 +1542,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         execution_source, bridged_legacy_bootstrap = (
             _live_execution_source_bytes(stored_source))
         base_sha = hashlib.sha256(execution_source).hexdigest()
+        drawing_fetch_ms = int(
+            (time.perf_counter() - drawing_fetch_started) * 1000)
 
         if run_tool_dynamic_fn is None:
             raise ValueError("live authored write requires a sandboxed planner")
@@ -1551,6 +1559,9 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 retryable=False, tool=name, version=tool_version,
             ), DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL])
         provenance = planner_env.get("execution_provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+            planner_env["execution_provenance"] = provenance
         if _protected_live_posture() and not _valid_microvm_provenance(provenance):
             return (err_envelope(
                 ErrorCode.INTERNAL,
@@ -1640,8 +1651,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         }
         if on_submitted is not None and _accepts_on_submitted(da.submit_workitem):
             submit_kwargs["on_submitted"] = on_submitted
+        submitted_at = time.time()
         status = da.submit_workitem(
             da.activity_qualified(WRITE_ACTIVITY), arguments, **submit_kwargs)
+        if hasattr(da, "_workitem_timing"):
+            aps_timing = da._workitem_timing(
+                status, submitted_at=submitted_at)
         if status.get("status") != "success":
             return (err_envelope(
                 ErrorCode.WORKITEM_FAILED,
@@ -1686,6 +1701,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                     "drawing mutations were drained before write commit",
                     retryable=True, tool=name, version=tool_version,
                 ), 503)
+            version_write_started = time.perf_counter()
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id, out_bytes,
                 parent_version=head_v,
@@ -1694,7 +1710,10 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                       "note": "live authored mutation plan"},
                 holder=holder, fence=fence, require_parent_is_head=True,
             )
+            version_write_ms = int(
+                (time.perf_counter() - version_write_started) * 1000)
             readable = False
+            publish_started = time.perf_counter()
             try:
                 publish_intake_cache(
                     backend, tenant_id, drawing_id, new_v, out_bytes, output_intake)
@@ -1702,6 +1721,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 readable = True
             except Exception:  # noqa: BLE001
                 readable = False
+            publish_ms = int((time.perf_counter() - publish_started) * 1000)
 
         planner_result.update({
             "new_version": {
@@ -1713,7 +1733,37 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         })
         planner_env["result"] = planner_result
         planner_env["cost"] = cost
-        planner_env["timing_ms"] = int((time.perf_counter() - t0) * 1000)
+        total_ms = int((time.perf_counter() - t0) * 1000)
+        planner_env["timing_ms"] = total_ms
+        aps_spans = (
+            aps_timing.get("spans_ms", {})
+            if isinstance(aps_timing, dict) else {}
+        )
+        cad_spans = {
+            "submit": aps_spans.get("submit"),
+            "queue": aps_spans.get("queue"),
+            "task_start": aps_spans.get("task_start"),
+            "image_pull": None,
+            "drawing_fetch": drawing_fetch_ms,
+            "engine": aps_spans.get("engine"),
+            "output_upload": aps_spans.get("output_upload"),
+            "version_write": version_write_ms,
+            "publish": publish_ms,
+            "client_delivery": None,
+        }
+        provenance["cad_timing"] = {
+            "contract": "leaf.cad-timing.v1",
+            "total_ms": total_ms,
+            "spans_ms": cad_spans,
+            "provider_accounted_ms": (
+                aps_timing.get("accounted_ms")
+                if isinstance(aps_timing, dict) else None
+            ),
+            "unavailable_spans": [
+                name for name, duration in cad_spans.items()
+                if duration is None
+            ],
+        }
         planner_env["degraded_mode"] = False
         return planner_env, 200
     except store.CheckoutDenied as exc:
