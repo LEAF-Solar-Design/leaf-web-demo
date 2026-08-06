@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 
 // "Author a tool" — a text description -> POST /api/author -> a generated
 // tool card + code preview, added to the tool list so it's immediately
@@ -262,12 +263,12 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       if (stageActivity?.active) setErr(null)
       return
     }
-    if (stageActivity?.resumable) setErr(String(e.message || e))
+    if (stageActivity?.resumable) setErr(e)
     else if (e.entitlementRequired) setBuildGate(true)
     else if (e.grantRequired) setGrantGate(true)
     else if (e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
     else if (isServiceDown(e)) setSvcGate(true)
-    else setErr(String(e.message || e))
+    else setErr(e)
   }, [stageActivity?.error, stageActivity?.resumable])
 
   // Prefill from a build-lane route (only when the signal changes, so manual
@@ -313,7 +314,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       else if (e && e.grantRequired) setGrantGate(true)
       else if (e && e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
       else if (isServiceDown(e)) setSvcGate(true)
-      else setErr(String(e.message || e))
+      else setErr(e)
     } finally {
       setBusy(false)
     }
@@ -326,7 +327,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       const published = await onPublish(authored)
       setAuthored(published)
     } catch (e) {
-      setPublishErr(lifecycleMessage(e))
+      setPublishErr(e)
     } finally {
       setPublishing(false)
     }
@@ -348,6 +349,8 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   })
 
   const prov = authored ? readProvenance(authored) : null
+  const authorError = err ? errorPresentation(err, 'Tool authoring failed.') : null
+  const publicationError = publishErr ? errorPresentation(publishErr, lifecycleMessage(publishErr)) : null
   const provLine = authored ? authoredProvLine(authored) : null
   const publicationStatus = authored?.publication_status || null
   const publicationPending = publicationStatus === 'awaiting_approval'
@@ -407,7 +410,12 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       )}
       {err && (
         <div className="inline-error">
-          <span>Couldn’t author the tool — {err}</span>
+          <span>
+            Couldn’t author the tool — {authorError.message}
+            {authorError.code && <> <code className="dim">{authorError.code}</code></>}
+          </span>
+          {authorError.nextAction && <span className="dim">Next: {authorError.nextAction}</span>}
+          {authorError.actor && <span className="key">{errorActorLabel(authorError.actor)}</span>}
           <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
             {stageActivity?.resumable ? 'Resume authoring' : <>Retry <span className="key">R</span></>}
           </button>
@@ -471,7 +479,14 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
               Run it now
             </button>
           )}
-          {publishErr && <div className="customization-state error" role="status">{publishErr}</div>}
+          {publishErr && (
+            <div className="customization-state error" role="status">
+              <span>{publicationError.message}</span>
+              {publicationError.code && <code className="dim">{publicationError.code}</code>}
+              {publicationError.nextAction && <span className="dim">Next: {publicationError.nextAction}</span>}
+              {publicationError.actor && <span className="key">{errorActorLabel(publicationError.actor)}</span>}
+            </div>
+          )}
         </div>
       )}
 
