@@ -260,14 +260,20 @@ override `LEAF_AGENT_STORE`, `LEAF_DRAWING_STORE`, `LEAF_UPLOAD_STORE` and
 `LEAF_BROKER_STORE` to `postgres` over the same image defaults, so production
 deliberately cut those over and has not cut sessions over.
 
-Two consequences follow. Production writes nothing to PostgreSQL for sessions,
-so there is no dual-write mirror and no partial coverage to reconcile against,
-and a cutover must backfill the **entire** production history rather than a
+Two consequences follow. Under this revision production performs no PostgreSQL
+writes for sessions, so nothing is mirrored forward as it is written, and a
+cutover has to account for the **entire** production history rather than a
 post-deploy remainder. Production also sets `SESSIONS_DB=/data/state/sessions.db`
 on the durable EFS volume instead of leaving it unset, so that history survives
 task replacement and the whole reason discard was cheap for staging is absent.
-Re-read the live revision **and** the image digest before relying on this: both
-age, and either layer can change the answer.
+
+**What this does not establish.** It is a measurement of write *routing*, not of
+table *contents*. Nobody queried either store. PostgreSQL may already hold
+production session or nonce rows from an earlier revision, a canary, or a manual
+backfill, and none of the above is evidence that the target is empty. Verify the
+target before any backfill or parity run rather than assuming a clean slate.
+Re-read the live revision **and** the image digest too: both age, and either
+layer can change the answer.
 
 **What a clean staging parity run does and does not prove.** After this deploy,
 `--mode parity` on staging compares only rows written since the NEW task

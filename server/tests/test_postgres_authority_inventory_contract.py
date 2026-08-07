@@ -1,4 +1,18 @@
-"""Contract checks for the machine-readable PostgreSQL authority inventory."""
+"""Contract checks for the machine-readable PostgreSQL authority inventory.
+
+WHAT THESE CHECKS CAN AND CANNOT DO. They verify the inventory's INTERNAL
+COHERENCE: that a status is one this file defines, that a value is consistent
+with the selector it describes, that a claim of completeness is not contradicted
+by the records under it. They CANNOT verify that a record is TRUE. Evidence is
+free text, so a record can name a real task-definition revision and a real image
+digest and still describe them falsely, and no static check over this JSON will
+notice. Nothing here reaches AWS.
+
+That is a boundary, not an oversight. The evidence strings exist so a human can
+re-run the two reads they name (the task definition and the pinned image config)
+and disprove the record. Treat a green contract as "this file does not
+contradict itself", never as "these values are what production runs".
+"""
 from __future__ import annotations
 
 from copy import deepcopy
