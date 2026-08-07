@@ -237,6 +237,7 @@ def _mount_operator_router() -> None:
     from routers import operator_sessions as operator_sessions_router
     from routers import operator_runbooks as operator_runbooks_router
     from routers import operator_overlay as operator_overlay_router
+    from routers import operator_secrets as operator_secrets_router
 
     app.include_router(operator_sessions_router.router)
     # Lane F reversible runbooks. Write actions are always-confirm and gated by
@@ -244,6 +245,9 @@ def _mount_operator_router() -> None:
     # so mounting the routes grants nothing until an operator enables an action.
     app.include_router(operator_runbooks_router.router)
     app.include_router(operator_overlay_router.router)
+    # Secret broker read surface: handle metadata only (never a value); the
+    # broker is fail-closed (no minter registered by default).
+    app.include_router(operator_secrets_router.router)
     print("[leaf-demo] operator control plane mounted (/api/operator/*)")
 
 

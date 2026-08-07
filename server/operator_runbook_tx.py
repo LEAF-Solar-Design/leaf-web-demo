@@ -3,11 +3,11 @@
 
 execute_atomic() runs, on ONE leaf_platform.db.connection() (commits on clean
 exit, rolls back on any exception):
-  0a. pg_advisory_xact_lock(hashtextextended(tenant_id, 0)) — serializes ALL
+  0a. pg_advisory_xact_lock(hashtextextended(tenant_id, 0)): serializes ALL
       operations on this tenant including the not-yet-created row, using the
       SAME key the canonical store uses (agent_pg_store.set_tenant_state), so
       the runbook and the ops surface serialize against each other.
-  0b. SELECT ... FOR UPDATE operator_principals — authoritative principal
+  0b. SELECT the operator_principals row FOR UPDATE: authoritative principal
       re-check on a LOCKED row (closes the revoke-after-preflight TOCTOU).
   1.  SELECT ... FOR UPDATE the agent_tenant_state row (current revision).
   2.  operator_authority.consume_in_tx(...) bound to the locked revision.
