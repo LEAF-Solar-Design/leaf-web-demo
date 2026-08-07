@@ -20,10 +20,25 @@ name: Dispatch staging deploys
 # clean skip; manifest-and-marker both absent stays a hard error, because a
 # successful build with no supply set means a partial run.
 #
-# Rerun semantics: rerunning a successful build (or this relay) dispatches
-# both deploys again, deliberately. The deploys register a fresh task
-# definition revision of the same images; per-service concurrency in the
-# infra repo serializes them.
+# Rerun semantics: rerunning a successful build (or this relay) deploys
+# both services again, deliberately. The deploys register a fresh task
+# definition revision of the same images.
+#
+# One service at a time, and each one PROVEN to land. The infra repo funnels
+# every staging mutation through ONE concurrency group
+# (leaf-platform-staging-ecs-mutation, shared by 39 workflows) so no sampled
+# digest can change before a release identity reaches the live app. GitHub
+# keeps at most ONE pending run per group and a newly queued run CANCELS the
+# previously pending one, so firing both deploys two seconds apart made the
+# second evict the first whenever the lock was already busy: 4 merges between
+# 2026-08-05 and 2026-08-06 deployed only one of their two services, silently,
+# because this relay used to dispatch and exit without ever reading an
+# outcome. Dispatching serially keeps at most one of our runs queued, and
+# watching each run to a terminal state is what makes a lost deploy loud.
+#
+# A run cancelled before any job started never reached AWS, so eviction is a
+# queueing loss rather than a deploy failure and is the one conclusion this
+# relay retries. Every other non-success fails the relay red.
 #
 # Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
 # repo) — the same pattern the aws-* service repos use with
@@ -55,7 +70,11 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The relay now watches both deploys to completion (observed: ~8 min for
+    # web, ~14 min for app, plus time queued behind the shared staging lock).
+    # Comfortably above the step's own 95-minute deadline so the step reports
+    # WHICH service was left undeployed instead of dying to a job timeout.
+    timeout-minutes: 105
 
     env:
       INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
@@ -140,22 +159,143 @@ jobs:
           echo "deploy=true" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch the web and app staging deploys concurrently
+      - name: Deploy each staging service in turn and prove each one landed
         if: >-
           steps.tip.outputs.current == 'true' &&
           steps.manifest.outputs.deploy == 'true'
         env:
           GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          # The tip re-check reads THIS repo, which the infra-repo PAT is not
+          # scoped for; the job's own token is.
+          HOME_TOKEN: ${{ github.token }}
           IMAGE_TAG: ${{ steps.manifest.outputs.image_tag }}
         run: |
           set -euo pipefail
+
+          POLL_SECONDS=15
+          EVICTION_RETRIES=2
+          DEADLINE=$(( $(date +%s) + 95 * 60 ))
+
+          before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
+
+          # `gh workflow run` does not return the run it creates, so the run
+          # we just made is "the one that appeared above this mark".
+          latest_any_run_id() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId \
+              | jq -r '[.[].databaseId] | max // 0'
+          }
+
+          # "<id><TAB><run name>" for every run above the mark, newest first.
+          new_runs_since() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId,displayTitle \
+              | jq -r --argjson mark "$1" \
+                  '[.[] | select(.databaseId > $mark)] | sort_by(-.databaseId)[]
+                   | "\(.databaseId)\t\(.displayTitle)"'
+          }
+
           for SERVICE in web app; do
-            gh workflow run "$DEPLOY_WORKFLOW" \
-              --repo "$INFRA_REPO" \
-              --ref main \
-              -f "service=$SERVICE" \
-              -f "expected_task_definition=auto-live" \
-              -f "image_tag=$IMAGE_TAG" \
-              -f "app_deploy_intent=forward"
-            echo "Dispatched $SERVICE deploy of $IMAGE_TAG."
+            WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+            ATTEMPT=0
+
+            while :; do
+              # Re-read the tip before every dispatch. Serial deploys widen the
+              # window in which main can move, and deploying an older tag after
+              # a newer relay already deployed would roll staging BACKWARDS —
+              # exactly what the latest-main-only rule exists to prevent. The
+              # newer commit's relay deploys every service, so standing down is
+              # convergent, not a gap.
+              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+              if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+                echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before the $SERVICE deploy; standing down (latest-main-only staging: the newer commit's relay deploys every service)."
+                exit 0
+              fi
+
+              BEFORE=$(latest_any_run_id)
+              gh workflow run "$DEPLOY_WORKFLOW" \
+                --repo "$INFRA_REPO" \
+                --ref main \
+                -f "service=$SERVICE" \
+                -f "expected_task_definition=auto-live" \
+                -f "image_tag=$IMAGE_TAG" \
+                -f "app_deploy_intent=forward"
+              echo "Dispatched $SERVICE deploy of $IMAGE_TAG (attempt $((ATTEMPT + 1)))."
+
+              # Resolve the run we just created, polling FAST so the window in
+              # which a sibling lane's dispatch could be confused for ours is
+              # a few seconds rather than a full poll interval. Sibling lanes
+              # dispatch this same workflow a few times an hour.
+              #
+              # One new run is unambiguous. More than one is resolvable only
+              # when the deploy workflow stamps run-name with the service and
+              # tag; until it does, this fails closed below rather than watch
+              # a run that is not ours. A sibling that dispatched the same
+              # service AND tag is deploying exactly what we asked for, so
+              # matching its run is still correct.
+              #
+              # Transient gh failures inside poll loops are tolerated and also
+              # fail closed: an unresolved run exhausts its budget and errors.
+              RUN_ID=""
+              RESOLVE_BY=$(( $(date +%s) + 5 * 60 ))
+              while [ "$(date +%s)" -lt "$RESOLVE_BY" ] && before_deadline; do
+                sleep 3
+                NEW=$(new_runs_since "$BEFORE" || true)
+                if [ -n "$NEW" ]; then
+                  if [ "$(printf '%s\n' "$NEW" | wc -l)" -eq 1 ]; then
+                    RUN_ID=$(printf '%s\n' "$NEW" | cut -f1)
+                    break
+                  fi
+                  NAMED=$(printf '%s\n' "$NEW" \
+                    | awk -F'\t' -v want="$WANT" '$2 == want { print $1; exit }')
+                  if [ -n "$NAMED" ]; then
+                    RUN_ID="$NAMED"
+                    break
+                  fi
+                fi
+              done
+              if [ -z "$RUN_ID" ]; then
+                echo "::error::Dispatched the $SERVICE deploy of $IMAGE_TAG but could not identify its run (none appeared, or concurrent dispatches were indistinguishable because no run carries the name '$WANT'). Staging is NOT converged on $BUILD_HEAD_SHA; check the deploy workflow before re-running."
+                exit 1
+              fi
+              echo "Watching $SERVICE deploy run $RUN_ID."
+
+              STATUS=""
+              CONCLUSION=""
+              while before_deadline; do
+                STATE=$(gh run view "$RUN_ID" --repo "$INFRA_REPO" \
+                  --json status,conclusion \
+                  --jq '"\(.status) \(.conclusion // "")"' || true)
+                STATUS=${STATE%% *}
+                CONCLUSION=${STATE#* }
+                [ "$STATUS" = "completed" ] && break
+                sleep "$POLL_SECONDS"
+              done
+
+              if [ "$STATUS" != "completed" ]; then
+                echo "::error::The $SERVICE deploy run $RUN_ID had not finished within the watch budget. Staging may be half-deployed on $BUILD_HEAD_SHA."
+                exit 1
+              fi
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
+                break
+              fi
+
+              # Zero jobs means the run was cancelled while still queued, i.e.
+              # evicted from the shared staging lock before touching AWS. Only
+              # that is retryable; a run that started and then failed must
+              # never be re-dispatched blind.
+              JOBS=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/jobs" \
+                --jq '.total_count')
+              if [ "$CONCLUSION" = "cancelled" ] && [ "$JOBS" -eq 0 ] \
+                && [ "$ATTEMPT" -lt "$EVICTION_RETRIES" ]; then
+                ATTEMPT=$((ATTEMPT + 1))
+                echo "::warning::The $SERVICE deploy run $RUN_ID was evicted from the staging lock before starting a job; re-dispatching."
+                continue
+              fi
+
+              echo "::error::The $SERVICE deploy of $IMAGE_TAG concluded '$CONCLUSION' (run $RUN_ID, $JOBS jobs). Staging is NOT converged on $BUILD_HEAD_SHA."
+              exit 1
+            done
           done

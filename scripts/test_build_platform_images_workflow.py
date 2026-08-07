@@ -2672,7 +2672,12 @@ def check_docs_noop_filter(text: str) -> None:
     # Pinned VALUES, not just keys: on a self-hosted runner the PAT-backed
     # step would execute on infrastructure outside GitHub's ephemeral VMs.
     assert dispatch_job["runs-on"] == "ubuntu-latest"
-    assert dispatch_job["timeout-minutes"] == 5
+    # 5 -> 105 on 2026-08-07: the relay now watches both deploys to a terminal
+    # state instead of dispatching and exiting, and a deploy runs ~8-14 min
+    # plus time queued behind the shared staging lock. Must stay above the
+    # step's own 95-minute deadline; check_staging_relay_convergence asserts
+    # that relationship rather than the literal.
+    assert dispatch_job["timeout-minutes"] == 105
     assert dispatch_job["env"] == {
         "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
         "DEPLOY_WORKFLOW": "deploy-leaf-platform-staging.yml",
@@ -2699,8 +2704,14 @@ def check_docs_noop_filter(text: str) -> None:
         "GH_TOKEN": "${{ github.token }}",
         "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
     }
+    # HOME_TOKEN added 2026-08-07. The per-service tip re-check reads THIS
+    # repo, which the infra PAT is not scoped for; github.token is, and the
+    # workflow's permissions block above still pins it read-only. This is a
+    # read the step already had the right to make, not new capability — the
+    # secret-reference count below remains the wall that matters.
     assert dispatch_step["env"] == {
         "GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}",
+        "HOME_TOKEN": "${{ github.token }}",
         "IMAGE_TAG": "${{ steps.manifest.outputs.image_tag }}",
     }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
@@ -2748,15 +2759,25 @@ def check_docs_noop_filter(text: str) -> None:
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
-    # Hash updated for lane L5 (PR #450): the manifest step's schema pin
-    # widened to accept leaf.staging-supply-set.v1 OR .v2 — same deployable
-    # fields, no new dispatch capability, no new secret surface.
+    # Hash updated 2026-08-07: the dispatch step now deploys one service at a
+    # time and watches each run to a terminal state, instead of firing both
+    # deploys two seconds apart and exiting. Reviewed for dispatch capability:
+    # still exactly one `gh workflow run` site with the same four inputs, one
+    # added read of THIS repo's tip on the workflow's own read-only token, and
+    # no new secret reference (the count assertion above is unchanged).
     assert frozen == (
-        "a4fd3f7b49df61be1a15b307c1b8425d08a6d47ad0410cfcedb38225fc4ff22a"
+        "469d978cf88a7089fb832932340d58d3d9374df94a4162670e07a1f6c3e5302c"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
     )
+
+    # The convergence contract itself: a dispatched service is always
+    # accounted for, or the relay goes red. Batteries prove each pin catches
+    # the regression vector it names.
+    check_staging_relay_convergence(relay_text)
+    check_staging_relay_convergence_battery(
+        WORKFLOW.parent / "dispatch-staging-deploys.yml")
 
     assert (
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
@@ -3349,10 +3370,221 @@ def check_speculative_dispatcher_battery(dispatcher_path: Path) -> None:
     print("speculative dispatcher decoy battery: PASS")
 
 
+def check_staging_relay_convergence(text: str) -> None:
+    """The relay may never end green with a dispatched service unaccounted for.
+
+    WHY: until 2026-08-07 this relay dispatched web and app about two
+    seconds apart and exited without reading either outcome. The infra repo
+    funnels every staging mutation through ONE concurrency group
+    (leaf-platform-staging-ecs-mutation, shared by 39 workflows) and GitHub
+    keeps at most ONE pending run per group, cancelling whichever run was
+    previously pending. So whenever the lock was already busy the second
+    dispatch evicted the first, and staging deployed one service instead of
+    two while the relay reported success.
+
+    Four merges lost a service that way between 2026-08-05 and 2026-08-06:
+    infra runs 30994453570, 31103023296, 31132184537 and 31132566801, each
+    cancelled with ZERO jobs, i.e. killed while still queued. The most
+    recent pair is the clearest reading — run 31132183543 (web) succeeded
+    while 31132184537 (app) died queued, then 31132566801 (web) died queued
+    while 31132568205 (app) succeeded — leaving leaf-platform-web-alt on the
+    PREVIOUS merge's tree with its own built image sitting unused in ECR.
+
+    These pins are about the RELAY'S OBLIGATION, not about the lock: the
+    shared group is legitimate and stays. What changed is that the relay now
+    deploys one service at a time and watches each run to a terminal state.
+    """
+    wf = _strict_yaml(text)
+    job = wf["jobs"]["dispatch"]
+    code = _executable_bash(job["steps"][-1]["run"])
+
+    # Both services stay covered, and from a single dispatch site: a second
+    # one is a deploy that the watch below would not be looking at.
+    assert "for SERVICE in web app; do" in code, (
+        "the relay must still deploy both staging services in one pass")
+    assert code.count("gh workflow run") == 1, (
+        "one dispatch site only: another would fire a deploy nobody watches")
+    dispatch_at = code.index("gh workflow run")
+
+    # THE HEADLINE INVARIANT, asserted first so a regression says so: a
+    # dispatch is followed by resolving the run it created and polling that
+    # run to a terminal state. Dispatching and exiting is the original bug.
+    assert 'gh run view "$RUN_ID"' in code, (
+        "a dispatched deploy must be watched to a terminal state, not assumed")
+    assert code.index('gh run view "$RUN_ID"') > dispatch_at
+
+    # The tip is re-read INSIDE the per-service loop, before each dispatch.
+    # Deploying serially widens the window in which main can move, and
+    # dispatching an older tag behind a newer relay would roll staging
+    # BACKWARDS — the exact thing latest-main-only staging exists to stop.
+    assert "for SERVICE in web app" in code
+    assert "branches/main" in code, (
+        "each dispatch must be preceded by a fresh tip-of-main read")
+    assert code.index("for SERVICE in web app") < code.index("branches/main") < dispatch_at, (
+        "the tip re-check must sit inside the loop and before each dispatch")
+
+    # The loop advances to the next service ONLY from inside the success arm.
+    # Pinned as "a break lives in that arm" rather than "break is the next
+    # line", so ordinary edits inside the arm stay legal.
+    success_arm = re.search(
+        r'if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\s*fi\b', code, re.S)
+    assert success_arm, "the watch needs an explicit success arm"
+    assert re.search(r"^\s*break\b", success_arm.group(1), re.M), (
+        "the loop may only advance past a service whose deploy concluded success")
+    assert "landed (run $RUN_ID)" in success_arm.group(1), (
+        "the success arm must say which run landed the deploy")
+
+    # Every announced error FAILS the job. An `::error::` followed by
+    # anything other than `exit 1` is the silent-success bug returning.
+    lines = code.splitlines()
+    error_lines = [i for i, line in enumerate(lines) if "::error::" in line]
+    assert len(error_lines) >= 3, (
+        "the unresolved-run, watch-budget and non-success paths each need a "
+        f"loud error; found {len(error_lines)}")
+    for i in error_lines:
+        following = [ln.strip() for ln in lines[i + 1:i + 3] if ln.strip()]
+        assert following and following[0] == "exit 1", (
+            f"::error:: on line {i + 1} is not followed by `exit 1`; "
+            f"found {following[:1]}")
+
+    # The only clean early exit is standing down for a newer commit.
+    assert code.count("exit 0") == 1, (
+        "the relay may exit 0 early only when a newer commit owns the deploy")
+    assert "standing down" in code[:code.index("exit 0")][-500:], (
+        "the single exit 0 must be the latest-main-only stand-down")
+
+    # Retry covers QUEUE EVICTION ONLY. Zero started jobs proves the run
+    # never reached AWS; re-dispatching a run that started and then failed
+    # would blind-redeploy over a real failure.
+    assert re.search(
+        r'\[ "\$CONCLUSION" = "cancelled" \]\s*&&\s*\[ "\$JOBS" -eq 0 \]', code), (
+        "the retry must require BOTH a cancelled conclusion and zero started jobs")
+    assert code.count("continue") == 1, (
+        "exactly one retry path may re-enter the dispatch loop")
+    assert re.search(r'\[ "\$ATTEMPT" -lt "\$EVICTION_RETRIES" \]', code), (
+        "eviction retries must be bounded")
+
+    # The job must outlive the step's own deadline, so a stuck deploy is
+    # reported as a NAMED half-deployed service instead of a bare job timeout.
+    deadline = re.search(
+        r"DEADLINE=\$\(\(\s*\$\(date \+%s\)\s*\+\s*(\d+)\s*\*\s*60", code)
+    assert deadline, "the watch loop needs an explicit wall-clock deadline"
+    assert job["timeout-minutes"] > int(deadline.group(1)), (
+        f"timeout-minutes {job['timeout-minutes']} must exceed the step's own "
+        f"{deadline.group(1)}-minute deadline")
+
+    print("staging relay convergence invariants: PASS")
+
+
+def check_staging_relay_convergence_battery(relay_path: Path) -> None:
+    """Decoy battery: each negative reintroduces a real regression vector.
+
+    Same shape as the speculative-dispatcher battery — negatives must be
+    CAUGHT, positive controls must still PASS, so the pins above cannot be
+    simultaneously incomplete and hostile to ordinary maintenance edits.
+    """
+    original = relay_path.read_text(encoding="utf-8")
+
+    def mutate(text: str, old: str, new: str) -> str:
+        assert old in text, f"battery fixture drifted: {old!r} not in relay"
+        return text.replace(old, new)
+
+    negatives = [
+        (
+            "non-success reported as a clean exit (the original silent bug)",
+            mutate(original,
+                   "\n              exit 1\n            done\n",
+                   "\n              exit 0\n            done\n"),
+        ),
+        (
+            "retrying a deploy that actually started and failed",
+            mutate(original,
+                   '[ "$CONCLUSION" = "cancelled" ] && [ "$JOBS" -eq 0 ] \\',
+                   '[ "$CONCLUSION" = "cancelled" ] \\'),
+        ),
+        (
+            "tip re-check weakened so an older tag can roll staging back",
+            mutate(original,
+                   '"repos/$GITHUB_REPOSITORY/branches/main" --jq \'.commit.sha\')',
+                   '"repos/$GITHUB_REPOSITORY" --jq \'.default_branch\')'),
+        ),
+        (
+            "a second dispatch nobody watches",
+            mutate(original,
+                   '              echo "Dispatched $SERVICE deploy of $IMAGE_TAG',
+                   '              gh workflow run "$DEPLOY_WORKFLOW" --repo "$INFRA_REPO"\n'
+                   '              echo "Dispatched $SERVICE deploy of $IMAGE_TAG'),
+        ),
+        (
+            "job timeout cut below the step's own watch deadline",
+            mutate(original, "timeout-minutes: 105", "timeout-minutes: 5"),
+        ),
+        (
+            "one service quietly dropped from the loop",
+            mutate(original, "for SERVICE in web app; do", "for SERVICE in web; do"),
+        ),
+        (
+            "watch removed, back to dispatch-and-hope",
+            mutate(original, 'gh run view "$RUN_ID"', 'true "$RUN_ID"'),
+        ),
+        (
+            "loop advances without the deploy having landed",
+            mutate(original,
+                   'landed (run $RUN_ID)."\n                break\n',
+                   'landed (run $RUN_ID)."\n'),
+        ),
+    ]
+    for name, mutant in negatives:
+        assert mutant != original
+        try:
+            check_staging_relay_convergence(mutant)
+        except AssertionError:
+            continue
+        raise AssertionError(f"relay convergence battery: {name} was NOT caught")
+
+    landed_echo = '                echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."\n'
+    positives = [
+        ("unmodified workflow", original),
+        (
+            "added full-line bash comment",
+            mutate(original,
+                   "          set -euo pipefail\n",
+                   "          set -euo pipefail\n          # maintenance note\n"),
+        ),
+        (
+            "added innocuous echo after a landed deploy",
+            mutate(original, landed_echo,
+                   landed_echo + '                echo "next service follows."\n'),
+        ),
+        (
+            "watch deadline retuned while staying under the job timeout",
+            mutate(original, "+ 95 * 60 ))", "+ 80 * 60 ))"),
+        ),
+    ]
+    for name, control in positives:
+        try:
+            check_staging_relay_convergence(control)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"relay convergence battery: control {name!r} must pass "
+                f"but tripped: {exc}")
+
+    print("staging relay convergence decoy battery: PASS")
+
+
 def test_build_platform_images_workflow_invariants() -> None:
     # Pytest entry point: the gate runner counts collected tests, and a bare
     # main() collects as zero.
     main()
+
+
+def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
+    # Named separately from the mega-test so a scoreboard failure says which
+    # invariant broke: this one is "a dispatched deploy is always accounted
+    # for", the recurring defect diagnosed on 2026-08-07.
+    relay = WORKFLOW.parent / "dispatch-staging-deploys.yml"
+    check_staging_relay_convergence(relay.read_text(encoding="utf-8"))
+    check_staging_relay_convergence_battery(relay)
 
 
 if __name__ == "__main__":
