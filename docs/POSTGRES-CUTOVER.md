@@ -295,3 +295,89 @@ expected-empty result is **indistinguishable from the false-clean**. Read it as
 source survives task replacement and the backfill has real value there. None of
 the ephemerality above applies. Do not reuse this record to justify skipping
 preservation in production.
+
+## Executing the staging flip: two things step 5 does not say
+
+Recorded 2026-08-06 after the mismatch fired live on staging (ten HTTP 500s in
+`/ecs/leaf-platform-app` between 03:00:18 and 03:14:25 UTC, on
+`GET /api/sessions/{id}/transcript` and `GET /api/agent/approvals/pending`).
+Both points below are read from the code, not from a completed flip.
+
+**1. The flip can briefly reproduce the very symptom it fixes.** `postgres` mode
+short-circuits before any comparison, so a fully flipped fleet cannot mismatch.
+A PARTLY flipped fleet can. `_SHADOW_READ_MODES` contains `dual_write_shadow`,
+and `get_session` runs
+`_shadow_equal("session", legacy, _pg_get_session(session_id))`. So an OLD task
+still on `dual_write_shadow` raises whenever its legacy row disagrees with what
+a NEW `postgres`-mode task has written.
+
+**The exposed set is: sessions MUTATED by a postgres-mode task, then READ by an
+old shadow task.** Both halves are required. A shared read creates no
+divergence, and an append by the OLD task is a dual write that keeps the two
+stores together, so neither alone can trigger it. Only the new task writes to
+one store and not the other. Two shapes, and the second is the easy one to miss:
+
+- A session the postgres task MINTED exists only in PostgreSQL, so the old task
+  compares a legacy `None` against a real row.
+- A PRE-EXISTING session the postgres task merely APPENDED to has moved in
+  PostgreSQL and not in SQLite: `_pg_append_event` runs
+  `UPDATE app_sessions SET last_seq = last_seq + 1, updated_at = %s`, and
+  `_shadow_equal` compares whole rows, so the stale legacy row and the advanced
+  PostgreSQL row differ on `last_seq` and `updated_at` alone. So a session that
+  existed long before the flip is still exposed, with no new session and no
+  legacy write anywhere in the sequence.
+
+Mitigation: flip the DRAINED color first, verify it through the color-addressed
+header rules, then drain the live color and flip it, so the two modes never
+serve overlapping traffic. That is the operational form of the "quiesce legacy
+writes" prerequisite above. **Re-read the live desired counts immediately before
+acting rather than trusting any recorded value, including this document.** Which
+color is drained flips with every blue/green cycle, and the counts in
+`platform/authority-inventory.json` disagreed with a live read on 2026-08-06.
+
+**2. Rollback has a mandatory ordering, and getting it backwards recreates this
+incident.** The return path is `postgres` to `shadow` to `legacy`. Every mode on
+that path except `postgres` reads the legacy SQLite. Staging's `SESSIONS_DB` is
+UNSET, so on staging every one of them resolves to the task-local
+`server/sessions.db` that dies with the task, which is exactly the configuration
+that produced the 500s. **Any rollback off `postgres` on staging must set
+`SESSIONS_DB` to durable storage in the same transaction, before or with the
+selector change, never after.** Note also that rolling back after PostgreSQL has
+accepted writes needs the fenced reverse backfill named in the contract above;
+`scripts/reconcile_sessions_authority.py` is SQLite to PostgreSQL only.
+
+**`app_sessions` exists on staging and holds rows. That is ALL the incident
+proves, and it is much weaker than "0012 is applied".** Both failing endpoints
+reach `get_session` first, which calls `_pg_get_session` and selects from
+`app_sessions` alone; the shadow compare then raises and aborts the request
+before anything queries transcript events or pending approvals. So the recorded
+mismatches say nothing about `app_session_events`, about `app_approvals`, or
+about the unique index on `(tenant_id, drawing_id)` that the separate
+`ON CONFLICT` path relies on. Do not stretch this evidence past the one table.
+
+Two things that do NOT prove it, so do not substitute them:
+
+- **A healthy service does not.** `session_store.ensure_started()` has no
+  startup or lifespan caller; it runs lazily on the first session request, and
+  `/api/health` never consults `session_store`. A task can be healthy having
+  never touched the sessions schema.
+- **`_pg_ensure_started()` passing does not.** It checks `to_regclass` on the
+  three tables and nothing else: not migration history, not columns, not
+  constraints, not indexes.
+
+So a pre-flight that asserts schema currency properly (`assert_schema_current()`
+from the exact candidate image, as the deploy path already does elsewhere) is
+still worth running. What is settled is only that the tables are present.
+
+**Two tables do not move, and the flip is not what strands them.**
+`server/checkpoints.py` and `server/session_policy.py` resolve `SESSIONS_DB`
+independently and consult neither `_store_mode` nor `LEAF_SESSIONS_STORE`, so
+`session_checkpoints` and `session_policies` stay on task-local SQLite before and
+after. The SELECTOR is neutral for them; the DEPLOYMENT that applies it is not,
+because any task replacement takes that file. Expect checkpoint restores to 404
+and custom policies to fall back to `DEFAULT_POLICY = "confirm_all"`, which is
+the safe direction and is already inside the DISCARD class above. What IS new
+after the flip: a session outlives its own checkpoints for the first time, so
+this stops being invisible and starts looking like a regression to a user. Give
+those two tables a PostgreSQL home, or classify them as disposable staging state
+in writing.
