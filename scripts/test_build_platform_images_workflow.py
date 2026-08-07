@@ -2836,8 +2836,22 @@ def check_docs_noop_filter(text: str) -> None:
     # call is added, a read-only GET of this repo's own branch tip on
     # `GH_TOKEN="$HOME_TOKEN"`, identical in form and token to the two tip
     # reads already present. No new endpoint, repo or credential.
+    # Hash updated again 2026-08-07 (sixth edit): sol-critic round 3 on PR
+    # #508. The `yes` arm now re-reads the tip after its classification poll
+    # and fails RED if main moved, because `yes` was a claim about a commit
+    # that could already have stopped being the tip: A polls deployable B,
+    # docs-only C lands during the poll, B's relay then SKIPS on the moved tip
+    # and C's relay skips on its own marker, so nothing converges and all
+    # three runs are green. A supply set proves B COULD deploy, never that its
+    # relay WILL. The supply-set match additionally rejects an EXPIRED
+    # artifact, which is a name the superseder's manifest step can no longer
+    # download. Reviewed for dispatch capability: still exactly ONE
+    # `gh workflow run` with the same four inputs and still exactly one secret
+    # reference. The one added call is a fourth read-only GET of this repo's
+    # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
+    # to the three already present. No new endpoint, repo or credential.
     assert frozen == (
-        "d499cf28e77654246dc0138d14f8d6ab841182b284cbe7c01a65521fe057e904"
+        "247317654de771bc12019de886617b5a519d41258869b02bdb5098c5df1585ed"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3554,9 +3568,16 @@ def check_staging_relay_convergence(text: str) -> None:
         "RED; a ::warning:: on a green run is the reporting hole itself")
     converged = re.search(
         r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*exit 0\n', code, re.S)
-    assert converged and "STAGING IS SPLIT" in converged.group(1), (
+    assert converged, "the converging-superseder arm must be able to exit 0"
+    # Bind this to the WARNING, not to the arm. The arm now also carries a
+    # stale-tip `::error::STAGING IS SPLIT AND UNCONVERGED`, and a whole-arm
+    # substring check would let that second site satisfy the pin while the
+    # stand-down warning itself stopped naming the split.
+    converged_warning = re.search(r'echo "::warning::([^"]*)"', converged.group(1))
+    assert converged_warning and "STAGING IS SPLIT" in converged_warning.group(1), (
         "standing down for a superseder that DOES build images may exit 0, "
-        "and must still name the split it leaves for that relay to close")
+        "and its WARNING must still name the split it leaves for that relay "
+        "to close")
 
     # A DOCS-ONLY SUPERSESSION MUST NOT STRAND A PARTIAL RELEASE.
     #
@@ -3609,6 +3630,32 @@ def check_staging_relay_convergence(text: str) -> None:
     assert stale_guard, "the re-read needs a guard that acts on a moved tip"
     assert "::error::" in stale_guard.group(1) and "exit 1" in stale_guard.group(1), (
         "a stale docs-noop finding must fail RED, not proceed and not exit 0")
+
+    # THE `yes` FINDING IS A POLL RESULT TOO, so it needs the same guard.
+    #
+    # sol-critic reproduced the consequence of leaving it out: A deploys web
+    # and polls deployable B; docs-only C lands during the poll; B completes
+    # with its supply set so A answers `yes` and exits GREEN; B's own relay
+    # then skips because C is the tip, and C's relay skips on its docs-noop
+    # marker. Nothing converges and all three runs are green -- the original
+    # incident displaced by one hop. A supply set proves B COULD deploy, never
+    # that its relay WILL.
+    converger_arm = re.search(
+        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*else\b', code, re.S)
+    assert converger_arm, "the converging-superseder arm must exist"
+    yes_body = converger_arm.group(1)
+    assert re.search(
+        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
+        r'"repos/\$GITHUB_REPOSITORY/branches/main"', yes_body), (
+        "the converging-superseder arm must re-read the tip AFTER its "
+        "classification poll; `yes` about a commit that is no longer the tip "
+        "is a claim about a relay that will itself stand down")
+    yes_stale = re.search(
+        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', yes_body, re.S)
+    assert yes_stale, "the converging-superseder re-read needs a guard"
+    assert ("::error::" in yes_stale.group(1)
+            and "exit 1" in yes_stale.group(1)), (
+        "a stale `converges` finding must fail RED, not exit 0")
 
     # The classifier reads the superseding build's OWN receipt. Re-deriving
     # the docs-only verdict from a compare API would be a second copy of a
@@ -3693,6 +3740,21 @@ def check_staging_relay_convergence(text: str) -> None:
         once, re.S)
     assert yes_arm and "echo yes" in yes_arm.group(1), (
         "the `yes` answer must sit INSIDE the supply-set check")
+    # An expired artifact is a name with nothing behind it; the superseder's
+    # manifest step still has to DOWNLOAD this supply set.
+    assert "(.expired != true)" in once, (
+        "an expired supply-set artifact must not earn `yes`")
+    # The CONDITION itself must stay falsifiable. sol-critic showed an
+    # always-true guard (`... >/dev/null || :`) passed every other pin while
+    # removing the requirement entirely, so pin the condition, not just the
+    # presence of the text inside it.
+    supply_condition = re.search(
+        r'if printf[^\n]*\n(?:[^\n]*\n)*?[^\n]*staging-supply-set[^\n]*\n'
+        r'(?:[^\n]*\n)*?[^\n]*; then\n', once)
+    assert supply_condition, "the supply-set requirement must gate `yes`"
+    assert "||" not in supply_condition.group(0), (
+        "the supply-set check must carry no `||` fallback: that makes the "
+        "condition unconditionally true and silently drops the requirement")
 
     # THE READ-TO-DISPATCH WINDOW IS CLOSED FOR REPORTING.
     #
@@ -3890,11 +3952,29 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         # --- sol-critic round 2 on PR #508 ---
         (
-            "a successful build that published NO supply set counted as a "
-            "converger, though its own relay fails on the missing manifest",
+            "the supply-set requirement neutralised by an always-true guard, "
+            "so a build that published NOTHING counts as a converger",
             mutate(original,
-                   'staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT',
-                   'docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT'),
+                   "'any(.artifacts[]; (.name == $n) and (.expired != true))' \\\n"
+                   "                  >/dev/null; then\n",
+                   "'any(.artifacts[]; (.name == $n) and (.expired != true))' \\\n"
+                   "                  >/dev/null || :; then\n"),
+        ),
+        (
+            "an EXPIRED supply set, which the superseder's relay cannot "
+            "download, counted as a converger",
+            mutate(original, " and (.expired != true)", ""),
+        ),
+        (
+            "the `yes` finding acted on the pre-poll tip snapshot, so a "
+            "docs-only commit landing during the poll strands the split",
+            mutate(original,
+                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \\\n'
+                   '                    "repos/$GITHUB_REPOSITORY/branches/main" --jq \'.commit.sha\')\n'
+                   '                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then\n'
+                   '                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale.',
+                   '                  if false; then\n'
+                   '                    echo "::error::stale.'),
         ),
         (
             "artifact listing trusted without proving it carries a count",

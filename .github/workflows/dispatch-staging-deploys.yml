@@ -313,9 +313,15 @@ jobs:
             # while we would have exited green on its success. Require the
             # exact attempt-bound supply set; anything else falls to `unknown`,
             # which is the RED path.
+            # An EXPIRED artifact is a name with nothing behind it: the
+            # superseder's own manifest step downloads this artifact, and that
+            # download is only valid until expiry. A name match that ignores
+            # `.expired` would answer `yes` for a supply set that relay can no
+            # longer fetch.
             if printf '%s' "$SUP_ARTIFACTS" \
               | jq -e --arg n "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" \
-                  'any(.artifacts[]; .name == $n)' >/dev/null; then
+                  'any(.artifacts[]; (.name == $n) and (.expired != true))' \
+                  >/dev/null; then
               case "$SUP_STATE" in
                 "completed success") echo yes; return 0 ;;
               esac
@@ -426,6 +432,24 @@ jobs:
                   NOOP_FINISH_FROM="$MAIN_SHA"
                   echo "::warning::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, but $MAIN_SHA published a docs-noop marker: it builds no images and its relay dispatches nothing, so no newer deploy exists and nothing else would converge staging. Finishing $SERVICE on $IMAGE_TAG is what closes the split."
                 elif [ "$CONVERGER" = "yes" ]; then
+                  # SYMMETRY WITH THE DOCS-NOOP ARM: this classification also
+                  # POLLED, so $MAIN_SHA is a snapshot taken before the wait,
+                  # and `yes` is a claim about a commit that may no longer be
+                  # the tip. sol-critic reproduced the consequence: A deploys
+                  # web and starts polling deployable B; docs-only C lands
+                  # while B is still building; B completes with its supply
+                  # set so A answers `yes` and exits green; B's own relay then
+                  # SKIPS because C is the tip; C's relay skips on its own
+                  # docs-noop marker. Nothing converges and A, B and C are all
+                  # green. That is the original incident displaced by one hop.
+                  # A supply set proves B COULD deploy, never that its relay
+                  # WILL. Fail CLOSED when the tip moved under the poll.
+                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
+                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                    exit 1
+                  fi
                   echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. That commit's build succeeded with a supply set, so its own relay converges staging."
                   exit 0
                 else
