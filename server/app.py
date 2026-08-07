@@ -46,6 +46,7 @@ from routers import (
     demand,
     drawings,
     jobs as jobs_router,
+    mcp_gateway,
     mcp_status,
     ops,
     ops_metrics,
@@ -138,6 +139,7 @@ app.add_middleware(_guest_uploads_mw.UploadBodyLimitMiddleware)
 from routers import sessions as _sessions_mw  # noqa: E402
 
 app.add_middleware(_sessions_mw.MessageBodyLimitMiddleware)
+app.add_middleware(mcp_gateway.McpAuthorityBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),  # F17: env-driven allow-list, default-deny in live-auth
@@ -156,6 +158,7 @@ app.include_router(tools.router)
 app.include_router(jobs_router.router)
 app.include_router(capabilities.router)
 app.include_router(mcp_status.router)
+app.include_router(mcp_gateway.router)
 app.include_router(deployment_identity.router)
 app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
