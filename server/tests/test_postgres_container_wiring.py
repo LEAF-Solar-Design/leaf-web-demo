@@ -571,6 +571,14 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
     # whose guard passed and whose documented command still fails. Adding
     # either must therefore be a decision someone makes here, not a side effect.
+    #
+    # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
+    # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
+    # run arbitrary commands at RUNTIME, and ENV can point PATH or PYTHONPATH
+    # somewhere else. A `HEALTHCHECK CMD rm -rf /app/scripts/...` below the
+    # guard passes this test, passes the build, and deletes the script seconds
+    # into container life while the container reports healthy. No rule about
+    # POSITION can bind runtime behaviour, so that is a review class, not a gate.
     cannot_remove = {
         "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
         "MAINTAINER", "SHELL", "STOPSIGNAL", "WORKDIR",
@@ -580,8 +588,8 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     assert not offending, (
         f"deploy/Dockerfile.app runs {offending} AFTER the existence guard, so "
         "those instructions ship unchecked. Put them above the guard, or teach "
-        "this allowlist why they can neither remove a file nor make one "
-        "unreachable to the runtime process."
+        "this allowlist why they cannot remove a file at BUILD time and cannot "
+        "mask or re-permission the path for the runtime process."
     )
 
 

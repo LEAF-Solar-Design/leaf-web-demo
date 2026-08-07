@@ -82,10 +82,12 @@ WORKDIR /app/server
 # `-s` as well as `-f`, because `-f` alone accepts an EMPTY file: a truncation
 # above this line (`: > .../reconcile_sessions_authority.py`) left both tests
 # green while the operator's parity run became a program that exits 0 and emits
-# no receipt. What this still does NOT prove: that the file is the RIGHT script
-# (a substitution of equal-looking content passes), or that the runtime identity
-# can read it. Those are separate contracts -- the COPY-map guard in
-# server/tests/test_postgres_container_wiring.py covers the first.
+# no receipt. `-s` closes the zero-byte case and NOTHING WIDER. A one-byte
+# overwrite (`RUN printf 'pass\n' > .../reconcile_sessions_authority.py`) is a
+# valid Python program that exits 0, emits no receipt, and passes this guard.
+# Nothing here decides file CONTENT, and no earlier check does either: the
+# COPY-map guard refuses a RENAMING copy, which is not the same thing. Content
+# is a review class, not a gate.
 #
 # ABOVE the per-commit ARG deliberately, and it belongs nowhere else. A RUN below
 # that ARG re-executes on every merge, which
