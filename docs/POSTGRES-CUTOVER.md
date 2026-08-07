@@ -449,12 +449,21 @@ executed. It stops there, at "the executable shape is: flip the LIVE color and
 accept a bounded mixed-mode rollout", and it explicitly leaves the other color
 unsettled. This section closes both questions.
 
+**It also retracts one word from the sentence it just quoted.** That section, and
+an earlier draft of this one, called the rollout window "bounded". It is not, and
+the measured subsection below shows why. Read every earlier "bounded mixed-mode
+rollout" in this document as "single mixed-mode rollout": what option A buys is
+that there is ONE such window rather than two, not that the window has a known
+maximum.
+
 ### The decision: option A
 
 Four paths were considered.
 
-- **A. One configuration deploy against the LIVE color**, accepting a bounded
-  mixed-mode rollout window. The idle color picks the selector up later.
+- **A. One configuration deploy against the LIVE color**, accepting ONE
+  mixed-mode rollout window. The idle color picks the selector up later. The
+  window is single, not bounded; see the measured section below, which retracts
+  the word "bounded" wherever this document used it of that window.
 - **B. Build a control that can flip a DRAINED color**, then do both colors with
   no overlap at all. Needs a workflow change, so it is not available today.
 - **C. Two-cycle.** Flip the live color now, then flip the other color the next
