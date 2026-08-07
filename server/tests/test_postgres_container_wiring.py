@@ -569,27 +569,37 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     AFTER every instruction above it, knows nothing about spelling, and fails
     the BUILD rather than a test.
 
-    WHAT IS BUILD-PROVEN, stated as evidence rather than as an absence, because
-    an absence decays the moment someone runs the build. Two different daemons
-    have now executed this guard:
+    WHAT A DAEMON HAS ACTUALLY RUN, split by which SPELLING of the guard it ran,
+    because the two are not interchangeable and only one of them ships.
 
-      * SHELL form, mutation-proven locally with `docker build -f
-        deploy/Dockerfile.app .`: unmodified green; dropping the sessions COPY,
-        and separately inserting `RUN rm -rf scripts` under WORKDIR /app, each
-        turned it red at this exact step.
-      * EXEC form, the spelling that actually ships, executed green in CI on the
-        PR that introduced it -- run 31157638863, `speculate (app)`, logging
-        `#31 [21/21] RUN ["/bin/sh", "-c", "test -f ..."]` then `#31 DONE 0.1s`.
-        Look for `DONE`, not merely a green job: the post-merge build of the
-        same tree reported `#31 CACHED`, which proves only that some earlier
-        build succeeded, never that this one ran the guard.
+      * SHELL form: mutation-proven locally with `docker build -f
+        deploy/Dockerfile.app .`. Unmodified green. Dropping the sessions COPY,
+        inserting `RUN rm -rf scripts` under WORKDIR /app, and truncating a
+        script with `: > ...` each turned it red at this exact step.
+      * EXEC form, the spelling that ships: its PASS path only. BuildKit
+        executed the vertex and reported `#31 DONE 0.1s`, in the build of tree
+        `27bdb1399ab256d849e1821710fbdee8d7b3448a`. That tree hash is the
+        durable citation -- it is `git rev-parse <commit>^{tree}` of the commit
+        that introduced exec form, and it is what the image tag
+        `leaf-platform-app:spec-<tree>` is built from, so the pairing is
+        checkable forever with git alone. The CI run number was 31157638863,
+        recorded only as a convenience: Actions logs expire, the tree hash does
+        not.
 
-    NOT yet daemon-proven: the mutations against the EXEC form specifically --
-    the two above plus the `SHELL ["/bin/true"]` neutering that motivated exec
-    form. Those are covered by this test statically (revert-to-shell-form and
-    wrong-interpreter both observed red) and by Docker's documented rule that
-    SHELL does not affect the exec form. Replaying them against a daemon would
-    retire this paragraph.
+    Read the log for `DONE`, not for a green job. A later build reported
+    `#31 CACHED` at this vertex, which proves only that some earlier build of an
+    identical layer succeeded, never that this one ran the guard.
+
+    NOT daemon-proven, and NOT closable by this test: every FAIL path of the exec
+    form. Deletion, truncation, and the `SHELL ["/bin/true"]` neutering that
+    motivated exec form have been replayed against the shell spelling or against
+    the static assertions here, never against exec form on a daemon. Do not read
+    the static coverage as standing in for them -- this test pins the guard's
+    argv, and no assertion about a Dockerfile's text can observe a file that is
+    missing or empty at build time. What the exec-form fail paths rest on is that
+    `test -f` and `test -s` do not change meaning with the interpreter, plus
+    Docker's documented rule that SHELL does not affect the exec form. Replaying
+    all three against a daemon is what retires this paragraph.
 
     Keyed on the COPY map, so a reconciler added later is covered the day it is
     copied rather than the day someone remembers to extend this list.
