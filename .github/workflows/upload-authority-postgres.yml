@@ -44,6 +44,9 @@ on:
       - 'platform/tests/test_schema_status_postgres_authority.py'
       - 'scripts/reconcile_customization_authority.py'
       - 'scripts/reconcile_sessions_authority.py'
+      # The WORKDIR/COPY guard in test_postgres_container_wiring.py reads this
+      # file, so a change to it must trigger the gate that runs the guard.
+      - 'deploy/Dockerfile.app'
       - 'deploy/required-config.app.json'
       - 'deploy/required-config.broker.json'
       - 'server/guest_uploads.py'

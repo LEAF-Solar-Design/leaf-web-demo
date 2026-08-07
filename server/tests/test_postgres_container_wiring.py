@@ -4,7 +4,7 @@ These checks do not need a Docker daemon or a live database. They protect the
 legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import ast
 import json
 import re
@@ -74,6 +74,102 @@ def _assert_customization_postgres_gate(workflow: str) -> None:
         if fragment not in workflow
     ]
     assert not missing, f"customization PostgreSQL gate omitted: {missing}"
+
+
+def _app_dockerfile() -> str:
+    return _read("deploy/Dockerfile.app")
+
+
+def _final_workdir(dockerfile: str) -> str:
+    """The WORKDIR a documented command actually starts from.
+
+    Dockerfile.app declares WORKDIR twice: an early `/app` for the build, and
+    `/app/server` at the end because the app must run there to keep `import
+    platform` pointing at the stdlib. Only the LAST one is effective, and
+    reading the first is precisely the mistake this guard exists to catch.
+    """
+    workdirs = [
+        line.split(None, 1)[1].strip()
+        for line in dockerfile.splitlines()
+        if line.startswith("WORKDIR ")
+    ]
+    assert workdirs, "deploy/Dockerfile.app declares no WORKDIR"
+    return workdirs[-1]
+
+
+def _copied_scripts(dockerfile: str) -> dict[str, str]:
+    """basename -> absolute in-image path, for single-file `COPY scripts/...`.
+
+    Deliberately restricted to explicit single-file copies out of scripts/.
+    Directory copies such as `COPY server/ /app/server/` are a different shape,
+    and the pytest/npm parity commands in the inventory are documented for a
+    source checkout rather than for the image, so keying on these lines is what
+    keeps this guard aimed at the commands that really do run in the container.
+    """
+    copies: dict[str, str] = {}
+    for line in dockerfile.splitlines():
+        if not line.startswith("COPY scripts/"):
+            continue
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        copies[PurePosixPath(parts[2]).name] = parts[2]
+    return copies
+
+
+def test_documented_authority_commands_resolve_in_the_image():
+    """Every documented reconciler command must resolve to the file the image
+    actually holds, for EVERY authority rather than one hand-picked entry.
+
+    The class defect this closes: the repo pinned both halves of the contract
+    independently and never compared them. One test asserted the
+    `COPY ... /app/scripts/...` line, another asserted the command string, and
+    nothing knew about WORKDIR. Both passed while the documented command
+    resolved to /app/server/scripts/..., which does not exist, so it failed in
+    the only place it is ever run. A per-authority copy of this check would
+    re-open the same hole for the next authority, so this loops instead.
+    """
+    dockerfile = _app_dockerfile()
+    final_workdir = _final_workdir(dockerfile)
+    assert PurePosixPath(final_workdir).is_absolute()
+
+    copies = _copied_scripts(dockerfile)
+    assert copies, "deploy/Dockerfile.app copies no scripts/ file"
+
+    inventory = json.loads(_read("platform/authority-inventory.json"))
+
+    checked: list[tuple[str, str, str]] = []
+    for authority in inventory["authorities"]:
+        for phase in ("backfill", "parity"):
+            command = authority.get(phase, {}).get("command")
+            if not command:
+                continue
+            for token in command.split():
+                target = copies.get(PurePosixPath(token).name)
+                if target is None:
+                    continue
+                resolved = str(
+                    PurePosixPath(token)
+                    if PurePosixPath(token).is_absolute()
+                    else PurePosixPath(final_workdir) / token
+                )
+                assert resolved == target, (
+                    f"{authority['id']} {phase} command names {token!r}, which "
+                    f"resolves to {resolved} from the image WORKDIR "
+                    f"{final_workdir}, but deploy/Dockerfile.app puts that "
+                    f"script at {target}. The documented command cannot run in "
+                    f"the image. Use the absolute path."
+                )
+                checked.append((authority["id"], phase, token))
+
+    # Anti-vacuity: if the Dockerfile or inventory parse ever drifts, this
+    # test must go red rather than silently check nothing. Both reconcilers
+    # are documented for backfill and parity, across three authority entries.
+    assert len(checked) >= 6, f"guard checked too few commands: {checked}"
+    assert {PurePosixPath(token).name for _, _, token in checked} == set(copies), (
+        "an image-copied reconciler script is documented by no authority "
+        f"command: copied={sorted(copies)}, exercised={sorted(checked)}"
+    )
 
 
 def test_required_config_manifests_fail_closed_for_postgres_authority():
