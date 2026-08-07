@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import ast
 import json
 import re
+import shlex
 
 import pytest
 
@@ -147,6 +148,27 @@ def _logical_lines(dockerfile: str) -> list[str]:
 
 
 _SHELL_FENCE = re.compile(r"```(?:shell|bash|sh)\n(.*?)```", re.DOTALL)
+
+
+def _command_tokens(command: str, origin: str) -> list[str]:
+    """Tokenise as the operator's shell will, not with a naive `.split()`.
+
+    `.split()` reads a QUOTED path as a distinct token that no longer matches
+    a bare script name, and reads the text of an inline `#` comment as real
+    arguments. Both matter: a documented
+        python 'scripts/reconcile_x.py' --mode parity  # /app/scripts/reconcile_x.py
+    passed a `.split()` guard, because the quoted relative path was skipped
+    while the absolute path in the comment was counted as the real one. The
+    shell strips the quotes and drops the comment, so the operator runs the
+    relative form and hits the missing path.
+    """
+    try:
+        return shlex.split(command, comments=True, posix=True)
+    except ValueError as exc:
+        raise AssertionError(
+            f"{origin} is not parseable as a shell command ({exc}), so this "
+            f"guard cannot tell what it runs: {command!r}"
+        ) from exc
 
 
 def _documented_shell_commands(markdown: str) -> list[str]:
@@ -402,7 +424,7 @@ def test_documented_authority_commands_resolve_in_the_image():
 
     checked: list[tuple[str, str]] = []
     for origin, command in sources:
-        for token in command.split():
+        for token in _command_tokens(command, origin):
             name = PurePosixPath(token).name
             if name not in repo_scripts:
                 continue
