@@ -801,10 +801,13 @@ So the ordering rule needs BOTH selectors, not one:
   at a fresh durable path, that reproduces the original hazard on the annex
   tables, for the same reason and with the same permanence.
 
-**Restated correctly: setting `SESSIONS_DB` is safe only when no selector that
-resolves it is in a shadow-reading mode.** Today that means
-`LEAF_SESSIONS_STORE=postgres` and `LEAF_SESSION_ANNEX_STORE` at `legacy` or
-`postgres`. Check both before touching the variable, and re-derive this list if a
+**Restated: setting `SESSIONS_DB` needs `LEAF_SESSIONS_STORE=postgres`, with
+`LEAF_SESSION_ANNEX_STORE` at `legacy` or `postgres`.** Do NOT compress that
+into "no selector is in a shadow-reading mode": an earlier draft did, and that
+phrasing admits plain `dual_write`, which compares. The exact rule, and the
+reason it is asymmetric between the two selectors, is derived below under "not
+comparing is not the same as being inert". Check both before touching the
+variable, and re-derive the list if a
 third consumer appears, because the earlier draft was wrong within hours purely
 because a second one did.
 
@@ -871,8 +874,14 @@ paragraph in this section already said:
   file, which is a different failure and not an acceptable one.
 - `LEAF_SESSION_ANNEX_STORE` may be `legacy` or `postgres` for the comparison
   rule, but under `legacy` the annex tables are still read from the file, so
-  repointing abandons them. On staging that content is already lost at every
-  task replacement, so it costs nothing; on production it would not be.
+  repointing abandons them. On staging that adds **no loss beyond what task
+  replacement already causes**, which is the accurate phrasing and not "costs
+  nothing": the annex section above is explicit that a running task can hold up
+  to one task-lifetime of checkpoints and non-default policies, that discarding
+  them is a real user-visible loss, and that it "is not nothing". Bounded by one
+  task lifetime rather than by history, and inside the discard class staging
+  already accepted. On production, where the file is durable EFS, it would not
+  be bounded and would not be acceptable.
 
 And the startup gate above then narrows every EXECUTABLE state to both selectors
 at `postgres`, which is the only combination where `SESSIONS_DB` is inert for
@@ -893,8 +902,12 @@ coverage claims. When you write one, write its expiry condition next to it.
 
 So there is one forbidden ordering and two acceptable terminal states:
 
-- **Forbidden:** set `SESSIONS_DB` while any selector resolving it is in a
-  shadow-reading mode. Permanent mismatch.
+- **Forbidden:** set `SESSIONS_DB` while `LEAF_SESSIONS_STORE` is anything but
+  `postgres`. In `dual_write`, `dual_write_shadow` or `shadow` it is a permanent
+  mismatch; in `legacy` it is not a mismatch at all but it moves the live
+  session authority to an empty file, which is worse rather than better. Note
+  the forbidden set is NOT "the shadow-reading modes": plain `dual_write`
+  compares too.
 - **Acceptable, and now the ONLY terminal state:** both selectors reach
   `postgres` together. **This is no longer a proposal**:
   `platform/migrations/0029_session_annex.sql` and the dispatch in both modules
