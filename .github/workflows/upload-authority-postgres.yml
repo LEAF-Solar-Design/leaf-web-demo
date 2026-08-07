@@ -27,12 +27,16 @@ on:
       - 'platform/tests/test_overlay_store_static.py'
       # The rest of the platform import closure the live async-job callback test
       # reaches. Its terminal write mirrors through platform_link._update_by_spine,
-      # which calls _load_platform() and imports leaf_platform.{db,store,deps}; a
-      # break in any of them raises through terminal_in_transaction and fails that
-      # test. This is the COMPUTED closure, not a guess: walking import-time edges
-      # from store/deps/db reaches exactly {db, deps, models, store}, and db.py was
-      # already listed. That is where this list stops, because nothing else in the
-      # package is imported on this path.
+      # which calls _load_platform(); that first runs _ensure_platform_package(),
+      # which EXECUTES platform/__init__.py through spec.loader.exec_module, and
+      # then imports leaf_platform.{db,store,deps}. A break in any of them raises
+      # through terminal_in_transaction and fails that test.
+      # This is the COMPUTED closure, not a guess: walking import-time edges from
+      # the package __init__ plus store/deps/db reaches exactly
+      # {__init__, db, deps, models, store}. db.py was already listed, and
+      # __init__.py imports nothing, so it adds no further edges. That is where
+      # this list stops, because nothing else in the package runs on this path.
+      - 'platform/__init__.py'
       - 'platform/deps.py'
       - 'platform/models.py'
       - 'platform/store.py'
