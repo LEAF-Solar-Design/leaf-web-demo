@@ -1,9 +1,11 @@
 name: Dispatch staging deploys
 
 # ---------------------------------------------------------------------------
-# Auto-dispatches the leaf-platform staging deploys (web + app, concurrently)
+# Auto-dispatches the leaf-platform staging deploys (web + app, ONE AT A TIME)
 # when a main-branch "Build platform images" push run succeeds. Removes the
-# hand-dispatch gap between build success and deploy start.
+# hand-dispatch gap between build success and deploy start. This line said
+# "concurrently" until 2026-08-07, left over from before the serial rewrite;
+# it contradicted the serial-dispatch rationale 20 lines below it.
 #
 # The image tag is read from the build run's own staging supply-set manifest
 # artifact (leaf.staging-supply-set.v1, field build_tag), never re-derived,
@@ -49,9 +51,21 @@ name: Dispatch staging deploys
 # app deploy between them, and staging ran a whole release split for over two
 # hours. The stand-down is correct and stays; what was wrong is that the
 # SAME service was always the one abandoned. Ordering by need hands the first
-# slot to whichever service was abandoned last time, so the two alternate and
-# neither can starve. That bounds a split to one release instead of letting it
-# grow without limit.
+# slot to whichever service the last successful deploys show further behind,
+# which removes that systematic bias: when the read decides, the service that
+# lost the previous race is the one that advances now.
+#
+# It does NOT guarantee alternation, and it does NOT bound a split to one
+# release. An earlier version of this comment claimed both and sol-critic
+# returned RED for it. The read is BEST EFFORT and every failure mode falls
+# back to the old fixed `web app` (see newest_deploy_title below): an
+# unreadable title, a non-prod tag, equal tags, or an ancestry compare that
+# does not come back "behind". A read that keeps failing, or keeps landing in
+# one of those cases, restores exactly the old starvation shape. Nothing here
+# stops the tip from moving either, so at a high enough merge rate a split can
+# still outlive several relays. The honest claim is narrower: the bias toward
+# one fixed victim is gone whenever the read decides, and the relay still
+# announces every split it leaves, naming the service it left behind.
 #
 # THAT READ MAY ONLY AFFECT ORDER, and here is exactly what that does and does
 # not buy. What it CANNOT do: choose a deploy tag (the tag always comes from
