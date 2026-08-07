@@ -93,4 +93,11 @@ describe('App.jsx wiring', () => {
       /!mock\s*&&\s*isWrite\s*&&\s*catalogRunContextRef\.current\.projectId\s*==\s*null\s*&&\s*catalogRunContextRef\.current\.drawingVersion\s*==\s*null[\s\S]*setRunErr\([\s\S]*return/,
     )
   })
+
+  it('derives the submitted drawing version from the tool capability', () => {
+    assert.match(
+      stripped,
+      /dwgVersion:\s*drawingVersionForRun\(tool,\s*executionContext,\s*health\?\.aps_live\)/,
+    )
+  })
 })
