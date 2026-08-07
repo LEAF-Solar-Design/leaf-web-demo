@@ -6,6 +6,8 @@ uses it only long enough to prove the broker's authenticated MCP contract.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -63,6 +65,7 @@ class CanaryAuthority:
     scope: str
     allowed_services: tuple[str, ...]
     allowed_effects: tuple[str, ...]
+    token_jti: str
 
 
 @dataclass(frozen=True)
@@ -123,7 +126,7 @@ def create_canary_attachment(
     channel_hash = hashlib.sha256(channel_secret.encode("utf-8")).hexdigest()
     session_id = f"{_CANARY_ID}-session-{secrets.token_urlsafe(18)}"
     turn_id = f"{_CANARY_ID}-turn-{secrets.token_urlsafe(18)}"
-    authority = CanaryAuthority(
+    authority_claims = dict(
         tenant_id=_CANARY_ID,
         subject_id=_CANARY_ID,
         session_id=session_id,
@@ -138,21 +141,25 @@ def create_canary_attachment(
     active_signer = authority_signer or mcp_authority.signer()
     bearer, expires_at = active_signer.issue(
         {
-            "sub": authority.subject_id,
-            "tenant_id": authority.tenant_id,
-            "subject_id": authority.subject_id,
-            "session_id": authority.session_id,
-            "authority_turn_id": authority.authority_turn_id,
-            "subscription_mount_id": authority.subscription_mount_id,
-            "runner_profile_id": authority.runner_profile_id,
-            "plan": authority.plan,
-            "allowed_services": list(authority.allowed_services),
-            "allowed_effects": list(authority.allowed_effects),
+            "sub": authority_claims["subject_id"],
+            "tenant_id": authority_claims["tenant_id"],
+            "subject_id": authority_claims["subject_id"],
+            "session_id": authority_claims["session_id"],
+            "authority_turn_id": authority_claims["authority_turn_id"],
+            "subscription_mount_id": authority_claims["subscription_mount_id"],
+            "runner_profile_id": authority_claims["runner_profile_id"],
+            "plan": authority_claims["plan"],
+            "allowed_services": list(authority_claims["allowed_services"]),
+            "allowed_effects": list(authority_claims["allowed_effects"]),
             "channel_hash": channel_hash,
-            "scope": authority.scope,
+            "scope": authority_claims["scope"],
         },
         audience=mcp_authority.attachment_audience(),
         ttl_seconds=CANARY_TTL_SECONDS,
+    )
+    authority = CanaryAuthority(
+        **authority_claims,
+        token_jti=_signed_token_jti(bearer),
     )
     return CanaryAttachment(
         bearer=bearer,
@@ -160,6 +167,28 @@ def create_canary_attachment(
         expires_at=expires_at,
         authority=authority,
     )
+
+
+def _signed_token_jti(bearer: str) -> str:
+    """Read the signer-issued JTI from the local JWT without exposing it."""
+
+    segments = bearer.split(".")
+    if len(segments) != 3 or not segments[1] or len(segments[1]) > 16_384:
+        raise ProbeError("the attachment authority returned an invalid bearer")
+    padding = "=" * (-len(segments[1]) % 4)
+    try:
+        raw = base64.urlsafe_b64decode((segments[1] + padding).encode("ascii"))
+        payload = json.loads(raw)
+    except (binascii.Error, UnicodeEncodeError, ValueError, TypeError) as exc:
+        raise ProbeError("the attachment authority returned an invalid bearer") from exc
+    jti = payload.get("jti") if isinstance(payload, dict) else None
+    if (
+        type(jti) is not str
+        or not 16 <= len(jti) <= 256
+        or jti != jti.strip()
+    ):
+        raise ProbeError("the attachment authority returned an invalid token ID")
+    return jti
 
 
 def _http_post_json(
@@ -293,6 +322,8 @@ def _validate_status(
         or structured.get("scope") != authority.scope
         or structured.get("allowed_services") != list(authority.allowed_services)
         or structured.get("allowed_effects") != list(authority.allowed_effects)
+        or structured.get("token_jti_digest")
+        != hashlib.sha256(authority.token_jti.encode("utf-8")).hexdigest()
         or type(structured.get("available_tool_count")) is not int
         or structured["available_tool_count"] != 1
     ):
@@ -401,6 +432,8 @@ def run_probe(
         == challenge_attachment.authority.session_id
         or attachment.authority.authority_turn_id
         == challenge_attachment.authority.authority_turn_id
+        or attachment.authority.token_jti
+        == challenge_attachment.authority.token_jti
     ):
         raise ProbeError("the final attachment was not fresh")
 

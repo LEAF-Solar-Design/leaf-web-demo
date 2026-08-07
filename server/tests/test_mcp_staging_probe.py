@@ -1,7 +1,9 @@
 """The deployment canary proves the private tenant MCP staging contract."""
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 
 import jwt
 import pytest
@@ -46,8 +48,13 @@ class CapturingSigner:
         self.calls: list[tuple[dict, str, int]] = []
 
     def issue(self, claims, *, audience, ttl_seconds):
-        self.calls.append((dict(claims), audience, ttl_seconds))
-        return f"header.payload.signature{len(self.calls)}", 1060
+        issued = dict(claims)
+        issued["jti"] = f"test-signer-issued-jti-{len(self.calls) + 1}"
+        self.calls.append((issued, audience, ttl_seconds))
+        payload = base64.urlsafe_b64encode(
+            json.dumps(issued, separators=(",", ":")).encode()
+        ).rstrip(b"=").decode()
+        return f"header.{payload}.signature{len(self.calls)}", 1060
 
 
 class FakeHttpResponse:
@@ -107,7 +114,7 @@ def rejected_response(status_code):
     return mcp_staging_probe.JsonResponse(status_code, {}, {})
 
 
-def status_response(claims, *, request_id=2, **overrides):
+def status_response(claims, *, request_id=2, omit=(), **overrides):
     status = {
         "status": "ready",
         "contract_version": "1",
@@ -121,9 +128,12 @@ def status_response(claims, *, request_id=2, **overrides):
         "scope": claims["scope"],
         "allowed_services": claims["allowed_services"],
         "allowed_effects": claims["allowed_effects"],
+        "token_jti_digest": hashlib.sha256(claims["jti"].encode()).hexdigest(),
         "available_tool_count": 1,
         **overrides,
     }
+    for key in omit:
+        status.pop(key, None)
     return mcp_staging_probe.JsonResponse(
         200,
         {},
@@ -183,6 +193,7 @@ def test_canary_is_kms_signed_with_only_time_read_authority(staging):
     assert claims["channel_hash"] == hashlib.sha256(
         attachment.channel_secret.encode()
     ).hexdigest()
+    assert attachment.authority.token_jti == claims["jti"]
     assert "authority_session_id" not in claims
 
 
@@ -198,6 +209,9 @@ def test_canary_uses_fresh_channel_session_turn_and_jti(staging):
     assert first_claims["session_id"] != second_claims["session_id"]
     assert first_claims["authority_turn_id"] != second_claims["authority_turn_id"]
     assert first_claims["jti"] != second_claims["jti"]
+    assert hashlib.sha256(first.authority.token_jti.encode()).hexdigest() != (
+        hashlib.sha256(second.authority.token_jti.encode()).hexdigest()
+    )
 
 
 def test_probe_initializes_and_calls_only_services_status(staging):
@@ -236,7 +250,8 @@ def test_probe_initializes_and_calls_only_services_status(staging):
     assert calls[0][1]["x-leaf-gateway-channel"] == (
         calls[1][1]["x-leaf-gateway-channel"]
     )
-    assert calls[1][1]["Authorization"] == "Bearer header.payload.signature1"
+    assert calls[1][1]["Authorization"].startswith("Bearer header.")
+    assert calls[1][1]["Authorization"].endswith(".signature1")
     assert calls[1][1]["x-leaf-gateway-channel"] == (
         calls[2][1]["x-leaf-gateway-channel"]
     )
@@ -255,7 +270,9 @@ def test_probe_initializes_and_calls_only_services_status(staging):
         "method": "tools/call",
         "params": {"name": "services_status", "arguments": {}},
     }
-    assert calls[4][1]["Authorization"] == "Bearer header.payload.signature2"
+    assert calls[4][1]["Authorization"].startswith("Bearer header.")
+    assert calls[4][1]["Authorization"].endswith(".signature2")
+    assert calls[4][1]["Authorization"] != calls[1][1]["Authorization"]
     assert len(calls[4][1]["x-leaf-gateway-channel"]) >= 32
     assert calls[4][1]["x-leaf-gateway-channel"] != (
         calls[1][1]["x-leaf-gateway-channel"]
@@ -459,6 +476,71 @@ def test_probe_rejects_empty_http_wrong_channel_response(staging, empty_status):
         if call_count == 3:
             return status_response(signer.calls[0][0], request_id=12)
         return rejected_response(empty_status)
+
+    with pytest.raises(mcp_staging_probe.ProbeError):
+        mcp_staging_probe.run_probe(
+            authority_signer=signer,
+            transport=transport,
+        )
+
+
+@pytest.mark.parametrize(
+    ("phase", "failure_mode"),
+    (
+        ("a", "missing"),
+        ("a", "mismatched"),
+        ("a", "stale"),
+        ("b", "missing"),
+        ("b", "mismatched"),
+        ("b", "stale"),
+    ),
+)
+def test_probe_rejects_missing_mismatched_or_stale_jti_digest(
+    staging, phase, failure_mode
+):
+    signer = CapturingSigner()
+    call_count = 0
+
+    def digest_failure_response(claims, *, request_id):
+        if failure_mode == "missing":
+            return status_response(
+                claims, request_id=request_id, omit=("token_jti_digest",)
+            )
+        if failure_mode == "mismatched":
+            return status_response(
+                claims,
+                request_id=request_id,
+                token_jti_digest="0" * 64,
+            )
+        stale_jti = (
+            "previous-deployment-canary-jti"
+            if phase == "a"
+            else signer.calls[0][0]["jti"]
+        )
+        return status_response(
+            claims,
+            request_id=request_id,
+            token_jti_digest=hashlib.sha256(stale_jti.encode()).hexdigest(),
+        )
+
+    def transport(*_args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return rejected_response(401)
+        if call_count == 2:
+            return initialize_response(request_id=11)
+        if call_count == 3:
+            if phase == "a":
+                return digest_failure_response(
+                    signer.calls[0][0], request_id=12
+                )
+            return status_response(signer.calls[0][0], request_id=12)
+        if call_count == 4:
+            return wrong_channel_response()
+        if call_count == 5:
+            return initialize_response()
+        return digest_failure_response(signer.calls[1][0], request_id=2)
 
     with pytest.raises(mcp_staging_probe.ProbeError):
         mcp_staging_probe.run_probe(
