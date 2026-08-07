@@ -182,6 +182,8 @@ SENTINEL = "dbname=leaf password=hunter2-should-never-be-logged"
 
 
 TENANT = "77777777-7777-4777-8777-777777777777"
+AUTHOR_SUBJECT = "auth0|refusal-observability-author"
+AUTHORITY_TURN_ID = "turn-refusal-observability"
 
 
 def _authorize_publish(monkeypatch, raiser):
@@ -238,34 +240,55 @@ ALL_HANDOFFS = [
 ]
 
 
-def _tenant_route_client(monkeypatch, raiser):
-    """Mount the router with the JWT dependency satisfied, so /api/* is reachable."""
+def _tenant_route_client(monkeypatch, tmp_path, raiser):
+    """Mount the router with a real same-subject active turn."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    import session_store
 
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
     monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "sessions.db")
+    monkeypatch.setattr(session_store, "_conn", None)
+    session_store.ensure_started()
+    session = session_store.get_or_create_session(TENANT, "drawing-refusal-observability")
+    assert session_store.try_begin_turn(
+        session["session_id"],
+        AUTHORITY_TURN_ID,
+        60,
+        tier="hosted_pro",
+        subject=AUTHOR_SUBJECT,
+    )
     monkeypatch.setattr(
         author_router.CustomizationService, "configured",
         classmethod(lambda cls: raiser()), raising=True,
     )
     route_app = FastAPI()
     route_app.include_router(author_router.router)
-    route_app.dependency_overrides[author_router.deps.require_tenant] = lambda: TENANT
-    return TestClient(route_app, raise_server_exceptions=False)
+    route_app.dependency_overrides[author_router.deps.require_tenant] = lambda: (
+        author_router.deps.TenantContext(
+            TENANT, tier="hosted_pro", subject=AUTHOR_SUBJECT
+        )
+    )
+    client = TestClient(route_app, raise_server_exceptions=False)
+    client.headers.update({
+        "X-Authority-Session-Id": session["session_id"],
+        "X-Authority-Turn-Id": AUTHORITY_TURN_ID,
+    })
+    return client
 
 
 @pytest.mark.parametrize("path,body,headers,code", ALL_HANDOFFS)
 def test_every_tenant_route_reports_its_unexpected_failure(
-    caplog, monkeypatch, path, body, headers, code
+    caplog, monkeypatch, tmp_path, path, body, headers, code
 ):
     """Blocker: one covered route left the other five free to regress silently."""
     def _raise():
         raise RuntimeError(SENTINEL)
 
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
-    client = _tenant_route_client(monkeypatch, _raise)
+    client = _tenant_route_client(monkeypatch, tmp_path, _raise)
     response = client.post(path, json=body, headers=headers)
     assert response.status_code == 503, response.text
     assert response.json()["reason_code"] == code
@@ -357,7 +380,9 @@ def _raise_with_secret_in_source():
     raise RuntimeError("password=literal-secret-in-source-9f3a")
 
 
-def test_the_source_line_at_the_raise_site_is_never_echoed(caplog, monkeypatch):
+def test_the_source_line_at_the_raise_site_is_never_echoed(
+    caplog, monkeypatch, tmp_path
+):
     """traceback.format_tb renders each frame's SOURCE, not just its location.
 
     So a literal at the raise site is reproduced verbatim in the log. Only a
@@ -365,7 +390,9 @@ def test_the_source_line_at_the_raise_site_is_never_echoed(caplog, monkeypatch):
     fails if format_tb, str(cause) or exc_info comes back.
     """
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
-    client = _tenant_route_client(monkeypatch, _raise_with_secret_in_source)
+    client = _tenant_route_client(
+        monkeypatch, tmp_path, _raise_with_secret_in_source
+    )
     response = client.post(
         "/api/author/stage",
         json={"description": "count panels", "mode": "build", "idempotency_key": "k"},
@@ -381,7 +408,9 @@ def test_the_source_line_at_the_raise_site_is_never_echoed(caplog, monkeypatch):
     assert "RuntimeError" in rendered
 
 
-def test_an_unknown_change_set_is_a_caller_error_not_an_operator_event(caplog, monkeypatch):
+def test_an_unknown_change_set_is_a_caller_error_not_an_operator_event(
+    caplog, monkeypatch, tmp_path
+):
     """The change-set id is caller-supplied, and authority is checked after load.
 
     Any tenant member can name arbitrary ids, so this must not cost one ERROR per
@@ -393,7 +422,7 @@ def test_an_unknown_change_set_is_a_caller_error_not_an_operator_event(caplog, m
         raise ChangeSetNotFoundError("change set was not found")
 
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
-    client = _tenant_route_client(monkeypatch, _raise)
+    client = _tenant_route_client(monkeypatch, tmp_path, _raise)
     response = client.post(
         "/api/author/confirmations",
         json={"contract": "leaf.customization.v1", "tenant_id": TENANT,
@@ -560,7 +589,9 @@ def test_every_authority_conversion_site_is_marked():
     ("/api/author/publication-requests", {"change_set_id": CHANGE_SET}),
     ("/api/author/rollback", {"change_set_id": CHANGE_SET, "idempotency_key": "k"}),
 ])
-def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch, path, body):
+def test_a_real_route_marks_its_authority_denial_quiet(
+    caplog, monkeypatch, tmp_path, path, body
+):
     """The behavioural half: the marking must actually reach the level decision.
 
     More than one route, because a single-route test let two unmarked branches
@@ -572,7 +603,7 @@ def test_a_real_route_marks_its_authority_denial_quiet(caplog, monkeypatch, path
         raise AuthorityError("stage_role_denied")
 
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
-    client = _tenant_route_client(monkeypatch, _raise)
+    client = _tenant_route_client(monkeypatch, tmp_path, _raise)
     response = client.post(path, json=body)
     assert response.status_code == 403, response.text
     assert response.json()["reason_code"] == "stage_role_denied"
@@ -609,6 +640,9 @@ def _change_set():
         change_set_id=CHANGE_SET, tenant_id=TENANT, base_commit="a" * 40,
         desired_platform_release="r1", workspace_contract_digest="d" * 64,
         idempotency_key="k", staged_commit="b" * 40, catalog_digest="c" * 64,
+        authority_session_id="session-refusal-observability",
+        authority_turn_id=AUTHORITY_TURN_ID,
+        author_subject=AUTHOR_SUBJECT,
     )
 
 
@@ -628,6 +662,23 @@ def test_harness_stage_failure_records_the_real_status(monkeypatch):
             raise requests.HTTPError("bad gateway", response=self)
 
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Response())
+    monkeypatch.setattr(
+        customization_service.deps,
+        "active_stage_author_subject",
+        lambda tenant_id, session_id, turn_id: (
+            AUTHOR_SUBJECT
+            if (
+                tenant_id,
+                session_id,
+                turn_id,
+            ) == (
+                TENANT,
+                "session-refusal-observability",
+                AUTHORITY_TURN_ID,
+            )
+            else None
+        ),
+    )
     with pytest.raises(CustomizationServiceError) as caught:
         customization_service.CustomizationService._harness_stage(
             None, TENANT, "count panels", _change_set()

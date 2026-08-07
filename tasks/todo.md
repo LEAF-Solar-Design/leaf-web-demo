@@ -453,3 +453,35 @@ Risks:
 - A subscription credential must never enter platform identity claims, logs, or another tenant's route.
 - The UI must not imply that Free accounts or pooled team credit are supported.
 - The change must not bypass the account-owner gate or the existing API-key lane.
+
+# Tenant-safe standard-service approval journal
+
+- [x] Sync the exact reviewed Mushy provider and approval-store contract.
+- [x] Replace destructive approval consumption with atomic pending, approved, executing, completed, and uncertain transitions.
+- [x] Return durable completed receipts idempotently and keep uncertain work non-executable.
+- [x] Fold bounded receipt events independently of the original turn terminal window.
+- [x] Validate the exact approval primary key and every migration check at startup.
+- [x] Run focused and registered server, harness, migration, type, build, vendor, and diff gates.
+- [x] Self-review the complete security boundary and commit the verified integration.
+
+Risks:
+
+- Only the atomic executing claimant may call the broker.
+- A crash after claim must become uncertain at the stored deadline and must never retry execution.
+- Completed retries must return the stored safe receipt without any new approval or broker call.
+- The public model facade must never acquire the human execution primitive.
+
+# Tenant-safe standard-service review follow-up
+
+- [x] Add the approval journal table, all 21 columns, named constraints, and expiry index to platform readiness under harness authority.
+- [x] Align Leaf artifact validation with the exact provider artifact ID and 64-item contract across TypeScript, Python, and transcript folding.
+- [x] Check the session before remote execution and deduplicate bounded completed receipt events.
+- [x] Add negative schema, provider-boundary, end-to-end artifact, vanished-session, and receipt replay regressions.
+- [x] Run focused and registered schema, harness, server, web, type, build, vendor, scan, and diff gates.
+- [x] Self-review and commit the verified follow-up without push or deployment.
+
+Risks:
+
+- Readiness must fail closed on any missing approval-table column or named catalog object.
+- Provider-accepted artifact IDs must survive every Leaf layer without broadening approval IDs.
+- A missing session must prevent the human execution call, not only suppress its receipt.

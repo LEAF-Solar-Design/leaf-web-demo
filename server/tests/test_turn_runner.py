@@ -1422,6 +1422,94 @@ def test_prior_messages_applies_the_byte_bound_on_the_real_path():
     assert _ctx_bytes(messages) < 24 * 120_000
 
 
+def test_prior_messages_exposes_only_the_safe_standard_service_receipt():
+    sess = _new_session("tenant-standard-service-receipt")
+    session_id = sess["session_id"]
+    turn_id = "prior-service-turn"
+    receipt_id = "b" * 64
+    session_store.append_event(session_id, turn_id, "turn_started", {"text": "create it"})
+    session_store.append_event(session_id, turn_id, "turn_complete", {"stop_reason": "end_turn"})
+    session_store.append_event(
+        session_id,
+        turn_id,
+        "standard_service_approval_receipt",
+        {
+            "status": "completed",
+            "receipt_id": receipt_id,
+            "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
+            "result": "private broker result must not be observed",
+            "bearer_token": "private credential must not be observed",
+        },
+    )
+
+    messages = turn_runner._prior_messages(session_id, exclude_turn_id="current-turn")
+
+    assistant = messages[-1]["text"]
+    assert messages[-1]["role"] == "assistant"
+    assert receipt_id in assistant
+    assert "-aaaaaaaaaaaaaaa" in assistant
+    assert "_bbbbbbbbbbbbbbb" in assistant
+    assert "private broker result" not in assistant
+    assert "private credential" not in assistant
+
+
+def test_prior_messages_folds_receipts_without_terminal_and_deduplicates_bounded(
+    monkeypatch,
+):
+    events = []
+    for index in range(turn_runner.MAX_STANDARD_SERVICE_RECEIPTS + 2):
+        receipt_id = f"{index:064x}"
+        event = {
+            "turn_id": f"aged-turn-{index}",
+            "type": "standard_service_approval_receipt",
+            "data": {"status": "completed", "receipt_id": receipt_id},
+        }
+        events.extend([event, dict(event)])
+    monkeypatch.setattr(session_store, "recent_events", lambda *_args: events)
+
+    messages = turn_runner._prior_messages("session-aged", "current-turn")
+
+    receipt_text = messages[-1]["text"]
+    assert receipt_text.count("Standard service approval completed") == (
+        turn_runner.MAX_STANDARD_SERVICE_RECEIPTS
+    )
+    assert f"{0:064x}" not in receipt_text
+    assert f"{1:064x}" not in receipt_text
+    newest = f"{turn_runner.MAX_STANDARD_SERVICE_RECEIPTS + 1:064x}"
+    assert receipt_text.count(newest) == 1
+
+
+def test_prior_messages_folds_only_safe_uncertain_approval_status(monkeypatch):
+    approval_id = "approval_12345678"
+    events = [
+        {
+            "turn_id": "aged-turn",
+            "type": "standard_service_approval_status",
+            "data": {
+                "status": "uncertain",
+                "approval_id": approval_id,
+                "result": "private result",
+                "bearer_token": "private token",
+            },
+        },
+        {
+            "turn_id": "aged-turn-invalid",
+            "type": "standard_service_approval_status",
+            "data": {"status": "uncertain", "approval_id": "unsafe/value"},
+        },
+    ]
+    monkeypatch.setattr(session_store, "recent_events", lambda *_args: events)
+
+    messages = turn_runner._prior_messages("session-aged", "current-turn")
+
+    status_text = messages[-1]["text"]
+    assert approval_id in status_text
+    assert "will not be retried" in status_text
+    assert "unsafe/value" not in status_text
+    assert "private result" not in status_text
+    assert "private token" not in status_text
+
+
 # --------------------------------------------------------------------------- #
 # The forwarded body must not balloon on non-ASCII text.
 # --------------------------------------------------------------------------- #

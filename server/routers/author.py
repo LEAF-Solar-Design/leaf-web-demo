@@ -365,6 +365,10 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "Tool authoring requires a verified workspace identity for the requester. "
         "The approved request was not executed."
     ),
+    "stage_authority_invalid": (
+        "Tool authoring requires the requester's active app turn. "
+        "The approved request was not executed."
+    ),
 }
 
 
@@ -624,6 +628,16 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
            authority_turn_id: str | None = Header(
                default=None, alias="X-Authority-Turn-Id")) -> Dict[str, Any]:
     """Use the controlled R5 path only after that tenant's rollout is enabled."""
+    authority_session_id = (
+        authority_session_id if isinstance(authority_session_id, str) else None
+    )
+    authority_turn_id = (
+        authority_turn_id if isinstance(authority_turn_id, str) else None
+    )
+    if bool(authority_session_id) != bool(authority_turn_id):
+        return _customization_error(
+            CustomizationServiceError("invalid_stage_authority", 422)
+        )
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
@@ -633,11 +647,19 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         if over_quota is not None:
             return over_quota
         return _legacy_author(req, tenant)
+    if not customization_enabled(5, str(tenant).strip()):
+        denied = _customization_gate(5, tenant)
+        if denied is not None:
+            return denied
     # A harness back-edge call authenticates as a tenant and carries no user.
     # Resolve the author from the app's own record of the turn that authorized
     # it; a direct user call is returned unchanged and keeps its own subject.
-    tenant = deps.backedge_author_identity(
+    tenant = deps.stage_author_identity(
         tenant, authority_session_id, authority_turn_id)
+    if tenant is None:
+        return _customization_error(
+            CustomizationServiceError("stage_authority_invalid", 409)
+        )
     denied = _customization_gate(5, tenant)
     if denied is not None:
         _emit_author_event("author.wall_hit", tenant, {"wall_kind": "entitlement"})
@@ -652,6 +674,10 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
+            **({
+                "authority_session_id": authority_session_id,
+                "authority_turn_id": authority_turn_id,
+            } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
         )
@@ -678,15 +704,45 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
 
 
 @router.post("/api/author/stage")
-def stage(req: StageRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def stage(
+    req: StageRequest,
+    tenant=Depends(deps.require_tenant),
+    authority_session_id: str | None = Header(
+        default=None, alias="X-Authority-Session-Id"
+    ),
+    authority_turn_id: str | None = Header(
+        default=None, alias="X-Authority-Turn-Id"
+    ),
+) -> Dict[str, Any]:
+    authority_session_id = (
+        authority_session_id if isinstance(authority_session_id, str) else None
+    )
+    authority_turn_id = (
+        authority_turn_id if isinstance(authority_turn_id, str) else None
+    )
+    if bool(authority_session_id) != bool(authority_turn_id):
+        return _customization_error(
+            CustomizationServiceError("invalid_stage_authority", 422)
+        )
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
+    tenant = deps.stage_author_identity(
+        tenant, authority_session_id, authority_turn_id
+    )
+    if tenant is None:
+        return _customization_error(
+            CustomizationServiceError("stage_authority_invalid", 409)
+        )
     try:
         service = CustomizationService.configured()
         enqueue = getattr(service, "enqueue_stage", service.stage)
         result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode, idempotency_key=req.idempotency_key,
+            **({
+                "authority_session_id": authority_session_id,
+                "authority_turn_id": authority_turn_id,
+            } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
         )

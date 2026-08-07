@@ -3,8 +3,8 @@
  * (leaf-backend-gaps.md §2.1, ports/converse.ts FROZEN). This is the riskiest lane in
  * the sessions build: everything else (turn engine, store, approvals router) runs
  * against a scripted fake; this file is what eventually talks to the real SDK.
- * Tenant MCP servers mount read-only in this release: their tools, resources, and
- * prompts are listable, but tenant tool execution approval ships separately.
+ * Standard services mount only through trusted product authority and the contained
+ * facade. Raw remote MCP configuration is never accepted by this runner.
  *
  * === SDK reality, read from node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
  * (v0.3.214) before writing a line of mapping code below - not assumed ===
@@ -80,15 +80,20 @@ import type {
   TenantRepoProvider,
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { composeRunnerCapabilities, type RunnerServicesAttachment } from "./runnerCapabilities.js";
+import { RUNNER_CAPABILITY_PROFILES, type RunnerCapabilityProfile } from "./standardServices.js";
+import { createStandardServicesFacade } from "./standardServicesFacade.js";
 import {
-  describeConfig,
-  FileMcpBridgeStore,
-  resolveMcpAttachment,
-  type McpAttachment,
-  type McpBridgeStore,
-  type McpHostResolver,
-} from "./mcpBridge.js";
+  resolveStandardServicesSession,
+  snapshotTrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
+import type {
+  StandardServicesResolver,
+  TrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
 import { findTool } from "../../registry/registerTool.js";
+import { grantSecrets, redactSecrets } from "../../redact.js";
+import { GrantRequiredError } from "./oauthGrantProvider.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces this file relies on (documented above,
@@ -106,11 +111,21 @@ interface SdkModule {
     handler: (args: Record<string, unknown>, extra: unknown) => Promise<CallToolResult>,
   ): unknown;
 }
+type Z = {
+  optional(): Z;
+  min(count: number): Z;
+  max(count: number): Z;
+};
 interface ZodModule {
   z: {
-    string(): { optional(): unknown };
-    array(schema: unknown): { min(count: number): { max(count: number): unknown } };
-    object(shape: Record<string, unknown>): unknown;
+    string(): Z;
+    number(): Z;
+    boolean(): Z;
+    unknown(): Z;
+    enum(values: readonly string[]): Z;
+    record(inner: unknown): Z;
+    array(schema: unknown): Z;
+    object(shape: Record<string, unknown>): Z;
     [k: string]: unknown;
   };
 }
@@ -139,6 +154,15 @@ const RESULT_SUMMARY_MAX_CHARS = 500;
  *  generic `error` event (SDKAssistantMessageError, sdk.d.ts:2866). */
 const RATE_LIMIT_ASSISTANT_ERRORS = new Set(["rate_limit", "overloaded"]);
 const QUOTA_ASSISTANT_ERRORS = new Set(["billing_error"]);
+const PUBLIC_ASSISTANT_ERRORS = new Set([
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "invalid_request",
+  "model_not_found",
+  "server_error",
+  "unknown",
+  "max_output_tokens",
+]);
 
 /**
  * Split `text` into ordered chunks whose concatenation reconstructs it EXACTLY
@@ -217,15 +241,18 @@ export function stopReasonFromResult(result: Record<string, unknown>): StopReaso
 
 function mapAssistant(msg: Record<string, unknown>, toolUseNames: Map<string, string>): HarnessTurnEvent[] {
   const err = msg.error;
-  if (typeof err === "string") {
-    if (RATE_LIMIT_ASSISTANT_ERRORS.has(err)) {
+  if (err !== undefined) {
+    if (typeof err === "string" && RATE_LIMIT_ASSISTANT_ERRORS.has(err)) {
       return [{ type: "turn_complete", data: { stop_reason: "llm_rate_limited" } }];
     }
-    if (QUOTA_ASSISTANT_ERRORS.has(err)) {
+    if (typeof err === "string" && QUOTA_ASSISTANT_ERRORS.has(err)) {
       return [{ type: "turn_complete", data: { stop_reason: "llm_quota_exhausted" } }];
     }
+    const errorCode = typeof err === "string" && PUBLIC_ASSISTANT_ERRORS.has(err)
+      ? err
+      : "agent_sdk_turn_failed";
     return [
-      { type: "error", data: { error: { error_code: err, message: `Agent SDK turn failed: ${err}` } } },
+      { type: "error", data: { error: { error_code: errorCode, message: "Agent SDK turn failed." } } },
       { type: "turn_complete", data: { stop_reason: "error" } },
     ];
   }
@@ -302,9 +329,8 @@ export function mapSdkMessage(raw: unknown, toolUseNames: Map<string, string> = 
 }
 
 // =========================================================================== //
-// The real runner. Untested by the hermetic suite (would spend LLM credit / touch the
-// network) - correctness here rests on (a) mapSdkMessage above being exhaustively
-// fixture-tested, and (b) the live smoke gate the lane brief calls out separately.
+// The real runner. Hermetic SDK seams verify composition without LLM credit or
+// network access; live SDK behavior remains covered by the separate smoke gate.
 // =========================================================================== //
 
 export const MCP_SERVER_NAME = "converse";
@@ -316,6 +342,10 @@ const ASK_USER_MCP_NAME = `${MCP_TOOL_PREFIX}${ASK_USER_TOOL}`;
 // Exact local MCP tool names that may bypass the tenant read-only denial. The
 // question tool only emits a transcript event, spends nothing, and mutates nothing.
 const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME, ASK_USER_MCP_NAME]);
+const LEGACY_CONVERSE_PROFILE: RunnerCapabilityProfile = {
+  ...RUNNER_CAPABILITY_PROFILES.spine,
+  private_mcp_servers: [MCP_SERVER_NAME],
+};
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -332,45 +362,13 @@ export function requiresToolConfirmation(toolName: string, approvalTools: Set<st
     || (toolName.startsWith("mcp__") && toolName !== ASK_USER_MCP_NAME);
 }
 
-const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
+const TENANT_MCP_TOOL_DENIAL = "untrusted MCP tools are not permitted; use the contained standard-services facade";
 
-/** Tenant MCP servers expose listable data only until their approval flow exists. */
+/** Preserve the legacy exported guard while refusing every unknown MCP server. */
 export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
   return toolName.startsWith("mcp__") && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
     ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
     : null;
-}
-
-/** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
-export async function resolveMcpAttachmentSafely(
-  store: McpBridgeStore,
-  tenantId: string,
-  report: (message: string) => void = console.error,
-  resolver?: McpHostResolver,
-): Promise<McpAttachment | null> {
-  try {
-    return await resolveMcpAttachment(store, tenantId, report, resolver);
-  } catch {
-    // The store error can include arbitrary corrupted input. Keep diagnostics tied to
-    // the bridge's redacted formatter rather than rendering the error or configuration.
-    report(`[leaf-mcp] skipping tenant MCP attachment after bridge failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
-    return null;
-  }
-}
-
-/** Env-gated bridge construction. When unset, no store is constructed or read. */
-export async function resolveEnvMcpAttachment(
-  bridgeDir: string | undefined,
-  tenantId: string,
-  report: (message: string) => void = console.error,
-): Promise<McpAttachment | null> {
-  if (!bridgeDir) return null;
-  try {
-    return await resolveMcpAttachmentSafely(new FileMcpBridgeStore({ dir: bridgeDir }), tenantId, report);
-  } catch {
-    report(`[leaf-mcp] skipping tenant MCP attachment after bridge setup failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
-    return null;
-  }
 }
 
 /** Parse the wrapper's `params_json` field (see makeApsTestRun / apsTestRun.ts: the
@@ -470,6 +468,11 @@ export interface AgentSdkTurnRunnerOptions {
   /** Bare tool names that require operator confirmation before they run. Defaults to
    *  {"aps_test_run"}. */
   approvalTools?: Set<string>;
+  /** Product-wide trusted resolver. No environment or filesystem bridge is read. */
+  standardServicesResolver?: StandardServicesResolver;
+  /** Test seams. Production loads the installed Agent SDK and zod. */
+  sdkImport?: () => Promise<unknown>;
+  zodImport?: () => Promise<unknown>;
 }
 
 type CanUseTool = (
@@ -477,26 +480,24 @@ type CanUseTool = (
   input: Record<string, unknown>,
 ) => Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }>;
 
-/** The bridge contributes no SDK option while it is disabled or has no tenant config. */
-export function buildTenantMcpOptions(attachment: McpAttachment | null): { mcpServers?: McpAttachment } {
-  return attachment ? { mcpServers: attachment } : {};
-}
-
 export interface BuildTurnOptionsInput {
   childEnv: NodeJS.ProcessEnv;
   model: string | undefined;
   maxTurns: number;
   abortController: AbortController;
   server: unknown;
-  mcpAttachment: McpAttachment | null;
+  services?: RunnerServicesAttachment;
   canUseTool: CanUseTool;
   planFirst?: boolean;
 }
 
-/** Assemble SDK options in one testable place. Tenant bridge servers are optional;
- * the local converse server remains authoritative if a key collides. */
+/** Assemble SDK options in one testable place from private and contained servers. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
-  const tenantMcp = buildTenantMcpOptions(input.mcpAttachment);
+  const composition = composeRunnerCapabilities({
+    profile: LEGACY_CONVERSE_PROFILE,
+    private_mcp_servers: { [MCP_SERVER_NAME]: input.server },
+    ...(input.services ? { services: input.services } : {}),
+  });
   return {
     env: input.childEnv,
     model: input.model,
@@ -504,8 +505,7 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     settingSources: [],
     permissionMode: "default",
     abortController: input.abortController,
-    // Load-bearing order: the local money-gated server wins any tenant key collision.
-    mcpServers: { ...(tenantMcp.mcpServers ?? {}), [MCP_SERVER_NAME]: input.server },
+    mcpServers: composition.mcpServers,
     // Skills reach the model through the SDK's own `skills` option, which enables the
     // Skill tool itself. This allowlist remains the existing APS MCP tool only —
     // EXCEPT under plan_first, where it is EMPTY: the SDK auto-approves
@@ -524,7 +524,204 @@ function summarizeEnvelope(envelope: ResultEnvelope): string {
     const text = JSON.stringify(envelope.result ?? {});
     return text.length > RESULT_SUMMARY_MAX_CHARS ? `${text.slice(0, RESULT_SUMMARY_MAX_CHARS)}… (truncated)` : text;
   }
-  return envelope.error?.message ?? "the tool run failed with no error detail.";
+  // The broker detail and error code are untrusted remote text. The legacy
+  // transcript needs only the stable failure state, not a credential-bearing
+  // backend diagnostic.
+  return "the tool run failed.";
+}
+
+const STABLE_RUNNER_ERRORS = new Set([
+  "agent_sdk_turn_broker_failed",
+  "agent_sdk_turn_failed",
+  "agent_sdk_turn_input_invalid",
+  "agent_sdk_turn_oauth_failed",
+  "agent_sdk_turn_query_failed",
+  "agent_sdk_turn_sdk_setup_failed",
+  "standard_services_attachment_expired",
+  "standard_services_attachment_identity_mismatch",
+  "standard_services_attachment_incomplete",
+  "standard_services_context_invalid",
+  "standard_services_context_required",
+  "standard_services_context_turn_mismatch",
+  "standard_services_resolver_setup_failed",
+]);
+const TRUSTED_CONTEXT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+function isStableRunnerError(message: string): boolean {
+  return STABLE_RUNNER_ERRORS.has(message);
+}
+
+function safeErrorMessage(error: unknown): string | undefined {
+  try {
+    if (!(error instanceof Error)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "message");
+    return descriptor && "value" in descriptor && typeof descriptor.value === "string"
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanError(code: string): Error {
+  const error = new Error(code);
+  error.stack = `${error.name}: ${code}`;
+  return error;
+}
+
+function stageError(error: unknown, fallback: string): Error {
+  const message = safeErrorMessage(error);
+  return new Error(message !== undefined && isStableRunnerError(message) ? message : fallback);
+}
+
+function publicRunnerError(error: unknown, grant: AgentGrant): Error {
+  const raw = safeErrorMessage(error) ?? "";
+  // Exact allowlisted codes are public protocol values. Check them before the
+  // token-shaped fallback pass, which would otherwise redact a long underscore
+  // code as if it were a credential.
+  const scrubbed = redactSecrets(raw, grantSecrets(grant));
+  const message = isStableRunnerError(raw)
+    ? raw
+    : isStableRunnerError(scrubbed) ? scrubbed : "agent_sdk_turn_failed";
+  const wrapped = new Error(message);
+  wrapped.stack = `${wrapped.name}: ${message}`;
+  return wrapped;
+}
+
+function isRecognizedGrantRequired(error: unknown, tenantId: string): boolean {
+  try {
+    if (!(error instanceof GrantRequiredError)) return false;
+    if (Object.getPrototypeOf(error) !== GrantRequiredError.prototype) return false;
+    const tenant = Object.getOwnPropertyDescriptor(error, "tenantId");
+    const marker = Object.getOwnPropertyDescriptor(error, "grantRequired");
+    return tenant?.value === tenantId && marker?.value === true;
+  } catch {
+    return false;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isJsonBinding(value: unknown, seen: Set<unknown> = new Set()): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonBinding(item, seen))
+    : isPlainRecord(value) && Object.values(value).every((item) => isJsonBinding(item, seen));
+  seen.delete(value);
+  return valid;
+}
+
+function deepFreeze<T>(value: T, seen: Set<unknown> = new Set()): T {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested, seen);
+  return Object.freeze(value);
+}
+
+function snapshotTurnInput(input: ConverseTurnInput): ConverseTurnInput {
+  let snapshot: ConverseTurnInput;
+  try {
+    snapshot = structuredClone(input);
+  } catch {
+    throw cleanError("agent_sdk_turn_input_invalid");
+  }
+  const ids = [snapshot.tenant_id, snapshot.session_id, snapshot.turn_id, snapshot.drawing_id];
+  const messagesValid = Array.isArray(snapshot.messages) && snapshot.messages.every((message) => (
+    isPlainRecord(message)
+    && (message.role === "user" || message.role === "assistant")
+    && typeof message.text === "string"
+  ));
+  const imagesValid = snapshot.images === undefined || (
+    Array.isArray(snapshot.images)
+    && snapshot.images.every((image) => isPlainRecord(image)
+      && typeof image.media_type === "string"
+      && typeof image.data === "string")
+  );
+  const confirm = snapshot.confirm;
+  const confirmValid = confirm === undefined || (
+    isPlainRecord(confirm)
+    && TRUSTED_CONTEXT_ID.test(confirm.confirmation_id)
+    && typeof confirm.approved === "boolean"
+    && isPlainRecord(confirm.proposal)
+    && TRUSTED_CONTEXT_ID.test(confirm.proposal.tool)
+    && isPlainRecord(confirm.proposal.params)
+    && isJsonBinding(confirm.proposal.params)
+    && (confirm.proposal.dwg === undefined || TRUSTED_CONTEXT_ID.test(confirm.proposal.dwg))
+    && (confirm.proposal.capability === undefined || typeof confirm.proposal.capability === "string")
+  );
+  const grant = snapshot.credential_grant;
+  const grantValid = grant === undefined || (
+    isPlainRecord(grant)
+    && (grant.kind === "api_key" || grant.kind === "oauth")
+    && (grant.kind === "api_key"
+      ? typeof grant.api_key === "string"
+      : typeof grant.oauth_token === "string")
+  );
+  if (
+    ids.some((value) => typeof value !== "string" || !TRUSTED_CONTEXT_ID.test(value))
+    || !messagesValid
+    || (snapshot.text !== undefined && typeof snapshot.text !== "string")
+    || !imagesValid
+    || !confirmValid
+    || (snapshot.model !== undefined && typeof snapshot.model !== "string")
+    || !grantValid
+  ) {
+    throw cleanError("agent_sdk_turn_input_invalid");
+  }
+  return deepFreeze(snapshot);
+}
+
+function validateStandardServicesContext(
+  input: ConverseTurnInput,
+  context: TrustedStandardServicesContext | undefined,
+  required: boolean,
+): TrustedStandardServicesContext | undefined {
+  if (!context) {
+    if (required) throw new Error("standard_services_context_required");
+    return undefined;
+  }
+  // Pin one plain snapshot before the first await. The caller cannot swap a
+  // mount or authority id while OAuth resolves and thereby change what reaches
+  // the resolver after this gate has passed.
+  let trusted: TrustedStandardServicesContext;
+  try {
+    trusted = snapshotTrustedStandardServicesContext(context);
+  } catch {
+    throw new Error("standard_services_context_invalid");
+  }
+  const ids = [
+    trusted.tenant_id,
+    trusted.session_id,
+    trusted.subscription_mount_id,
+    trusted.authority_session_id,
+    trusted.authority_turn_id,
+  ];
+  if (ids.some((value) => typeof value !== "string" || !TRUSTED_CONTEXT_ID.test(value))) {
+    throw new Error("standard_services_context_invalid");
+  }
+  if (
+    trusted.tenant_id !== input.tenant_id
+    || trusted.session_id !== input.session_id
+    || trusted.authority_turn_id !== input.turn_id
+  ) {
+    throw new Error("standard_services_context_turn_mismatch");
+  }
+  return trusted;
+}
+
+async function* guardedQuery(query: AsyncIterable<unknown>): AsyncIterable<unknown> {
+  try {
+    yield* query;
+  } catch (error) {
+    throw stageError(error, "agent_sdk_turn_query_failed");
+  }
 }
 
 /** Best-effort job id extraction. ResultEnvelope (CONTRACT section 3) has no dedicated
@@ -543,18 +740,51 @@ export class AgentSdkTurnRunner implements ConverseRunner {
   ) {}
 
   async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
+    const turnInput = snapshotTurnInput(input);
+    // Product authority must match the requested turn before any credential,
+    // repository, broker, resolver, or SDK dependency is touched. In particular,
+    // an approved confirmation is not permission to execute under swapped context.
+    const standardServicesContext = validateStandardServicesContext(
+      turnInput,
+      opts?.standardServicesContext,
+      this.opts.standardServicesResolver !== undefined,
+    );
+
     // Resolve the tenant's Agent SDK grant FIRST, before any yield: a thrown
     // GrantRequiredError propagates un-caught out of this generator's first next()
     // call, so the HTTP shell (server.ts /turn route) sees it before any NDJSON output
     // has started and can answer with a clean non-stream 401 (converse.ts doc: "401
     // {grant_required:true,...}") - the SAME mechanism /author already relies on.
-    const grant = await this.ports.oauth.getGrant(input.tenant_id);
-
-    if (input.confirm) {
-      yield* this.runConfirm(input, grant, opts?.signal, opts?.planFirst === true);
-      return;
+    let grant: AgentGrant;
+    try {
+      grant = await this.ports.oauth.getGrant(turnInput.tenant_id);
+    } catch (error) {
+      if (isRecognizedGrantRequired(error, turnInput.tenant_id)) {
+        throw new GrantRequiredError(turnInput.tenant_id);
+      }
+      throw cleanError("agent_sdk_turn_oauth_failed");
     }
-    yield* this.driveSession(input, grant, opts?.signal, opts?.planFirst === true);
+    try {
+      if (turnInput.confirm) {
+        yield* this.runConfirm(
+          turnInput,
+          grant,
+          opts?.signal,
+          opts?.planFirst === true,
+          standardServicesContext,
+        );
+        return;
+      }
+      yield* this.driveSession(
+        turnInput,
+        grant,
+        opts?.signal,
+        opts?.planFirst === true,
+        standardServicesContext,
+      );
+    } catch (error) {
+      throw publicRunnerError(error, grant);
+    }
   }
 
   private async *runConfirm(
@@ -562,6 +792,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     grant: AgentGrant,
     external?: AbortSignal,
     planFirst?: boolean,
+    standardServicesContext?: TrustedStandardServicesContext,
   ): AsyncGenerator<HarnessTurnEvent> {
     const { approved, proposal } = input.confirm!;
     if (!approved) {
@@ -583,7 +814,13 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       ...input.messages,
       { role: "assistant" as const, text: `Ran "${proposal.tool}". Result: ${outcome.summary}` },
     ];
-    yield* this.driveSession({ ...input, messages: continuationMessages }, grant, external, planFirst);
+    yield* this.driveSession(
+      { ...input, messages: continuationMessages },
+      grant,
+      external,
+      planFirst,
+      standardServicesContext,
+    );
   }
 
   private async *driveSession(
@@ -591,14 +828,21 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     grant: AgentGrant,
     external?: AbortSignal,
     planFirst?: boolean,
+    standardServicesContext?: TrustedStandardServicesContext,
   ): AsyncGenerator<HarnessTurnEvent> {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     const approvalTools = this.opts.approvalTools ?? DEFAULT_APPROVAL_TOOLS;
 
     const childEnv = buildScrubbedEnv(grant, process.env);
-    const sdk = (await dynImport(["@anthropic-ai", "claude-agent-sdk"])) as unknown as SdkModule;
-    const { z } = (await dynImport(["zod"])) as unknown as ZodModule;
+    let sdk: SdkModule;
+    let z: ZodModule["z"];
+    try {
+      sdk = (await (this.opts.sdkImport?.() ?? dynImport(["@anthropic-ai", "claude-agent-sdk"]))) as SdkModule;
+      ({ z } = (await (this.opts.zodImport?.() ?? dynImport(["zod"]))) as ZodModule);
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_sdk_setup_failed");
+    }
 
     const toolUseNames = new Map<string, string>();
     const pending: HarnessTurnEvent[] = [];
@@ -645,11 +889,30 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     );
 
     const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool, askUserTool] });
+    let services: ReturnType<typeof createStandardServicesFacade> | undefined;
+    if (this.opts.standardServicesResolver && standardServicesContext) {
+      try {
+        services = createStandardServicesFacade({
+          sdk,
+          z,
+          ...(await resolveStandardServicesSession(
+            this.opts.standardServicesResolver,
+            standardServicesContext,
+            "spine",
+          )),
+          profile: "spine",
+        });
+      } catch (error) {
+        throw stageError(error, "standard_services_resolver_setup_failed");
+      }
+    }
+    const standardServiceTools = new Set(services?.allowed_tools ?? []);
 
     const canUseTool = async (
       toolName: string,
       inp: Record<string, unknown>,
     ): Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }> => {
+      if (standardServiceTools.has(toolName)) return { behavior: "allow", updatedInput: inp };
       const tenantMcpDenial = tenantMcpToolDenial(toolName);
       if (tenantMcpDenial) return tenantMcpDenial;
       const bare = bareToolName(toolName);
@@ -689,27 +952,30 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // One guarded mount is the whole design; a second unguarded one is how the
     // guard gets lost. If this runner is ever revived, mount through the same
     // path ConverseSdkRunner uses, settings included.
-    const mcpAttachment = await resolveEnvMcpAttachment(process.env.LEAF_MCP_BRIDGE_DIR, input.tenant_id);
-
-    const q = sdk.query({
-      prompt: buildPrompt(input),
-      options: buildTurnOptions({
-        childEnv,
-        model: this.opts.model,
-        maxTurns,
-        abortController: abort,
-        server,
-        mcpAttachment,
-        planFirst: planFirst === true,
-        // This list stays the APS tool only; the money-gated canUseTool
-        // envelope below is unchanged.
-        canUseTool,
-      }),
-    });
+    let q: AsyncIterable<unknown>;
+    try {
+      q = sdk.query({
+        prompt: buildPrompt(input),
+        options: buildTurnOptions({
+          childEnv,
+          model: this.opts.model,
+          maxTurns,
+          abortController: abort,
+          server,
+          ...(services ? { services } : {}),
+          planFirst: planFirst === true,
+          // This list stays the APS tool only; the money-gated canUseTool
+          // envelope below is unchanged.
+          canUseTool,
+        }),
+      });
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_query_failed");
+    }
 
     let turnCount = 0;
     let cumulativeTokens = 0;
-    for await (const raw of q) {
+    for await (const raw of guardedQuery(q)) {
       const msg = raw as Record<string, unknown>;
       if (msg.type === "assistant") {
         turnCount += 1;
@@ -766,20 +1032,24 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     input: ConverseTurnInput,
     proposal: ConfirmProposal,
   ): Promise<{ ok: boolean; summary: string; jobId?: string }> {
-    const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
-    const pkg = findTool(repo.dir, proposal.tool);
-    if (!pkg) {
-      return { ok: false, summary: `no registered tool named "${proposal.tool}" was found in this tenant's registry.` };
+    try {
+      const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
+      const pkg = findTool(repo.dir, proposal.tool);
+      if (!pkg) {
+        return { ok: false, summary: `no registered tool named "${proposal.tool}" was found in this tenant's registry.` };
+      }
+      const envelope = await this.ports.broker.runTool({
+        tenantId: input.tenant_id,
+        tool: pkg,
+        params: proposal.params ?? {},
+        dwg: input.drawing_id,
+        apsLive: false,
+      });
+      const jobId = extractJobId(envelope);
+      return { ok: envelope.ok, summary: summarizeEnvelope(envelope), ...(jobId ? { jobId } : {}) };
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_broker_failed");
     }
-    const envelope = await this.ports.broker.runTool({
-      tenantId: input.tenant_id,
-      tool: pkg,
-      params: proposal.params ?? {},
-      dwg: input.drawing_id,
-      apsLive: false,
-    });
-    const jobId = extractJobId(envelope);
-    return { ok: envelope.ok, summary: summarizeEnvelope(envelope), ...(jobId ? { jobId } : {}) };
   }
 }
 

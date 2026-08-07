@@ -1,0 +1,93 @@
+/**
+ * HttpUpstreamSink — pushes captured authoring events to the operator's
+ * upstream queue (ops-dashboard POST /api/upstream/ingest).
+ *
+ * Contract discipline:
+ *   - Fire-and-forget: every failure path resolves; a sink outage can never
+ *     fail, slow, or throw into the consumer's authoring path.
+ *   - Own timeout (default 4s) via AbortController: a hung queue endpoint
+ *     cannot hold the process open.
+ *   - The bearer token is a machine credential for the OPERATOR's queue —
+ *     never a tenant grant, never logged.
+ */
+
+import { createHash } from "node:crypto";
+import type { UpstreamCapture, UpstreamSink } from "../index.js";
+
+export interface HttpUpstreamSinkOptions {
+  /** Full ingest URL, e.g. https://ops.example.com/api/upstream/ingest */
+  url: string;
+  /** UPSTREAM_API_KEY value on the queue side. */
+  token: string;
+  /** Label for the host platform this instance is bolted onto. */
+  platform?: string;
+  timeoutMs?: number;
+  /** Test seam: injectable fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/** Stable idempotency key: same consumer + route + prompt + commit collapse. */
+export function upstreamDedupeKey(event: UpstreamCapture): string {
+  return createHash("sha256")
+    .update(
+      [event.consumer, event.route, event.prompt, event.commit_sha ?? ""].join(
+        "\0",
+      ),
+    )
+    .digest("hex");
+}
+
+export class HttpUpstreamSink implements UpstreamSink {
+  constructor(private readonly options: HttpUpstreamSinkOptions) {}
+
+  async capture(event: UpstreamCapture): Promise<void> {
+    const timeoutMs = this.options.timeoutMs ?? 4000;
+    const doFetch = this.options.fetchImpl ?? fetch;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Node keeps the process alive for a pending timer; the sink must never
+    // extend the consumer's lifetime.
+    if (typeof (timer as { unref?: () => void }).unref === "function") {
+      (timer as unknown as { unref(): void }).unref();
+    }
+    try {
+      const payload: UpstreamCapture = {
+        ...event,
+        platform: event.platform ?? this.options.platform ?? null,
+        dedupe_key: event.dedupe_key ?? upstreamDedupeKey(event),
+      };
+      await doFetch(this.options.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.options.token}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch {
+      // Swallowed by contract: capture is best-effort telemetry, and the
+      // authoring path must be unobservable to sink failures.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Env-configured construction: returns the sink when UPSTREAM_SINK_URL and
+ * UPSTREAM_SINK_TOKEN are both present, undefined otherwise (port stays
+ * unwired, authoring identical).
+ */
+export function upstreamSinkFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): HttpUpstreamSink | undefined {
+  const url = env.UPSTREAM_SINK_URL?.trim();
+  const token = env.UPSTREAM_SINK_TOKEN?.trim();
+  if (!url || !token) return undefined;
+  return new HttpUpstreamSink({
+    url,
+    token,
+    platform: env.UPSTREAM_SINK_PLATFORM?.trim() || undefined,
+  });
+}

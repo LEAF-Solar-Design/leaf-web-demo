@@ -1,5 +1,14 @@
-// STRANGLER SHIM (mushy-code extraction, 2026-08-06): this module moved to the
-// vendored mushy-code library. The path and every export stay stable for all
-// in-repo importers; the implementation lives at the re-exported location and
-// is synced by scripts/sync-mushy-code.py (pin: harness/src/vendor/VENDOR-PIN.json).
-export * from "../../vendor/mushy-author/ports/impl/mcpProxy.js";
+// Consumer shim over the supported mushy-code package root. Keep Leaf callers
+// off internal vendor paths so upstream can remove private modules safely.
+export {
+  guardedFetch,
+  isAllowedMcpHost,
+  isForbiddenMcpAddress,
+  proxyTenantMcpServer,
+  resolveAllowedMcpHost,
+} from "../../vendor/mushy-author/index.js";
+export type {
+  McpHostResolver,
+  McpServerConfig,
+  ProxiedMcpServer,
+} from "../../vendor/mushy-author/index.js";

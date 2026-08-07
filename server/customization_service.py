@@ -508,6 +508,8 @@ class CustomizationService:
     def stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        authority_session_id: str | None = None,
+        authority_turn_id: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
@@ -519,6 +521,19 @@ class CustomizationService:
                     or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", target_tool_name)
                     or len(target_tool_name) > 64):
                 raise CustomizationServiceError("invalid_stage_request", 422)
+        authority_required = bool(
+            os.environ.get("LEAF_TENANT_MCP_BROKER_URL", "").strip()
+        )
+        authority_values = (authority_session_id, authority_turn_id)
+        if any(authority_values) != all(authority_values):
+            raise CustomizationServiceError("invalid_stage_authority", 422)
+        if authority_required and not all(authority_values):
+            raise CustomizationServiceError("active_stage_authority_required", 409)
+        for value in authority_values:
+            if value is not None and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", value
+            ):
+                raise CustomizationServiceError("invalid_stage_authority", 422)
         binding = _binding(tenant)
         tier = entitlements.resolve_tier(tenant)
         roles, elevated = entitlements.resolve_roles(tenant)
@@ -544,6 +559,8 @@ class CustomizationService:
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
             change_kind="revise" if target_tool_name else "create",
             target_tool_name=target_tool_name,
+            authority_session_id=authority_session_id,
+            authority_turn_id=authority_turn_id,
         )
         if change.state is ChangeState.CREATED:
             change = self.store.transition(
@@ -578,6 +595,8 @@ class CustomizationService:
     def enqueue_stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        authority_session_id: str | None = None,
+        authority_turn_id: str | None = None,
     ) -> dict[str, Any]:
         """Reserve and charge one exact stage request without calling the harness."""
         tenant_id = _tenant_id(tenant)
@@ -592,6 +611,19 @@ class CustomizationService:
             or len(target_tool_name) > 64
         ):
             raise CustomizationServiceError("invalid_stage_request", 422)
+        authority_required = bool(
+            os.environ.get("LEAF_TENANT_MCP_BROKER_URL", "").strip()
+        )
+        authority_values = (authority_session_id, authority_turn_id)
+        if any(authority_values) != all(authority_values):
+            raise CustomizationServiceError("invalid_stage_authority", 422)
+        if authority_required and not all(authority_values):
+            raise CustomizationServiceError("active_stage_authority_required", 409)
+        for value in authority_values:
+            if value is not None and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", value
+            ):
+                raise CustomizationServiceError("invalid_stage_authority", 422)
         binding = _binding(tenant)
         tier = entitlements.resolve_tier(tenant)
         roles, elevated = entitlements.resolve_roles(tenant)
@@ -625,6 +657,8 @@ class CustomizationService:
             change_kind="revise" if target_tool_name else "create",
             target_tool_name=target_tool_name, request_description=description,
             request_fingerprint=fingerprint,
+            authority_session_id=authority_session_id,
+            authority_turn_id=authority_turn_id,
         )
         if change.state is ChangeState.CREATED:
             try:
@@ -815,6 +849,17 @@ class CustomizationService:
         return dict(tool)
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
+        active_subject = deps.active_stage_author_subject(
+            tenant_id,
+            change.authority_session_id,
+            change.authority_turn_id,
+        )
+        if (
+            tenant_id != change.tenant_id
+            or not active_subject
+            or active_subject != change.author_subject
+        ):
+            raise CustomizationServiceError("stage_authority_invalid", 409)
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
@@ -822,7 +867,13 @@ class CustomizationService:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
-                headers={"X-Harness-Secret": secret},
+                headers={
+                    "X-Harness-Secret": secret,
+                    **({
+                        "X-Authority-Session-Id": change.authority_session_id,
+                        "X-Authority-Turn-Id": change.authority_turn_id,
+                    } if change.authority_session_id and change.authority_turn_id else {}),
+                },
                 json={"tenant_id": tenant_id, "description": description, "changeSetId": change.change_set_id,
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,

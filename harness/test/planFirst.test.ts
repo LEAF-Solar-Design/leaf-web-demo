@@ -29,7 +29,6 @@ function options(planFirst: boolean | undefined) {
     abortController: new AbortController(),
     server: { fake: true },
 
-    mcpAttachment: null,
     canUseTool: (async () => ({ behavior: "deny", message: "x" })) as never,
     ...(planFirst === undefined ? {} : { planFirst }),
   });

@@ -132,6 +132,37 @@ def test_every_shipped_table_has_a_readiness_contract():
     assert created <= proven
 
 
+def test_harness_approval_journal_has_exact_readiness_authority():
+    columns = db._AUTHORITY_REQUIRED_COLUMNS["harness_sessions"][
+        "harness_tenant_mcp_approvals"
+    ]
+    assert columns == {
+        "approval_id", "tenant_id", "subject_id", "session_id",
+        "authority_turn_id", "subscription_mount_id", "runner_profile_id",
+        "service_id", "tool_id", "arguments", "argument_digest",
+        "expires_at", "created_at", "execution_state", "approved_at",
+        "execution_claim_id", "execution_started_at",
+        "execution_deadline_at", "result", "completed_at", "uncertain_at",
+    }
+    assert len(columns) == 21
+
+    catalog = db.required_catalog_for_selected_authorities({
+        "LEAF_HARNESS_SESSION_STORE": "postgres",
+    })
+    assert {
+        "harness_tenant_mcp_approvals_pkey",
+        "harness_tenant_mcp_approvals_id_check",
+        "harness_tenant_mcp_approvals_profile_check",
+        "harness_tenant_mcp_approvals_arguments_check",
+        "harness_tenant_mcp_approvals_digest_check",
+        "harness_tenant_mcp_approvals_state_check",
+        "harness_tenant_mcp_approvals_claim_check",
+        "harness_tenant_mcp_approvals_result_check",
+        "harness_tenant_mcp_approvals_shape_check",
+    } <= set(catalog["constraints"])
+    assert "idx_harness_tenant_mcp_approvals_expiry" in catalog["indexes"]
+
+
 def test_legacy_selectors_preserve_the_base_schema_contract():
     required = db.required_columns_for_selected_authorities({
         "LEAF_JOBS_STORE": "legacy",
@@ -290,6 +321,49 @@ def test_complete_ledger_cannot_bootstrap_past_missing_runtime_constraint(
         f"{missing_constraint}:missing-or-wrong-relation"]
     assert status["ok"] is False
     with pytest.raises(RuntimeError, match=missing_constraint):
+        db.assert_schema_current()
+
+
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    [
+        ("constraints", "harness_tenant_mcp_approvals_pkey"),
+        ("constraints", "harness_tenant_mcp_approvals_id_check"),
+        ("constraints", "harness_tenant_mcp_approvals_profile_check"),
+        ("constraints", "harness_tenant_mcp_approvals_arguments_check"),
+        ("constraints", "harness_tenant_mcp_approvals_digest_check"),
+        ("constraints", "harness_tenant_mcp_approvals_state_check"),
+        ("constraints", "harness_tenant_mcp_approvals_claim_check"),
+        ("constraints", "harness_tenant_mcp_approvals_result_check"),
+        ("constraints", "harness_tenant_mcp_approvals_shape_check"),
+        ("indexes", "idx_harness_tenant_mcp_approvals_expiry"),
+    ],
+)
+def test_harness_approval_catalog_drift_fails_startup(
+    monkeypatch, kind, name,
+):
+    environ = {"LEAF_HARNESS_SESSION_STORE": "postgres"}
+    monkeypatch.setenv("LEAF_HARNESS_SESSION_STORE", "postgres")
+    required = db.required_columns_for_selected_authorities(environ)
+    required[db._MIGRATION_LEDGER_TABLE] = set(db._MIGRATION_LEDGER_COLUMNS)
+    column_rows = [
+        {"table_name": table, "column_name": column}
+        for table, columns in required.items()
+        for column in columns
+    ]
+    catalog_rows = _complete_catalog_rows(environ)
+    name_field = {"constraints": "conname", "indexes": "indexname"}[kind]
+    catalog_rows[kind] = [
+        row for row in catalog_rows[kind] if row[name_field] != name
+    ]
+    conn = _SchemaConnection(column_rows, db.migration_manifest(), catalog_rows)
+    monkeypatch.setattr(db, "get_pool", lambda: _Pool(conn))
+
+    status = db.schema_status()
+
+    assert status["ok"] is False
+    assert status[f"invalid_{kind}"] == [f"{name}:missing-or-wrong-relation"]
+    with pytest.raises(RuntimeError, match=name):
         db.assert_schema_current()
 
 
@@ -491,6 +565,16 @@ def test_catalog_contract_rejects_widened_catalog_column_lists(
         ("LEAF_DRAWING_STORE", "drawing_store_versions_state_check", "deleted"),
         ("LEAF_UPLOAD_STORE", "drawing_upload_attempts_status_check", "paused"),
         ("LEAF_UPLOAD_STORE", "drawing_purge_receipts_status_check", "pending"),
+        (
+            "LEAF_HARNESS_SESSION_STORE",
+            "harness_tenant_mcp_approvals_state_check",
+            "cancelled",
+        ),
+        (
+            "LEAF_HARNESS_SESSION_STORE",
+            "harness_tenant_mcp_approvals_profile_check",
+            "operator",
+        ),
     ],
 )
 def test_catalog_contract_rejects_widened_state_allowlists(

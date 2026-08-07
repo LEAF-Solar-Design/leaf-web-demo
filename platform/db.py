@@ -274,6 +274,14 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "harness_tenant_repo_leases": {
             "tenant_id", "owner_token", "generation", "acquired_at", "heartbeat_at", "expires_at",
         },
+        "harness_tenant_mcp_approvals": {
+            "approval_id", "tenant_id", "subject_id", "session_id",
+            "authority_turn_id", "subscription_mount_id", "runner_profile_id",
+            "service_id", "tool_id", "arguments", "argument_digest",
+            "expires_at", "created_at", "execution_state", "approved_at",
+            "execution_claim_id", "execution_started_at",
+            "execution_deadline_at", "result", "completed_at", "uncertain_at",
+        },
     },
     "customization": {
         "customization_change_sets": {
@@ -281,6 +289,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "base_commit", "staged_commit", "catalog_digest",
             "desired_platform_release", "workspace_contract_digest",
             "author_subject", "approver_subject", "created_at", "updated_at",
+            "authority_session_id", "authority_turn_id",
         },
         "effective_catalogs": {
             "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
@@ -524,6 +533,58 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES harness_sessions(session_id)", "ON DELETE CASCADE"),
         "harness_tenant_repo_leases_pkey": _catalog_contract(
             "harness_tenant_repo_leases", "PRIMARY KEY (tenant_id)"),
+        "harness_tenant_mcp_approvals_pkey": _catalog_contract(
+            "harness_tenant_mcp_approvals", "PRIMARY KEY (approval_id)"),
+        "harness_tenant_mcp_approvals_id_check": _catalog_contract(
+            "harness_tenant_mcp_approvals",
+            "CHECK (approval_id ~ '^[A-Za-z0-9_-]{8,256}$')"),
+        "harness_tenant_mcp_approvals_profile_check": _catalog_contract(
+            "harness_tenant_mcp_approvals",
+            "CHECK (runner_profile_id = ANY (ARRAY['author', 'spine']))"),
+        "harness_tenant_mcp_approvals_arguments_check": _catalog_contract(
+            "harness_tenant_mcp_approvals", "CHECK",
+            "jsonb_typeof(arguments) = 'object'"),
+        "harness_tenant_mcp_approvals_digest_check": _catalog_contract(
+            "harness_tenant_mcp_approvals",
+            "CHECK (argument_digest ~ '^[a-f0-9]{64}$')"),
+        "harness_tenant_mcp_approvals_state_check": _catalog_contract(
+            "harness_tenant_mcp_approvals",
+            "CHECK (execution_state = ANY (ARRAY['pending', 'approved', "
+            "'executing', 'completed', 'uncertain']))"),
+        "harness_tenant_mcp_approvals_claim_check": _catalog_contract(
+            "harness_tenant_mcp_approvals", "CHECK",
+            "execution_claim_id IS NULL OR execution_claim_id "
+            "~ '^[A-Za-z0-9_-]{16,256}$'"),
+        "harness_tenant_mcp_approvals_result_check": _catalog_contract(
+            "harness_tenant_mcp_approvals", "CHECK",
+            "result IS NULL OR",
+            "jsonb_typeof(result) = 'object'", "content", "artifact_ids",
+            "receipt_id",
+            "result - 'content' - 'artifact_ids' - 'receipt_id' = '{}'",
+            "jsonb_typeof(result -> 'artifact_ids') = 'array'",
+            "jsonb_typeof(result -> 'receipt_id') = 'string'"),
+        "harness_tenant_mcp_approvals_shape_check": _catalog_contract(
+            "harness_tenant_mcp_approvals", "CHECK",
+            "execution_state = 'pending' AND execution_claim_id IS NULL "
+            "AND execution_started_at IS NULL AND execution_deadline_at IS NULL "
+            "AND approved_at IS NULL AND result IS NULL AND completed_at IS NULL "
+            "AND uncertain_at IS NULL",
+            "execution_state = 'approved' AND execution_claim_id IS NULL "
+            "AND approved_at IS NOT NULL AND execution_started_at IS NULL "
+            "AND execution_deadline_at IS NULL AND result IS NULL "
+            "AND completed_at IS NULL AND uncertain_at IS NULL",
+            "execution_state = 'executing' AND execution_claim_id IS NOT NULL "
+            "AND approved_at IS NOT NULL AND execution_started_at IS NOT NULL "
+            "AND execution_deadline_at IS NOT NULL AND result IS NULL "
+            "AND completed_at IS NULL AND uncertain_at IS NULL",
+            "execution_state = 'completed' AND execution_claim_id IS NOT NULL "
+            "AND approved_at IS NOT NULL AND execution_started_at IS NOT NULL "
+            "AND execution_deadline_at IS NOT NULL AND result IS NOT NULL "
+            "AND completed_at IS NOT NULL AND uncertain_at IS NULL",
+            "execution_state = 'uncertain' AND execution_claim_id IS NOT NULL "
+            "AND approved_at IS NOT NULL AND execution_started_at IS NOT NULL "
+            "AND execution_deadline_at IS NOT NULL AND result IS NULL "
+            "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
         "customization_change_sets_pkey": _catalog_contract(
@@ -657,6 +718,8 @@ _AUTHORITY_REQUIRED_INDEXES = {
             "harness_usage", "(session_id, ts)"),
         "idx_harness_tenant_repo_leases_expiry": _catalog_contract(
             "harness_tenant_repo_leases", "(expires_at)"),
+        "idx_harness_tenant_mcp_approvals_expiry": _catalog_contract(
+            "harness_tenant_mcp_approvals", "(expires_at)"),
     },
     "customization": {
         "customization_recovery_idx": _catalog_contract(

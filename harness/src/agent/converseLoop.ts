@@ -27,6 +27,7 @@ import type {
   ConverseEvent,
   ConverseEventType,
   SpineConverseRunner,
+  ConverseRunInput,
   ConverseStopReason,
   GateClient,
   SessionRecord,
@@ -124,6 +125,8 @@ export interface ConverseMessageInput {
   instantDrawingContext?: InstantDrawingContext;
   authoritySessionId?: string;
   authorityTurnId?: string;
+  /** App-owned identity and lease mount for the standard-service facade. */
+  standardServicesContext?: ConverseRunInput["standardServicesContext"];
   /** Live event sink (SSE). Every event is ALSO persisted before delivery. */
   onEvent?: (ev: ConverseEvent) => void;
 }
@@ -464,6 +467,9 @@ export class ConverseLoop {
           : {}),
         model: this.model,
         ...(input.images?.length ? { images: input.images } : {}),
+        ...(input.standardServicesContext
+          ? { standardServicesContext: input.standardServicesContext }
+          : {}),
         tools,
         canUseTool,
       });

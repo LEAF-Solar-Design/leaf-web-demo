@@ -57,9 +57,30 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (27, "author_quota_idempotency"),
                 (28, "overlay_tokens"),
                 (29, "session_annex"),
+                (30, "tenant_mcp_approvals"),
+                (31, "customization_stage_authority"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
+
+
+def test_customization_authority_migration_follows_tenant_mcp_journal():
+    manifest = [item["name"] for item in db.migration_manifest()]
+    assert manifest[-2:] == [
+        "0030_tenant_mcp_approvals.sql",
+        "0031_customization_stage_authority.sql",
+    ]
+    migration = (
+        db._PKG_DIR / "migrations" / "0031_customization_stage_authority.sql"
+    ).read_text(encoding="utf-8")
+    assert "ALTER TABLE customization_change_sets" in migration
+    assert "authority_session_id TEXT" in migration
+    assert "authority_turn_id TEXT" in migration
+    assert {"authority_session_id", "authority_turn_id"} <= (
+        db._AUTHORITY_REQUIRED_COLUMNS["customization"][
+            "customization_change_sets"
+        ]
+    )
 
 
 def test_drawing_import_schema_is_required_before_startup():

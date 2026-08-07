@@ -1,12 +1,7 @@
-"""Tenant-scoped, redacted MCP attachment status for the converse composer."""
+"""Tenant-scoped public status for the standard-services broker facade."""
 from __future__ import annotations
 
-import hashlib
-import json
-import logging
 import os
-import re
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -16,95 +11,37 @@ import deps
 
 
 router = APIRouter()
-MAX_MCP_CONFIG_BYTES = 64 * 1024
-MAX_SERVERS = 16
-SERVER_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.IGNORECASE | re.ASCII)
-MIN_REDACTABLE_SECRET_LEN = 24
-logger = logging.getLogger(__name__)
 
 
-def _tenant_hash(tenant_id: str) -> str:
-    # Harness mcpBridge.ts: `return createHash("sha256").update(tenantId).digest("hex");`
-    return hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
-
-
-def _read_capped(path: Path) -> str | None:
+def _broker_descriptor(env: Any = os.environ) -> list[dict[str, str]]:
+    """Expose only the fixed facade name and configured broker host."""
+    value = env.get("LEAF_TENANT_MCP_BROKER_URL", "")
+    if not isinstance(value, str) or not value.strip():
+        return []
     try:
-        with path.open("rb") as source:
-            data = source.read(MAX_MCP_CONFIG_BYTES + 1)
-        if len(data) > MAX_MCP_CONFIG_BYTES:
-            return None
-        return data.decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _host(url: Any) -> str | None:
-    if not isinstance(url, str):
-        return None
-    try:
-        parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return None
+        parsed = urlsplit(value.strip())
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            return []
         hostname = parsed.hostname
         if ":" in hostname:
             hostname = f"[{hostname}]"
-        port = parsed.port
-        return f"{hostname}:{port}" if port is not None else hostname
+        host = f"{hostname}:{parsed.port}" if parsed.port is not None else hostname
     except (TypeError, ValueError):
-        return None
-
-
-def _redacted_servers(tenant_id: str, env: Any = os.environ) -> list[dict[str, str]]:
-    """Return only harmless server descriptors, or no descriptors on any fault."""
-    directory = env.get("LEAF_MCP_BRIDGE_DIR", "")
-    if not directory:
         return []
-    source = _read_capped(Path(directory) / f"{_tenant_hash(tenant_id)}.json")
-    if source is None:
-        return []
-    try:
-        configs = json.loads(source)
-    except (RecursionError, ValueError):
-        return []
-    if not isinstance(configs, list) or len(configs) > MAX_SERVERS:
-        return []
-
-    servers: list[dict[str, str]] = []
-    for config in configs:
-        if not isinstance(config, dict):
-            return []
-        name = config.get("name")
-        if not isinstance(name, str) or not SERVER_NAME.fullmatch(name) or name.endswith("."):
-            return []
-        host = _host(config.get("url"))
-        if host is None:
-            return []
-        entry = {"name": name, "host": host}
-        auth_token = config.get("authToken")
-        # NO length floor. The floor belongs to the REDACT-BY-REWRITE problem
-        # (a 1-char secret cannot be substring-replaced out of prose without
-        # mangling it); this check DROPS the whole entry instead, so a short
-        # token has no such downside — and mcpBridge.ts accepts tokens of any
-        # length, so a 20-char bearer embedded in a hostname leaked straight
-        # through the floor (review round 2). Any non-empty token that survives
-        # into the descriptor kills the entry.
-        # Compare against the VALUES, not their JSON serialization: json.dumps
-        # escapes non-ASCII, so a token of "e-acute" was compared against
-        # "é..." and never matched, leaking straight through the check
-        # (review round 3).
-        if (
-            isinstance(auth_token, str)
-            and auth_token
-            and any(auth_token in str(value) for value in entry.values())
-        ):
-            logger.warning("Dropping MCP server descriptor because it contains authToken=<redacted>")
-            continue
-        servers.append(entry)
-    return servers
+    return [{"name": "services", "host": host}]
 
 
 @router.get("/api/converse/mcp")
-def mcp_status(tenant=Depends(deps.require_active_tenant)) -> dict[str, list[dict[str, str]]]:
-    """List the calling tenant's mounted servers without exposing credentials."""
-    return {"servers": _redacted_servers(str(tenant))}
+def mcp_status(
+    tenant=Depends(deps.require_active_tenant),
+) -> dict[str, list[dict[str, str]]]:
+    """Show the one broker facade. Never enumerate upstream or operator MCPs."""
+    del tenant
+    return {"servers": _broker_descriptor()}

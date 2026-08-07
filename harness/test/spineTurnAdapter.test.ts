@@ -306,6 +306,48 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
     expect(grants).toEqual([{ kind: "oauth", oauthToken: "FAKE-ephemeral-token" }]);
   });
 
+  it("separates a BYO model grant from the tenant-owned standard-service mount", async () => {
+    const settlements: unknown[] = [];
+    const routed: OAuthGrantProvider = {
+      async getGrant(): Promise<AgentGrant> {
+        throw new Error("linked model grant must not replace BYO");
+      },
+      async acquireGrant() {
+        return {
+          grant: { kind: "oauth", oauthToken: "linked-model-token" },
+          account_id: "account-owned-by-tenant",
+          lease_id: "entitlement-lease",
+        };
+      },
+      async settleGrant(_tenantId, _leaseId, outcome) {
+        settlements.push(outcome);
+      },
+    };
+    const runner = new FakeConverseRunner();
+    const adapter = new SpineTurnAdapter({
+      oauth: routed,
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store: new FakeSessionStore(),
+      runnerFor: () => runner,
+      standardServicesResolver: { async resolve() { throw new Error("not called by fake"); } },
+    });
+
+    await drain(adapter.runTurn(turnInput({
+      text: "hello",
+      credential_grant: { kind: "oauth", oauth_token: "BYO-model-token" },
+    })));
+
+    expect(runner.runs[0]?.standardServicesContext).toEqual({
+      tenant_id: "demo-tenant",
+      session_id: "app-session-1",
+      subscription_mount_id: "account-owned-by-tenant",
+      authority_session_id: "app-session-1",
+      authority_turn_id: "app-turn-1",
+    });
+    expect(settlements).toEqual([{ usage: { cost_tokens: 0 }, stop_reason: "end_turn" }]);
+  });
+
   it("aborted signal: the stream ends without yielding further events", async () => {
     const { adapter } = makeAdapter();
     const ctrl = new AbortController();

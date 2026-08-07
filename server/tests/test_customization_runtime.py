@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 import app
 import customization_service
 from customization_flags import enabled
-from customization_models import ChangeSetConflictError, ChangeState
+from customization_models import ChangeSetConflictError, ChangeState, IdempotencyReplayError
 from customization_service import CustomizationService, CustomizationServiceError
 from customization_store import SQLiteCustomizationStore
 from customization_authority import TenantBinding
@@ -220,6 +220,86 @@ def test_ensure_bare_repo_rejects_unverified_harness_receipt(tmp_path, monkeypat
 
     with pytest.raises(CustomizationServiceError, match="tenant_repository_unavailable"):
         customization_service._ensure_bare_repo("tenant-a")
+
+
+def test_stage_worker_preserves_exact_authority_headers(tmp_path, monkeypatch):
+    store = SQLiteCustomizationStore(tmp_path / "customization.db")
+    store.initialize()
+    change, created = store.reserve_stage(
+        tenant_id="tenant-a",
+        idempotency_key="stage-authority-a",
+        base_commit=BASE,
+        desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|alice",
+        change_set_id="11111111-1111-4111-8111-111111111111",
+        request_description="make a tool",
+        request_fingerprint="e" * 64,
+        authority_session_id="session-a",
+        authority_turn_id="turn-a",
+    )
+    assert created is True
+    assert change.authority_session_id == "session-a"
+    assert change.authority_turn_id == "turn-a"
+    change = store.transition(
+        tenant_id="tenant-a",
+        change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING,
+        expected_version=change.version,
+        idempotency_key="stage-authority-transition",
+        expected_state=ChangeState.CREATED,
+    )
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"receipt": {}}
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response()
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-secret")
+    monkeypatch.setattr(
+        customization_service.deps,
+        "active_stage_author_subject",
+        lambda *_args: "auth0|alice",
+    )
+    monkeypatch.setattr(requests, "post", post)
+
+    CustomizationService(store).dispatch_stage(change)
+
+    assert calls[0][1]["headers"] == {
+        "X-Harness-Secret": "harness-secret",
+        "X-Authority-Session-Id": "session-a",
+        "X-Authority-Turn-Id": "turn-a",
+    }
+
+
+def test_stage_idempotency_rejects_authority_swap(tmp_path):
+    store = SQLiteCustomizationStore(tmp_path / "customization.db")
+    store.initialize()
+    request = dict(
+        tenant_id="tenant-a",
+        idempotency_key="stage-authority-a",
+        base_commit=BASE,
+        desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|alice",
+        change_set_id="11111111-1111-4111-8111-111111111111",
+        request_description="make a tool",
+        request_fingerprint="e" * 64,
+        authority_session_id="session-a",
+        authority_turn_id="turn-a",
+    )
+    store.reserve_stage(**request)
+
+    with pytest.raises(IdempotencyReplayError):
+        store.reserve_stage(**{**request, "authority_turn_id": "turn-b"})
 
 
 def publish_change(store, tenant_id="tenant-a", suffix="a"):
@@ -835,6 +915,9 @@ def test_live_author_preserves_requested_mode(monkeypatch):
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
     monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
+    monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",
         classmethod(lambda cls: service),
@@ -863,6 +946,9 @@ def test_live_author_reports_unsupported_one_off_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
     monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
+    monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",
         classmethod(lambda cls: service),
@@ -887,6 +973,9 @@ def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypa
     configured_calls = []
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
     monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",

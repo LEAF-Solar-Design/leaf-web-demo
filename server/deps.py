@@ -681,6 +681,74 @@ def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],
                          backedge=True)
 
 
+def active_stage_author_subject(
+    tenant_id: str,
+    authority_session_id: Optional[str],
+    authority_turn_id: Optional[str],
+) -> Optional[str]:
+    """Resolve one exact, currently active app turn without trusting the caller.
+
+    The session store query binds tenant, session, and turn in one lookup and
+    rejects completed, superseded, or stale turns. Any storage or runtime
+    configuration failure returns no authority so callers fail closed.
+    """
+    if not authority_session_id or not authority_turn_id:
+        return None
+    try:
+        import session_store
+        import turn_runner
+        return session_store.active_turn_subject(
+            str(authority_session_id),
+            str(authority_turn_id),
+            str(tenant_id),
+            turn_runner.turn_max_s(),
+        )
+    except Exception:  # noqa: BLE001 - authority lookup is fail closed
+        return None
+
+
+def stage_author_identity(
+    tenant: Any,
+    authority_session_id: Optional[str],
+    authority_turn_id: Optional[str],
+) -> Optional[Any]:
+    """Bind protected authoring to the authenticated author of this app turn.
+
+    A direct user must already carry the same subject as the active turn. A
+    verified subjectless dispatch back edge may recover that subject from the
+    app-owned turn and its current platform binding. No other subjectless
+    caller can borrow turn authority.
+    """
+    if not isinstance(tenant, TenantContext):
+        return None
+    subject = active_stage_author_subject(
+        str(tenant), authority_session_id, authority_turn_id
+    )
+    if not subject:
+        return None
+    if tenant.subject:
+        return tenant if tenant.subject == subject else None
+    if not getattr(tenant, "backedge", False):
+        return None
+    try:
+        platform_tenant_id, platform_tier = (
+            resolve_active_platform_tenant_authority(subject)
+        )
+    except Exception:  # noqa: BLE001 - binding outage cannot grant authority
+        return None
+    if platform_tenant_id != str(tenant):
+        return None
+    return TenantContext(
+        str(tenant),
+        org_id=tenant.org_id,
+        tier=platform_tier,
+        workspace=tenant.workspace,
+        subject=subject,
+        backedge=True,
+        authority_resolved=True,
+    )
+
+
 def backedge_run_identity(tenant: Any, authority_session_id: Optional[str],
                           authority_turn_id: Optional[str]) -> Optional[Any]:
     """Resolve live conversational run authority from the app-owned turn.

@@ -2,6 +2,8 @@ fastapi
 uvicorn
 pydantic
 requests
+boto3>=1.34,<2
+cryptography>=42
 python-multipart  # multipart parsing for POST /api/drawings/upload (§19); was installed-but-undeclared
 # tests
 jsonschema

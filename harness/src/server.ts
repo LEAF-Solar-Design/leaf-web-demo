@@ -52,6 +52,11 @@ import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
+import {
+  withAuthorStandardServicesAuthority,
+  type HumanApprovalHostInput,
+  type LeafStandardServicesHumanApprovalHost,
+} from "./ports/impl/leafStandardServicesResolver.js";
 
 export { DEFAULT_TENANT };
 
@@ -77,6 +82,31 @@ function tenantForRequest(req: IncomingMessage, body: Record<string, unknown>): 
   const t = body.tenant_id;
   if (typeof t === "string" && t.trim()) return t.trim();
   return tenantOf(req);
+}
+
+function authorityHeader(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function authorAuthorityForRequest(
+  req: IncomingMessage,
+  tenantId: string,
+): Omit<import("./ports/impl/leafStandardServicesResolver.js").AuthorAuthority, "subscription_mount_id"> | undefined {
+  const authoritySessionId = authorityHeader(req, "x-authority-session-id");
+  const authorityTurnId = authorityHeader(req, "x-authority-turn-id");
+  const required = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
+  if (Boolean(authoritySessionId) !== Boolean(authorityTurnId) || (required && !authoritySessionId)) {
+    throw new AuthorLoopError("active author authority headers are required", 409);
+  }
+  if (!authoritySessionId || !authorityTurnId) return undefined;
+  return {
+    tenant_id: tenantId,
+    session_id: authoritySessionId,
+    authority_session_id: authoritySessionId,
+    authority_turn_id: authorityTurnId,
+  };
 }
 
 // --------------------------------------------------------------------------- //
@@ -543,7 +573,13 @@ export interface Harness {
  * to stay hermetic); when omitted the gate resolves per-request from the environment via
  * resolveHarnessAuth() — so the live serve path needs no code change, only the env vars.
  */
-export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthConfig }): Harness {
+export function createHarness(ports: HarnessPorts, opts?: {
+  auth?: HarnessAuthConfig;
+  standardServicesApproval?: {
+    dispatchSecret: string;
+    host: LeafStandardServicesHumanApprovalHost;
+  };
+}): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
 
@@ -554,6 +590,73 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
     try {
       if (method === "GET" && path === "/health") {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
+      }
+
+      if (method === "POST" && path.startsWith("/internal/standard-services/approvals/")) {
+        const configured = opts?.standardServicesApproval;
+        const provided = authorityHeader(req, "x-dispatch-secret") ?? "";
+        if (
+          !configured?.dispatchSecret
+          || !provided
+          || !secretsEqual(provided, configured.dispatchSecret)
+        ) {
+          return send(res, 401, { error: { code: "approval_host_unauthorized", message: "approval host authority is required" } });
+        }
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("pragma", "no-cache");
+        const body = await readJsonBody(req, 64 * 1024);
+        if (path === "/internal/standard-services/approvals/review") {
+          try {
+            const reviewed = await configured.host.review({
+              approval_id: requiredText(body, "approval_id"),
+              argument_digest: requiredText(body, "argument_digest"),
+              tenant_id: requiredText(body, "tenant_id"),
+              subject_id: requiredText(body, "subject_id"),
+            });
+            if (!reviewed) {
+              return send(res, 404, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+            }
+            const identity = {
+              tenant_id: reviewed.identity.tenant_id,
+              subject_id: reviewed.identity.subject_id,
+              session_id: reviewed.identity.session_id,
+              authority_turn_id: reviewed.identity.authority_turn_id,
+              subscription_mount_id: reviewed.identity.subscription_mount_id,
+              runner_profile_id: reviewed.identity.runner_profile_id,
+            };
+            if (reviewed.status === "completed") {
+              if (typeof reviewed.receipt_id !== "string" || !/^[a-f0-9]{64}$/.test(reviewed.receipt_id)) {
+                throw new Error("invalid approval receipt");
+              }
+              return send(res, 200, {
+                status: "completed",
+                identity,
+                receipt_id: reviewed.receipt_id,
+                ...(reviewed.artifact_ids?.length ? { artifact_ids: [...reviewed.artifact_ids] } : {}),
+              });
+            }
+            return send(res, 200, { status: reviewed.status, identity });
+          } catch {
+            return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+          }
+        }
+        if (path === "/internal/standard-services/approvals/execute") {
+          try {
+            const receipt = await configured.host.execute(body as unknown as HumanApprovalHostInput);
+            if (receipt.status === "uncertain") return send(res, 200, { status: "uncertain" });
+            if (typeof receipt.receipt_id !== "string" || !/^[a-f0-9]{64}$/.test(receipt.receipt_id)) {
+              throw new Error("invalid approval receipt");
+            }
+            return send(res, 200, {
+              status: "completed",
+              receipt_id: receipt.receipt_id,
+              ...(receipt.artifact_ids?.length ? { artifact_ids: [...receipt.artifact_ids] } : {}),
+            });
+          } catch {
+            return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+          }
+        }
+        return send(res, 404, { error: { code: "not_found", message: "route not found" } });
       }
 
       // F5 caller-auth gate: every non-health route requires the shared secret when the
@@ -665,17 +768,21 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         const body = await readJsonBody(req);
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
+        const authority = authorAuthorityForRequest(req, tenant);
         // These names deliberately match AuthorLoop.stage's request exactly.
-        const out = await loop.stage(tenant, description, {
-          changeSetId: requiredText(body, "changeSetId"),
-          expectedBaseSha: requiredText(body, "expectedBaseSha"),
-          platformRelease: requiredText(body, "platformRelease"),
-          workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
-          idempotencyKey: requiredText(body, "idempotencyKey"),
-          ...(body.targetToolName === undefined
-            ? {}
-            : { targetToolName: requiredText(body, "targetToolName") }),
-        });
+        const stage = () => loop.stage(tenant, description, {
+            changeSetId: requiredText(body, "changeSetId"),
+            expectedBaseSha: requiredText(body, "expectedBaseSha"),
+            platformRelease: requiredText(body, "platformRelease"),
+            workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
+            idempotencyKey: requiredText(body, "idempotencyKey"),
+            ...(body.targetToolName === undefined
+              ? {}
+              : { targetToolName: requiredText(body, "targetToolName") }),
+          });
+        const out = authority
+          ? await withAuthorStandardServicesAuthority(authority, stage)
+          : await stage();
         return send(res, 200, out);
       }
 
@@ -899,6 +1006,11 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
+  const {
+    AuthorStandardServicesRunner,
+    StandardServicesOAuthGrantProvider,
+    standardServicesResolverFromEnv,
+  } = await import("./ports/impl/leafStandardServicesResolver.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
@@ -909,14 +1021,22 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
+  const standardServicesResolver = standardServicesResolverFromEnv();
+  const oauth = new StandardServicesOAuthGrantProvider(
+    new OAuthGrantProviderImpl({ store: grantStore }),
+  );
   const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
-        oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+        oauth,
         appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
-        runnerFor: (grant) => new ConverseSdkRunner({ grant }),
+        runnerFor: (grant) => new ConverseSdkRunner({
+          grant,
+          ...(standardServicesResolver ? { standardServicesResolver } : {}),
+        }),
+        ...(standardServicesResolver ? { standardServicesResolver } : {}),
         // Classify the turn's surface (drawing vs the product) with a small
         // fast model instead of matching vocabulary in the prompt. Advisory
         // and fail-open: see HaikuIntentSynthesizer.
@@ -926,9 +1046,14 @@ export async function startReal(port = 8130): Promise<Server> {
     : undefined;
 
   const ports: HarnessPorts = {
-    agentRunner: new AgentSdkRunner(),
+    agentRunner: new AuthorStandardServicesRunner(
+      new AgentSdkRunner({
+        ...(standardServicesResolver ? { standardServicesResolver } : {}),
+      }),
+      Boolean(standardServicesResolver),
+    ),
     broker: new BrokerApsClientHttp(),
-    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+    oauth,
     grantAdmin: grantStore,
     tenantRepo: new TenantRepoProviderImpl({
       locator: { async repoRef(t) { return `${tenantsDir}/${t}`; } },

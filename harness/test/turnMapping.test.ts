@@ -301,9 +301,19 @@ describe("mapSdkMessage: assistant errors", () => {
   it("maps an unrecognized fatal error to an error event followed by turn_complete{error}", () => {
     const events = mapSdkMessage(assistantText("", { error: "authentication_failed" }));
     expect(events).toEqual([
-      { type: "error", data: { error: { error_code: "authentication_failed", message: "Agent SDK turn failed: authentication_failed" } } },
+      { type: "error", data: { error: { error_code: "authentication_failed", message: "Agent SDK turn failed." } } },
       { type: "turn_complete", data: { stop_reason: "error" } },
     ]);
+  });
+
+  it("does not expose unknown upstream error text", () => {
+    const secret = "private-upstream-error-0123456789abcdef";
+    const events = mapSdkMessage(assistantText("", { error: secret }));
+    expect(events).toEqual([
+      { type: "error", data: { error: { error_code: "agent_sdk_turn_failed", message: "Agent SDK turn failed." } } },
+      { type: "turn_complete", data: { stop_reason: "error" } },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(secret);
   });
 });
 

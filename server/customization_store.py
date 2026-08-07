@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   target_tool_name TEXT,
   request_description TEXT,
   request_fingerprint TEXT,
+  authority_session_id TEXT,
+  authority_turn_id TEXT,
   stage_attempt INTEGER NOT NULL DEFAULT 0,
   stage_lease_owner TEXT,
   stage_lease_expires_at INTEGER,
@@ -287,6 +289,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         definitions = {
             "request_description": "TEXT",
             "request_fingerprint": "TEXT",
+            "authority_session_id": "TEXT",
+            "authority_turn_id": "TEXT",
             "stage_attempt": "INTEGER NOT NULL DEFAULT 0",
             "stage_lease_owner": "TEXT",
             "stage_lease_expires_at": "INTEGER",
@@ -347,6 +351,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_set_id: Optional[str] = None,
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
+        authority_session_id: Optional[str] = None,
+        authority_turn_id: Optional[str] = None,
     ) -> ChangeSet:
         row, _ = self._reserve_change_set(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -356,6 +362,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
             author_subject=author_subject, change_set_id=change_set_id,
             change_kind=change_kind, target_tool_name=target_tool_name,
             request_description=None, request_fingerprint=None,
+            authority_session_id=authority_session_id,
+            authority_turn_id=authority_turn_id,
         )
         return row
 
@@ -389,6 +397,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         target_tool_name: Optional[str] = None,
         request_description: Optional[str],
         request_fingerprint: Optional[str],
+        authority_session_id: Optional[str] = None,
+        authority_turn_id: Optional[str] = None,
     ) -> tuple[ChangeSet, bool]:
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
         idempotency_key = require_bounded(idempotency_key, "idempotency_key", 200)
@@ -426,6 +436,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.target_tool_name == target_tool_name
                     and row.request_fingerprint == request_fingerprint
                     and row.request_description == request_description
+                    and row.authority_session_id == authority_session_id
+                    and row.authority_turn_id == authority_turn_id
                 )
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
@@ -434,11 +446,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "INSERT INTO customization_change_sets "
                 "(change_set_id, tenant_id, idempotency_key, state, version, base_commit, "
                 "desired_platform_release, workspace_contract_digest, author_subject, "
-                "request_description, request_fingerprint) "
-                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                "request_description, request_fingerprint, authority_session_id, authority_turn_id) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (change_set_id, tenant_id, idempotency_key, ChangeState.CREATED.value,
                  base_commit, desired_platform_release, workspace_contract_digest,
-                 author_subject, request_description, request_fingerprint),
+                 author_subject, request_description, request_fingerprint,
+                 authority_session_id, authority_turn_id),
             )
             conn.execute(
                 "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ? "
@@ -1285,6 +1298,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
             change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
             request_description=row["request_description"],
             request_fingerprint=row["request_fingerprint"],
+            authority_session_id=row["authority_session_id"],
+            authority_turn_id=row["authority_turn_id"],
             stage_attempt=row["stage_attempt"],
             stage_lease_owner=row["stage_lease_owner"],
             stage_lease_expires_at=row["stage_lease_expires_at"],

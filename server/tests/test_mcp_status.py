@@ -1,137 +1,62 @@
-"""Security and tenant-isolation checks for GET /api/converse/mcp."""
+"""Security checks for the public standard-services status facade."""
 from __future__ import annotations
 
-import hashlib
 import inspect
-import json
-import sys
-from pathlib import Path
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-SERVER_DIR = Path(__file__).resolve().parents[1]
-if str(SERVER_DIR) not in sys.path:
-    sys.path.insert(0, str(SERVER_DIR))
-
-import deps  # noqa: E402
-from routers import mcp_status  # noqa: E402
+import deps
+from routers import mcp_status
 
 
-def _path(store: Path, tenant: str) -> Path:
-    digest = hashlib.sha256(tenant.encode("utf-8")).hexdigest()
-    return store / f"{digest}.json"
-
-
-@pytest.fixture()
-def client():
+def client() -> TestClient:
     app = FastAPI()
     app.include_router(mcp_status.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _response(client: TestClient, tenant: str):
-    return client.get("/api/converse/mcp", headers={"X-Tenant-Id": tenant})
+def test_reports_only_the_fixed_broker_facade(monkeypatch):
+    monkeypatch.setenv(
+        "LEAF_TENANT_MCP_BROKER_URL",
+        "https://tenant-broker.example:8443/mcp",
+    )
 
-
-def test_tenants_only_see_their_own_redacted_servers(client, monkeypatch, tmp_path):
-    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
-    sentinel = "Bearer sentinel-never-leak"
-    _path(tmp_path, "tenant-a").write_text(json.dumps([{
-        "name": "alpha", "url": "https://alpha.example.test/private?token=secret",
-        "authToken": sentinel,
-    }]), encoding="utf-8")
-    _path(tmp_path, "tenant-b").write_text(json.dumps([{
-        "name": "beta", "url": "https://beta.example.test:8443/hidden",
-        "authToken": sentinel,
-    }]), encoding="utf-8")
-
-    a = _response(client, "tenant-a")
-    b = _response(client, "tenant-b")
-
-    assert a.status_code == b.status_code == 200
-    assert a.json() == {"servers": [{"name": "alpha", "host": "alpha.example.test"}]}
-    assert b.json() == {"servers": [{"name": "beta", "host": "beta.example.test:8443"}]}
-    assert sentinel not in a.text + b.text
-    assert "private" not in a.text + b.text
-
-
-@pytest.mark.parametrize("contents", ["{", "[" * 1100 + "]" * 1100])
-def test_hostile_contents_degrade_to_an_empty_collection(client, monkeypatch, tmp_path, contents):
-    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
-    _path(tmp_path, "demo-tenant").write_text(contents, encoding="utf-8")
-
-    response = _response(client, "demo-tenant")
+    response = client().get(
+        "/api/converse/mcp", headers={"X-Tenant-Id": "tenant-a"}
+    )
 
     assert response.status_code == 200
+    assert response.json() == {
+        "servers": [{"name": "services", "host": "tenant-broker.example:8443"}]
+    }
+    assert "mcp" not in response.text
+
+
+def test_never_exposes_credentials_paths_or_operator_servers(monkeypatch):
+    secret = "secret-never-returned"
+    monkeypatch.setenv(
+        "LEAF_TENANT_MCP_BROKER_URL",
+        f"https://user:{secret}@operator.example/private?token={secret}",
+    )
+
+    response = client().get(
+        "/api/converse/mcp", headers={"X-Tenant-Id": "tenant-a"}
+    )
+
     assert response.json() == {"servers": []}
-    assert "sentinel" not in response.text
+    assert secret not in response.text
+    assert "operator" not in response.text
 
 
-def test_missing_store_environment_degrades_to_empty_collection(client, monkeypatch):
-    monkeypatch.delenv("LEAF_MCP_BRIDGE_DIR", raising=False)
-
-    response = _response(client, "demo-tenant")
-
-    assert response.status_code == 200
-    assert response.json() == {"servers": []}
-
-
-def test_drops_descriptors_that_embed_their_auth_token(client, monkeypatch, tmp_path):
-    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
-    sentinel = "token-abcdefghijklmnopqrstuvwxyz"
-    _path(tmp_path, "demo-tenant").write_text(json.dumps([
-        {"name": f"name-{sentinel}", "url": "https://name.example.test", "authToken": sentinel},
-        {"name": "host-leak", "url": f"https://host-{sentinel}.example.test", "authToken": sentinel},
-        {"name": "safe", "url": "https://safe.example.test", "authToken": sentinel},
-    ]), encoding="utf-8")
-
-    response = _response(client, "demo-tenant")
-
-    assert response.status_code == 200
-    assert response.json() == {"servers": [{"name": "safe", "host": "safe.example.test"}]}
-    assert sentinel not in response.text
+def test_missing_or_invalid_broker_config_fails_closed(monkeypatch):
+    monkeypatch.delenv("LEAF_TENANT_MCP_BROKER_URL", raising=False)
+    assert mcp_status._broker_descriptor() == []
+    assert mcp_status._broker_descriptor({
+        "LEAF_TENANT_MCP_BROKER_URL": "file:///operator-gateway"
+    }) == []
 
 
 def test_status_uses_the_active_tenant_dependency():
     dependency = inspect.signature(mcp_status.mcp_status).parameters["tenant"].default
-
     assert dependency.dependency is deps.require_active_tenant
-
-
-def test_a_short_token_embedded_in_the_host_is_still_dropped(client, monkeypatch, tmp_path):
-    """Review round 2 HIGH: a 24-char floor skipped containment for short
-    tokens while mcpBridge.ts accepts any length — a 20-char bearer inside a
-    hostname went straight through. Containment must not depend on length."""
-    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
-    short = "s" * 20
-    _path(tmp_path, "demo-tenant").write_text(json.dumps([
-        {"name": "leaky", "url": f"https://{short}.example.test", "authToken": short},
-        {"name": "clean", "url": "https://ok.example.test", "authToken": "t" * 40},
-    ]), encoding="utf-8")
-
-    response = _response(client, "demo-tenant")
-
-    assert response.status_code == 200
-    assert short not in response.text, f"a 20-char token leaked: {response.text}"
-    assert response.json() == {"servers": [{"name": "clean", "host": "ok.example.test"}]}
-
-
-def test_a_unicode_token_in_the_host_is_dropped(client, monkeypatch, tmp_path):
-    """Review round 3 HIGH: json.dumps escapes non-ASCII, so comparing the raw
-    token against the SERIALIZED entry never matched a Unicode token."""
-    monkeypatch.setenv("LEAF_MCP_BRIDGE_DIR", str(tmp_path))
-    token = "sécrét-token-value"
-    _path(tmp_path, "demo-tenant").write_text(json.dumps([
-        {"name": "leaky", "url": f"https://{token}.example.test", "authToken": token},
-        {"name": "clean", "url": "https://ok.example.test", "authToken": "t" * 40},
-    ]), encoding="utf-8")
-
-    response = _response(client, "demo-tenant")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert token not in json.dumps(body, ensure_ascii=False), (
-        f"a unicode token leaked: {body}")
-    assert body == {"servers": [{"name": "clean", "host": "ok.example.test"}]}

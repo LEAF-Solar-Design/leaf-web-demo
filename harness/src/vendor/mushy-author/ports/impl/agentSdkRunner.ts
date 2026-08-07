@@ -40,7 +40,15 @@ import type {
 } from "../index.js";
 import { acceptBrokerTestResult } from "../../agent/tools/toolExecutionReceipt.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
+import { grantSecrets, redactSecrets } from "../../redact.js";
 import { scrubSecrets } from "./envScrub.js";
+import { composeRunnerCapabilities } from "./runnerCapabilities.js";
+import { createStandardServicesFacade } from "./standardServicesFacade.js";
+import {
+  resolveStandardServicesSession,
+  snapshotTrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
+import type { StandardServicesResolver } from "./standardServicesRuntime.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented, not
@@ -65,6 +73,8 @@ interface ZodModule {
     string(): unknown;
     enum(v: string[]): unknown;
     array(inner: unknown): unknown;
+    record(inner: unknown): unknown;
+    unknown(): unknown;
     [k: string]: unknown;
   };
 }
@@ -132,6 +142,8 @@ export interface AgentSdkRunnerOptions {
   maxWallTimeMs?: number;
   /** Bounded reasoning effort for authoring. Defaults to LEAF_AUTHOR_EFFORT, then low. */
   effort?: AuthorEffort;
+  /** Product-wide resolver. A complete trusted run context mounts services automatically. */
+  standardServicesResolver?: StandardServicesResolver;
 }
 
 export type AuthorEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -436,7 +448,32 @@ export class AgentSdkRunner implements AgentRunner {
 
   constructor(private readonly opts: AgentSdkRunnerOptions = {}) {}
 
+  /**
+   * Scrub the grant out of anything that escapes. See the twin wrapper on
+   * SdkRepoEditor.edit for the full rationale: this runner injects the tenant's
+   * grant into the SDK's child env, SDK faults quote the offending value, and
+   * the shell's author lane persists whatever escapes into the durable
+   * conversation log that later models read back. (sol-critic PR #4, finding 1.)
+   */
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    try {
+      return await this.runInner(input);
+    } catch (e) {
+      const scrubbed = redactSecrets(
+        e instanceof Error ? e.message : String(e),
+        grantSecrets(input.grant),
+      );
+      const wrapped = new Error(scrubbed);
+      // Drop the original stack: it can quote the offending value too.
+      wrapped.stack = `${wrapped.name}: ${scrubbed}`;
+      throw wrapped;
+    }
+  }
+
+  private async runInner(input: AgentRunInput): Promise<AgentRunResult> {
+    const standardServicesContext = input.standardServicesContext === undefined
+      ? undefined
+      : snapshotTrustedStandardServicesContext(input.standardServicesContext);
     const authorStartedAt = Date.now();
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
@@ -567,7 +604,32 @@ export class AgentSdkRunner implements AgentRunner {
     const abort = new AbortController();
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
-    const allowed = new Set(allowedNames);
+    let services: ReturnType<typeof createStandardServicesFacade> | undefined;
+    if (this.opts.standardServicesResolver && standardServicesContext) {
+      try {
+        services = createStandardServicesFacade({
+          sdk,
+          z,
+          ...(await resolveStandardServicesSession(
+            this.opts.standardServicesResolver,
+            standardServicesContext,
+            "author",
+          )),
+          profile: "author",
+        });
+      } catch {
+        throw new Error("standard_services_resolver_setup_failed");
+      }
+    }
+    const composition = composeRunnerCapabilities({
+      profile: "author",
+      private_mcp_servers: registry
+        ? { author: server, registry: registry.serverConfig }
+        : { author: server },
+      private_allowed_tools: allowedNames,
+      ...(services ? { services } : {}),
+    });
+    const allowed = new Set(composition.allowedTools ?? []);
     const q = sdk.query({
       prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {
@@ -579,8 +641,8 @@ export class AgentSdkRunner implements AgentRunner {
         permissionMode: "default",
         cwd: input.repoDir,
         abortController: abort,
-        mcpServers: registry ? { author: server, registry: registry.serverConfig } : { author: server },
-        allowedTools: allowedNames,
+        mcpServers: composition.mcpServers,
+        allowedTools: composition.allowedTools,
         canUseTool: async (toolName: string, inp: Record<string, unknown>) => {
           if (allowed.has(toolName)) return { behavior: "allow", updatedInput: inp };
           return {

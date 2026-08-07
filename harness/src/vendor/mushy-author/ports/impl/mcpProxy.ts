@@ -1,8 +1,8 @@
 /**
  * The guarded upstream transport for tenant MCP servers.
  *
- * WHY THIS EXISTS. mcpBridge validates a tenant MCP server's HOST — at set time
- * and again by DNS at mount time. Host validation alone cannot make a
+ * WHY THIS EXISTS. The network policy validates a tenant MCP server's HOST.
+ * Host validation alone cannot make a
  * tenant-controlled URL safe, and PR #360's review proved it twice over:
  *
  *   1. REDIRECTS. Handing the Agent SDK `{ type: "http", url }` means the SDK
@@ -86,7 +86,19 @@ import {
   ListToolsResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpBridge.js";
+import {
+  isAllowedMcpHost,
+  isForbiddenMcpAddress,
+  resolveAllowedMcpHost,
+  type McpHostResolver,
+  type McpServerConfig,
+} from "./mcpNetworkPolicy.js";
+export {
+  isAllowedMcpHost,
+  isForbiddenMcpAddress,
+  resolveAllowedMcpHost,
+} from "./mcpNetworkPolicy.js";
+export type { McpHostResolver, McpServerConfig } from "./mcpNetworkPolicy.js";
 
 /** How long to wait for the upstream handshake before giving up on a server. */
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -185,9 +197,28 @@ export function guardedFetch(
   // accepted requests cannot distinguish "the SDK stopped dialling" from "the
   // SDK dials forever and the budget refuses forever" — this counter can.
   onStreamGetAttempt?: () => void,
+  resolver: McpHostResolver = async (name) => dnsLookup(name, { all: true, verbatim: true }),
 ): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" || input instanceof URL ? new URL(input.toString()) : new URL(input.url);
+    const url = typeof input === "string" || input instanceof URL ? new URL(input) : new URL(input.url);
+    const original = originalHost.startsWith("[") && originalHost.endsWith("]")
+      ? originalHost.slice(1, -1)
+      : originalHost;
+    const destination = url.hostname.startsWith("[") && url.hostname.endsWith("]")
+      ? url.hostname.slice(1, -1)
+      : url.hostname;
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+      throw new Error("mcp_upstream_url_unsafe");
+    }
+    if (destination.toLowerCase() !== original.toLowerCase()) {
+      throw new Error("mcp_upstream_host_changed");
+    }
+    if (
+      (isIP(original) && isForbiddenMcpAddress(original))
+      || (isIP(destination) && isForbiddenMcpAddress(destination))
+    ) {
+      throw new Error("mcp_upstream_host_unsafe");
+    }
     // Spend the stream budget BEFORE the DNS re-check: a dial we are refusing
     // anyway should not cost a lookup. GET is precise here — this transport
     // uses GET only to open or resume an SSE stream; messages are POSTs and
@@ -201,9 +232,13 @@ export function guardedFetch(
     }
     // An IP literal was already validated and cannot change under us; only a
     // NAME needs re-checking.
-    if (!isIP(originalHost)) {
-      const answers = await dnsLookup(originalHost, { all: true, verbatim: true });
-      if (!answers.length || answers.some((a) => isForbiddenMcpAddress(a.address))) {
+    if (!isIP(original)) {
+      const resolved = await resolver(original);
+      const answers = Array.isArray(resolved) ? resolved : [resolved];
+      if (!answers.length || answers.some((answer) => {
+        const address = typeof answer === "string" ? answer : answer.address;
+        return typeof address !== "string" || isForbiddenMcpAddress(address);
+      })) {
         throw new Error("mcp_upstream_host_became_unsafe");
       }
     }
@@ -224,8 +259,7 @@ export function guardedFetch(
  *
  * Returns null when the upstream cannot be reached or does not complete the
  * handshake in time — a tenant server being down must degrade the turn, never
- * fail it, which is the same posture resolveMcpAttachment already takes for a
- * server it refuses.
+ * fail it. A refused server is omitted from the contained proxy set.
  */
 export async function proxyTenantMcpServer(
   config: McpServerConfig,
@@ -242,7 +276,22 @@ export async function proxyTenantMcpServer(
   // silently refused forever.
   onStreamGetAttempt?: () => void,
 ): Promise<ProxiedMcpServer | null> {
-  const url = new URL(config.url);
+  let url: URL;
+  try {
+    url = new URL(config.url);
+  } catch {
+    report(`[leaf-mcp] tenant MCP server URL is invalid: ${JSON.stringify(config.name)}`);
+    return null;
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol)
+    || Boolean(url.username || url.password)
+    || !isAllowedMcpHost(url.hostname)
+    || !(await resolveAllowedMcpHost(url.hostname))
+  ) {
+    report(`[leaf-mcp] tenant MCP server URL is unsafe: ${JSON.stringify(config.name)}`);
+    return null;
+  }
   const transport = new StreamableHTTPClientTransport(url, {
     fetch: guardedFetch(url.hostname, { remaining: streamGetBudget }, onStreamGetAttempt),
     requestInit: config.authToken ? { headers: { Authorization: `Bearer ${config.authToken}` } } : {},

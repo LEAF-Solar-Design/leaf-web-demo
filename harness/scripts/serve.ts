@@ -50,7 +50,7 @@ import { redactTokens } from "../src/redact.js";
 import { authorRunnerMode, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { createShutdownHandler } from "../src/shutdown.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
-import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
+import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
@@ -72,6 +72,19 @@ import {
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import {
+  AuthorStandardServicesRunner,
+  LeafStandardServicesHumanApprovalHost,
+  parseStandardServicesEnvironment,
+  StandardServicesOAuthGrantProvider,
+  standardServicesResolverFromEnv,
+} from "../src/ports/impl/leafStandardServicesResolver.js";
+import {
+  assertTenantBrokerApprovalCatalog,
+  createTenantBrokerApprovalStore,
+  type TenantBrokerApprovalStoreHandle,
+} from "../src/ports/impl/tenantBrokerApprovalStore.js";
+import type { StandardServicesResolver } from "../src/vendor/mushy-author/index.js";
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
@@ -93,6 +106,7 @@ const TENANT_FIXTURE =
   process.env.LEAF_TENANT_FIXTURE ?? join(REPO_ROOT, "harness", "test", "fixtures", "tenant-repo");
 let sessionStoreHandle: SessionStoreHandle | null = null;
 let instantExecutorClient: HttpInstantExecutorClient | null = null;
+let tenantBrokerApprovalStoreHandle: TenantBrokerApprovalStoreHandle | null = null;
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
@@ -131,7 +145,10 @@ function tenantRepoDir(tenantId: string): string {
  * the converse lane stays unwired and `POST /turn` answers 501 — there is no
  * ungated fallback. The author/Build lane is unaffected either way.
  */
-function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefined {
+function spineTurnRunner(
+  oauth: OAuthGrantProvider,
+  standardServicesResolver: StandardServicesResolver | undefined,
+): ConverseRunner | undefined {
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   if (!appUrl || !dispatchSecret) {
@@ -154,13 +171,17 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
     gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
     store: sessionStoreHandle.store,
-    runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
+    runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({
+      grant,
+      ...(standardServicesResolver ? { standardServicesResolver } : {}),
+    }),
+    ...(standardServicesResolver ? { standardServicesResolver } : {}),
     ...(instantExecutorClient ? { instantExecutor: instantExecutorClient } : {}),
   });
 }
 
 /** Compose the real multi-tenant ports. */
-function buildPorts(): HarnessPorts {
+function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts {
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
@@ -178,7 +199,9 @@ function buildPorts(): HarnessPorts {
     log("[harness] author runner: AgentSdkRunner (structured source submission; generated code executes only through broker)");
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
-  const oauth = new OAuthGrantProviderImpl({ store: grantStore });
+  const oauth = new StandardServicesOAuthGrantProvider(
+    new OAuthGrantProviderImpl({ store: grantStore }),
+  );
   const tenantRepo = new TenantRepoProviderImpl({
     locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     inPlace: true,
@@ -193,11 +216,18 @@ function buildPorts(): HarnessPorts {
     broker,
     agentRunner: authorRunnerMode() === "fake"
       ? new FakeAgentRunner()
-      : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+      : new AuthorStandardServicesRunner(
+          new AgentSdkRunner({
+            maxTurns: 40,
+            maxTotalTokens: 500_000,
+            ...(standardServicesResolver ? { standardServicesResolver } : {}),
+          }),
+          Boolean(standardServicesResolver),
+        ),
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }
       : (() => {
-          const spine = spineTurnRunner(oauth);
+          const spine = spineTurnRunner(oauth, standardServicesResolver);
           return spine ? { converseRunner: spine } : {};
         })()),
     ...((process.env.LEAF_APP_URL ?? "").trim() && (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim()
@@ -240,6 +270,7 @@ async function validatePostgresStartup(): Promise<void> {
       "harness_confirmations",
       "harness_usage",
       "harness_tenant_repo_leases",
+      "harness_tenant_mcp_approvals",
     ];
     const columnRows = await pool.query<HarnessColumn>(
       `SELECT table_name, column_name, data_type, is_nullable
@@ -248,8 +279,9 @@ async function validatePostgresStartup(): Promise<void> {
          AND table_name = ANY($1::text[])`,
       [tableNames],
     );
-    const constraintRows = await pool.query<HarnessConstraint>(
-      `SELECT c.relname AS table_name, pg_get_constraintdef(pc.oid) AS definition
+    const constraintRows = await pool.query<HarnessConstraint & { constraint_name: string }>(
+      `SELECT c.relname AS table_name, pc.conname AS constraint_name,
+              pg_get_constraintdef(pc.oid) AS definition
        FROM pg_constraint pc
        JOIN pg_class c ON c.oid = pc.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -264,6 +296,7 @@ async function validatePostgresStartup(): Promise<void> {
       "idx_harness_confirmations_session",
       "idx_harness_usage_session",
       "idx_harness_tenant_repo_leases_expiry",
+      "idx_harness_tenant_mcp_approvals_expiry",
     ];
     const indexRows = await pool.query<HarnessIndex>(
       `SELECT indexname, indexdef
@@ -277,6 +310,11 @@ async function validatePostgresStartup(): Promise<void> {
       constraints: constraintRows.rows,
       indexes: indexRows.rows,
     });
+    assertTenantBrokerApprovalCatalog({
+      columns: columnRows.rows,
+      constraints: constraintRows.rows,
+      indexes: indexRows.rows,
+    });
   } finally {
     await pool.end();
   }
@@ -284,7 +322,29 @@ async function validatePostgresStartup(): Promise<void> {
 
 async function main(): Promise<void> {
   await validatePostgresStartup();
-  const server: Server = createHarness(buildPorts()).listen(HARNESS_PORT);
+  const standardServicesConfigured = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
+  tenantBrokerApprovalStoreHandle = standardServicesConfigured
+    ? createTenantBrokerApprovalStore()
+    : null;
+  const standardServicesResolver = standardServicesResolverFromEnv(
+    process.env,
+    undefined,
+    tenantBrokerApprovalStoreHandle?.store,
+  );
+  const standardServicesApproval = standardServicesResolver && tenantBrokerApprovalStoreHandle
+    ? {
+        dispatchSecret: (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim(),
+        host: new LeafStandardServicesHumanApprovalHost({
+          brokerEndpoint: (process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim(),
+          environment: parseStandardServicesEnvironment(process.env.LEAF_RUNTIME_ENV),
+          approvalStore: tenantBrokerApprovalStoreHandle.store,
+        }),
+      }
+    : undefined;
+  const server: Server = createHarness(
+    buildPorts(standardServicesResolver),
+    standardServicesApproval ? { standardServicesApproval } : undefined,
+  ).listen(HARNESS_PORT);
   server.on("listening", () => {
     log(
       `[harness] listening on http://127.0.0.1:${HARNESS_PORT}` +
@@ -311,6 +371,9 @@ async function main(): Promise<void> {
         },
       );
       instantExecutorClient?.close();
+      void (tenantBrokerApprovalStoreHandle?.close() ?? Promise.resolve()).catch(
+        (error: unknown) => log(`[harness] tenant MCP approval store close failed: ${(error as Error).message}`),
+      );
     },
   });
   process.on("SIGINT", () => shutdown("SIGINT"));

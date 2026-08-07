@@ -14,6 +14,7 @@ import customization_store
 import customization_service
 import author_quota
 import deps
+import session_store
 from customization_models import (
     ChangeSetNotFoundError,
     ChangeSetConflictError,
@@ -32,6 +33,8 @@ DIGEST = "c" * 64
 WORKSPACE = "d" * 64
 DESCRIPTION = "author a bounded write tool"
 FINGERPRINT = hashlib.sha256(DESCRIPTION.encode()).hexdigest()
+ALICE = "auth0|alice"
+MALLORY = "auth0|mallory"
 
 
 @pytest.fixture
@@ -39,6 +42,20 @@ def store(tmp_path):
     result = SQLiteCustomizationStore(tmp_path / "customization.db")
     result.initialize()
     return result
+
+
+@pytest.fixture
+def active_author_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "sessions.db")
+    monkeypatch.setattr(session_store, "_conn", None)
+    session_store.ensure_started()
+    session = session_store.get_or_create_session("tenant-a", "drawing-a")
+    session_id = session["session_id"]
+    turn_id = "turn-author"
+    assert session_store.try_begin_turn(
+        session_id, turn_id, 60, tier="hosted_pro", subject=ALICE
+    )
+    return session_id, turn_id
 
 
 def reserve(store, *, tenant="tenant-a", key="request-a", change_id=None):
@@ -355,23 +372,28 @@ def test_callback_completion_wins_and_clears_worker_lease(store):
     assert status["result"]["tool"]["name"] == "new-tool"
 
 
-def test_public_stage_route_returns_202_without_calling_synchronous_stage(monkeypatch):
+def test_public_stage_route_returns_202_without_calling_synchronous_stage(
+    monkeypatch, active_author_turn
+):
     called = threading.Event()
+    admitted = []
 
     def hung_stage(**_kwargs):
         called.set()
         time.sleep(5)
 
     service = SimpleNamespace(
-        enqueue_stage=lambda **_kwargs: {
-            "contract": "leaf.customization-stage-job.v1",
-            "change_set_id": "11111111-1111-4111-8111-111111111111",
-            "status": "queued",
-        },
+        enqueue_stage=lambda **kwargs: (
+            admitted.append(kwargs),
+            {
+                "contract": "leaf.customization-stage-job.v1",
+                "change_set_id": "11111111-1111-4111-8111-111111111111",
+                "status": "queued",
+            },
+        )[1],
         stage=hung_stage,
     )
-    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
-    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
     monkeypatch.setattr(
         author_router.CustomizationService, "configured",
         classmethod(lambda cls: service),
@@ -381,11 +403,201 @@ def test_public_stage_route_returns_202_without_calling_synchronous_stage(monkey
         author_router.StageRequest(
             description=DESCRIPTION, mode="build", idempotency_key="request-a"
         ),
-        tenant="tenant-a",
+        tenant=deps.TenantContext(
+            "tenant-a", tier="hosted_pro", subject=ALICE
+        ),
+        authority_session_id=active_author_turn[0],
+        authority_turn_id=active_author_turn[1],
     )
     assert response.status_code == 202
-    assert time.monotonic() - started < 0.1
+    assert time.monotonic() - started < 0.5
     assert not called.is_set()
+    assert admitted[0]["tenant"].subject == ALICE
+    assert admitted[0]["authority_session_id"] == active_author_turn[0]
+    assert admitted[0]["authority_turn_id"] == active_author_turn[1]
+
+
+def test_public_stage_route_rejects_partial_authority_tuple(monkeypatch):
+    called = False
+
+    def enqueue_stage(**_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: SimpleNamespace(enqueue_stage=enqueue_stage)),
+    )
+    response = author_router.stage(
+        author_router.StageRequest(
+            description=DESCRIPTION, mode="build", idempotency_key="request-a"
+        ),
+        tenant="tenant-a",
+        authority_session_id="session-a",
+        authority_turn_id=None,
+    )
+    assert response.status_code == 422
+    assert response.body
+    assert not called
+
+
+@pytest.mark.parametrize("route_name", ["author", "stage"])
+def test_author_routes_reject_same_tenant_cross_subject_turn(
+    monkeypatch, active_author_turn, route_name
+):
+    dispatched = []
+    service = SimpleNamespace(
+        enqueue_stage=lambda **kwargs: dispatched.append(kwargs) or {},
+        stage=lambda **kwargs: dispatched.append(kwargs) or {},
+    )
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: service),
+    )
+    tenant = deps.TenantContext(
+        "tenant-a", tier="hosted_pro", subject=MALLORY
+    )
+    if route_name == "author":
+        response = author_router.author(
+            author_router.AuthorRequest(description=DESCRIPTION, mode="build"),
+            tenant=tenant,
+            idempotency_key="request-a",
+            authority_session_id=active_author_turn[0],
+            authority_turn_id=active_author_turn[1],
+        )
+    else:
+        response = author_router.stage(
+            author_router.StageRequest(
+                description=DESCRIPTION, mode="build", idempotency_key="request-a"
+            ),
+            tenant=tenant,
+            authority_session_id=active_author_turn[0],
+            authority_turn_id=active_author_turn[1],
+        )
+    assert response.status_code == 409
+    assert b"stage_authority_invalid" in response.body
+    assert dispatched == []
+
+
+@pytest.mark.parametrize("route_name", ["author", "stage"])
+def test_direct_authenticated_author_cannot_bypass_missing_turn_authority(
+    monkeypatch, route_name
+):
+    dispatched = []
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(
+            lambda cls: SimpleNamespace(
+                enqueue_stage=lambda **kwargs: dispatched.append(kwargs) or {}
+            )
+        ),
+    )
+    tenant = deps.TenantContext("tenant-a", tier="hosted_pro", subject=ALICE)
+    if route_name == "author":
+        response = author_router.author(
+            author_router.AuthorRequest(description=DESCRIPTION, mode="build"),
+            tenant=tenant,
+            idempotency_key="request-a",
+        )
+    else:
+        response = author_router.stage(
+            author_router.StageRequest(
+                description=DESCRIPTION, mode="build", idempotency_key="request-a"
+            ),
+            tenant=tenant,
+        )
+    assert response.status_code == 409
+    assert dispatched == []
+
+
+@pytest.mark.parametrize("active_subject", [MALLORY, None])
+def test_stage_worker_rejects_subject_swap_or_stale_turn_before_harness(
+    store, monkeypatch, active_subject
+):
+    change, created = store.reserve_stage(
+        tenant_id="tenant-a",
+        idempotency_key="stage-authority-race",
+        base_commit=BASE,
+        desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject=ALICE,
+        request_description=DESCRIPTION,
+        request_fingerprint=FINGERPRINT,
+        authority_session_id="session-a",
+        authority_turn_id="turn-a",
+    )
+    assert created
+    observed = []
+
+    def resolve(tenant_id, session_id, turn_id):
+        observed.append((tenant_id, session_id, turn_id))
+        return active_subject
+
+    monkeypatch.setattr(deps, "active_stage_author_subject", resolve)
+    monkeypatch.setattr(
+        customization_service,
+        "_harness_config",
+        lambda: (_ for _ in ()).throw(AssertionError("harness config reached")),
+    )
+    with pytest.raises(CustomizationServiceError) as caught:
+        CustomizationService(store)._harness_stage(
+            "tenant-a", DESCRIPTION, change
+        )
+    assert caught.value.code == "stage_authority_invalid"
+    assert observed == [("tenant-a", "session-a", "turn-a")]
+
+
+def test_stage_worker_rejects_tenant_substitution_before_harness(
+    store, monkeypatch
+):
+    change, created = store.reserve_stage(
+        tenant_id="tenant-a",
+        idempotency_key="stage-authority-tenant-race",
+        base_commit=BASE,
+        desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject=ALICE,
+        request_description=DESCRIPTION,
+        request_fingerprint=FINGERPRINT,
+        authority_session_id="session-a",
+        authority_turn_id="turn-a",
+    )
+    assert created
+    monkeypatch.setattr(
+        deps, "active_stage_author_subject", lambda *_args: ALICE
+    )
+    monkeypatch.setattr(
+        customization_service,
+        "_harness_config",
+        lambda: (_ for _ in ()).throw(AssertionError("harness config reached")),
+    )
+    with pytest.raises(CustomizationServiceError) as caught:
+        CustomizationService(store)._harness_stage(
+            "tenant-b", DESCRIPTION, change
+        )
+    assert caught.value.code == "stage_authority_invalid"
+
+
+def test_stage_authority_lookup_failure_returns_no_authority(monkeypatch):
+    monkeypatch.setattr(
+        session_store,
+        "active_turn_subject",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+    assert deps.active_stage_author_subject(
+        "tenant-a", "session-a", "turn-a"
+    ) is None
 
 
 def test_stage_status_is_tenant_scoped_and_omits_private_request(store):
