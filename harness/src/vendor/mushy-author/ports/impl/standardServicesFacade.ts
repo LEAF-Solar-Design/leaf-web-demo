@@ -53,16 +53,36 @@ export const STANDARD_SERVICES_FACADE_TOOLS = [
 ] as const;
 
 const ISSUED_ID = /^[A-Za-z0-9_-]{8,256}$/;
+const PUBLIC_STANDARD_SERVICE_ERRORS = new Set([
+  "standard_service_approval_identity_mismatch",
+  "standard_service_approval_invalid_or_used",
+  "standard_service_approval_pending_human",
+  "standard_service_denied",
+  "standard_service_identity_incomplete",
+  "standard_service_read_requires_approval_request",
+  "standard_service_read_requires_observe_effect",
+  "standard_service_request_effect_not_supported",
+  "standard_service_request_requires_explicit_approval",
+  "standard_service_tool_not_permitted",
+  "standard_service_tool_unknown",
+  "standard_service_visual_requires_approval_request",
+  "standard_service_visual_target_identity_mismatch",
+  "standard_service_visual_target_missing_or_expired",
+  "standard_service_visual_target_must_be_issued_id",
+]);
 
 function result(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
 function failure(error: unknown): CallToolResult {
-  const raw = error instanceof Error ? error.message : String(error);
-  const safe = /^standard_service_[a-z0-9_:-]+$/i.test(raw)
-    ? raw
-    : "standard_service_provider_failure";
+  let raw = "";
+  try {
+    raw = error instanceof Error && typeof error.message === "string" ? error.message : "";
+  } catch {
+    // A hostile Error subclass may expose message through a throwing getter.
+  }
+  const safe = PUBLIC_STANDARD_SERVICE_ERRORS.has(raw) ? raw : "standard_service_provider_failure";
   return { content: [{ type: "text", text: safe }], isError: true };
 }
 

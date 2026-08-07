@@ -150,6 +150,15 @@ const RESULT_SUMMARY_MAX_CHARS = 500;
  *  generic `error` event (SDKAssistantMessageError, sdk.d.ts:2866). */
 const RATE_LIMIT_ASSISTANT_ERRORS = new Set(["rate_limit", "overloaded"]);
 const QUOTA_ASSISTANT_ERRORS = new Set(["billing_error"]);
+const PUBLIC_ASSISTANT_ERRORS = new Set([
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "invalid_request",
+  "model_not_found",
+  "server_error",
+  "unknown",
+  "max_output_tokens",
+]);
 
 /**
  * Split `text` into ordered chunks whose concatenation reconstructs it EXACTLY
@@ -228,15 +237,18 @@ export function stopReasonFromResult(result: Record<string, unknown>): StopReaso
 
 function mapAssistant(msg: Record<string, unknown>, toolUseNames: Map<string, string>): HarnessTurnEvent[] {
   const err = msg.error;
-  if (typeof err === "string") {
-    if (RATE_LIMIT_ASSISTANT_ERRORS.has(err)) {
+  if (err !== undefined) {
+    if (typeof err === "string" && RATE_LIMIT_ASSISTANT_ERRORS.has(err)) {
       return [{ type: "turn_complete", data: { stop_reason: "llm_rate_limited" } }];
     }
-    if (QUOTA_ASSISTANT_ERRORS.has(err)) {
+    if (typeof err === "string" && QUOTA_ASSISTANT_ERRORS.has(err)) {
       return [{ type: "turn_complete", data: { stop_reason: "llm_quota_exhausted" } }];
     }
+    const errorCode = typeof err === "string" && PUBLIC_ASSISTANT_ERRORS.has(err)
+      ? err
+      : "agent_sdk_turn_failed";
     return [
-      { type: "error", data: { error: { error_code: err, message: `Agent SDK turn failed: ${err}` } } },
+      { type: "error", data: { error: { error_code: errorCode, message: "Agent SDK turn failed." } } },
       { type: "turn_complete", data: { stop_reason: "error" } },
     ];
   }
@@ -522,13 +534,15 @@ const STABLE_RUNNER_ERRORS = new Set([
   "standard_services_attachment_expired",
   "standard_services_attachment_identity_mismatch",
   "standard_services_attachment_incomplete",
+  "standard_services_context_invalid",
+  "standard_services_context_required",
   "standard_services_context_turn_mismatch",
   "standard_services_resolver_setup_failed",
 ]);
-const STABLE_CONTEXT_ERROR = /^standard_services_context_invalid:(tenant_id|session_id|subscription_mount_id|authority_session_id|authority_turn_id)$/;
+const TRUSTED_CONTEXT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 function isStableRunnerError(message: string): boolean {
-  return STABLE_RUNNER_ERRORS.has(message) || STABLE_CONTEXT_ERROR.test(message);
+  return STABLE_RUNNER_ERRORS.has(message);
 }
 
 function stageError(error: unknown, fallback: string): Error {
@@ -553,14 +567,45 @@ function publicRunnerError(error: unknown, grant: AgentGrant): Error {
 function validateStandardServicesContext(
   input: ConverseTurnInput,
   context: TrustedStandardServicesContext | undefined,
-): void {
-  if (context && (
-    context.tenant_id !== input.tenant_id
-    || context.session_id !== input.session_id
-    || context.authority_turn_id !== input.turn_id
-  )) {
+  required: boolean,
+): TrustedStandardServicesContext | undefined {
+  if (!context) {
+    if (required) throw new Error("standard_services_context_required");
+    return undefined;
+  }
+  // Pin one plain snapshot before the first await. The caller cannot swap a
+  // mount or authority id while OAuth resolves and thereby change what reaches
+  // the resolver after this gate has passed.
+  let trusted: TrustedStandardServicesContext;
+  try {
+    trusted = Object.freeze({
+      tenant_id: context.tenant_id,
+      session_id: context.session_id,
+      subscription_mount_id: context.subscription_mount_id,
+      authority_session_id: context.authority_session_id,
+      authority_turn_id: context.authority_turn_id,
+    });
+  } catch {
+    throw new Error("standard_services_context_invalid");
+  }
+  const ids = [
+    trusted.tenant_id,
+    trusted.session_id,
+    trusted.subscription_mount_id,
+    trusted.authority_session_id,
+    trusted.authority_turn_id,
+  ];
+  if (ids.some((value) => typeof value !== "string" || !TRUSTED_CONTEXT_ID.test(value))) {
+    throw new Error("standard_services_context_invalid");
+  }
+  if (
+    trusted.tenant_id !== input.tenant_id
+    || trusted.session_id !== input.session_id
+    || trusted.authority_turn_id !== input.turn_id
+  ) {
     throw new Error("standard_services_context_turn_mismatch");
   }
+  return trusted;
 }
 
 async function* guardedQuery(query: AsyncIterable<unknown>): AsyncIterable<unknown> {
@@ -590,7 +635,11 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // Product authority must match the requested turn before any credential,
     // repository, broker, resolver, or SDK dependency is touched. In particular,
     // an approved confirmation is not permission to execute under swapped context.
-    validateStandardServicesContext(input, opts?.standardServicesContext);
+    const standardServicesContext = validateStandardServicesContext(
+      input,
+      opts?.standardServicesContext,
+      this.opts.standardServicesResolver !== undefined,
+    );
 
     // Resolve the tenant's Agent SDK grant FIRST, before any yield: a thrown
     // GrantRequiredError propagates un-caught out of this generator's first next()
@@ -605,7 +654,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
           grant,
           opts?.signal,
           opts?.planFirst === true,
-          opts?.standardServicesContext,
+          standardServicesContext,
         );
         return;
       }
@@ -614,7 +663,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         grant,
         opts?.signal,
         opts?.planFirst === true,
-        opts?.standardServicesContext,
+        standardServicesContext,
       );
     } catch (error) {
       throw publicRunnerError(error, grant);

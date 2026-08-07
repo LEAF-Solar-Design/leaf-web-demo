@@ -21,7 +21,7 @@
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "c65dadd5142705fa11a10b30b6992d648f983d9481539b63af0c68d1d5e14d06",
     "ports/impl/agentSdkRunner.ts": "de088e4fdde2028bad42bfe3a4eb56dca8936290cac47586a3351c85229fcc70",
-    "ports/impl/agentSdkTurnRunner.ts": "0e3a620e05ad3249c19c8f6fb92aa3307c48a03b7d7ed3465cfb7fcd966ce933",
+    "ports/impl/agentSdkTurnRunner.ts": "3f2de1834ed9297792f4598468039de66dbfbd3ad35c5c1144b64e5ac0528ccd",
     "ports/impl/converseSdkRunner.ts": "c77fde86fb1530fb6a51abc69ff91162c465c702d157477f0aca8f197da8fac5",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
@@ -39,7 +39,7 @@
     "ports/impl/sessionStoreFactory.ts": "b896d48b96f39ca6a3afcfbebc752cba155ef8d77762f5add0472ebcd9b39124",
     "ports/impl/skillBundle.ts": "e0a0f9b4e3a7eeaf37bdea16d0b2bd188096b0b30b18507d44beebacfd680e8f",
     "ports/impl/standardServices.ts": "6a7293a33330e464341b09e0ea602ba527c8e9aa13fda7ae10bc819b4ea9a528",
-    "ports/impl/standardServicesFacade.ts": "ecea537f5d974fb43049c33799c6f27eb5d9928f7b65e7dec5409494d166b709",
+    "ports/impl/standardServicesFacade.ts": "9e11c9b6cccb4f7eef80fefab092bf092bc1b00fc6df1f9ee1266f2e833e7ef0",
     "ports/impl/standardServicesRuntime.ts": "18338a6c4ba3cea96a48b3dcd7943a040a02d3db0bb67422f1020e290458a5d5",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "7bfb03463778735608efa9a57424d6cc5be1571adf71f28ebfca748ae31b0955",
     "ports/impl/tenantChangeRepo.ts": "0b651efdef1a6fe90a65ef473408dc8bdfaa6dda5d7a93856b463190bec23f43",
@@ -56,5 +56,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "1d9c996e0c38504171ae521fe270d7bdd9344f3a"
+  "upstream_commit": "452381a0b57fe2a155064867dfd73fbd15ec3be9"
 }
