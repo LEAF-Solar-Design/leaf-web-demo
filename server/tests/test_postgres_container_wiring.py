@@ -576,15 +576,13 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
         deploy/Dockerfile.app .`. Unmodified green. Dropping the sessions COPY,
         inserting `RUN rm -rf scripts` under WORKDIR /app, and truncating a
         script with `: > ...` each turned it red at this exact step.
-      * EXEC form, the spelling that ships: its PASS path only. BuildKit
-        executed the vertex and reported `#31 DONE 0.1s`, in the build of tree
-        `27bdb1399ab256d849e1821710fbdee8d7b3448a`. That tree hash is the
-        durable citation -- it is `git rev-parse <commit>^{tree}` of the commit
-        that introduced exec form, and it is what the image tag
-        `leaf-platform-app:spec-<tree>` is built from, so the pairing is
-        checkable forever with git alone. The CI run number was 31157638863,
-        recorded only as a convenience: Actions logs expire, the tree hash does
-        not.
+      * EXEC form, the spelling that ships: its PASS path only, once, in CI on
+        the PR that introduced it. BuildKit reported `#31 DONE 0.1s`, building
+        tree `27bdb1399ab256d849e1821710fbdee8d7b3448a` as
+        `leaf-platform-app:spec-27bdb1399ab256d849e1821710fbdee8d7b3448a-4aaf69f65ecc`,
+        Actions run 31157638863. Git still confirms that tree is the commit
+        which introduced exec form. Git does NOT confirm that BuildKit ran it,
+        and once the Actions log expires nothing here does.
 
     Read the log for `DONE`, not for a green job. A later build reported
     `#31 CACHED` at this vertex, which proves only that some earlier build of an
