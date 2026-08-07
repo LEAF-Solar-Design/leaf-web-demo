@@ -296,6 +296,35 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
     return copies
 
 
+def _assert_copies_survive_to_the_shipped_image(
+    dockerfile: str, copies: dict[str, str]
+) -> None:
+    """A COPY is a claim about the BUILD, not about what the image ships.
+
+    Anything after it can undo it -- `RUN rm -f /app/scripts/x.py` is a
+    plausible slimming step -- and the file is then simply absent while every
+    documented command still points at it. Rather than model deletion, moves,
+    permission changes and overwrites, refuse any later instruction that
+    mentions a copied path at all, and say what to teach the guard. Nothing in
+    deploy/Dockerfile.app touches these paths after copying them.
+    """
+    copied_so_far: set[str] = set()
+    for keyword, argument in _instructions(dockerfile):
+        if keyword == "COPY":
+            copied_so_far.update(
+                target for target in copies.values() if target in argument
+            )
+            continue
+        for target in sorted(copied_so_far):
+            assert target not in argument, (
+                f"{keyword} touches {target} after it is COPYed into the image: "
+                f"{argument!r}. A later instruction can delete, move, or replace "
+                f"a copied script, which would leave every documented command "
+                f"pointing at a path the shipped image does not have. This guard "
+                f"does not model post-copy mutation; teach it before doing this."
+            )
+
+
 def test_dockerfile_instruction_parsing_survives_case_and_indentation():
     """The guard below is only as good as this parse, and a naive
     `startswith("WORKDIR ")` fails OPEN here rather than closed.
@@ -410,6 +439,7 @@ def test_documented_authority_commands_resolve_in_the_image():
 
     copies = _copied_scripts(dockerfile)
     assert copies, "deploy/Dockerfile.app copies no scripts/ file"
+    _assert_copies_survive_to_the_shipped_image(dockerfile, copies)
 
     # WHAT TO CHECK IS CHOSEN FROM THE REPOSITORY, NOT FROM THE DOCKERFILE.
     # Selecting on the COPY map made a parse gap invisible twice over: a script
