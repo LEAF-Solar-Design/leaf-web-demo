@@ -813,16 +813,42 @@ saying rather than leaving a reader to infer they are equivalent.** The old
 reason was a property of the CODE: no shadow compare existed on those two
 modules, so only a merged, reviewed change could falsify it. The new reason is a
 property of the ENVIRONMENT: `LEAF_SESSION_ANNEX_STORE` happens to be unset.
-Anyone can falsify that by setting a variable, with no pull request, no review
-and no diff for anyone to notice. Same conclusion, much thinner footing.
 
-So state the condition rather than the observation. **The ordering argument holds
-only while every selector that resolves `SESSIONS_DB` is outside
-`session_annex.SHADOW_READ_MODES` and `session_store._SHADOW_READ_MODES`.** That
-is what has to stay true. Re-read the live task definition for BOTH selectors
-immediately before touching `SESSIONS_DB`, exactly as this document already says
-to re-read the desired counts, and for the same reason: a recorded environment
-fact is evidence about the past, not a guarantee about the present.
+Be accurate about how much weaker that is, because an earlier draft of this
+paragraph overstated it as "anyone can falsify that by setting a variable, with
+no pull request and no review". Not on this deployment. The selector lives in a
+task definition, so changing it means either a reviewed terraform change or a
+`configuration_delta`, and the allowlist described above does not even carry the
+annex selector today. The real difference is narrower and still worth having: the
+old reason was visible to anyone reading the application repository, and the new
+one is not. It can change with no diff in this repository at all, so a reader
+here cannot confirm it and must go and look at the live environment.
+
+So state the condition rather than the observation. A first attempt at that
+condition said "outside `session_annex.SHADOW_READ_MODES` and
+`session_store._SHADOW_READ_MODES`", **and it was wrong, because it let
+`dual_write` through.** Plain `dual_write` is not a shadow-read mode and still
+compares: `session_store.get_or_create_session` runs
+`_shadow_equal("session identity", legacy["session_id"], postgres["session_id"])`
+for every mode in `_DUAL_WRITE_MODES = {"dual_write", "dual_write_shadow"}`,
+with only the whole-row compare gated behind the shadow set. `checkpoints.py`
+has the identical shape around
+`session_annex.shadow_equal("checkpoint identity", ...)`. A review probe run at
+`LEAF_SESSIONS_STORE=dual_write` with a fresh legacy identity against an existing
+PostgreSQL identity raised `RuntimeError: session identity shadow mismatch`,
+which is precisely the failure the condition claimed to exclude.
+
+**Stated correctly, and simply: setting `SESSIONS_DB` is safe only while EVERY
+selector that resolves it is `legacy` or `postgres`.** Those are the only two of
+the five modes that never compare the stores: `legacy` never consults
+PostgreSQL, `postgres` short-circuits before the legacy read, and `dual_write`,
+`dual_write_shadow` and `shadow` all compare. Prefer that formulation to any
+list of mode-set names, since the naming is what produced the error.
+
+Re-read the live task definition for BOTH selectors immediately before touching
+`SESSIONS_DB`, exactly as this document already says to re-read the desired
+counts, and for the same reason: a recorded environment fact is evidence about
+the past, not a guarantee about the present.
 
 More generally, and this is the reusable half: **a claim about what COVERS
 something decays faster than a claim about what something IS.** "These tables
