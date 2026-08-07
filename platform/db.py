@@ -1024,6 +1024,14 @@ def _apply_one(path: Path, *, track: bool) -> None:
             )
 
 
+#: The files the loader treats as shipped migrations. Single source of truth:
+#: anything that reasons about the migration set -- including the static guards
+#: under ``platform/tests`` -- must glob with THIS pattern, or it sees a
+#: different set of files than the loader applies. A narrower ``00*.sql`` stops
+#: matching at 0100 while the loader keeps going.
+MIGRATION_GLOB = "[0-9][0-9][0-9][0-9]_*.sql"
+
+
 def apply_migration(sql_path: Optional[Path] = None) -> None:
     """Apply migrations. With no arg, apply EVERY ``NNNN_*.sql`` in ``migrations/``
     in sorted (numeric-prefix) order — so a fresh deploy gets 0001 (tables) AND
@@ -1036,10 +1044,10 @@ def apply_migration(sql_path: Optional[Path] = None) -> None:
     if sql_path is not None:
         path = Path(sql_path)
         track = path.resolve().parent == mig_dir.resolve() and path.match(
-            "[0-9][0-9][0-9][0-9]_*.sql")
+            MIGRATION_GLOB)
         _apply_one(path, track=track)
         return
-    for path in sorted(mig_dir.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+    for path in sorted(mig_dir.glob(MIGRATION_GLOB)):
         _apply_one(path, track=True)
 
 
@@ -1048,7 +1056,7 @@ def migration_manifest() -> List[Dict[str, str]]:
     mig_dir = _PKG_DIR / "migrations"
     return [
         _migration_record(path)
-        for path in sorted(mig_dir.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+        for path in sorted(mig_dir.glob(MIGRATION_GLOB))
     ]
 
 
