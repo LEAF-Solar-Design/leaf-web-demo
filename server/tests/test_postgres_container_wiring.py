@@ -301,27 +301,59 @@ def _assert_copies_survive_to_the_shipped_image(
 ) -> None:
     """A COPY is a claim about the BUILD, not about what the image ships.
 
-    Anything after it can undo it -- `RUN rm -f /app/scripts/x.py` is a
-    plausible slimming step -- and the file is then simply absent while every
-    documented command still points at it. Rather than model deletion, moves,
-    permission changes and overwrites, refuse any later instruction that
-    mentions a copied path at all, and say what to teach the guard. Nothing in
-    deploy/Dockerfile.app touches these paths after copying them.
+    Anything after it can undo it -- `RUN rm -rf /app/scripts` is a plausible
+    slimming step ("migration scripts should not ship in the runtime image") --
+    and the files are then simply absent while every documented command still
+    points at them.
+
+    TWO THINGS THIS DELIBERATELY DOES NOT DO, both learned from a fail-open:
+
+    * It does not match the full file path. `rm -rf /app/scripts` never
+      mentions any file, yet removes them all. Match the DIRECTORY, which is
+      the coarsest thing whose disappearance breaks every command under it.
+    * It does not read parsed instructions. `_logical_lines` drops heredoc
+      BODIES so they are not misread as instructions, which is right for
+      parsing and exactly wrong here: a body attached to RUN is executable
+      shell, so `RUN <<SLIM` / `rm -rf /app/scripts/x.py` / `SLIM` was
+      invisible. Scan the RAW text, which cannot have that blind spot.
+
+    Lines that are themselves a tracked COPY are exempt, since a second
+    script's COPY legitimately names the same directory.
     """
-    copied_so_far: set[str] = set()
-    for keyword, argument in _instructions(dockerfile):
-        if keyword == "COPY":
-            copied_so_far.update(
-                target for target in copies.values() if target in argument
-            )
-            continue
-        for target in sorted(copied_so_far):
-            assert target not in argument, (
-                f"{keyword} touches {target} after it is COPYed into the image: "
-                f"{argument!r}. A later instruction can delete, move, or replace "
-                f"a copied script, which would leave every documented command "
-                f"pointing at a path the shipped image does not have. This guard "
-                f"does not model post-copy mutation; teach it before doing this."
+    raw_lines = dockerfile.splitlines()
+    targets = set(copies.values())
+
+    # Exempt only lines that genuinely BELONG TO A COPY INSTRUCTION, including
+    # its continuations. Exempting "any line that mentions a target" instead
+    # would let `RUN rm -f /app/scripts/x.py` excuse itself for naming the very
+    # file it deletes, which is the opposite of the point.
+    copy_lines: set[int] = set()
+    inside_copy = False
+    for index, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if not inside_copy and stripped.lower().startswith("copy"):
+            inside_copy = True
+        if inside_copy:
+            copy_lines.add(index)
+            inside_copy = stripped.endswith("\\")
+
+    for target in sorted(targets):
+        directory = str(PurePosixPath(target).parent)
+        first_copy = min(
+            index for index in copy_lines if target in raw_lines[index]
+        )
+        for index in range(first_copy + 1, len(raw_lines)):
+            if index in copy_lines:
+                continue
+            assert directory not in raw_lines[index], (
+                f"deploy/Dockerfile.app line {index + 1} mentions {directory} "
+                f"after {target} is COPYed there: {raw_lines[index].strip()!r}. "
+                f"A later step can delete, move, or replace a copied script -- "
+                f"including from inside a heredoc body, and including by "
+                f"removing the whole directory -- which would leave every "
+                f"documented command pointing at a path the shipped image does "
+                f"not have. This guard does not model post-copy mutation; teach "
+                f"it before doing this."
             )
 
 
