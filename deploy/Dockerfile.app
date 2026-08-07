@@ -66,6 +66,28 @@ RUN chmod 0500 /app/server/start-app.sh
 # stays stdlib. Run from the server workdir.
 WORKDIR /app/server
 
+# --- Runtime proof that the reconcilers survived the build. -------------------
+# The image is the only place the documented reconciliation commands ever run
+# (platform/authority-inventory.json ships `python /app/scripts/reconcile_*.py`),
+# so a script that failed to land fails in an operator cutover rather than here.
+#
+# This is the LAST instruction that can touch the filesystem, and it must stay
+# that way: it proves the state of /app/scripts AFTER every RUN and COPY above
+# it, so a later instruction that removed them breaks the BUILD. No static check
+# can do this job -- a text scan of this file does not know the WORKDIR in effect
+# at each line, so a relative `rm -rf scripts` under WORKDIR /app reads as
+# harmless. That approach was tried and removed in dbd6e5d; see the module
+# comment in server/tests/test_postgres_container_wiring.py.
+#
+# ABOVE the per-commit ARG deliberately, and it belongs nowhere else. A RUN below
+# that ARG re-executes on every merge, which
+# scripts/test_build_platform_images_workflow.py forbids outright (it fails the
+# build gate, not merely the cache). The two rules interlock: a destructive RUN
+# appended at the end of this file is either above this guard, where the guard
+# catches it, or below the ARG, where that invariant catches it.
+RUN test -f /app/scripts/reconcile_customization_authority.py \
+ && test -f /app/scripts/reconcile_sessions_authority.py
+
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
 # miss for everything after it — declared at the top it made the apt/pip layers
@@ -96,22 +118,3 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
 # uvicorn binds 0.0.0.0 so the container is reachable on the compose network
 # (python app.py already binds 0.0.0.0, but uvicorn is the documented run form).
 CMD ["/app/server/start-app.sh"]
-
-# --- Runtime proof that the reconcilers survived the build. -------------------
-# The image is the only place the documented reconciliation commands ever run
-# (platform/authority-inventory.json ships `python /app/scripts/reconcile_*.py`),
-# so a script that failed to land fails in an operator cutover rather than here.
-#
-# Deliberately the LAST instruction, and it must STAY last: it proves the state of
-# the filesystem AFTER every instruction above it, so a later RUN or COPY that
-# removed /app/scripts breaks the BUILD. No static check can do this job -- a text
-# scan of this file does not know the WORKDIR in effect at each line, so a relative
-# `rm -rf scripts` under WORKDIR /app reads as harmless. That approach was tried
-# and removed in dbd6e5d; see the module comment in
-# server/tests/test_postgres_container_wiring.py. New instructions go ABOVE this.
-#
-# Below the ARG on purpose, which costs one uncached exec of two `test -f` calls
-# per build. The cache concern that ARG comment describes is the apt/pip layers,
-# and those stay above the ARG with their cache intact.
-RUN test -f /app/scripts/reconcile_customization_authority.py \
- && test -f /app/scripts/reconcile_sessions_authority.py

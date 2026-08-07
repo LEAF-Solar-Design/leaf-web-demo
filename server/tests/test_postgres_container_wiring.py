@@ -505,6 +505,15 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
 
     Keyed on the COPY map, so a reconciler added later is covered the day it is
     copied rather than the day someone remembers to extend this list.
+
+    It is NOT the last instruction in the file, and must not be: a RUN below the
+    per-commit `ARG LEAF_SOURCE_SHA` re-executes on every merge, which
+    scripts/test_build_platform_images_workflow.py forbids outright. That was
+    caught by CI, not by review. The two rules interlock rather than conflict --
+    a destructive RUN appended to this file is either above the guard, where the
+    guard catches it, or below the ARG, where that invariant catches it -- so
+    what this pins is the property that actually matters: nothing that can TOUCH
+    the filesystem comes after the guard.
     """
     dockerfile = _app_dockerfile()
     _single_stage(dockerfile)
@@ -512,20 +521,38 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     copies = _copied_scripts(dockerfile)
     assert copies, "deploy/Dockerfile.app copies no scripts/ file"
 
-    # LAST, not merely present. The guard's whole value is that nothing runs
-    # after it; an appended instruction is unchecked, so this fails loudly and
-    # makes moving the guard down a deliberate, reviewed act.
-    keyword, argument = _instructions(dockerfile)[-1]
-    assert keyword == "RUN", (
-        f"deploy/Dockerfile.app now ends in {keyword}, not the runtime "
-        "existence guard. The guard proves the filesystem AFTER every "
-        "instruction above it, so anything below it ships unchecked."
+    instructions = _instructions(dockerfile)
+    guarded = [
+        index for index, (keyword, argument) in enumerate(instructions)
+        if keyword == "RUN" and "test -f" in argument
+    ]
+    assert len(guarded) == 1, (
+        "deploy/Dockerfile.app must hold exactly one `RUN test -f` existence "
+        f"guard; found {len(guarded)}. Two of them make 'the' guard ambiguous "
+        "and let the later one be the only real check."
     )
+    argument = instructions[guarded[0]][1]
     for target in sorted(copies.values()):
         assert f"test -f {target}" in argument, (
-            f"the final RUN does not assert {target} exists, so an instruction "
+            f"the existence guard does not assert {target}, so an instruction "
             f"that removed it would ship a broken image: {argument!r}"
         )
+
+    # ALLOWLIST, not a denylist of RUN/COPY/ADD. An instruction this guard does
+    # not recognise fails LOUD rather than being assumed harmless, which is the
+    # failure mode the deleted static check had.
+    cannot_write = {
+        "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
+        "MAINTAINER", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+    }
+    after = [keyword for keyword, _ in instructions[guarded[0] + 1:]]
+    offending = sorted({k for k in after if k.upper() not in cannot_write})
+    assert not offending, (
+        f"deploy/Dockerfile.app runs {offending} AFTER the existence guard, so "
+        "those instructions ship unchecked. Put filesystem-touching "
+        "instructions above the guard, or teach this allowlist why they cannot "
+        "write."
+    )
 
 
 def test_required_config_manifests_fail_closed_for_postgres_authority():
