@@ -225,6 +225,11 @@ class WarmExecutorSupervisor:
         The record repeats every field of `health()` that is a number or a
         state, and nothing else: no tenant, session, assignment, or source
         value is in scope here, so this line cannot leak one.
+
+        A raise from `health()` is NOT caught here.  It belongs to
+        `CapacitySampler._run()`, this method's only production caller, which
+        both survives it and counts it -- swallowing it here would leave the
+        sampler unable to tell a failing sample from a working one.
         """
         state = self.health()
         try:
@@ -625,7 +630,9 @@ class CapacitySampler:
     """
 
     def __init__(self, supervisor: WarmExecutorSupervisor,
-                 interval_seconds: float = DEFAULT_CAPACITY_SAMPLE_SECONDS) -> None:
+                 interval_seconds: float = DEFAULT_CAPACITY_SAMPLE_SECONDS,
+                 *,
+                 runtime_event_sink: Callable[[dict[str, Any]], None] = emit_runtime_event) -> None:
         # Non-finite values pass a bare `<= 0` test and then break in ways that
         # are much worse than a rejected config.  `nan` makes Event.wait return
         # instantly, so the sampler busy-loops and floods the log group, and
@@ -646,6 +653,13 @@ class CapacitySampler:
         self._interval_seconds = interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # The sampler carries its OWN sink rather than borrowing the
+        # supervisor's.  The thing it has to report on is a supervisor whose
+        # `health()` just raised, and reaching into that same object for the
+        # channel used to say so would make the report depend on the component
+        # it is reporting about.
+        self._runtime_event_sink = runtime_event_sink
+        self._consecutive_failures = 0
 
     @classmethod
     def from_environment(cls, supervisor: WarmExecutorSupervisor,
@@ -679,6 +693,75 @@ class CapacitySampler:
         if thread is not None:
             thread.join(timeout=STOP_JOIN_SECONDS)
 
+    def _record_sample_failure(self, exc: BaseException) -> None:
+        """Say that a sample failed, on a schedule that cannot flood the log group.
+
+        A swallowed failure is barely better than a dead thread: both publish
+        nothing, and `capacity_slots` reads both as healthy quiet.  So the
+        failure gets its own line -- and the line is what a metric filter in the
+        terraform root would key on to alarm on a running-but-blind sampler.
+        Wiring that filter and its alarm is a terraform-side change and is NOT
+        in this commit; what is here is the event it would need.
+
+        BOUNDED BY OUTPUT, NOT BY TRIGGER.  A permanently broken `health()`
+        fails every interval forever, so reporting each one would emit two lines
+        a minute at the default interval and far more at a short one, into the
+        same log group the gauge itself uses.  Reporting only at counts that are
+        a power of two (1, 2, 4, 8, ...) keeps the first failure immediate -- the
+        one an operator needs -- while a run of length n costs log2(n) lines
+        instead of n.  The count rides in every line, so a consumer reading only
+        the newest one still learns how long the run is.
+
+        The exception TYPE is reported and its message is NOT.  `sample_capacity`
+        documents that its record carries no tenant, session, assignment, or
+        source value, and a test pins that; an uncontrolled exception string
+        would put that promise back in play (a KeyError on a session-keyed dict
+        prints the session id).  The type alone separates the causes worth
+        separating and cannot carry a payload.
+        """
+        self._consecutive_failures += 1
+        if self._consecutive_failures & (self._consecutive_failures - 1):
+            return  # not a power of two; already reported at the last one
+        self._emit({
+            "event_type": "capacity_sample_failed",
+            "executor_id": self._supervisor.executor_id,
+            "error_type": type(exc).__name__,
+            "consecutive_failures": self._consecutive_failures,
+            "occurred_at": _now(),
+        })
+
+    def _record_sample_success(self) -> None:
+        """Close a run of failures, so the log says when the gauge came back.
+
+        Without this the newest `capacity_sample_failed` line is unbounded in
+        time: a consumer cannot tell a run that ended two hours ago from one
+        still going, because a healthy sampler is silent about its own health.
+        This fires at most once per run of failures, and never on a sampler that
+        has not failed.
+        """
+        if not self._consecutive_failures:
+            return
+        recovered_after, self._consecutive_failures = self._consecutive_failures, 0
+        self._emit({
+            "event_type": "capacity_sample_recovered",
+            "executor_id": self._supervisor.executor_id,
+            "consecutive_failures": recovered_after,
+            "occurred_at": _now(),
+        })
+
+    def _emit(self, record: dict[str, Any]) -> None:
+        # Same contract as the sinks in the supervisor, and load-bearing twice
+        # over here: this runs on the path that exists BECAUSE something already
+        # raised, so a sink that raises in turn would kill the thread from
+        # inside the handler that exists to keep it alive.  It cannot recurse --
+        # nothing in here calls back into the sample path -- and the failure
+        # counter is advanced before the emit, so a sink that raises every time
+        # still decays to log2 attempts rather than one per interval.
+        try:
+            self._runtime_event_sink(record)
+        except Exception:  # noqa: BLE001 - see above
+            pass
+
     def _run(self) -> None:
         # Wait to a DEADLINE, not for a fixed duration. Sampling then waiting the
         # full interval spaces samples by `interval + however long the sample
@@ -688,7 +771,29 @@ class CapacitySampler:
         # the interval rather than against the interval plus unbounded work.
         deadline = time.monotonic()
         while not self._stop.is_set():
-            self._supervisor.sample_capacity()
+            # The ONLY thing standing between a raising sample and a gauge that
+            # is silent for the life of the process.  `sample_capacity()` guards
+            # its sink but not the `health()` call above it, and this loop is a
+            # bare daemon thread: an escaping exception ends the thread, nothing
+            # restarts it, and no surface says so.  The `capacity_slots` alarm
+            # then reads the resulting absence as notBreaching -- deliberately,
+            # because when the whole EXECUTOR dies two other alarms already fire
+            # -- while `capacity` and `registration` both stay green because the
+            # task is alive and still heartbeating.  A sampler-only death is
+            # therefore invisible on every surface, which is why it is caught
+            # here rather than left to the alarm.
+            #
+            # The guard wraps the call and NOTHING else: the deadline arithmetic
+            # below is what keeps the sample's own cost out of the spacing, and
+            # it must run on the failure path too, or a fast-failing sample would
+            # spin the loop.  `Exception`, not `BaseException`: a KeyboardInterrupt
+            # or SystemExit aimed at this thread should still end it.
+            try:
+                self._supervisor.sample_capacity()
+            except Exception as exc:  # noqa: BLE001 - see above
+                self._record_sample_failure(exc)
+            else:
+                self._record_sample_success()
             deadline += self._interval_seconds
             remaining = deadline - time.monotonic()
             if remaining <= 0:
