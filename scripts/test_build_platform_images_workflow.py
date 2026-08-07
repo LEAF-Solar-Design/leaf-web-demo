@@ -2770,8 +2770,16 @@ def check_docs_noop_filter(text: str) -> None:
     # and one run — each explicitly re-bound to the workflow's own read-only
     # token with `GH_TOKEN="$HOME_TOKEN"`, matching the existing tip read, so
     # the infra-repo PAT gains no new command.
+    # Hash updated again 2026-08-07 (third edit): the docs-noop arm now
+    # re-reads the tip AFTER its classification poll and fails RED on a moved
+    # tip, closing an interleaving an external review found and this repo
+    # reproduced. Reviewed for dispatch capability: no change to the dispatch
+    # itself, still ONE `gh workflow run` with the same four inputs, no new
+    # secret reference; the one added call is a read-only GET of this repo's
+    # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
+    # to the tip read already at the top of the loop.
     assert frozen == (
-        "2c886b156fafdcea600f25b0178b319ebf962eaa3e6358f0e033e365ba0c0a6c"
+        "97ae6184483f25908fc0429f8af8e96123f20c2e56a99e8cd027aaed5fd9214a"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3503,12 +3511,43 @@ def check_staging_relay_convergence(text: str) -> None:
     docs_noop_arm = re.search(
         r'if \[ "\$CONVERGER" = "no" \]; then\n(.*?)\n\s*elif ', code, re.S)
     assert docs_noop_arm, "the docs-noop superseder needs its own arm"
-    assert not re.search(r"\bexit\b", docs_noop_arm.group(1)), (
-        "a docs-noop superseder converges nothing, so this release must FALL "
-        "THROUGH and finish its remaining services; exiting here strands "
-        "staging split exactly as run 31144164225 did")
+    arm = docs_noop_arm.group(1)
     assert docs_noop_arm.end() < dispatch_at, (
         "the fall-through must reach the dispatch below it")
+
+    # The arm must FALL THROUGH on its success path. Its only exit may be the
+    # stale-classification guard below; an unconditional exit here strands
+    # staging split exactly as run 31144164225 did.
+    arm_exits = [ln.strip() for ln in arm.splitlines()
+                 if re.match(r"^\s*exit\b", ln)]
+    assert arm_exits == ["exit 1"], (
+        "the docs-noop arm may contain exactly one exit, the stale-tip guard; "
+        f"found {arm_exits}")
+    assert not re.match(r"^\s*exit\b", arm.splitlines()[-1]), (
+        "the docs-noop arm must not END in an exit; it has to reach the "
+        "dispatch that converges staging")
+
+    # THE CLASSIFICATION IS A POLL, SO ITS INPUT TIP IS A SNAPSHOT.
+    #
+    # sol@medium found this and it reproduced: between the classifier call and
+    # the dispatch there was no second tip read, so a DEPLOYABLE commit
+    # merging during the poll could deploy a newer tag to both services and
+    # this relay would then dispatch its older tag last. The shared
+    # concurrency group does not prevent that: it serializes runs that
+    # overlap, and does not order a dispatch arriving after the group drained.
+    # Fail CLOSED on a moved tip rather than re-classify, so the arm cannot
+    # spin on a fast-moving main.
+    assert re.search(
+        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
+        r'"repos/\$GITHUB_REPOSITORY/branches/main"', arm), (
+        "the docs-noop arm must re-read the tip AFTER the classification poll; "
+        "acting on the pre-poll snapshot can land a stale tag over a newer "
+        "deploy")
+    stale_guard = re.search(
+        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', arm, re.S)
+    assert stale_guard, "the re-read needs a guard that acts on a moved tip"
+    assert "::error::" in stale_guard.group(1) and "exit 1" in stale_guard.group(1), (
+        "a stale docs-noop finding must fail RED, not proceed and not exit 0")
 
     # The classifier reads the superseding build's OWN receipt. Re-deriving
     # the docs-only verdict from a compare API would be a second copy of a
@@ -3699,6 +3738,20 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "marker check replaced by a re-derived diff that can drift",
             mutate(original, 'docs-noop-$SUP_SHA-attempt-', "noop-guess-"),
+        ),
+        (
+            "acting on the pre-poll tip snapshot (sol@medium's interleaving)",
+            mutate(original,
+                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+',
+                   '                  TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
+'),
+        ),
+        (
+            "stale docs-noop finding proceeds instead of failing red",
+            mutate(original,
+                   'if [ "$TIP_NOW" != "$MAIN_SHA" ]; then',
+                   'if [ "$TIP_NOW" = "$TIP_NOW" ] && false; then'),
         ),
     ]
     for name, mutant in negatives:

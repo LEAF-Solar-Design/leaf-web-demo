@@ -300,6 +300,22 @@ jobs:
                 # turns entirely on whether the superseder converges it.
                 CONVERGER=$(superseder_deploys "$MAIN_SHA")
                 if [ "$CONVERGER" = "no" ]; then
+                  # The classification POLLS, so MAIN_SHA is a snapshot taken
+                  # before that wait. Re-read the tip and refuse to act on a
+                  # stale finding: while we classified $MAIN_SHA, a DEPLOYABLE
+                  # commit could have merged and its relay could have deployed
+                  # a newer tag to both services. Dispatching afterwards would
+                  # land $IMAGE_TAG last, which is the backwards deploy the
+                  # whole latest-main-only rule exists to stop. The shared
+                  # concurrency group does NOT save us here: it serializes
+                  # runs that overlap, and it does not order a dispatch that
+                  # arrives after the group has already drained.
+                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
+                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the docs-noop finding is stale and finishing $SERVICE on $IMAGE_TAG could land it on top of a newer deploy. Standing down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                    exit 1
+                  fi
                   # The superseder builds NO images, so its relay dispatches
                   # nothing and there is no newer deploy for $IMAGE_TAG to
                   # land on top of. The hazard that makes standing down
