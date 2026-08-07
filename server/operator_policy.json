@@ -1,0 +1,154 @@
+{
+  "_note": "Operator action catalog (contract/OPERATOR.md section 4). Namespaced operator.*, sealed handler registry, no production deploy route anywhere. Overlays only tighten. policy_revision = SHA-256 of this file's canonical JSON.",
+  "version": 1,
+  "authority_ttl_s": 300,
+  "rate_limits_per_hour": { "low": 240, "medium": 60, "high": 12 },
+  "budgets": {
+    "cost_tokens_per_job": 2000000,
+    "cost_tokens_per_session_day": 10000000,
+    "cost_tokens_per_principal_day": 20000000
+  },
+  "actions": {
+    "operator.read_fleet_state": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_fleet_state",
+      "args_schema": { "type": "object", "additionalProperties": false }
+    },
+    "operator.read_tenant_state": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_tenant_state",
+      "args_schema": { "type": "object",
+        "properties": { "tenant_id": { "type": "string" } },
+        "required": ["tenant_id"], "additionalProperties": false }
+    },
+    "operator.read_jobs": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_jobs",
+      "args_schema": { "type": "object",
+        "properties": { "limit": { "type": "integer", "maximum": 200 } },
+        "additionalProperties": false }
+    },
+    "operator.read_sessions": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_sessions",
+      "args_schema": { "type": "object", "additionalProperties": false }
+    },
+    "operator.read_audit": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_audit",
+      "args_schema": { "type": "object",
+        "properties": { "limit": { "type": "integer", "maximum": 500 } },
+        "additionalProperties": false }
+    },
+    "operator.read_worker_status": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "required": "operator", "rate": "low", "timeout_s": 10,
+      "handler": "read_worker_status",
+      "args_schema": { "type": "object",
+        "properties": { "job_id": { "type": "string" } },
+        "additionalProperties": false }
+    },
+    "operator.worker_submit_job": {
+      "class": "O2", "rung": 2, "policy": "auto",
+      "required": "operator", "rate": "medium", "timeout_s": 1800,
+      "handler": "worker_submit_job",
+      "args_schema": { "type": "object",
+        "properties": {
+          "workspace": { "type": "string", "enum": ["disposable"] },
+          "commands": { "type": "array", "items": { "type": "string" },
+                        "maxItems": 50 },
+          "repo": { "type": "string" },
+          "network": { "type": "array", "items": { "type": "string" },
+                       "maxItems": 20 },
+          "idempotency_key": { "type": "string" }
+        },
+        "required": ["workspace", "commands", "idempotency_key"],
+        "additionalProperties": false }
+    },
+    "operator.worker_cancel_job": {
+      "class": "O2", "rung": 2, "policy": "auto",
+      "required": "operator", "rate": "medium", "timeout_s": 30,
+      "handler": "worker_cancel_job",
+      "args_schema": { "type": "object",
+        "properties": { "job_id": { "type": "string" } },
+        "required": ["job_id"], "additionalProperties": false }
+    },
+    "operator.repo_propose_change": {
+      "class": "O3", "rung": 3, "policy": "auto",
+      "required": "operator", "rate": "medium", "timeout_s": 1800,
+      "handler": "repo_propose_change",
+      "args_schema": { "type": "object",
+        "properties": {
+          "repo": { "type": "string" },
+          "base_sha": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+          "description": { "type": "string", "maxLength": 4000 },
+          "idempotency_key": { "type": "string" }
+        },
+        "required": ["repo", "base_sha", "description", "idempotency_key"],
+        "additionalProperties": false }
+    },
+    "operator.tenant_agent_pause": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 30,
+      "handler": "tenant_agent_pause",
+      "args_schema": { "type": "object",
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "expected_state": { "type": "string", "enum": ["enabled"] }
+        },
+        "required": ["tenant_id", "expected_state"],
+        "additionalProperties": false }
+    },
+    "operator.tenant_agent_resume": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 30,
+      "handler": "tenant_agent_resume",
+      "args_schema": { "type": "object",
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "expected_state": { "type": "string", "enum": ["disabled"] }
+        },
+        "required": ["tenant_id", "expected_state"],
+        "additionalProperties": false }
+    },
+    "operator.tenant_overlay_set": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 30,
+      "handler": "tenant_overlay_set",
+      "args_schema": { "type": "object",
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "overlay": { "type": "object" },
+          "expected_revision": { "type": "integer" }
+        },
+        "required": ["tenant_id", "overlay", "expected_revision"],
+        "additionalProperties": false }
+    },
+    "operator.worker_credential_rotate": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 60,
+      "handler": "worker_credential_rotate",
+      "args_schema": { "type": "object",
+        "properties": { "credential_handle": { "type": "string" } },
+        "required": ["credential_handle"], "additionalProperties": false }
+    },
+    "operator.stage_release_candidate": {
+      "class": "O6", "rung": 6, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 3600,
+      "enabled": false,
+      "handler": "stage_release_candidate",
+      "args_schema": { "type": "object",
+        "properties": {
+          "source_sha": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+          "target": { "type": "string", "enum": ["staging"] }
+        },
+        "required": ["source_sha", "target"],
+        "additionalProperties": false }
+    }
+  }
+}

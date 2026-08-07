@@ -16,12 +16,16 @@ Lands with the contract-only operator PR (Wave 0). Load-bearing negative tests:
    no-oracle) instead of route-absent 404.
 """
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SERVER_DIR.parent
+MATRIX_PATH = REPO_ROOT / "contract" / "operator_action_matrix.v1.json"
 
 # --- 1. Frozen identity vocabularies: no operator entry appeared -----------
 
@@ -34,6 +38,219 @@ FROZEN_CAPABILITIES = {
     "run_read", "run_write", "solve", "build", "converse",
     "agent_write_autopilot", "deploy", "platform_customize", "upload",
 }
+
+
+# --- 0. Operator action matrix is self-contained and security-pinned -------
+#
+# The committed contract must carry its own action matrix (no dependency on an
+# external/temp artifact). This block pins the whole matrix by content SHA AND
+# asserts each security-critical field per action, so mutating any rung,
+# policy, handler, reversal, or production-reachability fails the gate — and
+# so does adding a production-reachable action or mounting production
+# promotion.
+
+FROZEN_MATRIX_SHA256 = (
+    "5a6dd550800fed8eddcb683e67787435d5b8a3441cb7a66561b5f74614debe53")
+
+# {action: (class, rung, policy, rate, spend, timeout_s, handler,
+#           reversal_substring)}. Every normative dimension the pre-repo
+# reference carried (rung, policy, rate, spend, timeout, precondition,
+# reversal) now has an in-repo source and is pinned here.
+FROZEN_MATRIX_FIELDS = {
+    "operator.read_fleet_state": ("O1", 1, "auto", "low", "none", 10, "read_fleet_state", "read"),
+    "operator.read_tenant_state": ("O1", 1, "auto", "low", "none", 10, "read_tenant_state", "read"),
+    "operator.read_jobs": ("O1", 1, "auto", "low", "none", 10, "read_jobs", "read"),
+    "operator.read_sessions": ("O1", 1, "auto", "low", "none", 10, "read_sessions", "read"),
+    "operator.read_audit": ("O1", 1, "auto", "low", "none", 10, "read_audit", "read"),
+    "operator.read_worker_status": ("O1", 1, "auto", "low", "none", 10, "read_worker_status", "read"),
+    "operator.worker_submit_job": ("O2", 2, "auto", "medium", "cost_tokens", 1800, "worker_submit_job", "disposable"),
+    "operator.worker_cancel_job": ("O2", 2, "auto", "medium", "none", 30, "worker_cancel_job", "idempotent"),
+    "operator.repo_propose_change": ("O3", 3, "auto", "medium", "none", 1800, "repo_propose_change", "branch"),
+    "operator.tenant_agent_pause": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_agent_pause", "resume"),
+    "operator.tenant_agent_resume": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_agent_resume", "pause"),
+    "operator.tenant_overlay_set": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_overlay_set", "overlay"),
+    "operator.worker_credential_rotate": ("O4", 4, "always-confirm", "high", "none", 60, "worker_credential_rotate", "scope"),
+    "operator.external_write": ("O5", 5, "always-confirm", "high", "usd", 600, "external_write", "adapter"),
+    "operator.stage_release_candidate": ("O6", 6, "always-confirm", "high", "usd", 3600, "stage_release_candidate", "rollback"),
+}
+
+# Required per-action keys the matrix must always carry (no normative
+# dimension may silently disappear again).
+REQUIRED_MATRIX_KEYS = {
+    "class", "rung", "policy", "rate", "spend", "timeout_s",
+    "precondition", "handler", "reversal", "production_reachable",
+    "enabled_v1",
+}
+
+
+def _load_matrix():
+    return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+
+
+# The exact §4.1 table header, pinned. Adding, removing, or reordering a
+# column changes this and fails the header-equality assertion.
+EXPECTED_MD_HEADERS = [
+    "action", "class", "rung", "policy", "rate", "spend", "timeout(s)",
+    "precondition", "handler", "reversal", "prod-reachable", "v1",
+]
+
+
+def _parse_md_matrix_table():
+    """Parse the OPERATOR.md §4.1 action table. Returns (headers, rows) where
+    rows is the ordered list of (action_name_or_None, cell_dict) for EVERY
+    data row — malformed rows carry a sentinel so they cannot silently vanish,
+    and the O7 'not mounted' row is retained (action_name None). Contiguity-
+    bounded so other tables in the doc are not picked up."""
+    lines = (REPO_ROOT / "contract" / "OPERATOR.md").read_text(
+        encoding="utf-8").splitlines()
+    header_idx = next(
+        i for i, ln in enumerate(lines)
+        if ln.strip().startswith("|") and "Action" in ln and "Policy" in ln)
+    headers = [c.strip().lower()
+               for c in lines[header_idx].strip().strip("|").split("|")]
+    delimiter = lines[header_idx + 1]  # the |---| separator row, validated below
+    rows = []
+    for ln in lines[header_idx + 2:]:  # data rows only
+        if not ln.strip().startswith("|"):
+            break  # end of this contiguous table
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) != len(headers):
+            rows.append((None, {"_malformed": ln.strip()}))
+            continue
+        row = dict(zip(headers, cells))
+        m = re.search(r"`(operator\.[a-z_]+)`", row.get("action", ""))
+        rows.append((m.group(1) if m else None, row))
+    return headers, delimiter, rows
+
+
+def test_matrix_is_committed_and_content_pinned():
+    assert MATRIX_PATH.exists(), (
+        "contract/operator_action_matrix.v1.json is missing — the operator "
+        "contract must carry its own matrix, not reference an external file")
+    canon = json.dumps(_load_matrix(), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    assert digest == FROZEN_MATRIX_SHA256, (
+        "operator action matrix content drifted; if intentional, re-pin this "
+        "SHA in the same PR (promotion ritual)")
+
+
+def test_matrix_carries_every_normative_dimension():
+    """No normative dimension (rate/spend/timeout/precondition/...) may be
+    dropped from any action entry."""
+    for name, entry in _load_matrix()["actions"].items():
+        missing = REQUIRED_MATRIX_KEYS - set(entry)
+        assert not missing, (name, "missing normative fields", missing)
+
+
+def test_matrix_security_fields_pinned_per_action():
+    matrix = _load_matrix()
+    actions = matrix["actions"]
+    assert set(actions) == set(FROZEN_MATRIX_FIELDS), (
+        "operator action set changed", set(actions) ^ set(FROZEN_MATRIX_FIELDS))
+    for name, fields in FROZEN_MATRIX_FIELDS.items():
+        cls, rung, policy, rate, spend, timeout_s, handler, rev_sub = fields
+        entry = actions[name]
+        assert entry["class"] == cls, (name, "class", entry["class"])
+        assert entry["rung"] == rung, (name, "rung", entry["rung"])
+        assert entry["policy"] == policy, (name, "policy", entry["policy"])
+        assert entry["rate"] == rate, (name, "rate", entry["rate"])
+        assert entry["spend"] == spend, (name, "spend", entry["spend"])
+        assert entry["timeout_s"] == timeout_s, (name, "timeout_s")
+        assert entry["handler"] == handler, (name, "handler", entry["handler"])
+        assert rev_sub in entry["reversal"].lower(), (name, "reversal")
+        assert entry["precondition"], (name, "precondition empty")
+
+
+def test_matrix_has_no_production_reachable_action():
+    matrix = _load_matrix()
+    assert matrix["production_promotion_mounted"] is False
+    assert "operator.promote_production" in matrix["not_mounted"]
+    for name, entry in matrix["actions"].items():
+        assert entry["production_reachable"] is False, (
+            f"{name} declares production_reachable=true; production promotion "
+            "must stay off every operator surface (contract section 7)")
+        blob = json.dumps(entry).lower()
+        assert "deploy-platform" not in blob
+        # 'production' may appear only inside a reversal note, never as a route
+        assert "/api/production" not in blob
+
+
+def test_operator_md_table_fields_match_json():
+    """Load-bearing JSON<->Markdown agreement: EVERY shared column of the
+    OPERATOR.md §4.1 table must equal the JSON for every action, compared
+    exactly. Editing any field in either copy fails the gate. Also pins the
+    exact header set, rejects malformed and duplicate rows, and validates the
+    O7 'not mounted' row so structural table edits cannot escape."""
+    matrix = _load_matrix()["actions"]
+    not_mounted = set(_load_matrix()["not_mounted"])
+    headers, delimiter, rows = _parse_md_matrix_table()
+
+    # (a) exact header set — an added/removed/reordered column fails here.
+    assert headers == EXPECTED_MD_HEADERS, ("md headers drifted", headers)
+
+    # (a2) the Markdown delimiter row is a proper separator with the exact
+    #      column count — a tampered/miscounted delimiter fails.
+    delim_cells = [c.strip() for c in delimiter.strip().strip("|").split("|")]
+    assert len(delim_cells) == len(headers), (
+        "delimiter column count != header count", delimiter)
+    assert all(re.fullmatch(r":?-{3,}:?", c) for c in delim_cells), (
+        "malformed Markdown delimiter row", delimiter)
+
+    # (b) no malformed row may hide in the table region.
+    malformed = [r["_malformed"] for n, r in rows if r.get("_malformed")]
+    assert not malformed, ("malformed §4.1 table row(s)", malformed)
+
+    # (b2) every well-formed data row must be either a recognized operator
+    #      action or the single O7 row — no unrecognized junk row is ignored.
+    unrecognized = [r.get("action") for n, r in rows
+                    if n is None and not r.get("_malformed")
+                    and "production promotion" not in r.get("action", "").lower()]
+    assert not unrecognized, (
+        "unrecognized §4.1 table row(s) (not an operator action, not O7)",
+        unrecognized)
+
+    # (c) duplicate action rows are rejected (a contradictory duplicate placed
+    #     before the valid row would otherwise overwrite silently).
+    action_names = [n for n, _ in rows if n]
+    assert len(action_names) == len(set(action_names)), (
+        "duplicate action rows in the §4.1 table", action_names)
+    table = {n: r for n, r in rows if n}
+
+    # (d) O7 production-promotion row is present and reads "not mounted"; and
+    #     no not_mounted action ever appears as a real data row.
+    o7 = [r for n, r in rows if n is None
+          and "production promotion" in r.get("action", "").lower()]
+    assert len(o7) == 1, "the O7 production-promotion row is missing or duplicated"
+    assert o7[0]["v1"].lower().strip("*") == "not mounted", (
+        "O7 row must read 'not mounted'", o7[0]["v1"])
+    assert not (set(table) & not_mounted), (
+        "a not_mounted action appears as a live §4.1 table row",
+        set(table) & not_mounted)
+
+    # (e) bidirectional membership: JSON actions and table actions are equal.
+    assert set(table) == set(matrix), (
+        "OPERATOR.md table and JSON action sets differ",
+        set(table) ^ set(matrix))
+
+    # (f) every shared column equals the JSON, exactly.
+    COLUMN_MAP = {
+        "class": "class", "rung": "rung", "policy": "policy",
+        "rate": "rate", "spend": "spend", "timeout(s)": "timeout_s",
+        "precondition": "precondition", "reversal": "reversal",
+    }
+    for name, entry in matrix.items():
+        row = table[name]
+        for md_col, json_key in COLUMN_MAP.items():
+            assert row[md_col] == str(entry[json_key]), (
+                name, md_col, "md=", row[md_col], "json=", entry[json_key])
+        # handler cell may be backtick-wrapped; compare on the bare name
+        assert entry["handler"] == row["handler"].strip("`"), (
+            name, "handler", row["handler"])
+        assert row["prod-reachable"].lower() == "no", (
+            name, "prod-reachable", row["prod-reachable"])
+        # enabled_v1 is bool in JSON, rendered on/off in the table.
+        assert row["v1"] == ("on" if entry["enabled_v1"] else "off"), (
+            name, "v1", row["v1"], entry["enabled_v1"])
 
 
 def test_tier_vocabulary_gained_no_operator_entry():

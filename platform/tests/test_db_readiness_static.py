@@ -59,6 +59,7 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (29, "session_annex"),
                 (30, "tenant_mcp_approvals"),
                 (31, "customization_stage_authority"),
+                (32, "operator_control_plane"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
@@ -66,10 +67,10 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
 
 def test_customization_authority_migration_follows_tenant_mcp_journal():
     manifest = [item["name"] for item in db.migration_manifest()]
-    assert manifest[-2:] == [
-        "0030_tenant_mcp_approvals.sql",
-        "0031_customization_stage_authority.sql",
-    ]
+    # 0031 follows 0030 immediately (intent preserved even as later
+    # migrations, e.g. 0032 operator control plane, append after it).
+    i30 = manifest.index("0030_tenant_mcp_approvals.sql")
+    assert manifest[i30 + 1] == "0031_customization_stage_authority.sql"
     migration = (
         db._PKG_DIR / "migrations" / "0031_customization_stage_authority.sql"
     ).read_text(encoding="utf-8")

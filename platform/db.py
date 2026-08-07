@@ -99,6 +99,25 @@ _REQUIRED_COLUMNS = {
     "professional_credentials": {"credential_id", "org_id", "binding_id"},
     "professional_credential_events": {"event_id", "credential_id", "state"},
     "review_signatures": {"signature_id", "org_id", "project_id", "bundle_id"},
+    # Operator control plane (0032). Dark-by-default and PG-opt-in, but the
+    # migration always ships these tables, so the readiness proof globs them
+    # and requires a contract here (contract/OPERATOR.md sections 1-2, 5).
+    "operator_principals": {
+        "subject", "role", "role_revision", "status", "profiles", "environment",
+    },
+    "operator_sessions": {
+        "session_id", "subject", "profile", "environment", "status",
+    },
+    "operator_events": {"session_id", "seq", "type"},
+    "operator_authorities": {
+        "authority_id", "subject", "role_revision", "action", "args_hash",
+        "policy_revision", "environment", "expires_at", "max_uses",
+        "used_count", "status",
+    },
+    "operator_budgets": {"subject", "scope", "scope_key", "used", "ceiling"},
+    "operator_security_audit": {
+        "audit_id", "subject", "action", "decision", "reason",
+    },
 }
 
 # Each selector adds the tables its PostgreSQL implementation reads or writes.

@@ -98,14 +98,38 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
     """True only where the shell would actually expand a per-commit ARG.
 
     Exec-form RUN (a JSON array, with or without leading --flags such as
-    --mount) never invokes a shell, so nothing expands. In shell form, a
-    $NAME / ${NAME} reference expands except inside single quotes or with
-    a backslash-escaped dollar; double quotes (including apostrophes
-    nested inside them) do expand. Known scope boundary, named here on
-    purpose: heredoc RUN bodies, $$ self-escapes, and BuildKit's own
-    expansion inside --flag values are not modeled — no checked
-    Dockerfile uses them, and a false trip fails loud, never silently
-    green.
+    --mount) invokes no shell, so nothing expands -- with ONE exception: an
+    explicit shell invocation, `["/bin/sh", "-c", "<script>"]` (or /bin/bash),
+    whose third element IS a shell script the shell expands exactly as a
+    shell-form RUN would, so that element is parsed out and scanned. In shell
+    form, a $NAME / ${NAME} reference expands except inside single
+    quotes or after a backslash-escaped dollar; double quotes (including
+    apostrophes nested inside them) do expand.
+
+    A `#` gets NO expansion decision here. _executable_bash has already
+    removed real full-line and trailing shell comments, so a `#` reaching
+    this scanner is ambiguous (a glued mid-word hash, or a comment inside
+    a substitution or backtick the line stripper cannot see), and this
+    returns False on it so the caller reports the RUN as offending: a
+    LOUD false-offend on that class. See the `if "#" in body` guard.
+
+    KNOWN FALSE-ACCEPT LIMITS (operator-accepted, PR #514 r9 -- do not
+    re-file as bugs). This is a best-effort scanner, not a shell parser.
+    It CAN silently mis-accept a per-commit ref that bash would not
+    actually expand when the ref sits inside nested quoting or
+    substitution, e.g. `"$(printf '%s' '${LEAF_SOURCE_SHA}')"` (single-
+    quoted inside a command substitution inside double quotes), inside a
+    heredoc body, or beside a `$$` self-escape; `_executable_bash` can
+    likewise drop a `#` that is really inside a double-quoted value and
+    skew the scan. Every such form needs adversarial RUN text: NO guarded
+    Dockerfile has a `#`, a `$(...)`, a backtick, a heredoc or a `$$` in
+    any post-ARG RUN (all six use simple `${REF}` forms), so the scanner
+    is offense-free and correct on every real input. The residual is a
+    SILENT cache-efficiency regression on contrived text only (one extra
+    rebuild), never a correctness or security fault. Closing it fully
+    needs a real shell parser or a fail-loud whitelist of allowed
+    constructs; rounds 4-9 showed patch-per-corner does not terminate, so
+    the residual is accepted rather than chased.
     """
     body = run_body.strip()
     # RUN flags (--mount/--network/--security[=value]) precede either
@@ -116,19 +140,75 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
             return False
         body = parts[1].lstrip()
     if body.startswith("["):
+        # Exec form. Almost all exec-form RUNs invoke no shell and expand
+        # nothing -- but `["/bin/sh", "-c", "<script>"]` and its /bin/bash
+        # twin DO run a shell over their third element, so parse the argv and
+        # fall through to the expansion scan on that script. Anything else in
+        # exec form still consumes nothing.
+        try:
+            argv = json.loads(body)
+        except (ValueError, TypeError):
+            return False
+        if (
+            isinstance(argv, list)
+            and len(argv) == 3
+            and argv[0] in ("/bin/sh", "/bin/bash")
+            and argv[1] == "-c"
+            and isinstance(argv[2], str)
+        ):
+            body = argv[2]
+        else:
+            return False
+    # sol-critic #514 r8: FAIL LOUD on any `#`, do not classify it.
+    # _executable_bash has already stripped real full-line and trailing
+    # shell comments, so a `#` surviving here is ambiguous -- a glued
+    # mid-word hash, or a comment INSIDE a substitution or backtick that
+    # the line-based stripper cannot see (`$(# ...)`, `` `# ...` ``).
+    # Rounds 4-7 grew a substitution/comment lexer to tell these apart
+    # and every round surfaced the next corner (`;#`, `)#`, `${X}#`,
+    # `$(x)#`, `$((1))#`, `\)#`, then r8's `$(#...)`), each an unbounded
+    # false-ACCEPT: a non-consuming RUN read as consuming, placed below
+    # the per-commit ARG, silently regressing layer caching -- the one
+    # merge-blocking direction. Rather than model one more corner, refuse
+    # the whole class: return False so the caller reports the RUN as
+    # offending. A LOUD false-offend is the declared-acceptable direction
+    # and this closes every silent false-accept by construction. No
+    # guarded Dockerfile RUN contains a `#`, so it never trips.
+    if "#" in body:
         return False
-    in_single = in_double = False
-    i = 0
-    while i < len(body):
+    # With `#` handled, a per-commit reference consumes wherever the
+    # shell would expand it: everywhere except inside single quotes or
+    # after a backslash-escaped `$`. Double quotes still expand
+    # (apostrophes nested in them are literal); a backtick or `$(...)`
+    # body expands too, so its inner reference is scanned like any other
+    # text. This is deliberately smaller than the r4-r7 lexer: with the
+    # `#` decision gone, no substitution/word-boundary state is needed.
+    in_double = False
+    i, n = 0, len(body)
+    while i < n:
         ch = body[i]
-        if ch == "\\" and not in_single:
+        if in_double:
+            if ch == "\\" and i + 1 < n and body[i + 1] in '$"`\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            elif ch == "$" and _PER_COMMIT_REF.match(body, i):
+                return True
+            i += 1
+            continue
+        if ch == "\\":
             i += 2
             continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "$" and not in_single and _PER_COMMIT_REF.match(body, i):
+        if ch == "'":                       # single quotes: literal to next '
+            close = body.find("'", i + 1)
+            i = close + 1 if close != -1 else n
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "$" and _PER_COMMIT_REF.match(body, i):
             return True
         i += 1
     return False
@@ -1246,6 +1326,46 @@ def main() -> None:
         ("RUN test -n $LEAF_SOURCE_SHA", False),
         ("RUN seal ${LEAF_SOURCE_SHA}", False),
         ("RUN python -c \"attest('${LEAF_SOURCE_SHA}')\"", False),
+        # The one exec form that DOES run a shell: `["/bin/sh","-c","<script>"]`
+        # (and /bin/bash). Its third element is scanned like a shell-form body,
+        # so it consumes when the script references the ARG and offends when it
+        # does not (canonical-worker's survival guard is the real user of this).
+        # `-lc` is not `-c`, so it is not treated as a shell invocation.
+        (
+            'RUN ["/bin/sh", "-c", "test -f /a && test -n \\"${LEAF_SOURCE_SHA}\\""]',
+            False,
+        ),
+        ('RUN ["/bin/sh", "-c", "echo no-arg-here"]', True),
+        ('RUN ["/bin/bash", "-c", "seal ${LEAF_SOURCE_SHA}"]', False),
+        ('RUN ["/bin/sh", "-lc", "echo ${LEAF_SOURCE_SHA}"]', True),
+        # sol-critic #514 r4-r8: a `#` ANYWHERE in a post-ARG RUN now fails
+        # loud (offends). The scanner no longer decides whether a `#` is a
+        # plain comment, a comment inside a substitution/backtick, or mid-word
+        # text: r4-r7 grew a lexer to tell those apart and each round surfaced
+        # the next corner, culminating in r8's SILENT false-accept `$(#...)`
+        # (bash comments the ref out inside the substitution, so it never
+        # expands, yet the lexer read it as consuming). Any `#` is refused
+        # instead. The six real guarded Dockerfiles contain no `#` in any RUN,
+        # so none is affected. Genuine comment forms (r4/r5) still offend:
+        ('RUN ["/bin/sh", "-c", "true;# ${LEAF_SOURCE_SHA:?expanded}"]', True),
+        ('RUN echo hi  # ${LEAF_SOURCE_SHA}', True),
+        ('RUN ["/bin/sh", "-c", "(true)# ${LEAF_SOURCE_SHA:?expanded}"]', True),
+        ('RUN (true)# ${LEAF_SOURCE_SHA:?expanded}', True),
+        # Mid-word `#` (r6/r7): bash WOULD expand the ref, but the scanner no
+        # longer leans on that distinction -- a loud false-offend on a form no
+        # Dockerfile uses beats modelling one more silent-false-accept corner.
+        ('RUN echo ${PATH}# ${LEAF_SOURCE_SHA}', True),
+        ('RUN {# ${LEAF_SOURCE_SHA}', True),
+        ('RUN `printf x`# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo $(printf x)# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo $((1+1))# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo \\)# ${LEAF_SOURCE_SHA}', True),
+        # r8's false-ACCEPT `$(#...)` and its backtick twin `` `#...` ``: `#`
+        # inside a command substitution or backtick is a comment, so bash does
+        # NOT expand the ref (both print with LEAF_SOURCE_SHA unset). The r7
+        # lexer read them as consuming; both must offend now.
+        ('RUN ["/bin/sh", "-c", "echo $(# ${LEAF_SOURCE_SHA:?x}\\nprintf ok)"]', True),
+        ('RUN echo `# ${LEAF_SOURCE_SHA}`', True),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (

@@ -17,6 +17,17 @@ COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke
 COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
 
+# The two RUNs below run as root (the image's default at this point): the first
+# attests the solver source against the checked-in commit-to-digest map, the
+# second seals the revisions into .leaf-source-revision under root-owned
+# /opt/leaf and /app. They ARE pinned -- byte-exact, as PARSED exec-form RUNs,
+# by test_canonical_worker_pins_its_solver_attestation_runs -- because they carry
+# the PROVENANCE contract (that attestation actually runs), which is a separate
+# contract from script survival. Script survival is covered instead by the guard
+# at the END of this file, which runs AFTER them as uid 65532 and observes the
+# real filesystem they leave behind -- so a chmod by the mutable Python the first
+# RUN imports is caught even though a text pin cannot bind that imported code.
+
 # Declared below every non-consuming instruction, deliberately: LEAF_SOURCE_SHA
 # is a new commit sha on every build, and a changed in-scope ARG is a buildx
 # cache miss for everything after it — declared at the top it made the pip
@@ -28,19 +39,20 @@ ARG LEAF_SOURCE_SHA
 # The named context may be a mutable local checkout. Do not trust the revision
 # argument by itself. Hash the copied Python source, require the checked-in
 # commit-to-digest mapping, then seal that verified identity into the image.
-RUN PYTHONPATH=/app/server python -c "from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))"
+#
+# BOTH provenance RUNs are EXEC form, and that is load-bearing, not style: a
+# shell-form RUN executes through whatever SHELL is in effect, so a
+# `SHELL ["/bin/true"]` inserted above would run them as `/bin/true -c "..."`,
+# exit 0, and neither attest nor seal -- while the byte-exact pins (which bind
+# the text) and every static gate stay green (sol-critic #514 round 5). Exec
+# form names /bin/sh directly and ignores SHELL. Pinned verbatim by
+# test_canonical_worker_pins_its_solver_attestation_runs, which also requires
+# exec form.
+RUN ["/bin/sh", "-c", "PYTHONPATH=/app/server python -c \"from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))\""]
 
 WORKDIR /app/server
 
-RUN python -c \
-      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
-      "$AUTOFILL_SOLVER_REVISION" \
-    && python -c \
-      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" \
-      "$LEAF_SOURCE_SHA" \
-    && printf '%s\n' "$AUTOFILL_SOLVER_REVISION" \
-      > /opt/leaf/autofill-solver/.leaf-source-revision \
-    && printf '%s\n' "$LEAF_SOURCE_SHA" > /app/.leaf-source-revision
+RUN ["/bin/sh", "-c", "python -c \"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\" && python -c \"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf '%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > /opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' \"$LEAF_SOURCE_SHA\" > /app/.leaf-source-revision"]
 
 ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
     AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION} \
@@ -54,5 +66,31 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
   CMD python -c "import platform_link; raise SystemExit(0 if platform_link.canonical_worker_health('string-autofill-opt') else 1)"
 
 USER 65532:65532
+
+# --- Runtime proof, at BUILD time, that the smoke script survived EVERY
+# instruction above it -- including the two root RUNs. This is the whole reason
+# it sits LAST rather than near the COPY. A guard placed above those RUNs (where
+# it lived through #514 round 3) proves only survival-through-COPY: a later edit
+# to the mutable Python the first root RUN imports (the solver source-attestation
+# call) could `chmod` /app/scripts as root
+# AFTER that guard passed, shipping a container whose runtime uid 65532 cannot
+# reach its own smoke script while every static check stayed green (sol-critic
+# PR #514 round 3). Byte-pinning that RUN's text did not close it -- the pin
+# binds the Dockerfile string, not the imported code it runs. Running the guard
+# HERE, as 65532, after the root window, observes the real filesystem instead.
+#
+# Same spelling as the other three images (`_survival_guard_argv`): EXEC FORM so
+# a `SHELL ["/bin/true"]` above it cannot neuter it (SHELL does not affect the
+# exec form); `-s` as well as `-f` because `-f` alone accepts an EMPTY file; `-r`
+# because this image drops privilege, so the guard runs as the runtime uid and
+# tests real uid/gid/directory traversal that a root guard cannot. The extra
+# `test -n "${LEAF_SOURCE_SHA}"` CONSUMES the per-commit ARG so the guard may
+# legally sit below it: the JSON form `["/bin/sh","-c",...]` DOES invoke a shell
+# and DOES expand the reference (scripts/test_build_platform_images_workflow.py
+# recognises this form). Pinned by
+# test_every_image_asserts_its_shipped_scripts_at_build_time, whose empty
+# allowlist for this image forbids any RUN after the guard, so it is necessarily
+# the last filesystem-touching step.
+RUN ["/bin/sh", "-c", "test -f /app/scripts/canonical-container-smoke.py && test -s /app/scripts/canonical-container-smoke.py && test -r /app/scripts/canonical-container-smoke.py && test -n \"${LEAF_SOURCE_SHA}\""]
 
 CMD ["python", "canonical_worker.py", "--poll-seconds", "1"]

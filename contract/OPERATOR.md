@@ -106,9 +106,45 @@ not grow:
   stage_release_candidate`); production promotion is NOT MOUNTED and stays
   with the canonical production deployment transaction and a separate owner.
 
-The v1 action set and per-action rung/policy/rate/spend/timeout/
-precondition/reversal matrix is the W0.2 architecture record's §4 table,
-adopted normatively at first landing.
+### 4.1 The v1 action matrix (normative, self-contained)
+
+The complete action set and its security-critical fields are declared here
+and in the machine-readable normative copy `contract/operator_action_matrix.v1.json`
+(the two must agree; the freeze gate pins the JSON). No entry is reachable to
+production, and production promotion is not an action at all — it is absent
+from the matrix (`operator.promote_production` is listed under `not_mounted`),
+enforcing §7.
+
+| Action | Class | Rung | Policy | Rate | Spend | Timeout(s) | Precondition | Handler | Reversal | Prod-reachable | v1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `operator.read_fleet_state` | O1 | 1 | auto | low | none | 10 | none | `read_fleet_state` | n/a (read-only) | no | on |
+| `operator.read_tenant_state` | O1 | 1 | auto | low | none | 10 | none | `read_tenant_state` | n/a (read-only) | no | on |
+| `operator.read_jobs` | O1 | 1 | auto | low | none | 10 | none | `read_jobs` | n/a (read-only) | no | on |
+| `operator.read_sessions` | O1 | 1 | auto | low | none | 10 | none | `read_sessions` | n/a (read-only) | no | on |
+| `operator.read_audit` | O1 | 1 | auto | low | none | 10 | none | `read_audit` | n/a (read-only) | no | on |
+| `operator.read_worker_status` | O1 | 1 | auto | low | none | 10 | none | `read_worker_status` | n/a (read-only) | no | on |
+| `operator.worker_submit_job` | O2 | 2 | auto | medium | cost_tokens | 1800 | no production credential in job env (structural); disposable workspace | `worker_submit_job` | cancel job; workspace is disposable and destroyed on completion | no | on |
+| `operator.worker_cancel_job` | O2 | 2 | auto | medium | none | 30 | job exists and is owned by the principal | `worker_cancel_job` | n/a (idempotent) | no | on |
+| `operator.repo_propose_change` | O3 | 3 | auto | medium | none | 1800 | branch namespace operator/<subject>/<uuid>; base SHA named | `repo_propose_change` | delete the operator/<subject>/<uuid> branch; never touches main | no | on |
+| `operator.tenant_agent_pause` | O4 | 4 | always-confirm | high | none | 30 | tenant exists; current enabled-state revision named | `tenant_agent_pause` | operator.tenant_agent_resume | no | off |
+| `operator.tenant_agent_resume` | O4 | 4 | always-confirm | high | none | 30 | tenant exists; current disabled-state revision named | `tenant_agent_resume` | operator.tenant_agent_pause | no | off |
+| `operator.tenant_overlay_set` | O4 | 4 | always-confirm | high | none | 30 | overlay revision guard (compare-and-set) | `tenant_overlay_set` | restore the prior overlay recorded on the authority receipt | no | off |
+| `operator.worker_credential_rotate` | O4 | 4 | always-confirm | high | none | 60 | credential is non-production-scoped (broker-verified) | `worker_credential_rotate` | re-issue the previous scope (not the previous secret) | no | off |
+| `operator.external_write` | O5 | 5 | always-confirm | high | usd | 600 | allowlisted destination; scoped short-lived token handle | `external_write` | per-adapter documented reversal, or the adapter does not ship | no | off |
+| `operator.stage_release_candidate` | O6 | 6 | always-confirm | high | usd | 3600 | exact source SHA named; candidate immutable; staging only | `stage_release_candidate` | staging auto-rollback to the previous ECS task-def revision | no | off |
+| (O7 production promotion) | O7 | — | — | — | — | — | — | — | — | — | **not mounted** |
+
+"v1 on" = enabled in the first release (the read-only O1 surface plus the
+disposable-worker O2/O3 lanes); "v1 off" = declared in the contract but ships
+dark, enabled per its own Wave gate. Every mounted action maps to exactly one
+sealed handler named above (the §4 startup seal). This table and
+`operator_action_matrix.v1.json` carry the identical values for every column;
+`test_operator_vocab_freeze.py` pins the JSON by canonical SHA-256, asserts
+each per-action field (class, rung, policy, rate, spend, timeout, precondition,
+handler, reversal, production-reachability), AND parses this table to confirm
+its rung/policy/handler/reversal/prod-reachable cells match the JSON — so
+mutating a field in either the JSON or this Markdown table, or adding a
+production-reachable action, fails the gate.
 
 ## 5. Execution authority
 
