@@ -47,7 +47,7 @@ class CapturingSigner:
 
     def issue(self, claims, *, audience, ttl_seconds):
         self.calls.append((dict(claims), audience, ttl_seconds))
-        return "private-bearer", 1060
+        return "header.payload.signature", 1060
 
 
 class FakeHttpResponse:
@@ -86,14 +86,14 @@ def staging(monkeypatch):
     )
 
 
-def initialize_response(*, protocol=None):
+def initialize_response(*, protocol=None, request_id=1):
     protocol = protocol or mcp_staging_probe.MCP_PROTOCOL_VERSION
     return mcp_staging_probe.JsonResponse(
         200,
         {"mcp-session-id": "mcp-session-a"},
         {
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "result": {
                 "protocolVersion": protocol,
                 "capabilities": {},
@@ -103,10 +103,24 @@ def initialize_response(*, protocol=None):
     )
 
 
-def status_response(**overrides):
+def rejected_response(status_code):
+    return mcp_staging_probe.JsonResponse(status_code, {}, {})
+
+
+def status_response(claims, *, request_id=2, **overrides):
     status = {
         "status": "ready",
         "contract_version": "1",
+        "tenant_id": claims["tenant_id"],
+        "subject_id": claims["subject_id"],
+        "session_id": claims["session_id"],
+        "authority_turn_id": claims["authority_turn_id"],
+        "subscription_mount_id": claims["subscription_mount_id"],
+        "runner_profile_id": claims["runner_profile_id"],
+        "plan": claims["plan"],
+        "scope": claims["scope"],
+        "allowed_services": claims["allowed_services"],
+        "allowed_effects": claims["allowed_effects"],
         "available_tool_count": 1,
         **overrides,
     }
@@ -115,8 +129,23 @@ def status_response(**overrides):
         {},
         {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": request_id,
             "result": {"isError": False, "structuredContent": status},
+        },
+    )
+
+
+def wrong_channel_response(code="invalid_channel"):
+    return mcp_staging_probe.JsonResponse(
+        200,
+        {},
+        {
+            "jsonrpc": "2.0",
+            "id": 93,
+            "result": {
+                "isError": False,
+                "structuredContent": {"status": "error", "code": code},
+            },
         },
     )
 
@@ -177,7 +206,15 @@ def test_probe_initializes_and_calls_only_services_status(staging):
 
     def transport(url, headers, payload):
         calls.append((url, dict(headers), dict(payload)))
-        return initialize_response() if len(calls) == 1 else status_response()
+        if len(calls) == 1:
+            return rejected_response(401)
+        if len(calls) == 2:
+            return initialize_response(request_id=92)
+        if len(calls) == 3:
+            return wrong_channel_response()
+        if len(calls) == 4:
+            return initialize_response()
+        return status_response(signer.calls[0][0])
 
     version = mcp_staging_probe.run_probe(
         authority_signer=signer, transport=transport
@@ -187,23 +224,40 @@ def test_probe_initializes_and_calls_only_services_status(staging):
     assert [call[0] for call in calls] == [
         "https://staging-api.leafdesign.ai/mcp",
         "https://staging-api.leafdesign.ai/mcp",
+        "https://staging-api.leafdesign.ai/mcp",
+        "https://staging-api.leafdesign.ai/mcp",
+        "https://staging-api.leafdesign.ai/mcp",
     ]
-    assert calls[0][2]["method"] == "initialize"
-    assert calls[1][2] == {
+    assert [call[2]["id"] for call in calls] == [91, 92, 93, 1, 2]
+    assert calls[0][1]["Authorization"] != calls[1][1]["Authorization"]
+    assert calls[0][1]["x-leaf-gateway-channel"] == (
+        calls[3][1]["x-leaf-gateway-channel"]
+    )
+    assert calls[1][1]["Authorization"] == "Bearer header.payload.signature"
+    assert calls[1][1]["x-leaf-gateway-channel"] != (
+        calls[3][1]["x-leaf-gateway-channel"]
+    )
+    assert calls[2][2] == {
+        "jsonrpc": "2.0",
+        "id": 93,
+        "method": "tools/call",
+        "params": {"name": "services_status", "arguments": {}},
+    }
+    assert calls[4][2] == {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
         "params": {"name": "services_status", "arguments": {}},
     }
-    assert calls[0][1]["Authorization"] == "Bearer private-bearer"
-    assert len(calls[0][1]["x-leaf-gateway-channel"]) >= 32
-    assert calls[1][1]["mcp-session-id"] == "mcp-session-a"
-    assert calls[1][1]["MCP-Protocol-Version"] == "2025-11-25"
+    assert calls[3][1]["Authorization"] == "Bearer header.payload.signature"
+    assert len(calls[3][1]["x-leaf-gateway-channel"]) >= 32
+    assert calls[4][1]["mcp-session-id"] == "mcp-session-a"
+    assert calls[4][1]["MCP-Protocol-Version"] == "2025-11-25"
     claims, audience, ttl = signer.calls[0]
     assert audience == "urn:leaf:tenant-mcp-broker"
     assert ttl == 60
     assert claims["channel_hash"] == hashlib.sha256(
-        calls[0][1]["x-leaf-gateway-channel"].encode()
+        calls[3][1]["x-leaf-gateway-channel"].encode()
     ).hexdigest()
 
 
@@ -231,15 +285,18 @@ def test_http_transport_is_bounded_and_does_not_follow_redirects(monkeypatch):
     assert response.closed is True
 
 
-def test_http_transport_rejects_non_success_without_reading_body(monkeypatch):
+def test_http_transport_returns_non_success_without_reading_body(monkeypatch):
     response = FakeHttpResponse(b"private-response", status_code=302)
     response.iter_content = lambda **_kwargs: pytest.fail("response body was read")
     import requests
 
     monkeypatch.setattr(requests, "post", lambda *args, **kwargs: response)
 
-    with pytest.raises(mcp_staging_probe.ProbeError):
-        mcp_staging_probe._http_post_json("https://broker.example/mcp", {}, {})
+    result = mcp_staging_probe._http_post_json(
+        "https://broker.example/mcp", {}, {}
+    )
+    assert result.status_code == 302
+    assert result.body == {}
     assert response.closed is True
 
 
@@ -305,31 +362,106 @@ def test_probe_rejects_initialize_contract_mismatches(staging):
         ),
     )
     for initialized in invalid:
-        with pytest.raises(mcp_staging_probe.ProbeError):
-            mcp_staging_probe.run_probe(
-                authority_signer=CapturingSigner(),
-                transport=lambda *_args, response=initialized: response,
-            )
-
-
-def test_probe_rejects_status_contract_mismatches(staging):
-    invalid = (
-        status_response(status="degraded"),
-        status_response(contract_version="2"),
-        status_response(available_tool_count=0),
-        status_response(available_tool_count=True),
-        mcp_staging_probe.JsonResponse(
-            200,
-            {},
-            {"jsonrpc": "2.0", "id": 2, "result": {"isError": True}},
-        ),
-    )
-    for status in invalid:
-        responses = iter((initialize_response(), status))
+        responses = iter(
+            (rejected_response(401), rejected_response(403), initialized)
+        )
         with pytest.raises(mcp_staging_probe.ProbeError):
             mcp_staging_probe.run_probe(
                 authority_signer=CapturingSigner(),
                 transport=lambda *_args: next(responses),
+            )
+
+
+def test_probe_rejects_status_contract_mismatches(staging):
+    overrides = (
+        {"status": "degraded"},
+        {"contract_version": "2"},
+        {"available_tool_count": 0},
+        {"available_tool_count": True},
+    )
+    for override in overrides:
+        signer = CapturingSigner()
+        call_count = 0
+
+        def transport(*_args):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return rejected_response(401)
+            if call_count == 2:
+                return rejected_response(403)
+            if call_count == 3:
+                return initialize_response()
+            return status_response(signer.calls[0][0], **override)
+
+        with pytest.raises(mcp_staging_probe.ProbeError):
+            mcp_staging_probe.run_probe(
+                authority_signer=signer,
+                transport=transport,
+            )
+
+
+def test_probe_rejects_unauthenticated_canned_initialize(staging):
+    with pytest.raises(mcp_staging_probe.ProbeError):
+        mcp_staging_probe.run_probe(
+            authority_signer=CapturingSigner(),
+            transport=lambda *_args: initialize_response(),
+        )
+
+
+def test_probe_rejects_wrong_channel_acceptance(staging):
+    signer = CapturingSigner()
+    call_count = 0
+
+    def transport(*_args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return rejected_response(401)
+        if call_count == 2:
+            return initialize_response(request_id=92)
+        return status_response(signer.calls[0][0], request_id=93)
+
+    with pytest.raises(mcp_staging_probe.ProbeError):
+        mcp_staging_probe.run_probe(
+            authority_signer=signer,
+            transport=transport,
+        )
+
+
+def test_probe_rejects_widened_catalog_or_identity_mismatch(staging):
+    overrides = (
+        {"allowed_services": ["time", "research"]},
+        {"allowed_effects": ["read", "external_read"]},
+        {"tenant_id": "another-tenant"},
+        {"subject_id": "another-subject"},
+        {"session_id": "another-session"},
+        {"authority_turn_id": "another-turn"},
+        {"subscription_mount_id": "another-mount"},
+        {"runner_profile_id": "author"},
+        {"plan": "pro"},
+        {"scope": "tenant:services tenant:admin"},
+        {"available_tool_count": 2},
+    )
+    for override in overrides:
+        signer = CapturingSigner()
+        call_count = 0
+
+        def transport(*_args):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return rejected_response(401)
+            if call_count == 2:
+                return rejected_response(403)
+            if call_count == 3:
+                return initialize_response()
+            return status_response(signer.calls[0][0], **override)
+
+        with pytest.raises(mcp_staging_probe.ProbeError):
+            mcp_staging_probe.run_probe(
+                authority_signer=signer,
+                transport=transport,
             )
 
 
