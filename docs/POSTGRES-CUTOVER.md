@@ -466,15 +466,21 @@ Four paths were considered.
 
 Why the others lose.
 
-- **C loses because its extra step is either redundant or harmful, never
-  neutral.** Its whole appeal is avoiding a mixed-mode fleet, and there is no
-  mixed-mode fleet to avoid: the idle color sits at desired 0 between cycles, so
-  its stale `dual_write_shadow` revision is a configuration artifact that no
-  request can reach. Confirmed live rather than reasoned: at 2026-08-07T06:57Z
-  the drained color's target group was EMPTY, with zero registered targets. So
-  if the next warm inherits `postgres`, C's second flip does nothing; if it does
-  not inherit, C opens a SECOND rollout window identical to A's. C is A plus a
-  coin flip between waste and repetition.
+- **C loses because A already contains C's second flip, as a conditional instead
+  of a commitment.** The section above already prescribes the corrective step:
+  confirm the idle color's registered revision carries
+  `LEAF_SESSIONS_STORE=postgres` after its next warm, and flip it explicitly if
+  it does not. So the second flip is not the difference between the two paths.
+  The difference is that C schedules it unconditionally, while A performs it only
+  when the inheritance check fails. Since the workflow permits an alternate ACTIVE
+  configuration baseline, inheritance is genuinely not guaranteed, and that
+  corrective flip may well be needed. **When it is needed it is necessary
+  remediation, not waste.** What C buys with its unconditional second flip is
+  nothing, because its stated appeal is avoiding a mixed-mode fleet and there is
+  no reachable mixed-mode fleet to avoid: the idle color sits at desired 0
+  between cycles, and at 2026-08-07T06:57Z its target group was EMPTY, with zero
+  registered targets. C therefore pays a second rollout window in the case where
+  A pays none, and matches A in the case where the check fails.
 - **B loses on availability, not on merit.** It is the only zero-overlap answer
   and it is the right long-term shape, but it needs a reviewed workflow change.
   It is recorded as the follow-up, not the path.
@@ -482,11 +488,14 @@ Why the others lose.
   fourteen minutes on 2026-08-06 and its trigger is ordinary traffic after any
   task replacement, which blue/green performs routinely.
 
-Independent support: the same fork was put to Codex, Kimi and DeepSeek on one
-prompt on 2026-08-07. Codex and DeepSeek both returned A, independently, and
-both gave the same deciding reason recorded above, that C's second flip is
-redundant or harmful. Kimi timed out and cast no vote. Neither lane argued for
-B, C or D.
+Independent support, with its limits stated: the same fork was put to Codex,
+Kimi and DeepSeek on one shared prompt on 2026-08-07. Codex and DeepSeek both
+returned A independently; Kimi timed out and cast no vote; neither answering
+lane argued for B, C or D. Weigh that at what it is worth. Both lanes reached A
+partly by calling C's second flip redundant, which is the reasoning corrected
+above, and both were wrong about the overlap window in the ways corrected below.
+**Agreement on the choice is not agreement on the argument**, and here the
+choice survived while much of the shared reasoning did not.
 
 ### The overlap window, measured rather than argued
 
@@ -495,8 +504,7 @@ measured directly against the live target group on 2026-08-07 rather than taken
 from either. All four numbers below are from `describe-target-groups`,
 `describe-target-group-attributes` and `describe-services` on the LIVE color:
 
-- health check interval **10s**, healthy threshold **2**, so roughly **20s** for
-  a new task to be marked healthy,
+- health check interval **10s**, timeout 5s, healthy threshold **2**,
 - `deregistration_delay.timeout_seconds` = **30s**,
 - `minimumHealthyPercent=100`, `maximumPercent=200`, strategy `ROLLING`.
 
@@ -505,13 +513,36 @@ module defaults and concluded the window was seconds. **The live values are 10s
 and 30s, so that reading was wrong on both numbers**, and the module default is
 not what is deployed. Read the live target group, not the module.
 
-The honest shape of the exposure: new requests stop being routed to the old task
-when ECS deregisters it, but the 30s deregistration drain lets requests already
-riding an established keep-alive connection continue to reach the old
-`dual_write_shadow` task. So the exposure is **bounded by the 30s drain**, not
-by the workflow's 12 minute stability budget and not by the 300s module default.
-It is not "a few seconds of scheduler latency" either, because keep-alive is
-exactly how a polling front end behaves.
+**Do not multiply the interval by the healthy threshold to predict how long the
+new task takes to start serving.** That threshold does not apply to a newly
+registered target. AWS is explicit: "After your target is registered, it must
+pass one health check to be considered healthy", and `HealthyThresholdCount` is
+defined as the consecutive successes required "before considering an UNHEALTHY
+target healthy". So a first registration costs roughly one interval plus
+registration time, not two intervals.
+
+**The exposure window is NOT bounded by the 30s drain, and an earlier draft of
+this section said it was.** That draft argued a client keep-alive connection
+could keep delivering new requests to the old task during the drain. It cannot,
+and the error was reading the client connection as if it terminated on the task.
+The client's persistent connection is to the load balancer, not to the target.
+AWS: "The load balancer stops routing requests to a target as soon as you
+deregister it", and connection draining is only the balancer waiting "until
+in-flight requests have completed". So the 30s delay covers work already in
+progress, and no new request reaches a draining target.
+
+The real window is the interval **between the new task becoming healthy and
+being routed to, and ECS beginning deregistration of the old one**. In that
+interval both targets are registered and healthy, so the load balancer spreads
+traffic across both, and a request can land on either mode. **AWS documents no
+maximum for it.** It is ECS scheduler behavior, not a configured value, so no
+measurement of this target group can bound it and none of the numbers above do.
+
+That leaves the honest position: the pieces are measured, the window itself is
+not bounded by anything we control or can cite. Treat it as short but open, plan
+to watch it rather than to wait it out, and do not put a number on it in a
+runbook. It is also not "a few seconds of scheduler latency", because that
+phrasing claims the same unbounded quantity is small.
 
 Note also that the live service runs with `deploymentCircuitBreaker` **disabled**
 and `rollback: false`. ECS will not undo a bad rollout on its own; the workflow's
@@ -532,12 +563,21 @@ insert-only, with the source opened `mode=ro`. There is no reverse direction. So
 that change converts a mismatch that self-clears at the next task replacement
 into one that never clears.
 
-**For the same reason, do not add `SESSIONS_DB` to
-`deploy/required-config.app.json`.** That file requires `LEAF_SESSIONS_STORE`
-and `JOBS_DB` but not `SESSIONS_DB`, which is how the omission survived config
-validation, so adding it looks like the tidy fix. It is not a fix. It would make
-the harmful state mandatory at validation time, on every environment, with no
-way to decline it.
+**Adding `SESSIONS_DB` to `deploy/required-config.app.json` is not the fix
+either, though not for the reason an earlier draft gave.** That draft claimed it
+would make the harmful state mandatory. It would not, and the manifest is weaker
+than that: it is a flat list of NAMES, and the gate only asserts membership. See
+`test_required_config_manifests_fail_closed_for_postgres_authority`, whose whole
+check is `}.issubset(app_environment)`. It never inspects a value, so it cannot
+tell a durable EFS path from the task-local default, and an explicit task-local
+path would satisfy it while changing nothing.
+
+That is precisely why it does not help. The requirement here is conditional,
+"durable if and only if the selector still reads legacy SQLite", and a flat
+name list cannot express a condition. Adding the name would buy no safety and
+would invite the next reader to satisfy it with a durable path while the
+selector is still `dual_write_shadow`, which is the forbidden ordering above.
+Leave it out until the condition disappears.
 
 What actually closes the drift is the flip itself. In `postgres` mode
 `get_or_create_session`, `get_session` and `append_event` all return at
@@ -567,7 +607,17 @@ durable in the same transaction, before or with the selector change, never after
 
 ### Live state this decision was made against
 
-Read read-only from account `807034087062`, `us-east-1`, 2026-08-07T06:57Z:
+Read read-only from account `807034087062`, `us-east-1`, 2026-08-07T06:57Z.
+These are observations, not artifacts committed here, so re-derive rather than
+cite them. The exact reads were `aws ecs describe-services --cluster
+leaf-automation-staging --services leaf-platform-app leaf-platform-app-alt`,
+then `aws elbv2 describe-target-health` on each service's
+`loadBalancers[0].targetGroupArn`, then `aws ecs describe-task-definition` on
+each reported revision. The timing values above came from
+`aws elbv2 describe-target-groups` and
+`aws elbv2 describe-target-group-attributes` on the LIVE color's target group
+`leaf-stg-platform-app-alt/5f41a0a56acd6ab6`, and the deployment percentages
+from `describe-services … --query 'services[0].deploymentConfiguration'`.
 
 | service | desired/running | task definition | target group |
 |---|---|---|---|
