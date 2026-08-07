@@ -99,6 +99,7 @@ def attachment_body(authority_session_id: str) -> dict[str, str]:
         "authority_session_id": authority_session_id,
         "authority_turn_id": TURN,
         "subscription_mount_id": MOUNT,
+        "runner_profile_id": "spine",
     }
 
 
@@ -254,6 +255,41 @@ def test_internal_exchange_binds_app_owned_authority_and_random_channel(authorit
     assert len(body["channel_secret"]) >= 32
     assert claims["exp"] - claims["iat"] == 120
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_internal_exchange_binds_exact_author_profile(authority):
+    client, authority_session_id, kms = authority
+    response = client.post(
+        "/internal/mcp/gateway/attachment",
+        json={
+            **attachment_body(authority_session_id),
+            "runner_profile_id": "author",
+        },
+        headers={"X-Tenant-Id": TENANT, "X-Dispatch-Secret": "dispatch-secret"},
+    )
+
+    assert response.status_code == 200, response.text
+    claims = decode(
+        response.json()["bearer_token"], kms.public,
+        "urn:leaf:tenant-mcp-broker",
+    )
+    assert claims["runner_profile_id"] == "author"
+    assert response.json()["identity"]["runner_profile_id"] == "author"
+
+
+def test_internal_exchange_requires_runner_profile(authority):
+    client, authority_session_id, kms = authority
+    body = attachment_body(authority_session_id)
+    body.pop("runner_profile_id")
+
+    response = client.post(
+        "/internal/mcp/gateway/attachment",
+        json=body,
+        headers={"X-Tenant-Id": TENANT, "X-Dispatch-Secret": "dispatch-secret"},
+    )
+
+    assert response.status_code == 422
+    assert kms.sign_calls == []
 
 
 @pytest.mark.parametrize(

@@ -73,6 +73,8 @@ class ChangeSet:
     target_tool_name: Optional[str] = None
     request_description: Optional[str] = None
     request_fingerprint: Optional[str] = None
+    authority_session_id: Optional[str] = None
+    authority_turn_id: Optional[str] = None
     stage_attempt: int = 0
     stage_lease_owner: Optional[str] = None
     stage_lease_expires_at: Optional[int] = None

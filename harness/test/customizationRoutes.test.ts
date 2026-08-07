@@ -144,6 +144,45 @@ describe("customization routes", () => {
     expect(git(bareDir, ["rev-parse", `refs/leaf/changes/${CHANGE}`])).toBe(body.receipt.staged_commit);
   });
 
+  it("requires a complete app authority tuple when standard services are enabled", async () => {
+    const previous = process.env.LEAF_TENANT_MCP_BROKER_URL;
+    process.env.LEAF_TENANT_MCP_BROKER_URL = "https://broker.example/mcp";
+    try {
+      const missing = await fetch(`${baseUrl}/author/stage`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-harness-secret": SECRET },
+        body: JSON.stringify(stageBody()),
+      });
+      expect(missing.status).toBe(409);
+
+      const partial = await fetch(`${baseUrl}/author/stage`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-harness-secret": SECRET,
+          "x-authority-session-id": "session-a",
+        },
+        body: JSON.stringify(stageBody()),
+      });
+      expect(partial.status).toBe(409);
+
+      const complete = await fetch(`${baseUrl}/author/stage`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-harness-secret": SECRET,
+          "x-authority-session-id": "session-a",
+          "x-authority-turn-id": "turn-a",
+        },
+        body: JSON.stringify(stageBody()),
+      });
+      expect(complete.status).toBe(200);
+    } finally {
+      if (previous === undefined) delete process.env.LEAF_TENANT_MCP_BROKER_URL;
+      else process.env.LEAF_TENANT_MCP_BROKER_URL = previous;
+    }
+  });
+
   it("publishes only the exact approved receipt", async () => {
     const stagedResponse = await fetch(`${baseUrl}/author/stage`, {
       method: "POST",

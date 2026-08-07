@@ -463,6 +463,8 @@ export interface AgentRunInput {
   repoDir: string;
   grant: AgentGrant;
   toolset: AuthorToolset;
+  /** Trusted product authority. Never sourced from model arguments. */
+  standardServicesContext?: import("./impl/standardServicesRuntime.js").TrustedStandardServicesContext;
 }
 
 export interface AgentRunResult {
@@ -647,6 +649,8 @@ export interface ConverseRunInput {
   images?: Array<{ media_type: string; data: string }>;
   tools: ToolExecutor;
   canUseTool: CanUseTool;
+  /** Trusted product authority. Never sourced from model arguments. */
+  standardServicesContext?: import("./impl/standardServicesRuntime.js").TrustedStandardServicesContext;
 }
 
 /**
@@ -983,6 +987,48 @@ export type ConsumerGrantProvider = OAuthGrantProvider;
 /** The default consumer id when a request carries none. */
 export const DEFAULT_CONSUMER = DEFAULT_TENANT;
 
+// --------------------------------------------------------------------------- //
+// UpstreamSink — platform-improvement capture (OPTIONAL port)
+// --------------------------------------------------------------------------- //
+
+/**
+ * One captured authoring event: the prompt a consumer typed into this mushy
+ * instance plus whatever they authored for themselves (or the failure, which
+ * is often the stronger platform signal — the user asked for something the
+ * platform could not do). Pushed to the operator's upstream queue where a
+ * 4-model panel reviews it for promotion into the host platform proper.
+ */
+export interface UpstreamCapture {
+  contract: "mushy.upstream-capture.v1";
+  /** The consumer/tenant id inside this mushy instance. */
+  consumer: string;
+  /** The host platform this instance is bolted onto (sink-configured label). */
+  platform: string | null;
+  route: "build" | "stage" | "one-off";
+  prompt: string;
+  authoring_status: "authored" | "failed";
+  tool_name?: string;
+  tool_manifest?: ToolPackage;
+  tool_code?: string;
+  commit_sha?: string;
+  telemetry?: AuthorTelemetry;
+  platform_release?: string;
+  /** Token-redacted failure message (redactTokens applied by the loop). */
+  error_message?: string;
+  captured_at: string; // ISO-8601
+  /** Idempotency key so a retried push never duplicates the queue row. */
+  dedupe_key?: string;
+}
+
+/**
+ * Fire-and-forget capture. Implementations own their own timeout and MUST
+ * swallow transport errors: a sink outage may never fail, slow, or otherwise
+ * observe back into the consumer's authoring path.
+ */
+export interface UpstreamSink {
+  capture(event: UpstreamCapture): Promise<void>;
+}
+
 export interface HarnessPorts {
   oauth: OAuthGrantProvider;
   tenantRepo: TenantRepoProvider;
@@ -1013,4 +1059,12 @@ export interface HarnessPorts {
   appRun?: AppRunClient;
   gate?: GateClient;
   sessionStore?: SessionStore;
+  /**
+   * OPTIONAL platform-improvement capture sink. When present, the author loop
+   * pushes every authoring event (prompt + authored artifacts, or the
+   * failure) to the operator's upstream queue, fire-and-forget. Absent in
+   * hermetic tests that don't exercise capture; authoring behavior is
+   * identical either way.
+   */
+  upstreamSink?: UpstreamSink;
 }

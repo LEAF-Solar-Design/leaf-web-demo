@@ -50,7 +50,7 @@ import { redactTokens } from "../src/redact.js";
 import { authorRunnerMode, validateProductionHarnessEnv } from "../src/runtimeSafety.js";
 import { createShutdownHandler } from "../src/shutdown.js";
 import { DEFAULT_TENANT } from "../src/ports/index.js";
-import type { AgentGrant, HarnessPorts } from "../src/ports/index.js";
+import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
@@ -72,6 +72,12 @@ import {
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import {
+  AuthorStandardServicesRunner,
+  StandardServicesOAuthGrantProvider,
+  standardServicesResolverFromEnv,
+} from "../src/ports/impl/leafStandardServicesResolver.js";
+import type { StandardServicesResolver } from "../src/vendor/mushy-author/ports/impl/standardServicesRuntime.js";
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
@@ -131,7 +137,10 @@ function tenantRepoDir(tenantId: string): string {
  * the converse lane stays unwired and `POST /turn` answers 501 — there is no
  * ungated fallback. The author/Build lane is unaffected either way.
  */
-function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefined {
+function spineTurnRunner(
+  oauth: OAuthGrantProvider,
+  standardServicesResolver: StandardServicesResolver | undefined,
+): ConverseRunner | undefined {
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   if (!appUrl || !dispatchSecret) {
@@ -154,7 +163,11 @@ function spineTurnRunner(oauth: OAuthGrantProviderImpl): ConverseRunner | undefi
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
     gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
     store: sessionStoreHandle.store,
-    runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({ grant }),
+    runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({
+      grant,
+      ...(standardServicesResolver ? { standardServicesResolver } : {}),
+    }),
+    ...(standardServicesResolver ? { standardServicesResolver } : {}),
     ...(instantExecutorClient ? { instantExecutor: instantExecutorClient } : {}),
   });
 }
@@ -178,7 +191,10 @@ function buildPorts(): HarnessPorts {
     log("[harness] author runner: AgentSdkRunner (structured source submission; generated code executes only through broker)");
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
-  const oauth = new OAuthGrantProviderImpl({ store: grantStore });
+  const standardServicesResolver = standardServicesResolverFromEnv();
+  const oauth = new StandardServicesOAuthGrantProvider(
+    new OAuthGrantProviderImpl({ store: grantStore }),
+  );
   const tenantRepo = new TenantRepoProviderImpl({
     locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     inPlace: true,
@@ -193,11 +209,18 @@ function buildPorts(): HarnessPorts {
     broker,
     agentRunner: authorRunnerMode() === "fake"
       ? new FakeAgentRunner()
-      : new AgentSdkRunner({ maxTurns: 40, maxTotalTokens: 500_000 }),
+      : new AuthorStandardServicesRunner(
+          new AgentSdkRunner({
+            maxTurns: 40,
+            maxTotalTokens: 500_000,
+            ...(standardServicesResolver ? { standardServicesResolver } : {}),
+          }),
+          Boolean(standardServicesResolver),
+        ),
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }
       : (() => {
-          const spine = spineTurnRunner(oauth);
+          const spine = spineTurnRunner(oauth, standardServicesResolver);
           return spine ? { converseRunner: spine } : {};
         })()),
     ...((process.env.LEAF_APP_URL ?? "").trim() && (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim()

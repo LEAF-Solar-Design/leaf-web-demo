@@ -3,8 +3,8 @@
  * (leaf-backend-gaps.md §2.1, ports/converse.ts FROZEN). This is the riskiest lane in
  * the sessions build: everything else (turn engine, store, approvals router) runs
  * against a scripted fake; this file is what eventually talks to the real SDK.
- * Tenant MCP servers mount read-only in this release: their tools, resources, and
- * prompts are listable, but tenant tool execution approval ships separately.
+ * This legacy runner mounts no tenant MCP servers. Product-owned standard services
+ * attach only through the resolver-aware author and spine runners.
  *
  * === SDK reality, read from node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
  * (v0.3.214) before writing a line of mapping code below - not assumed ===
@@ -80,14 +80,6 @@ import type {
   TenantRepoProvider,
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
-import {
-  describeConfig,
-  FileMcpBridgeStore,
-  resolveMcpAttachment,
-  type McpAttachment,
-  type McpBridgeStore,
-  type McpHostResolver,
-} from "./mcpBridge.js";
 import { findTool } from "../../registry/registerTool.js";
 
 // --------------------------------------------------------------------------- //
@@ -341,38 +333,6 @@ export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; messa
     : null;
 }
 
-/** Resolve a tenant attachment without exposing bridge failures to the chat turn. */
-export async function resolveMcpAttachmentSafely(
-  store: McpBridgeStore,
-  tenantId: string,
-  report: (message: string) => void = console.error,
-  resolver?: McpHostResolver,
-): Promise<McpAttachment | null> {
-  try {
-    return await resolveMcpAttachment(store, tenantId, report, resolver);
-  } catch {
-    // The store error can include arbitrary corrupted input. Keep diagnostics tied to
-    // the bridge's redacted formatter rather than rendering the error or configuration.
-    report(`[leaf-mcp] skipping tenant MCP attachment after bridge failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
-    return null;
-  }
-}
-
-/** Env-gated bridge construction. When unset, no store is constructed or read. */
-export async function resolveEnvMcpAttachment(
-  bridgeDir: string | undefined,
-  tenantId: string,
-  report: (message: string) => void = console.error,
-): Promise<McpAttachment | null> {
-  if (!bridgeDir) return null;
-  try {
-    return await resolveMcpAttachmentSafely(new FileMcpBridgeStore({ dir: bridgeDir }), tenantId, report);
-  } catch {
-    report(`[leaf-mcp] skipping tenant MCP attachment after bridge setup failure: ${describeConfig({ name: "<unavailable>", url: "" })}`);
-    return null;
-  }
-}
-
 /** Parse the wrapper's `params_json` field (see makeApsTestRun / apsTestRun.ts: the
  *  inner target tool's params travel inside `aps_test_run`'s call args as a JSON
  *  string, not as the wrapper's own params). Malformed/absent -> {}, never throws. */
@@ -477,26 +437,19 @@ type CanUseTool = (
   input: Record<string, unknown>,
 ) => Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }>;
 
-/** The bridge contributes no SDK option while it is disabled or has no tenant config. */
-export function buildTenantMcpOptions(attachment: McpAttachment | null): { mcpServers?: McpAttachment } {
-  return attachment ? { mcpServers: attachment } : {};
-}
-
 export interface BuildTurnOptionsInput {
   childEnv: NodeJS.ProcessEnv;
   model: string | undefined;
   maxTurns: number;
   abortController: AbortController;
   server: unknown;
-  mcpAttachment: McpAttachment | null;
   canUseTool: CanUseTool;
   planFirst?: boolean;
 }
 
-/** Assemble SDK options in one testable place. Tenant bridge servers are optional;
- * the local converse server remains authoritative if a key collides. */
+/** Assemble SDK options in one testable place. This legacy runner has no tenant
+ * service attachment. Live standard services mount through the product resolver. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
-  const tenantMcp = buildTenantMcpOptions(input.mcpAttachment);
   return {
     env: input.childEnv,
     model: input.model,
@@ -504,8 +457,7 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     settingSources: [],
     permissionMode: "default",
     abortController: input.abortController,
-    // Load-bearing order: the local money-gated server wins any tenant key collision.
-    mcpServers: { ...(tenantMcp.mcpServers ?? {}), [MCP_SERVER_NAME]: input.server },
+    mcpServers: { [MCP_SERVER_NAME]: input.server },
     // Skills reach the model through the SDK's own `skills` option, which enables the
     // Skill tool itself. This allowlist remains the existing APS MCP tool only —
     // EXCEPT under plan_first, where it is EMPTY: the SDK auto-approves
@@ -689,8 +641,6 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // One guarded mount is the whole design; a second unguarded one is how the
     // guard gets lost. If this runner is ever revived, mount through the same
     // path ConverseSdkRunner uses, settings included.
-    const mcpAttachment = await resolveEnvMcpAttachment(process.env.LEAF_MCP_BRIDGE_DIR, input.tenant_id);
-
     const q = sdk.query({
       prompt: buildPrompt(input),
       options: buildTurnOptions({
@@ -699,7 +649,6 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         maxTurns,
         abortController: abort,
         server,
-        mcpAttachment,
         planFirst: planFirst === true,
         // This list stays the APS tool only; the money-gated canUseTool
         // envelope below is unchanged.

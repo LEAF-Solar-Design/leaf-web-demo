@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 ATTACHMENT_TTL_SECONDS = 120
 APPROVAL_TTL_SECONDS = 120
 APPROVAL_AUDIENCE = "urn:leaf:tenant-mcp-approval"
-RUNNER_PROFILE_ID = "spine"
+RUNNER_PROFILE_IDS = frozenset({"author", "spine"})
 
 PUBLIC_SERVICES = (
     "artifact", "build", "chart", "code", "deployment", "diagram",
@@ -99,8 +99,10 @@ def approval_audience() -> str:
     return APPROVAL_AUDIENCE
 
 
-def runner_profile_id() -> str:
-    return RUNNER_PROFILE_ID
+def runner_profile_id(value: str) -> str:
+    if value not in RUNNER_PROFILE_IDS:
+        raise McpAuthorityError("the requested MCP runner profile is not allowed")
+    return value
 
 
 def tier_authority(tier: str) -> tuple[str, tuple[str, ...]]:

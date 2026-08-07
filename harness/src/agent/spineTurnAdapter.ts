@@ -63,6 +63,7 @@ import type {
   SpineConverseRunner,
   InstantExecutorClient,
 } from "../ports/index.js";
+import type { StandardServicesResolver } from "../vendor/mushy-author/ports/impl/standardServicesRuntime.js";
 
 /** The 9 event types the frozen wire admits (ports/converse.ts). The loop's
  *  turn_started / confirmation_resolved / session_state are the turn engine's
@@ -95,6 +96,8 @@ export interface SpineTurnAdapterPorts {
    */
   intentFor?: (grant: AgentGrant) => IntentSynthesizer;
   instantExecutor?: InstantExecutorClient;
+  /** When configured, every turn must reserve a tenant-owned mount for services. */
+  standardServicesResolver?: StandardServicesResolver;
 }
 
 export interface SpineTurnAdapterOptions {
@@ -120,12 +123,15 @@ export class SpineTurnAdapter implements ConverseRunner {
     //    the runner's scrubbed env, never logged, never persisted. Otherwise the
     //    tenant's linked grant is resolved; a missing one must surface as the
     //    non-stream 401 {grant_required:true}, never a half-open 200 stream.
-    const lease = !input.credential_grant && this.ports.oauth.acquireGrant
+    const lease = (!input.credential_grant || this.ports.standardServicesResolver) && this.ports.oauth.acquireGrant
       ? await this.ports.oauth.acquireGrant(input.tenant_id)
       : null;
     const grant: AgentGrant = input.credential_grant
       ? wireGrantToAgentGrant(input.credential_grant)
       : lease?.grant ?? await this.ports.oauth.getGrant(input.tenant_id);
+    if (this.ports.standardServicesResolver && !lease) {
+      throw new Error("standard_services_subscription_mount_missing");
+    }
 
     // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
     //
@@ -271,6 +277,17 @@ export class SpineTurnAdapter implements ConverseRunner {
       instantDrawingContext: opts?.instantDrawingContext,
       authoritySessionId: input.session_id,
       authorityTurnId: input.turn_id,
+      ...(this.ports.standardServicesResolver
+        ? {
+            standardServicesContext: {
+              tenant_id: input.tenant_id,
+              session_id: input.session_id,
+              subscription_mount_id: lease?.account_id ?? "",
+              authority_session_id: input.session_id,
+              authority_turn_id: input.turn_id,
+            },
+          }
+        : {}),
       onEvent,
     });
     void (async () => {
@@ -278,9 +295,11 @@ export class SpineTurnAdapter implements ConverseRunner {
         await done;
         if (lease && this.ports.oauth.settleGrant) {
           await this.ports.oauth.settleGrant(input.tenant_id, lease.lease_id, {
-            usage: routingUsage,
-            stop_reason: routingStopReason,
-            ...(routingRetryAfterS !== undefined ? { retry_after_s: routingRetryAfterS } : {}),
+            usage: input.credential_grant ? { cost_tokens: 0 } : routingUsage,
+            stop_reason: input.credential_grant ? "end_turn" : routingStopReason,
+            ...(!input.credential_grant && routingRetryAfterS !== undefined
+              ? { retry_after_s: routingRetryAfterS }
+              : {}),
           });
         }
       } finally {

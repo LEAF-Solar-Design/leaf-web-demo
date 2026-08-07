@@ -81,6 +81,10 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { composeRunnerCapabilities } from "./runnerCapabilities.js";
+import { createStandardServicesFacade } from "./standardServicesFacade.js";
+import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import type { StandardServicesResolver } from "./standardServicesRuntime.js";
 import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
@@ -182,6 +186,8 @@ export interface ConverseSdkRunnerOptions {
   /** Test seams: module loaders, mocked at the module boundary in unit tests. */
   sdkImport?: () => Promise<unknown>;
   zodImport?: () => Promise<unknown>;
+  /** Product-wide resolver. A complete trusted run context mounts services automatically. */
+  standardServicesResolver?: StandardServicesResolver;
 }
 
 export class ConverseSdkRunner implements SpineConverseRunner {
@@ -192,6 +198,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
   private readonly maxTurns: number;
   private readonly sdkImport: () => Promise<unknown>;
   private readonly zodImport: () => Promise<unknown>;
+  private readonly standardServicesResolver?: StandardServicesResolver;
 
   constructor(opts: ConverseSdkRunnerOptions) {
     this.grant = opts.grant;
@@ -201,6 +208,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     this.maxTurns = opts.maxTurns ?? 24;
     this.sdkImport = opts.sdkImport ?? (() => dynImport(["@anthropic-ai", "claude-agent-sdk"]));
     this.zodImport = opts.zodImport ?? (() => dynImport(["zod"]));
+    this.standardServicesResolver = opts.standardServicesResolver;
   }
 
   /**
@@ -290,6 +298,24 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       ),
     );
     const server = sdk.createSdkMcpServer({ name: "spine", version: "1.0.0", tools });
+    const services = this.standardServicesResolver && input.standardServicesContext
+      ? createStandardServicesFacade({
+          sdk,
+          z,
+          ...(await resolveStandardServicesSession(
+            this.standardServicesResolver,
+            input.standardServicesContext,
+            "spine",
+          )),
+          profile: "spine",
+        })
+      : undefined;
+    const composition = composeRunnerCapabilities({
+      profile: "spine",
+      private_mcp_servers: { spine: server },
+      ...(services ? { services } : {}),
+    });
+    const standardServiceTools = new Set(services?.allowed_tools ?? []);
 
     // WALL-CLOCK timeout: no single turn may hold its session lock forever.
     const abort = new AbortController();
@@ -340,7 +366,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           abortController: abort,
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
-          mcpServers: { spine: server },
+          mcpServers: composition.mcpServers,
           ...(skillBundle ? { plugins: [skillBundle.plugin], skills: skillBundle.skills } : {}),
           // SETTINGS, not top-level options — the distinction is the whole
           // fix. Both flags below are Settings fields (sdk.d.ts) delivered
@@ -382,8 +408,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           // narrow, and they are correct for a spine session either way.
           ...(resume ? { resume } : {}),
           canUseTool: async (toolName: string, inp: Record<string, unknown>) =>
-            // Bridge to the loop's hook (allow spine tools / deny everything else).
-            input.canUseTool(toolName, inp),
+            standardServiceTools.has(toolName)
+              ? { behavior: "allow", updatedInput: inp }
+              // Bridge private tools to the loop's hook.
+              : input.canUseTool(toolName, inp),
         },
       });
 

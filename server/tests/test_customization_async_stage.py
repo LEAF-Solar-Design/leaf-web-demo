@@ -388,6 +388,33 @@ def test_public_stage_route_returns_202_without_calling_synchronous_stage(monkey
     assert not called.is_set()
 
 
+def test_public_stage_route_rejects_partial_authority_tuple(monkeypatch):
+    called = False
+
+    def enqueue_stage(**_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: SimpleNamespace(enqueue_stage=enqueue_stage)),
+    )
+    response = author_router.stage(
+        author_router.StageRequest(
+            description=DESCRIPTION, mode="build", idempotency_key="request-a"
+        ),
+        tenant="tenant-a",
+        authority_session_id="session-a",
+        authority_turn_id=None,
+    )
+    assert response.status_code == 422
+    assert response.body
+    assert not called
+
+
 def test_stage_status_is_tenant_scoped_and_omits_private_request(store):
     change = queued(store)
     service = CustomizationService(store)

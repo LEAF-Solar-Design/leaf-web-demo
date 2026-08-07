@@ -158,6 +158,7 @@ class AttachmentExchangeRequest(BaseModel):
     authority_session_id: str
     authority_turn_id: str
     subscription_mount_id: str
+    runner_profile_id: str
 
 
 class HumanApprovalTokenRequest(AttachmentExchangeRequest):
@@ -169,6 +170,14 @@ def _id(name: str, value: str) -> str:
     if not isinstance(value, str) or not _ID.fullmatch(value):
         raise HTTPException(status_code=422, detail=f"invalid {name}")
     return value
+
+
+def _runner_profile(value: str) -> str:
+    _id("runner_profile_id", value)
+    try:
+        return mcp_authority.runner_profile_id(value)
+    except mcp_authority.McpAuthorityError as exc:
+        raise HTTPException(status_code=422, detail="invalid runner_profile_id") from exc
 
 
 def _active_authority(
@@ -206,7 +215,7 @@ def _mint_attachment(
     plan, effects = mcp_authority.tier_authority(tier)
     channel_secret = secrets.token_urlsafe(48)
     channel_hash = hashlib.sha256(channel_secret.encode("utf-8")).hexdigest()
-    profile = mcp_authority.runner_profile_id()
+    profile = _runner_profile(request.runner_profile_id)
     token, expires_at = mcp_authority.signer().issue(
         {
             "sub": subject_id,
@@ -264,6 +273,7 @@ def exchange_attachment(
     _id("authority_session_id", request.authority_session_id)
     _id("authority_turn_id", request.authority_turn_id)
     _id("subscription_mount_id", request.subscription_mount_id)
+    _runner_profile(request.runner_profile_id)
     subject, tier = _active_authority(
         tenant_id, request.authority_session_id, request.authority_turn_id
     )
@@ -330,7 +340,7 @@ def exchange_human_approval_token(
         mcp_authority.verify_subscription_mount(
             tenant_id, request.subscription_mount_id
         )
-        profile = mcp_authority.runner_profile_id()
+        profile = _runner_profile(request.runner_profile_id)
         token, expires_at = mcp_authority.signer().issue(
             {
                 "sub": tenant.subject,

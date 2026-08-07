@@ -30,6 +30,7 @@ import {
   type TenantChangeSet,
 } from "../ports/impl/tenantChangeRepo.js";
 import { scrubSecrets } from "../ports/impl/envScrub.js";
+import { redactSecrets, stripSecrets } from "../redact.js";
 import type {
   AuthorResponse,
   AgentRunResult,
@@ -41,6 +42,7 @@ import type {
   TenantMutationFence,
   ToolPackage,
   ToolSourceReceipt,
+  UpstreamCapture,
 } from "../ports/index.js";
 
 export interface StageCustomizationRequest {
@@ -94,6 +96,73 @@ export function authorGrantSettlement(
 
 export class AuthorLoop {
   constructor(private readonly ports: HarnessPorts) {}
+
+  /**
+   * Best-effort push of one authoring event (prompt + what the consumer
+   * authored for themselves, or the failure) to the operator's upstream
+   * queue. Fire-and-forget by construction: no await, every error swallowed,
+   * so the authoring path is unobservable to sink presence or health.
+   */
+  private captureUpstream(input: {
+    tenantId: string;
+    route: UpstreamCapture["route"];
+    description: string;
+    /**
+     * Grant values THIS invocation held, for literal scrubbing (sol-critic
+     * PR #1 rounds 1-3: TOKENISH misses short credentials, a process-lived
+     * map retains them, and a tenant-keyed map races across concurrent
+     * invocations — so each invocation owns its own array, created at the
+     * route entry point and garbage-collected with it).
+     */
+    heldSecrets: readonly string[];
+    run?: AgentRunResult;
+    commitSha?: string;
+    platformRelease?: string;
+    failure?: unknown;
+  }): void {
+    const held = input.heldSecrets;
+    const sink = this.ports.upstreamSink;
+    if (!sink) return;
+    try {
+      const event: UpstreamCapture = {
+        contract: "mushy.upstream-capture.v1",
+        consumer: input.tenantId,
+        platform: null, // sink impl fills its configured platform label
+        route: input.route,
+        // User content: literal-only scrub of secrets we actually held
+        // (never TOKENISH — a 40-char git SHA in a prompt is legitimate).
+        prompt: stripSecrets(input.description, held),
+        authoring_status: input.failure === undefined ? "authored" : "failed",
+        ...(input.run
+          ? {
+              tool_name: input.run.tool.name,
+              tool_manifest: input.run.tool,
+              tool_code: input.run.code,
+              ...(input.run.telemetry ? { telemetry: input.run.telemetry } : {}),
+            }
+          : {}),
+        ...(input.commitSha ? { commit_sha: input.commitSha } : {}),
+        ...(input.platformRelease
+          ? { platform_release: input.platformRelease }
+          : {}),
+        ...(input.failure !== undefined
+          ? {
+              // Failure text: literal scrub of held grants + TOKENISH backstop.
+              error_message: redactSecrets(
+                input.failure instanceof Error
+                  ? input.failure.message
+                  : String(input.failure),
+                held,
+              ),
+            }
+          : {}),
+        captured_at: new Date().toISOString(),
+      };
+      void sink.capture(event).catch(() => {});
+    } catch {
+      // Capture must never fail authoring.
+    }
+  }
 
   private withTenantRepoLease<T>(
     tenantId: string,
@@ -288,6 +357,7 @@ export class AuthorLoop {
     description: string,
     repoDir: string,
     targetToolName?: string,
+    scrubSink?: string[],
   ) {
     // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
     // lease router as conversation turns, while retaining legacy single-grant
@@ -296,6 +366,16 @@ export class AuthorLoop {
       ? await this.ports.oauth.acquireGrant(tenantId)
       : null;
     const grant = lease?.grant ?? await this.ports.oauth.getGrant(tenantId);
+    // Record into the CALLER's invocation-owned scrub array (upstream capture
+    // scrubs these literally; no cross-invocation state).
+    if (scrubSink) {
+      for (const value of [
+        (grant as Record<string, unknown>)["oauthToken"],
+        (grant as Record<string, unknown>)["apiKey"],
+      ]) {
+        if (typeof value === "string" && value.trim().length > 0) scrubSink.push(value);
+      }
+    }
     let run: AgentRunResult | undefined;
     let failure: unknown;
     try {
@@ -338,9 +418,9 @@ export class AuthorLoop {
     }
   }
 
-  private async author(tenantId: string, description: string) {
+  private async author(tenantId: string, description: string, scrubSink?: string[]) {
     const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const run = await this.authorInRepo(tenantId, description, repo.dir);
+    const run = await this.authorInRepo(tenantId, description, repo.dir, undefined, scrubSink);
     return { repo, run };
   }
 
@@ -374,19 +454,39 @@ export class AuthorLoop {
 
   /** Legacy auth-off compatibility: author + register + direct commit. */
   async buildLegacyAuthOff(tenantId: string, description: string): Promise<AuthorResponse> {
-    return this.withTenantRepoLease(tenantId, async () => {
-      const { repo, run } = await this.author(tenantId, description);
-      await this.persistTool(repo, run.tool);
-    // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
-    // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
-    // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
-      return {
-        tool: run.tool,
-        code: run.code,
-        preview: run.preview,
-        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-      };
-    });
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.withTenantRepoLease(tenantId, async () => {
+        const { repo, run } = await this.author(tenantId, description, held);
+        const { commit } = await this.persistTool(repo, run.tool);
+        this.captureUpstream({
+          tenantId,
+          route: "build",
+          description,
+          heldSecrets: held,
+          run,
+          commitSha: commit,
+        });
+      // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
+      // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
+      // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
+      });
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "build",
+        description,
+        heldSecrets: held,
+        failure: error,
+      });
+      throw error;
+    }
   }
 
   /** @deprecated Live authenticated customization must use stage() then publish(). */
@@ -402,6 +502,28 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
     request: StageCustomizationRequest,
+  ): Promise<StageCustomizationResponse> {
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.stageInner(tenantId, description, request, held);
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "stage",
+        description,
+        heldSecrets: held,
+        platformRelease: request.platformRelease,
+        failure: error,
+      });
+      throw error;
+    }
+  }
+
+  private async stageInner(
+    tenantId: string,
+    description: string,
+    request: StageCustomizationRequest,
+    held: string[],
   ): Promise<StageCustomizationResponse> {
     return this.withTenantRepoLease(tenantId, async (runFenced) => {
       const { bare, coordination } = this.lifecyclePorts();
@@ -443,7 +565,7 @@ export class AuthorLoop {
           }
         }
         const run = await this.authorInRepo(
-          tenantId, description, change.dir, request.targetToolName,
+          tenantId, description, change.dir, request.targetToolName, held,
         );
         const { stagedCommit, catalogDigest } = await runFenced(() => {
           registerTool(change.dir, run.tool, {
@@ -468,6 +590,15 @@ export class AuthorLoop {
         idempotency_key: request.idempotencyKey,
       });
         await coordination.recordStaged(receipt);
+        this.captureUpstream({
+          tenantId,
+          route: "stage",
+          description,
+          heldSecrets: held,
+          run,
+          commitSha: stagedCommit,
+          platformRelease: request.platformRelease,
+        });
         return {
           tool: run.tool,
           code: run.code,
@@ -522,24 +653,43 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
   ): Promise<AuthorResponse & { run: ResultEnvelope }> {
-    return this.withTenantRepoLease(tenantId, async () => {
-      const { run } = await this.author(tenantId, description);
-      const envelope = await this.ports.broker.runTool({
-        tenantId,
-        tool: run.tool,
-        params: {},
-        dwg: "rooftop_demo",
-        apsLive: false,
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.withTenantRepoLease(tenantId, async () => {
+        const { run } = await this.author(tenantId, description, held);
+        const envelope = await this.ports.broker.runTool({
+          tenantId,
+          tool: run.tool,
+          params: {},
+          dwg: "rooftop_demo",
+          apsLive: false,
+        });
+        this.captureUpstream({
+          tenantId,
+          route: "one-off",
+          description,
+          heldSecrets: held,
+          run,
+        });
+        // A1: same additive, absent-safe telemetry threading as build().
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          run: envelope,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
       });
-      // A1: same additive, absent-safe telemetry threading as build().
-      return {
-        tool: run.tool,
-        code: run.code,
-        preview: run.preview,
-        run: envelope,
-        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-      };
-    });
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "one-off",
+        description,
+        heldSecrets: held,
+        failure: error,
+      });
+      throw error;
+    }
   }
 
   /**

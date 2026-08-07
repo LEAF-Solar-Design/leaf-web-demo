@@ -103,34 +103,30 @@ describe("IPv4 embedded in IPv6 is decoded, not pattern-matched", () => {
  * description stays honest.
  *
  * Round 1 caught me repeating the trap this whole program keeps hitting: I
- * wrote that the live path "needs this regardless", when in fact the LIVE
- * converse runner mounts no tenant MCP servers at all. The bridge is reached
- * only by AgentSdkTurnRunner, which serve.ts does not construct. So this PR
- * hardens a surface that is currently unreachable in the converse lane, and
- * that is exactly right: admitting tenant MCP servers to the live lane is the
- * HELD design decision (#322), not something to smuggle in behind a security
- * fix.
+ * Standard services enter through one product-owned resolver and a local facade.
+ * No runner may reopen the raw tenant bridge.
  */
-describe("scope: the live converse runner still mounts no tenant MCP", () => {
+describe("scope: live runners mount only the tenant broker facade", () => {
   const read = async (relative: string): Promise<string> => {
     const { readFileSync } = await import("node:fs");
     const { fileURLToPath } = await import("node:url");
     return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
   };
 
-  it("ConverseSdkRunner passes only the spine server, and never touches the bridge", async () => {
+  it("ConverseSdkRunner composes the spine plus resolver facade and never touches the bridge", async () => {
     const source = await read("../src/vendor/mushy-author/ports/impl/converseSdkRunner.ts");
-    expect(source).toMatch(/mcpServers:\s*\{\s*spine:\s*server\s*\}/);
+    expect(source).toMatch(/composeRunnerCapabilities\(\{[\s\S]*profile:\s*"spine"[\s\S]*private_mcp_servers:\s*\{\s*spine:\s*server\s*\}/);
+    expect(source).toMatch(/standardServicesResolver/);
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
   });
 
-  it("the production COMPOSITION picks that runner and mounts no bridge", async () => {
+  it("the production composition injects the fixed standard-services resolver", async () => {
     // Round 2 was right that reading the runner alone is not enough: the live
     // selection happens in server.ts's startReal, and a runner swap or wrapper
     // THERE could mount tenant MCP while a runner-only test stayed green.
     const source = await read("../src/server.ts");
     // The one place a converse runner is chosen for production.
-    expect(source).toMatch(/runnerFor:\s*\(grant\)\s*=>\s*new ConverseSdkRunner\(\{\s*grant\s*\}\)/);
+    expect(source).toMatch(/new ConverseSdkRunner\(\{[\s\S]*grant,[\s\S]*standardServicesResolver/);
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
   });
 
@@ -141,12 +137,10 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
   });
 
-  it("only the NON-live runner reaches the bridge", async () => {
-    // The positive half: if this stops being true, the bridge either went live
-    // (the held #322 ruling) or went dead. Either way this PR's framing must
-    // be revisited, and the DNS-rebinding residual re-triaged.
+  it("the legacy runner cannot reopen the old tenant bridge", async () => {
     const dead = await read("../src/vendor/mushy-author/ports/impl/agentSdkTurnRunner.ts");
-    expect(dead).toMatch(/resolveEnvMcpAttachment/);
+    expect(dead).not.toMatch(/LEAF_MCP_BRIDGE_DIR|resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
+    expect(dead).toMatch(/mcpServers:\s*\{\s*\[MCP_SERVER_NAME\]:\s*input\.server\s*\}/);
   });
 });
 

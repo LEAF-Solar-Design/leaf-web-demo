@@ -52,6 +52,7 @@ import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
+import { withAuthorStandardServicesAuthority } from "./ports/impl/leafStandardServicesResolver.js";
 
 export { DEFAULT_TENANT };
 
@@ -77,6 +78,31 @@ function tenantForRequest(req: IncomingMessage, body: Record<string, unknown>): 
   const t = body.tenant_id;
   if (typeof t === "string" && t.trim()) return t.trim();
   return tenantOf(req);
+}
+
+function authorityHeader(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function authorAuthorityForRequest(
+  req: IncomingMessage,
+  tenantId: string,
+): Omit<import("./ports/impl/leafStandardServicesResolver.js").AuthorAuthority, "subscription_mount_id"> | undefined {
+  const authoritySessionId = authorityHeader(req, "x-authority-session-id");
+  const authorityTurnId = authorityHeader(req, "x-authority-turn-id");
+  const required = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
+  if (Boolean(authoritySessionId) !== Boolean(authorityTurnId) || (required && !authoritySessionId)) {
+    throw new AuthorLoopError("active author authority headers are required", 409);
+  }
+  if (!authoritySessionId || !authorityTurnId) return undefined;
+  return {
+    tenant_id: tenantId,
+    session_id: authoritySessionId,
+    authority_session_id: authoritySessionId,
+    authority_turn_id: authorityTurnId,
+  };
 }
 
 // --------------------------------------------------------------------------- //
@@ -665,17 +691,21 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
         const body = await readJsonBody(req);
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
+        const authority = authorAuthorityForRequest(req, tenant);
         // These names deliberately match AuthorLoop.stage's request exactly.
-        const out = await loop.stage(tenant, description, {
-          changeSetId: requiredText(body, "changeSetId"),
-          expectedBaseSha: requiredText(body, "expectedBaseSha"),
-          platformRelease: requiredText(body, "platformRelease"),
-          workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
-          idempotencyKey: requiredText(body, "idempotencyKey"),
-          ...(body.targetToolName === undefined
-            ? {}
-            : { targetToolName: requiredText(body, "targetToolName") }),
-        });
+        const stage = () => loop.stage(tenant, description, {
+            changeSetId: requiredText(body, "changeSetId"),
+            expectedBaseSha: requiredText(body, "expectedBaseSha"),
+            platformRelease: requiredText(body, "platformRelease"),
+            workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
+            idempotencyKey: requiredText(body, "idempotencyKey"),
+            ...(body.targetToolName === undefined
+              ? {}
+              : { targetToolName: requiredText(body, "targetToolName") }),
+          });
+        const out = authority
+          ? await withAuthorStandardServicesAuthority(authority, stage)
+          : await stage();
         return send(res, 200, out);
       }
 
@@ -899,6 +929,11 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
+  const {
+    AuthorStandardServicesRunner,
+    StandardServicesOAuthGrantProvider,
+    standardServicesResolverFromEnv,
+  } = await import("./ports/impl/leafStandardServicesResolver.js");
 
   const tenantsDir = process.env.LEAF_TENANTS_DIR ?? "C:/tmp/leaf-tenants";
   const tenantGitDir = process.env.LEAF_TENANT_GIT_DIR ?? `${tenantsDir}/tenant-git`;
@@ -909,14 +944,22 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
   const grantStore = createTenantGrantStore();
+  const standardServicesResolver = standardServicesResolverFromEnv();
+  const oauth = new StandardServicesOAuthGrantProvider(
+    new OAuthGrantProviderImpl({ store: grantStore }),
+  );
   const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
-        oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+        oauth,
         appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
-        runnerFor: (grant) => new ConverseSdkRunner({ grant }),
+        runnerFor: (grant) => new ConverseSdkRunner({
+          grant,
+          ...(standardServicesResolver ? { standardServicesResolver } : {}),
+        }),
+        ...(standardServicesResolver ? { standardServicesResolver } : {}),
         // Classify the turn's surface (drawing vs the product) with a small
         // fast model instead of matching vocabulary in the prompt. Advisory
         // and fail-open: see HaikuIntentSynthesizer.
@@ -926,9 +969,14 @@ export async function startReal(port = 8130): Promise<Server> {
     : undefined;
 
   const ports: HarnessPorts = {
-    agentRunner: new AgentSdkRunner(),
+    agentRunner: new AuthorStandardServicesRunner(
+      new AgentSdkRunner({
+        ...(standardServicesResolver ? { standardServicesResolver } : {}),
+      }),
+      Boolean(standardServicesResolver),
+    ),
     broker: new BrokerApsClientHttp(),
-    oauth: new OAuthGrantProviderImpl({ store: grantStore }),
+    oauth,
     grantAdmin: grantStore,
     tenantRepo: new TenantRepoProviderImpl({
       locator: { async repoRef(t) { return `${tenantsDir}/${t}`; } },
