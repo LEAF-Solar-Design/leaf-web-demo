@@ -1197,6 +1197,112 @@ def test_a_racing_target_write_is_never_reported_as_reconciled(source, target):
 
 
 @requires_database
+def test_an_empty_source_against_a_populated_target_withholds_a_clean_exit(
+    source, target
+):
+    """The shape a DESTROYED source takes reconciles trivially.
+
+    Every target row is an expected target-only row, nothing is missing, and
+    the command would exit 0 having proven only that the empty set is a subset.
+    That is exactly the state a deploy leaves wherever the legacy store is
+    task-local, which is where this command is most likely to be run first.
+    """
+    RECONCILE._ensure_source_schema(source.path)
+    tenant = _unique("empty-src")
+    with target.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_sessions (session_id, tenant_id, drawing_id, status,"
+            " created_at, updated_at, last_seq) VALUES (%s,%s,%s,'active',1.0,1.0,0)",
+            (_unique("survivor"), tenant, _unique("drawing")),
+        )
+
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    # The set comparison itself is still clean; that is the point.
+    assert receipt["reconciled"] is True
+    assert receipt["empty_source_populated_target"] is True
+
+    def run(*extra):
+        return subprocess.run(
+            [sys.executable, str(RECONCILE_PATH), "--mode", "parity",
+             "--sqlite", str(source.path), *extra],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+
+    refused = run()
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "NOT" in refused.stderr and "cutover receipt" in refused.stderr
+
+    # An operator who knows the source is legitimately empty can say so.
+    allowed = run("--allow-empty-source")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert json.loads(allowed.stdout)["empty_source_populated_target"] is True
+
+
+@requires_database
+def test_an_empty_source_and_an_empty_target_still_pass(source, monkeypatch):
+    """The flag must NOT be needed for a genuinely fresh pair.
+
+    The guard is deliberately global rather than tenant-scoped -- on a real
+    store the whole source matters -- so a shared test database always has rows
+    from sibling tests. The target is emptied at the snapshot seam instead of by
+    TRUNCATE, which would be destructive to those siblings.
+    """
+    RECONCILE._ensure_source_schema(source.path)
+    empty = {table: [] for table in RECONCILE.TABLE_COLUMNS}
+    monkeypatch.setattr(RECONCILE, "_postgres_snapshot", lambda _c: dict(empty))
+
+    receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
+    assert receipt["reconciled"] is True
+    assert receipt["empty_source_populated_target"] is False, (
+        "a fresh pair must not be treated as a destroyed source"
+    )
+    assert receipt["source_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
+    assert receipt["target_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
+
+    # And the CLI layer, which is what an operator and a gate actually see.
+    # Called IN-PROCESS rather than through subprocess on purpose: the guard
+    # lives in main(), and only an in-process call inherits the stubbed empty
+    # target above. Asserting the receipt alone would stay green through a
+    # regression that refused every empty source at the exit-code layer.
+    assert RECONCILE.main(
+        ["--mode", "parity", "--sqlite", str(source.path)]
+    ) == 0, "a genuinely fresh pair must exit 0 without --allow-empty-source"
+
+
+@requires_database
+def test_backfill_also_refuses_a_clean_exit_on_an_empty_source(source, target):
+    """The guard must not be parity-only.
+
+    A backfill against a destroyed source inserts nothing and would otherwise
+    report success, which is the same manufactured receipt in the other mode.
+    """
+    RECONCILE._ensure_source_schema(source.path)
+    with target.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_sessions (session_id, tenant_id, drawing_id, status,"
+            " created_at, updated_at, last_seq) VALUES (%s,%s,%s,'active',1.0,1.0,0)",
+            (_unique("survivor"), _unique("tenant"), _unique("drawing")),
+        )
+
+    def run(*extra):
+        return subprocess.run(
+            [sys.executable, str(RECONCILE_PATH), "--mode", "backfill",
+             "--sqlite", str(source.path), *extra],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+
+    refused = run()
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "cutover receipt" in refused.stderr
+    receipt = json.loads(refused.stdout)
+    assert receipt["inserted_total"] == 0
+    assert receipt["empty_source_populated_target"] is True
+
+    allowed = run("--allow-empty-source")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+
+
+@requires_database
 def test_a_database_error_exits_two_not_one(source, tmp_path):
     """Exit 1 means 'parity failed' and gates a flip, so a driver failure must
     not borrow it. psycopg errors are not OSError/RuntimeError/sqlite3.Error."""
