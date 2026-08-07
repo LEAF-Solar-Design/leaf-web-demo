@@ -238,6 +238,42 @@ def test_postgres_incremental_backfill_and_rollback_gate(authority_backfill_gate
     assert not authority_backfill_gate["superset_receipt"]["exact_equal"]
 
 
+def test_postgres_migration_order_keeps_stage_authority_and_mcp_journal(
+    authority_backfill_gate,
+):
+    database = platform_db()
+    with database.transaction() as connection:
+        columns = {
+            row["column_name"]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'customization_change_sets'"
+            ).fetchall()
+        }
+        migrations = [
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM leaf_schema_migrations "
+                "WHERE name IN ("
+                "'0030_tenant_mcp_approvals.sql', "
+                "'0031_customization_stage_authority.sql'"
+                ") ORDER BY name"
+            ).fetchall()
+        ]
+        approval_table = connection.execute(
+            "SELECT to_regclass("
+            "current_schema() || '.harness_tenant_mcp_approvals'"
+            ") AS table_name"
+        ).fetchone()["table_name"]
+    assert {"authority_session_id", "authority_turn_id"} <= columns
+    assert migrations == [
+        "0030_tenant_mcp_approvals.sql",
+        "0031_customization_stage_authority.sql",
+    ]
+    assert approval_table == "harness_tenant_mcp_approvals"
+
+
 def create(store, tenant: str, key: str):
     return store.create_change_set(
         tenant_id=tenant,

@@ -289,6 +289,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "base_commit", "staged_commit", "catalog_digest",
             "desired_platform_release", "workspace_contract_digest",
             "author_subject", "approver_subject", "created_at", "updated_at",
+            "authority_session_id", "authority_turn_id",
         },
         "effective_catalogs": {
             "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
