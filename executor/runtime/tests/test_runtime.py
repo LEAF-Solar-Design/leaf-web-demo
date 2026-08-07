@@ -682,7 +682,7 @@ class CapacitySamplerTests(unittest.TestCase):
                 CapacitySampler.from_environment(
                     self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": over})
 
-    def _spacing_at_ceiling(self, sample_cost: float, samples: int = 5) -> list[float]:
+    def _spacing_at_ceiling(self, sample_costs: list[float], samples: int = 5) -> list[float]:
         """Drive `_run()` on a stubbed clock and return the spacing it produces.
 
         The clock is faked rather than slept through, so this measures the real
@@ -697,7 +697,7 @@ class CapacitySamplerTests(unittest.TestCase):
 
         def sample() -> None:
             stamps.append(clock[0])
-            clock[0] += sample_cost
+            clock[0] += sample_costs[min(len(stamps) - 1, len(sample_costs) - 1)]
             if len(stamps) >= samples:
                 sampler._stop.set()
 
@@ -730,7 +730,7 @@ class CapacitySamplerTests(unittest.TestCase):
         contain a datapoint, so spacing must stay under a period with room to
         spare for jitter.
         """
-        spacings = self._spacing_at_ceiling(sample_cost=4.0)
+        spacings = self._spacing_at_ceiling([4.0])
 
         self.assertEqual(
             [MAX_CAPACITY_SAMPLE_SECONDS] * len(spacings), spacings,
@@ -739,19 +739,25 @@ class CapacitySamplerTests(unittest.TestCase):
             max(spacings), CAPACITY_ALARM_PERIOD_SECONDS,
             "a 60-second alarm period can contain no datapoint")
 
-    def test_a_sample_slower_than_the_interval_resyncs_instead_of_bursting(self) -> None:
-        """The overrun branch must not fire a catch-up burst into the log group.
+    def test_recovering_from_one_slow_sample_does_not_fire_a_catch_up_burst(self) -> None:
+        """The overrun branch must re-baseline, not repay the missed intervals.
 
-        Once a sample costs more than a whole interval the deadline is already
-        in the past, and a loop that kept adding intervals would emit back to
-        back until it caught up -- flooding fd 2 at exactly the moment fd 2 is
-        the thing that is slow. Re-baselining means the next sample is simply
-        the next one the machine can take.
+        This needs a slow sample FOLLOWED BY fast ones; a uniformly slow sample
+        cannot show the defect, because samples can never arrive faster than
+        their own cost. One 100-second sample puts the deadline more than three
+        intervals in the past. Without the re-baseline the loop then computes a
+        negative remaining three times in a row and samples with no wait at all,
+        emitting three lines at the same instant -- flooding fd 2 at exactly the
+        moment fd 2 is the thing that was slow.
         """
-        spacings = self._spacing_at_ceiling(sample_cost=MAX_CAPACITY_SAMPLE_SECONDS + 10.0)
+        slow = MAX_CAPACITY_SAMPLE_SECONDS * 10 / 3
+        spacings = self._spacing_at_ceiling([slow, 0.0])
 
-        for spacing in spacings:
-            self.assertEqual(MAX_CAPACITY_SAMPLE_SECONDS + 10.0, spacing)
+        self.assertEqual(slow, spacings[0], "the slow sample itself sets the first gap")
+        for spacing in spacings[1:]:
+            self.assertGreaterEqual(
+                spacing, MAX_CAPACITY_SAMPLE_SECONDS,
+                f"recovery emitted at {spacing}s spacing: {spacings}")
 
     def test_stop_does_not_wait_for_the_configured_interval(self) -> None:
         """Shutdown must not be hostage to a telemetry write.
