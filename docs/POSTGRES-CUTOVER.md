@@ -308,16 +308,28 @@ short-circuits before any comparison, so a fully flipped fleet cannot mismatch.
 A PARTLY flipped fleet can. `_SHADOW_READ_MODES` contains `dual_write_shadow`,
 and `get_session` runs
 `_shadow_equal("session", legacy, _pg_get_session(session_id))`. So an OLD task
-still on `dual_write_shadow`, serving a session that a NEW `postgres`-mode task
-minted, compares a legacy `None` against a live PostgreSQL row and raises the
-same `session shadow mismatch`. The exposure is brand-new sessions during the
-blue/green color overlap, not pre-existing ones.
+still on `dual_write_shadow` raises whenever its legacy row disagrees with what
+a NEW `postgres`-mode task has written.
 
-Mitigation, which costs nothing on the current topology: the alt color is
-already at desired 0. Flip the DRAINED color first, verify it through the
-color-addressed header rules, then drain the live color and flip it. That
-ordering keeps the two modes from serving the same session concurrently, and it
-is the operational form of the "quiesce legacy writes" prerequisite above.
+**Read the exposure as every session either task touches during the overlap, not
+just new ones.** Two shapes, and the second is the easy one to miss:
+
+- A session the postgres task MINTED exists only in PostgreSQL, so the old task
+  compares a legacy `None` against a real row.
+- A PRE-EXISTING session the postgres task merely APPENDED to has moved in
+  PostgreSQL and not in SQLite: `_pg_append_event` runs
+  `UPDATE app_sessions SET last_seq = last_seq + 1, updated_at = %s`, and
+  `_shadow_equal` compares whole rows, so the stale legacy row and the advanced
+  PostgreSQL row differ on `last_seq` and `updated_at` alone. No new session and
+  no legacy write is required to trigger it.
+
+Mitigation: flip the DRAINED color first, verify it through the color-addressed
+header rules, then drain the live color and flip it, so the two modes never
+serve overlapping traffic. That is the operational form of the "quiesce legacy
+writes" prerequisite above. **Re-read the live desired counts immediately before
+acting rather than trusting any recorded value, including this document.** Which
+color is drained flips with every blue/green cycle, and the counts in
+`platform/authority-inventory.json` disagreed with a live read on 2026-08-06.
 
 **2. Rollback has a mandatory ordering, and getting it backwards recreates this
 incident.** The return path is `postgres` to `shadow` to `legacy`. Every mode on
@@ -330,12 +342,26 @@ selector change, never after.** Note also that rolling back after PostgreSQL has
 accepted writes needs the fenced reverse backfill named in the contract above;
 `scripts/reconcile_sessions_authority.py` is SQLite to PostgreSQL only.
 
-**Already satisfied, so do not re-litigate it as a pre-flight.** `ensure_started`
-runs `_pg_ensure_started()` whenever the mode is not `legacy`, and that function
-fails closed on `to_regclass` for all three `app_*` tables. Staging runs
-`dual_write_shadow` and its service is healthy, so `0012_sessions.sql` is proven
-applied on staging today. A separate migration check before the flip buys
-nothing.
+**The three tables exist on staging, and that is a weaker statement than "0012
+is applied".** Take the evidence from the incident, not from the health check.
+The recorded mismatches prove `_pg_get_or_create_session` reached PostgreSQL and
+its `ON CONFLICT (tenant_id, drawing_id)` returned a durable row, which cannot
+happen unless `app_sessions` exists, holds rows, and carries the unique index
+that clause requires.
+
+Two things that do NOT prove it, so do not substitute them:
+
+- **A healthy service does not.** `session_store.ensure_started()` has no
+  startup or lifespan caller; it runs lazily on the first session request, and
+  `/api/health` never consults `session_store`. A task can be healthy having
+  never touched the sessions schema.
+- **`_pg_ensure_started()` passing does not.** It checks `to_regclass` on the
+  three tables and nothing else: not migration history, not columns, not
+  constraints, not indexes.
+
+So a pre-flight that asserts schema currency properly (`assert_schema_current()`
+from the exact candidate image, as the deploy path already does elsewhere) is
+still worth running. What is settled is only that the tables are present.
 
 **Two tables do not move, and the flip is not what strands them.**
 `server/checkpoints.py` and `server/session_policy.py` resolve `SESSIONS_DB`
