@@ -808,6 +808,28 @@ resolves it is in a shadow-reading mode.** Today that means
 third consumer appears, because the earlier draft was wrong within hours purely
 because a second one did.
 
+**The replacement argument is weaker than the one it replaced, and that is worth
+saying rather than leaving a reader to infer they are equivalent.** The old
+reason was a property of the CODE: no shadow compare existed on those two
+modules, so only a merged, reviewed change could falsify it. The new reason is a
+property of the ENVIRONMENT: `LEAF_SESSION_ANNEX_STORE` happens to be unset.
+Anyone can falsify that by setting a variable, with no pull request, no review
+and no diff for anyone to notice. Same conclusion, much thinner footing.
+
+So state the condition rather than the observation. **The ordering argument holds
+only while every selector that resolves `SESSIONS_DB` is outside
+`session_annex.SHADOW_READ_MODES` and `session_store._SHADOW_READ_MODES`.** That
+is what has to stay true. Re-read the live task definition for BOTH selectors
+immediately before touching `SESSIONS_DB`, exactly as this document already says
+to re-read the desired counts, and for the same reason: a recorded environment
+fact is evidence about the past, not a guarantee about the present.
+
+More generally, and this is the reusable half: **a claim about what COVERS
+something decays faster than a claim about what something IS.** "These tables
+live in SQLite" survived months here. "And nothing compares them" died the day a
+peer shipped the comparison. Both of the claims corrected in this section were
+coverage claims. When you write one, write its expiry condition next to it.
+
 So there is one forbidden ordering and two acceptable terminal states:
 
 - **Forbidden:** set `SESSIONS_DB` while any selector resolving it is in a
