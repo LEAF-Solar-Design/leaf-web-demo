@@ -243,6 +243,32 @@ def _instructions(dockerfile: str) -> list[tuple[str, str]]:
     return parsed
 
 
+def _exec_argv(argument: str) -> list[str] | None:
+    """The argv of an exec-form instruction, or None when it is not one.
+
+    None rather than an exception for every non-exec-form argument, because the
+    caller compares against an expected argv: a shell-form instruction must
+    simply fail to match, not blow up the test that is scanning past it.
+
+    Docker accepts only a JSON array of strings here. Anything that parses to
+    something else is not exec form to Docker either, so returning None for it
+    keeps this in step with the builder rather than being lenient where the
+    builder is not.
+    """
+    text = argument.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    if not all(isinstance(item, str) for item in parsed):
+        return None
+    return parsed
+
+
 def _copied_scripts(dockerfile: str) -> dict[str, str]:
     """basename -> absolute in-image path, for single-file `COPY scripts/...`.
 
@@ -541,10 +567,19 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
 
     The image decides it instead. A final `test -f` per shipped script runs
     AFTER every instruction above it, knows nothing about spelling, and fails
-    the BUILD rather than a test. Mutation-proven with a real `docker build -f
-    deploy/Dockerfile.app .`: unmodified builds green; dropping the sessions
-    COPY, and separately inserting `RUN rm -rf scripts` under WORKDIR /app,
-    each turn it red at this exact step.
+    the BUILD rather than a test.
+
+    WHAT IS BUILD-PROVEN AND WHAT IS NOT, because the two are not the same and
+    the difference is one instruction. The SHELL-form spelling of this guard
+    was mutation-proven with a real `docker build -f deploy/Dockerfile.app .`:
+    unmodified builds green; dropping the sessions COPY, and separately
+    inserting `RUN rm -rf scripts` under WORKDIR /app, each turned it red at
+    this exact step. The guard is now EXEC form, and that change has NOT been
+    re-proven against a daemon -- the host's Docker was down when it was made.
+    It rests instead on Docker's documented rule that SHELL does not affect the
+    exec form, which is precisely why the change was made. Anyone with a
+    working daemon should replay the same two mutations plus the SHELL one
+    below and delete this paragraph.
 
     Keyed on the COPY map, so a reconciler added later is covered the day it is
     copied rather than the day someone remembers to extend this list.
@@ -583,23 +618,38 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # exact form makes that impossible rather than merely unlikely, which is the
     # same trade `_PINNED_GIT_INSTALL` makes: changing HOW the guard is spelled
     # now requires editing this pin, and that is a change a reviewer should see.
-    expected: list[str] = []
-    for target in sorted(copies.values()):
+    # EXEC FORM, pinned as such. Pinning the tokens was not enough on its own:
+    # shell-form RUN executes through whatever SHELL is in effect, so
+    #     RUN rm -rf /app/scripts
+    #     SHELL ["/bin/true"]
+    # ran the byte-identical guard as `/bin/true -c "test -f ..."`, which exits
+    # 0 having tested nothing. The image shipped with both reconcilers deleted
+    # and BOTH this test and test_documented_authority_commands_resolve_in_the_image
+    # passed. A review confirmed it by replaying the mutation. That attack sits
+    # ABOVE the guard, where the allowlist below cannot see it by construction,
+    # so no rule about what FOLLOWS the guard could ever have caught it. Naming
+    # the interpreter closes it outright instead of adding another position
+    # rule: exec form ignores SHELL, so nothing above the guard changes what
+    # the guard means.
+    command = " && ".join(
         # `-s` as well as `-f`: `-f` alone accepts an EMPTY file, so a
         # truncation ships a reconciler that exits 0 and emits no receipt.
-        expected += ["test", "-f", target, "&&", "test", "-s", target, "&&"]
-    expected = expected[:-1]
+        f"test -f {target} && test -s {target}"
+        for target in sorted(copies.values())
+    )
+    expected = ["/bin/sh", "-c", command]
 
     instructions = _instructions(dockerfile)
     guarded = [
         index for index, (keyword, argument) in enumerate(instructions)
-        if keyword == "RUN" and argument.split() == expected
+        if keyword == "RUN" and _exec_argv(argument) == expected
     ]
     assert len(guarded) == 1, (
-        "deploy/Dockerfile.app must hold exactly one existence guard, spelled "
-        f"exactly:\n    RUN {' '.join(expected)}\n"
+        "deploy/Dockerfile.app must hold exactly one existence guard, in EXEC "
+        f"form, spelled exactly:\n    RUN {json.dumps(expected)}\n"
         f"found {len(guarded)}. A guard the image ships must assert every "
-        "script the COPY map ships, and nothing else may impersonate it."
+        "script the COPY map ships, must name its own interpreter so a SHELL "
+        "above it cannot neuter it, and nothing else may impersonate it."
     )
 
     # ALLOWLIST, not a denylist of RUN/COPY/ADD. An instruction this guard does

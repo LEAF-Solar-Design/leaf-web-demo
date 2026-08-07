@@ -96,10 +96,14 @@ WORKDIR /app/server
 # them: a destructive instruction above this guard is caught by the guard; a RUN
 # below the ARG is caught by that invariant; and anything else below this guard
 # is caught by the allowlist in test_the_image_asserts_its_own_reconcilers_at_build_time.
-RUN test -f /app/scripts/reconcile_customization_authority.py \
- && test -s /app/scripts/reconcile_customization_authority.py \
- && test -f /app/scripts/reconcile_sessions_authority.py \
- && test -s /app/scripts/reconcile_sessions_authority.py
+# EXEC FORM, and that is load-bearing rather than a style choice. Shell-form
+# RUN executes through whatever SHELL is in effect, so `SHELL ["/bin/true"]`
+# placed ABOVE this line ran the identical guard as `/bin/true -c "test -f ..."`
+# -- exit 0, nothing tested, image shipped with both reconcilers deleted, and
+# every static check still green. A review confirmed it by replaying the
+# mutation. Exec form names the interpreter itself and ignores SHELL, so no
+# instruction above the guard can change what the guard means.
+RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
