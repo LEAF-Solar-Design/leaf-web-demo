@@ -77,7 +77,11 @@ from envelopes import (  # noqa: E402
     ok_envelope,
     with_envelope_fields,
 )
-from tool_loader import is_trusted_builtin_tool, run_tool_dynamic  # noqa: E402
+from tool_loader import (  # noqa: E402
+    _sandbox_tier as _tool_sandbox_tier,
+    is_trusted_builtin_tool,
+    run_tool_dynamic,
+)
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 
@@ -658,14 +662,29 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
 
 
 # --------------------------------------------------------------------------- #
-# Production authored-execution containment.
+# Deployed-posture authored-execution containment.
 #
 # LEAF_RUNTIME_ENV is an explicit deployment posture. In production, authored
 # execution defaults OFF and can turn on only when both the operator flag and
-# an approved sandbox tier are present. Local/demo behavior stays unchanged.
+# an approved sandbox tier are present. In any deployed posture (staging or
+# production) authored execution requires an engaged sandbox tier, whether the
+# flag is explicit or defaulted on. Local/demo behavior stays unchanged.
 # --------------------------------------------------------------------------- #
 def _production_runtime() -> bool:
     return os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() == "production"
+
+
+def _deployed_runtime() -> bool:
+    """True when LEAF_RUNTIME_ENV names a real deployed posture.
+
+    Staging and production are the two deployed postures (the same primary
+    signal routers/demand.py::_deployed_runtime uses; the deploy contract
+    requires LEAF_RUNTIME_ENV in every deployed task definition). Local, demo,
+    dev, and test runs leave the variable unset or use another value and never
+    enter the deployed branch.
+    """
+    return os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() in (
+        "staging", "production")
 
 
 def _authored_execution_enabled() -> bool:
@@ -675,12 +694,47 @@ def _authored_execution_enabled() -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _authored_execution_explicitly_armed() -> bool:
+    """True only when LEAF_AUTHORED_EXECUTION is EXPLICITLY set to a truthy value.
+
+    Distinct from `_authored_execution_enabled()`, which defaults ON outside the
+    production posture. The sandbox floor in `validate_runtime_safety` fires on
+    the EXPLICIT flag in every posture, and additionally on the EFFECTIVE
+    (defaulted-on) value in a deployed posture, so only local/demo deployments
+    (no deployed LEAF_RUNTIME_ENV, authored execution defaulted on, sandbox off)
+    keep their existing in-process behavior byte-for-byte.
+    """
+    raw = os.environ.get("LEAF_AUTHORED_EXECUTION")
+    return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _sandbox_configured() -> bool:
     return os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b"
 
 
 def validate_runtime_safety() -> None:
     """Reject unsafe or ambiguous production broker configuration."""
+    # Posture-INDEPENDENT fail-closed floor. Tenant-authored tool code must
+    # NEVER execute in-process in this credential-holding broker. The floor
+    # fires when authored execution is EXPLICITLY armed (any posture) and ALSO
+    # when it is merely EFFECTIVELY enabled -- the flag unset and defaulting on
+    # -- in a DEPLOYED posture (staging/production), where an unset flag is a
+    # misconfiguration, not a dev convenience. This catches both the silent
+    # footgun where LEAF_SANDBOX="1" reads as a non-tier value and the staging
+    # counterexample where the flag is simply absent. Only local/demo (no
+    # deployed posture, flag unset) keeps the in-process default.
+    if _authored_execution_explicitly_armed() or (
+            _deployed_runtime() and _authored_execution_enabled()):
+        tier = _tool_sandbox_tier()
+        if tier not in ("subprocess", "microvm"):
+            raise RuntimeError(
+                "authored execution is enabled (LEAF_AUTHORED_EXECUTION="
+                f"{os.environ.get('LEAF_AUTHORED_EXECUTION')!r}; unset defaults "
+                "on outside production) without an engaged sandbox tier: set "
+                "LEAF_TOOL_SANDBOX_PROVIDER=e2b (or LEAF_SANDBOX=e2b|e2b-microvm)"
+                ". Refusing to start with tenant tool code able to execute "
+                f"in-process (sandbox tier={tier!r})."
+            )
     if not _production_runtime():
         return
     if not os.environ.get(BROKER_SECRET_ENV, "").strip():
@@ -2424,16 +2478,20 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-    # Phase 0 production gate: tracked builtins and APS-only tools remain
+    # Phase 0 deployed-posture gate: tracked builtins and APS-only tools remain
     # available, but a tenant-controlled Python file cannot load in this
-    # credential-bearing process. Enabling authored execution without a
-    # sandbox is rejected here as defense in depth even if startup validation
-    # was bypassed by a direct function call.
-    if _production_runtime() and not is_trusted_builtin_tool(tool, req.tenant_id):
-        if not _authored_execution_enabled() or not _sandbox_configured():
+    # credential-bearing process unless authored execution is enabled AND a
+    # real out-of-process sandbox tier is engaged. Production additionally
+    # pins the provider-based micro-VM tier. Rejected here as defense in
+    # depth even if startup validation (the same floor) was bypassed by a
+    # direct function call.
+    if _deployed_runtime() and not is_trusted_builtin_tool(tool, req.tenant_id):
+        engaged = _tool_sandbox_tier() in ("subprocess", "microvm")
+        if (not _authored_execution_enabled() or not engaged
+                or (_production_runtime() and not _sandbox_configured())):
             return (err_envelope(
                 ErrorCode.TENANT_DISABLED,
-                "tenant-authored execution is disabled in production",
+                "tenant-authored execution is disabled in this deployed posture",
                 retryable=False,
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED])

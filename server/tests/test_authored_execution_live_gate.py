@@ -205,6 +205,177 @@ def test_production_startup_accepts_enabled_execution_with_approved_sandbox(
     assert broker.validate_runtime_safety() is None
 
 
+def test_production_startup_rejects_armed_execution_with_truthy_invalid_sandbox(
+        monkeypatch):
+    # The exact live-staging footgun: LEAF_SANDBOX="1" reads as tier "invalid",
+    # so the sandbox is NOT engaged even though the config looks enabled. Must
+    # fail closed at boot rather than run tenant code in-process.
+    _safe_production(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.setenv("LEAF_SANDBOX", "1")
+
+    with pytest.raises(RuntimeError, match="authored execution is enabled"):
+        broker.validate_runtime_safety()
+
+
+def test_staging_posture_rejects_armed_execution_without_sandbox(monkeypatch):
+    # THE POSTURE-INDEPENDENT FLOOR. A NON-production posture (the old guard
+    # returned early here and never checked the sandbox) that EXPLICITLY arms
+    # authored execution must still have a real sandbox tier engaged.
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+
+    assert broker._production_runtime() is False
+    with pytest.raises(RuntimeError, match="authored execution is enabled"):
+        broker.validate_runtime_safety()
+
+
+def test_staging_posture_rejects_armed_execution_with_truthy_invalid_sandbox(
+        monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.setenv("LEAF_SANDBOX", "1")
+
+    with pytest.raises(RuntimeError, match="authored execution is enabled"):
+        broker.validate_runtime_safety()
+
+
+@pytest.mark.parametrize(
+    ("var", "value"),
+    [
+        ("LEAF_SANDBOX", "e2b"),          # v1 subprocess tier
+        ("LEAF_SANDBOX", "e2b-microvm"),  # micro-VM tier
+        ("LEAF_TOOL_SANDBOX_PROVIDER", "e2b"),  # provider selects micro-VM
+    ],
+)
+def test_staging_posture_accepts_armed_execution_with_real_tier(
+        monkeypatch, var, value):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.setenv(var, value)
+
+    # A non-production posture with a real tier passes the floor and returns
+    # (the strict production provider requirement applies only in production).
+    assert broker.validate_runtime_safety() is None
+
+
+def test_local_demo_unarmed_startup_is_unaffected(monkeypatch):
+    # Authored execution defaults ON off-production, but is NOT explicitly armed,
+    # so the sandbox floor must not fire: local/demo keeps byte-identical behavior.
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.delenv("LEAF_AUTHORED_EXECUTION", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+
+    assert broker._authored_execution_enabled() is True
+    assert broker._authored_execution_explicitly_armed() is False
+    assert broker.validate_runtime_safety() is None
+
+
+def test_staging_startup_rejects_default_enabled_execution_without_sandbox(
+        monkeypatch):
+    # REVIEW COUNTEREXAMPLE (startup half): LEAF_RUNTIME_ENV=staging with
+    # LEAF_AUTHORED_EXECUTION unset. Authored execution DEFAULTS ON outside
+    # production, so a floor keyed only on the EXPLICIT flag never fired and
+    # tenant code could reach in-process mod.run(...). In a DEPLOYED posture
+    # the EFFECTIVE value must satisfy the floor too.
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.delenv("LEAF_AUTHORED_EXECUTION", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+
+    assert broker._authored_execution_enabled() is True
+    assert broker._authored_execution_explicitly_armed() is False
+    with pytest.raises(RuntimeError, match="authored execution is enabled"):
+        broker.validate_runtime_safety()
+
+
+def test_staging_execution_denies_default_enabled_authored_file_without_sandbox(
+        monkeypatch):
+    # REVIEW COUNTEREXAMPLE (execution half): even if startup validation were
+    # bypassed by a direct function call, the request gate must stop a tenant
+    # file short of the in-process dynamic runner in a deployed posture.
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.delenv("LEAF_AUTHORED_EXECUTION", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.setattr(broker, "is_trusted_builtin_tool", lambda _tool, _tenant: False)
+
+    called = False
+
+    def forbidden_runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("tenant file runner must not be called")
+
+    monkeypatch.setattr(broker, "run_tool_dynamic", forbidden_runner)
+    env, status = _execute(monkeypatch, {
+        "name": "tenant-probe",
+        "entry": "tools/tenant-probe/tool.py",
+        "params": {"type": "object", "properties": {}},
+        "capabilities": ["drawing.read"],
+    })
+
+    assert status == 403
+    assert env["ok"] is False
+    assert env["error"]["error_code"] == "TENANT_DISABLED"
+    assert "authored execution is disabled" in env["error"]["message"]
+    assert called is False
+
+
+def test_staging_keeps_tracked_builtin_available(monkeypatch):
+    # The deployed-posture gate must not over-block: tracked builtins stay
+    # available on staging exactly as they do in production.
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.delenv("LEAF_AUTHORED_EXECUTION", raising=False)
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+
+    tool = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "measure-panel-area",
+    )
+    assert tool_loader.is_trusted_builtin_tool(tool, "wave0-tenant") is True
+    env, status = _execute(monkeypatch, tool)
+
+    assert status == 200
+    assert env["ok"] is True
+
+
+def test_production_startup_accepts_provider_precedence_over_legacy_sandbox_value(
+        monkeypatch):
+    # The EXACT armed live combination (staging broker task-def): the vestigial
+    # LEAF_SANDBOX="1" alongside LEAF_TOOL_SANDBOX_PROVIDER=e2b. Provider
+    # precedence must keep the tier "microvm" and startup green, so deploying
+    # this floor cannot break the currently armed broker before terraform #561
+    # strips the legacy value.
+    _safe_production(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setenv("E2B_API_KEY", "test-key")
+    monkeypatch.setenv("LEAF_SANDBOX", "1")
+
+    assert tool_loader._sandbox_tier() == "microvm"
+    assert broker.validate_runtime_safety() is None
+
+
+def test_staging_posture_accepts_provider_precedence_over_legacy_sandbox_value(
+        monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setenv("LEAF_SANDBOX", "1")
+
+    assert tool_loader._sandbox_tier() == "microvm"
+    assert broker.validate_runtime_safety() is None
+
+
 def test_trusted_builtin_classification_rejects_tenant_shadow(monkeypatch, tmp_path):
     repo = tmp_path / "tenant"
     shadow = repo / "builtins" / "count_by_layer.py"

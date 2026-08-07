@@ -87,8 +87,33 @@ def test_broker_manifest_requires_explicit_production_posture():
     assert {
         "LEAF_AUTHORED_EXECUTION",
         "LEAF_RUNTIME_ENV",
-        "LEAF_SANDBOX",
     } <= required
+
+
+def test_manifests_do_not_require_the_legacy_sandbox_variable():
+    """The runtime tool sandbox contract is provider-based and conditional.
+
+    ``LEAF_SANDBOX`` is the legacy tool_loader flag; terraform #561 strips the
+    vestigial ``LEAF_SANDBOX="1"`` from the staging task definitions (production
+    never carried it), so a manifest that still listed it would fail the
+    deploy-time required-config check after that rollout. The armed contract --
+    authored execution enabled requires ``LEAF_TOOL_SANDBOX_PROVIDER=e2b`` -- is
+    CONDITIONAL, which a static lower-bound list cannot express; it is enforced
+    instead by ``broker.validate_runtime_safety`` at boot, the deployed-posture
+    gate in ``broker._execute`` per request, the harness's
+    ``assertAuthoredSandboxBoundary``, and the terraform render script's
+    ``_assert_target_posture``. The provider variable is therefore not
+    unconditionally required either: a dark posture legitimately omits it.
+    """
+    for service in ("broker", "harness"):
+        manifest = json.loads(
+            (ROOT / "deploy" / f"required-config.{service}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        required = set(manifest["required"]["environment"])
+        assert "LEAF_SANDBOX" not in required, service
+        assert "LEAF_TOOL_SANDBOX_PROVIDER" not in required, service
 
 
 def test_credential_holding_services_require_runtime_posture():

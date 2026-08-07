@@ -1454,10 +1454,46 @@ available. A local Python implementation resolved from a tenant repository or
 `server/authored/` is denied before `run_tool_dynamic` can import or execute
 the file.
 
-Setting `LEAF_AUTHORED_EXECUTION=1` in production also requires
-`LEAF_SANDBOX=e2b` or `LEAF_SANDBOX=e2b-microvm`. Broker startup fails when
-that combination is incomplete. Local and demo deployments that do not set
-`LEAF_RUNTIME_ENV=production` keep their existing behavior.
+Whenever authored execution is EXPLICITLY armed (`LEAF_AUTHORED_EXECUTION` set
+to `1`/`true`/`yes`/`on`, in ANY posture), and also whenever it is EFFECTIVELY
+enabled in a DEPLOYED posture (`LEAF_RUNTIME_ENV` is `staging` or `production`;
+the flag unset defaults authored execution ON outside production), a real
+out-of-process sandbox tier must be engaged, or the broker refuses to start.
+`validate_runtime_safety` reads the effective tier from
+`tool_loader._sandbox_tier()` and refuses boot unless it is `subprocess`
+(`LEAF_SANDBOX=e2b`) or `microvm` (`LEAF_SANDBOX=e2b-microvm` or
+`LEAF_TOOL_SANDBOX_PROVIDER=e2b`). The same floor is applied per request:
+in a deployed posture `_execute` denies a non-builtin tool with
+`TENANT_DISABLED` unless authored execution is enabled and a real tier is
+engaged, even if startup validation was bypassed by a direct function call. In
+production the stricter existing check also requires
+`LEAF_TOOL_SANDBOX_PROVIDER=e2b` (the micro-VM tier) plus an E2B credential
+source.
+
+When `LEAF_TOOL_SANDBOX_PROVIDER` is unset, a NON-EMPTY but unrecognized
+`LEAF_SANDBOX` value (e.g. `1`, `true`, `on`) is a truthy-but-invalid footgun:
+`_sandbox_tier()` returns `invalid` (not a silent `off`), execution is refused,
+and an armed broker refuses to boot. With a valid provider set, the provider
+takes precedence and the tier is the provider's (`LEAF_TOOL_SANDBOX_PROVIDER=e2b`
+gives `microvm`), so a lingering legacy `LEAF_SANDBOX` value is inert. Explicit
+disable values (`off`, `0`, `false`, `no`, `none`, `disabled`) and an unset
+variable read as `off`. Local and demo deployments (no deployed
+`LEAF_RUNTIME_ENV`) that do not EXPLICITLY arm `LEAF_AUTHORED_EXECUTION` keep
+their existing in-process behavior byte-for-byte: authored execution defaults on
+for them, but the sandbox floor keys on the explicit flag outside deployed
+postures, so it does not fire for them.
+
+The deployment manifests (`deploy/required-config.{broker,harness}.json`) do
+not require the legacy `LEAF_SANDBOX` variable: the sandbox contract is
+provider-based, conditional on arming, and enforced by the boot floor and the
+request gate above rather than by an unconditional required-variable entry.
+
+The harness enforces the matching author-time boundary in
+`harness/src/runtimeSafety.ts::assertAuthoredSandboxBoundary`, also
+posture-independent: when authored execution is armed the tenant tool sandbox
+must be `LEAF_TOOL_SANDBOX_PROVIDER=e2b`, the author model stays on the trusted
+harness host (`LEAF_AUTHOR_SANDBOX_PROVIDER` off or unset), and the harness must
+not hold an E2B credential.
 ## §21 Tenant customization and controlled platform promotion
 
 Status: **FROZEN v1, 2026-07-23**
