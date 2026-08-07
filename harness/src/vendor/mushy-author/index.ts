@@ -31,7 +31,6 @@ export * from "./ports/impl/agentSdkRunner.js";
 export * from "./ports/impl/agentSdkTurnRunner.js";
 export * from "./ports/impl/e2bAgentRunner.js";
 export * from "./ports/impl/converseSdkRunner.js";
-export * from "./ports/impl/mcpBridge.js";
 export * from "./ports/impl/mcpProxy.js";
 export * from "./ports/impl/repoEditRunner.js";
 export * from "./ports/impl/httpUpstreamSink.js";

@@ -3,8 +3,8 @@
  * (leaf-backend-gaps.md §2.1, ports/converse.ts FROZEN). This is the riskiest lane in
  * the sessions build: everything else (turn engine, store, approvals router) runs
  * against a scripted fake; this file is what eventually talks to the real SDK.
- * This legacy runner mounts no tenant MCP servers. Product-owned standard services
- * attach only through the resolver-aware author and spine runners.
+ * Standard services mount only through trusted product authority and the contained
+ * facade. Raw remote MCP configuration is never accepted by this runner.
  *
  * === SDK reality, read from node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
  * (v0.3.214) before writing a line of mapping code below - not assumed ===
@@ -80,6 +80,14 @@ import type {
   TenantRepoProvider,
 } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { composeRunnerCapabilities, type RunnerServicesAttachment } from "./runnerCapabilities.js";
+import { RUNNER_CAPABILITY_PROFILES, type RunnerCapabilityProfile } from "./standardServices.js";
+import { createStandardServicesFacade } from "./standardServicesFacade.js";
+import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import type {
+  StandardServicesResolver,
+  TrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
 import { findTool } from "../../registry/registerTool.js";
 
 // --------------------------------------------------------------------------- //
@@ -98,11 +106,21 @@ interface SdkModule {
     handler: (args: Record<string, unknown>, extra: unknown) => Promise<CallToolResult>,
   ): unknown;
 }
+type Z = {
+  optional(): Z;
+  min(count: number): Z;
+  max(count: number): Z;
+};
 interface ZodModule {
   z: {
-    string(): { optional(): unknown };
-    array(schema: unknown): { min(count: number): { max(count: number): unknown } };
-    object(shape: Record<string, unknown>): unknown;
+    string(): Z;
+    number(): Z;
+    boolean(): Z;
+    unknown(): Z;
+    enum(values: readonly string[]): Z;
+    record(inner: unknown): Z;
+    array(schema: unknown): Z;
+    object(shape: Record<string, unknown>): Z;
     [k: string]: unknown;
   };
 }
@@ -294,9 +312,8 @@ export function mapSdkMessage(raw: unknown, toolUseNames: Map<string, string> = 
 }
 
 // =========================================================================== //
-// The real runner. Untested by the hermetic suite (would spend LLM credit / touch the
-// network) - correctness here rests on (a) mapSdkMessage above being exhaustively
-// fixture-tested, and (b) the live smoke gate the lane brief calls out separately.
+// The real runner. Hermetic SDK seams verify composition without LLM credit or
+// network access; live SDK behavior remains covered by the separate smoke gate.
 // =========================================================================== //
 
 export const MCP_SERVER_NAME = "converse";
@@ -308,6 +325,10 @@ const ASK_USER_MCP_NAME = `${MCP_TOOL_PREFIX}${ASK_USER_TOOL}`;
 // Exact local MCP tool names that may bypass the tenant read-only denial. The
 // question tool only emits a transcript event, spends nothing, and mutates nothing.
 const LOCAL_MCP_TOOL_ALLOWLIST = new Set([APS_TEST_RUN_MCP_NAME, ASK_USER_MCP_NAME]);
+const LEGACY_CONVERSE_PROFILE: RunnerCapabilityProfile = {
+  ...RUNNER_CAPABILITY_PROFILES.spine,
+  private_mcp_servers: [MCP_SERVER_NAME],
+};
 
 /** Tools that mutate/spend real resources and therefore require operator approval
  *  before they run (leaf-backend-gaps.md §2.1: "aps_test_run / anything mutating"). */
@@ -324,9 +345,9 @@ export function requiresToolConfirmation(toolName: string, approvalTools: Set<st
     || (toolName.startsWith("mcp__") && toolName !== ASK_USER_MCP_NAME);
 }
 
-const TENANT_MCP_TOOL_DENIAL = "tenant MCP tools are mounted read-only in this release; tool execution approval ships separately";
+const TENANT_MCP_TOOL_DENIAL = "untrusted MCP tools are not permitted; use the contained standard-services facade";
 
-/** Tenant MCP servers expose listable data only until their approval flow exists. */
+/** Preserve the legacy exported guard while refusing every unknown MCP server. */
 export function tenantMcpToolDenial(toolName: string): { behavior: "deny"; message: string } | null {
   return toolName.startsWith("mcp__") && !LOCAL_MCP_TOOL_ALLOWLIST.has(toolName)
     ? { behavior: "deny", message: TENANT_MCP_TOOL_DENIAL }
@@ -430,6 +451,11 @@ export interface AgentSdkTurnRunnerOptions {
   /** Bare tool names that require operator confirmation before they run. Defaults to
    *  {"aps_test_run"}. */
   approvalTools?: Set<string>;
+  /** Product-wide trusted resolver. No environment or filesystem bridge is read. */
+  standardServicesResolver?: StandardServicesResolver;
+  /** Test seams. Production loads the installed Agent SDK and zod. */
+  sdkImport?: () => Promise<unknown>;
+  zodImport?: () => Promise<unknown>;
 }
 
 type CanUseTool = (
@@ -443,13 +469,18 @@ export interface BuildTurnOptionsInput {
   maxTurns: number;
   abortController: AbortController;
   server: unknown;
+  services?: RunnerServicesAttachment;
   canUseTool: CanUseTool;
   planFirst?: boolean;
 }
 
-/** Assemble SDK options in one testable place. This legacy runner has no tenant
- * service attachment. Live standard services mount through the product resolver. */
+/** Assemble SDK options in one testable place from private and contained servers. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
+  const composition = composeRunnerCapabilities({
+    profile: LEGACY_CONVERSE_PROFILE,
+    private_mcp_servers: { [MCP_SERVER_NAME]: input.server },
+    ...(input.services ? { services: input.services } : {}),
+  });
   return {
     env: input.childEnv,
     model: input.model,
@@ -457,7 +488,7 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     settingSources: [],
     permissionMode: "default",
     abortController: input.abortController,
-    mcpServers: { [MCP_SERVER_NAME]: input.server },
+    mcpServers: composition.mcpServers,
     // Skills reach the model through the SDK's own `skills` option, which enables the
     // Skill tool itself. This allowlist remains the existing APS MCP tool only —
     // EXCEPT under plan_first, where it is EMPTY: the SDK auto-approves
@@ -503,10 +534,22 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const grant = await this.ports.oauth.getGrant(input.tenant_id);
 
     if (input.confirm) {
-      yield* this.runConfirm(input, grant, opts?.signal, opts?.planFirst === true);
+      yield* this.runConfirm(
+        input,
+        grant,
+        opts?.signal,
+        opts?.planFirst === true,
+        opts?.standardServicesContext,
+      );
       return;
     }
-    yield* this.driveSession(input, grant, opts?.signal, opts?.planFirst === true);
+    yield* this.driveSession(
+      input,
+      grant,
+      opts?.signal,
+      opts?.planFirst === true,
+      opts?.standardServicesContext,
+    );
   }
 
   private async *runConfirm(
@@ -514,6 +557,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     grant: AgentGrant,
     external?: AbortSignal,
     planFirst?: boolean,
+    standardServicesContext?: TrustedStandardServicesContext,
   ): AsyncGenerator<HarnessTurnEvent> {
     const { approved, proposal } = input.confirm!;
     if (!approved) {
@@ -535,7 +579,13 @@ export class AgentSdkTurnRunner implements ConverseRunner {
       ...input.messages,
       { role: "assistant" as const, text: `Ran "${proposal.tool}". Result: ${outcome.summary}` },
     ];
-    yield* this.driveSession({ ...input, messages: continuationMessages }, grant, external, planFirst);
+    yield* this.driveSession(
+      { ...input, messages: continuationMessages },
+      grant,
+      external,
+      planFirst,
+      standardServicesContext,
+    );
   }
 
   private async *driveSession(
@@ -543,14 +593,22 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     grant: AgentGrant,
     external?: AbortSignal,
     planFirst?: boolean,
+    standardServicesContext?: TrustedStandardServicesContext,
   ): AsyncGenerator<HarnessTurnEvent> {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     const approvalTools = this.opts.approvalTools ?? DEFAULT_APPROVAL_TOOLS;
+    if (standardServicesContext && (
+      standardServicesContext.tenant_id !== input.tenant_id
+      || standardServicesContext.session_id !== input.session_id
+      || standardServicesContext.authority_turn_id !== input.turn_id
+    )) {
+      throw new Error("standard_services_context_turn_mismatch");
+    }
 
     const childEnv = buildScrubbedEnv(grant, process.env);
-    const sdk = (await dynImport(["@anthropic-ai", "claude-agent-sdk"])) as unknown as SdkModule;
-    const { z } = (await dynImport(["zod"])) as unknown as ZodModule;
+    const sdk = (await (this.opts.sdkImport?.() ?? dynImport(["@anthropic-ai", "claude-agent-sdk"]))) as SdkModule;
+    const { z } = (await (this.opts.zodImport?.() ?? dynImport(["zod"]))) as ZodModule;
 
     const toolUseNames = new Map<string, string>();
     const pending: HarnessTurnEvent[] = [];
@@ -597,11 +655,25 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     );
 
     const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool, askUserTool] });
+    const services = this.opts.standardServicesResolver && standardServicesContext
+      ? createStandardServicesFacade({
+          sdk,
+          z,
+          ...(await resolveStandardServicesSession(
+            this.opts.standardServicesResolver,
+            standardServicesContext,
+            "spine",
+          )),
+          profile: "spine",
+        })
+      : undefined;
+    const standardServiceTools = new Set(services?.allowed_tools ?? []);
 
     const canUseTool = async (
       toolName: string,
       inp: Record<string, unknown>,
     ): Promise<{ behavior: string; message?: string; interrupt?: boolean; updatedInput?: Record<string, unknown> }> => {
+      if (standardServiceTools.has(toolName)) return { behavior: "allow", updatedInput: inp };
       const tenantMcpDenial = tenantMcpToolDenial(toolName);
       if (tenantMcpDenial) return tenantMcpDenial;
       const bare = bareToolName(toolName);
@@ -649,6 +721,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         maxTurns,
         abortController: abort,
         server,
+        ...(services ? { services } : {}),
         planFirst: planFirst === true,
         // This list stays the APS tool only; the money-gated canUseTool
         // envelope below is unchanged.

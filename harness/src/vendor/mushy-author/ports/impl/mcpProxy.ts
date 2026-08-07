@@ -87,6 +87,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpBridge.js";
+export {
+  isAllowedMcpHost,
+  isForbiddenMcpAddress,
+  resolveAllowedMcpHost,
+} from "./mcpBridge.js";
+export type { McpHostResolver, McpServerConfig } from "./mcpBridge.js";
 
 /** How long to wait for the upstream handshake before giving up on a server. */
 const CONNECT_TIMEOUT_MS = 10_000;

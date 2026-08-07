@@ -140,7 +140,9 @@ describe("scope: live runners mount only the tenant broker facade", () => {
   it("the legacy runner cannot reopen the old tenant bridge", async () => {
     const dead = await read("../src/vendor/mushy-author/ports/impl/agentSdkTurnRunner.ts");
     expect(dead).not.toMatch(/LEAF_MCP_BRIDGE_DIR|resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
-    expect(dead).toMatch(/mcpServers:\s*\{\s*\[MCP_SERVER_NAME\]:\s*input\.server\s*\}/);
+    expect(dead).toMatch(/composeRunnerCapabilities\(\{[\s\S]*private_mcp_servers:\s*\{\s*\[MCP_SERVER_NAME\]:\s*input\.server\s*\}/);
+    expect(dead).toMatch(/resolveStandardServicesSession\([\s\S]*"spine"/);
+    expect(dead).toMatch(/createStandardServicesFacade\(/);
   });
 });
 

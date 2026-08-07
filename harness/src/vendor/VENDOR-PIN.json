@@ -8,8 +8,8 @@
     "agent/tools/submitToolProposal.ts": "b35936272ba306289dfda1afa117b86b16117ca77606b2d4ae8dcf3cddc8ebfa",
     "agent/tools/toolExecutionReceipt.ts": "f71cd9293dcade693e1847220c3cc89fa704e8715fd6e87eb7f82422a317b04b",
     "agent/tools/validateTool.ts": "0ce4f9515865ce770f5496c00113a54b5eb074df158821cc935b1d1e59fbe1f3",
-    "index.ts": "1a803571bb50364af0d4843d99a8605e1c7c41376f0c1f297899fbcd230bdc9e",
-    "ports/converse.ts": "e7f7aeb83583fe329b7c6c648d9ceb73ceec64ae0d8e536588c470b66f61e68c",
+    "index.ts": "3322336a060b4587da15cb7388ff73efd08ee3ab5699d86ccd9aff3bf81ddf5a",
+    "ports/converse.ts": "ce505e83a1b93970dd30b9106b1ca046540334116057d3c58317eb020cac3f7a",
     "ports/fakes/fakeAgentRunner.ts": "4a08933ea73572a549b6ceb0dad908afde63a37f0e0397d4b383703e6f212ea3",
     "ports/fakes/fakeConverseRunner.ts": "86ecc67c90823325fa419db021a160be510c552b2af3ff68cb0246d631b2d1c3",
     "ports/fakes/fakeIntentSynthesizer.ts": "c7d32cc3b6a677e17688ba768c660afde238778a4eba18eefab82852398a153c",
@@ -21,7 +21,7 @@
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "c65dadd5142705fa11a10b30b6992d648f983d9481539b63af0c68d1d5e14d06",
     "ports/impl/agentSdkRunner.ts": "de088e4fdde2028bad42bfe3a4eb56dca8936290cac47586a3351c85229fcc70",
-    "ports/impl/agentSdkTurnRunner.ts": "7756f31361858fa3c65b5500e12ed6a294d85944b3accdaaa81f170a64871991",
+    "ports/impl/agentSdkTurnRunner.ts": "61b3d5bc29cee3a05412a981c81c473cab2d8846635b06f891fddb5e8823d7d6",
     "ports/impl/converseSdkRunner.ts": "c77fde86fb1530fb6a51abc69ff91162c465c702d157477f0aca8f197da8fac5",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
@@ -30,7 +30,7 @@
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
     "ports/impl/httpUpstreamSink.ts": "c936a9e2246ed8efab0abb837b5d2187f29e71034b4bf1755cf7b61f71e7e33c",
     "ports/impl/mcpBridge.ts": "6c5c46bf0da73011515ca50813e22f44f9bec300894914d5b308abba14509c1e",
-    "ports/impl/mcpProxy.ts": "272a98636a31abe09a55bd9ac54a58ca5c32ca10aa507ce2f6178d6bfebd723a",
+    "ports/impl/mcpProxy.ts": "ca40c055b75dd211e214b4474d2002c46fb2c55a6b3059995e3d14edf25654b0",
     "ports/impl/oauthGrantProvider.ts": "0b211d1ba3e1a6a4817fe591f65426e4d69f86a15eba1f06a00ce166576f6ef0",
     "ports/impl/pgSessionStore.ts": "fc903254d6a07a671cb15a7e14b7bef19abd7219b4ff7cbfda2503208d9e32dd",
     "ports/impl/repoEditRunner.ts": "d31f4f22613b653feff534c194f5247308e8c3053905f1b7469969ae0324b98b",
@@ -56,5 +56,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "94b3e683037b620dd6f3e1ea6fe392a01311e81a"
+  "upstream_commit": "898d39514648616a174f957537b3c852a6e435f8"
 }
