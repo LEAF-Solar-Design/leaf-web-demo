@@ -226,6 +226,44 @@ def test_configuration_baseline_validation_precedes_identity_injection():
     assert deployment_identity(runtime) == receipt
 
 
+def test_app_manifest_requires_an_explicit_session_authority():
+    """An absent LEAF_SESSIONS_STORE silently selects an EPHEMERAL authority.
+
+    ``session_store._store_mode`` defaults to ``legacy``, and ``legacy`` reads
+    and writes SQLite alone at ``SESSIONS_DB``, which itself defaults to the
+    task-local ``server/sessions.db``. A deploy that omits the selector
+    therefore lands an app whose session authority dies with the ECS task, and
+    nothing in the manifest notices. Absence is also not readable from the task
+    definition alone: ``deploy/Dockerfile.app`` bakes a value into the image, so
+    a task definition that sets nothing still runs an unstated mode.
+
+    Same shape as ``test_broker_manifest_requires_explicit_production_posture``
+    above: a variable whose ABSENCE picks the unsafe branch has to be required,
+    so the deployment states its authority instead of inheriting one.
+
+    This requires the SELECTOR, not ``SESSIONS_DB``, and that is deliberate:
+    requiring the path is the obvious-looking fix and does not work. Under a
+    legacy-touching mode, pointing it at a FRESH durable path leaves an empty
+    SQLite against a populated PostgreSQL, so every existing
+    ``(tenant_id, drawing_id)`` fails ``_shadow_equal`` permanently instead of
+    only until the next task replacement, and no reverse repair exists because
+    ``scripts/reconcile_sessions_authority.py`` copies SQLite to PostgreSQL only.
+
+    That is an argument against requiring the path HERE, not against the path.
+    ``SESSIONS_DB`` keeps real readers under every mode -- ``checkpoints.py`` and
+    ``session_policy.py`` resolve it independently of the selector -- so making it
+    durable stays a legitimate change, and no test forbids it. The rule that
+    would actually be worth enforcing (require the path whenever the mode touches
+    the legacy store) is conditional, which this flat manifest cannot express, so
+    it belongs in the app's startup validation.
+    """
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )
+
+    assert "LEAF_SESSIONS_STORE" in set(manifest["required"]["environment"])
+
+
 def test_web_image_writes_source_identity_health_file():
     dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
     assert "ARG LEAF_SOURCE_SHA=unknown" in dockerfile
