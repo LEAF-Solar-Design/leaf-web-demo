@@ -1436,7 +1436,7 @@ def test_prior_messages_exposes_only_the_safe_standard_service_receipt():
         {
             "status": "completed",
             "receipt_id": receipt_id,
-            "artifact_ids": ["artifact-safe"],
+            "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
             "result": "private broker result must not be observed",
             "bearer_token": "private credential must not be observed",
         },
@@ -1447,7 +1447,8 @@ def test_prior_messages_exposes_only_the_safe_standard_service_receipt():
     assistant = messages[-1]["text"]
     assert messages[-1]["role"] == "assistant"
     assert receipt_id in assistant
-    assert "artifact-safe" in assistant
+    assert "-aaaaaaaaaaaaaaa" in assistant
+    assert "_bbbbbbbbbbbbbbb" in assistant
     assert "private broker result" not in assistant
     assert "private credential" not in assistant
 

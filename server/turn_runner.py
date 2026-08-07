@@ -78,6 +78,7 @@ import entitlements
 import instant_execution
 import session_policy
 import session_store
+import standard_service_contract
 import telemetry_sink
 from envelopes import ErrorCode
 
@@ -470,19 +471,8 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
                 and len(receipt_id) == 64
                 and all(char in "0123456789abcdef" for char in receipt_id)
             )
-            valid_artifacts = (
-                isinstance(artifact_ids, list)
-                and len(artifact_ids) <= 32
-                and all(
-                    isinstance(value, str)
-                    and 1 <= len(value) <= 256
-                    and value[0] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-                    and all(
-                        char in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
-                        for char in value
-                    )
-                    for value in artifact_ids
-                )
+            valid_artifacts = standard_service_contract.valid_artifact_ids(
+                artifact_ids
             )
             if valid_receipt and valid_artifacts:
                 suffix = (

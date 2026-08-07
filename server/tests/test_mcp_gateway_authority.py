@@ -650,7 +650,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
         return {
             "status": "completed",
             "receipt_id": "b" * 64,
-            "artifact_ids": ["artifact-safe"],
+            "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
             "result": "must-not-be-reflected",
         }
 
@@ -668,7 +668,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
     assert response.json() == {
         "status": "completed",
         "receipt_id": "b" * 64,
-        "artifact_ids": ["artifact-safe"],
+        "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
     }
     assert len(calls) == 2
     assert calls[0] == (
@@ -720,8 +720,101 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
     assert receipt_events[-1]["data"] == {
         "status": "completed",
         "receipt_id": "b" * 64,
-        "artifact_ids": ["artifact-safe"],
+        "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
     }
+
+
+@pytest.mark.parametrize(
+    ("artifact_ids", "expected_status"),
+    [
+        (
+            [f"artifact_{index:08d}" for index in range(64)],
+            200,
+        ),
+        (
+            [f"artifact_{index:08d}" for index in range(65)],
+            409,
+        ),
+        ([".artifact00000000"], 409),
+        (["artifact-short"], 409),
+    ],
+)
+def test_human_approval_enforces_provider_artifact_contract_end_to_end(
+    authority, monkeypatch, artifact_ids, expected_status
+):
+    client, authority_session_id, _kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+
+    def approval_call(path, _payload):
+        if path == "review":
+            return {
+                "status": "pending",
+                "identity": {
+                    "tenant_id": TENANT,
+                    "subject_id": SUBJECT,
+                    "session_id": authority_session_id,
+                    "authority_turn_id": TURN,
+                    "subscription_mount_id": MOUNT,
+                    "runner_profile_id": "spine",
+                },
+            }
+        return {
+            "status": "completed",
+            "receipt_id": "d" * 64,
+            "artifact_ids": artifact_ids,
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == expected_status, response.text
+    if expected_status == 200:
+        assert response.json()["artifact_ids"] == artifact_ids
+
+
+def test_vanished_session_fails_before_human_approval_execution(
+    authority, monkeypatch
+):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    calls: list[str] = []
+
+    def approval_call(path, _payload):
+        calls.append(path)
+        assert path == "review"
+        return {
+            "status": "pending",
+            "identity": {
+                "tenant_id": TENANT,
+                "subject_id": SUBJECT,
+                "session_id": authority_session_id,
+                "authority_turn_id": TURN,
+                "subscription_mount_id": MOUNT,
+                "runner_profile_id": "spine",
+            },
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    monkeypatch.setattr(session_store, "get_session", lambda _session_id: None)
+
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == 409
+    assert calls == ["review"]
+    assert kms.sign_calls == []
 
 
 def test_completed_human_approval_retry_returns_journaled_receipt_without_mint_or_execute(
@@ -747,24 +840,35 @@ def test_completed_human_approval_retry_returns_journaled_receipt_without_mint_o
                 "runner_profile_id": "spine",
             },
             "receipt_id": "c" * 64,
-            "artifact_ids": ["artifact-safe"],
+            "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
         }
 
     monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
-    response = client.post(
+    first = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+    second = client.post(
         "/api/mcp/gateway/approvals/execute",
         json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
         headers={"Authorization": "Bearer test-human"},
     )
 
-    assert response.status_code == 200, response.text
-    assert response.json() == {
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json() == second.json() == {
         "status": "completed",
         "receipt_id": "c" * 64,
-        "artifact_ids": ["artifact-safe"],
+        "artifact_ids": ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
     }
-    assert calls == ["review"]
+    assert calls == ["review", "review"]
     assert kms.sign_calls == []
+    receipt_events = [
+        event for event in session_store.recent_events(authority_session_id, 20)
+        if event["type"] == "standard_service_approval_receipt"
+    ]
+    assert len(receipt_events) == 1
 
 
 def test_uncertain_human_approval_is_observable_and_never_reexecutes(

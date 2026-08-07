@@ -22,6 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 import deps
 import mcp_authority
 import session_store
+import standard_service_contract
 import turn_runner
 
 
@@ -36,6 +37,34 @@ _TOKEN_ROUTES = frozenset({
     "/api/mcp/gateway/approvals/token",
     "/api/mcp/gateway/approvals/execute",
 })
+_RECEIPT_DEDUPE_EVENT_WINDOW = 256
+
+
+def _append_completed_receipt_once(
+    session_id: str,
+    turn_id: str,
+    receipt_id: str,
+    artifact_ids: list[str] | None,
+) -> None:
+    for event in session_store.recent_events(
+        session_id, _RECEIPT_DEDUPE_EVENT_WINDOW
+    ):
+        if (
+            event.get("type") == "standard_service_approval_receipt"
+            and isinstance(event.get("data"), dict)
+            and event["data"].get("receipt_id") == receipt_id
+        ):
+            return
+    session_store.append_event(
+        session_id,
+        turn_id,
+        "standard_service_approval_receipt",
+        {
+            "status": "completed",
+            "receipt_id": receipt_id,
+            **({"artifact_ids": artifact_ids} if artifact_ids else {}),
+        },
+    )
 
 
 async def _plain_error(send: Send, status: int, detail: str) -> None:
@@ -543,6 +572,11 @@ def execute_human_approval(
             or identity_value.get("subject_id") != tenant.subject
         ):
             raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+        session = session_store.get_session(identity["session_id"])
+        if not session or session.get("tenant_id") != tenant_id:
+            raise mcp_authority.McpAuthorityError(
+                "MCP approval receipt session is unavailable"
+            )
         if approval_status in {"pending", "approved"}:
             mcp_authority.verify_subscription_mount(
                 tenant_id, identity["subscription_mount_id"]
@@ -582,11 +616,6 @@ def execute_human_approval(
         else:
             receipt = reviewed
 
-        session = session_store.get_session(identity["session_id"])
-        if not session or session.get("tenant_id") != tenant_id:
-            raise mcp_authority.McpAuthorityError(
-                "MCP approval receipt session is unavailable"
-            )
         if approval_status == "uncertain":
             session_store.append_event(
                 identity["session_id"],
@@ -610,11 +639,8 @@ def execute_human_approval(
             or (
                 artifact_ids is not None
                 and (
-                    not isinstance(artifact_ids, list)
-                    or len(artifact_ids) > 32
-                    or any(
-                        not isinstance(value, str) or not _ID.fullmatch(value)
-                        for value in artifact_ids
+                    not standard_service_contract.valid_artifact_ids(
+                        artifact_ids
                     )
                 )
             )
@@ -622,15 +648,11 @@ def execute_human_approval(
             raise mcp_authority.McpAuthorityError(
                 "MCP approval host returned invalid data"
             )
-        session_store.append_event(
+        _append_completed_receipt_once(
             identity["session_id"],
             identity["authority_turn_id"],
-            "standard_service_approval_receipt",
-            {
-                "status": "completed",
-                "receipt_id": receipt_id,
-                **({"artifact_ids": artifact_ids} if artifact_ids else {}),
-            },
+            receipt_id,
+            artifact_ids,
         )
     except mcp_authority.McpMountDenied as exc:
         raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc

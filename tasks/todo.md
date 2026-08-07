@@ -470,3 +470,18 @@ Risks:
 - A crash after claim must become uncertain at the stored deadline and must never retry execution.
 - Completed retries must return the stored safe receipt without any new approval or broker call.
 - The public model facade must never acquire the human execution primitive.
+
+# Tenant-safe standard-service review follow-up
+
+- [x] Add the approval journal table, all 21 columns, named constraints, and expiry index to platform readiness under harness authority.
+- [x] Align Leaf artifact validation with the exact provider artifact ID and 64-item contract across TypeScript, Python, and transcript folding.
+- [x] Check the session before remote execution and deduplicate bounded completed receipt events.
+- [x] Add negative schema, provider-boundary, end-to-end artifact, vanished-session, and receipt replay regressions.
+- [x] Run focused and registered schema, harness, server, web, type, build, vendor, scan, and diff gates.
+- [x] Self-review and commit the verified follow-up without push or deployment.
+
+Risks:
+
+- Readiness must fail closed on any missing approval-table column or named catalog object.
+- Provider-accepted artifact IDs must survive every Leaf layer without broadening approval IDs.
+- A missing session must prevent the human execution call, not only suppress its receipt.

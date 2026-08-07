@@ -12,6 +12,9 @@ import type {
   TenantBrokerCompletionReceipt,
   TenantBrokerPendingApprovalBinding,
 } from "../../vendor/mushy-author/index.js";
+import {
+  validStandardServiceArtifactIds,
+} from "./standardServiceArtifactContract.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const APPROVAL_ID = /^[A-Za-z0-9_-]{8,256}$/;
@@ -187,11 +190,8 @@ function validReceipt(value: unknown): value is TenantBrokerCompletionReceipt {
   if (Object.keys(result).some((key) => !["content", "artifact_ids", "receipt_id"].includes(key))) return false;
   if (typeof result.content !== "string" || Buffer.byteLength(result.content, "utf8") > MAX_RECEIPT_BYTES) return false;
   if (result.receipt_id !== undefined && (typeof result.receipt_id !== "string" || !APPROVAL_ID.test(result.receipt_id))) return false;
-  return result.artifact_ids === undefined || (
-    Array.isArray(result.artifact_ids)
-    && result.artifact_ids.length <= 32
-    && result.artifact_ids.every((value) => typeof value === "string" && ID.test(value))
-  );
+  return result.artifact_ids === undefined
+    || validStandardServiceArtifactIds(result.artifact_ids);
 }
 
 function validReviewInput(input: Parameters<LeafTenantBrokerApprovalStore["review"]>[0]): boolean {

@@ -12,6 +12,9 @@ import {
   FileTenantBrokerApprovalStore,
   PgTenantBrokerApprovalStore,
 } from "../src/ports/impl/tenantBrokerApprovalStore.js";
+import {
+  validStandardServiceArtifactIds,
+} from "../src/ports/impl/standardServiceArtifactContract.js";
 import { tenantBrokerApprovalDigest } from "../src/vendor/mushy-author/index.js";
 
 const directories: string[] = [];
@@ -58,6 +61,20 @@ afterEach(async () => {
 });
 
 describe("durable tenant broker approval store", () => {
+  it("matches the provider artifact id and count contract exactly", () => {
+    const leadingIds = ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"];
+    expect(leadingIds.every((artifactId) => artifactId.length === 16)).toBe(true);
+    expect(validStandardServiceArtifactIds(leadingIds)).toBe(true);
+    expect(validStandardServiceArtifactIds(
+      Array.from({ length: 64 }, (_value, index) => `artifact_${String(index).padStart(8, "0")}`),
+    )).toBe(true);
+    expect(validStandardServiceArtifactIds(["artifact-short"])).toBe(false);
+    expect(validStandardServiceArtifactIds([".artifact00000000"])).toBe(false);
+    expect(validStandardServiceArtifactIds(
+      Array.from({ length: 65 }, (_value, index) => `artifact_${String(index).padStart(8, "0")}`),
+    )).toBe(false);
+  });
+
   it("fails closed on file storage outside local mode", () => {
     expect(() => createTenantBrokerApprovalStore({
       LEAF_HARNESS_SESSION_STORE: "file",
@@ -195,7 +212,10 @@ describe("durable tenant broker approval store", () => {
       () => storeNow,
     );
     const pending = binding();
-    const receipt = { content: "{\"safe\":true}", artifact_ids: ["artifact-safe"] };
+    const receipt = {
+      content: "{\"safe\":true}",
+      artifact_ids: ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
+    };
     expect(await first.create(pending)).toBe(true);
     expect(await first.create(pending)).toBe(false);
     expect(await second.review(reviewInput(pending))).toEqual({ state: "pending", binding: pending });
@@ -338,7 +358,10 @@ describe("human approval host", () => {
           });
           if (!claimed || claimed.state !== "claimed") throw new Error("binding_invalid");
           toolCalls.push({ name: "services_confirm", args: { approval_id: approvalId } });
-          const result = { content: "{\"safe\":true}" };
+          const result = {
+            content: "{\"safe\":true}",
+            artifact_ids: ["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"],
+          };
           if (!await options.approvalStore.complete({
             approval_id: approvalId,
             identity: confirmedIdentity,
@@ -386,6 +409,7 @@ describe("human approval host", () => {
     });
 
     expect(receipt).toMatchObject({ status: "completed", receipt_id: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(receipt.artifact_ids).toEqual(["-aaaaaaaaaaaaaaa", "_bbbbbbbbbbbbbbb"]);
     expect(retry).toEqual(receipt);
     expect(brokerRequests).toHaveLength(1);
     expect(brokerRequests[0]?.url).toBe("http://127.0.0.1:18901/mcp/approvals/approval_12345678");

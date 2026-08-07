@@ -17,3 +17,8 @@ lost execution response. Until that contract exists, the tenant catalog omits
 `uncertain`, and Leaf reports that safe status without retrying the operation.
 This protects against duplicate effects, but it does not claim that an
 uncertain operation completed or failed.
+
+Leaf preserves the broker provider's artifact contract end to end. An artifact
+ID is 16 to 256 ASCII letters, digits, underscores, or hyphens, including a
+leading underscore or hyphen. A completion receipt carries at most 64 artifact
+IDs. Approval IDs keep their separate, stricter contract.

@@ -19,6 +19,10 @@ import type {
   TrustedStandardServicesContext,
 } from "../../vendor/mushy-author/index.js";
 import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/index.js";
+import {
+  MAX_STANDARD_SERVICE_ARTIFACT_IDS,
+  requiredStandardServiceArtifactId,
+} from "./standardServiceArtifactContract.js";
 import type { LeafTenantBrokerApprovalStore } from "./tenantBrokerApprovalStore.js";
 
 const MAX_ATTACHMENT_BYTES = 64 * 1024;
@@ -389,8 +393,8 @@ function safeHumanApprovalReceipt(
   argumentDigest: string,
   result: { content: string; artifact_ids?: string[] },
 ): HumanApprovalReceipt {
-  const artifactIds = result.artifact_ids?.map((artifactId) => requiredId("artifact_id", artifactId));
-  if (artifactIds && artifactIds.length > 32) {
+  const artifactIds = result.artifact_ids?.map(requiredStandardServiceArtifactId);
+  if (artifactIds && artifactIds.length > MAX_STANDARD_SERVICE_ARTIFACT_IDS) {
     throw new Error("standard_services_human_approval_artifacts_invalid");
   }
   return {
