@@ -887,9 +887,13 @@ def build_suites() -> List[Suite]:
         # sys.path, and the repo root would shadow the stdlib `platform`.
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
+        # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
+        # (a dispatched service is always accounted for, or the relay goes
+        # red) is its own named test, so a scoreboard failure says which
+        # invariant broke instead of pointing at the mega-test.
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 1),
+              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 2),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
