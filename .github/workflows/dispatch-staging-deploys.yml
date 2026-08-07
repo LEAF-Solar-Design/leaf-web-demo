@@ -204,57 +204,151 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Download run $1's supply-set artifact named $2 into
+          # staging-supply-set.json. Returns non-zero QUIETLY when that run
+          # published no such artifact, because the two callers below mean
+          # opposite things by an absence: for THIS build it may be a
+          # legitimate docs-only no-op, for a historical build it just means
+          # "keep looking". Leaves the run's artifact listing in artifacts.json
+          # either way, which the no-op marker check reads.
+          fetch_supply_set() {
+            local run_id=$1 name=$2 artifact_id
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+              > artifacts.json
+            artifact_id=$(jq -r --arg name "$name" '
+              first(.artifacts[] | select(.name == $name)).id // empty
+            ' artifacts.json)
+            [ -n "$artifact_id" ] || return 1
+            [[ "$artifact_id" =~ ^[0-9]+$ ]] || {
+              echo "::error::Supply-set artifact ID '$artifact_id' is not numeric."
+              exit 1
+            }
+            rm -f staging-supply-set.json
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+              > supply-set.zip
+            unzip -o supply-set.zip
+            [ -f staging-supply-set.json ] || {
+              echo "::error::Artifact $name carried no staging-supply-set.json."
+              exit 1
+            }
+          }
+
+          # Validate the downloaded supply set and print its build_tag. BOTH the
+          # primary read and the docs-only reconcile go through this, so the
+          # reconcile can never deploy a manifest the ordinary path would have
+          # refused. Diagnostics go to STDERR because every caller runs it as
+          # $(supply_set_tag), so anything on stdout is captured into the tag.
+          supply_set_tag() {
+            local schema tag
+            schema=$(jq -er '.schema' staging-supply-set.json)
+            case "$schema" in
+              leaf.staging-supply-set.v1|leaf.staging-supply-set.v2) ;;
+              *)
+                echo "::error::Supply-set schema '$schema' is not an accepted staging supply-set schema." >&2
+                exit 1
+                ;;
+            esac
+            tag=$(jq -er '.build_tag' staging-supply-set.json)
+            [[ "$tag" =~ ^prod-[0-9a-f]{7,40}$ ]] || {
+              echo "::error::Supply-set build_tag '$tag' is not an immutable prod tag." >&2
+              exit 1
+            }
+            printf '%s' "$tag"
+          }
+
           ARTIFACT_NAME="staging-supply-set-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
           NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100" \
-            > artifacts.json
-          ARTIFACT_ID=$(jq -r --arg name "$ARTIFACT_NAME" '
-            first(.artifacts[] | select(.name == $name)).id // empty
-          ' artifacts.json)
-          if [ -z "$ARTIFACT_ID" ]; then
-            # No supply set. A deliberate docs-only no-op run publishes a
-            # marker instead; that skips cleanly. Anything else is still a
-            # loud failure: a successful build without a manifest means a
-            # partial run and must never be silently swallowed.
-            if jq -e --arg name "$NOOP_NAME" \
-              'any(.artifacts[]; .name == $name)' artifacts.json >/dev/null; then
-              echo "::notice::Build run $BUILD_RUN_ID was a docs-only no-op; nothing to deploy."
-              echo "deploy=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+
+          # The ordinary path: THIS build published its own supply set, so
+          # deploy exactly the tag it names and require its provenance to match.
+          if fetch_supply_set "$BUILD_RUN_ID" "$ARTIFACT_NAME"; then
+            IMAGE_TAG=$(supply_set_tag)
+            MANIFEST_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+            [ "$MANIFEST_SHA" = "$BUILD_HEAD_SHA" ] || {
+              echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
+              exit 1
+            }
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # No supply set for THIS build. Two very different situations, and only
+          # one is legitimate: a deliberate docs-only no-op run publishes a
+          # marker instead. Manifest AND marker both absent means a successful
+          # build produced a partial run, which must never be silently swallowed.
+          if ! jq -e --arg name "$NOOP_NAME" \
+            'any(.artifacts[]; .name == $name)' artifacts.json >/dev/null; then
             echo "::error::Supply-set artifact $ARTIFACT_NAME not found and no $NOOP_NAME marker present."
             exit 1
           fi
-          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || {
-            echo "::error::Supply-set artifact ID '$ARTIFACT_ID' is not numeric."
+
+          # DOCS-ONLY RECONCILE. This arm used to set deploy=false and exit 0,
+          # and that skip is what let a staging split outlive an unbounded number
+          # of merges: only a DEPLOYABLE merge's relay deploys a service the
+          # stand-down left behind, so every docs-only merge in between was a
+          # guaranteed miss (observed 2026-08-07: web on prod-bc2fef0, app on
+          # prod-1133e9b). A docs-only tip builds no images, so there is nothing
+          # of its own to deploy; instead resolve the LAST tag built from main
+          # and set deploy=true onto it. The guarded dispatch step below then
+          # deploys BOTH services onto that tag through its one watched,
+          # one-at-a-time, fail-loud path -- there is no second dispatch site.
+          # The target tag comes from an authoritative artifact, never a read of
+          # live state: staging app/web are blue/green over digest-pinned task
+          # definitions, so "live" is a function of ALB weights and no run-name
+          # read is authoritative about it (sol-critic RED on PR #506 round 1).
+          echo "::notice::Build run $BUILD_RUN_ID was a docs-only no-op, which builds no images; reconciling both staging services onto the last tag built from main."
+
+          # Successful main build runs, newest first, selected by workflow PATH
+          # (a display name is not an identity: another workflow could share the
+          # name). Each row is "id head_sha run_attempt".
+          RUNS=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs?branch=main&event=push&status=success&per_page=100" \
+            --jq '[.workflow_runs[]
+                   | select(.path == ".github/workflows/build-platform-images.yml")]
+                  | sort_by(-.id) | .[]
+                  | "\(.id) \(.head_sha) \(.run_attempt)"')
+
+          IMAGE_TAG=""
+          TARGET_SHA=""
+          SCANNED=0
+          # Fed on fd 3, not stdin: the loop body runs gh, jq and unzip, and any
+          # one of them reading stdin would swallow the rest of the candidate
+          # list and cut the scan short. CR is an IFS separator so a CRLF-emitting
+          # jq (the Windows build does) cannot append a stray CR to the last
+          # field; GNU jq on ubuntu-latest emits LF, so this is belt-and-braces.
+          while IFS=$' \t\r' read -r RUN_ID RUN_SHA RUN_ATTEMPT <&3; do
+            [ -n "${RUN_ID:-}" ] || continue
+            [ "$RUN_ID" != "$BUILD_RUN_ID" ] || continue
+            SCANNED=$((SCANNED + 1))
+            fetch_supply_set "$RUN_ID" \
+              "staging-supply-set-$RUN_SHA-attempt-$RUN_ATTEMPT" || continue
+            CANDIDATE_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+            # REACHABILITY IS THE NEVER-BACKWARDS ARGUMENT. Runs are scanned
+            # newest-first and the FIRST ancestor wins, so every commit between
+            # the winner and the tip published no supply set, which means no
+            # newer main-derived image exists to be older than. A manifest whose
+            # commit is NOT an ancestor (history rewritten, or an artifact that
+            # outlived its branch) is skipped. An unreadable compare yields an
+            # empty relation and is skipped too, so this fails closed.
+            RELATION=$(gh api \
+              "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$BUILD_HEAD_SHA" \
+              --jq '.status' || true)
+            if [ "$RELATION" != "ahead" ]; then
+              echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): the compare against the tip reports '$RELATION', not 'ahead', so that commit is not an ancestor of $BUILD_HEAD_SHA and its images are not what this tip describes."
+              continue
+            fi
+            IMAGE_TAG=$(supply_set_tag)
+            TARGET_SHA="$CANDIDATE_SHA"
+            break
+          done 3<<< "$RUNS"
+
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "::error::Docs-only build $BUILD_RUN_ID has nothing to reconcile onto: scanned $SCANNED successful main build run(s) and found no valid staging supply set whose commit is an ancestor of $BUILD_HEAD_SHA. Failing loudly rather than skipping, because skipping is how a staging split used to survive a docs-only merge. Supply-set artifacts expire after 30 days, so the usual cause is that main has had no deployable merge in that long; land one, or dispatch $DEPLOY_WORKFLOW by hand with an exact task-definition ARN."
             exit 1
-          }
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
-            > supply-set.zip
-          unzip -o supply-set.zip
-          SCHEMA=$(jq -er '.schema' staging-supply-set.json)
-          # v2 = v1 plus tree-identity provenance (adopted speculative PR
-          # builds). Both dispatch identically: the deployable fields are
-          # byte-for-byte the same shape. v1 stays accepted because a rerun
-          # of a pre-v2 build run regenerates its artifact from the old
-          # workflow and must keep dispatching.
-          case "$SCHEMA" in
-            leaf.staging-supply-set.v1|leaf.staging-supply-set.v2) ;;
-            *)
-              echo "::error::Supply-set schema '$SCHEMA' is not an accepted staging supply-set schema."
-              exit 1
-              ;;
-          esac
-          IMAGE_TAG=$(jq -er '.build_tag' staging-supply-set.json)
-          [[ "$IMAGE_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || {
-            echo "::error::Supply-set build_tag '$IMAGE_TAG' is not an immutable prod tag."
-            exit 1
-          }
-          MANIFEST_SHA=$(jq -er '.source_revision' staging-supply-set.json)
-          [ "$MANIFEST_SHA" = "$BUILD_HEAD_SHA" ] || {
-            echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
-            exit 1
-          }
+          fi
+
+          echo "Reconciling both staging services onto $IMAGE_TAG, built from $TARGET_SHA ($SCANNED run(s) scanned)."
           echo "deploy=true" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 

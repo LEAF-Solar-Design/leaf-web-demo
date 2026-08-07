@@ -2944,8 +2944,29 @@ def check_docs_noop_filter(text: str) -> None:
     # results service, so it needs no addition to the permissions block and the
     # read-only capability wall stands. The infra-repo PAT gains no new command,
     # no new endpoint and no new repo.
+    # Hash updated 2026-08-07 (f): THE DOCS-ONLY RECONCILE (PR #519). The
+    # manifest step's docs-only arm no longer sets deploy=false and exits; it
+    # resolves the last tag built from main (the newest successful main build
+    # supply set whose commit is an ANCESTOR of the tip, scanned newest-first
+    # so the first hit is never-backwards) and sets deploy=true onto it, so the
+    # existing guarded dispatch step converges BOTH staging services. The
+    # manifest was refactored onto a shared fetch_supply_set/supply_set_tag
+    # helper pair used by the ordinary path and the reconcile, so both deploy a
+    # verified supply-set build_tag and neither reads live state (the tag
+    # NEVER comes from a run-name read -- sol-critic RED on PR #506 round 1).
+    # REVIEWED FOR DISPATCH CAPABILITY: the manifest step still holds only the
+    # read-only workflow token (its env is unchanged and asserted above),
+    # carries NO dispatch path (the token tripwire below still passes), and the
+    # ONE `gh workflow run` site stays in the guarded deploy step with the same
+    # four inputs. The reconcile adds only read-only `gh api` GETs on the
+    # workflow's own GH_TOKEN: a workflow-runs list filtered by build workflow
+    # PATH, per-candidate run-artifact listings and zip downloads (already made
+    # by the ordinary path via the same helper), and a compare of each
+    # candidate against the tip. No new secret reference, endpoint class, or
+    # credential; deploy=false is gone and deploy=true now appears twice, both
+    # asserted above.
     assert frozen == (
-        "e377f0ca6bf8d2bc76ccf8433916f6ddd3212a724fa44d15350127f1b27f5f3a"
+        "bf15a46f574f5381c0b57937d555516cff9000d3cac1107c16d44cd070ccffee"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -2962,9 +2983,34 @@ def check_docs_noop_filter(text: str) -> None:
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
         in manifest_code
     )
-    assert manifest_code.count('echo "deploy=false"') == 1
-    assert manifest_code.count('echo "deploy=true"') == 1
+    # DOCS-ONLY RECONCILE (PR #519): the docs-only arm no longer skips. It
+    # resolves the last tag built from main and sets deploy=true onto it, so a
+    # docs-only merge converges both staging services instead of stranding a
+    # split until the next deployable merge. deploy=false is therefore GONE,
+    # and deploy=true now appears twice: the ordinary same-build path and the
+    # reconcile path, both routed through the SAME guarded dispatch step.
+    assert manifest_code.count('echo "deploy=false"') == 0, (
+        "the docs-only arm must reconcile, not skip: a deploy=false skip is "
+        "exactly how a staging split outlived a docs-only merge")
+    assert manifest_code.count('echo "deploy=true"') == 2, (
+        "deploy=true is set by the same-build path and the reconcile path")
+    # Still ONE run-artifact listing endpoint, inside the shared
+    # fetch_supply_set helper that both paths call; the reconcile's run scan
+    # lists workflow RUNS, a different endpoint.
     assert manifest_code.count("artifacts?per_page=100") == 1
+    # The reconcile is real, not merely named: it scans successful main build
+    # runs, keeps only a supply set whose commit is an ANCESTOR of the tip
+    # (never-backwards), and fails RED when none is reachable rather than
+    # skipping. test_staging_relay_reconciles_a_docs_only_build EXECUTES it.
+    assert (
+        "reconciling both staging services onto the last tag built from main"
+        in manifest_code), "the docs-only arm must announce the reconcile"
+    assert '"$RELATION" != "ahead"' in manifest_code, (
+        "the reconcile must take the last built tag whose commit is an "
+        "ancestor of the tip, so it can never deploy a non-ancestor image")
+    assert "has nothing to reconcile onto" in manifest_code, (
+        "a docs-only build with no reachable supply set must fail loudly, "
+        "not skip")
     assert "no $NOOP_NAME marker present" in manifest_code, (
         "manifest-and-marker both absent must stay a hard error: a "
         "successful build without a supply set is a partial run")
@@ -5019,6 +5065,173 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
                 f"supply set is the reporting hole itself.")
 
     print(f"staging relay classifier rehearsal ({len(cases)} cases): PASS")
+
+
+_MANIFEST_FAKE_GH = r"""#!/usr/bin/env bash
+# Fake `gh` for the relay MANIFEST reconcile rehearsal. Answers the reads the
+# docs-only reconcile makes, from the scenario in the environment, so the
+# assertion is on the tag the reconcile ACTUALLY resolves, not on its text.
+set -uo pipefail
+args=("$@")
+url="${args[1]:-}"
+case "${args[0]}" in
+  api)
+    case "$url" in
+      *"/actions/runs?branch=main"*)
+        # Newest-first successful main build run scan. Rows are already in
+        # "id sha attempt" shape; the real --jq reduces to the same.
+        printf '%s\n' "$FAKE_ROWS"
+        ;;
+      *"/compare/"*)
+        rest="${url#*/compare/}"
+        base="${rest%%...*}"
+        printf '%s\n' "$(printf '%s' "$FAKE_RELATIONS" | jq -r --arg s "$base" '.[$s] // "diverged"')"
+        ;;
+      *"/artifacts/"*"/zip")
+        # The listing call stashed the supply set for this run; materialise it.
+        if [ -f .pending_supply_set.json ]; then
+          cp .pending_supply_set.json staging-supply-set.json
+        fi
+        printf 'zip\n'
+        ;;
+      *"/artifacts?per_page=100")
+        rest="${url#*/actions/runs/}"
+        run_id="${rest%%/*}"
+        rm -f .pending_supply_set.json
+        if [ "$run_id" = "$BUILD_RUN_ID" ]; then
+          printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$BUILD_HEAD_SHA"'-attempt-'"$BUILD_RUN_ATTEMPT"'","id":1,"expired":false}]}'
+        else
+          entry=$(printf '%s' "$FAKE_SUPPLY_SETS" | jq -c --arg id "$run_id" '.[$id] // empty')
+          if [ -n "$entry" ]; then
+            sha=$(printf '%s' "$entry" | jq -r '.sha')
+            att=$(printf '%s' "$entry" | jq -r '.attempt')
+            tag=$(printf '%s' "$entry" | jq -r '.tag')
+            jq -n --arg sha "$sha" --arg tag "$tag" \
+              '{schema:"leaf.staging-supply-set.v2",source_revision:$sha,build_tag:$tag}' \
+              > .pending_supply_set.json
+            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-'"$sha"'-attempt-'"$att"'","id":'"$run_id"',"expired":false}]}'
+          else
+            printf '%s\n' '{"total_count":0,"artifacts":[]}'
+          fi
+        fi
+        ;;
+      *) echo "fake gh: unhandled api $url" >&2; exit 9 ;;
+    esac
+    ;;
+  *) echo "fake gh: unhandled ${args[0]}" >&2; exit 9 ;;
+esac
+"""
+
+
+def _rehearse_relay_manifest(*, rows, supply_sets, relations,
+                             build_run_id="100", build_head_sha="docshead",
+                             build_attempt="1"):
+    """Execute the relay's ACTUAL manifest script (extracted from the parsed
+    YAML) against a fake gh, and return (returncode, combined_output,
+    {output-key: value}) parsed from the step's GITHUB_OUTPUT.
+    """
+    bash = shutil.which("bash")
+    jq = shutil.which("jq")
+    assert bash and jq, "the manifest reconcile rehearsal needs bash and jq on PATH"
+
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"))
+    manifest = next(s for s in relay["jobs"]["dispatch"]["steps"]
+                    if s.get("id") == "manifest")
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(_MANIFEST_FAKE_GH, encoding="utf-8", newline="\n")
+        (bindir / "gh").chmod(0o755)
+        # unzip is shimmed: the fake gh writes staging-supply-set.json at the zip
+        # download, so the script's `unzip -o` only has to succeed. This keeps the
+        # rehearsal off any real unzip binary (not guaranteed on the dev host).
+        (bindir / "unzip").write_text(
+            "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        (bindir / "unzip").chmod(0o755)
+
+        out = tmp / "github_output"
+        out.write_text("", encoding="utf-8")
+        script = tmp / "manifest.sh"
+        script.write_text(manifest["run"], encoding="utf-8", newline="\n")
+
+        env = dict(os.environ)
+        env.update(
+            PATH=f"{bindir}{os.pathsep}{env['PATH']}",
+            GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+            INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
+            DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
+            BUILD_RUN_ID=build_run_id,
+            BUILD_HEAD_SHA=build_head_sha,
+            BUILD_RUN_ATTEMPT=build_attempt,
+            GH_TOKEN="fake-token",
+            GITHUB_OUTPUT=str(out),
+            FAKE_ROWS="\n".join(rows),
+            FAKE_SUPPLY_SETS=json.dumps(supply_sets),
+            FAKE_RELATIONS=json.dumps(relations),
+        )
+        proc = subprocess.run(
+            [bash, str(script)], env=env, text=True, capture_output=True,
+            cwd=str(tmp))
+        outputs = {}
+        for line in out.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        return proc.returncode, proc.stdout + proc.stderr, outputs
+
+
+def test_staging_relay_reconciles_a_docs_only_build() -> None:
+    """A docs-only merge converges staging instead of stranding a split.
+
+    Runs the extracted manifest script against a fake gh: the docs-only build
+    published a marker and no supply set, so the reconcile scans main's
+    successful build runs newest-first, skips the newer NON-ancestor tag, takes
+    the newest tag whose commit IS an ancestor of the tip, and sets deploy=true
+    onto it. Then feeds that tag to the real dispatch script and asserts BOTH
+    staging services deploy onto it -- the split-closing behaviour end to end.
+    This is the DOES half of the static pins in the invariants test.
+    """
+    # Rows newest-first: 100 is the docs-only build itself (skipped), 99 carries
+    # a NEWER tag whose commit diverged from the tip (must be refused), 98
+    # carries the newest tag whose commit is an ancestor (must win).
+    rows = ["100 docshead 1", "99 notanc 1", "98 ancestor 1"]
+    supply = {"99": {"sha": "notanc", "attempt": "1", "tag": "prod-bad4567"},
+              "98": {"sha": "ancestor", "attempt": "1", "tag": "prod-abc1234"}}
+    relations = {"notanc": "diverged", "ancestor": "ahead"}
+
+    rc, out, outputs = _rehearse_relay_manifest(
+        rows=rows, supply_sets=supply, relations=relations)
+    assert rc == 0, out
+    assert outputs.get("deploy") == "true", (out, outputs)
+    # The newest ANCESTOR tag wins; the newer non-ancestor tag is refused. That
+    # refusal IS the never-backwards guarantee, so assert both.
+    assert outputs.get("image_tag") == "prod-abc1234", (out, outputs)
+    assert "not 'ahead'" in out, (
+        "the non-ancestor candidate must be explicitly refused")
+    assert "prod-bad4567" != outputs.get("image_tag")
+
+    # END TO END: hand the resolved tag to the REAL dispatch script; both
+    # services land on it through the single watched dispatch site.
+    rc2, out2, deployed = _rehearse_relay_dispatch(
+        image_tag="prod-abc1234", web_title=None, app_title=None,
+        relation="ahead")
+    assert rc2 == 0, out2
+    assert deployed == [("web", "prod-abc1234"), ("app", "prod-abc1234")], deployed
+
+    # NEGATIVE: a docs-only build with no reachable ancestor fails RED rather
+    # than skipping -- skipping is exactly how a split used to survive.
+    rc3, out3, outputs3 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "97 orphan 1"],
+        supply_sets={"97": {"sha": "orphan", "attempt": "1",
+                            "tag": "prod-dead999"}},
+        relations={"orphan": "diverged"})
+    assert rc3 != 0, out3
+    assert "has nothing to reconcile onto" in out3, out3
+    assert outputs3.get("deploy") != "true", outputs3
 
 
 def test_build_platform_images_workflow_invariants() -> None:
