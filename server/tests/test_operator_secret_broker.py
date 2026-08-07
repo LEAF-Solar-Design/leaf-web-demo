@@ -115,48 +115,44 @@ def test_inject_production_environment_refused():
     assert e.value.reason == "production_scope_refused"
 
 
-def test_inject_passes_credential_to_one_call_and_scrubs_the_result():
+def test_inject_passes_credential_to_one_call_and_returns_fixed_receipt():
     seen = {}
     broker.register_minter(lambda meta: f"tok-{meta['handle']}-abc")
 
     def use(credential):
         seen["cred"] = credential
-        # A hostile/buggy adapter tries to echo the credential back.
-        return {"status": "posted", "cred_len": len(credential),
-                "echoed": credential, "nested": [credential]}
+        seen["calls"] = seen.get("calls", 0) + 1
 
-    result = broker.with_injected("github_operator_pr", "staging", use)
+    receipt = broker.with_injected("github_operator_pr", "staging", use)
     cred = "tok-github_operator_pr-abc"
     assert seen["cred"] == cred  # the adapter received the real credential
-    assert result["status"] == "posted" and result["cred_len"] == len(cred)
-    # ...but the credential is REDACTED from everything that leaves the broker.
-    assert result["echoed"] == "***REDACTED***"
-    assert result["nested"] == ["***REDACTED***"]
-    assert cred not in json.dumps(result)
+    assert seen["calls"] == 1    # exactly one call
+    # The broker returns a FIXED receipt with no adapter-derived data.
+    assert receipt == {"handle": "github_operator_pr",
+                       "scope": "github_pr_open_operator_branch",
+                       "injected": True}
 
 
-def test_identity_callback_cannot_return_the_credential():
+def test_adapter_return_value_is_discarded_so_it_cannot_leak():
+    # The credential cannot escape through the return value no matter what the
+    # adapter returns: the broker discards the adapter's return entirely.
     broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
-    out = broker.with_injected("github_operator_pr", "staging", lambda c: c)
-    assert out == "***REDACTED***"
-
-
-def test_credential_in_dict_key_is_redacted():
-    broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
-    out = broker.with_injected("github_operator_pr", "staging",
-                               lambda c: {c: "x", "ok": True})
-    assert "CANARY-CREDENTIAL" not in json.dumps(out)
-    assert out.get("ok") is True
-
-
-def test_non_serializable_result_is_refused():
-    broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
-    for hostile in (lambda c: {c},           # set
-                    lambda c: c.encode(),     # bytes
-                    lambda c: object()):      # custom object
-        with pytest.raises(broker.SecretBrokerError) as e:
-            broker.with_injected("github_operator_pr", "staging", hostile)
-        assert e.value.reason == "adapter_result_not_serializable"
+    fixed = {"handle": "github_operator_pr",
+             "scope": "github_pr_open_operator_branch", "injected": True}
+    hostile_returns = (
+        lambda c: c,                       # echo the whole credential
+        lambda c: list(c),                 # split it character-by-character
+        lambda c: [c[:5], c[5:]],          # split it into two fragments
+        lambda c: {c: "x", "ok": True},    # hide it in a dict key
+        lambda c: {"nested": [c, {"k": c}]},  # bury it in nested structures
+        lambda c: {c},                     # a set (was previously "non-serializable")
+        lambda c: c.encode(),              # bytes
+        lambda c: object(),                # a custom object
+    )
+    for hostile in hostile_returns:
+        receipt = broker.with_injected("github_operator_pr", "staging", hostile)
+        assert receipt == fixed
+        assert "CANARY-CREDENTIAL" not in json.dumps(receipt)
 
 
 def test_adapter_exception_never_leaks_the_credential():
@@ -184,6 +180,26 @@ def test_callback_raising_secretbrokererror_with_credential_is_masked():
         broker.with_injected("github_operator_pr", "staging", use)
     assert e.value.reason == "adapter_failed"
     assert "CANARY" not in str(e.value)
+    assert e.value.__cause__ is None
+    assert e.value.__context__ is None
+
+
+def test_base_exception_carrying_the_credential_is_masked():
+    # Even a non-Exception BaseException (e.g. a credential-bearing error
+    # raised while a hostile return type is materialized) must be masked.
+    broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
+
+    class Boom(BaseException):
+        pass
+
+    def use(credential):
+        raise Boom(credential)
+
+    with pytest.raises(broker.SecretBrokerError) as e:
+        broker.with_injected("github_operator_pr", "staging", use)
+    assert e.value.reason == "adapter_failed"
+    assert "CANARY" not in str(e.value)
+    assert e.value.__context__ is None
 
 
 def test_minter_failure_is_a_denial():

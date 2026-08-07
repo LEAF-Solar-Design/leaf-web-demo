@@ -89,27 +89,18 @@ def _load_registry() -> Dict[str, Dict[str, Any]]:
     return handles
 
 
-def _safe_scrub(obj: Any, secret: str) -> Any:
-    """Return a credential-free copy of an adapter result, or raise
-    SecretBrokerError('adapter_result_not_serializable') if the result is not
-    a plain JSON structure. Forcing a JSON round-trip is deliberately strict:
-    it scrubs the credential from EVERY string (dict keys AND values) and
-    REFUSES any type that could carry the credential past a type-by-type scrub
-    (sets, bytes, generators, custom objects). Both the raw credential and its
-    JSON-escaped form are redacted."""
-    try:
-        serialized = json.dumps(obj)
-    except (TypeError, ValueError):
-        raise SecretBrokerError("adapter_result_not_serializable")
-    escaped = json.dumps(secret)[1:-1]  # the credential as it appears in JSON
-    for token in {secret, escaped}:
-        if token:
-            serialized = serialized.replace(token, "***REDACTED***")
-    return json.loads(serialized)
+# NOTE: there is deliberately NO "scrub the adapter's return value" path.
+# Scrubbing arbitrary returns is unwinnable: an adapter can split the
+# credential character-by-character (list(cred)), fragment it, or hide it in a
+# custom type. Instead, with_injected() returns a FIXED broker-authored
+# receipt and IGNORES the adapter's return value entirely, so there is no path
+# for the credential to escape through the return. An adapter that needs to
+# surface a real result captures it in the caller's own closure (adapters are
+# trusted server-side code), never through the broker.
 
 
 def describe(handle: str) -> Optional[Dict[str, Any]]:
-    """Handle metadata (scope, environment, kind, ttl_s) — NEVER a value.
+    """Handle metadata (scope, environment, kind, ttl_s), NEVER a value.
     None if the handle is unknown."""
     meta = _load_registry().get(handle)
     if meta is None:
@@ -140,12 +131,25 @@ def _audit_inject(subject: Optional[str], handle: str, scope: Optional[str],
 
 
 def with_injected(handle: str, environment: str,
-                  use: Callable[[str], Any], *,
-                  subject: Optional[str] = None) -> Any:
+                  use: Callable[[str], None], *,
+                  subject: Optional[str] = None) -> Dict[str, Any]:
     """Resolve a short-lived credential for `handle` and pass it to `use` for
-    EXACTLY ONE call. The credential is never returned to the caller and never
-    logged. Fail-closed: unknown handle, production scope/environment, or no
-    minter -> SecretBrokerError (audited as a denial)."""
+    EXACTLY ONE side-effecting call. `use` returns nothing that the broker
+    surfaces: its return value is DISCARDED. The broker returns a FIXED,
+    broker-authored receipt (handle, scope, injected=True) that contains no
+    adapter-derived data, so the credential has no path to escape through the
+    return value (a hostile adapter cannot echo, split, fragment, or encode it
+    into the broker's output). If the adapter needs to surface a real result
+    (a PR URL, a rotation receipt), it captures that in the CALLER's own
+    closure; adapters are trusted server-side code, so keeping the credential
+    out of that closure is the adapter's discipline, and the broker's job is
+    only to guarantee the credential never leaves through the broker itself.
+
+    Fail-closed: unknown handle, production scope/environment, no minter, a
+    minter error, or any adapter exception -> SecretBrokerError with a fixed
+    value-free reason (audited as a denial). Every failure raise happens
+    OUTSIDE its except block so no credential-bearing exception is retained in
+    __context__ or __cause__."""
     meta = _load_registry().get(handle)
     if meta is None:
         _audit_inject(subject, handle, None, "deny", "unknown_handle")
@@ -174,31 +178,24 @@ def with_injected(handle: str, environment: str,
         _audit_inject(subject, handle, scope, "deny", "minter_failed")
         raise SecretBrokerError("minter_failed")
 
-    # Run the adapter for EXACTLY ONE call. Any exception (including a
-    # SecretBrokerError raised by the adapter with the credential in it) is
-    # treated uniformly as adapter_failed with no detail; raised outside the
-    # except so nothing chains the original.
-    raw = None
+    # Run the adapter for EXACTLY ONE call. The return value is IGNORED, so the
+    # broker never surfaces adapter output, which closes every scrub-evasion
+    # vector at the source. Any exception (including a SecretBrokerError the
+    # adapter raises with the credential inside, or a credential-bearing error
+    # thrown while serializing a hostile return type) is treated uniformly as
+    # adapter_failed with no detail; raised outside the except so nothing
+    # chains the original.
     adapter_failed = False
     try:
-        raw = use(credential)
-    except Exception:  # noqa: BLE001
+        use(credential)
+    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
         adapter_failed = True
+    finally:
+        credential = None  # drop the reference in all paths
     if adapter_failed:
-        credential = None
         _audit_inject(subject, handle, scope, "deny", "adapter_failed")
         raise SecretBrokerError("adapter_failed")
 
-    # Redact the credential from the (JSON-only) result before it leaves.
-    result_error: Optional[str] = None
-    result: Any = None
-    try:
-        result = _safe_scrub(raw, credential)
-    except SecretBrokerError as exc:
-        result_error = exc.reason
-    credential = None  # drop the reference
-    if result_error is not None:
-        _audit_inject(subject, handle, scope, "deny", result_error)
-        raise SecretBrokerError(result_error)
     _audit_inject(subject, handle, scope, "inject", "credential_injected")
-    return result
+    # Fixed receipt: no adapter-derived data crosses back to the caller.
+    return {"handle": handle, "scope": scope, "injected": True}
