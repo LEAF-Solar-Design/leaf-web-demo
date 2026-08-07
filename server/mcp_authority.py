@@ -345,6 +345,6 @@ def signer() -> KmsRs256Signer:
 
 
 def expires_at_iso(expires_at: int) -> str:
-    return datetime.fromtimestamp(expires_at, timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return datetime.fromtimestamp(expires_at, timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")

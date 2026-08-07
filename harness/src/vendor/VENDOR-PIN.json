@@ -40,7 +40,7 @@
     "ports/impl/standardServices.ts": "6a7293a33330e464341b09e0ea602ba527c8e9aa13fda7ae10bc819b4ea9a528",
     "ports/impl/standardServicesFacade.ts": "57a7471551b029101aaae61f1dd36949577782ebf7ab7226b978fced0bc203a6",
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
-    "ports/impl/tenantBrokerStandardServiceProvider.ts": "ee0c8674396f6403f3965f6c7c38a22ae07843254c3634dcd5206fc88a55328f",
+    "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "0b651efdef1a6fe90a65ef473408dc8bdfaa6dda5d7a93856b463190bec23f43",
     "ports/impl/tenantRepoProvider.ts": "db6cfd3e672f7acd223c620586ff85428800e31e0d47b2616220e70ec47d63a3",
     "ports/index.ts": "41363aaaab25ebd0d6f29a27bfd6c5db72a29a3a7929315b97a0ead7356703d6",
@@ -55,5 +55,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "df595bdb7227a859d698aef994c2f851fa8cfde6"
+  "upstream_commit": "ee81b36cdcf7cd8dda8a83c1679c7a5664c06b15"
 }

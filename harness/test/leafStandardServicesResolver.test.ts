@@ -27,7 +27,10 @@ const context = {
 
 const approvalStore = {
   async create() { return true; },
-  async consume() { return null; },
+  async approve() { return true; },
+  async claim() { return null; },
+  async complete() { return false; },
+  async markUncertain() { return false; },
 };
 
 function attachment(overrides: Record<string, unknown> = {}) {
@@ -129,6 +132,18 @@ describe("LeafStandardServicesResolver", () => {
     })) as typeof fetch;
     await expect(resolver(oversized).resolve(context, "spine"))
       .rejects.toThrow("response_too_large");
+  });
+
+  it.each([
+    "2099-01-01T00:00:00Z",
+    "2099-01-01T00:00:00.000+00:00",
+    "2099-01-01 00:00:00.000Z",
+    "2099-02-30T00:00:00.000Z",
+    "2099-01-01T00:00:00.000Zextra",
+  ])("rejects a non-canonical attachment expiry %s", async (expires_at) => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ ...attachment(), expires_at })) as typeof fetch;
+    await expect(resolver(fetchImpl).resolve(context, "spine"))
+      .rejects.toThrow("exchange_expiry_invalid");
   });
 
   it("fails closed on redirects, missing config, and unsafe endpoints", async () => {

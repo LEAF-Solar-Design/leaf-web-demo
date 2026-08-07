@@ -54,19 +54,68 @@ export interface TenantBrokerPendingApprovalBinding {
   expires_at: string;
 }
 
+/** Canonical, credential-free completion data durable across provider processes. */
+export type TenantBrokerCompletionReceipt = StandardServiceResult;
+
+export type TenantBrokerApprovalClaimResult =
+  | {
+      state: "claimed";
+      execution_claim_id: string;
+      execution_deadline_ms: number;
+      binding: TenantBrokerPendingApprovalBinding;
+    }
+  | {
+      state: "completed";
+      binding: TenantBrokerPendingApprovalBinding;
+      receipt: TenantBrokerCompletionReceipt;
+    }
+  | {
+      state: "pending" | "executing" | "uncertain";
+      binding: TenantBrokerPendingApprovalBinding;
+    };
+
 export interface TenantBrokerApprovalStore {
   /** Atomically insert one binding. Return false when the id already exists. */
   create(binding: TenantBrokerPendingApprovalBinding): Promise<boolean>;
   /**
-   * Atomically remove and return the exact unexpired binding only when every
-   * supplied identity field matches. A mismatch, expiry, replay, or missing id
-   * returns null and must not change another principal's record.
+   * Human-authenticated host transition after the broker accepts the approval.
+   * Exact retries are idempotent and never regress a later state.
    */
-  consume(input: {
+  approve(input: {
+    approval_id: string;
+    identity: StandardServiceIdentity;
+    argument_digest: string;
+    approved_at_ms: number;
+  }): Promise<boolean>;
+  /**
+   * Atomically transition only the exact matching, unexpired approved state
+   * to executing. Pending must be returned as pending and must never claim.
+   */
+  claim(input: {
     approval_id: string;
     identity: StandardServiceIdentity;
     now_ms: number;
-  }): Promise<TenantBrokerPendingApprovalBinding | null>;
+    /** Persist this deadline; a later claim must atomically turn stale executing into uncertain. */
+    execution_deadline_ms: number;
+  }): Promise<TenantBrokerApprovalClaimResult | null>;
+  /**
+   * Atomically journal a safe result for the exact executing version. The
+   * transaction must read trusted store time and return false when commit time
+   * is greater than or equal to the persisted execution deadline.
+   */
+  complete(input: {
+    approval_id: string;
+    identity: StandardServiceIdentity;
+    execution_claim_id: string;
+    receipt: TenantBrokerCompletionReceipt;
+  }): Promise<boolean>;
+  /** Atomically fail closed for the exact executing version. */
+  markUncertain(input: {
+    approval_id: string;
+    identity: StandardServiceIdentity;
+    execution_claim_id: string;
+    failed_at_ms: number;
+  }): Promise<boolean>;
 }
 
 export interface TenantBrokerStandardServiceProviderOptions {
@@ -75,11 +124,6 @@ export interface TenantBrokerStandardServiceProviderOptions {
     identity: StandardServiceIdentity,
   ) => Promise<TenantBrokerAuthorization>;
   approvalStore: TenantBrokerApprovalStore;
-  clientFactory?: (context: {
-    identity: StandardServiceIdentity;
-    bearerToken: string;
-    channelSecret: string;
-  }) => Promise<TenantBrokerClient>;
   now?: () => number;
 }
 
@@ -94,11 +138,23 @@ const REQUIRED_IDENTITY = [
   "runner_profile_id",
 ];
 const APPROVAL_ID = /^[A-Za-z0-9_-]{8,256}$/;
+const EXECUTION_CLAIM_ID = /^[A-Za-z0-9_-]{16,256}$/;
 const ARGUMENT_DIGEST = /^[a-f0-9]{64}$/;
 const ARTIFACT_ID = /^[A-Za-z0-9_-]{16,256}$/;
+const BEARER_TOKEN = /^[\x21-\x7e]{16,8192}$/;
+const CHANNEL_SECRET = /^[A-Za-z0-9._~-]{32,512}$/;
+const CANONICAL_EXPIRY = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const TENANT_BROKER_MAX_RESPONSE_BYTES = 1_048_576;
 export const TENANT_BROKER_MAX_REQUEST_BYTES = 1_048_576;
+export const TENANT_BROKER_STREAM_GET_BUDGET = 8;
+export const TENANT_BROKER_CLIENT_LIFETIME_MS = 120_000;
 type FetchBody = Exclude<RequestInit["body"], null | undefined>;
+
+type TenantBrokerFetchLifetime = {
+  streamBudget?: { remaining: number };
+  deadlineSignal?: AbortSignal;
+  onStreamGetAttempt?: () => void;
+};
 
 function requestUrl(input: string | URL | Request): URL {
   return new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -146,7 +202,10 @@ async function measureKnownBody(body: FetchBody): Promise<void> {
   throw new Error("standard_service_broker_request_body_invalid");
 }
 
-async function measureRequestInputBody(request: Request): Promise<void> {
+async function measureRequestInputBody(request: Request, deadlineSignal: AbortSignal): Promise<void> {
+  if (deadlineSignal.aborted) {
+    throw new Error("standard_service_broker_client_lifetime_expired");
+  }
   if (!request.body) return;
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
@@ -154,6 +213,8 @@ async function measureRequestInputBody(request: Request): Promise<void> {
   } catch {
     throw new Error("standard_service_broker_request_body_invalid");
   }
+  const cancelAtDeadline = () => { void reader.cancel().catch(() => {}); };
+  deadlineSignal.addEventListener("abort", cancelAtDeadline, { once: true });
   let total = 0;
   try {
     while (true) {
@@ -167,12 +228,16 @@ async function measureRequestInputBody(request: Request): Promise<void> {
     }
   } catch (error) {
     void reader.cancel().catch(() => {});
+    if (deadlineSignal.aborted) {
+      throw new Error("standard_service_broker_client_lifetime_expired");
+    }
     if (error instanceof Error && (
       error.message === "standard_service_broker_request_too_large"
       || error.message === "standard_service_broker_request_body_invalid"
     )) throw error;
     throw new Error("standard_service_broker_request_body_invalid");
   } finally {
+    deadlineSignal.removeEventListener("abort", cancelAtDeadline);
     reader.releaseLock();
   }
 }
@@ -180,12 +245,16 @@ async function measureRequestInputBody(request: Request): Promise<void> {
 async function enforceBrokerRequestBodyLimit(
   input: string | URL | Request,
   init?: RequestInit,
+  deadlineSignal: AbortSignal = AbortSignal.timeout(TENANT_BROKER_CLIENT_LIFETIME_MS),
 ): Promise<void> {
+  if (deadlineSignal.aborted) {
+    throw new Error("standard_service_broker_client_lifetime_expired");
+  }
   if (init?.body !== undefined && init.body !== null) {
     await measureKnownBody(init.body);
     return;
   }
-  if (input instanceof Request) await measureRequestInputBody(input);
+  if (input instanceof Request) await measureRequestInputBody(input, deadlineSignal);
 }
 
 async function boundedBrokerResponse(response: Response): Promise<Response> {
@@ -228,6 +297,7 @@ async function boundedBrokerResponse(response: Response): Promise<Response> {
 export function guardedTenantBrokerFetch(
   endpointInput: string | URL,
   resolver?: McpHostResolver,
+  lifetime: TenantBrokerFetchLifetime = {},
 ): typeof fetch {
   let endpoint: URL;
   try {
@@ -235,7 +305,18 @@ export function guardedTenantBrokerFetch(
   } catch {
     throw new Error("standard_service_broker_endpoint_insecure");
   }
-  const guarded = guardedFetch(endpoint.hostname, undefined, undefined, resolver);
+  // One wrapper is created per broker client. Reconnects reuse this exact
+  // counter and deadline, so an accepted SSE dial can never refill either.
+  const streamBudget = lifetime.streamBudget
+    ?? { remaining: TENANT_BROKER_STREAM_GET_BUDGET };
+  const deadlineSignal = lifetime.deadlineSignal
+    ?? AbortSignal.timeout(TENANT_BROKER_CLIENT_LIFETIME_MS);
+  const guarded = guardedFetch(
+    endpoint.hostname,
+    streamBudget,
+    lifetime.onStreamGetAttempt,
+    resolver,
+  );
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const destination = requestUrl(input);
     if (
@@ -250,8 +331,15 @@ export function guardedTenantBrokerFetch(
     }
     // Body size is settled before the DNS gate. No oversized or streaming
     // request can trigger a lookup or carry credentials onto the network.
-    await enforceBrokerRequestBodyLimit(input, init);
-    return boundedBrokerResponse(await guarded(input, init));
+    await enforceBrokerRequestBodyLimit(input, init, deadlineSignal);
+    if (deadlineSignal.aborted) {
+      throw new Error("standard_service_broker_client_lifetime_expired");
+    }
+    const requestSignal = input instanceof Request ? input.signal : undefined;
+    const signals = [requestSignal, init?.signal, deadlineSignal]
+      .filter(Boolean) as AbortSignal[];
+    const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+    return boundedBrokerResponse(await guarded(input, { ...init, signal }));
   }) as typeof fetch;
 }
 
@@ -264,11 +352,62 @@ function sameIdentity(a: StandardServiceIdentity, b: StandardServiceIdentity): b
     && a.runner_profile_id === b.runner_profile_id;
 }
 
-function brokerClientError(code: "connect" | "call"): Error {
+function brokerClientError(code: "connect" | "call" | "close"): Error {
   const message = `standard_service_broker_${code}_failed`;
   const error = new Error(message);
   error.stack = `Error: ${message}`;
   return error;
+}
+
+function brokerApprovalError(
+  code: "binding_invalid" | "executing" | "pending" | "state_invalid" | "uncertain",
+): Error {
+  const message = `standard_service_broker_approval_${code}`;
+  const error = new Error(message);
+  error.stack = `Error: ${message}`;
+  return error;
+}
+
+async function closeClient(
+  client: TenantBrokerClient | undefined,
+  deadlineMs: number,
+  now: () => number,
+): Promise<void> {
+  if (!client) return;
+  try {
+    await beforeDeadline(() => client.close(), deadlineMs, now);
+  } catch {
+    throw brokerClientError("close");
+  }
+}
+
+async function beforeDeadline<T>(
+  action: () => Promise<T>,
+  deadlineMs: number,
+  now: () => number,
+): Promise<T> {
+  const remaining = deadlineMs - now();
+  if (!Number.isSafeInteger(deadlineMs) || remaining <= 0) {
+    throw new Error("standard_service_broker_client_lifetime_expired");
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const value = await Promise.race([
+      action(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("standard_service_broker_client_lifetime_expired")),
+          remaining,
+        );
+      }),
+    ]);
+    if (now() >= deadlineMs) {
+      throw new Error("standard_service_broker_client_lifetime_expired");
+    }
+    return value;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function requireTurnIdentity(identity: StandardServiceIdentity): void {
@@ -359,14 +498,52 @@ function artifactIds(result: unknown): string[] | undefined {
   return typeof artifactId === "string" && artifactId ? [artifactId] : undefined;
 }
 
+function snapshotCompletedResult(value: unknown): TenantBrokerCompletionReceipt {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(value);
+  } catch {
+    throw new Error("standard_service_broker_approval_state_invalid");
+  }
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("standard_service_broker_approval_state_invalid");
+  }
+  const result = snapshot as Record<string, unknown>;
+  if (
+    Object.keys(result).some((key) => !["content", "artifact_ids", "receipt_id"].includes(key))
+    || typeof result.content !== "string"
+    || new TextEncoder().encode(result.content as string).byteLength > TENANT_BROKER_MAX_RESPONSE_BYTES
+    || (result.receipt_id !== undefined && (
+      typeof result.receipt_id !== "string"
+      || !APPROVAL_ID.test(result.receipt_id)
+    ))
+    || (result.artifact_ids !== undefined && (
+      !Array.isArray(result.artifact_ids)
+      || result.artifact_ids.length > 64
+      || result.artifact_ids.some((id) => typeof id !== "string" || !ARTIFACT_ID.test(id))
+    ))
+  ) {
+    throw new Error("standard_service_broker_approval_state_invalid");
+  }
+  return Object.freeze({
+    content: result.content,
+    ...(result.receipt_id === undefined ? {} : { receipt_id: result.receipt_id }),
+    ...(result.artifact_ids === undefined
+      ? {}
+      : { artifact_ids: Object.freeze([...result.artifact_ids]) as unknown as string[] }),
+  });
+}
+
 /** Production adapter for the public tenant broker's six facade tools. */
 export class TenantBrokerStandardServiceProvider implements StandardServiceProvider {
   private readonly endpoint: string;
   private readonly authorization: TenantBrokerStandardServiceProviderOptions["authorization"];
-  private readonly clientFactory?: TenantBrokerStandardServiceProviderOptions["clientFactory"];
   private readonly approvalStore: TenantBrokerApprovalStore;
   private readonly now: () => number;
-  private lastCatalog?: StandardServiceCatalog;
+  private lastCatalog?: {
+    identity: StandardServiceIdentity;
+    catalog: StandardServiceCatalog;
+  };
   private readonly visualArtifacts = new Map<string, {
     identity: StandardServiceIdentity;
     reference: StandardServiceArtifactReference;
@@ -393,12 +570,14 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     if (
       !options.approvalStore
       || typeof options.approvalStore.create !== "function"
-      || typeof options.approvalStore.consume !== "function"
+      || typeof options.approvalStore.approve !== "function"
+      || typeof options.approvalStore.claim !== "function"
+      || typeof options.approvalStore.complete !== "function"
+      || typeof options.approvalStore.markUncertain !== "function"
     ) {
       throw new Error("standard_service_broker_approval_store_required");
     }
     this.approvalStore = options.approvalStore;
-    this.clientFactory = options.clientFactory;
     this.now = options.now ?? Date.now;
   }
 
@@ -408,14 +587,22 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       client.callTool("services_catalog", {}));
     const value = requireCompleted(parseToolResult(response));
     if (!Array.isArray(value.tools)) throw new Error("standard_service_broker_catalog_invalid");
-    const tools = value.tools.map(catalogTool);
+    // This adapter has no broker receipt lookup yet. A crash after a remote
+    // effect can only become uncertain, so do not advertise mutation or
+    // operator effects until reconciliation can resolve that state.
+    const tools = value.tools
+      .map(catalogTool)
+      .filter((tool) => tool.effect !== "mutate-tenant" && tool.effect !== "operator-privileged");
     const digest = createHash("sha256").update(JSON.stringify(tools)).digest("hex").slice(0, 16);
     const catalog = validateStandardServiceCatalog({
       catalog_version: `broker-${digest}`,
       policy_version: "broker-1",
       tools,
     });
-    this.lastCatalog = catalog;
+    this.lastCatalog = {
+      identity: structuredClone(identity),
+      catalog: structuredClone(catalog),
+    };
     return structuredClone(catalog);
   }
 
@@ -441,6 +628,14 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     const boundIdentity = structuredClone(identity);
     requireTurnIdentity(boundIdentity);
     const frozenCall = structuredClone(call);
+    const catalogTool = this.lastCatalog
+      && sameIdentity(boundIdentity, this.lastCatalog.identity)
+      ? this.lastCatalog.catalog.tools.find((tool) =>
+          tool.service_id === frozenCall.service_id && tool.tool_id === frozenCall.tool_id)
+      : undefined;
+    if (!catalogTool || catalogTool.approval !== "explicit-once") {
+      throw brokerApprovalError("binding_invalid");
+    }
     const expectedDigest = tenantBrokerApprovalDigest(boundIdentity, frozenCall);
     const value = parseToolResult(await this.withClient(boundIdentity, (client) =>
       client.callTool("services_request", {
@@ -477,42 +672,137 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     };
   }
 
+  /** Record the human-authenticated approval after the broker accepts it. */
+  async recordHumanAuthenticatedApproval(
+    identity: StandardServiceIdentity,
+    approvalId: string,
+    argumentDigest: string,
+  ): Promise<void> {
+    const boundIdentity = structuredClone(identity);
+    requireTurnIdentity(boundIdentity);
+    if (!APPROVAL_ID.test(approvalId) || !ARGUMENT_DIGEST.test(argumentDigest)) {
+      throw brokerApprovalError("binding_invalid");
+    }
+    let approved = false;
+    try {
+      approved = await this.approvalStore.approve({
+        approval_id: approvalId,
+        identity: boundIdentity,
+        argument_digest: argumentDigest,
+        approved_at_ms: this.now(),
+      });
+    } catch {
+      throw brokerApprovalError("uncertain");
+    }
+    if (!approved) throw brokerApprovalError("binding_invalid");
+  }
+
   async confirm(identity: StandardServiceIdentity, approvalId: string): Promise<StandardServiceResult> {
     const boundIdentity = structuredClone(identity);
     requireTurnIdentity(boundIdentity);
     if (!APPROVAL_ID.test(approvalId)) {
       throw new Error("standard_service_broker_approval_binding_invalid");
     }
-    const consumed = await this.approvalStore.consume({
-      approval_id: approvalId,
-      identity: structuredClone(boundIdentity),
-      now_ms: this.now(),
-    });
-    const pending = consumed === null ? null : structuredClone(consumed);
+    let state: TenantBrokerApprovalClaimResult | null;
+    let requestedExecutionDeadline = 0;
+    try {
+      const claimStartedAt = this.now();
+      const claimed = await this.approvalStore.claim({
+        approval_id: approvalId,
+        identity: structuredClone(boundIdentity),
+        now_ms: claimStartedAt,
+        execution_deadline_ms: claimStartedAt + TENANT_BROKER_CLIENT_LIFETIME_MS,
+      });
+      requestedExecutionDeadline = claimStartedAt + TENANT_BROKER_CLIENT_LIFETIME_MS;
+      state = claimed === null ? null : structuredClone(claimed);
+    } catch {
+      // The claim may have committed before its acknowledgement was lost.
+      // Never guess that it stayed pending and never execute on this path.
+      throw brokerApprovalError("uncertain");
+    }
+    const pending = state?.binding ?? null;
     const expiresAtMs = Date.parse(pending?.expires_at ?? "");
     if (
       !pending
       || pending.approval_id !== approvalId
       || !sameIdentity(boundIdentity, pending.identity)
       || !ARGUMENT_DIGEST.test(pending.argument_digest)
-      || !Number.isFinite(expiresAtMs)
-      || expiresAtMs <= this.now()
       || tenantBrokerApprovalDigest(pending.identity, pending.call) !== pending.argument_digest
     ) {
-      throw new Error("standard_service_broker_approval_binding_invalid");
+      throw brokerApprovalError("binding_invalid");
     }
-    // The store consumed before the remote call. A lost response must never
-    // make an exact one-use effect look safe to retry.
-    const value = requireCompleted(parseToolResult(await this.withClient(boundIdentity, (client) =>
-      client.callTool("services_confirm", { approval_id: approvalId }))));
-    const ids = pending.call.service_id === "visual"
-      && pending.call.tool_id === "inspect-issued-target"
-      ? [this.bindVisualArtifact(identity, value.result).artifact_id]
-      : artifactIds(value.result);
-    return {
-      content: JSON.stringify(value.result ?? null),
-      ...(ids ? { artifact_ids: ids } : {}),
-    };
+    if (state?.state === "completed") {
+      return snapshotCompletedResult(state.receipt);
+    }
+    if (state?.state === "pending" || state?.state === "executing" || state?.state === "uncertain") {
+      throw brokerApprovalError(state.state);
+    }
+    if (
+      state?.state !== "claimed"
+      || !EXECUTION_CLAIM_ID.test(state.execution_claim_id)
+      || !Number.isSafeInteger(state.execution_deadline_ms)
+      || state.execution_deadline_ms !== requestedExecutionDeadline
+      || state.execution_deadline_ms <= this.now()
+      || !Number.isFinite(expiresAtMs)
+      || expiresAtMs <= this.now()
+    ) {
+      throw brokerApprovalError("binding_invalid");
+    }
+    try {
+      const value = requireCompleted(parseToolResult(await this.withClient(
+        boundIdentity,
+        (client) => client.callTool("services_confirm", { approval_id: approvalId }),
+        state.execution_deadline_ms,
+      )));
+      const ids = pending.call.service_id === "visual"
+        && pending.call.tool_id === "inspect-issued-target"
+        ? [this.bindVisualArtifact(identity, value.result).artifact_id]
+        : artifactIds(value.result);
+      const result = snapshotCompletedResult({
+        content: JSON.stringify(value.result ?? null),
+        ...(ids ? { artifact_ids: ids } : {}),
+        ...(value.result
+          && typeof value.result === "object"
+          && !Array.isArray(value.result)
+          && typeof (value.result as Record<string, unknown>).receipt_id === "string"
+          ? { receipt_id: (value.result as Record<string, unknown>).receipt_id }
+          : {}),
+      });
+      if (this.now() >= state.execution_deadline_ms) {
+        throw brokerApprovalError("uncertain");
+      }
+      // The store transaction must use its own trusted clock and return false
+      // when that clock is >= its persisted execution deadline. The caller's
+      // clock is only an outer guard and is never commit authority.
+      const completed = await beforeDeadline(
+        () => this.approvalStore.complete({
+          approval_id: approvalId,
+          identity: structuredClone(boundIdentity),
+          execution_claim_id: state.execution_claim_id,
+          receipt: structuredClone(result),
+        }),
+        state.execution_deadline_ms,
+        this.now,
+      );
+      if (this.now() >= state.execution_deadline_ms) {
+        throw brokerApprovalError("uncertain");
+      }
+      if (!completed) throw brokerApprovalError("uncertain");
+      return result;
+    } catch {
+      try {
+        await this.approvalStore.markUncertain({
+          approval_id: approvalId,
+          identity: structuredClone(boundIdentity),
+          execution_claim_id: state.execution_claim_id,
+          failed_at_ms: this.now(),
+        });
+      } catch {
+        // The durable store remains the source of truth. A later claim can
+        // recover a completion that committed before its acknowledgement was lost.
+      }
+      throw brokerApprovalError("uncertain");
+    }
   }
 
   async visualInspect(
@@ -546,14 +836,17 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
 
   async status(identity: StandardServiceIdentity): Promise<StandardServiceStatus> {
     try {
-      requireTurnIdentity(identity);
-      const value = requireCompleted(parseToolResult(await this.withClient(identity, (client) =>
+      const boundIdentity = structuredClone(identity);
+      requireTurnIdentity(boundIdentity);
+      const value = requireCompleted(parseToolResult(await this.withClient(boundIdentity, (client) =>
         client.callTool("services_status", {}))));
+      const catalogDigest = this.lastCatalog
+        && sameIdentity(boundIdentity, this.lastCatalog.identity)
+        ? createHash("sha256").update(JSON.stringify(this.lastCatalog.catalog)).digest("hex")
+        : "unknown";
       return {
         state: "ready",
-        catalog_digest: this.lastCatalog
-          ? createHash("sha256").update(JSON.stringify(this.lastCatalog)).digest("hex")
-          : "unknown",
+        catalog_digest: catalogDigest,
         services: { broker: "ready" },
         ...(typeof value.message === "string" ? { message: value.message } : {}),
       };
@@ -569,69 +862,117 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
   private async withClient<T>(
     identity: StandardServiceIdentity,
     action: (client: TenantBrokerClient) => Promise<T>,
+    deadlineMs: number = this.now() + TENANT_BROKER_CLIENT_LIFETIME_MS,
   ): Promise<T> {
-    const client = await this.openClient(identity);
+    const client = await this.openClient(identity, deadlineMs);
+    let value: T | undefined;
+    let actionFailed = false;
     try {
-      return await action(client);
+      value = await beforeDeadline(() => action(client), deadlineMs, this.now);
     } catch {
-      throw brokerClientError("call");
-    } finally {
-      await client.close().catch(() => {});
+      actionFailed = true;
     }
+    // Close failure takes precedence so it can never be mistaken for success
+    // or disappear behind another fixed lifecycle error.
+    await closeClient(client, deadlineMs, this.now);
+    if (actionFailed) {
+      throw brokerClientError("call");
+    }
+    return value as T;
   }
 
-  private async openClient(identity: StandardServiceIdentity): Promise<TenantBrokerClient> {
+  private async openClient(
+    identity: StandardServiceIdentity,
+    deadlineMs: number,
+  ): Promise<TenantBrokerClient> {
     requireTurnIdentity(identity);
     const endpoint = new URL(this.endpoint);
-    if (!this.clientFactory && !(await resolveAllowedMcpHost(endpoint.hostname))) {
+    let hostAllowed = false;
+    try {
+      hostAllowed = await beforeDeadline(
+        () => resolveAllowedMcpHost(endpoint.hostname),
+        deadlineMs,
+        this.now,
+      );
+    } catch {
+      throw brokerClientError("connect");
+    }
+    if (!hostAllowed) {
       throw new Error("standard_service_broker_endpoint_unsafe");
     }
-    const authorization = await this.authorization(structuredClone(identity));
-    const expiresAt = Date.parse(authorization?.expires_at ?? "");
-    if (
-      !authorization?.bearer_token
-      || typeof authorization.channel_secret !== "string"
-      || authorization.channel_secret.length < 32
-      || !Number.isFinite(expiresAt)
-      || expiresAt <= this.now()
-    ) {
-      throw new Error("standard_service_broker_authorization_invalid_or_expired");
-    }
-    if (this.clientFactory) {
-      let client: TenantBrokerClient | undefined;
-      try {
-        client = await this.clientFactory({
-          identity: structuredClone(identity),
-          bearerToken: authorization.bearer_token,
-          channelSecret: authorization.channel_secret,
-        });
-        await client.connect();
-        return client;
-      } catch {
-        await client?.close().catch(() => {});
+    let authorization: TenantBrokerAuthorization;
+    try {
+      const issued = await beforeDeadline(
+        () => this.authorization(structuredClone(identity)),
+        deadlineMs,
+        this.now,
+      );
+      const bearerToken = issued?.bearer_token;
+      const channelSecret = issued?.channel_secret;
+      const expiresAtText = issued?.expires_at;
+      if (
+        typeof bearerToken !== "string"
+        || !BEARER_TOKEN.test(bearerToken)
+        || typeof channelSecret !== "string"
+        || !CHANNEL_SECRET.test(channelSecret)
+        || typeof expiresAtText !== "string"
+        || expiresAtText.length !== 24
+        || !CANONICAL_EXPIRY.test(expiresAtText)
+      ) {
         throw brokerClientError("connect");
       }
-    }
-    const transport = new StreamableHTTPClientTransport(endpoint, {
-      fetch: guardedTenantBrokerFetch(endpoint),
-      requestInit: {
-        headers: {
-          Authorization: `Bearer ${authorization.bearer_token}`,
-          "X-Leaf-Gateway-Channel": authorization.channel_secret,
-        },
-      },
-    });
-    const client = new Client({ name: "mushy-tenant-standard-services", version: "1.0.0" });
-    const adapter: TenantBrokerClient = {
-      connect: () => client.connect(transport),
-      callTool: (name, args) => client.callTool({ name, arguments: args }) as Promise<GatewayToolResult>,
-      close: () => client.close(),
-    };
-    try {
-      await adapter.connect();
-      return adapter;
+      const expiresAt = Date.parse(expiresAtText);
+      if (
+        !Number.isFinite(expiresAt)
+        || new Date(expiresAt).toISOString() !== expiresAtText
+        || expiresAt <= this.now()
+      ) {
+        throw brokerClientError("connect");
+      }
+      // Keep only copied scalars. A credential issuer cannot mutate the
+      // attachment after it passes the boundary.
+      authorization = {
+        bearer_token: bearerToken,
+        channel_secret: channelSecret,
+        expires_at: expiresAtText,
+      };
     } catch {
-      await adapter.close().catch(() => {});
+      throw brokerClientError("connect");
+    }
+    const remaining = deadlineMs - this.now();
+    if (remaining <= 0) throw brokerClientError("connect");
+    let adapter: TenantBrokerClient | undefined;
+    try {
+      // Credential-bearing header construction stays inside this fixed-error
+      // boundary even though credentials were already copied as primitives.
+      const transport = new StreamableHTTPClientTransport(endpoint, {
+        fetch: guardedTenantBrokerFetch(endpoint, undefined, {
+          deadlineSignal: AbortSignal.timeout(remaining),
+        }),
+        requestInit: {
+          headers: {
+            Authorization: `Bearer ${authorization.bearer_token}`,
+            "X-Leaf-Gateway-Channel": authorization.channel_secret,
+          },
+        },
+      });
+      const client = new Client({ name: "mushy-tenant-standard-services", version: "1.0.0" });
+      const createdAdapter: TenantBrokerClient = {
+        connect: () => client.connect(transport),
+        callTool: (name, args) => client.callTool({ name, arguments: args }) as Promise<GatewayToolResult>,
+        close: () => client.close(),
+      };
+      adapter = createdAdapter;
+      await beforeDeadline(() => createdAdapter.connect(), deadlineMs, this.now);
+      return createdAdapter;
+    } catch {
+      if (adapter) {
+        try {
+          await closeClient(adapter, deadlineMs, this.now);
+        } catch {
+          throw brokerClientError("close");
+        }
+      }
       throw brokerClientError("connect");
     }
   }

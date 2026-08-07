@@ -205,6 +205,7 @@ PRIOR_EVENTS_WINDOW = 400
 MAX_PRIOR_MESSAGES = 20
 MAX_PRIOR_MESSAGE_BYTES = 64 * 1024
 MAX_PRIOR_CONTEXT_BYTES = 256 * 1024
+MAX_STANDARD_SERVICE_RECEIPTS = 8
 # The ceiling the harness enforces on POST /turn (harness/src/server.ts
 # MAX_TURN_BODY_BYTES). The app measures its ENCODED body against this and
 # trims prior context until it fits, so the harness ceiling is an upper bound
@@ -430,14 +431,17 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
     """Fold the recent event log into `[{role, text}, ...]`: a `user` message
     per prior turn's `turn_started.data.text` (confirm-only turns contribute no
     user text) and an `assistant` message per prior turn's concatenated
-    `text_delta.data.text` plus any validated standard-service receipt, but ONLY
-    for turns that actually completed
+    `text_delta.data.text`, but ONLY for turns that actually completed
     (`turn_complete`/`error` seen) — an in-flight turn never contributes a
-    partial assistant message. `exclude_turn_id` keeps the CURRENT turn (whose
-    `turn_started` was just appended) out of its own prior context."""
+    partial assistant message. Validated standard-service receipts are folded
+    independently because their terminal event may have aged out of the raw
+    window. Receipt IDs are deduplicated and count-bounded. `exclude_turn_id`
+    keeps the CURRENT turn out of its own prior context."""
     events = session_store.recent_events(session_id, PRIOR_EVENTS_WINDOW)
     order: List[str] = []
     by_turn: Dict[str, Dict[str, Any]] = {}
+    receipts: Dict[str, str] = {}
+    approval_statuses: Dict[str, str] = {}
     for ev in events:
         tid = ev.get("turn_id")
         if not tid or tid == exclude_turn_id:
@@ -485,10 +489,29 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
                     f" Artifacts: {', '.join(artifact_ids)}."
                     if artifact_ids else ""
                 )
-                slot["parts"].append(
-                    f"\n\nStandard service approval completed. "
-                    f"Receipt: {receipt_id}.{suffix}"
+                receipts[receipt_id] = (
+                    f"Standard service approval completed. Receipt: {receipt_id}.{suffix}"
                 )
+                while len(receipts) > MAX_STANDARD_SERVICE_RECEIPTS:
+                    del receipts[next(iter(receipts))]
+        elif etype == "standard_service_approval_status":
+            approval_id = data.get("approval_id")
+            valid_approval_id = (
+                data.get("status") == "uncertain"
+                and isinstance(approval_id, str)
+                and 8 <= len(approval_id) <= 256
+                and all(
+                    char in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+                    for char in approval_id
+                )
+            )
+            if valid_approval_id:
+                approval_statuses[approval_id] = (
+                    "Standard service approval outcome is uncertain and will not be "
+                    f"retried. Approval: {approval_id}."
+                )
+                while len(approval_statuses) > MAX_STANDARD_SERVICE_RECEIPTS:
+                    del approval_statuses[next(iter(approval_statuses))]
         elif etype in ("turn_complete", "error"):
             slot["terminal"] = True
 
@@ -499,6 +522,9 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
             messages.append({"role": "user", "text": slot["user"]})
         if slot["terminal"] and slot["parts"]:
             messages.append({"role": "assistant", "text": "".join(slot["parts"])})
+    standard_service_events = [*receipts.values(), *approval_statuses.values()]
+    if standard_service_events:
+        messages.append({"role": "assistant", "text": "\n".join(standard_service_events)})
     return _fit_prior_context(messages[-MAX_PRIOR_MESSAGES:])
 
 

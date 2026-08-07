@@ -453,3 +453,20 @@ Risks:
 - A subscription credential must never enter platform identity claims, logs, or another tenant's route.
 - The UI must not imply that Free accounts or pooled team credit are supported.
 - The change must not bypass the account-owner gate or the existing API-key lane.
+
+# Tenant-safe standard-service approval journal
+
+- [x] Sync the exact reviewed Mushy provider and approval-store contract.
+- [x] Replace destructive approval consumption with atomic pending, approved, executing, completed, and uncertain transitions.
+- [x] Return durable completed receipts idempotently and keep uncertain work non-executable.
+- [x] Fold bounded receipt events independently of the original turn terminal window.
+- [x] Validate the exact approval primary key and every migration check at startup.
+- [x] Run focused and registered server, harness, migration, type, build, vendor, and diff gates.
+- [x] Self-review the complete security boundary and commit the verified integration.
+
+Risks:
+
+- Only the atomic executing claimant may call the broker.
+- A crash after claim must become uncertain at the stored deadline and must never retry execution.
+- Completed retries must return the stored safe receipt without any new approval or broker call.
+- The public model facade must never acquire the human execution primitive.

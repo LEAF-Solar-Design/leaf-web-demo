@@ -619,6 +619,10 @@ def test_human_token_is_bound_to_exact_approval_and_digest(authority):
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_mcp_expiry_wire_is_canonical_bounded_rfc3339():
+    assert mcp_authority.expires_at_iso(0) == "1970-01-01T00:00:00.000Z"
+
+
 def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receipt(
     authority, monkeypatch
 ):
@@ -717,6 +721,103 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
         "status": "completed",
         "receipt_id": "b" * 64,
         "artifact_ids": ["artifact-safe"],
+    }
+
+
+def test_completed_human_approval_retry_returns_journaled_receipt_without_mint_or_execute(
+    authority, monkeypatch
+):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    calls: list[str] = []
+
+    def approval_call(path, _payload):
+        calls.append(path)
+        assert path == "review"
+        return {
+            "status": "completed",
+            "identity": {
+                "tenant_id": TENANT,
+                "subject_id": SUBJECT,
+                "session_id": authority_session_id,
+                "authority_turn_id": TURN,
+                "subscription_mount_id": MOUNT,
+                "runner_profile_id": "spine",
+            },
+            "receipt_id": "c" * 64,
+            "artifact_ids": ["artifact-safe"],
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "completed",
+        "receipt_id": "c" * 64,
+        "artifact_ids": ["artifact-safe"],
+    }
+    assert calls == ["review"]
+    assert kms.sign_calls == []
+
+
+def test_uncertain_human_approval_is_observable_and_never_reexecutes(
+    authority, monkeypatch
+):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    state = "pending"
+    calls: list[str] = []
+
+    def approval_call(path, _payload):
+        nonlocal state
+        calls.append(path)
+        if path == "execute":
+            state = "uncertain"
+            return {"status": "uncertain", "result": "must-not-be-reflected"}
+        return {
+            "status": state,
+            "identity": {
+                "tenant_id": TENANT,
+                "subject_id": SUBJECT,
+                "session_id": authority_session_id,
+                "authority_turn_id": TURN,
+                "subscription_mount_id": MOUNT,
+                "runner_profile_id": "spine",
+            },
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    request = {
+        "json": {"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        "headers": {"Authorization": "Bearer test-human"},
+    }
+    first = client.post("/api/mcp/gateway/approvals/execute", **request)
+    sign_count = len(kms.sign_calls)
+    second = client.post("/api/mcp/gateway/approvals/execute", **request)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json() == {"status": "uncertain"}
+    assert second.json() == {"status": "uncertain"}
+    assert "must-not-be-reflected" not in first.text
+    assert calls == ["review", "execute", "review"]
+    assert len(kms.sign_calls) == sign_count
+    status_events = [
+        event for event in session_store.recent_events(authority_session_id, 20)
+        if event["type"] == "standard_service_approval_status"
+    ]
+    assert status_events[-1]["data"] == {
+        "status": "uncertain",
+        "approval_id": "approval_12345678",
     }
 
 

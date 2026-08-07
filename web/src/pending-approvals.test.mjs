@@ -34,6 +34,19 @@ describe('pending approvals', () => {
     })
   })
 
+  it('returns the safe uncertain outcome without a client retry', async () => {
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      return response(200, { status: 'uncertain' })
+    }
+
+    const outcome = await approveStandardService('approval_12345678', 'a'.repeat(64))
+
+    assert.deepEqual(outcome, { status: 'uncertain' })
+    assert.equal(calls, 1)
+  })
+
   it('loads the bounded tenant inbox', async () => {
     let request
     globalThis.fetch = async (url, options) => {

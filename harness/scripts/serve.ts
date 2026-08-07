@@ -279,8 +279,9 @@ async function validatePostgresStartup(): Promise<void> {
          AND table_name = ANY($1::text[])`,
       [tableNames],
     );
-    const constraintRows = await pool.query<HarnessConstraint>(
-      `SELECT c.relname AS table_name, pg_get_constraintdef(pc.oid) AS definition
+    const constraintRows = await pool.query<HarnessConstraint & { constraint_name: string }>(
+      `SELECT c.relname AS table_name, pc.conname AS constraint_name,
+              pg_get_constraintdef(pc.oid) AS definition
        FROM pg_constraint pc
        JOIN pg_class c ON c.oid = pc.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -311,6 +312,7 @@ async function validatePostgresStartup(): Promise<void> {
     });
     assertTenantBrokerApprovalCatalog({
       columns: columnRows.rows,
+      constraints: constraintRows.rows,
       indexes: indexRows.rows,
     });
   } finally {

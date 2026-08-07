@@ -120,6 +120,24 @@ describe("standard services human approval host routes", () => {
     expect(text).not.toContain("attachment-token");
   });
 
+  it("returns only the safe uncertain status", async () => {
+    execute.mockResolvedValueOnce({ status: "uncertain", result: "private broker result" });
+    const response = await post("/internal/standard-services/approvals/execute", {
+      approval_id: "approval_12345678",
+      argument_digest: "a".repeat(64),
+      identity: IDENTITY,
+      human_bearer: "secret-human-token-value",
+      attachment: {
+        bearer_token: "attachment-token",
+        channel_secret: "channel-secret",
+        expires_at: "2099-01-01T00:00:00.000Z",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "uncertain" });
+  });
+
   it("fails closed on an unknown path and an oversized chunked body", async () => {
     const unknown = await post("/internal/standard-services/approvals/unknown", {});
     const oversized = await post("/internal/standard-services/approvals/review", {

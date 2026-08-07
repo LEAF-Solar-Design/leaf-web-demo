@@ -16,7 +16,6 @@ import type {
   StandardServicesSessionAttachment,
   TenantBrokerApprovalStore,
   TenantBrokerAuthorization,
-  TenantBrokerClient,
   TrustedStandardServicesContext,
 } from "../../vendor/mushy-author/index.js";
 import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/index.js";
@@ -26,6 +25,7 @@ const MAX_ATTACHMENT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const TOKEN = /^[A-Za-z0-9._~-]{16,8192}$/;
+const CANONICAL_EXPIRY = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const CANONICAL_BROKER_ORIGIN = {
   staging: "https://staging-api.leafdesign.ai",
   production: "https://api.leafdesign.ai",
@@ -33,6 +33,17 @@ const CANONICAL_BROKER_ORIGIN = {
 const BROKER_MCP_PATH = "/mcp";
 
 type FetchLike = typeof fetch;
+
+function canonicalExpiryMillis(value: unknown): number | null {
+  if (typeof value !== "string" || value.length !== 24 || !CANONICAL_EXPIRY.test(value)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isSafeInteger(parsed)) return null;
+  try {
+    return new Date(parsed).toISOString() === value ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 interface AttachmentResponse {
   bearer_token: string;
@@ -191,7 +202,7 @@ function parseAttachment(value: unknown): AttachmentResponse {
   if (typeof body.channel_secret !== "string" || !TOKEN.test(body.channel_secret)) {
     throw new Error("standard_services_exchange_channel_invalid");
   }
-  if (typeof body.expires_at !== "string" || !Number.isFinite(Date.parse(body.expires_at))) {
+  if (typeof body.expires_at !== "string" || canonicalExpiryMillis(body.expires_at) === null) {
     throw new Error("standard_services_exchange_expiry_invalid");
   }
   return {
@@ -267,7 +278,8 @@ export class LeafStandardServicesResolver implements StandardServicesResolver {
     }
     if (response.status !== 200) throw new Error(`standard_services_exchange_rejected:${response.status}`);
     const attachment = parseAttachment(await boundedJson(response));
-    const expiresAt = Date.parse(attachment.expires_at);
+    const expiresAt = canonicalExpiryMillis(attachment.expires_at);
+    if (expiresAt === null) throw new Error("standard_services_exchange_expiry_invalid");
     if (expiresAt <= this.now()) throw new Error("standard_services_attachment_expired");
     const expected: Omit<StandardServiceIdentity, "subject_id"> = {
       tenant_id: context.tenant_id,
@@ -297,7 +309,8 @@ export class LeafStandardServicesResolver implements StandardServicesResolver {
             throw new Error("standard_services_authorization_identity_mismatch");
           }
         }
-        if (Date.parse(attachment.expires_at) <= this.now()) {
+        const authorizationExpiry = canonicalExpiryMillis(attachment.expires_at);
+        if (authorizationExpiry === null || authorizationExpiry <= this.now()) {
           throw new Error("standard_services_attachment_expired");
         }
         return {
@@ -354,9 +367,39 @@ export interface HumanApprovalHostInput {
 }
 
 export interface HumanApprovalReceipt {
-  status: "completed";
-  receipt_id: string;
+  status: "completed" | "uncertain";
+  receipt_id?: string;
   artifact_ids?: string[];
+}
+
+interface HumanApprovalProvider {
+  recordHumanAuthenticatedApproval(
+    identity: StandardServiceIdentity,
+    approvalId: string,
+    argumentDigest: string,
+  ): Promise<void>;
+  confirm(identity: StandardServiceIdentity, approvalId: string): Promise<{
+    content: string;
+    artifact_ids?: string[];
+  }>;
+}
+
+function safeHumanApprovalReceipt(
+  approvalId: string,
+  argumentDigest: string,
+  result: { content: string; artifact_ids?: string[] },
+): HumanApprovalReceipt {
+  const artifactIds = result.artifact_ids?.map((artifactId) => requiredId("artifact_id", artifactId));
+  if (artifactIds && artifactIds.length > 32) {
+    throw new Error("standard_services_human_approval_artifacts_invalid");
+  }
+  return {
+    status: "completed",
+    receipt_id: createHash("sha256")
+      .update(`${approvalId}\0${argumentDigest}\0${result.content}`)
+      .digest("hex"),
+    ...(artifactIds?.length ? { artifact_ids: artifactIds } : {}),
+  };
 }
 
 /** Human-only host adapter. It is never attached to an SDK MCP server. */
@@ -371,16 +414,15 @@ export class LeafStandardServicesHumanApprovalHost {
     approvalStore: LeafTenantBrokerApprovalStore;
     fetchImpl?: FetchLike;
     now?: () => number;
-    providerFactory?: typeof TenantBrokerStandardServiceProvider;
-    clientFactory?: (context: {
-      identity: StandardServiceIdentity;
-      bearerToken: string;
-      channelSecret: string;
-    }) => Promise<TenantBrokerClient>;
+    /** Local-test seam. Deployed environments always construct the reviewed provider. */
+    providerFactory?: (options: ConstructorParameters<typeof TenantBrokerStandardServiceProvider>[0]) => HumanApprovalProvider;
   }) {
     this.endpoint = parseBrokerEndpoint(options.brokerEndpoint, options.environment);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? Date.now;
+    if (options.providerFactory && options.environment !== "local") {
+      throw new Error("standard_services_human_approval_provider_override_forbidden");
+    }
   }
 
   async review(input: {
@@ -388,15 +430,28 @@ export class LeafStandardServicesHumanApprovalHost {
     argument_digest: string;
     tenant_id: string;
     subject_id: string;
-  }): Promise<{ status: "pending"; identity: StandardServiceIdentity } | null> {
-    const binding = await this.options.approvalStore.review({
+  }): Promise<{
+    status: "pending" | "approved" | "completed" | "uncertain";
+    identity: StandardServiceIdentity;
+    receipt_id?: string;
+    artifact_ids?: string[];
+  } | null> {
+    const reviewed = await this.options.approvalStore.review({
       approval_id: input.approval_id,
       argument_digest: input.argument_digest,
       tenant_id: input.tenant_id,
       subject_id: input.subject_id,
       now_ms: this.now(),
     });
-    return binding ? { status: "pending", identity: structuredClone(binding.identity) } : null;
+    if (!reviewed) return null;
+    const identity = structuredClone(reviewed.binding.identity);
+    if (reviewed.state === "completed") {
+      return { ...safeHumanApprovalReceipt(input.approval_id, input.argument_digest, reviewed.receipt), identity };
+    }
+    if (reviewed.state === "executing" || reviewed.state === "uncertain") {
+      return { status: "uncertain", identity };
+    }
+    return { status: reviewed.state, identity };
   }
 
   async execute(input: HumanApprovalHostInput): Promise<HumanApprovalReceipt> {
@@ -412,11 +467,6 @@ export class LeafStandardServicesHumanApprovalHost {
       subscription_mount_id: requiredId("subscription_mount_id", input.identity.subscription_mount_id),
       runner_profile_id: runnerProfile(input.identity.runner_profile_id),
     };
-    if (!TOKEN.test(input.human_bearer) || !TOKEN.test(input.attachment.bearer_token)
-      || !TOKEN.test(input.attachment.channel_secret)
-      || Date.parse(input.attachment.expires_at) <= this.now()) {
-      throw new Error("standard_services_human_approval_credential_invalid");
-    }
     const reviewed = await this.options.approvalStore.review({
       approval_id: approvalId,
       argument_digest: input.argument_digest,
@@ -429,36 +479,25 @@ export class LeafStandardServicesHumanApprovalHost {
       "tenant_id", "subject_id", "session_id", "authority_turn_id",
       "subscription_mount_id", "runner_profile_id",
     ] as const) {
-      if (reviewed.identity[key] !== identity[key]) {
+      if (reviewed.binding.identity[key] !== identity[key]) {
         throw new Error("standard_services_human_approval_binding_invalid");
       }
     }
-    const approvalUrl = new URL(
-      `/mcp/approvals/${encodeURIComponent(approvalId)}`,
-      this.endpoint.origin,
-    );
-    const response = await this.fetchImpl(approvalUrl, {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        authorization: `Bearer ${input.human_bearer}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ argument_digest: input.argument_digest }),
-    });
-    if (response.status !== 200) throw new Error("standard_services_human_approval_rejected");
-    const approved = await boundedJson(response);
-    if (
-      !approved
-      || typeof approved !== "object"
-      || Array.isArray(approved)
-      || Object.keys(approved).length !== 1
-      || (approved as Record<string, unknown>).status !== "approved"
-    ) {
-      throw new Error("standard_services_human_approval_response_invalid");
+    if (reviewed.state === "completed") {
+      return safeHumanApprovalReceipt(approvalId, input.argument_digest, reviewed.receipt);
     }
-    const Provider = this.options.providerFactory ?? TenantBrokerStandardServiceProvider;
-    const provider = new Provider({
+    if (reviewed.state === "executing" || reviewed.state === "uncertain") {
+      return { status: "uncertain" };
+    }
+    const credentialExpiry = canonicalExpiryMillis(input.attachment.expires_at);
+    if (typeof input.human_bearer !== "string" || !TOKEN.test(input.human_bearer)
+      || typeof input.attachment.bearer_token !== "string" || !TOKEN.test(input.attachment.bearer_token)
+      || typeof input.attachment.channel_secret !== "string" || !TOKEN.test(input.attachment.channel_secret)
+      || credentialExpiry === null
+      || credentialExpiry <= this.now()) {
+      throw new Error("standard_services_human_approval_credential_invalid");
+    }
+    const providerOptions: ConstructorParameters<typeof TenantBrokerStandardServiceProvider>[0] = {
       endpoint: this.endpoint.toString(),
       approvalStore: this.options.approvalStore,
       authorization: async (requested) => {
@@ -472,22 +511,56 @@ export class LeafStandardServicesHumanApprovalHost {
         }
         return structuredClone(input.attachment);
       },
-      ...(this.options.clientFactory ? { clientFactory: this.options.clientFactory } : {}),
       now: this.now,
-    });
-    const result = await provider.confirm(identity, approvalId);
-    const artifactIds = result.artifact_ids?.map((artifactId) => requiredId("artifact_id", artifactId));
-    if (artifactIds && artifactIds.length > 32) {
-      throw new Error("standard_services_human_approval_artifacts_invalid");
-    }
-    const receiptId = createHash("sha256")
-      .update(`${approvalId}\0${input.argument_digest}\0${result.content}`)
-      .digest("hex");
-    return {
-      status: "completed",
-      receipt_id: receiptId,
-      ...(artifactIds?.length ? { artifact_ids: artifactIds } : {}),
     };
+    const provider = this.options.providerFactory
+      ? this.options.providerFactory(providerOptions)
+      : new TenantBrokerStandardServiceProvider(providerOptions);
+    if (reviewed.state === "pending") {
+      const approvalUrl = new URL(
+        `/mcp/approvals/${encodeURIComponent(approvalId)}`,
+        this.endpoint.origin,
+      );
+      const response = await this.fetchImpl(approvalUrl, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          authorization: `Bearer ${input.human_bearer}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ argument_digest: input.argument_digest }),
+      });
+      if (response.status !== 200) throw new Error("standard_services_human_approval_rejected");
+      const approved = await boundedJson(response);
+      if (
+        !approved
+        || typeof approved !== "object"
+        || Array.isArray(approved)
+        || Object.keys(approved).length !== 1
+        || (approved as Record<string, unknown>).status !== "approved"
+      ) {
+        throw new Error("standard_services_human_approval_response_invalid");
+      }
+      await provider.recordHumanAuthenticatedApproval(identity, approvalId, input.argument_digest);
+    }
+    try {
+      return safeHumanApprovalReceipt(approvalId, input.argument_digest, await provider.confirm(identity, approvalId));
+    } catch (error) {
+      const latest = await this.options.approvalStore.review({
+        approval_id: approvalId,
+        argument_digest: input.argument_digest,
+        tenant_id: identity.tenant_id,
+        subject_id: identity.subject_id,
+        now_ms: this.now(),
+      });
+      if (latest?.state === "completed") {
+        return safeHumanApprovalReceipt(approvalId, input.argument_digest, latest.receipt);
+      }
+      if (latest?.state === "executing" || latest?.state === "uncertain") {
+        return { status: "uncertain" };
+      }
+      throw error;
+    }
   }
 }
 

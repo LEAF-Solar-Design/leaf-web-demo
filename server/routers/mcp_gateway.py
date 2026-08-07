@@ -523,7 +523,8 @@ def execute_human_approval(
             "subject_id": tenant.subject,
         })
         identity_value = reviewed.get("identity")
-        if reviewed.get("status") != "pending" or not isinstance(identity_value, dict):
+        approval_status = reviewed.get("status")
+        if approval_status not in {"pending", "approved", "completed", "uncertain"} or not isinstance(identity_value, dict):
             raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
         identity = {
             "session_id": _id("session_id", identity_value.get("session_id")),
@@ -542,40 +543,64 @@ def execute_human_approval(
             or identity_value.get("subject_id") != tenant.subject
         ):
             raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
-        mcp_authority.verify_subscription_mount(
-            tenant_id, identity["subscription_mount_id"]
-        )
-        human_token, _human_expires = _mint_human_approval_token(
-            tenant_id=tenant_id,
-            subject_id=tenant.subject,
-            identity=identity,
-            approval_id=request.approval_id,
-            argument_digest=request.argument_digest,
-        )
-        attachment_request = AttachmentExchangeRequest(
-            session_id=identity["session_id"],
-            authority_session_id=identity["session_id"],
-            authority_turn_id=identity["authority_turn_id"],
-            subscription_mount_id=identity["subscription_mount_id"],
-            runner_profile_id=identity["runner_profile_id"],
-        )
-        attachment = _mint_attachment(
-            tenant_id=tenant_id,
-            subject_id=tenant.subject,
-            tier=current_tier,
-            request=attachment_request,
-        )
-        receipt = _harness_approval_call("execute", {
-            "approval_id": request.approval_id,
-            "argument_digest": request.argument_digest,
-            "identity": attachment["identity"],
-            "human_bearer": human_token,
-            "attachment": {
-                "bearer_token": attachment["bearer_token"],
-                "channel_secret": attachment["channel_secret"],
-                "expires_at": attachment["expires_at"],
-            },
-        })
+        if approval_status in {"pending", "approved"}:
+            mcp_authority.verify_subscription_mount(
+                tenant_id, identity["subscription_mount_id"]
+            )
+            human_token, _human_expires = _mint_human_approval_token(
+                tenant_id=tenant_id,
+                subject_id=tenant.subject,
+                identity=identity,
+                approval_id=request.approval_id,
+                argument_digest=request.argument_digest,
+            )
+            attachment_request = AttachmentExchangeRequest(
+                session_id=identity["session_id"],
+                authority_session_id=identity["session_id"],
+                authority_turn_id=identity["authority_turn_id"],
+                subscription_mount_id=identity["subscription_mount_id"],
+                runner_profile_id=identity["runner_profile_id"],
+            )
+            attachment = _mint_attachment(
+                tenant_id=tenant_id,
+                subject_id=tenant.subject,
+                tier=current_tier,
+                request=attachment_request,
+            )
+            receipt = _harness_approval_call("execute", {
+                "approval_id": request.approval_id,
+                "argument_digest": request.argument_digest,
+                "identity": attachment["identity"],
+                "human_bearer": human_token,
+                "attachment": {
+                    "bearer_token": attachment["bearer_token"],
+                    "channel_secret": attachment["channel_secret"],
+                    "expires_at": attachment["expires_at"],
+                },
+            })
+            approval_status = receipt.get("status")
+        else:
+            receipt = reviewed
+
+        session = session_store.get_session(identity["session_id"])
+        if not session or session.get("tenant_id") != tenant_id:
+            raise mcp_authority.McpAuthorityError(
+                "MCP approval receipt session is unavailable"
+            )
+        if approval_status == "uncertain":
+            session_store.append_event(
+                identity["session_id"],
+                identity["authority_turn_id"],
+                "standard_service_approval_status",
+                {
+                    "status": "uncertain",
+                    "approval_id": request.approval_id,
+                },
+            )
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            return {"status": "uncertain"}
+
         receipt_id = receipt.get("receipt_id")
         artifact_ids = receipt.get("artifact_ids")
         if (
@@ -596,11 +621,6 @@ def execute_human_approval(
         ):
             raise mcp_authority.McpAuthorityError(
                 "MCP approval host returned invalid data"
-            )
-        session = session_store.get_session(identity["session_id"])
-        if not session or session.get("tenant_id") != tenant_id:
-            raise mcp_authority.McpAuthorityError(
-                "MCP approval receipt session is unavailable"
             )
         session_store.append_event(
             identity["session_id"],

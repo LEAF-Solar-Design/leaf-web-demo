@@ -613,9 +613,29 @@ export function createHarness(ports: HarnessPorts, opts?: {
               tenant_id: requiredText(body, "tenant_id"),
               subject_id: requiredText(body, "subject_id"),
             });
-            return reviewed
-              ? send(res, 200, reviewed)
-              : send(res, 404, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+            if (!reviewed) {
+              return send(res, 404, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+            }
+            const identity = {
+              tenant_id: reviewed.identity.tenant_id,
+              subject_id: reviewed.identity.subject_id,
+              session_id: reviewed.identity.session_id,
+              authority_turn_id: reviewed.identity.authority_turn_id,
+              subscription_mount_id: reviewed.identity.subscription_mount_id,
+              runner_profile_id: reviewed.identity.runner_profile_id,
+            };
+            if (reviewed.status === "completed") {
+              if (typeof reviewed.receipt_id !== "string" || !/^[a-f0-9]{64}$/.test(reviewed.receipt_id)) {
+                throw new Error("invalid approval receipt");
+              }
+              return send(res, 200, {
+                status: "completed",
+                identity,
+                receipt_id: reviewed.receipt_id,
+                ...(reviewed.artifact_ids?.length ? { artifact_ids: [...reviewed.artifact_ids] } : {}),
+              });
+            }
+            return send(res, 200, { status: reviewed.status, identity });
           } catch {
             return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
           }
@@ -623,7 +643,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
         if (path === "/internal/standard-services/approvals/execute") {
           try {
             const receipt = await configured.host.execute(body as unknown as HumanApprovalHostInput);
-            return send(res, 200, receipt);
+            if (receipt.status === "uncertain") return send(res, 200, { status: "uncertain" });
+            if (typeof receipt.receipt_id !== "string" || !/^[a-f0-9]{64}$/.test(receipt.receipt_id)) {
+              throw new Error("invalid approval receipt");
+            }
+            return send(res, 200, {
+              status: "completed",
+              receipt_id: receipt.receipt_id,
+              ...(receipt.artifact_ids?.length ? { artifact_ids: [...receipt.artifact_ids] } : {}),
+            });
           } catch {
             return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
           }
