@@ -1789,8 +1789,8 @@ def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
 
     # THE RACE THIS ONCE LEFT HALF OPEN IS NOW CLOSED, BUT NOT WHERE THIS COMMENT
     # USED TO SAY. The check above reads the attempt here, and a lease reclaim can
-    # advance the job before the terminal write lands. Two different mechanisms
-    # close that window, and it is worth naming them separately:
+    # advance the job before the terminal write lands. Two mechanisms bear on that
+    # window and only the SECOND one closes it, so they are worth naming apart:
     #
     #   1. `jobs.complete_callback` re-reads the DURABLE attempt and runs
     #      `_validate_terminal_context` against it. This happens BEFORE the store

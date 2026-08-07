@@ -25,6 +25,17 @@ on:
       - 'platform/overlay_store.py'
       - 'platform/tests/test_overlay_store_postgres.py'
       - 'platform/tests/test_overlay_store_static.py'
+      # The rest of the platform import closure the live async-job callback test
+      # reaches. Its terminal write mirrors through platform_link._update_by_spine,
+      # which calls _load_platform() and imports leaf_platform.{db,store,deps}; a
+      # break in any of them raises through terminal_in_transaction and fails that
+      # test. This is the COMPUTED closure, not a guess: walking import-time edges
+      # from store/deps/db reaches exactly {db, deps, models, store}, and db.py was
+      # already listed. That is where this list stops, because nothing else in the
+      # package is imported on this path.
+      - 'platform/deps.py'
+      - 'platform/models.py'
+      - 'platform/store.py'
       - 'platform/tests/test_drawing_import.py'
       - 'platform/tests/test_schema_status_postgres_authority.py'
       - 'scripts/reconcile_customization_authority.py'
