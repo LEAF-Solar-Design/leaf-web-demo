@@ -320,7 +320,7 @@ jobs:
             # longer fetch.
             if printf '%s' "$SUP_ARTIFACTS" \
               | jq -e --arg n "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" \
-                  'any(.artifacts[]; (.name == $n) and (.expired != true))' \
+                  'any(.artifacts[]; (.name == $n) and (.expired == false))' \
                   >/dev/null; then
               case "$SUP_STATE" in
                 "completed success") echo yes; return 0 ;;

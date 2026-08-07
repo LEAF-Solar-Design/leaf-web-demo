@@ -2850,8 +2850,16 @@ def check_docs_noop_filter(text: str) -> None:
     # reference. The one added call is a fourth read-only GET of this repo's
     # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
     # to the three already present. No new endpoint, repo or credential.
+    # Hash updated again 2026-08-07 (seventh edit): sol-critic round 4 on PR
+    # #508. The supply-set expiry test tightened from `.expired != true` to
+    # `.expired == false`, because jq reads a MISSING field as null and
+    # `null != true` is true, so the loose form accepted a partial artifact
+    # object that never proved the artifact is still downloadable. Comment and
+    # filter change only; the dispatch is untouched, still ONE
+    # `gh workflow run` with the same four inputs, one secret reference, and
+    # the same four read-only GETs on `GH_TOKEN="$HOME_TOKEN"`.
     assert frozen == (
-        "247317654de771bc12019de886617b5a519d41258869b02bdb5098c5df1585ed"
+        "ae799ff5341ddd617cfc89632155aeb4136634877e0da91eb807c88b87f5b9b5"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3560,6 +3568,13 @@ def check_staging_relay_convergence(text: str) -> None:
     assert code.count("CONVERGER=$(superseder_deploys") == 1, (
         "a mid-release stand-down must classify whether the superseding "
         "commit converges staging, from exactly one place")
+    # ...and that call must be the ONLY thing that ever sets it. A second
+    # assignment placed after it (`CONVERGER=yes`) leaves the call in place,
+    # satisfies the count above, and silently overrides the classification.
+    converger_writes = re.findall(r"^\s*CONVERGER=", code, re.M)
+    assert len(converger_writes) == 1, (
+        "CONVERGER may be assigned exactly once, by the classifier call; "
+        f"found {len(converger_writes)} assignments, so one can override it")
     unconverged = re.search(
         r'else\n\s*echo "::error::STAGING IS SPLIT AND UNCONVERGED:.*?\n\s*exit 1\n',
         code, re.S)
@@ -3742,8 +3757,15 @@ def check_staging_relay_convergence(text: str) -> None:
         "the `yes` answer must sit INSIDE the supply-set check")
     # An expired artifact is a name with nothing behind it; the superseder's
     # manifest step still has to DOWNLOAD this supply set.
-    assert "(.expired != true)" in once, (
-        "an expired supply-set artifact must not earn `yes`")
+    # `.expired == false`, not `!= true`: jq reads a MISSING field as null and
+    # `null != true` is true, so the loose form would accept a partial artifact
+    # object that never proved the artifact is still downloadable. This
+    # classifier fails closed on an unproven response, and that includes an
+    # artifact whose expiry it cannot read.
+    assert "(.expired == false)" in once, (
+        "an expired -- or unproven -- supply-set artifact must not earn `yes`")
+    assert ".expired != true" not in once, (
+        "`.expired != true` accepts a missing field; require `== false`")
     # The CONDITION itself must stay falsifiable. sol-critic showed an
     # always-true guard (`... >/dev/null || :`) passed every other pin while
     # removing the requirement entirely, so pin the condition, not just the
@@ -3755,6 +3777,13 @@ def check_staging_relay_convergence(text: str) -> None:
     assert "||" not in supply_condition.group(0), (
         "the supply-set check must carry no `||` fallback: that makes the "
         "condition unconditionally true and silently drops the requirement")
+    # A shell-level `||` is not the only way to make the guard vacuous: the jq
+    # FILTER can be made a tautology from the inside. Pin the filter exactly.
+    assert (
+        "'any(.artifacts[]; (.name == $n) and (.expired == false))'"
+        in supply_condition.group(0)), (
+        "the supply-set jq filter must be exactly the membership test; a "
+        "disjunction such as `any(...) or true` accepts a missing supply set")
 
     # THE READ-TO-DISPATCH WINDOW IS CLOSED FOR REPORTING.
     #
@@ -3955,15 +3984,32 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             "the supply-set requirement neutralised by an always-true guard, "
             "so a build that published NOTHING counts as a converger",
             mutate(original,
-                   "'any(.artifacts[]; (.name == $n) and (.expired != true))' \\\n"
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))' \\\n"
                    "                  >/dev/null; then\n",
-                   "'any(.artifacts[]; (.name == $n) and (.expired != true))' \\\n"
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))' \\\n"
                    "                  >/dev/null || :; then\n"),
         ),
         (
             "an EXPIRED supply set, which the superseder's relay cannot "
             "download, counted as a converger",
-            mutate(original, " and (.expired != true)", ""),
+            mutate(original, " and (.expired == false)", ""),
+        ),
+        (
+            "expiry test loosened so a partial artifact object with no "
+            "`expired` field still earns `yes`",
+            mutate(original, "(.expired == false)", "(.expired != true)"),
+        ),
+        (
+            "the jq membership test made a tautology from the inside",
+            mutate(original,
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))'",
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false)) or true'"),
+        ),
+        (
+            "the classification silently overridden by a second assignment",
+            mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
+                   'CONVERGER=$(superseder_deploys "$MAIN_SHA")\n'
+                   "                CONVERGER=yes"),
         ),
         (
             "the `yes` finding acted on the pre-poll tip snapshot, so a "
