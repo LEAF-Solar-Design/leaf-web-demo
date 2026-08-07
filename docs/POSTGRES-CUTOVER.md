@@ -311,8 +311,11 @@ and `get_session` runs
 still on `dual_write_shadow` raises whenever its legacy row disagrees with what
 a NEW `postgres`-mode task has written.
 
-**Read the exposure as every session either task touches during the overlap, not
-just new ones.** Two shapes, and the second is the easy one to miss:
+**The exposed set is: sessions MUTATED by a postgres-mode task, then READ by an
+old shadow task.** Both halves are required. A shared read creates no
+divergence, and an append by the OLD task is a dual write that keeps the two
+stores together, so neither alone can trigger it. Only the new task writes to
+one store and not the other. Two shapes, and the second is the easy one to miss:
 
 - A session the postgres task MINTED exists only in PostgreSQL, so the old task
   compares a legacy `None` against a real row.
@@ -320,8 +323,9 @@ just new ones.** Two shapes, and the second is the easy one to miss:
   PostgreSQL and not in SQLite: `_pg_append_event` runs
   `UPDATE app_sessions SET last_seq = last_seq + 1, updated_at = %s`, and
   `_shadow_equal` compares whole rows, so the stale legacy row and the advanced
-  PostgreSQL row differ on `last_seq` and `updated_at` alone. No new session and
-  no legacy write is required to trigger it.
+  PostgreSQL row differ on `last_seq` and `updated_at` alone. So a session that
+  existed long before the flip is still exposed, with no new session and no
+  legacy write anywhere in the sequence.
 
 Mitigation: flip the DRAINED color first, verify it through the color-addressed
 header rules, then drain the live color and flip it, so the two modes never
@@ -342,12 +346,14 @@ selector change, never after.** Note also that rolling back after PostgreSQL has
 accepted writes needs the fenced reverse backfill named in the contract above;
 `scripts/reconcile_sessions_authority.py` is SQLite to PostgreSQL only.
 
-**The three tables exist on staging, and that is a weaker statement than "0012
-is applied".** Take the evidence from the incident, not from the health check.
-The recorded mismatches prove `_pg_get_or_create_session` reached PostgreSQL and
-its `ON CONFLICT (tenant_id, drawing_id)` returned a durable row, which cannot
-happen unless `app_sessions` exists, holds rows, and carries the unique index
-that clause requires.
+**`app_sessions` exists on staging and holds rows. That is ALL the incident
+proves, and it is much weaker than "0012 is applied".** Both failing endpoints
+reach `get_session` first, which calls `_pg_get_session` and selects from
+`app_sessions` alone; the shadow compare then raises and aborts the request
+before anything queries transcript events or pending approvals. So the recorded
+mismatches say nothing about `app_session_events`, about `app_approvals`, or
+about the unique index on `(tenant_id, drawing_id)` that the separate
+`ON CONFLICT` path relies on. Do not stretch this evidence past the one table.
 
 Two things that do NOT prove it, so do not substitute them:
 
