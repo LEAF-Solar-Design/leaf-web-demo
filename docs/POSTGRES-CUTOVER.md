@@ -672,26 +672,29 @@ very change being made.** `server/app.py` calls
 was just set. So a delta carrying only the sessions selector produces a task that
 refuses to serve, and it is the flip itself that arms the refusal.
 
-**But the deploy workflow will not carry the second selector.** In
-`deploy-leaf-platform-staging.yml`, `allowed_delta_pair()` is a closed
-allowlist, and its entire contents are `LEAF_JOBS_STORE=postgres` and the five
-`LEAF_SESSIONS_STORE` values. `LEAF_SESSION_ANNEX_STORE` does not appear
-anywhere in that workflow: verified against terraform `main` at `4e86975`, zero
-occurrences in the file. A delta naming it exits with
+**And for about three hours the deploy workflow WOULD NOT carry the second
+selector.** Past tense throughout the rest of this subsection: all of it
+describes terraform `main` at `4e86975` (2026-08-07T08:34:56Z) and was fixed by
+PR #534 at 11:50:05Z.
+
+At that commit, `allowed_delta_pair()` in `deploy-leaf-platform-staging.yml`
+was a closed allowlist whose entire contents were `LEAF_JOBS_STORE=postgres`
+and the five `LEAF_SESSIONS_STORE` values. `LEAF_SESSION_ANNEX_STORE` did not
+appear anywhere in that workflow, zero occurrences in the file, so a delta
+naming it exited with
 `"configuration_delta pair is not on the reviewed migration-variable allowlist"`.
 
-So both dispatches available today fail, in opposite ways:
+So both dispatches available AT THAT COMMIT failed, in opposite ways:
 
-| dispatch | outcome |
-|---|---|
-| `LEAF_SESSIONS_STORE=postgres` alone | workflow accepts, new task raises at startup |
-| both selectors together | workflow refuses the delta before deploying |
+| dispatch | outcome at `4e86975` | outcome now |
+|---|---|---|
+| `LEAF_SESSIONS_STORE=postgres` alone | workflow accepts, new task raises at startup | unchanged, still raises |
+| both selectors together | workflow refuses the delta before deploying | **accepted, this is the correct dispatch** |
 
-Both rows of that table were true on terraform `main` at `4e86975`
-(2026-08-07T08:34:56Z), where `LEAF_SESSION_ANNEX_STORE` occurred zero times in
-the workflow file. **PR #534 closed the second row.** The first row still holds
-and always will: a single-selector delta still produces a task that refuses to
-start, because that refusal is the application's deliberate gate, not a gap.
+**PR #534 closed the second row, and it is the row you act on.** The first row
+still holds and always will: a single-selector delta still produces a task that
+refuses to start, because that refusal is the application's deliberate gate, not
+a gap.
 
 So the surviving rule is not "wait for terraform" but **name both pairs in one
 dispatch**. `allowed_delta_pair()` now accepts the annex selector at `legacy`
