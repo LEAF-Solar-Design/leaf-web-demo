@@ -444,10 +444,14 @@ def test_real_author_route_uses_current_platform_tier(
     seen = {}
 
     class _RecordingService:
-        def stage(self, *, tenant, description, mode, idempotency_key):
+        def stage(
+            self, *, tenant, description, mode, idempotency_key,
+            authority_session_id, authority_turn_id,
+        ):
             seen["tenant"] = str(tenant)
             seen["tier"] = tenant.tier
             seen["subject"] = tenant.subject
+            seen["authority"] = (authority_session_id, authority_turn_id)
             return {"change_set_id": "cs-route", "state": "staged"}
 
     monkeypatch.setattr(deps, "auth_live", lambda: True)
@@ -480,6 +484,7 @@ def test_real_author_route_uses_current_platform_tier(
         "tenant": "tenant-a",
         "tier": "hosted_pro",
         "subject": ALICE,
+        "authority": (session_id, "turn-route"),
     }
 
 

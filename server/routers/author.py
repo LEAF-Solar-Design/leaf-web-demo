@@ -365,6 +365,10 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "Tool authoring requires a verified workspace identity for the requester. "
         "The approved request was not executed."
     ),
+    "stage_authority_invalid": (
+        "Tool authoring requires the requester's active app turn. "
+        "The approved request was not executed."
+    ),
 }
 
 
@@ -643,11 +647,19 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         if over_quota is not None:
             return over_quota
         return _legacy_author(req, tenant)
+    if not customization_enabled(5, str(tenant).strip()):
+        denied = _customization_gate(5, tenant)
+        if denied is not None:
+            return denied
     # A harness back-edge call authenticates as a tenant and carries no user.
     # Resolve the author from the app's own record of the turn that authorized
     # it; a direct user call is returned unchanged and keeps its own subject.
-    tenant = deps.backedge_author_identity(
+    tenant = deps.stage_author_identity(
         tenant, authority_session_id, authority_turn_id)
+    if tenant is None:
+        return _customization_error(
+            CustomizationServiceError("stage_authority_invalid", 409)
+        )
     denied = _customization_gate(5, tenant)
     if denied is not None:
         _emit_author_event("author.wall_hit", tenant, {"wall_kind": "entitlement"})
@@ -715,6 +727,13 @@ def stage(
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
+    tenant = deps.stage_author_identity(
+        tenant, authority_session_id, authority_turn_id
+    )
+    if tenant is None:
+        return _customization_error(
+            CustomizationServiceError("stage_authority_invalid", 409)
+        )
     try:
         service = CustomizationService.configured()
         enqueue = getattr(service, "enqueue_stage", service.stage)

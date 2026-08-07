@@ -96,7 +96,10 @@ def r5_author(monkeypatch, allow_memory):
     _the_harness_call pins that placement against the real source."""
     staged = []
 
-    def fake_stage(*, tenant, description, mode, idempotency_key):
+    def fake_stage(
+        *, tenant, description, mode, idempotency_key,
+        authority_session_id=None, authority_turn_id=None,
+    ):
         tier = author_router.entitlements.resolve_tier(tenant)
         author_quota.enforce(str(tenant), tier)
         staged.append({"tenant": tenant, "description": description,
@@ -105,6 +108,9 @@ def r5_author(monkeypatch, allow_memory):
 
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
     monkeypatch.setattr(
         author_router.CustomizationService, "configured",
         classmethod(lambda cls: SimpleNamespace(stage=fake_stage)),
@@ -690,13 +696,19 @@ def test_stage_route_shares_the_same_budget(monkeypatch, allow_memory):
     monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
     staged = []
 
-    def fake_stage(*, tenant, description, mode, idempotency_key):
+    def fake_stage(
+        *, tenant, description, mode, idempotency_key,
+        authority_session_id=None, authority_turn_id=None,
+    ):
         author_quota.enforce(str(tenant), "hosted_starter")
         staged.append(idempotency_key)
         return {"status": "staged"}
 
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
     monkeypatch.setattr(author_router.CustomizationService, "configured",
                         classmethod(lambda cls: SimpleNamespace(stage=fake_stage)))
 

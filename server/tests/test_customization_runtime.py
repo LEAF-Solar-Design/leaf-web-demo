@@ -264,6 +264,11 @@ def test_stage_worker_preserves_exact_authority_headers(tmp_path, monkeypatch):
 
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
     monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-secret")
+    monkeypatch.setattr(
+        customization_service.deps,
+        "active_stage_author_subject",
+        lambda *_args: "auth0|alice",
+    )
     monkeypatch.setattr(requests, "post", post)
 
     CustomizationService(store).dispatch_stage(change)
@@ -910,6 +915,9 @@ def test_live_author_preserves_requested_mode(monkeypatch):
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
     monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
+    monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",
         classmethod(lambda cls: service),
@@ -938,6 +946,9 @@ def test_live_author_reports_unsupported_one_off_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
     monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
+    monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",
         classmethod(lambda cls: service),
@@ -962,6 +973,9 @@ def test_live_author_requires_stable_idempotency_key_when_r5_is_enabled(monkeypa
     configured_calls = []
     monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        author_router.deps, "stage_author_identity", lambda tenant, *_: tenant
+    )
     monkeypatch.setattr(
         author_router.CustomizationService,
         "configured",

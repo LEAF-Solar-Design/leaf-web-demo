@@ -849,6 +849,17 @@ class CustomizationService:
         return dict(tool)
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
+        active_subject = deps.active_stage_author_subject(
+            tenant_id,
+            change.authority_session_id,
+            change.authority_turn_id,
+        )
+        if (
+            tenant_id != change.tenant_id
+            or not active_subject
+            or active_subject != change.author_subject
+        ):
+            raise CustomizationServiceError("stage_authority_invalid", 409)
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
