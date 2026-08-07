@@ -1454,10 +1454,32 @@ available. A local Python implementation resolved from a tenant repository or
 `server/authored/` is denied before `run_tool_dynamic` can import or execute
 the file.
 
-Setting `LEAF_AUTHORED_EXECUTION=1` in production also requires
-`LEAF_SANDBOX=e2b` or `LEAF_SANDBOX=e2b-microvm`. Broker startup fails when
-that combination is incomplete. Local and demo deployments that do not set
-`LEAF_RUNTIME_ENV=production` keep their existing behavior.
+Whenever `LEAF_AUTHORED_EXECUTION` is EXPLICITLY set to a truthy value
+(`1`/`true`/`yes`/`on`), a real out-of-process sandbox tier must be engaged, or
+the broker refuses to start. `validate_runtime_safety` reads the effective tier
+from `tool_loader._sandbox_tier()` and refuses boot unless it is `subprocess`
+(`LEAF_SANDBOX=e2b`) or `microvm` (`LEAF_SANDBOX=e2b-microvm` or
+`LEAF_TOOL_SANDBOX_PROVIDER=e2b`). This floor is **posture-independent**: it
+fires in staging and any explicitly-armed deployment, not only when
+`LEAF_RUNTIME_ENV=production`. In production the stricter existing check also
+requires `LEAF_TOOL_SANDBOX_PROVIDER=e2b` (the micro-VM tier) plus an E2B
+credential source.
+
+A NON-EMPTY but unrecognized `LEAF_SANDBOX` value (e.g. `1`, `true`, `on`) is a
+truthy-but-invalid footgun: `_sandbox_tier()` returns `invalid` (not a silent
+`off`), execution is refused, and an armed broker refuses to boot. Explicit
+disable values (`off`, `0`, `false`, `no`, `none`, `disabled`) and an unset
+variable read as `off`. Local and demo deployments that do not EXPLICITLY arm
+`LEAF_AUTHORED_EXECUTION` keep their existing in-process behavior byte-for-byte
+(authored execution defaults on outside production, but the sandbox floor keys
+on the explicit flag, so it does not fire for them).
+
+The harness enforces the matching author-time boundary in
+`harness/src/runtimeSafety.ts::assertAuthoredSandboxBoundary`, also
+posture-independent: when authored execution is armed the tenant tool sandbox
+must be `LEAF_TOOL_SANDBOX_PROVIDER=e2b`, the author model stays on the trusted
+harness host (`LEAF_AUTHOR_SANDBOX_PROVIDER` off or unset), and the harness must
+not hold an E2B credential.
 ## §21 Tenant customization and controlled platform promotion
 
 Status: **FROZEN v1, 2026-07-23**

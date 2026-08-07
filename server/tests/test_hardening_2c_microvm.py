@@ -386,9 +386,23 @@ def test_sandbox_tier_tri_state_and_enabled_flag_backcompat(monkeypatch):
     assert tool_loader._sandbox_tier() == "microvm"
     assert tool_loader._sandbox_enabled() is False
 
-    monkeypatch.setenv("LEAF_SANDBOX", "something-else")
-    assert tool_loader._sandbox_tier() == "off"
-    assert tool_loader._sandbox_enabled() is False
+    # Explicit disable values (and unset) keep the in-process "off" default.
+    for disabled in ("off", "0", "false", "no", "none", "disabled", " OFF "):
+        monkeypatch.setenv("LEAF_SANDBOX", disabled)
+        assert tool_loader._sandbox_tier() == "off"
+        assert tool_loader._sandbox_enabled() is False
+
+
+def test_sandbox_tier_rejects_truthy_but_invalid_leaf_sandbox(monkeypatch):
+    # The =1 footgun: a boolean-style value where the code demands the tier
+    # enum. It must FAIL CLOSED as "invalid" (execution refused / boot refused),
+    # never silently read as "off" and run tenant code in-process.
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    for footgun in ("1", "true", "on", "yes", "enabled", "something-else"):
+        monkeypatch.setenv("LEAF_SANDBOX", footgun)
+        assert tool_loader._sandbox_tier() == "invalid", footgun
+        # _sandbox_enabled() keeps its exact v1 contract (== "e2b" only).
+        assert tool_loader._sandbox_enabled() is False, footgun
 
 
 def test_tool_provider_is_separate_and_fail_closed(monkeypatch):

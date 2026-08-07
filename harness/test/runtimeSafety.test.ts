@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertAuthoredSandboxBoundary,
   authoredExecutionEnabled,
   authorRunnerMode,
   authorSandboxProvider,
@@ -116,5 +117,54 @@ describe("production harness runtime safety", () => {
       LEAF_AUTHORED_EXECUTION: "1",
       LEAF_HARNESS_SESSION_STORE: "postgres",
     })).toThrow(/LEAF_TOOL_SANDBOX_PROVIDER=e2b/);
+  });
+});
+
+describe("authored-execution sandbox boundary is posture-independent", () => {
+  it("does nothing when authored execution is not armed", () => {
+    expect(() => assertAuthoredSandboxBoundary({})).not.toThrow();
+    expect(() => assertAuthoredSandboxBoundary({ LEAF_RUNTIME_ENV: "staging" }))
+      .not.toThrow();
+  });
+
+  it("refuses an armed NON-production harness with no tool sandbox provider", () => {
+    // The old guard returned early for any non-production posture, so an armed
+    // staging harness with no sandbox escaped entirely. It must now fail closed.
+    expect(() => assertAuthoredSandboxBoundary({
+      LEAF_RUNTIME_ENV: "staging",
+      LEAF_AUTHORED_EXECUTION: "1",
+    })).toThrow(/LEAF_TOOL_SANDBOX_PROVIDER=e2b/);
+    expect(() => validateProductionHarnessEnv({
+      LEAF_RUNTIME_ENV: "staging",
+      LEAF_AUTHORED_EXECUTION: "1",
+    })).toThrow(/LEAF_TOOL_SANDBOX_PROVIDER=e2b/);
+  });
+
+  it("accepts an armed non-production harness with the correct boundary", () => {
+    const armed = {
+      LEAF_RUNTIME_ENV: "staging",
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_TOOL_SANDBOX_PROVIDER: "e2b",
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "off",
+    };
+    expect(() => assertAuthoredSandboxBoundary(armed)).not.toThrow();
+    expect(() => assertAuthoredSandboxBoundary({ ...armed, LEAF_AUTHOR_SANDBOX_PROVIDER: undefined }))
+      .not.toThrow();
+  });
+
+  it("refuses an author sandbox provider or an E2B credential in any posture", () => {
+    const armed = {
+      LEAF_RUNTIME_ENV: "staging",
+      LEAF_AUTHORED_EXECUTION: "1",
+      LEAF_TOOL_SANDBOX_PROVIDER: "e2b",
+    };
+    expect(() => assertAuthoredSandboxBoundary({
+      ...armed,
+      LEAF_AUTHOR_SANDBOX_PROVIDER: "e2b",
+    })).toThrow(/trusted harness host/);
+    expect(() => assertAuthoredSandboxBoundary({
+      ...armed,
+      E2B_API_KEY: "must-belong-to-broker",
+    })).toThrow(/must not receive E2B credentials/);
   });
 });
