@@ -2766,7 +2766,7 @@ def check_docs_noop_filter(text: str) -> None:
     # added read of THIS repo's tip on the workflow's own read-only token, and
     # no new secret reference (the count assertion above is unchanged).
     assert frozen == (
-        "469d978cf88a7089fb832932340d58d3d9374df94a4162670e07a1f6c3e5302c"
+        "1aba114045e52a7ad3102b3030b25444e1d732c80cceafc2a92dc81ad56a2511"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3413,6 +3413,22 @@ def check_staging_relay_convergence(text: str) -> None:
         "a dispatched deploy must be watched to a terminal state, not assumed")
     assert code.index('gh run view "$RUN_ID"') > dispatch_at
 
+    # Identity must be POSITIVE. sol-critic returned RED on PR #497 against an
+    # earlier version that bound "the one new run above the high-water mark":
+    # GitHub creates and lists dispatched runs asynchronously and sibling lanes
+    # dispatch the same workflow a few times an hour, so a sibling's run can
+    # become visible before ours. The relay would then watch THEIR run, report
+    # their success as our service's, and dispatch the next service — evicting
+    # its own still-queued run. Green relay, undeployed service: the very bug
+    # this file exists to prevent, re-entering through the resolver.
+    assert re.search(r'RUN_ID=\$\(find_run_named "\$BEFORE" "\$WANT"', code), (
+        "the watched run must be identified BY NAME; inferring it from "
+        "'a new run appeared' can bind a sibling lane's run")
+    assert code.count("RUN_ID=$(") == 1, (
+        "exactly one place may bind RUN_ID")
+    assert "displayTitle == $want" in code, (
+        "run resolution must compare the run name, not just the run id")
+
     # The tip is re-read INSIDE the per-service loop, before each dispatch.
     # Deploying serially widens the window in which main can move, and
     # dispatching an older tag behind a newer relay would roll staging
@@ -3422,6 +3438,15 @@ def check_staging_relay_convergence(text: str) -> None:
         "each dispatch must be preceded by a fresh tip-of-main read")
     assert code.index("for SERVICE in web app") < code.index("branches/main") < dispatch_at, (
         "the tip re-check must sit inside the loop and before each dispatch")
+
+    # ...but standing down is only legal while NOTHING of this release is live.
+    # kimi-adversary on PR #497: once web has landed, standing down leaves
+    # staging on a mixed identity and calls it success, and a superseding
+    # docs-only commit builds no images, so its relay skips and never
+    # converges the split. Finishing the release is the safer end state.
+    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "false" \]', code), (
+        "the stand-down must be gated on nothing of this release being live, "
+        "or a superseding docs-only commit leaves staging silently split")
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
@@ -3433,6 +3458,9 @@ def check_staging_relay_convergence(text: str) -> None:
         "the loop may only advance past a service whose deploy concluded success")
     assert "landed (run $RUN_ID)" in success_arm.group(1), (
         "the success arm must say which run landed the deploy")
+    assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(1), re.M), (
+        "a landed deploy must record that this release is now partly live, so "
+        "the stand-down above cannot abandon it half-deployed")
 
     # Every announced error FAILS the job. An `::error::` followed by
     # anything other than `exit 1` is the silent-success bug returning.
@@ -3526,6 +3554,22 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "watch removed, back to dispatch-and-hope",
             mutate(original, 'gh run view "$RUN_ID"', 'true "$RUN_ID"'),
+        ),
+        (
+            "run bound by 'newest new run' instead of by name (sol-critic RED)",
+            mutate(original,
+                   'RUN_ID=$(find_run_named "$BEFORE" "$WANT" || true)',
+                   'RUN_ID=$(newest_run_since "$BEFORE" || true)'),
+        ),
+        (
+            "stand-down ungated, abandoning a half-deployed release",
+            mutate(original,
+                   '              if [ "$DEPLOYED_ANY" = "false" ]; then\n',
+                   '              if true; then\n'),
+        ),
+        (
+            "landed deploy no longer records that the release is partly live",
+            mutate(original, "                DEPLOYED_ANY=true\n", ""),
         ),
         (
             "loop advances without the deploy having landed",

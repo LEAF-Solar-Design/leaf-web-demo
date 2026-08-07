@@ -186,31 +186,57 @@ jobs:
               | jq -r '[.[].databaseId] | max // 0'
           }
 
-          # "<id><TAB><run name>" for every run above the mark, newest first.
-          new_runs_since() {
+          # Newest run above the mark whose run-name is EXACTLY this service
+          # and this image tag.
+          #
+          # Identity must be positive, never inferred from "a new run
+          # appeared". Sibling lanes dispatch this same workflow a few times
+          # an hour, and GitHub creates and lists dispatched runs
+          # asynchronously, so a sibling's run can become visible before ours
+          # does. Binding the newest new run would then watch THEIR run,
+          # report their success as our service's, and dispatch the next
+          # service — which evicts our own still-queued run. That is exactly
+          # the silent partial deploy this whole change exists to kill.
+          #
+          # A sibling that dispatched the identical service AND tag is
+          # deploying precisely what we asked for, so matching its run is
+          # still correct.
+          find_run_named() {
             gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
               --limit 100 --json databaseId,displayTitle \
-              | jq -r --argjson mark "$1" \
-                  '[.[] | select(.databaseId > $mark)] | sort_by(-.databaseId)[]
-                   | "\(.databaseId)\t\(.displayTitle)"'
+              | jq -r --argjson mark "$1" --arg want "$2" \
+                  '[.[] | select(.databaseId > $mark and .displayTitle == $want)]
+                   | sort_by(-.databaseId) | first | .databaseId // empty'
           }
+
+          DEPLOYED_ANY=false
 
           for SERVICE in web app; do
             WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
             ATTEMPT=0
 
             while :; do
-              # Re-read the tip before every dispatch. Serial deploys widen the
-              # window in which main can move, and deploying an older tag after
-              # a newer relay already deployed would roll staging BACKWARDS —
-              # exactly what the latest-main-only rule exists to prevent. The
-              # newer commit's relay deploys every service, so standing down is
-              # convergent, not a gap.
-              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-              if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
-                echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before the $SERVICE deploy; standing down (latest-main-only staging: the newer commit's relay deploys every service)."
-                exit 0
+              # Stand down for a newer commit ONLY while this release has put
+              # nothing live yet. Serial deploys widen the window in which main
+              # can move, and starting a release whose tag is already stale
+              # would roll staging BACKWARDS.
+              #
+              # Once a service of this release HAS landed, standing down would
+              # leave staging on a MIXED identity (web on this tree, app on the
+              # previous one) and call it success. Nothing reliably converges
+              # that: a superseding docs-only commit builds no images, so its
+              # own relay skips without deploying anything, and the split then
+              # survives until the next deployable merge. Finishing the release
+              # is the safer end state. It cannot land behind a newer relay
+              # either, because every relay deploys web before app, so a newer
+              # one reaches each service after we do and lands on top.
+              if [ "$DEPLOYED_ANY" = "false" ]; then
+                MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                  "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+                if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+                  echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
+                  exit 0
+                fi
               fi
 
               BEFORE=$(latest_any_run_id)
@@ -223,40 +249,17 @@ jobs:
                 -f "app_deploy_intent=forward"
               echo "Dispatched $SERVICE deploy of $IMAGE_TAG (attempt $((ATTEMPT + 1)))."
 
-              # Resolve the run we just created, polling FAST so the window in
-              # which a sibling lane's dispatch could be confused for ours is
-              # a few seconds rather than a full poll interval. Sibling lanes
-              # dispatch this same workflow a few times an hour.
-              #
-              # One new run is unambiguous. More than one is resolvable only
-              # when the deploy workflow stamps run-name with the service and
-              # tag; until it does, this fails closed below rather than watch
-              # a run that is not ours. A sibling that dispatched the same
-              # service AND tag is deploying exactly what we asked for, so
-              # matching its run is still correct.
-              #
-              # Transient gh failures inside poll loops are tolerated and also
-              # fail closed: an unresolved run exhausts its budget and errors.
+              # Transient gh failures inside poll loops are tolerated and fail
+              # CLOSED: an unresolved run exhausts its budget and errors below.
               RUN_ID=""
               RESOLVE_BY=$(( $(date +%s) + 5 * 60 ))
               while [ "$(date +%s)" -lt "$RESOLVE_BY" ] && before_deadline; do
                 sleep 3
-                NEW=$(new_runs_since "$BEFORE" || true)
-                if [ -n "$NEW" ]; then
-                  if [ "$(printf '%s\n' "$NEW" | wc -l)" -eq 1 ]; then
-                    RUN_ID=$(printf '%s\n' "$NEW" | cut -f1)
-                    break
-                  fi
-                  NAMED=$(printf '%s\n' "$NEW" \
-                    | awk -F'\t' -v want="$WANT" '$2 == want { print $1; exit }')
-                  if [ -n "$NAMED" ]; then
-                    RUN_ID="$NAMED"
-                    break
-                  fi
-                fi
+                RUN_ID=$(find_run_named "$BEFORE" "$WANT" || true)
+                if [ -n "$RUN_ID" ]; then break; fi
               done
               if [ -z "$RUN_ID" ]; then
-                echo "::error::Dispatched the $SERVICE deploy of $IMAGE_TAG but could not identify its run (none appeared, or concurrent dispatches were indistinguishable because no run carries the name '$WANT'). Staging is NOT converged on $BUILD_HEAD_SHA; check the deploy workflow before re-running."
+                echo "::error::Dispatched the $SERVICE deploy of $IMAGE_TAG but no run named '$WANT' appeared. This relay identifies its run by name and never guesses, so it fails here rather than watch a run that may not be ours. PREREQUISITE: $INFRA_REPO must set run-name on $DEPLOY_WORKFLOW to 'Deploy leaf-platform staging <service> (<image_tag>)'. Staging is NOT converged on $BUILD_HEAD_SHA."
                 exit 1
               fi
               echo "Watching $SERVICE deploy run $RUN_ID."
@@ -278,6 +281,7 @@ jobs:
                 exit 1
               fi
               if [ "$CONCLUSION" = "success" ]; then
+                DEPLOYED_ANY=true
                 echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
                 break
               fi
