@@ -41,6 +41,7 @@ import type {
 import { acceptBrokerTestResult } from "../../agent/tools/toolExecutionReceipt.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { scrubSecrets } from "./envScrub.js";
+import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented, not
@@ -568,6 +569,13 @@ export class AgentSdkRunner implements AgentRunner {
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
     const allowed = new Set(allowedNames);
+    const composition = composeRunnerCapabilities({
+      profile: "author",
+      private_mcp_servers: registry
+        ? { author: server, registry: registry.serverConfig }
+        : { author: server },
+      private_allowed_tools: allowedNames,
+    });
     const q = sdk.query({
       prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {
@@ -579,8 +587,8 @@ export class AgentSdkRunner implements AgentRunner {
         permissionMode: "default",
         cwd: input.repoDir,
         abortController: abort,
-        mcpServers: registry ? { author: server, registry: registry.serverConfig } : { author: server },
-        allowedTools: allowedNames,
+        mcpServers: composition.mcpServers,
+        allowedTools: composition.allowedTools,
         canUseTool: async (toolName: string, inp: Record<string, unknown>) => {
           if (allowed.has(toolName)) return { behavior: "allow", updatedInput: inp };
           return {

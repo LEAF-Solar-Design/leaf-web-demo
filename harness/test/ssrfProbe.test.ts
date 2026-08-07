@@ -120,7 +120,10 @@ describe("scope: the live converse runner still mounts no tenant MCP", () => {
 
   it("ConverseSdkRunner passes only the spine server, and never touches the bridge", async () => {
     const source = await read("../src/vendor/mushy-author/ports/impl/converseSdkRunner.ts");
-    expect(source).toMatch(/mcpServers:\s*\{\s*spine:\s*server\s*\}/);
+    expect(source).toMatch(
+      /composeRunnerCapabilities\(\{[\s\S]*profile:\s*"spine"[\s\S]*private_mcp_servers:\s*\{\s*spine:\s*server\s*\}/,
+    );
+    expect(source).toMatch(/mcpServers:\s*composition\.mcpServers/);
     expect(source).not.toMatch(/resolveEnvMcpAttachment|resolveMcpAttachment|mcpBridge/);
   });
 

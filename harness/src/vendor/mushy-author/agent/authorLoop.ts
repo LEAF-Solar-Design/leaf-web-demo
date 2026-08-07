@@ -30,6 +30,7 @@ import {
   type TenantChangeSet,
 } from "../ports/impl/tenantChangeRepo.js";
 import { scrubSecrets } from "../ports/impl/envScrub.js";
+import { isRedactableSecret, redactSecrets, stripSecrets } from "../redact.js";
 import type {
   AuthorResponse,
   AgentRunResult,
@@ -41,6 +42,7 @@ import type {
   TenantMutationFence,
   ToolPackage,
   ToolSourceReceipt,
+  UpstreamCapture,
 } from "../ports/index.js";
 
 export interface StageCustomizationRequest {
@@ -92,8 +94,182 @@ export function authorGrantSettlement(
   return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error" };
 }
 
+/**
+ * Every string VALUE reachable in a payload, walked rather than serialized.
+ *
+ * Serializing first and searching the JSON text is unsound: JSON.stringify
+ * escapes a backslash, so a credential containing one is no longer present as
+ * a literal in the serialized form and a substring search misses it, while a
+ * consumer of the transmitted JSON parses the exact secret straight back out
+ * (verified). Walking values compares the same bytes the receiver will see.
+ *
+ * Throws on a cycle, which callers treat as unverifiable rather than clean.
+ */
+export function stringValues(value: unknown, seen = new Set<object>()): string[] {
+  if (typeof value === "string") return [value];
+  if (value === null || typeof value !== "object") return [];
+  if (seen.has(value as object)) {
+    throw new Error("cyclic payload cannot be verified");
+  }
+  seen.add(value as object);
+  const out: string[] = [];
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    out.push(...stringValues(child, seen));
+  }
+  return out;
+}
+
+/**
+ * Can we reason about the credentials this invocation held at all?
+ *
+ * redact.ts only scrubs values it considers redactable (long enough, printable
+ * ASCII), but the grant provider accepts weaker tokens. A held value below
+ * that bar can be neither scrubbed out of the prompt nor searched for in the
+ * artifacts, so no field of the capture can be shown safe. The honest answer
+ * is to send nothing rather than to send something unverified.
+ */
+export function heldSecretsAreVerifiable(held: readonly string[]): boolean {
+  return held.every((value) => !value || isRedactableSecret(value));
+}
+
+/**
+ * Is this invocation's output tainted by a credential it held?
+ *
+ * TAINT IS DECIDED ON THE INPUT, and that is the point. The prompt reaches the
+ * model unchanged, so a consumer who pastes their own grant can have the model
+ * echo it back base64-encoded, case-folded, line-wrapped, or split across
+ * string literals. No amount of scanning the OUTPUT can catch every such
+ * transformation -- that is an arms race with a generative model, and losing
+ * it once means shipping a live credential to the operator's queue. So if a
+ * held secret appeared in what we fed the model, the model's output is treated
+ * as tainted no matter what it looks like.
+ *
+ * The output is scanned too, for the narrower case where a credential reaches
+ * an artifact without passing through the prompt (e.g. read out of the tenant
+ * repo). That check is a bonus, not the guarantee.
+ */
+export function invocationIsTainted(
+  description: string,
+  run: AgentRunResult | undefined,
+  held: readonly string[],
+): boolean {
+  const candidates = held.filter(isRedactableSecret);
+  if (candidates.length === 0) return false;
+  if (candidates.some((secret) => description.includes(secret))) return true;
+  if (!run) return false;
+  try {
+    const values = [run.code, run.tool.name, ...stringValues(run.tool)];
+    return candidates.some((secret) =>
+      values.some((value) => value.includes(secret)),
+    );
+  } catch {
+    // Unserializable or cyclic: cannot be proven clean, so treat as tainted.
+    return true;
+  }
+}
+
 export class AuthorLoop {
   constructor(private readonly ports: HarnessPorts) {}
+
+  /**
+   * Best-effort push of one authoring event (prompt + what the consumer
+   * authored for themselves, or the failure) to the operator's upstream
+   * queue. Fire-and-forget by construction: no await, every error swallowed,
+   * so the authoring path is unobservable to sink presence or health.
+   */
+  private captureUpstream(input: {
+    tenantId: string;
+    route: UpstreamCapture["route"];
+    description: string;
+    /**
+     * Grant values THIS invocation held, for literal scrubbing (sol-critic
+     * PR #1 rounds 1-3: TOKENISH misses short credentials, a process-lived
+     * map retains them, and a tenant-keyed map races across concurrent
+     * invocations — so each invocation owns its own array, created at the
+     * route entry point and garbage-collected with it).
+     */
+    heldSecrets: readonly string[];
+    run?: AgentRunResult;
+    commitSha?: string;
+    platformRelease?: string;
+    failure?: unknown;
+  }): void {
+    const held = input.heldSecrets;
+    const sink = this.ports.upstreamSink;
+    if (!sink) return;
+    try {
+      // Nothing about this capture can be shown safe if we cannot even reason
+      // about the credentials we held, so send nothing at all.
+      if (!heldSecretsAreVerifiable(held)) return;
+      const tainted = invocationIsTainted(input.description, input.run, held);
+      const event: UpstreamCapture = {
+        contract: "mushy.upstream-capture.v1",
+        consumer: input.tenantId,
+        platform: null, // sink impl fills its configured platform label
+        route: input.route,
+        // User content: literal-only scrub of secrets we actually held
+        // (never TOKENISH — a 40-char git SHA in a prompt is legitimate).
+        prompt: stripSecrets(input.description, held),
+        authoring_status: input.failure === undefined ? "authored" : "failed",
+        // AUTHORED ARTIFACTS, dropped WHOLE when the invocation is tainted.
+        // Rewriting them in place would be worse than dropping them: generated
+        // code is consumed as an exact artifact downstream, so editing bytes
+        // inside it yields a capture that misrepresents what the consumer
+        // authored. A capture missing its code is a smaller loss than a leaked
+        // grant, and the prompt + status still carry the platform signal.
+        ...(input.run && !tainted
+          ? {
+              tool_name: input.run.tool.name,
+              tool_manifest: input.run.tool,
+              tool_code: input.run.code,
+              ...(input.run.telemetry ? { telemetry: input.run.telemetry } : {}),
+            }
+          : {}),
+        ...(input.run && tainted
+          ? { artifacts_withheld: "held-secret-present" as const }
+          : {}),
+        ...(input.commitSha ? { commit_sha: input.commitSha } : {}),
+        ...(input.platformRelease
+          ? { platform_release: input.platformRelease }
+          : {}),
+        ...(input.failure !== undefined
+          ? {
+              // Failure text: literal scrub of held grants + TOKENISH backstop.
+              error_message: redactSecrets(
+                input.failure instanceof Error
+                  ? input.failure.message
+                  : String(input.failure),
+                held,
+              ),
+            }
+          : {}),
+        captured_at: new Date().toISOString(),
+      };
+      // FAIL-CLOSED BACKSTOP over the assembled event, covering every field
+      // including ones added later (platform_release, telemetry, anything a
+      // future contract version introduces). If a held credential is still
+      // literally present anywhere on the wire, send nothing.
+      const candidates = held.filter(isRedactableSecret);
+      if (candidates.length > 0) {
+        let values: string[];
+        try {
+          values = stringValues(event);
+        } catch {
+          return; // unverifiable payload
+        }
+        if (
+          candidates.some((secret) =>
+            values.some((value) => value.includes(secret)),
+          )
+        ) {
+          return;
+        }
+      }
+      void sink.capture(event).catch(() => {});
+    } catch {
+      // Capture must never fail authoring.
+    }
+  }
 
   private withTenantRepoLease<T>(
     tenantId: string,
@@ -288,6 +464,7 @@ export class AuthorLoop {
     description: string,
     repoDir: string,
     targetToolName?: string,
+    scrubSink?: string[],
   ) {
     // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
     // lease router as conversation turns, while retaining legacy single-grant
@@ -296,6 +473,16 @@ export class AuthorLoop {
       ? await this.ports.oauth.acquireGrant(tenantId)
       : null;
     const grant = lease?.grant ?? await this.ports.oauth.getGrant(tenantId);
+    // Record into the CALLER's invocation-owned scrub array (upstream capture
+    // scrubs these literally; no cross-invocation state).
+    if (scrubSink) {
+      for (const value of [
+        (grant as Record<string, unknown>)["oauthToken"],
+        (grant as Record<string, unknown>)["apiKey"],
+      ]) {
+        if (typeof value === "string" && value.trim().length > 0) scrubSink.push(value);
+      }
+    }
     let run: AgentRunResult | undefined;
     let failure: unknown;
     try {
@@ -338,9 +525,9 @@ export class AuthorLoop {
     }
   }
 
-  private async author(tenantId: string, description: string) {
+  private async author(tenantId: string, description: string, scrubSink?: string[]) {
     const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const run = await this.authorInRepo(tenantId, description, repo.dir);
+    const run = await this.authorInRepo(tenantId, description, repo.dir, undefined, scrubSink);
     return { repo, run };
   }
 
@@ -374,19 +561,39 @@ export class AuthorLoop {
 
   /** Legacy auth-off compatibility: author + register + direct commit. */
   async buildLegacyAuthOff(tenantId: string, description: string): Promise<AuthorResponse> {
-    return this.withTenantRepoLease(tenantId, async () => {
-      const { repo, run } = await this.author(tenantId, description);
-      await this.persistTool(repo, run.tool);
-    // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
-    // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
-    // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
-      return {
-        tool: run.tool,
-        code: run.code,
-        preview: run.preview,
-        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-      };
-    });
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.withTenantRepoLease(tenantId, async () => {
+        const { repo, run } = await this.author(tenantId, description, held);
+        const { commit } = await this.persistTool(repo, run.tool);
+        this.captureUpstream({
+          tenantId,
+          route: "build",
+          description,
+          heldSecrets: held,
+          run,
+          commitSha: commit,
+        });
+      // A1: thread the runner's authoring telemetry (turns/tokens/cost/models) through
+      // to /author, ADDITIVELY. A runner that did not meter (the fake) leaves it undefined,
+      // so the response stays exactly {tool, code, preview} — the frozen shape is preserved.
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
+      });
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "build",
+        description,
+        heldSecrets: held,
+        failure: error,
+      });
+      throw error;
+    }
   }
 
   /** @deprecated Live authenticated customization must use stage() then publish(). */
@@ -402,6 +609,28 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
     request: StageCustomizationRequest,
+  ): Promise<StageCustomizationResponse> {
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.stageInner(tenantId, description, request, held);
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "stage",
+        description,
+        heldSecrets: held,
+        platformRelease: request.platformRelease,
+        failure: error,
+      });
+      throw error;
+    }
+  }
+
+  private async stageInner(
+    tenantId: string,
+    description: string,
+    request: StageCustomizationRequest,
+    held: string[],
   ): Promise<StageCustomizationResponse> {
     return this.withTenantRepoLease(tenantId, async (runFenced) => {
       const { bare, coordination } = this.lifecyclePorts();
@@ -443,7 +672,7 @@ export class AuthorLoop {
           }
         }
         const run = await this.authorInRepo(
-          tenantId, description, change.dir, request.targetToolName,
+          tenantId, description, change.dir, request.targetToolName, held,
         );
         const { stagedCommit, catalogDigest } = await runFenced(() => {
           registerTool(change.dir, run.tool, {
@@ -468,6 +697,15 @@ export class AuthorLoop {
         idempotency_key: request.idempotencyKey,
       });
         await coordination.recordStaged(receipt);
+        this.captureUpstream({
+          tenantId,
+          route: "stage",
+          description,
+          heldSecrets: held,
+          run,
+          commitSha: stagedCommit,
+          platformRelease: request.platformRelease,
+        });
         return {
           tool: run.tool,
           code: run.code,
@@ -522,24 +760,43 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
   ): Promise<AuthorResponse & { run: ResultEnvelope }> {
-    return this.withTenantRepoLease(tenantId, async () => {
-      const { run } = await this.author(tenantId, description);
-      const envelope = await this.ports.broker.runTool({
-        tenantId,
-        tool: run.tool,
-        params: {},
-        dwg: "rooftop_demo",
-        apsLive: false,
+    const held: string[] = []; // this invocation's scrub values, and only its own
+    try {
+      return await this.withTenantRepoLease(tenantId, async () => {
+        const { run } = await this.author(tenantId, description, held);
+        const envelope = await this.ports.broker.runTool({
+          tenantId,
+          tool: run.tool,
+          params: {},
+          dwg: "rooftop_demo",
+          apsLive: false,
+        });
+        this.captureUpstream({
+          tenantId,
+          route: "one-off",
+          description,
+          heldSecrets: held,
+          run,
+        });
+        // A1: same additive, absent-safe telemetry threading as build().
+        return {
+          tool: run.tool,
+          code: run.code,
+          preview: run.preview,
+          run: envelope,
+          ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+        };
       });
-      // A1: same additive, absent-safe telemetry threading as build().
-      return {
-        tool: run.tool,
-        code: run.code,
-        preview: run.preview,
-        run: envelope,
-        ...(run.telemetry ? { telemetry: run.telemetry } : {}),
-      };
-    });
+    } catch (error) {
+      this.captureUpstream({
+        tenantId,
+        route: "one-off",
+        description,
+        heldSecrets: held,
+        failure: error,
+      });
+      throw error;
+    }
   }
 
   /**

@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
+import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 
@@ -290,6 +291,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       ),
     );
     const server = sdk.createSdkMcpServer({ name: "spine", version: "1.0.0", tools });
+    const composition = composeRunnerCapabilities({
+      profile: "spine",
+      private_mcp_servers: { spine: server },
+    });
 
     // WALL-CLOCK timeout: no single turn may hold its session lock forever.
     const abort = new AbortController();
@@ -340,7 +345,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           abortController: abort,
           includePartialMessages: true,
           tools: [], // no built-in tools: the spine MCP server is the whole surface
-          mcpServers: { spine: server },
+          mcpServers: composition.mcpServers,
           ...(skillBundle ? { plugins: [skillBundle.plugin], skills: skillBundle.skills } : {}),
           // SETTINGS, not top-level options — the distinction is the whole
           // fix. Both flags below are Settings fields (sdk.d.ts) delivered
