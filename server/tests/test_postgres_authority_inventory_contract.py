@@ -218,14 +218,31 @@ def _inventory_errors(inventory: dict) -> list[str]:
                 # just as well. The claim "no override, so this is the shipped
                 # default" is only coherent when the value IS that default, and
                 # that is checkable against the selector the authority declares.
-                elif selection["value"] not in {
-                    declared.get("repository_default")
-                    for declared in authority["selectors"]
-                }:
+                #
+                # Exactly ONE selector, deliberately. A draft of this rule
+                # accepted the default of ANY selector the authority owns, which
+                # customization_r5 defeats: it owns LEAF_CUSTOMIZATION_R5_MODE
+                # (default "off") and LEAF_CUSTOMIZATION_STORE (default
+                # "sqlite"), so a record claiming the R5 mode shipped as
+                # "sqlite" passed. The deeper problem is that `value` is a
+                # single field with no way to name which selector it describes,
+                # so for a multi-selector authority it has no defined referent
+                # at all. Rather than guess, refuse the status there: such an
+                # authority needs a per-selector selection shape first.
+                elif len(authority["selectors"]) != 1:
+                    errors.append(
+                        f"{authority_id}: measured_no_override {environment} "
+                        "selection is ambiguous because the authority owns "
+                        f"{len(authority['selectors'])} selectors and the "
+                        "selection cannot name which one it describes"
+                    )
+                elif selection["value"] != authority["selectors"][0].get(
+                        "repository_default"):
                     errors.append(
                         f"{authority_id}: measured_no_override {environment} "
                         f"value {selection['value']!r} is not the "
-                        "repository_default of any of its selectors"
+                        "repository_default of its selector "
+                        f"{authority['selectors'][0].get('name')!r}"
                     )
 
     if selectors != EXPECTED_SELECTOR_DEFAULTS:
@@ -388,8 +405,23 @@ def test_shipped_defaults_cannot_pose_as_production_selections() -> None:
         "LEAF_SESSIONS_STORE is not absent; it is explicitly set to postgres."
     )
     assert any(
-        "is not the repository_default of any of its selectors" in error
+        "is not the repository_default of its selector" in error
         for error in _inventory_errors(contradictory)
+    )
+
+    # The regression that retired the FIRST structural draft: it accepted the
+    # default of any selector the authority owned. customization_r5 owns
+    # LEAF_CUSTOMIZATION_R5_MODE (default "off") and LEAF_CUSTOMIZATION_STORE
+    # (default "sqlite"), so a record claiming the R5 mode shipped as "sqlite"
+    # borrowed the sibling's default and passed with zero errors.
+    borrowed = deepcopy(inventory)
+    selection = _production_of(borrowed, "customization_r5")
+    selection["status"] = "measured_no_override"
+    selection["value"] = "sqlite"
+    selection["evidence"] = "Forged: borrows the sibling selector's default."
+    assert any(
+        "is ambiguous because the authority owns 2 selectors" in error
+        for error in _inventory_errors(borrowed)
     )
 
 
