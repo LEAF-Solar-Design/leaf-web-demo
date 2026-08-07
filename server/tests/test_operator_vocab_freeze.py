@@ -58,7 +58,16 @@ def test_roles_file_gained_no_operator_role():
         "store, never a role claim (contract/OPERATOR.md section 1)")
 
 
-# --- 2. Tenant agent-policy catalog unchanged ------------------------------
+# --- 2. Tenant agent-policy catalog unchanged (whole-content pin) ----------
+
+# SHA-256 over the canonical JSON (sort_keys, compact separators) of the
+# ENTIRE parsed agent_policy.json — every action's routes, rung, schema,
+# capability, timeout, and every top-level knob. Whitespace-insensitive,
+# content-exact: any semantic drift (e.g. a production route appearing in a
+# dispatch list) changes this digest. A legitimate tenant-catalog change
+# re-pins this constant in the same PR, per the promotion ritual.
+FROZEN_TENANT_POLICY_SHA256 = (
+    "7c35884f5cfd1b654b5e8b418deec2e59e5a86f751fa23c238b9dac628a88f1d")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
@@ -75,13 +84,37 @@ FROZEN_TENANT_ACTIONS = {
 }
 
 
-def test_tenant_agent_policy_catalog_unchanged():
-    policy = json.loads(
+def _load_tenant_policy():
+    return json.loads(
         (SERVER_DIR / "agent_policy.json").read_text(encoding="utf-8"))
-    live = {name: entry["policy"] for name, entry in policy["actions"].items()}
+
+
+def test_tenant_agent_policy_content_identical():
+    import hashlib
+
+    canon = json.dumps(_load_tenant_policy(), sort_keys=True,
+                       separators=(",", ":"))
+    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    assert digest == FROZEN_TENANT_POLICY_SHA256, (
+        "server/agent_policy.json content drifted under the operator "
+        "contract; if the tenant catalog change is intentional, re-pin this "
+        "digest in the same PR (promotion ritual)")
+
+
+def test_tenant_agent_policy_catalog_unchanged():
+    live = {name: entry["policy"]
+            for name, entry in _load_tenant_policy()["actions"].items()}
     assert live == FROZEN_TENANT_ACTIONS
     assert not any(name.startswith("operator.") for name in live), (
         "operator actions live in server/operator_policy.json, never here")
+
+
+def test_tenant_agent_policy_names_no_production_route():
+    for name, entry in _load_tenant_policy()["actions"].items():
+        for route in entry.get("dispatch", {}).get("routes", []):
+            lowered = route.lower()
+            assert "production" not in lowered and "deploy-platform" not in lowered, (
+                f"action {name} names a production-shaped route: {route}")
 
 
 # --- 3. Operator namespace absent: forged elevation resolves nothing -------
@@ -104,6 +137,21 @@ OPERATOR_PROBES = (
     ("GET", "/api/operator/audit"),
     ("POST", "/api/operator/approvals/any-id"),
 )
+
+
+def test_no_registered_route_under_operator_namespace():
+    """Exhaustive, not sampled: walk every registered route on the app and
+    prove none lives under /api/operator. Covers /stream, /transcript, and
+    any surface a later change might mount without amending this gate."""
+    from app import app
+
+    operator_routes = [
+        getattr(r, "path", "") for r in app.routes
+        if getattr(r, "path", "").startswith("/api/operator")]
+    assert operator_routes == [], (
+        f"routes registered under /api/operator on a pre-operator app "
+        f"revision: {operator_routes}; Lane A must amend this gate in the "
+        "same PR that mounts the operator router")
 
 
 def test_operator_namespace_absent_denies_with_404():
