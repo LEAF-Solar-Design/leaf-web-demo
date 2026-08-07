@@ -697,14 +697,21 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 46,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
-        # Floor 7, re-measured when the production selections were recorded. It
-        # was 6; the added case is the one that stops an inferred repository
+        # Floor 8, re-measured when the session_annex dependency was added. It
+        # was 7; the earlier added case is the one that stops an inferred default
         # default from being re-labelled as an observed setting, so letting it
         # vanish silently would retire the guard and still report green. Moves
         # in lockstep with the assertion in scripts/test_gate_runner.py.
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 7),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 8),
+        # The annex authority the sessions flip strands without. Fully
+        # offline: the PostgreSQL halves run against a fake in place of
+        # platform.db, so nothing here skips on a no-DB host and the floor
+        # is the exact collected count.
+        Suite("server-session-annex-store",
+              "server tests/test_session_annex_store.py", "pytest",
+              SERVER, _py_pytest("tests/test_session_annex_store.py"), 26),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),

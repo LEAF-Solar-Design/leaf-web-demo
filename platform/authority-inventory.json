@@ -29,7 +29,8 @@
       "0025",
       "0026",
       "0027",
-      "0028"
+      "0028",
+      "0029"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -50,6 +51,17 @@
         "value": "postgres"
       },
       "reason": "The PostgreSQL upload lifecycle creates and advances drawing manifests and versions, so upload and drawing metadata must share one PostgreSQL authority."
+    },
+    {
+      "when": {
+        "name": "LEAF_SESSIONS_STORE",
+        "value": "postgres"
+      },
+      "requires": {
+        "name": "LEAF_SESSION_ANNEX_STORE",
+        "value": "postgres"
+      },
+      "reason": "A PostgreSQL sessions authority makes a session survive task replacement while every annex mode except postgres still reads session_checkpoints and session_policies from the SQLite file at SESSIONS_DB, which staging leaves task-local. The session then outlives its own restore points: checkpoint reads 404 and a custom policy silently reverts to confirm_all. Enforced at startup by server/platform_link.validate_session_annex_authority."
     }
   ],
   "authorities": [
@@ -293,6 +305,62 @@
           "value": "legacy",
           "status": "measured_no_override",
           "evidence": "MEASURED, and it is the shipped image default rather than a production selection. Read-only on 2026-08-07, account 807034087062, us-east-1. TWO LAYERS WERE READ, because a task definition alone cannot establish this: a Docker image ENV REMAINS in the process environment when ECS supplies no override, so an absent task-definition variable does NOT mean the code fallback is what runs. (1) DEPLOYMENT LAYER: task definition leaf-automation-production-platform:98, which service leaf-platform runs at desired 1 / running 1, does NOT set LEAF_SESSIONS_STORE in any of its four container definitions, in environment, in secrets, or in environmentFiles (null on every container), so no deployment-layer override exists. (2) IMAGE LAYER: that revision pins the app container to leaf-platform-app@sha256:1504240dffd3bc50321100ad21d81f5d968df7d4ae5ee0aaa6c0e8c307e6fce6, whose linux/amd64 OCI config blob sha256:a41d004471f6 bakes LEAF_SESSIONS_STORE=legacy, matching the ENV in deploy/Dockerfile.app. The app therefore reads that explicit 'legacy' and does NOT fall through to the identically named default in session_store._store_mode(). Both paths yield legacy, so the effective mode is legacy either way. WHAT THIS IS NOT: nobody selected legacy for production. It is the value the image ships, left unoverridden, which is why the status is measured_no_override and not measured. The same revision DOES override LEAF_AGENT_STORE, LEAF_DRAWING_STORE, LEAF_UPLOAD_STORE and LEAF_BROKER_STORE to postgres over the same image defaults, so production deliberately cut those over and did not cut sessions over. REVISION 98 AND THIS IMAGE DIGEST WILL AGE; re-read both before relying on this. Consequence, and it is the opposite posture from staging: under this revision production performs NO PostgreSQL writes for sessions, so nothing is being mirrored forward as it is written. The app container sets SESSIONS_DB=/data/state/sessions.db on durable EFS, so the full legacy history accumulates there and survives task replacement, so the legacy SOURCE holds the ENTIRE production session history rather than a post-deploy remainder, which is the scope a cutover has to read from, whatever the target already contains, and the staging DISCARD decision recorded in backfill.note must not be reused here. WHAT THIS DOES NOT ESTABLISH, and it bounds every consequence above: this is a measurement of WRITE ROUTING under revision 98, not of table CONTENTS. Nobody queried either store. PostgreSQL may already hold production rows from an earlier revision, a canary, or a manual backfill, and this record is not evidence that the target is empty. Verify the target before any backfill or parity run rather than assuming a clean slate."
+        }
+      }
+    },
+    {
+      "id": "session_annex",
+      "coverage": [
+        "session_annex"
+      ],
+      "selectors": [
+        {
+          "name": "LEAF_SESSION_ANNEX_STORE",
+          "allowed_modes": [
+            "legacy",
+            "dual_write",
+            "dual_write_shadow",
+            "shadow",
+            "postgres"
+          ],
+          "repository_default": "legacy"
+        }
+      ],
+      "postgres_tables": [
+        "app_session_checkpoints",
+        "app_session_policies"
+      ],
+      "legacy_source": [
+        "SESSIONS_DB SQLite session_checkpoints and session_policies tables"
+      ],
+      "backfill": {
+        "command": null,
+        "status": "not_implemented",
+        "note": "NO BACKFILL COMMAND EXISTS FOR THESE TWO TABLES. scripts/reconcile_sessions_authority.py covers exactly three table pairs (sessions/app_sessions, session_events/app_session_events, approvals/app_approvals) and neither annex table is among them, so it must not be cited as this authority's backfill. Selecting any mode other than legacy therefore starts from an EMPTY PostgreSQL target: dual_write mirrors rows written from that moment forward and copies nothing that already exists. WHAT THAT COSTS DEPENDS ENTIRELY ON THE ENVIRONMENT, and the two are opposite cases. On staging SESSIONS_DB is unset, so the legacy source is the task-local server/sessions.db that dies with every task; there is no accumulated history to lose and no source a backfill could read, which is why staging can select postgres directly and skip this phase. Production sets SESSIONS_DB=/data/state/sessions.db on durable EFS, so its checkpoints and policies HAVE accumulated across task replacements, and cutting production over without first writing a backfill would silently drop every existing restore point and every non-default policy. Write the backfill before production, not before staging. The two tables are independent inserts with no ordering constraint between them and no foreign key to app_sessions (see 0029_session_annex.sql), so a backfill is a simpler shape than the sessions one: no parent-first ordering, no sequence invariant. The cap in checkpoints.CHECKPOINT_CAP is the one thing it must respect, since a source session already holding 50 rows must not become 51 in the target."
+      },
+      "parity": {
+        "command": null,
+        "status": "not_implemented",
+        "note": "No parity command exists for these tables either. The in-process substitute is the shadow read: dual_write_shadow and shadow compare every read against PostgreSQL and raise on disagreement (server/session_annex.shadow_equal), which covers rows as they are READ rather than the full table, and only for sessions actually in use. That is weaker than a full-table sweep in two specific ways worth stating: it never examines a row nobody reads, and it does not compare WRITES, because a shadow-mode write deliberately does not reach PostgreSQL and comparing straight after one would test a target the mode chose not to update. Do not record a clean shadow period as a parity certificate."
+      },
+      "cutover_modes": [
+        "legacy",
+        "dual_write",
+        "dual_write_shadow",
+        "shadow",
+        "postgres"
+      ],
+      "rollback_mode": "ROLLBACK IS UNDESIGNED AND MUST NOT BE ASSUMED. Returning through shadow or dual_write to legacy makes SQLite the read authority again, and there is no PostgreSQL-to-SQLite writer anywhere in this repository -- scripts/reconcile_sessions_authority.py is SQLite to PostgreSQL only, and it does not cover these tables in either direction. So every checkpoint and policy written while postgres was the authority becomes unreadable the moment the selector leaves postgres, and stays unreadable. ON STAGING that is inside the accepted discard class already recorded for app_sessions_and_approvals: the legacy target is the task-local server/sessions.db, so rollback loses the annex rows whatever anyone does, and the degradation is the safe direction (checkpoint lists read empty, get_policy falls back to DEFAULT_POLICY='confirm_all'). Roll back on staging knowing that, not expecting recovery. ON PRODUCTION it is a blocker, not a caveat, and it is the reason production must not select postgres before a reverse writer exists. Production's SQLite source is durable on EFS, so a rollback there would silently revert every user's restore points to whatever the file held at cutover time while newer PostgreSQL rows survive, unread, in a table nothing consults. Note also that the ordering rule recorded for LEAF_SESSIONS_STORE -- any rollback off postgres on staging must set SESSIONS_DB to durable storage in the same transaction -- applies here identically and for the same reason.",
+      "current_selection": {
+        "staging": {
+          "value": null,
+          "status": "unknown",
+          "evidence": "NOT DEPLOYED ANYWHERE YET. LEAF_SESSION_ANNEX_STORE is introduced by the change that adds this record, so no running task definition sets it and no deployed image bakes it. Establishing a value needs BOTH layers, as the app_sessions_and_approvals record sets out: a task-definition read alone cannot settle it, because a Docker image ENV remains in the process environment when ECS supplies no override. deploy/Dockerfile.app in this change bakes LEAF_SESSION_ANNEX_STORE=legacy, so once an image built from it is deployed with no task-definition override, the honest status becomes measured_no_override with value legacy -- record it then, against the actual revision and digest, not now from this file's intent. CONSEQUENCE FOR THE STAGING FLIP, and it is deliberate: docs/POSTGRES-CUTOVER.md step 3 requires every unknown item resolved before a selector changes, so this entry blocks a LEAF_SESSIONS_STORE flip until someone decides the annex selector in the same transaction. That is the whole point of the dependency in selector_dependencies; a flip that leaves this unknown is exactly the combination that strands checkpoints."
+        },
+        "production": {
+          "value": null,
+          "status": "unknown",
+          "evidence": "NOT DEPLOYED ANYWHERE YET; same reasoning as the staging selection above, and it must be established the same way, against a real task-definition revision and the image digest that revision pins. PRODUCTION IS THE HARDER CASE and its ordering is the reverse of staging's. Production sets SESSIONS_DB=/data/state/ sessions.db on durable EFS, so session_checkpoints and session_policies there hold real accumulated history that survives task replacement. Both the backfill and the reverse writer named in this record's backfill and rollback_mode notes are prerequisites of selecting anything other than legacy in production. Neither exists. Do not reuse the staging discard reasoning here."
         }
       }
     },

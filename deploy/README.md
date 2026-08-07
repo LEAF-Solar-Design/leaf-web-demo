@@ -141,6 +141,7 @@ authority keeps its legacy default:
 | Process | Selector | Default | PostgreSQL connection |
 |---|---|---|---|
 | app sessions and approvals | `LEAF_SESSIONS_STORE` | `legacy` | `DATABASE_URL` |
+| app session checkpoints and policies | `LEAF_SESSION_ANNEX_STORE` | `legacy` | `DATABASE_URL` |
 | app and broker async jobs | `LEAF_JOBS_STORE` | `legacy` | their service-specific `DATABASE_URL` |
 | app agent gate state | `LEAF_AGENT_STORE` | `legacy` | `DATABASE_URL` |
 | app guest upload caps | `LEAF_GUEST_CAP_STORE` | `memory` | `DATABASE_URL` |
@@ -222,6 +223,7 @@ docker compose -f docker-compose.yml -f docker-compose.canonical.yml up -d
 | `SESSIONS_DB` | app | `/data/state/sessions.db` | conversational sessions/events/approvals (single-writer SQLite) |
 | `DATABASE_URL` | app | `${DATABASE_URL:-}` (empty) | **opt-in** platform Project/Job persistence; empty ⇒ platform DB endpoints stay dark, demo-safe |
 | `LEAF_SESSIONS_STORE` | app | `legacy` | app session authority selector; PostgreSQL remains opt-in |
+| `LEAF_SESSION_ANNEX_STORE` | app | `legacy` | authority selector for `session_checkpoints` and `session_policies`, which 0012 left on SQLite. Separate from `LEAF_SESSIONS_STORE` so a sessions cutover does not retroactively require this schema. **`LEAF_SESSIONS_STORE=postgres` requires this to be `postgres` too** and the app refuses to start otherwise: every other annex mode still READS the SQLite file at `SESSIONS_DB`, so the session would outlive its own checkpoints |
 | `LEAF_JOBS_STORE` | app | `legacy` | async job and delivery lease authority selector; PostgreSQL remains opt-in |
 | `LEAF_AGENT_STORE` | app | `legacy` | agent gate authority selector; PostgreSQL remains opt-in |
 | `LEAF_GUEST_CAP_STORE` | app | `memory` | guest daily-cap authority selector; PostgreSQL remains opt-in |

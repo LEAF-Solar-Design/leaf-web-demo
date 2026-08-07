@@ -3,8 +3,12 @@ auto_approve_reads; paid/write always confirms").
 
 Its own table, lock and connection — the checkpoints.py precedent — so
 session_store's dual-mode (SQLite/PostgreSQL) shadow parity is untouched: the
-frozen session projections never grow a field the PG mirror lacks. PostgreSQL
-persistence for policies is a named follow-up alongside the store migration.
+frozen session projections never grow a field the PG mirror lacks.
+
+Since 0029 the table also has a PostgreSQL home, selected by
+``LEAF_SESSION_ANNEX_STORE`` rather than by ``LEAF_SESSIONS_STORE``. The reasons
+for a separate selector, and the mode vocabulary, are in ``session_annex``.
+Under the default ``legacy`` this module behaves exactly as it did before.
 
 Two values, and the DEFAULT is the whole safety story:
 
@@ -35,6 +39,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+import session_annex
 
 SERVER_DIR = Path(__file__).resolve().parent
 # Same resolution rule as session_store.DB_PATH so tests' SESSIONS_DB redirect
@@ -70,11 +76,8 @@ def is_valid_policy(value: object) -> bool:
     return isinstance(value, str) and value in POLICIES
 
 
-def set_policy(session_id: str, tenant_id: str, policy: str) -> None:
-    """Upsert. Caller validates `policy` (the router 400s invalid values);
-    this refuses anyway rather than storing garbage."""
-    if not is_valid_policy(policy):
-        raise ValueError(f"invalid policy {policy!r}")
+def _legacy_set_policy(session_id: str, tenant_id: str, policy: str,
+                       updated_at: float) -> None:
     with _lock:
         conn = _db()
         conn.execute(
@@ -82,14 +85,12 @@ def set_policy(session_id: str, tenant_id: str, policy: str) -> None:
             " VALUES (?,?,?,?) ON CONFLICT(session_id)"
             " DO UPDATE SET policy = excluded.policy, updated_at = excluded.updated_at"
             " WHERE session_policies.tenant_id = excluded.tenant_id",
-            (session_id, str(tenant_id), policy, time.time()),
+            (session_id, str(tenant_id), policy, updated_at),
         )
         conn.commit()
 
 
-def get_policy(session_id: str, tenant_id: str) -> str:
-    """Tenant-scoped at the STORAGE boundary (the checkpoint-chip lesson):
-    a mismatched tenant reads the DEFAULT, exactly like an absent row."""
+def _legacy_get_policy(session_id: str, tenant_id: str) -> Optional[str]:
     with _lock:
         conn = _db()
         conn.row_factory = sqlite3.Row
@@ -98,5 +99,79 @@ def get_policy(session_id: str, tenant_id: str) -> str:
             " WHERE session_id = ? AND tenant_id = ?",
             (session_id, str(tenant_id)),
         ).fetchone()
-    value = row["policy"] if row else None
+    return row["policy"] if row else None
+
+
+def _pg_set_policy(session_id: str, tenant_id: str, policy: str,
+                   updated_at: float) -> None:
+    """Same tenant-guarded upsert as the legacy path, including its no-op.
+
+    The trailing WHERE is not decoration. A session_id already held by another
+    tenant must leave the stored policy alone rather than be overwritten, and
+    dropping the clause here would make the PostgreSQL authority strictly more
+    permissive than the SQLite one it replaces.
+    """
+    db = session_annex.platform_db()
+    with db.transaction() as conn:
+        conn.execute(
+            f"INSERT INTO {session_annex.PG_POLICIES_TABLE}"
+            " (session_id, tenant_id, policy, updated_at) VALUES (%s,%s,%s,%s)"
+            " ON CONFLICT (session_id) DO UPDATE SET policy = excluded.policy,"
+            " updated_at = excluded.updated_at"
+            f" WHERE {session_annex.PG_POLICIES_TABLE}.tenant_id = excluded.tenant_id",
+            (session_id, str(tenant_id), policy, updated_at),
+        )
+
+
+def _pg_get_policy(session_id: str, tenant_id: str) -> Optional[str]:
+    db = session_annex.platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            f"SELECT policy FROM {session_annex.PG_POLICIES_TABLE}"
+            " WHERE session_id = %s AND tenant_id = %s",
+            (session_id, str(tenant_id)),
+        )
+        row = cur.fetchone()
+    return row["policy"] if row else None
+
+
+def set_policy(session_id: str, tenant_id: str, policy: str) -> None:
+    """Upsert. Caller validates `policy` (the router 400s invalid values);
+    this refuses anyway rather than storing garbage."""
+    if not is_valid_policy(policy):
+        raise ValueError(f"invalid policy {policy!r}")
+    updated_at = time.time()
+    mode = session_annex.store_mode()
+    if mode == "postgres":
+        _pg_set_policy(session_id, tenant_id, policy, updated_at)
+        return
+    if mode in session_annex.DUAL_WRITE_MODES:
+        # Pre-flight only; the two stores share no atomic transaction, so a
+        # committed legacy row can still outrun its mirror.
+        session_annex.ensure_started()
+    # One timestamp for both stores. Calling time.time() per backend would make
+    # every dual_write_shadow read compare two rows that differ on updated_at.
+    _legacy_set_policy(session_id, tenant_id, policy, updated_at)
+    if mode in session_annex.DUAL_WRITE_MODES:
+        _pg_set_policy(session_id, tenant_id, policy, updated_at)
+    # `shadow` deliberately does not compare here — see checkpoints.create_checkpoint.
+
+
+def get_policy(session_id: str, tenant_id: str) -> str:
+    """Tenant-scoped at the STORAGE boundary (the checkpoint-chip lesson):
+    a mismatched tenant reads the DEFAULT, exactly like an absent row.
+
+    The validity filter is applied to whichever backend answered, so a row that
+    somehow holds an unknown value still degrades to ``confirm_all``. That is
+    fail-closed in both stores, and in PostgreSQL the CHECK constraint in
+    0029 makes such a row unwritable in the first place.
+    """
+    mode = session_annex.store_mode()
+    if mode == "postgres":
+        value = _pg_get_policy(session_id, tenant_id)
+        return value if is_valid_policy(value) else DEFAULT_POLICY
+    value = _legacy_get_policy(session_id, tenant_id)
+    if mode in session_annex.SHADOW_READ_MODES:
+        session_annex.shadow_equal(
+            "session policy", value, _pg_get_policy(session_id, tenant_id))
     return value if is_valid_policy(value) else DEFAULT_POLICY

@@ -389,6 +389,101 @@ because any task replacement takes that file. Expect checkpoint restores to 404
 and custom policies to fall back to `DEFAULT_POLICY = "confirm_all"`, which is
 the safe direction and is already inside the DISCARD class above. What IS new
 after the flip: a session outlives its own checkpoints for the first time, so
-this stops being invisible and starts looking like a regression to a user. Give
-those two tables a PostgreSQL home, or classify them as disposable staging state
-in writing.
+this stops being invisible and starts looking like a regression to a user.
+
+That choice is now closed. See the next section.
+
+## The session annex tables: DECIDED, migrate (2026-08-07)
+
+**Decision: give them a PostgreSQL home. They are NOT classified as disposable.**
+`platform/migrations/0029_session_annex.sql` creates `app_session_checkpoints`
+and `app_session_policies`, and both modules now dispatch on a store mode
+instead of resolving `SESSIONS_DB` and stopping there.
+
+**Why not "disposable".** The disposable reading is TRUE on staging and FALSE on
+production, and nothing in the code can tell the two apart. Staging leaves
+`SESSIONS_DB` unset, so the file is task-local and the rows genuinely are
+throwaway. Production sets `SESSIONS_DB=/data/state/sessions.db` on durable EFS,
+so the same two tables there hold restore points and non-default policies that
+have accumulated across task replacements. `checkpoints.py` and
+`session_policy.py` have no notion of environment, so a written classification
+would have been a claim no code could honour, and the first person to read it in
+a production context would read it as licence to discard real user state. A
+label that is only true in one environment is worse than no label.
+
+**Selector: its own, `LEAF_SESSION_ANNEX_STORE`, not `LEAF_SESSIONS_STORE`.**
+Both were arguable, and reusing the sessions selector has a real virtue: it
+makes the harmful combination unrepresentable in one stroke. Three things
+decided it the other way.
+
+1. *Reuse would move the readiness verdict for a config that is already
+   deployed.* `platform/db.py._AUTHORITY_SELECTORS` keys required schema by
+   selector VALUE, and the sessions entry already lists `dual_write`,
+   `dual_write_shadow`, `shadow` and `postgres`. Sharing the selector would make
+   the two annex tables required the moment sessions reaches `dual_write` —
+   which staging passed long ago — so merging this change would retroactively
+   fail `assert_schema_current()` on the running staging task until 0029 is
+   applied. A code change must not decide that a live deployment became
+   non-current.
+2. *Rollback would couple in the wrong direction.* The sessions rollback path
+   recorded above is `postgres` → `shadow` → `legacy`, and every mode but
+   `postgres` reads SQLite. On one selector, rolling sessions back would also
+   drag the annex back to a SQLite file that, on staging, holds nothing.
+3. *One selector per authority is the repository's only pattern.* Sixteen
+   authorities, eighteen selectors, and the inventory contract already treats a
+   twice-owned selector as an error.
+
+**The coupling is declared and ENFORCED, not left to the selector's shape.**
+`platform/authority-inventory.json` gains a `selector_dependencies` entry —
+`LEAF_SESSIONS_STORE=postgres` requires `LEAF_SESSION_ANNEX_STORE=postgres` —
+using the same mechanism `LEAF_UPLOAD_STORE` → `LEAF_DRAWING_STORE` already
+uses. `server/platform_link.validate_session_annex_authority` refuses to start an
+app in that combination, so this is a startup failure rather than a document.
+Note the requirement is `postgres` EXACTLY: under `dual_write` and both shadow
+modes the annex still READS SQLite, so those modes do not fix the ephemerality.
+
+**What this changes about step 5.** The staging flip must now set
+`LEAF_SESSION_ANNEX_STORE=postgres` in the SAME task-definition change that sets
+`LEAF_SESSIONS_STORE=postgres`. An app that gets one without the other does not
+start. Apply 0029 before either. Step 3's "resolve every `unknown`" requirement
+also now covers the new `session_annex` authority, whose selection is recorded
+`unknown` in both environments because the selector is introduced by this change
+and no deployed image bakes it yet; record `measured_no_override` against a real
+revision and image digest once one does, not from this document's intent.
+
+**What is deliberately NOT built, and what it blocks.**
+
+- *No backfill.* `scripts/reconcile_sessions_authority.py` covers three table
+  pairs and neither annex table is among them. Selecting a non-`legacy` mode
+  starts from an empty target. Staging can skip this because its source is
+  task-local and holds nothing worth moving; **production cannot**, and cutting
+  production over without writing one would silently drop every existing restore
+  point and every non-default policy.
+- *No reverse writer, so rollback is undesigned rather than merely awkward.*
+  There is no PostgreSQL-to-SQLite direction anywhere in this repository, in
+  either the sessions lane or this one. Once `postgres` is the annex authority,
+  leaving it makes every row written under it unreadable, permanently. On
+  staging that sits inside the discard class already accepted above and degrades
+  safely (empty checkpoint lists, `DEFAULT_POLICY = "confirm_all"`). On
+  production it is a blocker: the rollback would revert users to whatever the
+  EFS file held at cutover while newer rows survive unread in a table nothing
+  consults.
+
+So the supported end state today is staging on `postgres` and **production on
+`legacy`**. Production needs the backfill and the reverse writer first, and the
+inventory record says so in both the `backfill` and `rollback_mode` fields
+rather than leaving a future reader to infer it.
+
+**No foreign key to `app_sessions`, on purpose.** `app_session_events` has one;
+these do not. With independent selectors, `annex=postgres` while
+`sessions=legacy` is a representable configuration, and under an FK every
+checkpoint write in it would fail at INSERT time as a 500. The declared
+dependency covers the harmful direction at startup instead, and an orphaned
+annex row reads as an empty checkpoint list and a default policy — both
+harmless.
+
+**Unverified.** Nothing here was run against a live PostgreSQL. The tests cover
+dispatch, the emitted SQL, and the enforcement, against a fake in place of
+`platform.db`; 0029 itself has been applied nowhere. Treat the PostgreSQL paths
+as reviewed code, not as exercised code, until a real apply and a real request
+say otherwise.
