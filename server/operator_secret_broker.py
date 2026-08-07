@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -29,6 +30,11 @@ from operator_principals import _db
 
 _NON_PRODUCTION = {"staging", "development"}
 _ALLOWED_META = {"scope", "environment", "kind", "ttl_s"}
+# scope / kind are echoed into audits (and were once echoed to callers), so
+# they must be bounded IDENTIFIERS, never free text. This makes it structurally
+# impossible to smuggle a credential value (mixed case, high entropy, length,
+# or special characters) into a metadata field the broker surfaces.
+_IDENT_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$")
 
 # Deployment-registered minter: (handle_meta) -> short-lived credential string.
 # Left None so the broker is dark until a real minter is registered.
@@ -78,6 +84,15 @@ def _load_registry() -> Dict[str, Dict[str, Any]]:
                 raise SecretBrokerError(
                     f"secrets registry: {handle}.{key} must be a non-empty "
                     "string (no nested objects, which could smuggle a value)")
+        # scope / kind are surfaced in audits, so they must be bounded
+        # identifiers. A credential-shaped string (uppercase, entropy, length,
+        # special characters) is rejected at load, not echoed downstream.
+        for key in ("scope", "kind"):
+            if not _IDENT_RE.match(meta[key]):
+                raise SecretBrokerError(
+                    f"secrets registry: {handle}.{key} must match "
+                    f"[a-z0-9_.:-]{{1,64}} so a credential value cannot be "
+                    "smuggled into echoed metadata")
         if (not isinstance(meta["ttl_s"], int)
                 or isinstance(meta["ttl_s"], bool)
                 or not 1 <= meta["ttl_s"] <= 86400):
@@ -172,7 +187,7 @@ def with_injected(handle: str, environment: str,
     minter_failed = False
     try:
         credential = _MINTER(dict(meta, handle=handle))
-    except Exception:  # noqa: BLE001
+    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
         minter_failed = True
     if minter_failed:
         _audit_inject(subject, handle, scope, "deny", "minter_failed")
@@ -197,5 +212,8 @@ def with_injected(handle: str, environment: str,
         raise SecretBrokerError("adapter_failed")
 
     _audit_inject(subject, handle, scope, "inject", "credential_injected")
-    # Fixed receipt: no adapter-derived data crosses back to the caller.
-    return {"handle": handle, "scope": scope, "injected": True}
+    # Fixed receipt: only the caller's own `handle` (a known registry key) and
+    # a boolean. No adapter output, and no registry-controlled string like
+    # `scope`, crosses back to the caller. The caller can describe(handle) for
+    # metadata; the receipt only confirms injection happened.
+    return {"handle": handle, "injected": True}

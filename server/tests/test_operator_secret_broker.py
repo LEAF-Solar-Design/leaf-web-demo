@@ -127,18 +127,16 @@ def test_inject_passes_credential_to_one_call_and_returns_fixed_receipt():
     cred = "tok-github_operator_pr-abc"
     assert seen["cred"] == cred  # the adapter received the real credential
     assert seen["calls"] == 1    # exactly one call
-    # The broker returns a FIXED receipt with no adapter-derived data.
-    assert receipt == {"handle": "github_operator_pr",
-                       "scope": "github_pr_open_operator_branch",
-                       "injected": True}
+    # The broker returns a FIXED receipt: only the caller's own handle and a
+    # boolean. No adapter output and no registry-controlled string (scope).
+    assert receipt == {"handle": "github_operator_pr", "injected": True}
 
 
 def test_adapter_return_value_is_discarded_so_it_cannot_leak():
     # The credential cannot escape through the return value no matter what the
     # adapter returns: the broker discards the adapter's return entirely.
     broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
-    fixed = {"handle": "github_operator_pr",
-             "scope": "github_pr_open_operator_branch", "injected": True}
+    fixed = {"handle": "github_operator_pr", "injected": True}
     hostile_returns = (
         lambda c: c,                       # echo the whole credential
         lambda c: list(c),                 # split it character-by-character
@@ -209,6 +207,43 @@ def test_minter_failure_is_a_denial():
     with pytest.raises(broker.SecretBrokerError) as e:
         broker.with_injected("github_operator_pr", "staging", lambda c: c)
     assert e.value.reason == "minter_failed"
+
+
+def test_minter_base_exception_carrying_the_credential_is_masked():
+    # A minter that mints a credential and then raises a non-Exception
+    # BaseException carrying it must NOT leak: the minter catch is
+    # `except BaseException`, and the fixed error is raised outside the except.
+    class MinterBase(BaseException):
+        pass
+
+    def bad_minter(meta):
+        raise MinterBase("CANARY-CREDENTIAL-9f31")
+
+    broker.register_minter(bad_minter)
+    with pytest.raises(broker.SecretBrokerError) as e:
+        broker.with_injected("github_operator_pr", "staging", lambda c: c)
+    assert e.value.reason == "minter_failed"
+    assert "CANARY" not in str(e.value)
+    assert e.value.__cause__ is None
+    assert e.value.__context__ is None
+
+
+def test_registry_rejects_credential_shaped_scope(tmp_path, monkeypatch):
+    # A credential-shaped scope string (uppercase + entropy) must be refused at
+    # load so it can never reach an audit or a receipt.
+    _write_registry(tmp_path, monkeypatch, {"h": {
+        "scope": "CANARY-CREDENTIAL-9f31", "environment": "staging",
+        "kind": "k", "ttl_s": 900}})
+    with pytest.raises(broker.SecretBrokerError):
+        broker.list_handles()
+
+
+def test_registry_rejects_credential_shaped_kind(tmp_path, monkeypatch):
+    _write_registry(tmp_path, monkeypatch, {"h": {
+        "scope": "s", "environment": "staging",
+        "kind": "ghp_AbC123SecretLooking", "ttl_s": 900}})
+    with pytest.raises(broker.SecretBrokerError):
+        broker.list_handles()
 
 
 def test_registry_rejects_nested_value_in_scope(tmp_path, monkeypatch):
