@@ -776,7 +776,9 @@ What actually closes the drift is the flip itself. In `postgres` mode
 `if mode == "postgres"` before touching legacy SQLite or `_shadow_equal`, so the
 `app_sessions` path stops reading `SESSIONS_DB` entirely.
 
-**Two consumers survive, and since 0029 they answer to a SECOND selector.** An
+**Two SERVING-PATH consumers survive, and since 0029 they answer to a SECOND
+selector.** Serving-path is doing real work in that sentence: a third shipped
+reader exists, the operator-run reconciler, and it is described further down. An
 earlier draft of this subsection said `server/checkpoints.py` and
 `server/session_policy.py` consult no store mode and never shadow-compare, so
 that after the flip nothing could compare the two stores any more. **The annex
