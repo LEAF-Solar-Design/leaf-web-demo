@@ -40,6 +40,11 @@ on:
       - 'server/customization_postgres_store.py'
       - 'server/customization_service.py'
       - 'server/customization_store.py'
+      # The async-job authority and its callback route. `server/broker.py` was
+      # already listed, so a change to the callback attempt guard already
+      # triggered this workflow while no step here ran the suite that covers it.
+      - 'server/job_pg_store.py'
+      - 'server/jobs.py'
       - 'server/ops_metrics_read.py'
       - 'server/platform_link.py'
       - 'server/routers/drawings.py'
@@ -56,6 +61,7 @@ on:
       - 'server/tests/test_guest_fail_closed.py'
       - 'server/tests/test_guest_session_auth.py'
       - 'server/tests/test_guest_uploads.py'
+      - 'server/tests/test_jobs_callbacks_postgres.py'
       - 'server/tests/test_ops_metrics.py'
       - 'server/tests/test_ops_metrics_pg.py'
       - 'server/tests/test_postgres_authority_inventory_contract.py'
@@ -194,6 +200,38 @@ jobs:
       - name: Run observability read-model PostgreSQL verifier
         working-directory: server
         run: python -m pytest -q tests/test_ops_metrics_pg.py
+
+      # Nine of this suite's ten tests need DATABASE_URL, and its run-all-gates
+      # floor is 1, so on the hermetic test-gate workflow it reports green with
+      # nine tests inert. That is not hypothetical: the signed /da/callback test
+      # was cited as evidence the callback path worked while it could not have
+      # passed, because a later `attempt` guard in broker.py refuses the body it
+      # sends and no runner ever executed it. The suite runs here, where a
+      # database exists, and the skip check below is what makes that a fact
+      # rather than an intention.
+      - name: Run async-job callback PostgreSQL suite
+        working-directory: server
+        run: |
+          # ONE run for both the result and the did-not-skip check. Two runs
+          # could disagree, and it is the executed run whose skips matter.
+          # The `if !` is not decoration: under `bash -e {0}` a bare
+          # `out=$(pytest ...)` aborts the step on a real test failure with the
+          # captured stdout still inside `$out`, so the failure detail never
+          # reaches the log. This prints it, then fails.
+          if ! out=$(python -m pytest -q -rs tests/test_jobs_callbacks_postgres.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          # Same bash string match as the overlay and sessions steps, for the
+          # reason written out in full at the overlay skip-check above.
+          # `${out,,}` keeps it as case-insensitive as `grep -qi`.
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: async-job callback tests skipped - DATABASE_URL is not reaching pytest.'
+            echo 'A skipped suite reports green and proves nothing. That is the bug this step exists for.'
+            exit 1
+          fi
 
       - name: Run customization authority PostgreSQL tests
         working-directory: server
