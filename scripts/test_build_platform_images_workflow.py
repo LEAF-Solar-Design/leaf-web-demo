@@ -4244,6 +4244,23 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
          {"ARTIFACTS_JSON": arts((supply, False)),
           "RECORD_JSON": '{"status":"completed","conclusion":"failure",'
                          '"run_attempt":2}'}, "unknown"),
+        # THE ATTEMPT MUST COME FROM THE RUN RECORD, NOT FROM THE FIXTURE.
+        # Every case above happens to sit on run_attempt 2, so a classifier
+        # that hardcoded `SUP_ATTEMPT=2` would satisfy all of them. These two
+        # move the record's attempt to 3 so only a classifier that actually
+        # reads it can tell them apart.
+        ("attempt 3 in flight, only the PREVIOUS attempt's supply set",
+         {"ARTIFACTS_JSON": arts((supply, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "unknown"),
+        ("attempt 3 in flight with its OWN supply set",
+         {"ARTIFACTS_JSON": arts((f"staging-supply-set-{sha}-attempt-3", False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "yes"),
+        ("attempt 3 in flight, only the PREVIOUS attempt's docs marker",
+         {"ARTIFACTS_JSON": arts((marker, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "unknown"),
     ]
 
     with tempfile.TemporaryDirectory() as tmp_name:
