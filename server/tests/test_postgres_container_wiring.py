@@ -80,6 +80,29 @@ def _app_dockerfile() -> str:
     return _read("deploy/Dockerfile.app")
 
 
+# Dockerfile instruction keywords are CASE-INSENSITIVE and may be indented, so
+# a guard that matches `line.startswith("WORKDIR ")` reads a formatting-only
+# change as "this instruction is not here". For WORKDIR that fails OPEN rather
+# than closed: lowercasing the final `workdir /app/server` would leave only the
+# earlier `/app` visible, a relative command would then resolve to
+# /app/scripts/... and MATCH the COPY target, and the guard would go green over
+# exactly the defect it exists to catch. Parse the instruction properly instead.
+# `[A-Za-z]+` cannot match a `#` comment or a `\`-continuation line, and the
+# trailing `\s` requirement stops `ENV` continuations like `APP_PORT=8130 \`
+# from being read as an instruction named APP.
+_DOCKERFILE_INSTRUCTION = re.compile(r"^\s*([A-Za-z]+)\s+(\S.*)$")
+
+
+def _instructions(dockerfile: str) -> list[tuple[str, str]]:
+    """(KEYWORD, argument-text) for each instruction, keyword upper-cased."""
+    parsed: list[tuple[str, str]] = []
+    for line in dockerfile.splitlines():
+        match = _DOCKERFILE_INSTRUCTION.match(line)
+        if match:
+            parsed.append((match.group(1).upper(), match.group(2).strip()))
+    return parsed
+
+
 def _final_workdir(dockerfile: str) -> str:
     """The WORKDIR a documented command actually starts from.
 
@@ -89,9 +112,8 @@ def _final_workdir(dockerfile: str) -> str:
     reading the first is precisely the mistake this guard exists to catch.
     """
     workdirs = [
-        line.split(None, 1)[1].strip()
-        for line in dockerfile.splitlines()
-        if line.startswith("WORKDIR ")
+        argument for keyword, argument in _instructions(dockerfile)
+        if keyword == "WORKDIR"
     ]
     assert workdirs, "deploy/Dockerfile.app declares no WORKDIR"
     return workdirs[-1]
@@ -107,14 +129,46 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
     keeps this guard aimed at the commands that really do run in the container.
     """
     copies: dict[str, str] = {}
-    for line in dockerfile.splitlines():
-        if not line.startswith("COPY scripts/"):
+    for keyword, argument in _instructions(dockerfile):
+        if keyword != "COPY":
             continue
-        parts = line.split()
-        if len(parts) != 3:
+        parts = argument.split()
+        if len(parts) != 2 or not parts[0].startswith("scripts/"):
             continue
-        copies[PurePosixPath(parts[2]).name] = parts[2]
+        copies[PurePosixPath(parts[1]).name] = parts[1]
     return copies
+
+
+def test_dockerfile_instruction_parsing_survives_case_and_indentation():
+    """The guard below is only as good as this parse, and a naive
+    `startswith("WORKDIR ")` fails OPEN here rather than closed.
+
+    Docker keywords are case-insensitive and may be indented. If the FINAL
+    `workdir /app/server` is written in lower case and the parser misses it,
+    the parser silently falls back to the earlier `/app` — at which point a
+    repo-relative command resolves to /app/scripts/... , matches the COPY
+    target, and the guard reports green over the exact defect it exists to
+    catch. The anti-vacuity floor does not help: the command count is
+    unchanged. So pin the parse itself.
+    """
+    dockerfile = (
+        "# a comment mentioning WORKDIR /decoy\n"
+        "FROM python:3.12-slim\n"
+        "WORKDIR /app\n"
+        "  copy scripts/reconcile_demo.py /app/scripts/reconcile_demo.py\n"
+        "ENV APP_PORT=8130 \\\n"
+        "    PYTHONUNBUFFERED=1\n"
+        "\tworkdir /app/server\n"
+    )
+
+    assert _final_workdir(dockerfile) == "/app/server"
+    assert _copied_scripts(dockerfile) == {
+        "reconcile_demo.py": "/app/scripts/reconcile_demo.py"
+    }
+    # A continuation line must never be read as an instruction named APP.
+    assert "APP" not in {keyword for keyword, _ in _instructions(dockerfile)}
+    # A directory copy is a different shape and must stay out of the mapping.
+    assert _copied_scripts("COPY server/ /app/server/\n") == {}
 
 
 def test_documented_authority_commands_resolve_in_the_image():
