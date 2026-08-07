@@ -817,9 +817,13 @@ So there is one forbidden ordering and two acceptable terminal states:
   `platform/migrations/0029_session_annex.sql` and the dispatch in both modules
   landed in the section above, and the startup gate documented earlier makes it
   the only legal combination once the sessions selector moves. At that point the
-  annex tables are on PostgreSQL and no SERVING path resolves `SESSIONS_DB` at
-  all. Note the annex section's own caveat that those PostgreSQL paths are
-  reviewed code, not exercised code.
+  annex tables are on PostgreSQL and **no serving operation touches the SQLite
+  file**. Say it that way and not "nothing resolves `SESSIONS_DB`": all three
+  modules still RESOLVE it at import, unconditionally and regardless of mode
+  (`session_store.py:114`, `checkpoints.py:25`, `session_policy.py:48`). The
+  variable keeps a resolved value; what stops is any read or write through it.
+  Note the annex section's own caveat that those PostgreSQL paths are reviewed
+  code, not exercised code.
 
 **An earlier draft listed a third state, "after the flip, set `SESSIONS_DB` to
 durable storage so those two tables stop dying with every task replacement".
@@ -833,10 +837,19 @@ and a durable `SESSIONS_DB` would preserve nothing.
 survives: `scripts/reconcile_sessions_authority.py`, whose
 `default_sqlite_path()` returns `session_store.DB_PATH` precisely so the
 reconciler resolves the legacy file the same way the app does, and which
-`deploy/Dockerfile.app` COPYs to `/app/scripts/`. That is by design and is not a
-hazard, because the reconciler is an operator-run command that reads the legacy
-store read-only rather than a serving path that could raise on a request. State
-it as **no serving-path consumers**, not none.
+`deploy/Dockerfile.app` COPYs to `/app/scripts/`. State it as **no serving-path
+consumers**, not none.
+
+It is not a request-path hazard, because it is operator-run and nothing about it
+can raise on a user request. **But do not describe it as read-only, which an
+earlier draft of this paragraph did.** That holds for `parity` mode only. In
+`backfill`, `reconcile()` calls `_ensure_source_schema()`, which yields
+`store._db()`, the app's own WRITABLE connection, to run the lazy schema
+bootstrap; its docstring says outright that this "runs against the SAME database
+the live app is serving from, so a write lock held by a concurrent request is
+expected and recoverable". The `mode=ro` URI cited earlier governs the snapshot
+read, not the whole command. The direction claim is unaffected: it still never
+writes PostgreSQL back to SQLite, and it still has no UPDATE or DELETE path.
 
 The rollback requirement in the section above is the same rule read backwards
 and does not conflict with this: every mode on the return path except `postgres`
