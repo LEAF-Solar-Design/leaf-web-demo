@@ -138,6 +138,18 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "decided", "approved", "decided_by", "created_at", "expires_at", "consumed",
         },
     },
+    # Separate from "sessions" on purpose: LEAF_SESSION_ANNEX_STORE selects
+    # these independently, so a sessions-only deployment must not be required to
+    # carry them. See server/session_annex.py.
+    "session_annex": {
+        "app_session_checkpoints": {
+            "checkpoint_id", "session_id", "tenant_id", "drawing_id",
+            "drawing_version", "transcript_seq", "label", "created_at",
+        },
+        "app_session_policies": {
+            "session_id", "tenant_id", "policy", "updated_at",
+        },
+    },
     "agent": {
         "agent_approvals": {
             "confirmation_id", "tenant_id", "session_id", "turn_id", "action", "args",
@@ -339,6 +351,20 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "FOREIGN KEY (session_id) REFERENCES app_sessions(session_id) ON DELETE CASCADE"),
         "app_approvals_pkey": _catalog_contract(
             "app_approvals", "PRIMARY KEY (confirmation_id)"),
+    },
+    "session_annex": {
+        "app_session_checkpoints_pkey": _catalog_contract(
+            "app_session_checkpoints", "PRIMARY KEY (checkpoint_id)"),
+        "app_session_policies_pkey": _catalog_contract(
+            "app_session_policies", "PRIMARY KEY (session_id)"),
+        # The upsert in session_policy._pg_set_policy depends on this exact
+        # conflict target; without the primary key its ON CONFLICT (session_id)
+        # is a runtime error, not a silent fallback.
+        "app_session_policies_policy_check": _catalog_contract(
+            "app_session_policies", "CHECK",
+            "confirm_all", "auto_approve_reads", "plan_first"),
+        "app_session_checkpoints_transcript_seq_check": _catalog_contract(
+            "app_session_checkpoints", "CHECK", "transcript_seq >= 0"),
     },
     "agent": {
         "agent_approvals_pkey": _catalog_contract(
@@ -567,6 +593,11 @@ _AUTHORITY_REQUIRED_INDEXES = {
         "idx_app_approvals_session": _catalog_contract(
             "app_approvals", "(session_id, created_at DESC)"),
     },
+    "session_annex": {
+        "idx_app_session_checkpoints_scope": _catalog_contract(
+            "app_session_checkpoints",
+            "(session_id, tenant_id, created_at, checkpoint_id)"),
+    },
     "agent": {
         "idx_agent_approvals_pending": _catalog_contract(
             "agent_approvals", "(tenant_id, expires_at)", "WHERE",
@@ -667,6 +698,15 @@ _AUTHORITY_SELECTORS = {
         "dual_write_shadow": "sessions",
         "shadow": "sessions",
         "postgres": "sessions",
+    },
+    # Every mode that touches PostgreSQL requires the schema, mirroring the
+    # sessions selector above. `legacy` is absent from both, so the annex tables
+    # are not required of a deployment that has not started this cutover.
+    "LEAF_SESSION_ANNEX_STORE": {
+        "dual_write": "session_annex",
+        "dual_write_shadow": "session_annex",
+        "shadow": "session_annex",
+        "postgres": "session_annex",
     },
     "LEAF_AGENT_STORE": {"postgres": "agent"},
     "LEAF_BROKER_STORE": {"postgres": "broker"},

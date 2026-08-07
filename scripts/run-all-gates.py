@@ -611,9 +611,14 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-postgres-startup",
               "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
               _py_pytest("tests/test_platform_postgres_startup.py"), 13),
-        # Floor 45, re-measured 2026-08-07 when the post-merge review of the
-        # generalised WORKDIR/COPY guard added two cases: a documented command
-        # naming no real script, and a shell fence found however it is spelled.
+        # Floor 46, re-measured 2026-08-07 after merging origin/main. THE MERGE
+        # IS WHY THIS LINE NEEDS READING TWICE: this branch raised it 43 -> 45
+        # for two new cases, main separately added
+        # test_the_image_asserts_its_own_reconcilers_at_build_time to the same
+        # file without raising it, and git auto-merged the two edits to 45 with
+        # no conflict. The suite executes 46. A floor left silently one low is
+        # precisely the drift this comment exists to prevent, so it is
+        # re-MEASURED here rather than inferred from either side of the merge.
         # It sat at 7 while the suite executed 41, which is the exact hazard the
         # note at the top of this list describes: a low floor PASSes with an
         # "(executed-count drift: ...)" note, so 34 of these could have vanished
@@ -625,7 +630,7 @@ def build_suites() -> List[Suite]:
         # fewer. That is also why it needs no allowed_skip_reasons.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 45),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 46),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
@@ -700,14 +705,21 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 46,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
-        # Floor 7, re-measured when the production selections were recorded. It
-        # was 6; the added case is the one that stops an inferred repository
+        # Floor 8, re-measured when the session_annex dependency was added. It
+        # was 7; the earlier added case is the one that stops an inferred default
         # default from being re-labelled as an observed setting, so letting it
         # vanish silently would retire the guard and still report green. Moves
         # in lockstep with the assertion in scripts/test_gate_runner.py.
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 7),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 8),
+        # The annex authority the sessions flip strands without. Fully
+        # offline: the PostgreSQL halves run against a fake in place of
+        # platform.db, so nothing here skips on a no-DB host and the floor
+        # is the exact collected count.
+        Suite("server-session-annex-store",
+              "server tests/test_session_annex_store.py", "pytest",
+              SERVER, _py_pytest("tests/test_session_annex_store.py"), 27),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),

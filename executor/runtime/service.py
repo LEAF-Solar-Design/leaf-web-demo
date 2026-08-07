@@ -14,7 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .supervisor import ExecutorError, WarmExecutorSupervisor
+from .supervisor import CapacitySampler, ExecutorError, WarmExecutorSupervisor
 from .accounting import StructuredAccountingEmitter
 from executor.registry import ImmutableArtifactRegistry
 from .registration import HostRegistrar, HostRegistrationConfig, resolve_executor_id
@@ -203,17 +203,33 @@ def serve_registered(
     server: ThreadingHTTPServer,
     supervisor: WarmExecutorSupervisor,
     registrar: HostRegistrar | None,
+    sampler: CapacitySampler | None = None,
 ) -> None:
-    """Advertise readiness only after the listening socket and pool exist."""
+    """Advertise readiness only after the listening socket and pool exist.
+
+    The capacity sampler starts BEFORE registration and stops FIRST, so the
+    slot gauge covers the whole window in which this host is advertised as
+    usable, including a registration that fails and never serves.
+    """
     try:
+        if sampler is not None:
+            sampler.start()
         if registrar is not None:
             registrar.start()
         server.serve_forever()
     finally:
-        if registrar is not None:
-            registrar.close()
-        server.server_close()
-        supervisor.close()
+        # Nested, so a sampler that fails to stop cannot skip the teardown that
+        # actually matters. Flat cleanup let one raising `stop()` leave the
+        # registrar registered, the listening socket open, and every child
+        # process alive.
+        try:
+            if sampler is not None:
+                sampler.stop()
+        finally:
+            if registrar is not None:
+                registrar.close()
+            server.server_close()
+            supervisor.close()
 
 
 def scrub_child_environment(environ: dict[str, str] | None = None) -> None:
@@ -308,11 +324,12 @@ def main() -> None:
         registrar = configure_host_registrar(supervisor, config=registration_config)
         if not is_loopback and registrar is None:
             raise ValueError("non-loopback executor listeners require control-plane host registration")
+        sampler = CapacitySampler.from_environment(supervisor)
         server = make_server((args.host, args.port), supervisor, control_secret or None, tls_config=tls_config)
     except (ValueError, OSError) as exc:
         supervisor.close()
         raise SystemExit(str(exc)) from exc
-    serve_registered(server, supervisor, registrar)
+    serve_registered(server, supervisor, registrar, sampler)
 
 
 if __name__ == "__main__":

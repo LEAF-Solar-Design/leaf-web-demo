@@ -442,10 +442,12 @@ jobs:
           # never trips it and only a DROP does. Deleting a test on purpose
           # means lowering this number in the same commit, deliberately.
           #
-          # Raised 227 -> 229 on 2026-08-07: the post-merge review of the
-          # WORKDIR/COPY guard added two cases to
-          # test_postgres_container_wiring.py. Raising by exactly the number of
-          # tests added is safe whatever the true total is now, because both are
+          # Raised 227 -> 230 on 2026-08-07, in two steps. +2 for the post-merge
+          # review of the WORKDIR/COPY guard, and +1 more after merging
+          # origin/main, which added
+          # test_the_image_asserts_its_own_reconcilers_at_build_time to the same
+          # module and did NOT raise this number. Raising by exactly the count of
+          # tests added is safe whatever the true total is, because all three are
           # unconditional -- that module carries no skipif, pytest.skip or
           # importorskip, so no runner executes fewer. Adding them without
           # raising this would have been safe too, and useless: the floor's
@@ -477,9 +479,9 @@ jobs:
           # under `bash -e`: an unmatched grep leaves `ran` empty, which the
           # `${ran:-0}` default turns into a loud 0 rather than a silent pass.
           ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
-          if [ "${ran:-0}" -lt 229 ]; then
+          if [ "${ran:-0}" -lt 230 ]; then
             printf '%s\n' "$out"
-            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 229 - tests stopped being collected without reporting a skip."
+            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 230 - tests stopped being collected without reporting a skip."
             exit 1
           fi
 

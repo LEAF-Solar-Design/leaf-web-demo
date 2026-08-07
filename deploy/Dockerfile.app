@@ -66,6 +66,45 @@ RUN chmod 0500 /app/server/start-app.sh
 # stays stdlib. Run from the server workdir.
 WORKDIR /app/server
 
+# --- Runtime proof that the reconcilers survived the build. -------------------
+# The image is the only place the documented reconciliation commands ever run
+# (platform/authority-inventory.json ships `python /app/scripts/reconcile_*.py`),
+# so a script that failed to land fails in an operator cutover rather than here.
+#
+# This is the LAST instruction that can touch the filesystem, and it must stay
+# that way: it proves the state of /app/scripts AFTER every RUN and COPY above
+# it, so a later instruction that removed them breaks the BUILD. No static check
+# can do this job -- a text scan of this file does not know the WORKDIR in effect
+# at each line, so a relative `rm -rf scripts` under WORKDIR /app reads as
+# harmless. That approach was tried and removed in dbd6e5d; see the module
+# comment in server/tests/test_postgres_container_wiring.py.
+#
+# `-s` as well as `-f`, because `-f` alone accepts an EMPTY file: a truncation
+# above this line (`: > .../reconcile_sessions_authority.py`) left both tests
+# green while the operator's parity run became a program that exits 0 and emits
+# no receipt. `-s` closes the zero-byte case and NOTHING WIDER. A one-byte
+# overwrite (`RUN printf 'pass\n' > .../reconcile_sessions_authority.py`) is a
+# valid Python program that exits 0, emits no receipt, and passes this guard.
+# Nothing here decides file CONTENT, and no earlier check does either: the
+# COPY-map guard refuses a RENAMING copy, which is not the same thing. Content
+# is a review class, not a gate.
+#
+# ABOVE the per-commit ARG deliberately, and it belongs nowhere else. A RUN below
+# that ARG re-executes on every merge, which
+# scripts/test_build_platform_images_workflow.py forbids outright (it fails the
+# build gate, not merely the cache). Three rules cover the positions between
+# them: a destructive instruction above this guard is caught by the guard; a RUN
+# below the ARG is caught by that invariant; and anything else below this guard
+# is caught by the allowlist in test_the_image_asserts_its_own_reconcilers_at_build_time.
+# EXEC FORM, and that is load-bearing rather than a style choice. Shell-form
+# RUN executes through whatever SHELL is in effect, so `SHELL ["/bin/true"]`
+# placed ABOVE this line ran the identical guard as `/bin/true -c "test -f ..."`
+# -- exit 0, nothing tested, image shipped with both reconcilers deleted, and
+# every static check still green. A review confirmed it by replaying the
+# mutation. Exec form names the interpreter itself and ignores SHELL, so no
+# instruction above the guard can change what the guard means.
+RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py"]
+
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
 # miss for everything after it — declared at the top it made the apt/pip layers
@@ -77,6 +116,7 @@ ENV APS_LIVE=0 \
     APP_PORT=8130 \
     LEAF_JOBS_STORE=legacy \
     LEAF_SESSIONS_STORE=legacy \
+    LEAF_SESSION_ANNEX_STORE=legacy \
     LEAF_AGENT_STORE=legacy \
     LEAF_INSTANT_EXECUTION_ENABLED=0 \
     LEAF_GUEST_CAP_STORE=memory \

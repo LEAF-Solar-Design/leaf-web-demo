@@ -87,6 +87,7 @@ services:
       DATABASE_URL: postgresql://leaf:leaf-local-only@postgres:5432/leaf
       LEAF_JOBS_STORE: ${LEAF_JOBS_STORE:-legacy}
       LEAF_SESSIONS_STORE: ${LEAF_SESSIONS_STORE:-legacy}
+      LEAF_SESSION_ANNEX_STORE: ${LEAF_SESSION_ANNEX_STORE:-legacy}
       LEAF_AGENT_STORE: ${LEAF_AGENT_STORE:-legacy}
       LEAF_GUEST_CAP_STORE: ${LEAF_GUEST_CAP_STORE:-memory}
       LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
