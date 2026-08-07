@@ -26,6 +26,7 @@ export class FakeStandardServiceProvider implements StandardServiceProvider {
   private readonly approvals = new Map<string, {
     identity: StandardServiceIdentity;
     call: StandardServiceCall;
+    approved: boolean;
     used: boolean;
   }>();
   private nextApproval = 1;
@@ -36,7 +37,13 @@ export class FakeStandardServiceProvider implements StandardServiceProvider {
   }
 
   private assertAllowed(identity: StandardServiceIdentity, operation: string): void {
-    for (const value of [identity.tenant_id, identity.subject_id, identity.session_id, identity.runner_profile_id]) {
+    for (const value of [
+      identity.tenant_id,
+      identity.subject_id,
+      identity.session_id,
+      identity.subscription_mount_id,
+      identity.runner_profile_id,
+    ]) {
       if (!value) throw new Error("standard_service_identity_incomplete");
     }
     const reason = this.deny?.(identity, operation);
@@ -56,13 +63,25 @@ export class FakeStandardServiceProvider implements StandardServiceProvider {
   async request(identity: StandardServiceIdentity, call: StandardServiceCall): Promise<StandardServiceRequestResult> {
     this.assertAllowed(identity, `request:${call.service_id}/${call.tool_id}`);
     const approvalId = `approval-${this.nextApproval++}`;
-    this.approvals.set(approvalId, { identity: structuredClone(identity), call: structuredClone(call), used: false });
+    this.approvals.set(approvalId, {
+      identity: structuredClone(identity),
+      call: structuredClone(call),
+      approved: false,
+      used: false,
+    });
     return {
       approval_id: approvalId,
       argument_digest: standardServiceArgumentDigest(call),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       summary: `${call.service_id}/${call.tool_id}`,
     };
+  }
+
+  /** Simulate a separate authenticated human approval action. Never model-mounted. */
+  approve(approvalId: string): void {
+    const approval = this.approvals.get(approvalId);
+    if (!approval || approval.used) throw new Error("standard_service_approval_invalid_or_used");
+    approval.approved = true;
   }
 
   async confirm(identity: StandardServiceIdentity, approvalId: string): Promise<StandardServiceResult> {
@@ -72,6 +91,7 @@ export class FakeStandardServiceProvider implements StandardServiceProvider {
     if (JSON.stringify(approval.identity) !== JSON.stringify(identity)) {
       throw new Error("standard_service_approval_identity_mismatch");
     }
+    if (!approval.approved) throw new Error("standard_service_approval_pending_human");
     approval.used = true;
     return { content: JSON.stringify({ call: approval.call }), receipt_id: `receipt-${approvalId}` };
   }

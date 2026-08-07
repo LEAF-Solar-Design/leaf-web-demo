@@ -147,6 +147,9 @@ export function createStandardServicesFacade(options: StandardServicesFacadeOpti
           if (tool.effect !== "observe-contained" && tool.effect !== "observe-external") {
             throw new Error("standard_service_read_requires_observe_effect");
           }
+          if (tool.approval !== "none") {
+            throw new Error("standard_service_read_requires_approval_request");
+          }
           return result(await provider.read(identity, call));
         } catch (error) { return failure(error); }
       },
@@ -163,7 +166,12 @@ export function createStandardServicesFacade(options: StandardServicesFacadeOpti
         };
         try {
           const tool = await permittedTool(provider, identity, profile, call);
-          if (tool.effect !== "mutate-tenant") throw new Error("standard_service_request_requires_mutation");
+          if (tool.approval !== "explicit-once") {
+            throw new Error("standard_service_request_requires_explicit_approval");
+          }
+          if (tool.effect !== "mutate-tenant" && tool.effect !== "observe-external") {
+            throw new Error("standard_service_request_effect_not_supported");
+          }
           return result(await provider.request(identity, call));
         } catch (error) { return failure(error); }
       },

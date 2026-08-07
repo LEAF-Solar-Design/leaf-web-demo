@@ -16,7 +16,7 @@
     "ports/fakes/fakeOAuthGrant.ts": "b0d44aa4ce9dc8e313cc7b8ba9caa372250d99229ce68e2ccfb27286e8616802",
     "ports/fakes/fakeRepoEditor.ts": "c16b160f23a098b3ff5441da85ff2774dbc11850bb3f15e7510df19656ab8bf1",
     "ports/fakes/fakeSessionStore.ts": "5a32cef3cf018e679021e80b46d64fd853945839e929b94f7ffde72a755c4d3c",
-    "ports/fakes/fakeStandardServiceProvider.ts": "0d99428458b44b206945c34b85cfcd3adf3642d92b6ff70bdeb5c164ad440bf5",
+    "ports/fakes/fakeStandardServiceProvider.ts": "81ca3991767022ed31abf1fee6385221eeb256144c2fe98ff04c4b240ec2c0ce",
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "c65dadd5142705fa11a10b30b6992d648f983d9481539b63af0c68d1d5e14d06",
@@ -39,7 +39,7 @@
     "ports/impl/sessionStoreFactory.ts": "b896d48b96f39ca6a3afcfbebc752cba155ef8d77762f5add0472ebcd9b39124",
     "ports/impl/skillBundle.ts": "e0a0f9b4e3a7eeaf37bdea16d0b2bd188096b0b30b18507d44beebacfd680e8f",
     "ports/impl/standardServices.ts": "880ac8675234ce1952db154c197a6eb11cd545f52421a22b081dce884daf050d",
-    "ports/impl/standardServicesFacade.ts": "761b6a21a20f1f2bfd56131fcacf89189ac033617b475a5d25cb3476c72cefdc",
+    "ports/impl/standardServicesFacade.ts": "f3d2034ed845aec02b9a498ea6e7dbabc8bc2b09debd43977abd4cac494f793e",
     "ports/impl/standardServicesRuntime.ts": "e7250307fa74a6f8f0a8bb109aba9d4d4da80c5dfa625a55987bcf53961598a1",
     "ports/impl/tenantChangeRepo.ts": "0b651efdef1a6fe90a65ef473408dc8bdfaa6dda5d7a93856b463190bec23f43",
     "ports/impl/tenantRepoProvider.ts": "db6cfd3e672f7acd223c620586ff85428800e31e0d47b2616220e70ec47d63a3",
@@ -55,5 +55,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "9f51a030895b6a982bab56459527839336017209"
+  "upstream_commit": "cdce2617433cb47002e955e664d943fde648f29b"
 }
