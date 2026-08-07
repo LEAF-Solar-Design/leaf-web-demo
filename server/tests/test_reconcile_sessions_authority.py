@@ -1259,6 +1259,15 @@ def test_an_empty_source_and_an_empty_target_still_pass(source, monkeypatch):
     assert receipt["source_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
     assert receipt["target_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
 
+    # And the CLI layer, which is what an operator and a gate actually see.
+    # Called IN-PROCESS rather than through subprocess on purpose: the guard
+    # lives in main(), and only an in-process call inherits the stubbed empty
+    # target above. Asserting the receipt alone would stay green through a
+    # regression that refused every empty source at the exit-code layer.
+    assert RECONCILE.main(
+        ["--mode", "parity", "--sqlite", str(source.path)]
+    ) == 0, "a genuinely fresh pair must exit 0 without --allow-empty-source"
+
 
 @requires_database
 def test_backfill_also_refuses_a_clean_exit_on_an_empty_source(source, target):
