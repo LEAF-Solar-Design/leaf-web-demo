@@ -83,7 +83,10 @@ import { SPINE_TOOL_NAMES } from "../index.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
-import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import {
+  resolveStandardServicesSession,
+  snapshotTrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
 import type { StandardServicesResolver } from "./standardServicesRuntime.js";
 import { skillBundleAttachment } from "./skillBundle.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
@@ -237,6 +240,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
   }
 
   private async *runInner(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent> {
+    const standardServicesContext = input.standardServicesContext === undefined
+      ? undefined
+      : snapshotTrustedStandardServicesContext(input.standardServicesContext);
     const sdk = (await this.sdkImport()) as SdkModule;
     const { z } = (await this.zodImport()) as ZodModule;
 
@@ -298,18 +304,23 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       ),
     );
     const server = sdk.createSdkMcpServer({ name: "spine", version: "1.0.0", tools });
-    const services = this.standardServicesResolver && input.standardServicesContext
-      ? createStandardServicesFacade({
+    let services: ReturnType<typeof createStandardServicesFacade> | undefined;
+    if (this.standardServicesResolver && standardServicesContext) {
+      try {
+        services = createStandardServicesFacade({
           sdk,
           z,
           ...(await resolveStandardServicesSession(
             this.standardServicesResolver,
-            input.standardServicesContext,
+            standardServicesContext,
             "spine",
           )),
           profile: "spine",
-        })
-      : undefined;
+        });
+      } catch {
+        throw new Error("standard_services_resolver_setup_failed");
+      }
+    }
     const composition = composeRunnerCapabilities({
       profile: "spine",
       private_mcp_servers: { spine: server },

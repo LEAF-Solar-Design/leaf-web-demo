@@ -25,6 +25,11 @@ const context = {
   authority_turn_id: "turn-a",
 };
 
+const approvalStore = {
+  async create() { return true; },
+  async consume() { return null; },
+};
+
 function attachment(overrides: Record<string, unknown> = {}) {
   return {
     bearer_token: "bearer.token.value.1234567890",
@@ -48,6 +53,7 @@ function resolver(fetchImpl: typeof fetch, now: () => number = () => 1_000) {
     brokerEndpoint: "https://staging-api.leafdesign.ai",
     dispatchSecret: "dispatch-secret-value",
     environment: "staging",
+    approvalStore,
     fetchImpl,
     now,
   });
@@ -143,18 +149,21 @@ describe("LeafStandardServicesResolver", () => {
       brokerEndpoint: "https://api.leafdesign.ai",
       dispatchSecret: "dispatch-secret-value",
       environment: "production",
+      approvalStore,
     })).toThrow("LEAF_APP_URL");
     expect(() => new LeafStandardServicesResolver({
       appOrigin: "https://app.example",
       brokerEndpoint: "http://api.leafdesign.ai",
       dispatchSecret: "dispatch-secret-value",
       environment: "production",
+      approvalStore,
     })).toThrow("canonical tenant broker origin");
     expect(() => new LeafStandardServicesResolver({
       appOrigin: "http://app.example",
       brokerEndpoint: "https://api.leafdesign.ai",
       dispatchSecret: "dispatch-secret-value",
       environment: "production",
+      approvalStore,
     })).toThrow("LEAF_APP_URL must use HTTPS");
   });
 
@@ -172,6 +181,7 @@ describe("LeafStandardServicesResolver", () => {
       brokerEndpoint,
       dispatchSecret: "dispatch-secret-value",
       environment,
+      approvalStore,
     })).toThrow("LEAF_TENANT_MCP_BROKER_URL");
   });
 
@@ -181,7 +191,7 @@ describe("LeafStandardServicesResolver", () => {
       LEAF_TENANT_MCP_BROKER_URL: "https://staging-api.leafdesign.ai/",
       LEAF_APP_DISPATCH_SECRET: "dispatch-secret-value",
       LEAF_RUNTIME_ENV: "staging",
-    });
+    }, undefined, approvalStore);
     expect((staging as unknown as { brokerEndpoint: URL }).brokerEndpoint.toString())
       .toBe("https://staging-api.leafdesign.ai/mcp");
     const local = standardServicesResolverFromEnv({
@@ -189,7 +199,7 @@ describe("LeafStandardServicesResolver", () => {
       LEAF_TENANT_MCP_BROKER_URL: "http://127.0.0.1:18900",
       LEAF_APP_DISPATCH_SECRET: "dispatch-secret-value",
       LEAF_RUNTIME_ENV: "local",
-    });
+    }, undefined, approvalStore);
     expect((local as unknown as { brokerEndpoint: URL }).brokerEndpoint.toString())
       .toBe("http://127.0.0.1:18900/mcp");
   });

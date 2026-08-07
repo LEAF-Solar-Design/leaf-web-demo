@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
@@ -32,6 +34,7 @@ _TOKEN_BODY_MAX_BYTES = 16 * 1024
 _TOKEN_ROUTES = frozenset({
     "/internal/mcp/gateway/attachment",
     "/api/mcp/gateway/approvals/token",
+    "/api/mcp/gateway/approvals/execute",
 })
 
 
@@ -166,6 +169,13 @@ class HumanApprovalTokenRequest(AttachmentExchangeRequest):
     argument_digest: str
 
 
+class HumanApprovalExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str
+    argument_digest: str
+
+
 def _id(name: str, value: str) -> str:
     if not isinstance(value, str) or not _ID.fullmatch(value):
         raise HTTPException(status_code=422, detail=f"invalid {name}")
@@ -247,6 +257,118 @@ def _mint_attachment(
             "runner_profile_id": profile,
         },
     }
+
+
+def _harness_approval_call(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    base = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/")
+    secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
+    parsed = urlparse(base)
+    if (
+        not base
+        or not secret
+        or path not in {"review", "execute"}
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise mcp_authority.McpAuthorityError("MCP approval host is unavailable")
+    try:
+        import requests
+
+        response = requests.post(
+            f"{base}/internal/standard-services/approvals/{path}",
+            headers={"X-Dispatch-Secret": secret, "Content-Type": "application/json"},
+            json=payload,
+            timeout=5,
+            allow_redirects=False,
+            stream=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise mcp_authority.McpAuthorityError("MCP approval host is unavailable") from exc
+    try:
+        if response.status_code != 200:
+            raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+        declared = response.headers.get("Content-Length")
+        if declared is not None:
+            declared_length = int(declared, 10)
+            if declared_length < 0 or declared_length > 64 * 1024:
+                raise mcp_authority.McpAuthorityError(
+                    "MCP approval host returned invalid data"
+                )
+        raw = getattr(response, "raw", None)
+        if raw is None or not callable(getattr(raw, "read", None)):
+            raise mcp_authority.McpAuthorityError(
+                "MCP approval host returned invalid data"
+            )
+        chunks: list[bytes] = []
+        received = 0
+        while received <= 64 * 1024:
+            remaining = 64 * 1024 + 1 - received
+            chunk = raw.read(min(8192, remaining), decode_content=True)
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes) or len(chunk) > remaining:
+                raise mcp_authority.McpAuthorityError(
+                    "MCP approval host returned invalid data"
+                )
+            received += len(chunk)
+            if received > 64 * 1024:
+                raise mcp_authority.McpAuthorityError("MCP approval host returned invalid data")
+            chunks.append(chunk)
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"invalid JSON constant: {value}")
+
+        def reject_duplicate_keys(
+            pairs: list[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+
+        value = json.loads(
+            b"".join(chunks).decode("utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        return value
+    except mcp_authority.McpAuthorityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - transport details are private
+        raise mcp_authority.McpAuthorityError(
+            "MCP approval host returned invalid data"
+        ) from exc
+    finally:
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001 - close details are private
+            pass
+
+
+def _mint_human_approval_token(
+    *, tenant_id: str, subject_id: str, identity: dict[str, str],
+    approval_id: str, argument_digest: str,
+) -> tuple[str, int]:
+    return mcp_authority.signer().issue(
+        {
+            "sub": subject_id,
+            "tenant_id": tenant_id,
+            "subject_id": subject_id,
+            **identity,
+            "approval_id": approval_id,
+            "argument_digest": argument_digest,
+        },
+        audience=mcp_authority.approval_audience(),
+        ttl_seconds=mcp_authority.APPROVAL_TTL_SECONDS,
+    )
 
 
 @router.get("/api/mcp/gateway/.well-known/jwks.json")
@@ -341,20 +463,17 @@ def exchange_human_approval_token(
             tenant_id, request.subscription_mount_id
         )
         profile = _runner_profile(request.runner_profile_id)
-        token, expires_at = mcp_authority.signer().issue(
-            {
-                "sub": tenant.subject,
-                "tenant_id": tenant_id,
-                "subject_id": tenant.subject,
+        token, expires_at = _mint_human_approval_token(
+            tenant_id=tenant_id,
+            subject_id=tenant.subject,
+            identity={
                 "session_id": request.session_id,
                 "authority_turn_id": request.authority_turn_id,
                 "subscription_mount_id": request.subscription_mount_id,
                 "runner_profile_id": profile,
-                "approval_id": request.approval_id,
-                "argument_digest": request.argument_digest,
             },
-            audience=mcp_authority.approval_audience(),
-            ttl_seconds=mcp_authority.APPROVAL_TTL_SECONDS,
+            approval_id=request.approval_id,
+            argument_digest=request.argument_digest,
         )
     except mcp_authority.McpMountDenied as exc:
         raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc
@@ -367,4 +486,142 @@ def exchange_human_approval_token(
     return {
         "bearer_token": token,
         "expires_at": mcp_authority.expires_at_iso(expires_at),
+    }
+
+
+@router.post("/api/mcp/gateway/approvals/execute")
+def execute_human_approval(
+    request: HumanApprovalExecuteRequest,
+    response: Response,
+    tenant: Any = Depends(deps.require_tenant),
+) -> dict[str, Any]:
+    if (
+        not deps.auth_live()
+        or not isinstance(tenant, deps.TenantContext)
+        or getattr(tenant, "backedge", False)
+        or not getattr(tenant, "authority_resolved", False)
+        or not isinstance(tenant.subject, str)
+        or not tenant.subject
+    ):
+        raise HTTPException(status_code=401, detail="verified human identity is required")
+    tenant_id = _id("tenant_id", str(tenant))
+    if not _APPROVAL_ID.fullmatch(request.approval_id):
+        raise HTTPException(status_code=422, detail="invalid approval_id")
+    if not _DIGEST.fullmatch(request.argument_digest):
+        raise HTTPException(status_code=422, detail="invalid argument_digest")
+    current_tenant, current_tier = deps.resolve_active_platform_tenant_authority(
+        tenant.subject
+    )
+    if current_tenant != tenant_id:
+        raise HTTPException(status_code=409, detail="platform authority changed")
+
+    try:
+        reviewed = _harness_approval_call("review", {
+            "approval_id": request.approval_id,
+            "argument_digest": request.argument_digest,
+            "tenant_id": tenant_id,
+            "subject_id": tenant.subject,
+        })
+        identity_value = reviewed.get("identity")
+        if reviewed.get("status") != "pending" or not isinstance(identity_value, dict):
+            raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+        identity = {
+            "session_id": _id("session_id", identity_value.get("session_id")),
+            "authority_turn_id": _id(
+                "authority_turn_id", identity_value.get("authority_turn_id")
+            ),
+            "subscription_mount_id": _id(
+                "subscription_mount_id", identity_value.get("subscription_mount_id")
+            ),
+            "runner_profile_id": _runner_profile(
+                identity_value.get("runner_profile_id")
+            ),
+        }
+        if (
+            identity_value.get("tenant_id") != tenant_id
+            or identity_value.get("subject_id") != tenant.subject
+        ):
+            raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+        mcp_authority.verify_subscription_mount(
+            tenant_id, identity["subscription_mount_id"]
+        )
+        human_token, _human_expires = _mint_human_approval_token(
+            tenant_id=tenant_id,
+            subject_id=tenant.subject,
+            identity=identity,
+            approval_id=request.approval_id,
+            argument_digest=request.argument_digest,
+        )
+        attachment_request = AttachmentExchangeRequest(
+            session_id=identity["session_id"],
+            authority_session_id=identity["session_id"],
+            authority_turn_id=identity["authority_turn_id"],
+            subscription_mount_id=identity["subscription_mount_id"],
+            runner_profile_id=identity["runner_profile_id"],
+        )
+        attachment = _mint_attachment(
+            tenant_id=tenant_id,
+            subject_id=tenant.subject,
+            tier=current_tier,
+            request=attachment_request,
+        )
+        receipt = _harness_approval_call("execute", {
+            "approval_id": request.approval_id,
+            "argument_digest": request.argument_digest,
+            "identity": attachment["identity"],
+            "human_bearer": human_token,
+            "attachment": {
+                "bearer_token": attachment["bearer_token"],
+                "channel_secret": attachment["channel_secret"],
+                "expires_at": attachment["expires_at"],
+            },
+        })
+        receipt_id = receipt.get("receipt_id")
+        artifact_ids = receipt.get("artifact_ids")
+        if (
+            receipt.get("status") != "completed"
+            or not isinstance(receipt_id, str)
+            or not _DIGEST.fullmatch(receipt_id)
+            or (
+                artifact_ids is not None
+                and (
+                    not isinstance(artifact_ids, list)
+                    or len(artifact_ids) > 32
+                    or any(
+                        not isinstance(value, str) or not _ID.fullmatch(value)
+                        for value in artifact_ids
+                    )
+                )
+            )
+        ):
+            raise mcp_authority.McpAuthorityError(
+                "MCP approval host returned invalid data"
+            )
+        session = session_store.get_session(identity["session_id"])
+        if not session or session.get("tenant_id") != tenant_id:
+            raise mcp_authority.McpAuthorityError(
+                "MCP approval receipt session is unavailable"
+            )
+        session_store.append_event(
+            identity["session_id"],
+            identity["authority_turn_id"],
+            "standard_service_approval_receipt",
+            {
+                "status": "completed",
+                "receipt_id": receipt_id,
+                **({"artifact_ids": artifact_ids} if artifact_ids else {}),
+            },
+        )
+    except mcp_authority.McpMountDenied as exc:
+        raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc
+    except (mcp_authority.McpAuthorityError, HTTPException) as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=409, detail="MCP approval is unavailable") from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return {
+        "status": "completed",
+        "receipt_id": receipt_id,
+        **({"artifact_ids": artifact_ids} if artifact_ids else {}),
     }

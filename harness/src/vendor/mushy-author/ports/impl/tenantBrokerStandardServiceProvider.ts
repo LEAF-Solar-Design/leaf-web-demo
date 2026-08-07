@@ -21,6 +21,12 @@ import {
   tenantBrokerApprovalDigest,
   validateStandardServiceCatalog,
 } from "./standardServices.js";
+import { guardedFetch } from "./mcpProxy.js";
+import {
+  isAllowedMcpHost,
+  resolveAllowedMcpHost,
+  type McpHostResolver,
+} from "./mcpNetworkPolicy.js";
 
 type GatewayToolResult = {
   content?: Array<{ type?: string; text?: string }>;
@@ -40,11 +46,35 @@ export interface TenantBrokerAuthorization {
   expires_at: string;
 }
 
+export interface TenantBrokerPendingApprovalBinding {
+  approval_id: string;
+  identity: StandardServiceIdentity;
+  call: StandardServiceCall;
+  argument_digest: string;
+  expires_at: string;
+}
+
+export interface TenantBrokerApprovalStore {
+  /** Atomically insert one binding. Return false when the id already exists. */
+  create(binding: TenantBrokerPendingApprovalBinding): Promise<boolean>;
+  /**
+   * Atomically remove and return the exact unexpired binding only when every
+   * supplied identity field matches. A mismatch, expiry, replay, or missing id
+   * returns null and must not change another principal's record.
+   */
+  consume(input: {
+    approval_id: string;
+    identity: StandardServiceIdentity;
+    now_ms: number;
+  }): Promise<TenantBrokerPendingApprovalBinding | null>;
+}
+
 export interface TenantBrokerStandardServiceProviderOptions {
   endpoint: string;
   authorization: (
     identity: StandardServiceIdentity,
   ) => Promise<TenantBrokerAuthorization>;
+  approvalStore: TenantBrokerApprovalStore;
   clientFactory?: (context: {
     identity: StandardServiceIdentity;
     bearerToken: string;
@@ -66,6 +96,164 @@ const REQUIRED_IDENTITY = [
 const APPROVAL_ID = /^[A-Za-z0-9_-]{8,256}$/;
 const ARGUMENT_DIGEST = /^[a-f0-9]{64}$/;
 const ARTIFACT_ID = /^[A-Za-z0-9_-]{16,256}$/;
+export const TENANT_BROKER_MAX_RESPONSE_BYTES = 1_048_576;
+export const TENANT_BROKER_MAX_REQUEST_BYTES = 1_048_576;
+type FetchBody = Exclude<RequestInit["body"], null | undefined>;
+
+function requestUrl(input: string | URL | Request): URL {
+  return new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+}
+
+function requireRequestSize(bytes: number): void {
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > TENANT_BROKER_MAX_REQUEST_BYTES) {
+    throw new Error("standard_service_broker_request_too_large");
+  }
+}
+
+async function measureKnownBody(body: FetchBody): Promise<void> {
+  if (typeof body === "string") {
+    requireRequestSize(new TextEncoder().encode(body).byteLength);
+    return;
+  }
+  if (body instanceof URLSearchParams) {
+    requireRequestSize(new TextEncoder().encode(body.toString()).byteLength);
+    return;
+  }
+  if (body instanceof Blob) {
+    requireRequestSize(body.size);
+    return;
+  }
+  if (body instanceof ArrayBuffer) {
+    requireRequestSize(body.byteLength);
+    return;
+  }
+  if (ArrayBuffer.isView(body)) {
+    requireRequestSize(body.byteLength);
+    return;
+  }
+  if (body instanceof FormData) {
+    try {
+      requireRequestSize((await new Response(body).arrayBuffer()).byteLength);
+    } catch (error) {
+      if (error instanceof Error && error.message === "standard_service_broker_request_too_large") throw error;
+      throw new Error("standard_service_broker_request_body_invalid");
+    }
+    return;
+  }
+  if (body instanceof ReadableStream) {
+    throw new Error("standard_service_broker_request_stream_unmeasurable");
+  }
+  throw new Error("standard_service_broker_request_body_invalid");
+}
+
+async function measureRequestInputBody(request: Request): Promise<void> {
+  if (!request.body) return;
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = request.clone().body!.getReader();
+  } catch {
+    throw new Error("standard_service_broker_request_body_invalid");
+  }
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (!(value instanceof Uint8Array)) {
+        throw new Error("standard_service_broker_request_body_invalid");
+      }
+      total += value.byteLength;
+      requireRequestSize(total);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    if (error instanceof Error && (
+      error.message === "standard_service_broker_request_too_large"
+      || error.message === "standard_service_broker_request_body_invalid"
+    )) throw error;
+    throw new Error("standard_service_broker_request_body_invalid");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function enforceBrokerRequestBodyLimit(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<void> {
+  if (init?.body !== undefined && init.body !== null) {
+    await measureKnownBody(init.body);
+    return;
+  }
+  if (input instanceof Request) await measureRequestInputBody(input);
+}
+
+async function boundedBrokerResponse(response: Response): Promise<Response> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const bytes = Number(declared);
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > TENANT_BROKER_MAX_RESPONSE_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error("standard_service_broker_response_too_large");
+    }
+  }
+  if (!response.body) return response;
+  let received = 0;
+  const bounded = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (!(chunk instanceof Uint8Array)) {
+        controller.error(new Error("standard_service_broker_response_invalid"));
+        return;
+      }
+      received += chunk.byteLength;
+      if (received > TENANT_BROKER_MAX_RESPONSE_BYTES) {
+        controller.error(new Error("standard_service_broker_response_too_large"));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+  return new Response(bounded, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+/**
+ * Keep the broker attachment credential on the one configured HTTPS endpoint.
+ * Every request rechecks DNS before dispatch and refuses redirects. The MCP
+ * transport cannot widen the endpoint through a response or session value.
+ */
+export function guardedTenantBrokerFetch(
+  endpointInput: string | URL,
+  resolver?: McpHostResolver,
+): typeof fetch {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(endpointInput);
+  } catch {
+    throw new Error("standard_service_broker_endpoint_insecure");
+  }
+  const guarded = guardedFetch(endpoint.hostname, undefined, undefined, resolver);
+  return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const destination = requestUrl(input);
+    if (
+      destination.protocol !== "https:"
+      || destination.username
+      || destination.password
+      || destination.origin !== endpoint.origin
+      || destination.pathname !== endpoint.pathname
+      || destination.search !== endpoint.search
+    ) {
+      throw new Error("standard_service_broker_endpoint_changed");
+    }
+    // Body size is settled before the DNS gate. No oversized or streaming
+    // request can trigger a lookup or carry credentials onto the network.
+    await enforceBrokerRequestBodyLimit(input, init);
+    return boundedBrokerResponse(await guarded(input, init));
+  }) as typeof fetch;
+}
 
 function sameIdentity(a: StandardServiceIdentity, b: StandardServiceIdentity): boolean {
   return a.tenant_id === b.tenant_id
@@ -74,6 +262,13 @@ function sameIdentity(a: StandardServiceIdentity, b: StandardServiceIdentity): b
     && a.authority_turn_id === b.authority_turn_id
     && a.subscription_mount_id === b.subscription_mount_id
     && a.runner_profile_id === b.runner_profile_id;
+}
+
+function brokerClientError(code: "connect" | "call"): Error {
+  const message = `standard_service_broker_${code}_failed`;
+  const error = new Error(message);
+  error.stack = `Error: ${message}`;
+  return error;
 }
 
 function requireTurnIdentity(identity: StandardServiceIdentity): void {
@@ -169,31 +364,40 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
   private readonly endpoint: string;
   private readonly authorization: TenantBrokerStandardServiceProviderOptions["authorization"];
   private readonly clientFactory?: TenantBrokerStandardServiceProviderOptions["clientFactory"];
+  private readonly approvalStore: TenantBrokerApprovalStore;
   private readonly now: () => number;
   private lastCatalog?: StandardServiceCatalog;
-  private readonly approvals = new Map<string, {
-    identity: StandardServiceIdentity;
-    call: StandardServiceCall;
-    digest: string;
-    expiresAtMs: number;
-    consumed: boolean;
-  }>();
   private readonly visualArtifacts = new Map<string, {
     identity: StandardServiceIdentity;
     reference: StandardServiceArtifactReference;
   }>();
 
   constructor(options: TenantBrokerStandardServiceProviderOptions) {
-    const endpoint = new URL(options.endpoint);
+    let endpoint: URL;
+    try {
+      endpoint = new URL(options.endpoint);
+    } catch {
+      throw new Error("standard_service_broker_endpoint_insecure");
+    }
     if (
       endpoint.protocol !== "https:"
-      && endpoint.hostname !== "127.0.0.1"
-      && endpoint.hostname !== "localhost"
+      || endpoint.username
+      || endpoint.password
+      || endpoint.hash
+      || !isAllowedMcpHost(endpoint.hostname)
     ) {
       throw new Error("standard_service_broker_endpoint_insecure");
     }
     this.endpoint = endpoint.toString();
     this.authorization = options.authorization;
+    if (
+      !options.approvalStore
+      || typeof options.approvalStore.create !== "function"
+      || typeof options.approvalStore.consume !== "function"
+    ) {
+      throw new Error("standard_service_broker_approval_store_required");
+    }
+    this.approvalStore = options.approvalStore;
     this.clientFactory = options.clientFactory;
     this.now = options.now ?? Date.now;
   }
@@ -234,10 +438,11 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     identity: StandardServiceIdentity,
     call: StandardServiceCall,
   ): Promise<StandardServiceRequestResult> {
-    requireTurnIdentity(identity);
+    const boundIdentity = structuredClone(identity);
+    requireTurnIdentity(boundIdentity);
     const frozenCall = structuredClone(call);
-    const expectedDigest = tenantBrokerApprovalDigest(identity, frozenCall);
-    const value = parseToolResult(await this.withClient(identity, (client) =>
+    const expectedDigest = tenantBrokerApprovalDigest(boundIdentity, frozenCall);
+    const value = parseToolResult(await this.withClient(boundIdentity, (client) =>
       client.callTool("services_request", {
         service_id: frozenCall.service_id,
         tool_id: frozenCall.tool_id,
@@ -253,17 +458,17 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       || !Number.isInteger(value.expires_at)
       || value.expires_at * 1_000 <= this.now()
       || value.argument_digest !== expectedDigest
-      || this.approvals.has(value.approval_id)
     ) {
       throw new Error("standard_service_broker_approval_invalid");
     }
-    this.approvals.set(value.approval_id, {
-      identity: structuredClone(identity),
+    const created = await this.approvalStore.create(structuredClone({
+      approval_id: value.approval_id,
+      identity: boundIdentity,
       call: frozenCall,
-      digest: expectedDigest,
-      expiresAtMs: value.expires_at * 1_000,
-      consumed: false,
-    });
+      argument_digest: expectedDigest,
+      expires_at: new Date(value.expires_at * 1_000).toISOString(),
+    }));
+    if (!created) throw new Error("standard_service_broker_approval_invalid");
     return {
       approval_id: value.approval_id,
       argument_digest: expectedDigest,
@@ -273,22 +478,32 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
   }
 
   async confirm(identity: StandardServiceIdentity, approvalId: string): Promise<StandardServiceResult> {
-    requireTurnIdentity(identity);
-    const pending = this.approvals.get(approvalId);
+    const boundIdentity = structuredClone(identity);
+    requireTurnIdentity(boundIdentity);
+    if (!APPROVAL_ID.test(approvalId)) {
+      throw new Error("standard_service_broker_approval_binding_invalid");
+    }
+    const consumed = await this.approvalStore.consume({
+      approval_id: approvalId,
+      identity: structuredClone(boundIdentity),
+      now_ms: this.now(),
+    });
+    const pending = consumed === null ? null : structuredClone(consumed);
+    const expiresAtMs = Date.parse(pending?.expires_at ?? "");
     if (
-      !APPROVAL_ID.test(approvalId)
-      || !pending
-      || pending.consumed
-      || pending.expiresAtMs <= this.now()
-      || !sameIdentity(identity, pending.identity)
-      || tenantBrokerApprovalDigest(pending.identity, pending.call) !== pending.digest
+      !pending
+      || pending.approval_id !== approvalId
+      || !sameIdentity(boundIdentity, pending.identity)
+      || !ARGUMENT_DIGEST.test(pending.argument_digest)
+      || !Number.isFinite(expiresAtMs)
+      || expiresAtMs <= this.now()
+      || tenantBrokerApprovalDigest(pending.identity, pending.call) !== pending.argument_digest
     ) {
       throw new Error("standard_service_broker_approval_binding_invalid");
     }
-    // Consume before the remote call. A lost response must never make an exact
-    // one-use effect look safe to retry.
-    pending.consumed = true;
-    const value = requireCompleted(parseToolResult(await this.withClient(identity, (client) =>
+    // The store consumed before the remote call. A lost response must never
+    // make an exact one-use effect look safe to retry.
+    const value = requireCompleted(parseToolResult(await this.withClient(boundIdentity, (client) =>
       client.callTool("services_confirm", { approval_id: approvalId }))));
     const ids = pending.call.service_id === "visual"
       && pending.call.tool_id === "inspect-issued-target"
@@ -358,6 +573,8 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     const client = await this.openClient(identity);
     try {
       return await action(client);
+    } catch {
+      throw brokerClientError("call");
     } finally {
       await client.close().catch(() => {});
     }
@@ -365,6 +582,10 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
 
   private async openClient(identity: StandardServiceIdentity): Promise<TenantBrokerClient> {
     requireTurnIdentity(identity);
+    const endpoint = new URL(this.endpoint);
+    if (!this.clientFactory && !(await resolveAllowedMcpHost(endpoint.hostname))) {
+      throw new Error("standard_service_broker_endpoint_unsafe");
+    }
     const authorization = await this.authorization(structuredClone(identity));
     const expiresAt = Date.parse(authorization?.expires_at ?? "");
     if (
@@ -377,20 +598,22 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       throw new Error("standard_service_broker_authorization_invalid_or_expired");
     }
     if (this.clientFactory) {
-      const client = await this.clientFactory({
-        identity: structuredClone(identity),
-        bearerToken: authorization.bearer_token,
-        channelSecret: authorization.channel_secret,
-      });
+      let client: TenantBrokerClient | undefined;
       try {
+        client = await this.clientFactory({
+          identity: structuredClone(identity),
+          bearerToken: authorization.bearer_token,
+          channelSecret: authorization.channel_secret,
+        });
         await client.connect();
         return client;
-      } catch (error) {
-        await client.close().catch(() => {});
-        throw error;
+      } catch {
+        await client?.close().catch(() => {});
+        throw brokerClientError("connect");
       }
     }
-    const transport = new StreamableHTTPClientTransport(new URL(this.endpoint), {
+    const transport = new StreamableHTTPClientTransport(endpoint, {
+      fetch: guardedTenantBrokerFetch(endpoint),
       requestInit: {
         headers: {
           Authorization: `Bearer ${authorization.bearer_token}`,
@@ -407,9 +630,9 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
     try {
       await adapter.connect();
       return adapter;
-    } catch (error) {
+    } catch {
       await adapter.close().catch(() => {});
-      throw error;
+      throw brokerClientError("connect");
     }
   }
 

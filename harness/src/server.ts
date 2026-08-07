@@ -52,7 +52,11 @@ import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
-import { withAuthorStandardServicesAuthority } from "./ports/impl/leafStandardServicesResolver.js";
+import {
+  withAuthorStandardServicesAuthority,
+  type HumanApprovalHostInput,
+  type LeafStandardServicesHumanApprovalHost,
+} from "./ports/impl/leafStandardServicesResolver.js";
 
 export { DEFAULT_TENANT };
 
@@ -569,7 +573,13 @@ export interface Harness {
  * to stay hermetic); when omitted the gate resolves per-request from the environment via
  * resolveHarnessAuth() — so the live serve path needs no code change, only the env vars.
  */
-export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthConfig }): Harness {
+export function createHarness(ports: HarnessPorts, opts?: {
+  auth?: HarnessAuthConfig;
+  standardServicesApproval?: {
+    dispatchSecret: string;
+    host: LeafStandardServicesHumanApprovalHost;
+  };
+}): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
 
@@ -580,6 +590,45 @@ export function createHarness(ports: HarnessPorts, opts?: { auth?: HarnessAuthCo
     try {
       if (method === "GET" && path === "/health") {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
+      }
+
+      if (method === "POST" && path.startsWith("/internal/standard-services/approvals/")) {
+        const configured = opts?.standardServicesApproval;
+        const provided = authorityHeader(req, "x-dispatch-secret") ?? "";
+        if (
+          !configured?.dispatchSecret
+          || !provided
+          || !secretsEqual(provided, configured.dispatchSecret)
+        ) {
+          return send(res, 401, { error: { code: "approval_host_unauthorized", message: "approval host authority is required" } });
+        }
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("pragma", "no-cache");
+        const body = await readJsonBody(req, 64 * 1024);
+        if (path === "/internal/standard-services/approvals/review") {
+          try {
+            const reviewed = await configured.host.review({
+              approval_id: requiredText(body, "approval_id"),
+              argument_digest: requiredText(body, "argument_digest"),
+              tenant_id: requiredText(body, "tenant_id"),
+              subject_id: requiredText(body, "subject_id"),
+            });
+            return reviewed
+              ? send(res, 200, reviewed)
+              : send(res, 404, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+          } catch {
+            return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+          }
+        }
+        if (path === "/internal/standard-services/approvals/execute") {
+          try {
+            const receipt = await configured.host.execute(body as unknown as HumanApprovalHostInput);
+            return send(res, 200, receipt);
+          } catch {
+            return send(res, 409, { error: { code: "approval_unavailable", message: "approval is unavailable" } });
+          }
+        }
+        return send(res, 404, { error: { code: "not_found", message: "route not found" } });
       }
 
       // F5 caller-auth gate: every non-health route requires the shared secret when the

@@ -83,13 +83,17 @@ import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { composeRunnerCapabilities, type RunnerServicesAttachment } from "./runnerCapabilities.js";
 import { RUNNER_CAPABILITY_PROFILES, type RunnerCapabilityProfile } from "./standardServices.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
-import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import {
+  resolveStandardServicesSession,
+  snapshotTrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
 import type {
   StandardServicesResolver,
   TrustedStandardServicesContext,
 } from "./standardServicesRuntime.js";
 import { findTool } from "../../registry/registerTool.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
+import { GrantRequiredError } from "./oauthGrantProvider.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces this file relies on (documented above,
@@ -529,6 +533,8 @@ function summarizeEnvelope(envelope: ResultEnvelope): string {
 const STABLE_RUNNER_ERRORS = new Set([
   "agent_sdk_turn_broker_failed",
   "agent_sdk_turn_failed",
+  "agent_sdk_turn_input_invalid",
+  "agent_sdk_turn_oauth_failed",
   "agent_sdk_turn_query_failed",
   "agent_sdk_turn_sdk_setup_failed",
   "standard_services_attachment_expired",
@@ -545,13 +551,31 @@ function isStableRunnerError(message: string): boolean {
   return STABLE_RUNNER_ERRORS.has(message);
 }
 
+function safeErrorMessage(error: unknown): string | undefined {
+  try {
+    if (!(error instanceof Error)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "message");
+    return descriptor && "value" in descriptor && typeof descriptor.value === "string"
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanError(code: string): Error {
+  const error = new Error(code);
+  error.stack = `${error.name}: ${code}`;
+  return error;
+}
+
 function stageError(error: unknown, fallback: string): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  return new Error(isStableRunnerError(message) ? message : fallback);
+  const message = safeErrorMessage(error);
+  return new Error(message !== undefined && isStableRunnerError(message) ? message : fallback);
 }
 
 function publicRunnerError(error: unknown, grant: AgentGrant): Error {
-  const raw = error instanceof Error ? error.message : String(error);
+  const raw = safeErrorMessage(error) ?? "";
   // Exact allowlisted codes are public protocol values. Check them before the
   // token-shaped fallback pass, which would otherwise redact a long underscore
   // code as if it were a credential.
@@ -562,6 +586,96 @@ function publicRunnerError(error: unknown, grant: AgentGrant): Error {
   const wrapped = new Error(message);
   wrapped.stack = `${wrapped.name}: ${message}`;
   return wrapped;
+}
+
+function isRecognizedGrantRequired(error: unknown, tenantId: string): boolean {
+  try {
+    if (!(error instanceof GrantRequiredError)) return false;
+    if (Object.getPrototypeOf(error) !== GrantRequiredError.prototype) return false;
+    const tenant = Object.getOwnPropertyDescriptor(error, "tenantId");
+    const marker = Object.getOwnPropertyDescriptor(error, "grantRequired");
+    return tenant?.value === tenantId && marker?.value === true;
+  } catch {
+    return false;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isJsonBinding(value: unknown, seen: Set<unknown> = new Set()): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonBinding(item, seen))
+    : isPlainRecord(value) && Object.values(value).every((item) => isJsonBinding(item, seen));
+  seen.delete(value);
+  return valid;
+}
+
+function deepFreeze<T>(value: T, seen: Set<unknown> = new Set()): T {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested, seen);
+  return Object.freeze(value);
+}
+
+function snapshotTurnInput(input: ConverseTurnInput): ConverseTurnInput {
+  let snapshot: ConverseTurnInput;
+  try {
+    snapshot = structuredClone(input);
+  } catch {
+    throw cleanError("agent_sdk_turn_input_invalid");
+  }
+  const ids = [snapshot.tenant_id, snapshot.session_id, snapshot.turn_id, snapshot.drawing_id];
+  const messagesValid = Array.isArray(snapshot.messages) && snapshot.messages.every((message) => (
+    isPlainRecord(message)
+    && (message.role === "user" || message.role === "assistant")
+    && typeof message.text === "string"
+  ));
+  const imagesValid = snapshot.images === undefined || (
+    Array.isArray(snapshot.images)
+    && snapshot.images.every((image) => isPlainRecord(image)
+      && typeof image.media_type === "string"
+      && typeof image.data === "string")
+  );
+  const confirm = snapshot.confirm;
+  const confirmValid = confirm === undefined || (
+    isPlainRecord(confirm)
+    && TRUSTED_CONTEXT_ID.test(confirm.confirmation_id)
+    && typeof confirm.approved === "boolean"
+    && isPlainRecord(confirm.proposal)
+    && TRUSTED_CONTEXT_ID.test(confirm.proposal.tool)
+    && isPlainRecord(confirm.proposal.params)
+    && isJsonBinding(confirm.proposal.params)
+    && (confirm.proposal.dwg === undefined || TRUSTED_CONTEXT_ID.test(confirm.proposal.dwg))
+    && (confirm.proposal.capability === undefined || typeof confirm.proposal.capability === "string")
+  );
+  const grant = snapshot.credential_grant;
+  const grantValid = grant === undefined || (
+    isPlainRecord(grant)
+    && (grant.kind === "api_key" || grant.kind === "oauth")
+    && (grant.kind === "api_key"
+      ? typeof grant.api_key === "string"
+      : typeof grant.oauth_token === "string")
+  );
+  if (
+    ids.some((value) => typeof value !== "string" || !TRUSTED_CONTEXT_ID.test(value))
+    || !messagesValid
+    || (snapshot.text !== undefined && typeof snapshot.text !== "string")
+    || !imagesValid
+    || !confirmValid
+    || (snapshot.model !== undefined && typeof snapshot.model !== "string")
+    || !grantValid
+  ) {
+    throw cleanError("agent_sdk_turn_input_invalid");
+  }
+  return deepFreeze(snapshot);
 }
 
 function validateStandardServicesContext(
@@ -578,13 +692,7 @@ function validateStandardServicesContext(
   // the resolver after this gate has passed.
   let trusted: TrustedStandardServicesContext;
   try {
-    trusted = Object.freeze({
-      tenant_id: context.tenant_id,
-      session_id: context.session_id,
-      subscription_mount_id: context.subscription_mount_id,
-      authority_session_id: context.authority_session_id,
-      authority_turn_id: context.authority_turn_id,
-    });
+    trusted = snapshotTrustedStandardServicesContext(context);
   } catch {
     throw new Error("standard_services_context_invalid");
   }
@@ -632,11 +740,12 @@ export class AgentSdkTurnRunner implements ConverseRunner {
   ) {}
 
   async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
+    const turnInput = snapshotTurnInput(input);
     // Product authority must match the requested turn before any credential,
     // repository, broker, resolver, or SDK dependency is touched. In particular,
     // an approved confirmation is not permission to execute under swapped context.
     const standardServicesContext = validateStandardServicesContext(
-      input,
+      turnInput,
       opts?.standardServicesContext,
       this.opts.standardServicesResolver !== undefined,
     );
@@ -646,11 +755,19 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // call, so the HTTP shell (server.ts /turn route) sees it before any NDJSON output
     // has started and can answer with a clean non-stream 401 (converse.ts doc: "401
     // {grant_required:true,...}") - the SAME mechanism /author already relies on.
-    const grant = await this.ports.oauth.getGrant(input.tenant_id);
+    let grant: AgentGrant;
     try {
-      if (input.confirm) {
+      grant = await this.ports.oauth.getGrant(turnInput.tenant_id);
+    } catch (error) {
+      if (isRecognizedGrantRequired(error, turnInput.tenant_id)) {
+        throw new GrantRequiredError(turnInput.tenant_id);
+      }
+      throw cleanError("agent_sdk_turn_oauth_failed");
+    }
+    try {
+      if (turnInput.confirm) {
         yield* this.runConfirm(
-          input,
+          turnInput,
           grant,
           opts?.signal,
           opts?.planFirst === true,
@@ -659,7 +776,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         return;
       }
       yield* this.driveSession(
-        input,
+        turnInput,
         grant,
         opts?.signal,
         opts?.planFirst === true,

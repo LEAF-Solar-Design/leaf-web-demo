@@ -39,7 +39,6 @@ export * from "./ports/impl/standardServicesRuntime.js";
 export * from "./ports/impl/tenantBrokerStandardServiceProvider.js";
 export * from "./ports/impl/runnerCapabilities.js";
 export * from "./ports/impl/standardServicesFacade.js";
-export * from "./ports/impl/gatewayStandardServiceProvider.js";
 
 // Hermetic fakes (contract-test doubles; also the CI path for consumers)
 export * from "./ports/fakes/fakeAgentRunner.js";

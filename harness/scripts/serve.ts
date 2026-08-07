@@ -74,9 +74,16 @@ import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import {
   AuthorStandardServicesRunner,
+  LeafStandardServicesHumanApprovalHost,
+  parseStandardServicesEnvironment,
   StandardServicesOAuthGrantProvider,
   standardServicesResolverFromEnv,
 } from "../src/ports/impl/leafStandardServicesResolver.js";
+import {
+  assertTenantBrokerApprovalCatalog,
+  createTenantBrokerApprovalStore,
+  type TenantBrokerApprovalStoreHandle,
+} from "../src/ports/impl/tenantBrokerApprovalStore.js";
 import type { StandardServicesResolver } from "../src/vendor/mushy-author/index.js";
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
@@ -99,6 +106,7 @@ const TENANT_FIXTURE =
   process.env.LEAF_TENANT_FIXTURE ?? join(REPO_ROOT, "harness", "test", "fixtures", "tenant-repo");
 let sessionStoreHandle: SessionStoreHandle | null = null;
 let instantExecutorClient: HttpInstantExecutorClient | null = null;
+let tenantBrokerApprovalStoreHandle: TenantBrokerApprovalStoreHandle | null = null;
 
 // Defense in depth: redact any token-shaped value from anything we log. We never
 // read or print the grant ourselves, but a stray error string must never leak one.
@@ -173,7 +181,7 @@ function spineTurnRunner(
 }
 
 /** Compose the real multi-tenant ports. */
-function buildPorts(): HarnessPorts {
+function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts {
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
@@ -191,7 +199,6 @@ function buildPorts(): HarnessPorts {
     log("[harness] author runner: AgentSdkRunner (structured source submission; generated code executes only through broker)");
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
-  const standardServicesResolver = standardServicesResolverFromEnv();
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
@@ -263,6 +270,7 @@ async function validatePostgresStartup(): Promise<void> {
       "harness_confirmations",
       "harness_usage",
       "harness_tenant_repo_leases",
+      "harness_tenant_mcp_approvals",
     ];
     const columnRows = await pool.query<HarnessColumn>(
       `SELECT table_name, column_name, data_type, is_nullable
@@ -287,6 +295,7 @@ async function validatePostgresStartup(): Promise<void> {
       "idx_harness_confirmations_session",
       "idx_harness_usage_session",
       "idx_harness_tenant_repo_leases_expiry",
+      "idx_harness_tenant_mcp_approvals_expiry",
     ];
     const indexRows = await pool.query<HarnessIndex>(
       `SELECT indexname, indexdef
@@ -300,6 +309,10 @@ async function validatePostgresStartup(): Promise<void> {
       constraints: constraintRows.rows,
       indexes: indexRows.rows,
     });
+    assertTenantBrokerApprovalCatalog({
+      columns: columnRows.rows,
+      indexes: indexRows.rows,
+    });
   } finally {
     await pool.end();
   }
@@ -307,7 +320,29 @@ async function validatePostgresStartup(): Promise<void> {
 
 async function main(): Promise<void> {
   await validatePostgresStartup();
-  const server: Server = createHarness(buildPorts()).listen(HARNESS_PORT);
+  const standardServicesConfigured = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
+  tenantBrokerApprovalStoreHandle = standardServicesConfigured
+    ? createTenantBrokerApprovalStore()
+    : null;
+  const standardServicesResolver = standardServicesResolverFromEnv(
+    process.env,
+    undefined,
+    tenantBrokerApprovalStoreHandle?.store,
+  );
+  const standardServicesApproval = standardServicesResolver && tenantBrokerApprovalStoreHandle
+    ? {
+        dispatchSecret: (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim(),
+        host: new LeafStandardServicesHumanApprovalHost({
+          brokerEndpoint: (process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim(),
+          environment: parseStandardServicesEnvironment(process.env.LEAF_RUNTIME_ENV),
+          approvalStore: tenantBrokerApprovalStoreHandle.store,
+        }),
+      }
+    : undefined;
+  const server: Server = createHarness(
+    buildPorts(standardServicesResolver),
+    standardServicesApproval ? { standardServicesApproval } : undefined,
+  ).listen(HARNESS_PORT);
   server.on("listening", () => {
     log(
       `[harness] listening on http://127.0.0.1:${HARNESS_PORT}` +
@@ -334,6 +369,9 @@ async function main(): Promise<void> {
         },
       );
       instantExecutorClient?.close();
+      void (tenantBrokerApprovalStoreHandle?.close() ?? Promise.resolve()).catch(
+        (error: unknown) => log(`[harness] tenant MCP approval store close failed: ${(error as Error).message}`),
+      );
     },
   });
   process.on("SIGINT", () => shutdown("SIGINT"));

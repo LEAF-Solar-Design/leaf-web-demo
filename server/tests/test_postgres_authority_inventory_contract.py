@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 30)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 31)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -124,6 +124,7 @@ REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
     "LEAF_HARNESS_SESSION_STORE": {
         "harness_sessions", "harness_turns", "harness_events",
         "harness_confirmations", "harness_usage", "harness_tenant_repo_leases",
+        "harness_tenant_mcp_approvals",
     },
     "LEAF_CUSTOMIZATION_STORE": {
         "customization_change_sets",

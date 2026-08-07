@@ -430,7 +430,8 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
     """Fold the recent event log into `[{role, text}, ...]`: a `user` message
     per prior turn's `turn_started.data.text` (confirm-only turns contribute no
     user text) and an `assistant` message per prior turn's concatenated
-    `text_delta.data.text`, but ONLY for turns that actually completed
+    `text_delta.data.text` plus any validated standard-service receipt, but ONLY
+    for turns that actually completed
     (`turn_complete`/`error` seen) — an in-flight turn never contributes a
     partial assistant message. `exclude_turn_id` keeps the CURRENT turn (whose
     `turn_started` was just appended) out of its own prior context."""
@@ -456,6 +457,38 @@ def _prior_messages(session_id: str, exclude_turn_id: str) -> List[Dict[str, str
             piece = data.get("text")
             if isinstance(piece, str):
                 slot["parts"].append(piece)
+        elif etype == "standard_service_approval_receipt":
+            receipt_id = data.get("receipt_id")
+            artifact_ids = data.get("artifact_ids", [])
+            valid_receipt = (
+                data.get("status") == "completed"
+                and isinstance(receipt_id, str)
+                and len(receipt_id) == 64
+                and all(char in "0123456789abcdef" for char in receipt_id)
+            )
+            valid_artifacts = (
+                isinstance(artifact_ids, list)
+                and len(artifact_ids) <= 32
+                and all(
+                    isinstance(value, str)
+                    and 1 <= len(value) <= 256
+                    and value[0] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+                    and all(
+                        char in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+                        for char in value
+                    )
+                    for value in artifact_ids
+                )
+            )
+            if valid_receipt and valid_artifacts:
+                suffix = (
+                    f" Artifacts: {', '.join(artifact_ids)}."
+                    if artifact_ids else ""
+                )
+                slot["parts"].append(
+                    f"\n\nStandard service approval completed. "
+                    f"Receipt: {receipt_id}.{suffix}"
+                )
         elif etype in ("turn_complete", "error"):
             slot["terminal"] = True
 

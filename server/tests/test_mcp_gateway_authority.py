@@ -353,6 +353,91 @@ def test_subscription_mount_never_forwards_secret_across_redirect(monkeypatch):
     monkeypatch.setattr("requests.get", get)
     with pytest.raises(mcp_authority.McpAuthorityError):
         mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+
+def test_human_approval_host_uses_fixed_private_route_and_closes(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "dispatch-secret")
+    response = StreamingGrantResponse(b'{"status":"pending"}')
+    seen = {}
+
+    def post(url, *, headers, json, timeout, allow_redirects, stream):
+        seen.update(
+            url=url,
+            headers=headers,
+            json=json,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            stream=stream,
+        )
+        return response
+
+    monkeypatch.setattr("requests.post", post)
+    assert mcp_gateway._harness_approval_call("review", {"approval_id": "x"}) == {
+        "status": "pending"
+    }
+    assert seen == {
+        "url": "http://harness.internal:8120/internal/standard-services/approvals/review",
+        "headers": {
+            "X-Dispatch-Secret": "dispatch-secret",
+            "Content-Type": "application/json",
+        },
+        "json": {"approval_id": "x"},
+        "timeout": 5,
+        "allow_redirects": False,
+        "stream": True,
+    }
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://user:password@harness.example",
+        "https://harness.example/attacker-path",
+        "https://harness.example?redirect=1",
+        "file:///tmp/harness",
+    ],
+)
+def test_human_approval_host_rejects_non_origin_configuration_before_network(
+    monkeypatch, base
+):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", base)
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "dispatch-secret")
+    post = lambda *_args, **_kwargs: pytest.fail("network must not be reached")
+    monkeypatch.setattr("requests.post", post)
+
+    with pytest.raises(mcp_authority.McpAuthorityError, match="unavailable"):
+        mcp_gateway._harness_approval_call("review", {})
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        StreamingGrantResponse(
+            b'{}', headers={"Content-Length": str(64 * 1024 + 1)}
+        ),
+        StreamingGrantResponse(b"x" * (64 * 1024 + 100)),
+        StreamingGrantResponse(b'{"status":"one","status":"two"}'),
+        StreamingGrantResponse(b'{"status":'),
+        StreamingGrantResponse(b"", read_error=OSError("private transport")),
+    ],
+    ids=["declared", "actual", "duplicate-key", "malformed", "transport"],
+)
+def test_human_approval_host_rejects_unbounded_or_invalid_response(
+    monkeypatch, response
+):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "dispatch-secret")
+    monkeypatch.setattr("requests.post", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(mcp_authority.McpAuthorityError) as exc:
+        mcp_gateway._harness_approval_call("review", {})
+
+    assert "private transport" not in str(exc.value)
+    assert response.closed is True
+    if response._body.startswith(b"x"):
+        assert response.returned_bytes == 64 * 1024 + 1
     assert response.closed is True
 
 
@@ -532,6 +617,188 @@ def test_human_token_is_bound_to_exact_approval_and_digest(authority):
     assert claims["approval_id"] == "approval_12345678"
     assert claims["argument_digest"] == "a" * 64
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receipt(
+    authority, monkeypatch
+):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def approval_call(path, payload):
+        calls.append((path, payload))
+        if path == "review":
+            return {
+                "status": "pending",
+                "identity": {
+                    "tenant_id": TENANT,
+                    "subject_id": SUBJECT,
+                    "session_id": authority_session_id,
+                    "authority_turn_id": TURN,
+                    "subscription_mount_id": MOUNT,
+                    "runner_profile_id": "spine",
+                },
+            }
+        assert path == "execute"
+        return {
+            "status": "completed",
+            "receipt_id": "b" * 64,
+            "artifact_ids": ["artifact-safe"],
+            "result": "must-not-be-reflected",
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={
+            "approval_id": "approval_12345678",
+            "argument_digest": "a" * 64,
+        },
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "completed",
+        "receipt_id": "b" * 64,
+        "artifact_ids": ["artifact-safe"],
+    }
+    assert len(calls) == 2
+    assert calls[0] == (
+        "review",
+        {
+            "approval_id": "approval_12345678",
+            "argument_digest": "a" * 64,
+            "tenant_id": TENANT,
+            "subject_id": SUBJECT,
+        },
+    )
+    execute_payload = calls[1][1]
+    human_claims = decode(
+        execute_payload["human_bearer"],
+        kms.public,
+        "urn:leaf:tenant-mcp-approval",
+    )
+    attachment_claims = decode(
+        execute_payload["attachment"]["bearer_token"],
+        kms.public,
+        "urn:leaf:tenant-mcp-broker",
+    )
+    for claims in (human_claims, attachment_claims):
+        assert claims["tenant_id"] == TENANT
+        assert claims["subject_id"] == SUBJECT
+        assert claims["session_id"] == authority_session_id
+        assert claims["authority_turn_id"] == TURN
+        assert claims["subscription_mount_id"] == MOUNT
+        assert claims["runner_profile_id"] == "spine"
+    assert human_claims["approval_id"] == "approval_12345678"
+    assert human_claims["argument_digest"] == "a" * 64
+    assert execute_payload["identity"] == {
+        "tenant_id": TENANT,
+        "subject_id": SUBJECT,
+        "session_id": authority_session_id,
+        "authority_turn_id": TURN,
+        "subscription_mount_id": MOUNT,
+        "runner_profile_id": "spine",
+    }
+    response_text = response.text
+    assert execute_payload["human_bearer"] not in response_text
+    assert execute_payload["attachment"]["bearer_token"] not in response_text
+    assert execute_payload["attachment"]["channel_secret"] not in response_text
+    assert "must-not-be-reflected" not in response_text
+    receipt_events = [
+        event for event in session_store.recent_events(authority_session_id, 20)
+        if event["type"] == "standard_service_approval_receipt"
+    ]
+    assert receipt_events[-1]["data"] == {
+        "status": "completed",
+        "receipt_id": "b" * 64,
+        "artifact_ids": ["artifact-safe"],
+    }
+
+
+@pytest.mark.parametrize(
+    "review_identity",
+    [
+        {
+            "tenant_id": TENANT,
+            "subject_id": OTHER_SUBJECT,
+            "session_id": "session-other",
+            "authority_turn_id": TURN,
+            "subscription_mount_id": MOUNT,
+            "runner_profile_id": "spine",
+        },
+        None,
+    ],
+    ids=["cross-subject", "missing-binding"],
+)
+def test_human_execution_fails_before_broker_call_for_unowned_binding(
+    authority, monkeypatch, review_identity
+):
+    client, _authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    calls: list[str] = []
+
+    def approval_call(path, _payload):
+        calls.append(path)
+        assert path == "review"
+        if review_identity is None:
+            return {"status": "pending"}
+        return {"status": "pending", "identity": review_identity}
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == 409
+    assert calls == ["review"]
+    assert kms.sign_calls == []
+
+
+def test_human_execution_rechecks_mount_before_mint_or_execute(authority, monkeypatch):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mcp_gateway,
+        "_harness_approval_call",
+        lambda path, _payload: calls.append(path) or {
+            "status": "pending",
+            "identity": {
+                "tenant_id": TENANT,
+                "subject_id": SUBJECT,
+                "session_id": authority_session_id,
+                "authority_turn_id": TURN,
+                "subscription_mount_id": MOUNT,
+                "runner_profile_id": "spine",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mcp_authority,
+        "verify_subscription_mount",
+        lambda *_args: (_ for _ in ()).throw(mcp_authority.McpMountDenied()),
+    )
+
+    response = client.post(
+        "/api/mcp/gateway/approvals/execute",
+        json={"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        headers={"Authorization": "Bearer test-human"},
+    )
+
+    assert response.status_code == 403
+    assert calls == ["review"]
+    assert kms.sign_calls == []
 
 
 @pytest.mark.parametrize(

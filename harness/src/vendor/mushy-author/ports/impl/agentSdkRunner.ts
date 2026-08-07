@@ -44,7 +44,10 @@ import { grantSecrets, redactSecrets } from "../../redact.js";
 import { scrubSecrets } from "./envScrub.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
-import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import {
+  resolveStandardServicesSession,
+  snapshotTrustedStandardServicesContext,
+} from "./standardServicesRuntime.js";
 import type { StandardServicesResolver } from "./standardServicesRuntime.js";
 
 // --------------------------------------------------------------------------- //
@@ -468,6 +471,9 @@ export class AgentSdkRunner implements AgentRunner {
   }
 
   private async runInner(input: AgentRunInput): Promise<AgentRunResult> {
+    const standardServicesContext = input.standardServicesContext === undefined
+      ? undefined
+      : snapshotTrustedStandardServicesContext(input.standardServicesContext);
     const authorStartedAt = Date.now();
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
@@ -598,18 +604,23 @@ export class AgentSdkRunner implements AgentRunner {
     const abort = new AbortController();
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
-    const services = this.opts.standardServicesResolver && input.standardServicesContext
-      ? createStandardServicesFacade({
+    let services: ReturnType<typeof createStandardServicesFacade> | undefined;
+    if (this.opts.standardServicesResolver && standardServicesContext) {
+      try {
+        services = createStandardServicesFacade({
           sdk,
           z,
           ...(await resolveStandardServicesSession(
             this.opts.standardServicesResolver,
-            input.standardServicesContext,
+            standardServicesContext,
             "author",
           )),
           profile: "author",
-        })
-      : undefined;
+        });
+      } catch {
+        throw new Error("standard_services_resolver_setup_failed");
+      }
+    }
     const composition = composeRunnerCapabilities({
       profile: "author",
       private_mcp_servers: registry

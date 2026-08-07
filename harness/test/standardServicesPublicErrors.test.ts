@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createStandardServicesFacade,
@@ -10,7 +10,7 @@ type Handler = (args: Record<string, unknown>) => Promise<{
   isError?: boolean;
 }>;
 
-function catalogHandler(provider: FakeStandardServiceProvider): Handler {
+function facadeHandlers(provider: FakeStandardServiceProvider): Map<string, Handler> {
   const handlers = new Map<string, Handler>();
   const sdk = {
     tool(name: string, _description: string, _schema: Record<string, unknown>, handler: Handler) {
@@ -42,7 +42,11 @@ function catalogHandler(provider: FakeStandardServiceProvider): Handler {
     },
     environment: "staging",
   });
-  return handlers.get("services_catalog")!;
+  return handlers;
+}
+
+function catalogHandler(provider: FakeStandardServiceProvider): Handler {
+  return facadeHandlers(provider).get("services_catalog")!;
 }
 
 describe("standard services public errors", () => {
@@ -94,5 +98,19 @@ describe("standard services public errors", () => {
       isError: true,
     });
     expect(JSON.stringify(response)).not.toContain(secret);
+  });
+
+  it("keeps model confirmation pending without invoking the human-only provider method", async () => {
+    const provider = new FakeStandardServiceProvider();
+    const confirm = vi.spyOn(provider, "confirm");
+    const handler = facadeHandlers(provider).get("services_confirm")!;
+
+    const response = await handler({ approval_id: "approval_12345678" });
+
+    expect(response).toEqual({
+      content: [{ type: "text", text: "standard_service_approval_pending_human" }],
+      isError: true,
+    });
+    expect(confirm).not.toHaveBeenCalled();
   });
 });

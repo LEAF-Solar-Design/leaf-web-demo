@@ -228,12 +228,9 @@ export function createStandardServicesFacade(options: StandardServicesFacadeOpti
     ),
     sdk.tool(
       "services_confirm",
-      "Execute one already approved request. The provider uses the stored exact arguments and consumes the approval once.",
+      "Report that a pending request must be approved and executed by the human-authenticated product path.",
       { approval_id: z.string() },
-      async (args) => {
-        try { return result(await provider.confirm(identity, String(args.approval_id ?? ""))); }
-        catch (error) { return failure(error); }
-      },
+      async () => failure(new Error("standard_service_approval_pending_human")),
     ),
     sdk.tool(
       "visual_inspect",

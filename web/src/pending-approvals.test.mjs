@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, it } from 'node:test'
 
-import { listPendingApprovals, resolveApproval } from './converse.js'
+import { approveStandardService, listPendingApprovals, resolveApproval } from './converse.js'
 
 const originalFetch = globalThis.fetch
 
@@ -16,6 +16,24 @@ function response(status, body) {
 }
 
 describe('pending approvals', () => {
+  it('executes a standard service only through the authenticated human route', async () => {
+    let request
+    globalThis.fetch = async (url, options) => {
+      request = { url, options }
+      return response(200, { status: 'completed', receipt_id: 'b'.repeat(64) })
+    }
+
+    const receipt = await approveStandardService('approval_12345678', 'a'.repeat(64))
+
+    assert.equal(receipt.status, 'completed')
+    assert.equal(request.url, '/api/mcp/gateway/approvals/execute')
+    assert.equal(request.options.method, 'POST')
+    assert.deepEqual(JSON.parse(request.options.body), {
+      approval_id: 'approval_12345678',
+      argument_digest: 'a'.repeat(64),
+    })
+  })
+
   it('loads the bounded tenant inbox', async () => {
     let request
     globalThis.fetch = async (url, options) => {

@@ -1422,6 +1422,36 @@ def test_prior_messages_applies_the_byte_bound_on_the_real_path():
     assert _ctx_bytes(messages) < 24 * 120_000
 
 
+def test_prior_messages_exposes_only_the_safe_standard_service_receipt():
+    sess = _new_session("tenant-standard-service-receipt")
+    session_id = sess["session_id"]
+    turn_id = "prior-service-turn"
+    receipt_id = "b" * 64
+    session_store.append_event(session_id, turn_id, "turn_started", {"text": "create it"})
+    session_store.append_event(session_id, turn_id, "turn_complete", {"stop_reason": "end_turn"})
+    session_store.append_event(
+        session_id,
+        turn_id,
+        "standard_service_approval_receipt",
+        {
+            "status": "completed",
+            "receipt_id": receipt_id,
+            "artifact_ids": ["artifact-safe"],
+            "result": "private broker result must not be observed",
+            "bearer_token": "private credential must not be observed",
+        },
+    )
+
+    messages = turn_runner._prior_messages(session_id, exclude_turn_id="current-turn")
+
+    assistant = messages[-1]["text"]
+    assert messages[-1]["role"] == "assistant"
+    assert receipt_id in assistant
+    assert "artifact-safe" in assistant
+    assert "private broker result" not in assistant
+    assert "private credential" not in assistant
+
+
 # --------------------------------------------------------------------------- #
 # The forwarded body must not balloon on non-ASCII text.
 # --------------------------------------------------------------------------- #

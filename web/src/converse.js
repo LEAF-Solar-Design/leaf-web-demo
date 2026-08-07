@@ -244,6 +244,20 @@ export async function listPendingApprovals(sessionId, limit = 100) {
   return Array.isArray(body?.approvals) ? body.approvals : []
 }
 
+// Human-only standard-service approval. The app resolves the stored broker
+// identity, mints both short-lived credentials server-side, executes the exact
+// stored call through the private harness host, and returns only a safe receipt.
+export async function approveStandardService(approvalId, argumentDigest) {
+  const { res, body } = await post('/api/mcp/gateway/approvals/execute', {
+    approval_id: approvalId,
+    argument_digest: argumentDigest,
+  })
+  if (!res.ok) {
+    throw tagged(res, body, `POST /api/mcp/gateway/approvals/execute -> ${res.status}`)
+  }
+  return body
+}
+
 export async function resolveApproval(
   confirmationId, owningSessionId, approved, decisionRecorded = false,
 ) {

@@ -30,7 +30,8 @@
       "0026",
       "0027",
       "0028",
-      "0029"
+      "0029",
+      "0030"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -755,27 +756,29 @@
         "harness_events",
         "harness_confirmations",
         "harness_usage",
-        "harness_tenant_repo_leases"
+        "harness_tenant_repo_leases",
+        "harness_tenant_mcp_approvals"
       ],
       "legacy_source": [
         "LEAF_SESSIONS_DIR session directories",
-        "process-local tenant repository locking"
+        "process-local tenant repository locking",
+        "LEAF_TENANT_MCP_APPROVALS_DIR local approval binding files"
       ],
       "backfill": {
         "command": null,
         "status": "not_implemented",
-        "note": "No harness file-session import command exists. Repository lease rows begin with PostgreSQL use."
+        "note": "No harness file-session or local tenant MCP approval binding import command exists. Repository lease and approval rows begin with PostgreSQL use."
       },
       "parity": {
         "command": "npm test -- test/sessionStoreFactory.test.ts test/tenantRepoLease.test.ts",
         "status": "contract_tests_only",
-        "note": "Tests cover selection and lease fencing, not live session parity."
+        "note": "Tests cover selection, lease fencing, and exact one-use approval binding behavior, not live session or approval parity."
       },
       "cutover_modes": [
         "file",
         "postgres"
       ],
-      "rollback_mode": "Select file only after stopping all authors and exporting PostgreSQL sessions; no export command exists. Repository lease fencing is lost on rollback.",
+      "rollback_mode": "Select file only after stopping all authors and exporting PostgreSQL sessions; no export command exists. Repository lease fencing is lost on rollback, and pending tenant MCP approvals must expire rather than move between stores.",
       "current_selection": {
         "staging": {
           "value": null,

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 
 import type {
   AgentRunInput,
@@ -13,9 +14,13 @@ import type {
   StandardServiceIdentity,
   StandardServicesResolver,
   StandardServicesSessionAttachment,
+  TenantBrokerApprovalStore,
+  TenantBrokerAuthorization,
+  TenantBrokerClient,
   TrustedStandardServicesContext,
 } from "../../vendor/mushy-author/index.js";
 import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/index.js";
+import type { LeafTenantBrokerApprovalStore } from "./tenantBrokerApprovalStore.js";
 
 const MAX_ATTACHMENT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -61,7 +66,7 @@ function runnerProfile(value: unknown): RunnerCapabilityProfileId {
   return profile;
 }
 
-function parseEnvironment(value: string | undefined): "local" | "staging" | "production" {
+export function parseStandardServicesEnvironment(value: string | undefined): "local" | "staging" | "production" {
   const normalized = (value ?? "").trim().toLowerCase();
   if (normalized === "local" || normalized === "development" || normalized === "test") return "local";
   if (normalized === "staging" || normalized === "production") return normalized;
@@ -126,8 +131,14 @@ function parseBrokerEndpoint(value: string, environment: "local" | "staging" | "
 
 async function boundedJson(response: Response): Promise<unknown> {
   const length = response.headers.get("content-length");
-  if (length && Number(length) > MAX_ATTACHMENT_BYTES) {
-    throw new Error("standard_services_exchange_response_too_large");
+  if (length) {
+    const declared = Number(length);
+    if (!Number.isSafeInteger(declared) || declared < 0) {
+      throw new Error("standard_services_exchange_response_invalid");
+    }
+    if (declared > MAX_ATTACHMENT_BYTES) {
+      throw new Error("standard_services_exchange_response_too_large");
+    }
   }
   if (!response.body) throw new Error("standard_services_exchange_response_missing");
   const reader = response.body.getReader();
@@ -196,6 +207,7 @@ export interface LeafStandardServicesResolverOptions {
   brokerEndpoint: string;
   dispatchSecret: string;
   environment: "local" | "staging" | "production";
+  approvalStore: TenantBrokerApprovalStore;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   now?: () => number;
@@ -271,6 +283,7 @@ export class LeafStandardServicesResolver implements StandardServicesResolver {
     }
     const provider = new TenantBrokerStandardServiceProvider({
       endpoint: this.brokerEndpoint.toString(),
+      approvalStore: this.options.approvalStore,
       authorization: async (identity) => {
         for (const key of [
           "tenant_id",
@@ -307,6 +320,7 @@ export class LeafStandardServicesResolver implements StandardServicesResolver {
 export function standardServicesResolverFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl?: FetchLike,
+  approvalStore?: TenantBrokerApprovalStore,
 ): LeafStandardServicesResolver | undefined {
   const appOrigin = (env.LEAF_APP_URL ?? "").trim();
   const brokerEndpoint = (env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim();
@@ -320,13 +334,161 @@ export function standardServicesResolverFromEnv(
     return undefined;
   }
   if (configured !== 3) throw new Error("standard services require LEAF_APP_URL, LEAF_TENANT_MCP_BROKER_URL, and LEAF_APP_DISPATCH_SECRET");
+  if (!approvalStore) throw new Error("standard services require a durable tenant broker approval store");
   return new LeafStandardServicesResolver({
     appOrigin,
     brokerEndpoint,
     dispatchSecret,
-    environment: parseEnvironment(env.LEAF_RUNTIME_ENV),
+    environment: parseStandardServicesEnvironment(env.LEAF_RUNTIME_ENV),
+    approvalStore,
     ...(fetchImpl ? { fetchImpl } : {}),
   });
+}
+
+export interface HumanApprovalHostInput {
+  approval_id: string;
+  argument_digest: string;
+  identity: StandardServiceIdentity;
+  human_bearer: string;
+  attachment: TenantBrokerAuthorization;
+}
+
+export interface HumanApprovalReceipt {
+  status: "completed";
+  receipt_id: string;
+  artifact_ids?: string[];
+}
+
+/** Human-only host adapter. It is never attached to an SDK MCP server. */
+export class LeafStandardServicesHumanApprovalHost {
+  private readonly endpoint: URL;
+  private readonly fetchImpl: FetchLike;
+  private readonly now: () => number;
+
+  constructor(private readonly options: {
+    brokerEndpoint: string;
+    environment: "local" | "staging" | "production";
+    approvalStore: LeafTenantBrokerApprovalStore;
+    fetchImpl?: FetchLike;
+    now?: () => number;
+    providerFactory?: typeof TenantBrokerStandardServiceProvider;
+    clientFactory?: (context: {
+      identity: StandardServiceIdentity;
+      bearerToken: string;
+      channelSecret: string;
+    }) => Promise<TenantBrokerClient>;
+  }) {
+    this.endpoint = parseBrokerEndpoint(options.brokerEndpoint, options.environment);
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.now = options.now ?? Date.now;
+  }
+
+  async review(input: {
+    approval_id: string;
+    argument_digest: string;
+    tenant_id: string;
+    subject_id: string;
+  }): Promise<{ status: "pending"; identity: StandardServiceIdentity } | null> {
+    const binding = await this.options.approvalStore.review({
+      approval_id: input.approval_id,
+      argument_digest: input.argument_digest,
+      tenant_id: input.tenant_id,
+      subject_id: input.subject_id,
+      now_ms: this.now(),
+    });
+    return binding ? { status: "pending", identity: structuredClone(binding.identity) } : null;
+  }
+
+  async execute(input: HumanApprovalHostInput): Promise<HumanApprovalReceipt> {
+    const approvalId = requiredId("approval_id", input.approval_id);
+    if (!/^[A-Za-z0-9_-]{8,256}$/.test(approvalId) || !/^[a-f0-9]{64}$/.test(input.argument_digest)) {
+      throw new Error("standard_services_human_approval_invalid");
+    }
+    const identity: StandardServiceIdentity = {
+      tenant_id: requiredId("tenant_id", input.identity.tenant_id),
+      subject_id: requiredId("subject_id", input.identity.subject_id),
+      session_id: requiredId("session_id", input.identity.session_id),
+      authority_turn_id: requiredId("authority_turn_id", input.identity.authority_turn_id),
+      subscription_mount_id: requiredId("subscription_mount_id", input.identity.subscription_mount_id),
+      runner_profile_id: runnerProfile(input.identity.runner_profile_id),
+    };
+    if (!TOKEN.test(input.human_bearer) || !TOKEN.test(input.attachment.bearer_token)
+      || !TOKEN.test(input.attachment.channel_secret)
+      || Date.parse(input.attachment.expires_at) <= this.now()) {
+      throw new Error("standard_services_human_approval_credential_invalid");
+    }
+    const reviewed = await this.options.approvalStore.review({
+      approval_id: approvalId,
+      argument_digest: input.argument_digest,
+      tenant_id: identity.tenant_id,
+      subject_id: identity.subject_id,
+      now_ms: this.now(),
+    });
+    if (!reviewed) throw new Error("standard_services_human_approval_binding_invalid");
+    for (const key of [
+      "tenant_id", "subject_id", "session_id", "authority_turn_id",
+      "subscription_mount_id", "runner_profile_id",
+    ] as const) {
+      if (reviewed.identity[key] !== identity[key]) {
+        throw new Error("standard_services_human_approval_binding_invalid");
+      }
+    }
+    const approvalUrl = new URL(
+      `/mcp/approvals/${encodeURIComponent(approvalId)}`,
+      this.endpoint.origin,
+    );
+    const response = await this.fetchImpl(approvalUrl, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        authorization: `Bearer ${input.human_bearer}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ argument_digest: input.argument_digest }),
+    });
+    if (response.status !== 200) throw new Error("standard_services_human_approval_rejected");
+    const approved = await boundedJson(response);
+    if (
+      !approved
+      || typeof approved !== "object"
+      || Array.isArray(approved)
+      || Object.keys(approved).length !== 1
+      || (approved as Record<string, unknown>).status !== "approved"
+    ) {
+      throw new Error("standard_services_human_approval_response_invalid");
+    }
+    const Provider = this.options.providerFactory ?? TenantBrokerStandardServiceProvider;
+    const provider = new Provider({
+      endpoint: this.endpoint.toString(),
+      approvalStore: this.options.approvalStore,
+      authorization: async (requested) => {
+        for (const key of [
+          "tenant_id", "subject_id", "session_id", "authority_turn_id",
+          "subscription_mount_id", "runner_profile_id",
+        ] as const) {
+          if (requested[key] !== identity[key]) {
+            throw new Error("standard_services_human_approval_identity_mismatch");
+          }
+        }
+        return structuredClone(input.attachment);
+      },
+      ...(this.options.clientFactory ? { clientFactory: this.options.clientFactory } : {}),
+      now: this.now,
+    });
+    const result = await provider.confirm(identity, approvalId);
+    const artifactIds = result.artifact_ids?.map((artifactId) => requiredId("artifact_id", artifactId));
+    if (artifactIds && artifactIds.length > 32) {
+      throw new Error("standard_services_human_approval_artifacts_invalid");
+    }
+    const receiptId = createHash("sha256")
+      .update(`${approvalId}\0${input.argument_digest}\0${result.content}`)
+      .digest("hex");
+    return {
+      status: "completed",
+      receipt_id: receiptId,
+      ...(artifactIds?.length ? { artifact_ids: artifactIds } : {}),
+    };
+  }
 }
 
 export function withAuthorStandardServicesAuthority<T>(
