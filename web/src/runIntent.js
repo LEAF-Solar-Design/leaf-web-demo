@@ -44,6 +44,13 @@ export function prepareCatalogRunParams(tool, params, context, overlays = {}) {
   return normalizeRunParams(prepared)
 }
 
+export function drawingVersionForRun(tool, context, apsLive) {
+  const isWrite = (tool?.capabilities || []).includes('drawing.write')
+  return isWrite || apsLive === false
+    ? context?.drawingVersion ?? undefined
+    : undefined
+}
+
 export function createCatalogRunContext({
   tenantId, orgId = null, projectId = null, workspace = null,
   selectedVersionId = null, drawingState = null, fallbackDrawingId,

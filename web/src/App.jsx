@@ -37,7 +37,7 @@ import {
 } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
-  dismissRunIntent, prepareCatalogRunParams, stageRunIntent,
+  dismissRunIntent, drawingVersionForRun, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
@@ -1431,7 +1431,7 @@ export default function App() {
         : runToolAsync(tool, merged, executionContext.drawingId, {
           orgId: executionContext.orgId || undefined,
           projectId: executionContext.projectId || undefined,
-          dwgVersion: executionContext.drawingVersion ?? undefined,
+          dwgVersion: drawingVersionForRun(tool, executionContext, health?.aps_live),
           idempotencyKey: idempotencyKey || undefined,
           catalogDigest: (runContext?.toolSnapshot?.catalogDigest
             || createCatalogToolSnapshot(tool).catalogDigest || undefined),
@@ -1447,7 +1447,8 @@ export default function App() {
     }
     return envelope
   }, [agentMode, catalogRunContext, clearAgentMode, dismissRoute, loadCheckout, loadUsage, mock,
-    openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob, shown, writeLocked])
+    health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
+    shown, writeLocked])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool

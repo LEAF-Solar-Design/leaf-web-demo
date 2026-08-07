@@ -3,6 +3,7 @@ import {
   confirmRunIntent,
   createCatalogToolSnapshot,
   createRunIntentState,
+  drawingVersionForRun,
   prepareCatalogRunParams,
   stageRunIntent,
 } from '../src/runIntent.js'
@@ -75,6 +76,22 @@ assert(
 assert(
   prepareCatalogRunParams(authoredWrite, {}, context).height === 100,
   'ordinary JSON-schema defaults must still be applied',
+)
+assert(
+  drawingVersionForRun({ ...tool, capabilities: ['drawing.read'] }, { drawingVersion: 7 }, true) === undefined,
+  'a read tool must not send a drawing version pin to the live APS broker',
+)
+assert(
+  drawingVersionForRun({ ...tool, capabilities: ['drawing.read'] }, { drawingVersion: 7 }) === undefined,
+  'a read tool must fail safe when APS mode is not known',
+)
+assert(
+  drawingVersionForRun({ ...tool, capabilities: ['drawing.read'] }, { drawingVersion: 7 }, false) === 7,
+  'an offline read must keep its exact version pin',
+)
+assert(
+  drawingVersionForRun(tool, { drawingVersion: 7 }, true) === 7,
+  'a drawing.write tool must keep its optimistic concurrency pin',
 )
 
 // Normalize newlines before matching. Some assertions span a line break, so
