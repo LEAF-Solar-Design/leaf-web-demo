@@ -2756,6 +2756,31 @@ def check_docs_noop_filter(text: str) -> None:
     # readable failures; the hash is the contract, and the capability
     # wall means the unguarded scripts hold no credential able to
     # dispatch even if edited.
+    # A COMMENT IS NOT ALWAYS INERT, so the freeze cannot assume it is.
+    #
+    # Bash removes backslash-newline BEFORE it processes comments, so a
+    # full-line comment placed after a continued line is spliced INTO that
+    # command and comments out the remainder of it. `_executable_bash` instead
+    # drops comment lines and joins the continuation to the next CODE line, so
+    # such an edit changes what bash actually runs while leaving the frozen
+    # hash below byte-identical. sol-critic demonstrated exactly that on
+    # PR #508: the mutated script failed under bash and still hashed to
+    # 97ae6184…9214a. Refuse the construct in the frozen scripts outright,
+    # which is stricter than modelling it and cannot itself drift.
+    for step_name, raw in (("tip", tip_step["run"]),
+                           ("manifest", manifest_step["run"]),
+                           ("dispatch", dispatch_step["run"])):
+        raw_lines = raw.splitlines()
+        for idx, line in enumerate(raw_lines[:-1]):
+            if (line.rstrip().endswith("\\")
+                    and raw_lines[idx + 1].lstrip().startswith("#")):
+                raise AssertionError(
+                    f"{step_name} step line {idx + 2}: a full-line comment "
+                    "follows a line continuation. Bash splices it into the "
+                    "continued command and comments out the rest, so this "
+                    "changes behaviour while the frozen hash stays identical. "
+                    "Put the comment above the statement instead.")
+
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
@@ -2778,8 +2803,25 @@ def check_docs_noop_filter(text: str) -> None:
     # secret reference; the one added call is a read-only GET of this repo's
     # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
     # to the tip read already at the top of the loop.
+    # Hash updated again 2026-08-07 (fourth edit): sol-critic returned RED on
+    # PR #508 against the third edit, and all three P1s reproduced. The
+    # classifier now (a) fails CLOSED on every read instead of suppressing a
+    # failed artifact listing with `|| true`, which let a docs-only superseder
+    # classify as `yes` on the strength of its build concluding success, (b)
+    # binds the docs-noop marker to the run's CURRENT attempt, since artifacts
+    # are keyed by run id and an attempt-1 marker otherwise outlives a rerun
+    # whose attempt 2 built real images, and (c) selects the superseding build
+    # by workflow PATH rather than display name, which any other workflow can
+    # also carry. Marker absence is additionally only trusted against a
+    # listing proven whole. Reviewed for dispatch capability: UNCHANGED. Still
+    # exactly ONE `gh workflow run` with the same four inputs, still exactly
+    # one secret reference, and the classifier still makes the same THREE
+    # read-only `gh api` GETs against THIS repo — the run list, one run
+    # record, and that run's artifacts — on `GH_TOKEN="$HOME_TOKEN"`. No new
+    # endpoint, no new repo, no new credential: only the handling of their
+    # failures and the strictness of their matching changed.
     assert frozen == (
-        "97ae6184483f25908fc0429f8af8e96123f20c2e56a99e8cd027aaed5fd9214a"
+        "1d1cca8b3a4c5a181a7b2c245114d6714de2d58ca3702d41875a62aaada85c1e"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3565,6 +3607,52 @@ def check_staging_relay_convergence(text: str) -> None:
         "exhausting the classifier budget must fall to 'unknown', which is "
         "the RED path; defaulting to 'yes' would restore the silent split")
 
+    # EVERY READ IN THE CLASSIFIER FAILS CLOSED.
+    #
+    # sol-critic RED, reproduced: `|| true` on the artifact listing emptied
+    # the result on any transient API failure, the marker check was then
+    # skipped, and a DOCS-ONLY superseder classified as `yes` on the strength
+    # of its build concluding success. That is precisely the green-on-a-split
+    # outcome this guard exists to stop, reachable through one dropped
+    # request. An unproven read must retry, never decide.
+    classifier = re.search(
+        r"^classify_superseder_once\(\) \{\n(.*?)\n\}$", code, re.S | re.M)
+    assert classifier, "the per-poll classification must be its own function"
+    once = classifier.group(1)
+    assert "|| true" not in once, (
+        "no read in the classifier may be suppressed with `|| true`: an "
+        "unproven read must retry, never fall through to a decision")
+    assert once.count("|| return 1") >= 4, (
+        "the run list, the run record, the artifact listing and the "
+        "completeness check must each fail closed with `return 1`; found "
+        f"{once.count('|| return 1')}")
+
+    # A NAME IS NOT AN IDENTITY. Selecting the superseding build by display
+    # name lets any other workflow also called "Build platform images" supply
+    # a colliding marker or conclusion, and adding one would not touch this
+    # file or its frozen hash.
+    assert "select(.path == $path)" in once, (
+        "the superseding build must be selected by workflow PATH, not by its "
+        "display name")
+    assert "BUILD_WORKFLOW_PATH=" in code, "the pinned build path must be declared"
+
+    # ABSENCE ONLY COUNTS AGAINST A LISTING PROVEN WHOLE. A truncated page
+    # says nothing about the entries it did not return, and marker absence is
+    # exactly what promotes the answer to `yes`.
+    assert "(.total_count // 0) <= (.artifacts | length)" in once, (
+        "marker absence may only be trusted when the artifact listing is "
+        "proven complete")
+
+    # THE MARKER IS BOUND TO THE RUN'S CURRENT ATTEMPT. Artifacts are keyed by
+    # run id and NOT by attempt, so an attempt-1 docs marker outlives a rerun
+    # whose attempt 2 built real images. A prefix match would call that rerun
+    # `no` and finish this release on the older tag, landing it on top of the
+    # images the rerun is about to deploy.
+    assert "any(.artifacts[]; .name == $n)" in once, (
+        "the marker must match by EXACT name, not by prefix across attempts")
+    assert "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
+        "the marker name must be bound to the run's CURRENT attempt")
+
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
     # line", so ordinary edits inside the arm stay legal.
@@ -3730,8 +3818,34 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "any completed superseding build counted as a converger",
             mutate(original,
-                   '                  "completed success") echo yes; return 0 ;;\n',
-                   "                  completed*) echo yes; return 0 ;;\n"),
+                   '              "completed success") echo yes ;;\n',
+                   "              completed*) echo yes ;;\n"),
+        ),
+        # --- sol-critic RED on PR #508: the classifier's own read paths ---
+        (
+            "a failed artifact listing suppressed, so absence is assumed and "
+            "a docs-only superseder classifies as `yes`",
+            mutate(original, "|| return 1", "|| true"),
+        ),
+        (
+            "the superseding build selected by display name, which any other "
+            "workflow can also carry",
+            mutate(original, "select(.path == $path)",
+                   'select(.name == "Build platform images")'),
+        ),
+        (
+            "marker absence trusted against a truncated artifact page",
+            mutate(original, "(.total_count // 0) <= (.artifacts | length)",
+                   "(.total_count // 0) >= 0"),
+        ),
+        (
+            "marker matched across rerun attempts, so an attempt-1 docs "
+            "marker outlives a rerun whose attempt 2 built real images",
+            mutate(
+                mutate(original, "any(.artifacts[]; .name == $n)",
+                       "any(.artifacts[]; .name | startswith($n))"),
+                "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT",
+                "docs-noop-$SUP_SHA-attempt-"),
         ),
         (
             "superseder classification skipped, split assumed benign",

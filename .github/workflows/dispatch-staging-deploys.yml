@@ -241,32 +241,77 @@ jobs:
           #           produced a supply set and its own relay converges
           #   unknown its build failed, never appeared, or outlived the
           #           budget; nothing is KNOWN to converge staging
-          superseder_deploys() {
+          # Every read here FAILS CLOSED. A read that cannot be proven
+          # complete retries until the deadline and then answers `unknown`;
+          # it never falls through to a decision. Suppressing a failed read
+          # with `|| true` used to empty the artifact list, skip the marker
+          # check, and classify a DOCS-ONLY superseder as `yes` on the
+          # strength of its build concluding success -- which is exactly the
+          # green-on-a-split outcome this guard exists to stop.
+          BUILD_WORKFLOW_PATH=".github/workflows/build-platform-images.yml"
+          # ONE poll of the superseder's build. Echoes no/yes/unknown only
+          # when the reads PROVE that answer, echoes nothing while the build
+          # has not decided yet, and returns 1 when any read could not be
+          # proven complete. An unproven read is therefore always a retry and
+          # never a decision, and the caller alone owns the retry.
+          classify_superseder_once() {
             SUP_SHA="$1"
+            SUP_RUNS=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SUP_SHA&event=push&per_page=100") \
+              || return 1
+            # Select the build by workflow PATH, not display name. A name is
+            # not an identity: another workflow could also be called "Build
+            # platform images" and supply a colliding marker or conclusion,
+            # and adding one would not change this file or its frozen hash.
+            SUP_RUN=$(printf '%s' "$SUP_RUNS" \
+              | jq -r --arg path "$BUILD_WORKFLOW_PATH" \
+                  '[.workflow_runs[] | select(.path == $path)]
+                   | sort_by(-.id) | first | .id // empty') \
+              || return 1
+            [ -n "$SUP_RUN" ] || return 0
+            # One read carries status, conclusion AND the current attempt.
+            SUP_RECORD=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN") || return 1
+            SUP_ATTEMPT=$(printf '%s' "$SUP_RECORD" | jq -r '.run_attempt // empty')
+            SUP_STATE=$(printf '%s' "$SUP_RECORD" | jq -r '"\(.status) \(.conclusion // "")"')
+            [ -n "$SUP_ATTEMPT" ] || return 1
+            SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100") \
+              || return 1
+            # Marker ABSENCE only counts against a listing proven WHOLE. A
+            # truncated page says nothing about the entries it did not return,
+            # and absence is exactly what promotes this answer to `yes`.
+            printf '%s' "$SUP_ARTIFACTS" \
+              | jq -e '(.total_count // 0) <= (.artifacts | length)' >/dev/null \
+              || return 1
+            # The marker is written in `prepare`, so it lands minutes before
+            # any supply set and decides this early. Bind it to the run's
+            # CURRENT attempt, the same way this workflow names its own marker
+            # above. Artifacts are keyed by run id and NOT by attempt, so an
+            # attempt-1 docs marker outlives a rerun whose attempt 2 built real
+            # images; matching any attempt would call that rerun `no` and
+            # finish this release on the older tag, landing it on top of the
+            # images that rerun is about to deploy.
+            if printf '%s' "$SUP_ARTIFACTS" \
+              | jq -e --arg n "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" \
+                  'any(.artifacts[]; .name == $n)' >/dev/null; then
+              echo no
+              return 0
+            fi
+            case "$SUP_STATE" in
+              "completed success") echo yes ;;
+              completed*) echo unknown ;;
+            esac
+            return 0
+          }
+
+          superseder_deploys() {
             while before_deadline; do
-              SUP_RUN=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SUP_SHA&event=push&per_page=100" \
-                --jq '[.workflow_runs[] | select(.name == "Build platform images")]
-                      | sort_by(-.id) | first | .id // empty' || true)
-              if [ -n "$SUP_RUN" ]; then
-                SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                  "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100" \
-                  || true)
-                # The marker is written in `prepare`, so it lands minutes
-                # before any supply set and decides this early.
-                if [ -n "$SUP_ARTIFACTS" ] && printf '%s' "$SUP_ARTIFACTS" \
-                  | jq -e --arg p "docs-noop-$SUP_SHA-attempt-" \
-                      'any(.artifacts[]; .name | startswith($p))' >/dev/null; then
-                  echo no
+              if VERDICT=$(classify_superseder_once "$1"); then
+                if [ -n "$VERDICT" ]; then
+                  echo "$VERDICT"
                   return 0
                 fi
-                SUP_STATE=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                  "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN" \
-                  --jq '"\(.status) \(.conclusion // "")"' || true)
-                case "$SUP_STATE" in
-                  "completed success") echo yes; return 0 ;;
-                  completed*) echo unknown; return 0 ;;
-                esac
               fi
               sleep "$POLL_SECONDS"
             done
@@ -332,11 +377,27 @@ jobs:
                   # release. This does NOT reopen the sol-critic RED from
                   # PR #497 (relay A's older app landing over relay B's):
                   # that needs a competing deploy, and a docs-only
-                  # superseder has none. The residual it does not remove is
-                  # the pre-existing one: a third, deployable commit can
-                  # merge while a dispatched run is already being watched.
-                  # The tip re-read at the top of the next attempt catches
-                  # it before any further dispatch.
+                  # superseder has none.
+                  #
+                  # KNOWN RESIDUAL, not closed here and deliberately named.
+                  # The re-read shrinks the window to the gap between it and
+                  # the dispatch below, but does not remove it: a DEPLOYABLE
+                  # commit C can merge inside that gap, C's own relay can
+                  # deploy newer images, and because the shared group orders
+                  # neither by dispatch time nor reliably at all, this relay's
+                  # older tag can still execute last. The same residual
+                  # predates this arm and covers a third commit merging while
+                  # a dispatched run is already being watched. No read taken
+                  # BEFORE a dispatch can close it, because the truth can
+                  # change after the read and before the deploy acts. The
+                  # durable fix is to validate deploy authority INSIDE the
+                  # deploy workflow while it already holds the staging
+                  # mutation lock, comparing the requested tag against the
+                  # tip at that moment; that lives in the infra repo and is
+                  # out of scope for this one. Until then the window is
+                  # seconds rather than the classifier's minutes, and the
+                  # failure it can still produce is the one this relay now
+                  # reports loudly rather than the one it used to hide.
                   echo "::warning::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, but $MAIN_SHA published a docs-noop marker: it builds no images and its relay dispatches nothing, so no newer deploy exists and nothing else would converge staging. Finishing $SERVICE on $IMAGE_TAG is what closes the split."
                 elif [ "$CONVERGER" = "yes" ]; then
                   echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. That commit's build succeeded with a supply set, so its own relay converges staging."
