@@ -243,6 +243,7 @@ def test_internal_exchange_binds_app_owned_authority_and_random_channel(authorit
     assert claims["subscription_mount_id"] == MOUNT
     assert claims["runner_profile_id"] == "spine"
     assert claims["plan"] == "pro"
+    assert claims["scope"] == "tenant:services"
     assert set(claims["allowed_effects"]) == {
         "read", "external_read", "write", "external_write"
     }

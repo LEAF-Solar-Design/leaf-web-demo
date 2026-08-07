@@ -220,6 +220,7 @@ def _mint_attachment(
             "allowed_services": list(mcp_authority.PUBLIC_SERVICES),
             "allowed_effects": list(effects),
             "channel_hash": channel_hash,
+            "scope": "tenant:services",
         },
         audience=mcp_authority.attachment_audience(),
         ttl_seconds=mcp_authority.ATTACHMENT_TTL_SECONDS,
