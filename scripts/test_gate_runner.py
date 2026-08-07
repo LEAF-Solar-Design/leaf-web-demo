@@ -43,11 +43,17 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     suites = {suite.id: suite for suite in g.build_suites()}
 
     inventory = suites["server-postgres-authority-inventory"]
-    # 7 since the production selections were recorded (was 6). Mirrors the floor
-    # in run-all-gates.py; BOTH must move together when the contract file gains
-    # a test, and only alongside a re-measured run-all-gates.py floor.
-    assert inventory.expected == 7
+    # 8 since the session_annex selector dependency was added (was 7). Mirrors
+    # the floor in run-all-gates.py; BOTH must move together when the contract
+    # file gains a test, and only alongside a re-measured run-all-gates.py floor.
+    assert inventory.expected == 8
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
+
+    annex = suites["server-session-annex-store"]
+    # 27 collected, 0 skipped: the PostgreSQL halves run against a fake in
+    # place of platform.db, so a no-DB host executes every one of them.
+    assert annex.expected == 27
+    assert "tests/test_session_annex_store.py" in annex.argv
 
     static = suites["platform-static"]
     # 124 collected across the 8 *_static.py files minus the 2 DATABASE_URL-
