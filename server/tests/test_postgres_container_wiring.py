@@ -481,15 +481,43 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
                 f"wrong file. This guard identifies a script by its repository "
                 f"source; teach it before overwriting a tracked destination."
             )
-            # A destination ABOVE the script's directory still reaches it.
-            # Docker merges a directory copy RECURSIVELY, resolving conflicts in
-            # favour of the added content, and ADD auto-extracts a local tar the
-            # same way. So `COPY overlay/ /app/` with an `overlay/scripts/x.py`,
-            # and `ADD payload.tar /app/` with a `scripts/x.py` inside, both
-            # replace a tracked script while naming a destination that equals
-            # neither it nor its parent.
-            if _contains(destination, target):
-                _refuse_if_it_can_reach(source, destination, target)
+            # A destination ABOVE the script's directory still reaches it, and
+            # this guard REFUSES that shape rather than adjudicating it.
+            #
+            # Docker merges a directory copy recursively and auto-extracts a
+            # local tar, so `COPY overlay/ /app/` and `ADD payload.tar /app/` can
+            # both replace a tracked script while naming a destination that
+            # equals neither it nor its parent.
+            #
+            # A previous attempt DID adjudicate this, by asking the repository
+            # tree whether the source carried a colliding path. Review found four
+            # defects in that one check within a single round: `--from=` sources
+            # a tree that is not this repository at all; docker detects an
+            # archive by its CONTENT, so a tar named `payload.bin` extracted
+            # anyway; the suffix rule refused the repo's real
+            # `web/vendor/node_modules-linux-x64.tar.gz` even under COPY, which
+            # never extracts; and globs, `--exclude=`, and .dockerignore all made
+            # a legitimate source look absent. Two false negatives and two false
+            # positives, in twenty lines.
+            #
+            # That is the pattern this whole module was rebuilt around: every one
+            # of the review findings against it has been in the Dockerfile parse,
+            # never in the contract it protects. So this stops parsing and
+            # refuses, exactly as it already does for multi-stage builds, the
+            # JSON form, `--from=` out of scripts/, and an escape directive.
+            # deploy/Dockerfile.app copies into no ancestor of /app/scripts
+            # today, so this costs nothing; the day it needs to, the message says
+            # what to write instead.
+            assert not _contains(destination, target), (
+                f"{keyword} writes into {destination}, which is ABOVE {target}. "
+                f"Docker merges a directory copy recursively and extracts a "
+                f"local archive, so content under {source} could replace that "
+                f"script and the operator's documented command would run the "
+                f"wrong file. This guard deliberately does not try to decide "
+                f"whether it actually does -- four ways of getting that wrong "
+                f"were found in one review round. Copy to a destination that is "
+                f"not above a shipped script, or teach this guard."
+            )
     return copies
 
 
@@ -499,45 +527,6 @@ def _contains(directory: str, path: str) -> bool:
     return path.startswith(prefix) and path != directory.rstrip("/")
 
 
-# Docker auto-extracts these when ADDed from the build context, so what lands in
-# the image is the ARCHIVE's contents, which this guard cannot see.
-_AUTO_EXTRACTED = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
-                   ".tar.xz", ".txz", ".tar.z")
-
-
-def _refuse_if_it_can_reach(source: str, destination: str, target: str) -> None:
-    """Refuse a copy into an ANCESTOR of a tracked script unless it provably misses.
-
-    Checked against the REPOSITORY tree, which is the same principle the command
-    selection uses: the build context is this repo, so whether `source` carries a
-    colliding path is a fact already on disk. What cannot be read that way --
-    an archive's contents, or a source that is not in the tree -- is refused
-    rather than assumed harmless.
-    """
-    relative = posixpath.relpath(target, destination.rstrip("/"))
-    trimmed = source.rstrip("/")
-
-    assert not trimmed.lower().endswith(_AUTO_EXTRACTED), (
-        f"ADD {source} unpacks into {destination}, and docker extracts a local "
-        f"archive recursively, so a {relative!r} entry inside it would replace "
-        f"{target}. This guard cannot read the archive. Extract it in a RUN, or "
-        f"copy to a destination that is not above a shipped script."
-    )
-
-    resolved = REPO_ROOT / trimmed
-    assert resolved.exists(), (
-        f"COPY {source} writes into {destination}, which is above {target}, and "
-        f"{source} is not in the repository tree, so this guard cannot tell "
-        f"whether it carries a {relative!r} that would replace that script. "
-        f"Refusing rather than assuming it does not."
-    )
-    if resolved.is_dir():
-        assert not (resolved / relative).exists(), (
-            f"COPY {source} merges into {destination}, and docker resolves a "
-            f"directory conflict in favour of the added content, so "
-            f"{trimmed}/{relative} would replace {target}. The operator's "
-            f"documented command would run that file instead."
-        )
 
 
 def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
@@ -651,31 +640,38 @@ def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
 
     # A destination ABOVE the script's directory reaches it too: docker merges a
     # directory copy recursively and auto-extracts a local tar, so neither
-    # equals the target or its parent while both replace the target.
-    with pytest.raises(AssertionError, match="cannot read the archive"):
-        _copied_scripts(shipped + "ADD data/payload.tar /app/\n")
-    with pytest.raises(AssertionError, match="cannot read the archive"):
-        _copied_scripts(shipped + "ADD data/payload.tar.gz /app/\n")
-    # A source that is not in the repository tree cannot be cleared, so it is
-    # refused rather than assumed harmless.
-    with pytest.raises(AssertionError, match="not in the repository tree"):
-        _copied_scripts(shipped + "COPY overlay/ /app/\n")
-    # A source that IS in the tree and provably carries no colliding path is
-    # allowed -- this must not become a blanket refusal of every copy into /app.
-    assert _copied_scripts(shipped + "COPY docs/ /app/\n") == {
-        "x.py": "/app/scripts/x.py"
-    }
-    # ...and the same source IS refused when it does carry the colliding path.
-    with pytest.raises(AssertionError, match="merges into"):
-        _copied_scripts(
-            "COPY scripts/reconcile_customization_authority.py "
-            "/app/scripts/reconcile_customization_authority.py\n"
-            "COPY . /app/\n"
-        )
-    # A sibling directory is not an ancestor and must stay allowed.
+    # equals the target or its parent while both replace the target. REFUSED as
+    # a shape, without asking what the source contains -- deciding that was
+    # tried and produced two false negatives and two false positives in one
+    # review round. Every form below is refused by the same single assertion,
+    # which is the point: none of them needs its own reasoning.
+    for above in (
+        "ADD data/payload.tar /app/\n",          # auto-extracted by content
+        "ADD data/payload.bin /app/\n",          # a tar that is not named one
+        "COPY overlay/ /app/\n",                 # not in the repository tree
+        "COPY docs/ /app/\n",                    # in the tree, no collision
+        "COPY . /app/\n",                        # the whole build context
+        "COPY docs/*.md /app/\n",                # a glob
+        "COPY --from=other docs/ /app/\n",       # a tree that is not this repo
+        "COPY --exclude=scripts/x.py . /app/\n",  # an exclusion this cannot read
+        "ADD https://example.com/a.tar /app/\n",  # remote, not unpacked
+    ):
+        with pytest.raises(AssertionError, match="which is ABOVE"):
+            _copied_scripts(shipped + above)
+
+    # A SIBLING is not an ancestor and must stay allowed, or this refusal would
+    # swallow deploy/Dockerfile.app's own `COPY server/ /app/server/`.
     assert _copied_scripts(shipped + "COPY docs/ /app/docs/\n") == {
         "x.py": "/app/scripts/x.py"
     }
+    assert _copied_scripts(shipped + "COPY server/ /app/server/\n") == {
+        "x.py": "/app/scripts/x.py"
+    }
+    # An archive copied to a sibling is ordinary and correct: COPY never
+    # extracts, and this is a real path in this repository.
+    assert _copied_scripts(
+        shipped + "COPY web/vendor/node_modules-linux-x64.tar.gz /app/web/\n"
+    ) == {"x.py": "/app/scripts/x.py"}
 
     # `_contains` decides WHICH copies get the ancestor treatment, so pin its
     # boundary directly. A prefix is not a parent: /app/script must not be read
