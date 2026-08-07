@@ -29,15 +29,25 @@ DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
 DEFAULT_CAPACITY_SAMPLE_SECONDS = 30.0
-# Bounded by the COMPANION ALARM'S PERIOD, not by a round number. The staging
-# `capacity_slots` alarm evaluates 60-second periods, so an interval longer than
-# one period leaves periods with no datapoint at all, and the alarm can never
-# accumulate the consecutive breaching periods it needs. The gauge would exist
-# and never be alarmable, which is the defect this whole feature removes. The
-# 30s default deliberately sits at half this, so a period carries two samples
-# and ordinary scheduling jitter cannot empty one.
+# Bounded by HALF the companion alarm's period, not by a round number and not by
+# the period itself. The staging `capacity_slots` alarm evaluates 60-second
+# periods, so a period with no datapoint at all breaks the consecutive-breach
+# count and the alarm can never fire: the gauge would exist and never be
+# alarmable, which is the defect this whole feature removes.
+#
+# One sample per period is NOT enough to prevent that, for two reasons, and an
+# earlier revision of this ceiling was equal to the period and was wrong on both:
+#   1. Samples land on the wall clock, alarm periods land on fixed 60-second
+#      boundaries. Exactly-one-period spacing puts two samples in one bucket and
+#      none in the next the moment anything jitters.
+#   2. `CapacitySampler._run()` samples and THEN waits, so real spacing is the
+#      wait plus the sample's own duration -- necessarily more than the interval.
+#      The deadline in `_run()` absorbs that term while the sample is quicker
+#      than one interval, but the ceiling must not depend on it being so.
+# At half a period both go away: every 60-second period holds two samples, and
+# emptying one would take a sample that itself ran longer than 30 seconds.
 CAPACITY_ALARM_PERIOD_SECONDS = 60.0
-MAX_CAPACITY_SAMPLE_SECONDS = CAPACITY_ALARM_PERIOD_SECONDS
+MAX_CAPACITY_SAMPLE_SECONDS = CAPACITY_ALARM_PERIOD_SECONDS / 2
 STOP_JOIN_SECONDS = 5.0
 
 
@@ -629,8 +639,9 @@ class CapacitySampler:
         if interval_seconds > MAX_CAPACITY_SAMPLE_SECONDS:
             raise ValueError(
                 f"interval_seconds must be at most {MAX_CAPACITY_SAMPLE_SECONDS:g}, "
-                "the companion alarm's period; a longer interval leaves periods "
-                "with no datapoint and the alarm can never fire")
+                f"half the companion alarm's {CAPACITY_ALARM_PERIOD_SECONDS:g}s period; "
+                "a longer interval can leave a period with no datapoint and the "
+                "alarm can never fire")
         self._supervisor = supervisor
         self._interval_seconds = interval_seconds
         self._stop = threading.Event()
@@ -669,7 +680,22 @@ class CapacitySampler:
             thread.join(timeout=STOP_JOIN_SECONDS)
 
     def _run(self) -> None:
+        # Wait to a DEADLINE, not for a fixed duration. Sampling then waiting the
+        # full interval spaces samples by `interval + however long the sample
+        # took`, which drifts later every cycle -- and the sample writes to fd 2,
+        # which can block. Subtracting the sample's own cost keeps spacing at the
+        # interval instead of above it, so the ceiling's guarantee holds against
+        # the interval rather than against the interval plus unbounded work.
+        deadline = time.monotonic()
         while not self._stop.is_set():
             self._supervisor.sample_capacity()
-            if self._stop.wait(self._interval_seconds):
+            deadline += self._interval_seconds
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # The sample outran a whole interval. Resync rather than firing a
+                # catch-up burst into the log group; the next sample is already
+                # overdue, so take it now and re-baseline from here.
+                deadline = time.monotonic()
+                continue
+            if self._stop.wait(remaining):
                 return

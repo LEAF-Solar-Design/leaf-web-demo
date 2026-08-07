@@ -617,9 +617,9 @@ class CapacitySamplerTests(unittest.TestCase):
         self.assertEqual(published, len(self.events))
 
     def test_sampler_publishes_immediately_rather_than_after_one_interval(self) -> None:
-        # At the ceiling interval the second sample is a full alarm period
-        # away, so without a boot sample the metric would be absent for that
-        # whole period after every deploy.
+        # At the ceiling interval the second sample is half an alarm period
+        # away, so without a boot sample the metric would be absent for the
+        # first period after every deploy.
         sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
         sampler.start()
         deadline = time.monotonic() + 5
@@ -653,28 +653,105 @@ class CapacitySamplerTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f"{value} was accepted"):
                 CapacitySampler.from_environment(
                     self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": value})
-    def test_the_interval_ceiling_is_the_companion_alarms_period(self) -> None:
-        """The ceiling must be the alarm's PERIOD, not a round number.
+    def test_the_interval_ceiling_is_half_the_companion_alarms_period(self) -> None:
+        """The ceiling must be HALF the alarm's period, not the period itself.
 
         A ceiling of, say, an hour would accept an interval that emits once and
         then leaves 59 consecutive one-minute periods with no datapoint at all,
         so the alarm can never accumulate consecutive breaching periods. The
         gauge would exist and never be alarmable, which is exactly the defect
         this feature removes -- so a too-loose ceiling silently reintroduces it.
+
+        A ceiling equal to the period is ALSO too loose, which an earlier
+        revision of this test missed by pinning the literal 60 instead of the
+        property. Samples land on the wall clock; alarm periods land on fixed
+        60-second boundaries. At exactly one period of spacing, any jitter puts
+        two samples in one bucket and none in the next, and missing data counts
+        as non-breaching -- so the empty period interrupts the consecutive-breach
+        run. 60 is therefore in the rejected list below, not the accepted one.
         """
-        self.assertEqual(60.0, MAX_CAPACITY_SAMPLE_SECONDS)
-        self.assertEqual(CAPACITY_ALARM_PERIOD_SECONDS, MAX_CAPACITY_SAMPLE_SECONDS)
-        # The default samples twice per period, so jitter cannot empty one.
-        self.assertLessEqual(
-            DEFAULT_CAPACITY_SAMPLE_SECONDS * 2, CAPACITY_ALARM_PERIOD_SECONDS)
+        self.assertEqual(CAPACITY_ALARM_PERIOD_SECONDS / 2, MAX_CAPACITY_SAMPLE_SECONDS)
+        self.assertLessEqual(DEFAULT_CAPACITY_SAMPLE_SECONDS, MAX_CAPACITY_SAMPLE_SECONDS)
 
         at_ceiling = CapacitySampler.from_environment(
-            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "60"})
-        self.assertEqual(60.0, at_ceiling._interval_seconds)
-        for over in ("60.5", "61", "3600"):
+            self.supervisor,
+            {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": repr(MAX_CAPACITY_SAMPLE_SECONDS)})
+        self.assertEqual(MAX_CAPACITY_SAMPLE_SECONDS, at_ceiling._interval_seconds)
+        for over in ("30.5", "31", "60", "3600"):
             with self.assertRaisesRegex(ValueError, "at most", msg=f"{over} was accepted"):
                 CapacitySampler.from_environment(
                     self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": over})
+
+    def _spacing_at_ceiling(self, sample_cost: float, samples: int = 5) -> list[float]:
+        """Drive `_run()` on a stubbed clock and return the spacing it produces.
+
+        The clock is faked rather than slept through, so this measures the real
+        loop at the real ceiling in milliseconds. `time.monotonic` is patched
+        process-wide for the duration, which is safe only because `_run()` is
+        called directly here -- no sampler thread is started, and the stubbed
+        wait never blocks, so nothing else in the process is mid-measurement.
+        """
+        clock = [1000.0]
+        stamps: list[float] = []
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
+
+        def sample() -> None:
+            stamps.append(clock[0])
+            clock[0] += sample_cost
+            if len(stamps) >= samples:
+                sampler._stop.set()
+
+        def wait(timeout: float | None = None) -> bool:
+            self.assertIsNotNone(timeout, "the loop waited with no bound")
+            self.assertGreater(timeout, 0, "the loop waited on a non-positive timeout")
+            clock[0] += timeout
+            return sampler._stop.is_set()
+
+        self.supervisor.sample_capacity = sample
+        sampler._stop.wait = wait
+        with patch("time.monotonic", lambda: clock[0]):
+            sampler._run()
+
+        self.assertEqual(samples, len(stamps), "the loop did not run to completion")
+        return [b - a for a, b in zip(stamps, stamps[1:])]
+
+    def test_sample_spacing_is_the_interval_not_the_interval_plus_the_sample(self) -> None:
+        """The property the ceiling exists for, measured instead of asserted.
+
+        The previous revision pinned the ceiling's literal value and never
+        checked spacing, which let this through: `_run()` sampled and THEN
+        waited the whole interval, so real spacing was `interval + however long
+        the sample took` and drifted later every cycle. The sample writes to
+        fd 2 and that write can block, so the extra term is not negligible.
+        Charging the sample four seconds here makes the old behaviour visible --
+        it would space samples 34s apart at a 30s interval.
+
+        The bar is the one the alarm actually needs: every 60-second period must
+        contain a datapoint, so spacing must stay under a period with room to
+        spare for jitter.
+        """
+        spacings = self._spacing_at_ceiling(sample_cost=4.0)
+
+        self.assertEqual(
+            [MAX_CAPACITY_SAMPLE_SECONDS] * len(spacings), spacings,
+            "the sample's own duration leaked into the spacing")
+        self.assertLess(
+            max(spacings), CAPACITY_ALARM_PERIOD_SECONDS,
+            "a 60-second alarm period can contain no datapoint")
+
+    def test_a_sample_slower_than_the_interval_resyncs_instead_of_bursting(self) -> None:
+        """The overrun branch must not fire a catch-up burst into the log group.
+
+        Once a sample costs more than a whole interval the deadline is already
+        in the past, and a loop that kept adding intervals would emit back to
+        back until it caught up -- flooding fd 2 at exactly the moment fd 2 is
+        the thing that is slow. Re-baselining means the next sample is simply
+        the next one the machine can take.
+        """
+        spacings = self._spacing_at_ceiling(sample_cost=MAX_CAPACITY_SAMPLE_SECONDS + 10.0)
+
+        for spacing in spacings:
+            self.assertEqual(MAX_CAPACITY_SAMPLE_SECONDS + 10.0, spacing)
 
     def test_stop_does_not_wait_for_the_configured_interval(self) -> None:
         """Shutdown must not be hostage to a telemetry write.
