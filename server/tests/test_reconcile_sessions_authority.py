@@ -241,51 +241,10 @@ def test_app_image_contains_the_reconciliation_command():
     ) in dockerfile
 
 
-def test_documented_command_resolves_from_the_image_working_directory():
-    """Two green tests are not enough: one pins the COPY target, another pins
-    the command, and neither knows about WORKDIR.
-
-    deploy/Dockerfile.app COPYs the script to /app/scripts/ but its FINAL
-    WORKDIR is /app/server. A repo-relative command therefore resolves to
-    /app/server/scripts/..., which does not exist, so the documented command
-    fails in the only place it is ever run. Nothing tied those three facts
-    together until this test, and the pair above passed the whole time.
-    """
-    import posixpath
-
-    dockerfile = APP_DOCKERFILE.read_text(encoding="utf-8")
-
-    workdirs = [
-        line.split(None, 1)[1].strip()
-        for line in dockerfile.splitlines()
-        if line.startswith("WORKDIR ")
-    ]
-    assert workdirs, "Dockerfile.app declares no WORKDIR"
-    final_workdir = workdirs[-1]
-
-    copy_target = next(
-        line.split()[2]
-        for line in dockerfile.splitlines()
-        if line.startswith("COPY scripts/reconcile_sessions_authority.py")
-    )
-
-    inventory = json.loads(INVENTORY)
-    entry = next(
-        item for item in inventory["authorities"]
-        if item["id"] == "app_sessions_and_approvals"
-    )
-
-    for mode in ("backfill", "parity"):
-        script_arg = entry[mode]["command"].split()[1]
-        resolved = posixpath.normpath(
-            script_arg if posixpath.isabs(script_arg)
-            else posixpath.join(final_workdir, script_arg)
-        )
-        assert resolved == copy_target, (
-            f"documented {mode} command resolves to {resolved} from "
-            f"WORKDIR {final_workdir}, but the image puts the script at "
-            f"{copy_target}"
-        )
+# The WORKDIR-vs-COPY guard that used to live here now covers EVERY authority
+# rather than just this one, so it sits with the other image-wiring contracts:
+# see test_documented_authority_commands_resolve_in_the_image in
+# server/tests/test_postgres_container_wiring.py.
 
 
 def test_default_sqlite_path_tracks_the_app_resolution(monkeypatch, tmp_path):
