@@ -119,7 +119,7 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
 
 def test_every_shipped_table_has_a_readiness_contract():
     created = set()
-    for path in (db._PKG_DIR / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"):
+    for path in (db._PKG_DIR / "migrations").glob(db.MIGRATION_GLOB):
         created.update(re.findall(
             r"CREATE TABLE IF NOT EXISTS\s+([a-z_][a-z0-9_]*)",
             path.read_text(encoding="utf-8"),
