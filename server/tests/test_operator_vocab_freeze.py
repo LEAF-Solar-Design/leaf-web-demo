@@ -18,6 +18,7 @@ Lands with the contract-only operator PR (Wave 0). Load-bearing negative tests:
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -49,30 +50,65 @@ FROZEN_CAPABILITIES = {
 # promotion.
 
 FROZEN_MATRIX_SHA256 = (
-    "0c7dfcc7703321ede315927a43681c32839422713670a30b39d926ffbdd12831")
+    "5a6dd550800fed8eddcb683e67787435d5b8a3441cb7a66561b5f74614debe53")
 
-# {action: (class, rung, policy, handler, reversal_substring)}
+# {action: (class, rung, policy, rate, spend, timeout_s, handler,
+#           reversal_substring)}. Every normative dimension the pre-repo
+# reference carried (rung, policy, rate, spend, timeout, precondition,
+# reversal) now has an in-repo source and is pinned here.
 FROZEN_MATRIX_FIELDS = {
-    "operator.read_fleet_state": ("O1", 1, "auto", "read_fleet_state", "read"),
-    "operator.read_tenant_state": ("O1", 1, "auto", "read_tenant_state", "read"),
-    "operator.read_jobs": ("O1", 1, "auto", "read_jobs", "read"),
-    "operator.read_sessions": ("O1", 1, "auto", "read_sessions", "read"),
-    "operator.read_audit": ("O1", 1, "auto", "read_audit", "read"),
-    "operator.read_worker_status": ("O1", 1, "auto", "read_worker_status", "read"),
-    "operator.worker_submit_job": ("O2", 2, "auto", "worker_submit_job", "disposable"),
-    "operator.worker_cancel_job": ("O2", 2, "auto", "worker_cancel_job", "idempotent"),
-    "operator.repo_propose_change": ("O3", 3, "auto", "repo_propose_change", "branch"),
-    "operator.tenant_agent_pause": ("O4", 4, "always-confirm", "tenant_agent_pause", "resume"),
-    "operator.tenant_agent_resume": ("O4", 4, "always-confirm", "tenant_agent_resume", "pause"),
-    "operator.tenant_overlay_set": ("O4", 4, "always-confirm", "tenant_overlay_set", "overlay"),
-    "operator.worker_credential_rotate": ("O4", 4, "always-confirm", "worker_credential_rotate", "scope"),
-    "operator.external_write": ("O5", 5, "always-confirm", "external_write", "adapter"),
-    "operator.stage_release_candidate": ("O6", 6, "always-confirm", "stage_release_candidate", "rollback"),
+    "operator.read_fleet_state": ("O1", 1, "auto", "low", "none", 10, "read_fleet_state", "read"),
+    "operator.read_tenant_state": ("O1", 1, "auto", "low", "none", 10, "read_tenant_state", "read"),
+    "operator.read_jobs": ("O1", 1, "auto", "low", "none", 10, "read_jobs", "read"),
+    "operator.read_sessions": ("O1", 1, "auto", "low", "none", 10, "read_sessions", "read"),
+    "operator.read_audit": ("O1", 1, "auto", "low", "none", 10, "read_audit", "read"),
+    "operator.read_worker_status": ("O1", 1, "auto", "low", "none", 10, "read_worker_status", "read"),
+    "operator.worker_submit_job": ("O2", 2, "auto", "medium", "cost_tokens", 1800, "worker_submit_job", "disposable"),
+    "operator.worker_cancel_job": ("O2", 2, "auto", "medium", "none", 30, "worker_cancel_job", "idempotent"),
+    "operator.repo_propose_change": ("O3", 3, "auto", "medium", "none", 1800, "repo_propose_change", "branch"),
+    "operator.tenant_agent_pause": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_agent_pause", "resume"),
+    "operator.tenant_agent_resume": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_agent_resume", "pause"),
+    "operator.tenant_overlay_set": ("O4", 4, "always-confirm", "high", "none", 30, "tenant_overlay_set", "overlay"),
+    "operator.worker_credential_rotate": ("O4", 4, "always-confirm", "high", "none", 60, "worker_credential_rotate", "scope"),
+    "operator.external_write": ("O5", 5, "always-confirm", "high", "usd", 600, "external_write", "adapter"),
+    "operator.stage_release_candidate": ("O6", 6, "always-confirm", "high", "usd", 3600, "stage_release_candidate", "rollback"),
+}
+
+# Required per-action keys the matrix must always carry (no normative
+# dimension may silently disappear again).
+REQUIRED_MATRIX_KEYS = {
+    "class", "rung", "policy", "rate", "spend", "timeout_s",
+    "precondition", "handler", "reversal", "production_reachable",
+    "enabled_v1",
 }
 
 
 def _load_matrix():
     return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+
+
+def _parse_md_matrix_table():
+    """Parse the OPERATOR.md §4.1 action table into {action: {header: cell}}.
+    Contiguity-bounded so other tables in the doc are not picked up."""
+    lines = (REPO_ROOT / "contract" / "OPERATOR.md").read_text(
+        encoding="utf-8").splitlines()
+    header_idx = next(
+        i for i, ln in enumerate(lines)
+        if ln.strip().startswith("|") and "Action" in ln and "Policy" in ln)
+    headers = [c.strip().lower()
+               for c in lines[header_idx].strip().strip("|").split("|")]
+    table = {}
+    for ln in lines[header_idx + 2:]:  # skip the |---| separator row
+        if not ln.strip().startswith("|"):
+            break  # end of this contiguous table
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) != len(headers):
+            continue
+        row = dict(zip(headers, cells))
+        m = re.search(r"`(operator\.[a-z_]+)`", row.get("action", ""))
+        if m:
+            table[m.group(1)] = row
+    return headers, table
 
 
 def test_matrix_is_committed_and_content_pinned():
@@ -86,18 +122,31 @@ def test_matrix_is_committed_and_content_pinned():
         "SHA in the same PR (promotion ritual)")
 
 
+def test_matrix_carries_every_normative_dimension():
+    """No normative dimension (rate/spend/timeout/precondition/...) may be
+    dropped from any action entry."""
+    for name, entry in _load_matrix()["actions"].items():
+        missing = REQUIRED_MATRIX_KEYS - set(entry)
+        assert not missing, (name, "missing normative fields", missing)
+
+
 def test_matrix_security_fields_pinned_per_action():
     matrix = _load_matrix()
     actions = matrix["actions"]
     assert set(actions) == set(FROZEN_MATRIX_FIELDS), (
         "operator action set changed", set(actions) ^ set(FROZEN_MATRIX_FIELDS))
-    for name, (cls, rung, policy, handler, rev_sub) in FROZEN_MATRIX_FIELDS.items():
+    for name, fields in FROZEN_MATRIX_FIELDS.items():
+        cls, rung, policy, rate, spend, timeout_s, handler, rev_sub = fields
         entry = actions[name]
         assert entry["class"] == cls, (name, "class", entry["class"])
         assert entry["rung"] == rung, (name, "rung", entry["rung"])
         assert entry["policy"] == policy, (name, "policy", entry["policy"])
+        assert entry["rate"] == rate, (name, "rate", entry["rate"])
+        assert entry["spend"] == spend, (name, "spend", entry["spend"])
+        assert entry["timeout_s"] == timeout_s, (name, "timeout_s")
         assert entry["handler"] == handler, (name, "handler", entry["handler"])
         assert rev_sub in entry["reversal"].lower(), (name, "reversal")
+        assert entry["precondition"], (name, "precondition empty")
 
 
 def test_matrix_has_no_production_reachable_action():
@@ -114,12 +163,25 @@ def test_matrix_has_no_production_reachable_action():
         assert "/api/production" not in blob
 
 
-def test_matrix_agrees_with_operator_md_table():
-    """Every action in the JSON must also appear in the OPERATOR.md inline
-    table, so the human and machine copies cannot silently diverge."""
-    md = (REPO_ROOT / "contract" / "OPERATOR.md").read_text(encoding="utf-8")
-    for name in _load_matrix()["actions"]:
-        assert f"`{name}`" in md, f"{name} missing from OPERATOR.md table"
+def test_operator_md_table_fields_match_json():
+    """Load-bearing JSON<->Markdown agreement: the OPERATOR.md table's
+    rung / policy / handler / reversal / prod-reachable cells must equal the
+    JSON for every action. Editing a field in EITHER copy fails the gate."""
+    matrix = _load_matrix()["actions"]
+    headers, table = _parse_md_matrix_table()
+    for col in ("rung", "policy", "handler", "reversal", "prod-reachable"):
+        assert col in headers, f"OPERATOR.md §4.1 table missing '{col}' column"
+    for name, entry in matrix.items():
+        assert name in table, f"{name} missing from the OPERATOR.md table"
+        row = table[name]
+        assert row["rung"] == str(entry["rung"]), (name, "rung", row["rung"])
+        assert row["policy"] == entry["policy"], (name, "policy", row["policy"])
+        # handler cell may be backtick-wrapped; compare on the bare name
+        assert entry["handler"] == row["handler"].strip("`"), (
+            name, "handler", row["handler"])
+        assert row["reversal"], (name, "reversal cell empty in Markdown")
+        assert row["prod-reachable"].lower() == "no", (
+            name, "prod-reachable", row["prod-reachable"])
 
 
 def test_tier_vocabulary_gained_no_operator_entry():
