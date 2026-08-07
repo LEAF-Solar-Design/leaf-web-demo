@@ -102,15 +102,19 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
     explicit shell invocation, `["/bin/sh", "-c", "<script>"]` (or /bin/bash),
     whose third element IS a shell script the shell expands exactly as a
     shell-form RUN would, so that element is parsed out and scanned. In shell
-    form, a
-    $NAME / ${NAME} reference expands except inside single quotes, with
-    a backslash-escaped dollar, or after an unquoted `#` that begins a
-    shell comment; double quotes (including apostrophes nested inside
-    them) do expand. Known scope boundary, named here on
-    purpose: heredoc RUN bodies, $$ self-escapes, and BuildKit's own
-    expansion inside --flag values are not modeled — no checked
-    Dockerfile uses them, and a false trip fails loud, never silently
-    green.
+    form, a $NAME / ${NAME} reference expands except inside single
+    quotes or after a backslash-escaped dollar; double quotes (including
+    apostrophes nested inside them) do expand.
+
+    A `#` gets NO expansion decision here. _executable_bash has already
+    removed real full-line and trailing shell comments, so any `#`
+    reaching this scanner is ambiguous (a glued mid-word hash, or a
+    comment inside a substitution or backtick the line stripper cannot
+    see), and this returns False on it so the caller reports the RUN as
+    offending: a LOUD false-offend, never a silent false-accept. See the
+    `if "#" in body` guard below. Other scope boundaries, fail-loud not
+    silent: heredoc bodies, $$ self-escapes, and BuildKit --flag
+    expansion are not modeled; no checked Dockerfile uses them.
     """
     body = run_body.strip()
     # RUN flags (--mount/--network/--security[=value]) precede either
@@ -140,20 +144,31 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
             body = argv[2]
         else:
             return False
-    # Scan the shell script tracking exactly enough state to decide two things:
-    # is a `$NAME`/`${NAME}` reference in a position the shell would expand, and
-    # does a `#` begin a comment. A `#` is a comment only when it BEGINS A WORD:
-    # at the start, or after unquoted whitespace or a word-ending operator
-    # (`;` `&` `|`, or a real subshell `)`). Getting `)` right needs
-    # substitution state -- a `)` that closes `$(...)`/`$((...))`, or an escaped
-    # `\)`, does NOT end a word, so a `#` after it is not a comment. sol-critic
-    # #514 r4-r7 walked these corners (`;#`, `)#`, `${X}#`, `` `x`#``, `$(x)#`,
-    # `$((1))#`, `\)#`); this replaced the preceding-char heuristic that could
-    # not tell them apart. Unmodelled and left to fail loud, never silently
-    # green: heredocs, `$$`, process substitution `<(...)`.
+    # sol-critic #514 r8: FAIL LOUD on any `#`, do not classify it.
+    # _executable_bash has already stripped real full-line and trailing
+    # shell comments, so a `#` surviving here is ambiguous -- a glued
+    # mid-word hash, or a comment INSIDE a substitution or backtick that
+    # the line-based stripper cannot see (`$(# ...)`, `` `# ...` ``).
+    # Rounds 4-7 grew a substitution/comment lexer to tell these apart
+    # and every round surfaced the next corner (`;#`, `)#`, `${X}#`,
+    # `$(x)#`, `$((1))#`, `\)#`, then r8's `$(#...)`), each an unbounded
+    # false-ACCEPT: a non-consuming RUN read as consuming, placed below
+    # the per-commit ARG, silently regressing layer caching -- the one
+    # merge-blocking direction. Rather than model one more corner, refuse
+    # the whole class: return False so the caller reports the RUN as
+    # offending. A LOUD false-offend is the declared-acceptable direction
+    # and this closes every silent false-accept by construction. No
+    # guarded Dockerfile RUN contains a `#`, so it never trips.
+    if "#" in body:
+        return False
+    # With `#` handled, a per-commit reference consumes wherever the
+    # shell would expand it: everywhere except inside single quotes or
+    # after a backslash-escaped `$`. Double quotes still expand
+    # (apostrophes nested in them are literal); a backtick or `$(...)`
+    # body expands too, so its inner reference is scanned like any other
+    # text. This is deliberately smaller than the r4-r7 lexer: with the
+    # `#` decision gone, no substitution/word-boundary state is needed.
     in_double = False
-    subst = []            # 'S' = $(  'A' = $((  'P' = plain subshell (
-    prev_boundary = True  # start of string begins a word
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -163,70 +178,24 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
                 continue
             if ch == '"':
                 in_double = False
-                prev_boundary = False
             elif ch == "$" and _PER_COMMIT_REF.match(body, i):
                 return True
             i += 1
             continue
         if ch == "\\":
             i += 2
-            prev_boundary = False
             continue
         if ch == "'":                       # single quotes: literal to next '
             close = body.find("'", i + 1)
             i = close + 1 if close != -1 else n
-            prev_boundary = False
             continue
         if ch == '"':
             in_double = True
             i += 1
-            prev_boundary = False
             continue
-        if ch == "`":                       # command-sub result is a word char
-            i += 1
-            prev_boundary = False
-            continue
-        if ch == "#" and prev_boundary:
-            break
-        if ch == "$":
-            if body[i:i + 3] == "$((":
-                subst.append("A")
-                i += 3
-                prev_boundary = False
-                continue
-            if body[i:i + 2] == "$(":
-                subst.append("S")
-                i += 2
-                prev_boundary = False
-                continue
-            if _PER_COMMIT_REF.match(body, i):
-                return True
-            i += 1
-            prev_boundary = False
-            continue
-        if ch == "(":                       # plain subshell; its ) ends a word
-            subst.append("P")
-            i += 1
-            prev_boundary = True
-            continue
-        if ch == ")":
-            top = subst.pop() if subst else None
-            if top == "A":
-                i += 2 if body[i:i + 2] == "))" else 1
-                prev_boundary = False       # $((...)) result is a word char
-            elif top == "S":
-                i += 1
-                prev_boundary = False        # $(...) result is a word char
-            else:
-                i += 1
-                prev_boundary = True         # real subshell close ends a word
-            continue
-        if ch in " \t\n;&|":
-            i += 1
-            prev_boundary = True
-            continue
+        if ch == "$" and _PER_COMMIT_REF.match(body, i):
+            return True
         i += 1
-        prev_boundary = False
     return False
 
 
@@ -1354,26 +1323,34 @@ def main() -> None:
         ('RUN ["/bin/sh", "-c", "echo no-arg-here"]', True),
         ('RUN ["/bin/bash", "-c", "seal ${LEAF_SOURCE_SHA}"]', False),
         ('RUN ["/bin/sh", "-lc", "echo ${LEAF_SOURCE_SHA}"]', True),
-        # A reference the shell never expands because it sits in a comment does
-        # NOT consume (sol-critic #514 r4): `#` after `;` starts a comment, so
-        # `true` runs and LEAF_SOURCE_SHA stays unset -- this RUN must offend.
+        # sol-critic #514 r4-r8: a `#` ANYWHERE in a post-ARG RUN now fails
+        # loud (offends). The scanner no longer decides whether a `#` is a
+        # plain comment, a comment inside a substitution/backtick, or mid-word
+        # text: r4-r7 grew a lexer to tell those apart and each round surfaced
+        # the next corner, culminating in r8's SILENT false-accept `$(#...)`
+        # (bash comments the ref out inside the substitution, so it never
+        # expands, yet the lexer read it as consuming). Any `#` is refused
+        # instead. The six real guarded Dockerfiles contain no `#` in any RUN,
+        # so none is affected. Genuine comment forms (r4/r5) still offend:
         ('RUN ["/bin/sh", "-c", "true;# ${LEAF_SOURCE_SHA:?expanded}"]', True),
         ('RUN echo hi  # ${LEAF_SOURCE_SHA}', True),
-        # `#` after `)` also starts a comment (sol-critic #514 r5), shell and
-        # JSON form alike -- the reference is never expanded, so both offend.
         ('RUN ["/bin/sh", "-c", "(true)# ${LEAF_SOURCE_SHA:?expanded}"]', True),
         ('RUN (true)# ${LEAF_SOURCE_SHA:?expanded}', True),
-        # ...but `#` MID-WORD is NOT a comment (sol-critic #514 r6): `}` and
-        # backtick and `{` do not end a word, so the reference after them still
-        # expands and the RUN consumes -- these must NOT offend.
-        ('RUN echo ${PATH}# ${LEAF_SOURCE_SHA}', False),
-        ('RUN {# ${LEAF_SOURCE_SHA}', False),
-        ('RUN `printf x`# ${LEAF_SOURCE_SHA}', False),
-        # A `)` that closes a substitution, or an escaped `\)`, does NOT end a
-        # word (sol-critic #514 r7), so the reference after it still expands.
-        ('RUN echo $(printf x)# ${LEAF_SOURCE_SHA}', False),
-        ('RUN echo $((1+1))# ${LEAF_SOURCE_SHA}', False),
-        ('RUN echo \\)# ${LEAF_SOURCE_SHA}', False),
+        # Mid-word `#` (r6/r7): bash WOULD expand the ref, but the scanner no
+        # longer leans on that distinction -- a loud false-offend on a form no
+        # Dockerfile uses beats modelling one more silent-false-accept corner.
+        ('RUN echo ${PATH}# ${LEAF_SOURCE_SHA}', True),
+        ('RUN {# ${LEAF_SOURCE_SHA}', True),
+        ('RUN `printf x`# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo $(printf x)# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo $((1+1))# ${LEAF_SOURCE_SHA}', True),
+        ('RUN echo \\)# ${LEAF_SOURCE_SHA}', True),
+        # r8's false-ACCEPT `$(#...)` and its backtick twin `` `#...` ``: `#`
+        # inside a command substitution or backtick is a comment, so bash does
+        # NOT expand the ref (both print with LEAF_SOURCE_SHA unset). The r7
+        # lexer read them as consuming; both must offend now.
+        ('RUN ["/bin/sh", "-c", "echo $(# ${LEAF_SOURCE_SHA:?x}\\nprintf ok)"]', True),
+        ('RUN echo `# ${LEAF_SOURCE_SHA}`', True),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (
