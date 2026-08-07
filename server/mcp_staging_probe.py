@@ -244,7 +244,9 @@ def _validate_rejection(response: JsonResponse, allowed_statuses: frozenset[int]
         raise ProbeError("the broker did not reject an invalid credential challenge")
 
 
-def _validate_wrong_channel_result(response: JsonResponse) -> None:
+def _validate_wrong_channel_result(
+    response: JsonResponse, request_id: int
+) -> None:
     if response.status_code in {401, 403}:
         return
     body = response.body
@@ -253,7 +255,7 @@ def _validate_wrong_channel_result(response: JsonResponse) -> None:
     if (
         response.status_code != 200
         or body.get("jsonrpc") != "2.0"
-        or body.get("id") != 93
+        or body.get("id") != request_id
         or "error" in body
         or not isinstance(result, dict)
         or result.get("isError") is True
@@ -264,14 +266,18 @@ def _validate_wrong_channel_result(response: JsonResponse) -> None:
         raise ProbeError("the broker did not reject the wrong-channel challenge")
 
 
-def _validate_status(response: JsonResponse, authority: CanaryAuthority) -> str:
+def _validate_status(
+    response: JsonResponse,
+    authority: CanaryAuthority,
+    request_id: int,
+) -> str:
     body = response.body
     result = body.get("result")
     structured = result.get("structuredContent") if isinstance(result, dict) else None
     if (
         response.status_code != 200
         or body.get("jsonrpc") != "2.0"
-        or body.get("id") != 2
+        or body.get("id") != request_id
         or "error" in body
         or not isinstance(result, dict)
         or result.get("isError") is True
@@ -338,7 +344,7 @@ def run_probe(
     """Run the private staging probe and return the proven contract version."""
 
     url = _staging_mcp_url()
-    attachment = create_canary_attachment(authority_signer)
+    challenge_attachment = create_canary_attachment(authority_signer)
     request = transport or _http_post_json
     base_headers = {
         "Accept": "application/json, text/event-stream",
@@ -346,37 +352,59 @@ def run_probe(
     }
     invalid_bearer_headers = {
         **base_headers,
-        "Authorization": f"Bearer {_invalid_signature_bearer(attachment.bearer)}",
-        "x-leaf-gateway-channel": attachment.channel_secret,
+        "Authorization": (
+            f"Bearer {_invalid_signature_bearer(challenge_attachment.bearer)}"
+        ),
+        "x-leaf-gateway-channel": challenge_attachment.channel_secret,
     }
     _validate_rejection(
         request(url, invalid_bearer_headers, _initialize_payload(91)),
         frozenset({401}),
     )
 
+    challenge_headers = {
+        **base_headers,
+        "Authorization": f"Bearer {challenge_attachment.bearer}",
+        "x-leaf-gateway-channel": challenge_attachment.channel_secret,
+    }
+    challenge_initialized = request(
+        url, challenge_headers, _initialize_payload(11)
+    )
+    _validate_initialize(challenge_initialized, 11)
+    challenge_status_headers = dict(challenge_headers)
+    challenge_session_id = challenge_initialized.headers.get("mcp-session-id")
+    if challenge_session_id:
+        challenge_status_headers["mcp-session-id"] = challenge_session_id
+    challenge_status_headers["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
+    challenge_status = request(
+        url, challenge_status_headers, _status_payload(12)
+    )
+    _validate_status(challenge_status, challenge_attachment.authority, 12)
+
     wrong_channel = secrets.token_urlsafe(48)
-    if secrets.compare_digest(wrong_channel, attachment.channel_secret):
+    if secrets.compare_digest(wrong_channel, challenge_attachment.channel_secret):
         raise ProbeError("the wrong-channel challenge collided with the valid channel")
     wrong_channel_headers = {
-        **base_headers,
-        "Authorization": f"Bearer {attachment.bearer}",
+        **challenge_status_headers,
         "x-leaf-gateway-channel": wrong_channel,
     }
-    wrong_initialized = request(
-        url, wrong_channel_headers, _initialize_payload(92)
+    _validate_wrong_channel_result(
+        request(url, wrong_channel_headers, _status_payload(13)),
+        13,
     )
-    if wrong_initialized.status_code in {401, 403}:
-        _validate_rejection(wrong_initialized, frozenset({401, 403}))
-    else:
-        _validate_initialize(wrong_initialized, 92)
-        wrong_status_headers = dict(wrong_channel_headers)
-        wrong_session_id = wrong_initialized.headers.get("mcp-session-id")
-        if wrong_session_id:
-            wrong_status_headers["mcp-session-id"] = wrong_session_id
-        wrong_status_headers["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
-        _validate_wrong_channel_result(
-            request(url, wrong_status_headers, _status_payload(93))
+
+    attachment = create_canary_attachment(authority_signer)
+    if (
+        attachment.bearer == challenge_attachment.bearer
+        or secrets.compare_digest(
+            attachment.channel_secret, challenge_attachment.channel_secret
         )
+        or attachment.authority.session_id
+        == challenge_attachment.authority.session_id
+        or attachment.authority.authority_turn_id
+        == challenge_attachment.authority.authority_turn_id
+    ):
+        raise ProbeError("the final attachment was not fresh")
 
     headers = {
         **base_headers,
@@ -400,7 +428,7 @@ def run_probe(
         second_headers,
         _status_payload(2),
     )
-    return _validate_status(status, attachment.authority)
+    return _validate_status(status, attachment.authority, 2)
 
 
 def main() -> int:

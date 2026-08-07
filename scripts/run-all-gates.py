@@ -260,7 +260,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_gateway_authority.py"), 21),
         Suite("server-mcp-staging-probe",
               "server tests/test_mcp_staging_probe.py", "pytest", SERVER,
-              _py_pytest("tests/test_mcp_staging_probe.py"), 15),
+              _py_pytest("tests/test_mcp_staging_probe.py"), 16),
         Suite("server-dynamic-loader", "server test_dynamic_loader.py", "pytest", SERVER,
               _py_pytest("test_dynamic_loader.py"), 4),
         Suite("server-write-loop", "server tests/test_write_loop.py", "pytest", SERVER,

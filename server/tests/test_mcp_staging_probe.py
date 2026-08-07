@@ -47,7 +47,7 @@ class CapturingSigner:
 
     def issue(self, claims, *, audience, ttl_seconds):
         self.calls.append((dict(claims), audience, ttl_seconds))
-        return "header.payload.signature", 1060
+        return f"header.payload.signature{len(self.calls)}", 1060
 
 
 class FakeHttpResponse:
@@ -135,13 +135,13 @@ def status_response(claims, *, request_id=2, **overrides):
     )
 
 
-def wrong_channel_response(code="invalid_channel"):
+def wrong_channel_response(code="invalid_channel", request_id=13):
     return mcp_staging_probe.JsonResponse(
         200,
         {},
         {
             "jsonrpc": "2.0",
-            "id": 93,
+            "id": request_id,
             "result": {
                 "isError": False,
                 "structuredContent": {"status": "error", "code": code},
@@ -209,12 +209,14 @@ def test_probe_initializes_and_calls_only_services_status(staging):
         if len(calls) == 1:
             return rejected_response(401)
         if len(calls) == 2:
-            return initialize_response(request_id=92)
+            return initialize_response(request_id=11)
         if len(calls) == 3:
-            return wrong_channel_response()
+            return status_response(signer.calls[0][0], request_id=12)
         if len(calls) == 4:
+            return wrong_channel_response()
+        if len(calls) == 5:
             return initialize_response()
-        return status_response(signer.calls[0][0])
+        return status_response(signer.calls[1][0])
 
     version = mcp_staging_probe.run_probe(
         authority_signer=signer, transport=transport
@@ -227,38 +229,51 @@ def test_probe_initializes_and_calls_only_services_status(staging):
         "https://staging-api.leafdesign.ai/mcp",
         "https://staging-api.leafdesign.ai/mcp",
         "https://staging-api.leafdesign.ai/mcp",
+        "https://staging-api.leafdesign.ai/mcp",
     ]
-    assert [call[2]["id"] for call in calls] == [91, 92, 93, 1, 2]
+    assert [call[2]["id"] for call in calls] == [91, 11, 12, 13, 1, 2]
     assert calls[0][1]["Authorization"] != calls[1][1]["Authorization"]
     assert calls[0][1]["x-leaf-gateway-channel"] == (
-        calls[3][1]["x-leaf-gateway-channel"]
+        calls[1][1]["x-leaf-gateway-channel"]
     )
-    assert calls[1][1]["Authorization"] == "Bearer header.payload.signature"
+    assert calls[1][1]["Authorization"] == "Bearer header.payload.signature1"
+    assert calls[1][1]["x-leaf-gateway-channel"] == (
+        calls[2][1]["x-leaf-gateway-channel"]
+    )
     assert calls[1][1]["x-leaf-gateway-channel"] != (
         calls[3][1]["x-leaf-gateway-channel"]
     )
-    assert calls[2][2] == {
+    assert calls[3][2] == {
         "jsonrpc": "2.0",
-        "id": 93,
+        "id": 13,
         "method": "tools/call",
         "params": {"name": "services_status", "arguments": {}},
     }
-    assert calls[4][2] == {
+    assert calls[5][2] == {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
         "params": {"name": "services_status", "arguments": {}},
     }
-    assert calls[3][1]["Authorization"] == "Bearer header.payload.signature"
-    assert len(calls[3][1]["x-leaf-gateway-channel"]) >= 32
-    assert calls[4][1]["mcp-session-id"] == "mcp-session-a"
-    assert calls[4][1]["MCP-Protocol-Version"] == "2025-11-25"
-    claims, audience, ttl = signer.calls[0]
-    assert audience == "urn:leaf:tenant-mcp-broker"
-    assert ttl == 60
-    assert claims["channel_hash"] == hashlib.sha256(
-        calls[3][1]["x-leaf-gateway-channel"].encode()
-    ).hexdigest()
+    assert calls[4][1]["Authorization"] == "Bearer header.payload.signature2"
+    assert len(calls[4][1]["x-leaf-gateway-channel"]) >= 32
+    assert calls[4][1]["x-leaf-gateway-channel"] != (
+        calls[1][1]["x-leaf-gateway-channel"]
+    )
+    assert calls[5][1]["mcp-session-id"] == "mcp-session-a"
+    assert calls[5][1]["MCP-Protocol-Version"] == "2025-11-25"
+    assert len(signer.calls) == 2
+    for index, call_index in ((0, 1), (1, 4)):
+        claims, audience, ttl = signer.calls[index]
+        assert audience == "urn:leaf:tenant-mcp-broker"
+        assert ttl == 60
+        assert claims["channel_hash"] == hashlib.sha256(
+            calls[call_index][1]["x-leaf-gateway-channel"].encode()
+        ).hexdigest()
+    assert signer.calls[0][0]["session_id"] != signer.calls[1][0]["session_id"]
+    assert signer.calls[0][0]["authority_turn_id"] != (
+        signer.calls[1][0]["authority_turn_id"]
+    )
 
 
 def test_http_transport_is_bounded_and_does_not_follow_redirects(monkeypatch):
@@ -355,16 +370,14 @@ def test_probe_rejects_any_broker_url_that_is_not_an_https_origin(
 
 def test_probe_rejects_initialize_contract_mismatches(staging):
     invalid = (
-        mcp_staging_probe.JsonResponse(200, {}, {"jsonrpc": "2.0", "id": 1}),
-        initialize_response(protocol="wrong"),
+        mcp_staging_probe.JsonResponse(200, {}, {"jsonrpc": "2.0", "id": 11}),
+        initialize_response(protocol="wrong", request_id=11),
         mcp_staging_probe.JsonResponse(
-            200, {}, {"jsonrpc": "2.0", "id": 1, "error": {"code": -1}}
+            200, {}, {"jsonrpc": "2.0", "id": 11, "error": {"code": -1}}
         ),
     )
     for initialized in invalid:
-        responses = iter(
-            (rejected_response(401), rejected_response(403), initialized)
-        )
+        responses = iter((rejected_response(401), initialized))
         with pytest.raises(mcp_staging_probe.ProbeError):
             mcp_staging_probe.run_probe(
                 authority_signer=CapturingSigner(),
@@ -389,10 +402,10 @@ def test_probe_rejects_status_contract_mismatches(staging):
             if call_count == 1:
                 return rejected_response(401)
             if call_count == 2:
-                return rejected_response(403)
-            if call_count == 3:
-                return initialize_response()
-            return status_response(signer.calls[0][0], **override)
+                return initialize_response(request_id=11)
+            return status_response(
+                signer.calls[0][0], request_id=12, **override
+            )
 
         with pytest.raises(mcp_staging_probe.ProbeError):
             mcp_staging_probe.run_probe(
@@ -419,8 +432,10 @@ def test_probe_rejects_wrong_channel_acceptance(staging):
         if call_count == 1:
             return rejected_response(401)
         if call_count == 2:
-            return initialize_response(request_id=92)
-        return status_response(signer.calls[0][0], request_id=93)
+            return initialize_response(request_id=11)
+        if call_count == 3:
+            return status_response(signer.calls[0][0], request_id=12)
+        return status_response(signer.calls[0][0], request_id=13)
 
     with pytest.raises(mcp_staging_probe.ProbeError):
         mcp_staging_probe.run_probe(
@@ -453,16 +468,56 @@ def test_probe_rejects_widened_catalog_or_identity_mismatch(staging):
             if call_count == 1:
                 return rejected_response(401)
             if call_count == 2:
-                return rejected_response(403)
-            if call_count == 3:
-                return initialize_response()
-            return status_response(signer.calls[0][0], **override)
+                return initialize_response(request_id=11)
+            return status_response(
+                signer.calls[0][0], request_id=12, **override
+            )
 
         with pytest.raises(mcp_staging_probe.ProbeError):
             mcp_staging_probe.run_probe(
                 authority_signer=signer,
                 transport=transport,
             )
+
+
+def test_wrong_channel_status_is_never_replaced_by_wrong_channel_initialize(staging):
+    signer = CapturingSigner()
+    challenge_bearer = None
+    challenge_channel = None
+    saw_wrong_status = False
+
+    def transport(_url, headers, payload):
+        nonlocal challenge_bearer, challenge_channel, saw_wrong_status
+        request_id = payload["id"]
+        if request_id == 91:
+            return rejected_response(401)
+        if request_id == 11:
+            challenge_bearer = headers["Authorization"]
+            challenge_channel = headers["x-leaf-gateway-channel"]
+            return initialize_response(request_id=11)
+        if (
+            payload["method"] == "initialize"
+            and headers["Authorization"] == challenge_bearer
+            and headers["x-leaf-gateway-channel"] != challenge_channel
+        ):
+            pytest.fail("the probe attempted a skippable wrong-channel initialize")
+        if request_id == 12:
+            return status_response(signer.calls[0][0], request_id=12)
+        if request_id == 13:
+            assert payload["method"] == "tools/call"
+            assert headers["Authorization"] == challenge_bearer
+            assert headers["x-leaf-gateway-channel"] != challenge_channel
+            saw_wrong_status = True
+            return wrong_channel_response()
+        if request_id == 1:
+            return initialize_response()
+        return status_response(signer.calls[1][0])
+
+    assert mcp_staging_probe.run_probe(
+        authority_signer=signer,
+        transport=transport,
+    ) == "1"
+    assert saw_wrong_status is True
 
 
 def test_command_output_never_contains_private_probe_material(monkeypatch, capsys):
