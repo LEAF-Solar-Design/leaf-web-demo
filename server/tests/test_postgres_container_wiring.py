@@ -80,23 +80,63 @@ def _app_dockerfile() -> str:
     return _read("deploy/Dockerfile.app")
 
 
-# Dockerfile instruction keywords are CASE-INSENSITIVE and may be indented, so
-# a guard that matches `line.startswith("WORKDIR ")` reads a formatting-only
-# change as "this instruction is not here". For WORKDIR that fails OPEN rather
-# than closed: lowercasing the final `workdir /app/server` would leave only the
-# earlier `/app` visible, a relative command would then resolve to
-# /app/scripts/... and MATCH the COPY target, and the guard would go green over
-# exactly the defect it exists to catch. Parse the instruction properly instead.
-# `[A-Za-z]+` cannot match a `#` comment or a `\`-continuation line, and the
-# trailing `\s` requirement stops `ENV` continuations like `APP_PORT=8130 \`
-# from being read as an instruction named APP.
-_DOCKERFILE_INSTRUCTION = re.compile(r"^\s*([A-Za-z]+)\s+(\S.*)$")
+# Reading this file needs a real parse, and two weaker ones already failed OPEN
+# here — each time letting the guard go green over the very defect it exists to
+# catch, which is the worst way for a guard to be wrong.
+#
+#   1. `line.startswith("WORKDIR ")` treats a formatting change as absence.
+#      Docker keywords are case-insensitive and may be indented, so lowercasing
+#      the final `workdir /app/server` leaves only the earlier `/app` visible;
+#      a relative command then resolves to /app/scripts/... and MATCHES.
+#   2. Matching PHYSICAL lines ignores continuations. A `\`-continued line is
+#      part of the instruction above it, not a new one. deploy/Dockerfile.app
+#      already shows this: its HEALTHCHECK continues onto a `CMD ...` line,
+#      which a per-line parse reports as a CMD instruction. The exploit is the
+#      same shape as (1) — a `RUN foo \` continued by `    WORKDIR /app` is not
+#      a WORKDIR to Docker, but a per-line parse takes it as the LAST one.
+#
+# Neither is visible to the anti-vacuity floor, because the command count does
+# not change. So join logical lines first, then match.
+_DOCKERFILE_INSTRUCTION = re.compile(r"^([A-Za-z]+)\s+(\S.*)$")
+_ESCAPE_DIRECTIVE = re.compile(r"^#\s*escape\s*=", re.IGNORECASE)
+
+
+def _logical_lines(dockerfile: str) -> list[str]:
+    """Instruction lines with `\\`-continuations joined, comments dropped."""
+    # The `escape` parser directive can change the continuation character, which
+    # would silently invalidate the joining below. Fail closed instead of
+    # guessing; deploy/Dockerfile.app does not use one.
+    assert not any(
+        _ESCAPE_DIRECTIVE.match(line.strip()) for line in dockerfile.splitlines()
+    ), "Dockerfile sets an escape directive; this parser assumes a backslash"
+
+    lines: list[str] = []
+    pending: str | None = None
+    for raw in dockerfile.splitlines():
+        stripped = raw.strip()
+        if pending is None:
+            if not stripped or stripped.startswith("#"):
+                continue
+            pending = stripped
+        else:
+            # A comment inside a continuation is removed and does NOT end it.
+            if stripped.startswith("#"):
+                continue
+            pending = f"{pending} {stripped}"
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+        else:
+            lines.append(pending)
+            pending = None
+    if pending is not None:
+        lines.append(pending)
+    return lines
 
 
 def _instructions(dockerfile: str) -> list[tuple[str, str]]:
     """(KEYWORD, argument-text) for each instruction, keyword upper-cased."""
     parsed: list[tuple[str, str]] = []
-    for line in dockerfile.splitlines():
+    for line in _logical_lines(dockerfile):
         match = _DOCKERFILE_INSTRUCTION.match(line)
         if match:
             parsed.append((match.group(1).upper(), match.group(2).strip()))
@@ -174,6 +214,37 @@ def test_dockerfile_instruction_parsing_survives_case_and_indentation():
     assert "APP" not in {keyword for keyword, _ in _instructions(dockerfile)}
     # A directory copy is a different shape and must stay out of the mapping.
     assert _copied_scripts("COPY server/ /app/server/\n") == {}
+
+    # A `\`-continuation belongs to the instruction above it. Taking it as a
+    # new instruction is the second way this parser failed open: the fake
+    # WORKDIR below would win as "last" and send a relative command to a
+    # /app/scripts/... that MATCHES, hiding a live defect.
+    continued = (
+        "WORKDIR /app/server\n"
+        "RUN printf '%s\\n' \\\n"
+        "    WORKDIR /app\n"
+    )
+    assert _final_workdir(continued) == "/app/server"
+
+    # The real Dockerfile already contains this shape: HEALTHCHECK continues
+    # onto a CMD line, which a per-line parse reports as a CMD instruction.
+    health = (
+        "WORKDIR /app/server\n"
+        "HEALTHCHECK --interval=10s \\\n"
+        '  CMD python -c "import urllib.request"\n'
+    )
+    keywords = [keyword for keyword, _ in _instructions(health)]
+    assert keywords == ["WORKDIR", "HEALTHCHECK"], keywords
+    assert "CMD" not in keywords
+
+    # A comment inside a continuation is removed and must not end it.
+    commented = "WORKDIR /app/server\nRUN one \\\n# an aside\n    WORKDIR /app\n"
+    assert _final_workdir(commented) == "/app/server"
+
+    # An escape directive would change the continuation character, so the
+    # parser must refuse rather than silently mis-join.
+    with pytest.raises(AssertionError, match="escape directive"):
+        _instructions("# escape=`\nWORKDIR /app\n")
 
 
 def test_documented_authority_commands_resolve_in_the_image():
