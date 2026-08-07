@@ -29,7 +29,15 @@ DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
 DEFAULT_CAPACITY_SAMPLE_SECONDS = 30.0
-MAX_CAPACITY_SAMPLE_SECONDS = 3600.0
+# Bounded by the COMPANION ALARM'S PERIOD, not by a round number. The staging
+# `capacity_slots` alarm evaluates 60-second periods, so an interval longer than
+# one period leaves periods with no datapoint at all, and the alarm can never
+# accumulate the consecutive breaching periods it needs. The gauge would exist
+# and never be alarmable, which is the defect this whole feature removes. The
+# 30s default deliberately sits at half this, so a period carries two samples
+# and ordinary scheduling jitter cannot empty one.
+CAPACITY_ALARM_PERIOD_SECONDS = 60.0
+MAX_CAPACITY_SAMPLE_SECONDS = CAPACITY_ALARM_PERIOD_SECONDS
 STOP_JOIN_SECONDS = 5.0
 
 
@@ -619,11 +627,10 @@ class CapacitySampler:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
         if interval_seconds > MAX_CAPACITY_SAMPLE_SECONDS:
-            # An interval longer than this cannot keep a 60s-period alarm fed,
-            # so the gauge would silently stop being alarmable. Fail at startup
-            # instead, where it is visible.
             raise ValueError(
-                f"interval_seconds must be at most {MAX_CAPACITY_SAMPLE_SECONDS:g}")
+                f"interval_seconds must be at most {MAX_CAPACITY_SAMPLE_SECONDS:g}, "
+                "the companion alarm's period; a longer interval leaves periods "
+                "with no datapoint and the alarm can never fire")
         self._supervisor = supervisor
         self._interval_seconds = interval_seconds
         self._stop = threading.Event()

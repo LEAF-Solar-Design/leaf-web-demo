@@ -14,7 +14,14 @@ from executor.runtime import child
 from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
 from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
 from executor.runtime.ed25519 import sign
-from executor.runtime.supervisor import CapacitySampler, WarmExecutorSupervisor, emit_runtime_event
+from executor.runtime.supervisor import (
+    CAPACITY_ALARM_PERIOD_SECONDS,
+    DEFAULT_CAPACITY_SAMPLE_SECONDS,
+    MAX_CAPACITY_SAMPLE_SECONDS,
+    CapacitySampler,
+    WarmExecutorSupervisor,
+    emit_runtime_event,
+)
 from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS, EXECUTOR_ID, documents, keys, lease
 
 
@@ -610,9 +617,10 @@ class CapacitySamplerTests(unittest.TestCase):
         self.assertEqual(published, len(self.events))
 
     def test_sampler_publishes_immediately_rather_than_after_one_interval(self) -> None:
-        # An hour-long interval would otherwise leave the metric absent for an
-        # hour after every deploy, and absent is what the alarm treats as bad.
-        sampler = CapacitySampler(self.supervisor, interval_seconds=3600)
+        # At the ceiling interval the second sample is a full alarm period
+        # away, so without a boot sample the metric would be absent for that
+        # whole period after every deploy.
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
         sampler.start()
         deadline = time.monotonic() + 5
         while not self.events and time.monotonic() < deadline:
@@ -645,13 +653,28 @@ class CapacitySamplerTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f"{value} was accepted"):
                 CapacitySampler.from_environment(
                     self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": value})
-        # An interval this long cannot keep a 60s-period alarm fed, so the gauge
-        # would exist and never be alarmable -- the defect this feature removes.
-        with self.assertRaisesRegex(ValueError, "at most"):
-            CapacitySampler.from_environment(
-                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "3601"})
-        self.assertEqual(3600.0, CapacitySampler.from_environment(
-            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "3600"})._interval_seconds)
+    def test_the_interval_ceiling_is_the_companion_alarms_period(self) -> None:
+        """The ceiling must be the alarm's PERIOD, not a round number.
+
+        A ceiling of, say, an hour would accept an interval that emits once and
+        then leaves 59 consecutive one-minute periods with no datapoint at all,
+        so the alarm can never accumulate consecutive breaching periods. The
+        gauge would exist and never be alarmable, which is exactly the defect
+        this feature removes -- so a too-loose ceiling silently reintroduces it.
+        """
+        self.assertEqual(60.0, MAX_CAPACITY_SAMPLE_SECONDS)
+        self.assertEqual(CAPACITY_ALARM_PERIOD_SECONDS, MAX_CAPACITY_SAMPLE_SECONDS)
+        # The default samples twice per period, so jitter cannot empty one.
+        self.assertLessEqual(
+            DEFAULT_CAPACITY_SAMPLE_SECONDS * 2, CAPACITY_ALARM_PERIOD_SECONDS)
+
+        at_ceiling = CapacitySampler.from_environment(
+            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "60"})
+        self.assertEqual(60.0, at_ceiling._interval_seconds)
+        for over in ("60.5", "61", "3600"):
+            with self.assertRaisesRegex(ValueError, "at most", msg=f"{over} was accepted"):
+                CapacitySampler.from_environment(
+                    self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": over})
 
     def test_stop_does_not_wait_for_the_configured_interval(self) -> None:
         """Shutdown must not be hostage to a telemetry write.
@@ -660,7 +683,7 @@ class CapacitySamplerTests(unittest.TestCase):
         for the CONFIGURED interval would stall every later teardown step for
         as long as the operator set it to. The join is a fixed short bound.
         """
-        sampler = CapacitySampler(self.supervisor, interval_seconds=3600)
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
         blocked = threading.Event()
 
         def wedge(_record: dict) -> None:
@@ -673,4 +696,9 @@ class CapacitySamplerTests(unittest.TestCase):
         started = time.monotonic()
         sampler.stop()
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 10, f"stop() waited {elapsed:.1f}s on a wedged sink")
+        self.assertLess(
+            elapsed,
+            MAX_CAPACITY_SAMPLE_SECONDS / 2,
+            f"stop() waited {elapsed:.1f}s on a wedged sink; it must not scale "
+            "with the configured interval",
+        )
