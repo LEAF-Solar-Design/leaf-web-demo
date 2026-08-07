@@ -140,32 +140,93 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
             body = argv[2]
         else:
             return False
-    in_single = in_double = False
-    i = 0
-    while i < len(body):
+    # Scan the shell script tracking exactly enough state to decide two things:
+    # is a `$NAME`/`${NAME}` reference in a position the shell would expand, and
+    # does a `#` begin a comment. A `#` is a comment only when it BEGINS A WORD:
+    # at the start, or after unquoted whitespace or a word-ending operator
+    # (`;` `&` `|`, or a real subshell `)`). Getting `)` right needs
+    # substitution state -- a `)` that closes `$(...)`/`$((...))`, or an escaped
+    # `\)`, does NOT end a word, so a `#` after it is not a comment. sol-critic
+    # #514 r4-r7 walked these corners (`;#`, `)#`, `${X}#`, `` `x`#``, `$(x)#`,
+    # `$((1))#`, `\)#`); this replaced the preceding-char heuristic that could
+    # not tell them apart. Unmodelled and left to fail loud, never silently
+    # green: heredocs, `$$`, process substitution `<(...)`.
+    in_double = False
+    subst = []            # 'S' = $(  'A' = $((  'P' = plain subshell (
+    prev_boundary = True  # start of string begins a word
+    i, n = 0, len(body)
+    while i < n:
         ch = body[i]
-        if ch == "\\" and not in_single:
-            i += 2
+        if in_double:
+            if ch == "\\" and i + 1 < n and body[i + 1] in '$"`\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+                prev_boundary = False
+            elif ch == "$" and _PER_COMMIT_REF.match(body, i):
+                return True
+            i += 1
             continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif (ch == "#" and not in_single and not in_double
-              and (i == 0 or body[i - 1] in " \t\n;&|()")):
-            # A '#' starts a shell comment only when it BEGINS A WORD: at the
-            # start, or right after whitespace or a word-ending operator
-            # (; & | and the subshell parens). The set is exactly those, and no
-            # more -- `{`, `}` and backtick do NOT end a word, so `${PATH}#x`,
-            # `{#x` and `` `cmd`#x `` keep `#` mid-word and the shell expands what
-            # follows (sol-critic #514 r5 added `)`, r6 removed the over-broad
-            # `{}` and backtick that caused false CI failures on such forms).
-            # This matters most for the JSON exec form, whose argv[2] is a raw
-            # shell script _executable_bash does not pre-strip.
+        if ch == "\\":
+            i += 2
+            prev_boundary = False
+            continue
+        if ch == "'":                       # single quotes: literal to next '
+            close = body.find("'", i + 1)
+            i = close + 1 if close != -1 else n
+            prev_boundary = False
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            prev_boundary = False
+            continue
+        if ch == "`":                       # command-sub result is a word char
+            i += 1
+            prev_boundary = False
+            continue
+        if ch == "#" and prev_boundary:
             break
-        elif ch == "$" and not in_single and _PER_COMMIT_REF.match(body, i):
-            return True
+        if ch == "$":
+            if body[i:i + 3] == "$((":
+                subst.append("A")
+                i += 3
+                prev_boundary = False
+                continue
+            if body[i:i + 2] == "$(":
+                subst.append("S")
+                i += 2
+                prev_boundary = False
+                continue
+            if _PER_COMMIT_REF.match(body, i):
+                return True
+            i += 1
+            prev_boundary = False
+            continue
+        if ch == "(":                       # plain subshell; its ) ends a word
+            subst.append("P")
+            i += 1
+            prev_boundary = True
+            continue
+        if ch == ")":
+            top = subst.pop() if subst else None
+            if top == "A":
+                i += 2 if body[i:i + 2] == "))" else 1
+                prev_boundary = False       # $((...)) result is a word char
+            elif top == "S":
+                i += 1
+                prev_boundary = False        # $(...) result is a word char
+            else:
+                i += 1
+                prev_boundary = True         # real subshell close ends a word
+            continue
+        if ch in " \t\n;&|":
+            i += 1
+            prev_boundary = True
+            continue
         i += 1
+        prev_boundary = False
     return False
 
 
@@ -1308,6 +1369,11 @@ def main() -> None:
         ('RUN echo ${PATH}# ${LEAF_SOURCE_SHA}', False),
         ('RUN {# ${LEAF_SOURCE_SHA}', False),
         ('RUN `printf x`# ${LEAF_SOURCE_SHA}', False),
+        # A `)` that closes a substitution, or an escaped `\)`, does NOT end a
+        # word (sol-critic #514 r7), so the reference after it still expands.
+        ('RUN echo $(printf x)# ${LEAF_SOURCE_SHA}', False),
+        ('RUN echo $((1+1))# ${LEAF_SOURCE_SHA}', False),
+        ('RUN echo \\)# ${LEAF_SOURCE_SHA}', False),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (
