@@ -785,3 +785,165 @@ class CapacitySamplerTests(unittest.TestCase):
             f"stop() waited {elapsed:.1f}s on a wedged sink; it must not scale "
             "with the configured interval",
         )
+
+    # ---- a failing sample must not take the gauge down with it ----------
+    #
+    # `sample_capacity()` guards its sink but not the `health()` call above it,
+    # and `_run()` is a bare daemon thread. An escaping exception therefore ends
+    # the thread for the life of the process, and NO alarm sees it: `capacity`
+    # stays green (the task is alive), `registration` stays green (heartbeats
+    # continue), and `capacity_slots` treats the resulting missing data as
+    # notBreaching -- a deliberate choice, because when the whole executor dies
+    # the other two already fire and a third would triple-page one outage.
+
+    def _sampler_over_a_failing_health(self, sink) -> tuple["CapacitySampler", list]:
+        attempts: list[float] = []
+
+        def sample() -> None:
+            attempts.append(time.monotonic())
+            raise RuntimeError("health() is broken")
+
+        self.supervisor.sample_capacity = sample
+        return CapacitySampler(self.supervisor, interval_seconds=0.02,
+                               runtime_event_sink=sink), attempts
+
+    def _run_until_three_attempts(self, sampler, attempts: list) -> bool:
+        sampler.start()
+        deadline = time.monotonic() + 5
+        while len(attempts) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        alive = sampler._thread.is_alive()
+        sampler.stop()
+        return alive
+
+    def test_a_failing_sample_does_not_end_the_sampler_thread(self) -> None:
+        """The whole point: a raising sample must cost one sample, not all of them."""
+        sampler, attempts = self._sampler_over_a_failing_health(lambda _record: None)
+        alive = self._run_until_three_attempts(sampler, attempts)
+
+        self.assertGreaterEqual(
+            len(attempts), 3,
+            "the sampler stopped attempting after a failing sample: the gauge is "
+            "now silent for the life of the process and no alarm can see it")
+        self.assertTrue(alive, "the sampler thread died on a failing sample")
+
+    def test_a_failure_report_that_raises_cannot_kill_the_sampler(self) -> None:
+        """The report runs BECAUSE something already raised.
+
+        A sink that raises in turn would kill the thread from inside the handler
+        that exists to keep it alive -- restoring the exact failure by way of the
+        fix for it.
+        """
+        def explode(_record: dict) -> None:
+            raise OSError("fd 2 is gone")
+
+        sampler, attempts = self._sampler_over_a_failing_health(explode)
+        alive = self._run_until_three_attempts(sampler, attempts)
+
+        self.assertGreaterEqual(
+            len(attempts), 3, "a raising failure-sink ended the sampler")
+        self.assertTrue(alive, "the sampler thread died reporting its own failure")
+
+    def _drive(self, outcomes: list[bool]) -> list[dict]:
+        """Run `_run()` over a scripted sequence of sample outcomes on a fake clock.
+
+        True = the sample returns, False = it raises. No thread and no sleeping,
+        so the reporting schedule pinned below is measured off the real loop
+        body rather than approximated by a timing race. Same stubbing discipline
+        as `_spacing_at_ceiling`: `_run()` is called directly, no sampler thread
+        exists, and the stubbed wait never blocks.
+        """
+        emitted: list[dict] = []
+        clock = [1000.0]
+        taken = [0]
+        sampler = CapacitySampler(self.supervisor,
+                                  interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS,
+                                  runtime_event_sink=emitted.append)
+
+        def sample() -> None:
+            index = taken[0]
+            taken[0] += 1
+            if taken[0] >= len(outcomes):
+                sampler._stop.set()
+            if not outcomes[index]:
+                raise RuntimeError("health() is broken")
+
+        def wait(timeout: float | None = None) -> bool:
+            clock[0] += timeout
+            return sampler._stop.is_set()
+
+        self.supervisor.sample_capacity = sample
+        sampler._stop.wait = wait
+        with patch("time.monotonic", lambda: clock[0]):
+            sampler._run()
+
+        self.assertEqual(len(outcomes), taken[0], "the loop did not run the whole script")
+        return emitted
+
+    def test_a_failing_sample_is_reported_rather_than_silently_swallowed(self) -> None:
+        """A swallowed failure publishes exactly as much as a dead thread: nothing.
+
+        So the failure carries its own line, which is what a metric filter in
+        the terraform root would key on to alarm on a running-but-blind sampler.
+        """
+        [record] = self._drive([False])
+
+        self.assertEqual("capacity_sample_failed", record["event_type"])
+        self.assertEqual(EXECUTOR_ID, record["executor_id"])
+        self.assertEqual("RuntimeError", record["error_type"])
+        self.assertEqual(1, record["consecutive_failures"])
+        # The message is deliberately absent: `sample_capacity` promises its
+        # record carries no tenant, session, assignment or source value, and an
+        # uncontrolled exception string would put that promise back in play.
+        self.assertEqual(
+            {"event_type", "executor_id", "error_type",
+             "consecutive_failures", "occurred_at"},
+            set(record))
+        self.assertNotIn("health() is broken", str(record))
+
+    def test_a_permanently_broken_sample_reports_on_a_bounded_schedule(self) -> None:
+        """Bound the OUTPUT, not the trigger.
+
+        A permanently broken `health()` fails every interval forever. Reporting
+        each one would emit two lines a minute at the default interval, and far
+        more at a short one, into the same log group the gauge itself uses.
+        Powers of two keep the first failure immediate -- the one an operator
+        needs -- and cost log2(n) lines for a run of n instead of n.
+        """
+        records = self._drive([False] * 20)
+
+        self.assertEqual([1, 2, 4, 8, 16],
+                         [record["consecutive_failures"] for record in records])
+        self.assertEqual({"capacity_sample_failed"},
+                         {record["event_type"] for record in records})
+
+    def test_recovery_closes_the_run_exactly_once_and_states_its_length(self) -> None:
+        """Without this the newest failure line is unbounded in time.
+
+        A healthy sampler is silent about its own health, so nothing else
+        distinguishes a run that ended an hour ago from one still going.
+        """
+        records = self._drive([False, False, False, True, True])
+
+        self.assertEqual(
+            ["capacity_sample_failed", "capacity_sample_failed",
+             "capacity_sample_recovered"],
+            [record["event_type"] for record in records])
+        # Three failures, reported at 1 and 2; the recovery states all three.
+        self.assertEqual(3, records[-1]["consecutive_failures"])
+
+    def test_the_failure_run_restarts_after_a_recovery(self) -> None:
+        # A counter that recovery did not reset would make the second run's
+        # first failure read as the second failure of one long run, and would
+        # skip reporting it entirely once the counter passed a power of two.
+        records = self._drive([False, True, False])
+
+        self.assertEqual(
+            [("capacity_sample_failed", 1), ("capacity_sample_recovered", 1),
+             ("capacity_sample_failed", 1)],
+            [(record["event_type"], record["consecutive_failures"]) for record in records])
+
+    def test_a_healthy_sampler_says_nothing_about_itself(self) -> None:
+        # Recovery must fire only after a failure. A line every interval would
+        # double the gauge's own volume and say nothing.
+        self.assertEqual([], self._drive([True, True, True]))

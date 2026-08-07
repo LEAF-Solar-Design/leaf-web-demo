@@ -139,6 +139,44 @@ Three details are load-bearing:
   would silently stop publishing the gauge an alarm is watching, failing toward
   "quiet", which is the failure mode this exists to remove.
 
+### Why the sampler cannot die quietly
+
+Guarding the sink was not enough. `sample_capacity()` computes `health()` before
+it reaches the sink, and `_run()` is a bare daemon thread, so a raise from
+`health()` ended the thread for the life of the process. **No alarm sees that
+state**, and that is the point: `capacity` stays green because the task is
+alive, `registration` stays green because heartbeats continue, and
+`capacity_slots` treats the missing data as `notBreaching`. That last choice is
+correct for its stated purpose — when the whole executor dies the other two
+alarms already fire, and a third would triple-page one outage — so a
+sampler-only death has to be caught in the executor rather than in the alarm.
+
+`_run()` therefore wraps the sample call, **and nothing else**: the deadline
+arithmetic that keeps the sample's own cost out of the spacing has to run on the
+failure path too, or a fast-failing sample would spin the loop.
+
+A swallowed failure would publish exactly as much as a dead thread, so failures
+are also stated:
+
+- `capacity_sample_failed` carries `error_type` and `consecutive_failures`. It
+  is emitted only when the run length is a power of two (1, 2, 4, 8, …), so the
+  first failure is immediate and a permanently broken `health()` costs log2(n)
+  lines instead of one per interval into the same log group the gauge uses.
+- `capacity_sample_recovered` closes the run and states its length, so the
+  newest failure line is bounded in time. A healthy sampler is otherwise silent
+  about its own health.
+- The exception **message** is deliberately omitted. The gauge record promises
+  it carries no tenant, session, assignment, or source value; an uncontrolled
+  exception string would put that promise back in play.
+- The sampler holds its **own** sink rather than the supervisor's, because the
+  thing it reports on is a supervisor whose `health()` just raised.
+
+Publishing `consecutive_failures` as its own CloudWatch metric would close the
+remaining gap — a sampler that runs but always fails still publishes no gauge,
+so `capacity_slots` is still blind to it. That needs a second metric filter and
+alarm in the terraform root and is **not** done; the event those would read is
+what exists today.
+
 **Companion change, in the terraform repo.** The metric filter that reads these
 lines, and the alarm on the resulting metric, live there. The filter selects
 `$.record.event_type = "capacity_sample"` and publishes `$.record.ready_slots`,
