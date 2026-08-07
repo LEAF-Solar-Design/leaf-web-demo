@@ -3,6 +3,12 @@
 This module is a private ECS task command, not an HTTP route. It mints one
 deployment-canary attachment with the app task's existing KMS authority and
 uses it only long enough to prove the broker's authenticated MCP contract.
+
+The command is started only by the protected broker deployment transaction in
+``LEAF-Solar-Design/leaf-automation-aws-terraform``. Its canonical ownership
+and invocation contract is documented in
+``docs/tenant-mcp-broker-staging-rollout.md`` in that repository. The Leaf app
+does not expose or independently dispatch this command.
 """
 from __future__ import annotations
 

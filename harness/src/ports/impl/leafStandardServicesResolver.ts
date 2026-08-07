@@ -21,6 +21,11 @@ const MAX_ATTACHMENT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const TOKEN = /^[A-Za-z0-9._~-]{16,8192}$/;
+const CANONICAL_BROKER_ORIGIN = {
+  staging: "https://staging-api.leafdesign.ai",
+  production: "https://api.leafdesign.ai",
+} as const;
+const BROKER_MCP_PATH = "/mcp";
 
 type FetchLike = typeof fetch;
 
@@ -95,14 +100,28 @@ function parseBrokerEndpoint(value: string, environment: "local" | "staging" | "
   } catch {
     throw new Error("LEAF_TENANT_MCP_BROKER_URL must be an absolute URL");
   }
-  if (!url.hostname || url.username || url.password || url.search || url.hash) {
+  if (
+    !url.hostname
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || !["", "/"].includes(url.pathname)
+  ) {
     throw new Error("LEAF_TENANT_MCP_BROKER_URL must not contain credentials, query, or fragment");
   }
   const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname.toLowerCase());
-  if (url.protocol !== "https:" && !(environment === "local" && url.protocol === "http:" && loopback)) {
-    throw new Error("LEAF_TENANT_MCP_BROKER_URL must use HTTPS outside local loopback");
+  if (environment === "local") {
+    if (!loopback || !["http:", "https:"].includes(url.protocol)) {
+      throw new Error("LEAF_TENANT_MCP_BROKER_URL must use an explicit local loopback origin in local mode");
+    }
+    return new URL(BROKER_MCP_PATH, url.origin);
   }
-  return url;
+  const canonicalOrigin = CANONICAL_BROKER_ORIGIN[environment];
+  if (url.protocol !== "https:" || url.origin !== canonicalOrigin) {
+    throw new Error("LEAF_TENANT_MCP_BROKER_URL must match the canonical tenant broker origin");
+  }
+  return new URL(BROKER_MCP_PATH, canonicalOrigin);
 }
 
 async function boundedJson(response: Response): Promise<unknown> {

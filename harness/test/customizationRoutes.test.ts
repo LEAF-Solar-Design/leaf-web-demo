@@ -146,7 +146,7 @@ describe("customization routes", () => {
 
   it("requires a complete app authority tuple when standard services are enabled", async () => {
     const previous = process.env.LEAF_TENANT_MCP_BROKER_URL;
-    process.env.LEAF_TENANT_MCP_BROKER_URL = "https://broker.example/mcp";
+    process.env.LEAF_TENANT_MCP_BROKER_URL = "https://staging-api.leafdesign.ai";
     try {
       const missing = await fetch(`${baseUrl}/author/stage`, {
         method: "POST",

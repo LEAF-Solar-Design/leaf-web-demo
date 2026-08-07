@@ -114,6 +114,49 @@ def decode(token: str, public_key, audience: str) -> dict:
     )
 
 
+class StreamingGrantResponse:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        read_error: Exception | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.closed = False
+        self._body = body
+        self._offset = 0
+        self._read_error = read_error
+        self.read_sizes: list[int] = []
+        self.returned_bytes = 0
+        self.raw = self
+
+    def read(self, size: int, *, decode_content: bool) -> bytes:
+        assert decode_content is True
+        self.read_sizes.append(size)
+        if self._read_error is not None:
+            raise self._read_error
+        chunk = self._body[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        self.returned_bytes += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def grant_body(accounts: list[dict] | None = None) -> bytes:
+    return json.dumps({
+        "linked": True,
+        "accounts": accounts if accounts is not None else [
+            {"id": MOUNT, "eligible": True},
+            {"id": "ineligible", "eligible": False},
+        ],
+    }).encode("utf-8")
+
+
 def test_kms_signer_resolves_alias_and_publishes_matching_jwk(monkeypatch):
     monkeypatch.setenv(
         "LEAF_TENANT_MCP_ATTACHMENT_ISSUER", "https://platform.example"
@@ -156,27 +199,19 @@ def test_subscription_mount_uses_separate_grant_admin_authority(monkeypatch):
     monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
     seen = {}
 
-    class Response:
-        status_code = 200
+    responses: list[StreamingGrantResponse] = []
 
-        @staticmethod
-        def json():
-            return {
-                "linked": True,
-                "accounts": [
-                    {"id": MOUNT, "eligible": True},
-                    {"id": "ineligible", "eligible": False},
-                ],
-            }
-
-    def get(url, *, headers, timeout, allow_redirects):
+    def get(url, *, headers, timeout, allow_redirects, stream):
         seen.update(
             url=url,
             headers=headers,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            stream=stream,
         )
-        return Response()
+        response = StreamingGrantResponse(grant_body())
+        responses.append(response)
+        return response
 
     monkeypatch.setattr("requests.get", get)
 
@@ -187,9 +222,111 @@ def test_subscription_mount_uses_separate_grant_admin_authority(monkeypatch):
         "headers": {"X-Harness-Secret": "harness-admin-secret"},
         "timeout": 5,
         "allow_redirects": False,
+        "stream": True,
     }
+    assert responses[0].closed is True
     with pytest.raises(mcp_authority.McpMountDenied):
         mcp_authority.verify_subscription_mount(TENANT, "ineligible")
+    assert responses[1].closed is True
+
+
+def test_subscription_mount_rejects_oversized_declared_body_without_reading(
+    monkeypatch,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+    response = StreamingGrantResponse(
+        grant_body(),
+        headers={
+            "Content-Length": str(
+                mcp_authority.MOUNT_AUTHORITY_MAX_RESPONSE_BYTES + 1
+            )
+        },
+    )
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(mcp_authority.McpAuthorityError, match="too large"):
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+    assert response.returned_bytes == 0
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Transfer-Encoding": "chunked"},
+        {},
+    ],
+    ids=["chunked", "no-content-length"],
+)
+def test_subscription_mount_caps_actual_streamed_body(monkeypatch, headers):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+    limit = mcp_authority.MOUNT_AUTHORITY_MAX_RESPONSE_BYTES
+    response = StreamingGrantResponse(b"x" * (limit + 100), headers=headers)
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(mcp_authority.McpAuthorityError, match="too large"):
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+    assert response.returned_bytes == limit + 1
+    assert max(response.read_sizes) <= 8192
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"linked":true,"accounts":',
+        b'{"linked":true,"linked":true,"accounts":[]}',
+        json.dumps({
+            "linked": True,
+            "accounts": [{"id": MOUNT, "eligible": "yes"}],
+        }).encode("utf-8"),
+        grant_body([
+            {"id": f"account-{index}", "eligible": True}
+            for index in range(101)
+        ]),
+    ],
+    ids=["malformed-json", "duplicate-key", "malformed-account", "too-many-accounts"],
+)
+def test_subscription_mount_rejects_malformed_or_unbounded_data(monkeypatch, body):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+    response = StreamingGrantResponse(body)
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(mcp_authority.McpAuthorityError):
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+    assert response.closed is True
+
+
+def test_subscription_mount_closes_on_read_transport_failure(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+    response = StreamingGrantResponse(b"", read_error=OSError("private transport"))
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(mcp_authority.McpAuthorityError, match="unavailable") as exc:
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+    assert "private transport" not in str(exc.value)
+    assert response.closed is True
+
+
+def test_subscription_mount_sanitizes_request_transport_failure(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("private request transport")
+
+    monkeypatch.setattr("requests.get", fail)
+    with pytest.raises(mcp_authority.McpAuthorityError, match="unavailable") as exc:
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+    assert "private request transport" not in str(exc.value)
 
 
 def test_subscription_mount_fails_closed_without_independent_verifier(monkeypatch):
@@ -204,18 +341,19 @@ def test_subscription_mount_never_forwards_secret_across_redirect(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
     monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
 
-    class Redirect:
-        status_code = 302
+    response = StreamingGrantResponse(b"", status_code=302)
 
-    def get(_url, *, headers, timeout, allow_redirects):
+    def get(_url, *, headers, timeout, allow_redirects, stream):
         assert headers == {"X-Harness-Secret": "harness-admin-secret"}
         assert timeout == 5
         assert allow_redirects is False
-        return Redirect()
+        assert stream is True
+        return response
 
     monkeypatch.setattr("requests.get", get)
     with pytest.raises(mcp_authority.McpAuthorityError):
         mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+    assert response.closed is True
 
 
 def test_internal_exchange_binds_app_owned_authority_and_random_channel(authority):

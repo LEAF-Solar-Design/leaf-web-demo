@@ -27,6 +27,8 @@ ATTACHMENT_TTL_SECONDS = 120
 APPROVAL_TTL_SECONDS = 120
 APPROVAL_AUDIENCE = "urn:leaf:tenant-mcp-approval"
 RUNNER_PROFILE_IDS = frozenset({"author", "spine"})
+MOUNT_AUTHORITY_MAX_RESPONSE_BYTES = 64 * 1024
+MOUNT_AUTHORITY_MAX_ACCOUNTS = 100
 
 PUBLIC_SERVICES = (
     "artifact", "build", "chart", "code", "deployment", "diagram",
@@ -144,19 +146,102 @@ def verify_subscription_mount(tenant_id: str, mount_id: str) -> None:
             headers={"X-Harness-Secret": secret},
             timeout=5,
             allow_redirects=False,
+            stream=True,
         )
     except Exception as exc:  # noqa: BLE001 - provider errors are sanitized
         raise McpAuthorityError("subscription mount authority is unavailable") from exc
-    if response.status_code != 200:
-        raise McpAuthorityError("subscription mount authority refused verification")
     try:
-        body = response.json()
-    except (TypeError, ValueError) as exc:
-        raise McpAuthorityError("subscription mount authority returned invalid data") from exc
+        if response.status_code != 200:
+            raise McpAuthorityError(
+                "subscription mount authority refused verification"
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length, 10)
+            except (TypeError, ValueError) as exc:
+                raise McpAuthorityError(
+                    "subscription mount authority returned invalid data"
+                ) from exc
+            if declared_length < 0:
+                raise McpAuthorityError(
+                    "subscription mount authority returned invalid data"
+                )
+            if declared_length > MOUNT_AUTHORITY_MAX_RESPONSE_BYTES:
+                raise McpAuthorityError(
+                    "subscription mount authority response is too large"
+                )
+
+        raw = getattr(response, "raw", None)
+        if raw is None or not callable(getattr(raw, "read", None)):
+            raise McpAuthorityError(
+                "subscription mount authority returned invalid data"
+            )
+        chunks: list[bytes] = []
+        received = 0
+        while received <= MOUNT_AUTHORITY_MAX_RESPONSE_BYTES:
+            remaining = MOUNT_AUTHORITY_MAX_RESPONSE_BYTES + 1 - received
+            try:
+                chunk = raw.read(min(8192, remaining), decode_content=True)
+            except Exception as exc:  # noqa: BLE001 - transport details are private
+                raise McpAuthorityError(
+                    "subscription mount authority is unavailable"
+                ) from exc
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes) or len(chunk) > remaining:
+                raise McpAuthorityError(
+                    "subscription mount authority returned invalid data"
+                )
+            chunks.append(chunk)
+            received += len(chunk)
+            if received > MOUNT_AUTHORITY_MAX_RESPONSE_BYTES:
+                raise McpAuthorityError(
+                    "subscription mount authority response is too large"
+                )
+        try:
+            text = b"".join(chunks).decode("utf-8")
+
+            def reject_constant(value: str) -> None:
+                raise ValueError(f"invalid JSON constant: {value}")
+
+            def reject_duplicate_keys(
+                pairs: list[tuple[str, Any]],
+            ) -> dict[str, Any]:
+                result: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate JSON key")
+                    result[key] = value
+                return result
+
+            body = json.loads(
+                text,
+                parse_constant=reject_constant,
+                object_pairs_hook=reject_duplicate_keys,
+            )
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise McpAuthorityError(
+                "subscription mount authority returned invalid data"
+            ) from exc
+    finally:
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001 - close must not expose provider details
+            pass
     if not isinstance(body, dict) or body.get("linked") is not True:
         raise McpMountDenied("subscription mount is not linked to this tenant")
     accounts = body.get("accounts")
-    if not isinstance(accounts, list) or len(accounts) > 100:
+    if (
+        not isinstance(accounts, list)
+        or len(accounts) > MOUNT_AUTHORITY_MAX_ACCOUNTS
+        or any(
+            not isinstance(account, dict)
+            or not isinstance(account.get("id"), str)
+            or type(account.get("eligible")) is not bool
+            for account in accounts
+        )
+    ):
         raise McpAuthorityError("subscription mount authority returned invalid data")
     for account in accounts:
         if (
