@@ -1635,20 +1635,16 @@ _GUARDED_IMAGES = {
 # comment. Provenance is a SEPARATE contract from script survival, so it gets its
 # own pin here: both RUNs must be present verbatim as parsed RUN instructions --
 # a comment cannot satisfy this, and editing either is a change a reviewer sees.
+# EXEC form (`["/bin/sh","-c",...]`), pinned verbatim. Round 5 shipped these as
+# shell form and sol-critic caught the consequence: a `SHELL ["/bin/true"]`
+# inserted above ran them as `/bin/true -c "..."` -- no attest, no seal -- while
+# these byte-exact pins and every static gate stayed green. Exec form names
+# /bin/sh directly and ignores SHELL, the same reason the survival guard is exec
+# form. The pins are the parsed RUN ARGUMENT text; the test also requires exec
+# form via _exec_argv, so a revert to shell form reddens.
 _CANONICAL_WORKER_ATTESTATION_RUNS = (
-    'PYTHONPATH=/app/server python -c "from pathlib import Path; from '
-    "solver_adapters.autofill import attest_source; attest_source("
-    "Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', "
-    "Path('/app/deploy/autofill-solver-sources.json'))\"",
-    'python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
-    "re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must "
-    "be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\""
-    ' && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
-    "re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an "
-    "exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf "
-    "'%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > "
-    "/opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' "
-    '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
+    '["/bin/sh", "-c", "PYTHONPATH=/app/server python -c \\"from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path(\'/opt/leaf/autofill-solver\'), \'${AUTOFILL_SOLVER_REVISION}\', Path(\'/app/deploy/autofill-solver-sources.json\'))\\""]',
+    '["/bin/sh", "-c", "python -c \\"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r\'[0-9a-f]{40}\', value) else \'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit\')\\" \\"$AUTOFILL_SOLVER_REVISION\\" && python -c \\"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r\'[0-9a-f]{40}\', value) else \'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit\')\\" \\"$LEAF_SOURCE_SHA\\" && printf \'%s\\\\n\' \\"$AUTOFILL_SOLVER_REVISION\\" > /opt/leaf/autofill-solver/.leaf-source-revision && printf \'%s\\\\n\' \\"$LEAF_SOURCE_SHA\\" > /app/.leaf-source-revision"]',
 )
 
 
@@ -1674,6 +1670,15 @@ def test_canonical_worker_pins_its_solver_attestation_runs():
             "deploy/Dockerfile.canonical-worker no longer runs this attestation/"
             f"revision-sealing RUN verbatim:\n    {pinned}\nparsed RUNs:\n    "
             + "\n    ".join(run_args)
+        )
+        # EXEC form is load-bearing, not style: a shell-form provenance RUN can be
+        # neutered by a `SHELL ["/bin/true"]` above it (sol-critic #514 r5), and
+        # the byte-exact pin above would not see it because the RUN text is
+        # unchanged. Requiring exec form here closes that, and a revert to shell
+        # form reddens both this and the pin above.
+        assert _exec_argv(pinned) is not None, (
+            "this provenance RUN must be EXEC form so a SHELL above it cannot turn "
+            f"it into a no-op:\n    {pinned}"
         )
 
 

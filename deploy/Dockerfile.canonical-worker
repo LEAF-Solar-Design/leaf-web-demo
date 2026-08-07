@@ -17,14 +17,16 @@ COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke
 COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
 
-# The two RUNs below run as root (the image's default at this point): the second
-# writes .leaf-source-revision into root-owned /opt/leaf and /app. They are
-# ordinary build steps -- NOT byte-pinned or fenced against tampering -- because
-# the survival guard that used to sit ABOVE them now runs AFTER them, as the
-# runtime uid 65532. See the guard at the end of this file for why that is
-# strictly stronger: pinning a RUN's text cannot bind the mutable Python the
-# first RUN imports, but a guard that runs afterward observes the real
-# filesystem that RUN leaves behind.
+# The two RUNs below run as root (the image's default at this point): the first
+# attests the solver source against the checked-in commit-to-digest map, the
+# second seals the revisions into .leaf-source-revision under root-owned
+# /opt/leaf and /app. They ARE pinned -- byte-exact, as PARSED exec-form RUNs,
+# by test_canonical_worker_pins_its_solver_attestation_runs -- because they carry
+# the PROVENANCE contract (that attestation actually runs), which is a separate
+# contract from script survival. Script survival is covered instead by the guard
+# at the END of this file, which runs AFTER them as uid 65532 and observes the
+# real filesystem they leave behind -- so a chmod by the mutable Python the first
+# RUN imports is caught even though a text pin cannot bind that imported code.
 
 # Declared below every non-consuming instruction, deliberately: LEAF_SOURCE_SHA
 # is a new commit sha on every build, and a changed in-scope ARG is a buildx
@@ -37,19 +39,20 @@ ARG LEAF_SOURCE_SHA
 # The named context may be a mutable local checkout. Do not trust the revision
 # argument by itself. Hash the copied Python source, require the checked-in
 # commit-to-digest mapping, then seal that verified identity into the image.
-RUN PYTHONPATH=/app/server python -c "from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))"
+#
+# BOTH provenance RUNs are EXEC form, and that is load-bearing, not style: a
+# shell-form RUN executes through whatever SHELL is in effect, so a
+# `SHELL ["/bin/true"]` inserted above would run them as `/bin/true -c "..."`,
+# exit 0, and neither attest nor seal -- while the byte-exact pins (which bind
+# the text) and every static gate stay green (sol-critic #514 round 5). Exec
+# form names /bin/sh directly and ignores SHELL. Pinned verbatim by
+# test_canonical_worker_pins_its_solver_attestation_runs, which also requires
+# exec form.
+RUN ["/bin/sh", "-c", "PYTHONPATH=/app/server python -c \"from pathlib import Path; from solver_adapters.autofill import attest_source; attest_source(Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', Path('/app/deploy/autofill-solver-sources.json'))\""]
 
 WORKDIR /app/server
 
-RUN python -c \
-      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')" \
-      "$AUTOFILL_SOLVER_REVISION" \
-    && python -c \
-      "import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')" \
-      "$LEAF_SOURCE_SHA" \
-    && printf '%s\n' "$AUTOFILL_SOLVER_REVISION" \
-      > /opt/leaf/autofill-solver/.leaf-source-revision \
-    && printf '%s\n' "$LEAF_SOURCE_SHA" > /app/.leaf-source-revision
+RUN ["/bin/sh", "-c", "python -c \"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\" && python -c \"import re,sys; value=sys.argv[1]; raise SystemExit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf '%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > /opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' \"$LEAF_SOURCE_SHA\" > /app/.leaf-source-revision"]
 
 ENV AUTOFILL_SOLVER_ROOT=/opt/leaf/autofill-solver \
     AUTOFILL_SOLVER_REVISION=${AUTOFILL_SOLVER_REVISION} \

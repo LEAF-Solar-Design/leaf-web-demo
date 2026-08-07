@@ -152,7 +152,7 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif (ch == "#" and not in_single and not in_double
-              and (i == 0 or body[i - 1] in " \t\n;&|(`")):
+              and (i == 0 or body[i - 1] in " \t\n;&|(){}`")):
             # An unquoted '#' at a word boundary starts a shell comment; the
             # shell never expands what follows it. This matters most for the
             # JSON exec form, whose argv[2] is a raw shell script that
@@ -1296,6 +1296,10 @@ def main() -> None:
         # `true` runs and LEAF_SOURCE_SHA stays unset -- this RUN must offend.
         ('RUN ["/bin/sh", "-c", "true;# ${LEAF_SOURCE_SHA:?expanded}"]', True),
         ('RUN echo hi  # ${LEAF_SOURCE_SHA}', True),
+        # `#` after `)` also starts a comment (sol-critic #514 r5), shell and
+        # JSON form alike -- the reference is never expanded, so both offend.
+        ('RUN ["/bin/sh", "-c", "(true)# ${LEAF_SOURCE_SHA:?expanded}"]', True),
+        ('RUN (true)# ${LEAF_SOURCE_SHA:?expanded}', True),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (
