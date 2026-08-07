@@ -17,6 +17,19 @@ value never crosses back to the caller. Fail-closed by construction:
   registered out of band; until then the broker only serves metadata.
 - Every injection writes an operator_security_audit row (handle, scope,
   decision) with NO secret value.
+
+TRUST BOUNDARY. The registry is TRUSTED server configuration (a checked-in
+file, or a deployment-set LEAF_OPERATOR_SECRETS_FILE). It is not reachable by
+the model, by tenants, or by any HTTP request, and by contract it holds ONLY
+metadata, never a secret value. Handle / scope / kind / environment are PUBLIC
+metadata BY DESIGN: describe() and the /api/operator/secrets route exist to
+surface them. So the broker's runtime guarantee is specifically about the
+value the MINTER returns: that minted credential must never appear in a return
+value, an exception, or an audit. The broker never surfaces minter output as
+metadata, and its receipt is a pure constant, so no minted credential can ride
+out on the metadata surface. The identifier charset on registry fields is
+defense-in-depth (it refuses obviously value-shaped strings); the registry-is-
+trusted contract, not the charset, is what keeps secrets out of metadata.
 """
 from __future__ import annotations
 
@@ -79,10 +92,13 @@ def _load_registry() -> Dict[str, Dict[str, Any]]:
             raise SecretBrokerError(f"secrets registry: {handle} must be a mapping")
         if set(meta) != _ALLOWED_META:
             # Exact field set: no unknown fields, and none of scope /
-            # environment / kind / ttl_s may be omitted.
+            # environment / kind / ttl_s may be omitted. Do NOT interpolate the
+            # actual field names: an unknown field name is un-validated registry
+            # content and this error surfaces (HTTP 409), so echoing it would be
+            # a smuggling path. `handle` is already charset-validated above.
             raise SecretBrokerError(
                 f"secrets registry: {handle} fields must be exactly "
-                f"{sorted(_ALLOWED_META)}, got {sorted(meta)}")
+                f"{sorted(_ALLOWED_META)}")
         # Every metadata field must be a plain string / bounded int. This
         # blocks a nested value from hiding inside e.g. scope: {"token": ...}.
         for key in ("scope", "environment", "kind"):
@@ -218,8 +234,9 @@ def with_injected(handle: str, environment: str,
         raise SecretBrokerError("adapter_failed")
 
     _audit_inject(subject, handle, scope, "inject", "credential_injected")
-    # Fixed receipt: only the caller's own `handle` (a known registry key) and
-    # a boolean. No adapter output, and no registry-controlled string like
-    # `scope`, crosses back to the caller. The caller can describe(handle) for
+    # Receipt is a PURE CONSTANT: it carries nothing derived from the minter,
+    # the adapter, or the registry, so it is provably impossible for any minted
+    # credential or registry string to ride out on the return value. The caller
+    # already knows which handle it called and can describe(handle) for
     # metadata; the receipt only confirms injection happened.
-    return {"handle": handle, "injected": True}
+    return {"injected": True}

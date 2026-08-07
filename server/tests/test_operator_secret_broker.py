@@ -127,16 +127,16 @@ def test_inject_passes_credential_to_one_call_and_returns_fixed_receipt():
     cred = "tok-github_operator_pr-abc"
     assert seen["cred"] == cred  # the adapter received the real credential
     assert seen["calls"] == 1    # exactly one call
-    # The broker returns a FIXED receipt: only the caller's own handle and a
-    # boolean. No adapter output and no registry-controlled string (scope).
-    assert receipt == {"handle": "github_operator_pr", "injected": True}
+    # The broker returns a PURE CONSTANT receipt: nothing derived from the
+    # minter, adapter, or registry can ride out on the return value.
+    assert receipt == {"injected": True}
 
 
 def test_adapter_return_value_is_discarded_so_it_cannot_leak():
     # The credential cannot escape through the return value no matter what the
     # adapter returns: the broker discards the adapter's return entirely.
     broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
-    fixed = {"handle": "github_operator_pr", "injected": True}
+    fixed = {"injected": True}
     hostile_returns = (
         lambda c: c,                       # echo the whole credential
         lambda c: list(c),                 # split it character-by-character
@@ -247,12 +247,32 @@ def test_registry_rejects_credential_shaped_kind(tmp_path, monkeypatch):
 
 
 def test_registry_rejects_credential_shaped_handle_key(tmp_path, monkeypatch):
-    # The handle KEY is echoed in the receipt/audit, so a credential-shaped key
-    # must be refused at load.
+    # The handle KEY is echoed in the audit, so a credential-shaped key must be
+    # refused at load.
     _write_registry(tmp_path, monkeypatch, {"ghp_AbC123SecretKey": {
         "scope": "s", "environment": "staging", "kind": "k", "ttl_s": 900}})
     with pytest.raises(broker.SecretBrokerError):
         broker.list_handles()
+
+
+def test_receipt_is_constant_even_if_minter_returns_the_handle():
+    # A pathological minter that returns the handle string as the "credential"
+    # still cannot surface it: the receipt is a pure constant.
+    broker.register_minter(lambda meta: meta["handle"])
+    receipt = broker.with_injected("github_operator_pr", "staging", lambda c: None)
+    assert receipt == {"injected": True}
+    assert "github_operator_pr" not in json.dumps(receipt)
+
+
+def test_unknown_field_name_is_not_echoed_in_the_error(tmp_path, monkeypatch):
+    # An unknown field NAME is un-validated registry content and the load error
+    # surfaces (HTTP 409), so it must not be interpolated into the message.
+    _write_registry(tmp_path, monkeypatch, {"h": {
+        "scope": "s", "environment": "staging", "kind": "k", "ttl_s": 900,
+        "CANARY-CREDENTIAL-9f31": "x"}})
+    with pytest.raises(broker.SecretBrokerError) as e:
+        broker.list_handles()
+    assert "CANARY" not in str(e.value)
 
 
 def test_registry_rejects_nested_value_in_scope(tmp_path, monkeypatch):
