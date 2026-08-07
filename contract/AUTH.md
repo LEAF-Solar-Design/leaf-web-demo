@@ -422,3 +422,17 @@ mid-turn gate re-checks are tier-only for now. Staff admins are unaffected
 (their authority rides `tier="admin"`). Extending the turn record with roles
 is scheduled with the org-role preset phase. The queued-turn payload DOES
 snapshot roles/elevation, so enqueue→kick entitlement re-checks honor roles.
+
+**11.6 Operator principals (added 2026-08-07 per the §11 ritual; contract:
+`contract/OPERATOR.md`).**
+
+Operator authority is never carried in a token. A verified JWT supplies only
+the `sub`; a server-owned `operator_principals` PostgreSQL record (subject,
+role, monotonic `role_revision`, status, profiles, environment) is the sole
+grant, managed exclusively out of band by a DB-credentialed CLI. No claim
+value, tier (including `admin`), role (including `platform_admin`), ops
+secret, dispatch header, or model output can mint, imply, or extend it;
+revocation or a `role_revision` bump denies the subject's next request. The
+§11.2 tier vocabulary, §11.3 capability vocabulary, and §11.5 role overlay
+gain no operator member — that absence is itself freeze-gated. Freeze gate:
+`server/tests/test_operator_vocab_freeze.py`.
