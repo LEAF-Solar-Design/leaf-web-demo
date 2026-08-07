@@ -272,17 +272,22 @@ jobs:
             # One read carries status, conclusion AND the current attempt.
             SUP_RECORD=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN") || return 1
-            SUP_ATTEMPT=$(printf '%s' "$SUP_RECORD" | jq -r '.run_attempt // empty')
-            SUP_STATE=$(printf '%s' "$SUP_RECORD" | jq -r '"\(.status) \(.conclusion // "")"')
+            SUP_ATTEMPT=$(printf '%s' "$SUP_RECORD" | jq -r '.run_attempt // empty') \
+              || return 1
+            SUP_STATE=$(printf '%s' "$SUP_RECORD" \
+              | jq -r '"\(.status) \(.conclusion // "")"') || return 1
             [ -n "$SUP_ATTEMPT" ] || return 1
             SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100") \
               || return 1
-            # Marker ABSENCE only counts against a listing proven WHOLE. A
-            # truncated page says nothing about the entries it did not return,
-            # and absence is exactly what promotes this answer to `yes`.
+            # Artifact ABSENCE only counts against a listing proven WHOLE, and
+            # a response is only whole if it actually carries the two fields
+            # that say so. A truncated page, or a body missing `total_count`,
+            # says nothing about the entries it did not return.
             printf '%s' "$SUP_ARTIFACTS" \
-              | jq -e '(.total_count // 0) <= (.artifacts | length)' >/dev/null \
+              | jq -e '(.artifacts | type == "array")
+                       and (.total_count | type == "number")
+                       and (.total_count <= (.artifacts | length))' >/dev/null \
               || return 1
             # The marker is written in `prepare`, so it lands minutes before
             # any supply set and decides this early. Bind it to the run's
@@ -298,8 +303,24 @@ jobs:
               echo no
               return 0
             fi
+            # `yes` asserts that the superseder's OWN relay will converge
+            # staging, so it has to be earned by the artifact that relay
+            # actually needs, not by a green conclusion. A build can conclude
+            # success and still publish no supply set (a partial run, a failed
+            # upload). The manifest step above then fails LOUD on exactly that
+            # -- "Supply-set artifact ... not found and no ... marker present"
+            # -- so that relay deploys NOTHING and this split never converges,
+            # while we would have exited green on its success. Require the
+            # exact attempt-bound supply set; anything else falls to `unknown`,
+            # which is the RED path.
+            if printf '%s' "$SUP_ARTIFACTS" \
+              | jq -e --arg n "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" \
+                  'any(.artifacts[]; .name == $n)' >/dev/null; then
+              case "$SUP_STATE" in
+                "completed success") echo yes; return 0 ;;
+              esac
+            fi
             case "$SUP_STATE" in
-              "completed success") echo yes ;;
               completed*) echo unknown ;;
             esac
             return 0
@@ -335,6 +356,8 @@ jobs:
               # relay; it does not order two relays against each other.
               MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
                 "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+              # Set only when this attempt dispatches DESPITE a moved tip.
+              NOOP_FINISH_FROM=""
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
                 if [ "$DEPLOYED_ANY" != "true" ]; then
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
@@ -398,6 +421,9 @@ jobs:
                   # seconds rather than the classifier's minutes, and the
                   # failure it can still produce is the one this relay now
                   # reports loudly rather than the one it used to hide.
+                  # Remember that this dispatch happens on a tip we had to
+                  # clear, so the landing check below can prove it stayed put.
+                  NOOP_FINISH_FROM="$MAIN_SHA"
                   echo "::warning::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, but $MAIN_SHA published a docs-noop marker: it builds no images and its relay dispatches nothing, so no newer deploy exists and nothing else would converge staging. Finishing $SERVICE on $IMAGE_TAG is what closes the split."
                 elif [ "$CONVERGER" = "yes" ]; then
                   echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. That commit's build succeeded with a supply set, so its own relay converges staging."
@@ -451,6 +477,26 @@ jobs:
               fi
               if [ "$CONCLUSION" = "success" ]; then
                 DEPLOYED_ANY=true
+                # THE READ-TO-DISPATCH WINDOW, closed for REPORTING.
+                #
+                # Only the docs-noop arm dispatches after main has already
+                # moved, and no read taken BEFORE a dispatch can prove the tip
+                # held across it. So check now that the deploy has landed. If a
+                # third commit merged inside that window it may build images
+                # and deploy them, and this older tag could have landed last,
+                # leaving staging BACKWARDS. We cannot prove staging is
+                # forward, so say so loudly instead of concluding success.
+                # Preventing the stale write (rather than reporting it) needs
+                # authority validated inside the deploy workflow while it holds
+                # the staging mutation lock, which lives in the infra repo.
+                if [ -n "$NOOP_FINISH_FROM" ]; then
+                  TIP_AFTER=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+                  if [ "$TIP_AFTER" != "$NOOP_FINISH_FROM" ]; then
+                    echo "::error::STAGING MAY BE BACKWARDS: $SERVICE was finished on $IMAGE_TAG after main had already moved to $NOOP_FINISH_FROM, and main moved again to $TIP_AFTER while that deploy was in flight. If $TIP_AFTER builds images, its relay may have deployed them before this one landed, leaving staging on an OLDER release. Staging is NOT provably converged on $BUILD_HEAD_SHA; check the live images and converge with a successful main build."
+                    exit 1
+                  fi
+                fi
                 echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
                 break
               fi

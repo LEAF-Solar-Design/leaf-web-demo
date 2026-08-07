@@ -2820,8 +2820,24 @@ def check_docs_noop_filter(text: str) -> None:
     # record, and that run's artifacts — on `GH_TOKEN="$HOME_TOKEN"`. No new
     # endpoint, no new repo, no new credential: only the handling of their
     # failures and the strictness of their matching changed.
+    # Hash updated again 2026-08-07 (fifth edit): sol-critic round 2 on PR
+    # #508. `yes` no longer rests on a green conclusion alone — it now
+    # requires the superseder's exact attempt-bound supply-set artifact,
+    # because a build can conclude success and publish nothing, in which case
+    # the manifest step above fails LOUD on the missing supply set and that
+    # relay converges nothing. Artifact completeness additionally requires the
+    # response to carry a numeric `total_count` and an array of artifacts, and
+    # both JSON parses now fail closed explicitly. Finally, a deploy dispatched
+    # over a tip we had to clear re-reads the tip AFTER it lands and fails RED
+    # if it moved, which closes the read-to-dispatch window for REPORTING
+    # (preventing the stale write needs in-lock validation in the infra repo).
+    # Reviewed for dispatch capability: still exactly ONE `gh workflow run`
+    # with the same four inputs and still exactly one secret reference. One
+    # call is added, a read-only GET of this repo's own branch tip on
+    # `GH_TOKEN="$HOME_TOKEN"`, identical in form and token to the two tip
+    # reads already present. No new endpoint, repo or credential.
     assert frozen == (
-        "1d1cca8b3a4c5a181a7b2c245114d6714de2d58ca3702d41875a62aaada85c1e"
+        "d499cf28e77654246dc0138d14f8d6ab841182b284cbe7c01a65521fe057e904"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3639,9 +3655,14 @@ def check_staging_relay_convergence(text: str) -> None:
     # ABSENCE ONLY COUNTS AGAINST A LISTING PROVEN WHOLE. A truncated page
     # says nothing about the entries it did not return, and marker absence is
     # exactly what promotes the answer to `yes`.
-    assert "(.total_count // 0) <= (.artifacts | length)" in once, (
-        "marker absence may only be trusted when the artifact listing is "
-        "proven complete")
+    assert "(.total_count <= (.artifacts | length))" in once, (
+        "artifact absence may only be trusted when the listing is proven "
+        "complete")
+    assert '(.total_count | type == "number")' in once, (
+        "a response missing `total_count` proves nothing about completeness "
+        "and must not be treated as whole")
+    assert '(.artifacts | type == "array")' in once, (
+        "the artifact listing must be proven to BE a listing")
 
     # THE MARKER IS BOUND TO THE RUN'S CURRENT ATTEMPT. Artifacts are keyed by
     # run id and NOT by attempt, so an attempt-1 docs marker outlives a rerun
@@ -3653,17 +3674,63 @@ def check_staging_relay_convergence(text: str) -> None:
     assert "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
         "the marker name must be bound to the run's CURRENT attempt")
 
+    # `yes` MUST BE EARNED BY THE SUPPLY SET, NOT BY A GREEN CONCLUSION.
+    #
+    # sol-critic round 2, reproduced: a build can conclude success and publish
+    # NO artifacts (a partial run, a failed upload). The completeness check
+    # passes on {"total_count":0,"artifacts":[]}, no marker is found, and the
+    # old code answered `yes`. But the manifest step of THIS very workflow
+    # treats a missing supply set with no marker as a hard failure, so that
+    # superseder's relay deploys nothing and the split never converges, while
+    # this relay exited green on its success. `yes` claims the superseder
+    # converges staging, so it has to require the artifact that makes that
+    # true.
+    assert "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
+        "`yes` must require the superseder's exact attempt-bound supply-set "
+        "artifact, not merely a successful conclusion")
+    yes_arm = re.search(
+        r'staging-supply-set-\$SUP_SHA-attempt-\$SUP_ATTEMPT"(.*?)\n\s*fi\n',
+        once, re.S)
+    assert yes_arm and "echo yes" in yes_arm.group(1), (
+        "the `yes` answer must sit INSIDE the supply-set check")
+
+    # THE READ-TO-DISPATCH WINDOW IS CLOSED FOR REPORTING.
+    #
+    # Only the docs-noop arm dispatches after main has already moved, and no
+    # read taken BEFORE a dispatch can prove the tip held across it. A third,
+    # deployable commit merging inside that window can deploy newer images
+    # that this older tag then lands on top of. The relay cannot prove staging
+    # is forward, so it must not conclude success.
+    assert re.search(r"^\s*NOOP_FINISH_FROM=\"\$MAIN_SHA\"", code, re.M), (
+        "the docs-noop arm must record the tip it dispatched over")
+    landing_check = re.search(
+        r'if \[ -n "\$NOOP_FINISH_FROM" \]; then\n(.*?)\n\s*fi\n', code, re.S)
+    assert landing_check, (
+        "a landed deploy that was dispatched over a moved tip must re-check "
+        "the tip")
+    assert "TIP_AFTER" in landing_check.group(1), "the landing check needs a fresh tip read"
+    assert ("::error::" in landing_check.group(1)
+            and "exit 1" in landing_check.group(1)), (
+        "a deploy that cannot be proven forward must fail RED, not exit 0")
+    assert code.index("NOOP_FINISH_FROM=\"$MAIN_SHA\"") < code.index(
+        'if [ -n "$NOOP_FINISH_FROM" ]; then'), (
+        "the flag must be set before the landing check reads it")
+
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
     # line", so ordinary edits inside the arm stay legal.
+    # The close is anchored to the OPENING indentation so a nested `if` inside
+    # the arm (the post-landing tip check) cannot truncate the match and let
+    # `break` slip out of view.
     success_arm = re.search(
-        r'if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\s*fi\b', code, re.S)
+        r'^(\s*)if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\1fi\b',
+        code, re.S | re.M)
     assert success_arm, "the watch needs an explicit success arm"
-    assert re.search(r"^\s*break\b", success_arm.group(1), re.M), (
+    assert re.search(r"^\s*break\b", success_arm.group(2), re.M), (
         "the loop may only advance past a service whose deploy concluded success")
-    assert "landed (run $RUN_ID)" in success_arm.group(1), (
+    assert "landed (run $RUN_ID)" in success_arm.group(2), (
         "the success arm must say which run landed the deploy")
-    assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(1), re.M), (
+    assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(2), re.M), (
         "a landed deploy must record that this release is now partly live, so "
         "the stand-down above cannot abandon it half-deployed")
 
@@ -3818,8 +3885,26 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "any completed superseding build counted as a converger",
             mutate(original,
-                   '              "completed success") echo yes ;;\n',
-                   "              completed*) echo yes ;;\n"),
+                   '                "completed success") echo yes; return 0 ;;\n',
+                   "                completed*) echo yes; return 0 ;;\n"),
+        ),
+        # --- sol-critic round 2 on PR #508 ---
+        (
+            "a successful build that published NO supply set counted as a "
+            "converger, though its own relay fails on the missing manifest",
+            mutate(original,
+                   'staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT',
+                   'docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT'),
+        ),
+        (
+            "artifact listing trusted without proving it carries a count",
+            mutate(original, '(.total_count | type == "number")', "true"),
+        ),
+        (
+            "a deploy dispatched over a moved tip reported green without "
+            "re-checking the tip after it landed",
+            mutate(original, 'NOOP_FINISH_FROM="$MAIN_SHA"',
+                   'NOOP_FINISH_FROM=""'),
         ),
         # --- sol-critic RED on PR #508: the classifier's own read paths ---
         (
@@ -3835,8 +3920,8 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         (
             "marker absence trusted against a truncated artifact page",
-            mutate(original, "(.total_count // 0) <= (.artifacts | length)",
-                   "(.total_count // 0) >= 0"),
+            mutate(original, "(.total_count <= (.artifacts | length))",
+                   "(.total_count >= 0)"),
         ),
         (
             "marker matched across rerun attempts, so an attempt-1 docs "
