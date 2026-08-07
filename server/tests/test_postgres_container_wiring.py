@@ -135,7 +135,12 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
         parts = argument.split()
         if len(parts) != 2 or not parts[0].startswith("scripts/"):
             continue
-        copies[PurePosixPath(parts[1]).name] = parts[1]
+        name = PurePosixPath(parts[1]).name
+        # Carried over from the sessions-only guard #495 merged: two COPYs of
+        # one basename make "the" image path ambiguous, and a dict would
+        # silently keep the last one.
+        assert name not in copies, f"{name} is COPYed to more than one target"
+        copies[name] = parts[1]
     return copies
 
 
