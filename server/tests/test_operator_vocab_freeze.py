@@ -87,9 +87,20 @@ def _load_matrix():
     return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
 
 
+# The exact §4.1 table header, pinned. Adding, removing, or reordering a
+# column changes this and fails the header-equality assertion.
+EXPECTED_MD_HEADERS = [
+    "action", "class", "rung", "policy", "rate", "spend", "timeout(s)",
+    "precondition", "handler", "reversal", "prod-reachable", "v1",
+]
+
+
 def _parse_md_matrix_table():
-    """Parse the OPERATOR.md §4.1 action table into {action: {header: cell}}.
-    Contiguity-bounded so other tables in the doc are not picked up."""
+    """Parse the OPERATOR.md §4.1 action table. Returns (headers, rows) where
+    rows is the ordered list of (action_name_or_None, cell_dict) for EVERY
+    data row — malformed rows carry a sentinel so they cannot silently vanish,
+    and the O7 'not mounted' row is retained (action_name None). Contiguity-
+    bounded so other tables in the doc are not picked up."""
     lines = (REPO_ROOT / "contract" / "OPERATOR.md").read_text(
         encoding="utf-8").splitlines()
     header_idx = next(
@@ -97,18 +108,18 @@ def _parse_md_matrix_table():
         if ln.strip().startswith("|") and "Action" in ln and "Policy" in ln)
     headers = [c.strip().lower()
                for c in lines[header_idx].strip().strip("|").split("|")]
-    table = {}
+    rows = []
     for ln in lines[header_idx + 2:]:  # skip the |---| separator row
         if not ln.strip().startswith("|"):
             break  # end of this contiguous table
         cells = [c.strip() for c in ln.strip().strip("|").split("|")]
         if len(cells) != len(headers):
+            rows.append((None, {"_malformed": ln.strip()}))
             continue
         row = dict(zip(headers, cells))
         m = re.search(r"`(operator\.[a-z_]+)`", row.get("action", ""))
-        if m:
-            table[m.group(1)] = row
-    return headers, table
+        rows.append((m.group(1) if m else None, row))
+    return headers, rows
 
 
 def test_matrix_is_committed_and_content_pinned():
@@ -166,22 +177,49 @@ def test_matrix_has_no_production_reachable_action():
 def test_operator_md_table_fields_match_json():
     """Load-bearing JSON<->Markdown agreement: EVERY shared column of the
     OPERATOR.md §4.1 table must equal the JSON for every action, compared
-    exactly. Editing any field in either copy fails the gate."""
+    exactly. Editing any field in either copy fails the gate. Also pins the
+    exact header set, rejects malformed and duplicate rows, and validates the
+    O7 'not mounted' row so structural table edits cannot escape."""
     matrix = _load_matrix()["actions"]
-    headers, table = _parse_md_matrix_table()
-    # md-header -> json-key (exact string compare of str(json_value))
+    not_mounted = set(_load_matrix()["not_mounted"])
+    headers, rows = _parse_md_matrix_table()
+
+    # (a) exact header set — an added/removed/reordered column fails here.
+    assert headers == EXPECTED_MD_HEADERS, ("md headers drifted", headers)
+
+    # (b) no malformed row may hide in the table region.
+    malformed = [r["_malformed"] for n, r in rows if r.get("_malformed")]
+    assert not malformed, ("malformed §4.1 table row(s)", malformed)
+
+    # (c) duplicate action rows are rejected (a contradictory duplicate placed
+    #     before the valid row would otherwise overwrite silently).
+    action_names = [n for n, _ in rows if n]
+    assert len(action_names) == len(set(action_names)), (
+        "duplicate action rows in the §4.1 table", action_names)
+    table = {n: r for n, r in rows if n}
+
+    # (d) O7 production-promotion row is present and reads "not mounted"; and
+    #     no not_mounted action ever appears as a real data row.
+    o7 = [r for n, r in rows if n is None
+          and "production promotion" in r.get("action", "").lower()]
+    assert len(o7) == 1, "the O7 production-promotion row is missing or duplicated"
+    assert o7[0]["v1"].lower().strip("*") == "not mounted", (
+        "O7 row must read 'not mounted'", o7[0]["v1"])
+    assert not (set(table) & not_mounted), (
+        "a not_mounted action appears as a live §4.1 table row",
+        set(table) & not_mounted)
+
+    # (e) bidirectional membership: JSON actions and table actions are equal.
+    assert set(table) == set(matrix), (
+        "OPERATOR.md table and JSON action sets differ",
+        set(table) ^ set(matrix))
+
+    # (f) every shared column equals the JSON, exactly.
     COLUMN_MAP = {
         "class": "class", "rung": "rung", "policy": "policy",
         "rate": "rate", "spend": "spend", "timeout(s)": "timeout_s",
         "precondition": "precondition", "reversal": "reversal",
     }
-    for col in list(COLUMN_MAP) + ["handler", "prod-reachable", "v1"]:
-        assert col in headers, f"OPERATOR.md §4.1 table missing '{col}' column"
-    # Bidirectional membership: neither a JSON action missing from the table
-    # nor a Markdown-only action row may slip through.
-    assert set(table) == set(matrix), (
-        "OPERATOR.md table and JSON action sets differ",
-        set(table) ^ set(matrix))
     for name, entry in matrix.items():
         row = table[name]
         for md_col, json_key in COLUMN_MAP.items():
