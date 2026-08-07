@@ -205,7 +205,8 @@ describe("LeafStandardServicesResolver", () => {
       LEAF_APP_URL: "https://app.example",
       LEAF_TENANT_MCP_BROKER_URL: "https://staging-api.leafdesign.ai/",
       LEAF_APP_DISPATCH_SECRET: "dispatch-secret-value",
-      LEAF_RUNTIME_ENV: "staging",
+      LEAF_RUNTIME_ENV: "production",
+      LEAF_STANDARD_SERVICES_ENV: "staging",
     }, undefined, approvalStore);
     expect((staging as unknown as { brokerEndpoint: URL }).brokerEndpoint.toString())
       .toBe("https://staging-api.leafdesign.ai/mcp");
@@ -218,6 +219,60 @@ describe("LeafStandardServicesResolver", () => {
     expect((local as unknown as { brokerEndpoint: URL }).brokerEndpoint.toString())
       .toBe("http://127.0.0.1:18900/mcp");
   });
+
+  it.each(["staging", "production"] as const)(
+    "requires the service tuple for explicit %s standard services",
+    (environment) => {
+      expect(() => standardServicesResolverFromEnv({
+        LEAF_RUNTIME_ENV: "production",
+        LEAF_STANDARD_SERVICES_ENV: environment,
+      })).toThrow("standard services are required in staging and production");
+    },
+  );
+
+  it.each(["", "preview"])(
+    "rejects the explicit invalid standard services environment %j",
+    (environment) => {
+      expect(() => standardServicesResolverFromEnv({
+        LEAF_RUNTIME_ENV: "development",
+        LEAF_STANDARD_SERVICES_ENV: environment,
+      })).toThrow("LEAF_RUNTIME_ENV must be local, staging, or production");
+    },
+  );
+
+  it.each([
+    ["local", "production"],
+    ["staging", "production"],
+    ["production", "local"],
+  ] as const)(
+    "rejects the incompatible runtime %s and standard-services %s pair",
+    (runtime, standardServices) => {
+      expect(() => standardServicesResolverFromEnv({
+        LEAF_APP_URL: "https://app.example",
+        LEAF_TENANT_MCP_BROKER_URL: "https://api.leafdesign.ai",
+        LEAF_APP_DISPATCH_SECRET: "dispatch-secret-value",
+        LEAF_RUNTIME_ENV: runtime,
+        LEAF_STANDARD_SERVICES_ENV: standardServices,
+      }, undefined, approvalStore)).toThrow(
+        "LEAF_STANDARD_SERVICES_ENV is incompatible with LEAF_RUNTIME_ENV",
+      );
+    },
+  );
+
+  it.each([
+    ["staging", "local"],
+    ["production", "local"],
+  ] as const)(
+    "rejects the zero-tuple runtime %s and standard-services %s pair",
+    (runtime, standardServices) => {
+      expect(() => standardServicesResolverFromEnv({
+        LEAF_RUNTIME_ENV: runtime,
+        LEAF_STANDARD_SERVICES_ENV: standardServices,
+      })).toThrow(
+        "LEAF_STANDARD_SERVICES_ENV is incompatible with LEAF_RUNTIME_ENV",
+      );
+    },
+  );
 });
 
 describe("author authority and grant separation", () => {

@@ -88,6 +88,22 @@ export function parseStandardServicesEnvironment(value: string | undefined): "lo
   throw new Error("LEAF_RUNTIME_ENV must be local, staging, or production for standard services");
 }
 
+export function standardServicesEnvironmentFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): "local" | "staging" | "production" {
+  const runtime = parseStandardServicesEnvironment(env.LEAF_RUNTIME_ENV);
+  if (env.LEAF_STANDARD_SERVICES_ENV === undefined) return runtime;
+  const selected = parseStandardServicesEnvironment(env.LEAF_STANDARD_SERVICES_ENV);
+  const compatible = selected === runtime
+    || (runtime === "production" && selected === "staging");
+  if (!compatible) {
+    throw new Error(
+      "LEAF_STANDARD_SERVICES_ENV is incompatible with LEAF_RUNTIME_ENV",
+    );
+  }
+  return selected;
+}
+
 function parseAppOrigin(value: string, environment: "local" | "staging" | "production"): URL {
   let url: URL;
   try {
@@ -345,6 +361,13 @@ export function standardServicesResolverFromEnv(
   const configured = [appOrigin, brokerEndpoint, dispatchSecret].filter(Boolean).length;
   const runtime = (env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase();
   if (configured === 0) {
+    if (env.LEAF_STANDARD_SERVICES_ENV !== undefined) {
+      const environment = standardServicesEnvironmentFromEnv(env);
+      if (environment === "staging" || environment === "production") {
+        throw new Error("standard services are required in staging and production");
+      }
+      return undefined;
+    }
     if (runtime === "staging" || runtime === "production") {
       throw new Error("standard services are required in staging and production");
     }
@@ -356,7 +379,7 @@ export function standardServicesResolverFromEnv(
     appOrigin,
     brokerEndpoint,
     dispatchSecret,
-    environment: parseStandardServicesEnvironment(env.LEAF_RUNTIME_ENV),
+    environment: standardServicesEnvironmentFromEnv(env),
     approvalStore,
     ...(fetchImpl ? { fetchImpl } : {}),
   });
