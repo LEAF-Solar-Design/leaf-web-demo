@@ -633,6 +633,62 @@ above, and both were wrong about the overlap window in the ways corrected below.
 **Agreement on the choice is not agreement on the argument**, and here the
 choice survived while much of the shared reasoning did not.
 
+### Option A is decided but NOT dispatchable today, and this is a hard blocker
+
+Found while re-reviewing this section after `0029` landed. It is not a caveat on
+the decision, it is a prerequisite that lives in the OTHER repository, and
+without it a release-complete go would fail.
+
+**Half of this is already recorded above and is deliberate.** The annex section
+documents the coupling and its enforcement: a `selector_dependencies` entry in
+`platform/authority-inventory.json`, plus
+`server/platform_link.validate_session_annex_authority` refusing to start an app
+in the wrong combination, with the requirement being `postgres` EXACTLY. That is
+a good design and this section does not argue with it.
+
+What follows is the part that section does not cover, because it lives in
+another repository.
+
+**The coupling is reachable on the ordinary serving path, and it is armed by the
+very change being made.** `server/app.py` calls
+`platform_link.validate_postgres_startup()`, which calls
+`validate_session_annex_authority()`, and
+`postgres_startup_required()` becomes true BECAUSE `LEAF_SESSIONS_STORE=postgres`
+was just set. So a delta carrying only the sessions selector produces a task that
+refuses to serve, and it is the flip itself that arms the refusal.
+
+**But the deploy workflow will not carry the second selector.** In
+`deploy-leaf-platform-staging.yml`, `allowed_delta_pair()` is a closed
+allowlist, and its entire contents are `LEAF_JOBS_STORE=postgres` and the five
+`LEAF_SESSIONS_STORE` values. `LEAF_SESSION_ANNEX_STORE` does not appear
+anywhere in that workflow: verified against terraform `main` at `4e86975`, zero
+occurrences in the file. A delta naming it exits with
+`"configuration_delta pair is not on the reviewed migration-variable allowlist"`.
+
+So both dispatches available today fail, in opposite ways:
+
+| dispatch | outcome |
+|---|---|
+| `LEAF_SESSIONS_STORE=postgres` alone | workflow accepts, new task raises at startup |
+| both selectors together | workflow refuses the delta before deploying |
+
+**The prerequisite** is therefore a reviewed change in
+`LEAF-Solar-Design/leaf-automation-aws-terraform` adding
+`LEAF_SESSION_ANNEX_STORE=postgres` to `allowed_delta_pair()`. Until it merges,
+option A cannot be executed, and neither can B or C, because all three need the
+same delta. This blocker is independent of the operator's release hold: lifting
+the hold does not make the dispatch work.
+
+**Stated plainly, because it is the kind of thing that gets lost between
+repositories:** `0029` made the staging flip require two selectors, and the
+deploy workflow can carry only one, so `0029` left the staging flip
+undispatchable. Nothing was done wrong. The enforcement is correct and the
+allowlist is correctly closed; they were simply written in different repositories
+and no gate spans both. This document is the only place that currently says so.
+
+The decision itself is unaffected. A is still the path; it now has a named,
+locatable prerequisite instead of an assumed-clear runway.
+
 ### The overlap window, measured rather than argued
 
 The two lanes that answered disagreed on the size of the window, so it was
@@ -756,15 +812,31 @@ So there is one forbidden ordering and two acceptable terminal states:
 
 - **Forbidden:** set `SESSIONS_DB` while any selector resolving it is in a
   shadow-reading mode. Permanent mismatch.
-- **Acceptable, preferred:** the annex tables move to PostgreSQL. **This is no
-  longer a proposal**: `platform/migrations/0029_session_annex.sql` and the
-  dispatch in both modules landed in the section above. Once that selector is
-  `postgres` as well, `SESSIONS_DB` has no consumers on staging at all and the
-  drift closes by deletion rather than by configuration. Note the annex section's
-  own caveat that those PostgreSQL paths are reviewed code, not exercised code.
-- **Acceptable, fallback:** after the flip lands and with both selectors clear of
-  shadow modes, set `SESSIONS_DB` to durable storage to stop those two tables
-  dying with every task replacement.
+- **Acceptable, and now the ONLY terminal state:** both selectors reach
+  `postgres` together. **This is no longer a proposal**:
+  `platform/migrations/0029_session_annex.sql` and the dispatch in both modules
+  landed in the section above, and the startup gate documented earlier makes it
+  the only legal combination once the sessions selector moves. At that point the
+  annex tables are on PostgreSQL and no SERVING path resolves `SESSIONS_DB` at
+  all. Note the annex section's own caveat that those PostgreSQL paths are
+  reviewed code, not exercised code.
+
+**An earlier draft listed a third state, "after the flip, set `SESSIONS_DB` to
+durable storage so those two tables stop dying with every task replacement".
+Delete that idea; it is unreachable.** It assumed a world where
+`LEAF_SESSIONS_STORE=postgres` coexists with an annex still reading SQLite, and
+`validate_session_annex_authority()` rejects exactly that combination at
+startup. In the only state the gate permits, the annex is already on PostgreSQL
+and a durable `SESSIONS_DB` would preserve nothing.
+
+**And "no consumers at all" was too strong even then.** A third shipped reader
+survives: `scripts/reconcile_sessions_authority.py`, whose
+`default_sqlite_path()` returns `session_store.DB_PATH` precisely so the
+reconciler resolves the legacy file the same way the app does, and which
+`deploy/Dockerfile.app` COPYs to `/app/scripts/`. That is by design and is not a
+hazard, because the reconciler is an operator-run command that reads the legacy
+store read-only rather than a serving path that could raise on a request. State
+it as **no serving-path consumers**, not none.
 
 The rollback requirement in the section above is the same rule read backwards
 and does not conflict with this: every mode on the return path except `postgres`
@@ -801,8 +873,21 @@ immediately before acting, including against this table.
 ### What is NOT authorized here
 
 No deploy was dispatched. The staging flip is not operator-authorized, and this
-section decides only which path to take once it is. When that authorization
-arrives, the dispatch targets `target_color=live` with
-`configuration_delta=LEAF_SESSIONS_STORE=postgres`, against whichever color a
-fresh read shows is live at that moment, which is not necessarily the one in the
-table above.
+section decides only which path to take once it is.
+
+**Do not copy an earlier draft's dispatch line.** It read
+`configuration_delta=LEAF_SESSIONS_STORE=postgres`, which is the single-selector
+delta that produces a task refusing to start. The correct delta names both
+selectors, and cannot be sent until the terraform allowlist accepts the second
+one. In order:
+
+1. Land the allowlist change in `leaf-automation-aws-terraform` adding
+   `LEAF_SESSION_ANNEX_STORE=postgres` to `allowed_delta_pair()`.
+2. Wait for operator release-complete.
+3. Re-read the live desired counts and pick the color that is live AT THAT
+   MOMENT, which is not necessarily the one in the table above.
+4. Dispatch with `target_color=live` and a delta naming BOTH
+   `LEAF_SESSIONS_STORE=postgres` and `LEAF_SESSION_ANNEX_STORE=postgres`.
+5. Verify the idle color's next warm on BOTH selectors, not just the sessions
+   one. The inheritance check described earlier is incomplete as written for the
+   same reason the dispatch was.
