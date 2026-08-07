@@ -53,10 +53,28 @@ name: Dispatch staging deploys
 # neither can starve. That bounds a split to one release instead of letting it
 # grow without limit.
 #
-# THAT READ MAY ONLY AFFECT ORDER. It never chooses a tag and never drops a
-# service: both services are still dispatched with THIS relay's own build tag,
-# one at a time, watched, behind the ungated per-attempt tip re-check. Getting
-# the order wrong costs nothing, and that is the whole point. Inferring live
+# THAT READ MAY ONLY AFFECT ORDER, and here is exactly what that does and does
+# not buy. What it CANNOT do: choose a deploy tag (the tag always comes from
+# the verified supply-set manifest), drop a service from the list, inject a
+# token into the loop, or fail the release when the read itself errors. So it
+# cannot cause a backwards deploy, which is the invariant that matters most.
+#
+# What it CAN do, stated plainly because an earlier version of this comment
+# claimed otherwise and sol-critic returned RED for it: ORDER DECIDES WHO GETS
+# SKIPPED. Only the first service is dispatched unconditionally; the second sits
+# behind another tip re-check and is abandoned if main moved. So a WRONG read
+# can be worse than the fixed order in one concrete schedule: app (~14 min) is
+# put first on bad evidence, main moves at t=10, and web is skipped, where
+# web-first would have landed web at t=8 and dispatched app before the move.
+#
+# That trade is taken deliberately. The fixed order did not avoid the cost, it
+# just always charged it to the same service: web won every race and app lost
+# every race, forever. Occasionally swapping WHICH service lags is strictly
+# better than permanently starving one, and no ordering can stop the tip from
+# moving. The relay still announces the split it leaves, naming the skipped
+# service, so the cost is visible rather than silent.
+#
+# Inferring live
 # state from CI run history is NOT sound, and an earlier cut of this change
 # that used it to pick a DEPLOY TAG was returned RED by sol-critic on PR #506
 # for two reasons: a deploy that flips traffic and then fails or is cancelled
@@ -268,9 +286,10 @@ jobs:
 
           # Hand the first slot to whichever service looks further behind, so
           # the one abandoned by the last superseded relay is the one that
-          # advances now. Read the header: this may only reorder. Both
-          # services are always dispatched, always with $IMAGE_TAG, so an
-          # inaccurate read is harmless by construction.
+          # advances now. Only the FIRST service is dispatched
+          # unconditionally, so this decides who gets skipped if main moves;
+          # read the header for why that trade is taken. It cannot change the
+          # tag, drop a service, or fail the release.
           SERVICES="web app"
           WEB_TAG=$(tag_of_title "$(newest_deploy_title web || true)")
           APP_TAG=$(tag_of_title "$(newest_deploy_title app || true)")

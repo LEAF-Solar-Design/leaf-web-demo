@@ -3420,9 +3420,19 @@ def check_staging_relay_convergence(text: str) -> None:
     # 7056e2e, 48204c4) produced web deploys with no app deploy between them
     # and staging ran a whole release split for over two hours.
     #
-    # SERVICES may take exactly the two full-set orderings and nothing else.
-    # This is the pin that makes the ordering read safe: it cannot drop a
-    # service, so a wrong read costs a suboptimal order and nothing more.
+    # SERVICES may take exactly the two full-set orderings and nothing else,
+    # so the ordering read cannot drop a service from the list.
+    #
+    # BE PRECISE ABOUT WHAT THAT BUYS. It does NOT make a wrong read free.
+    # Only the FIRST service is dispatched unconditionally; the second sits
+    # behind another tip re-check, so ORDER DECIDES WHO GETS SKIPPED when main
+    # moves. sol-critic RED round 2 on PR #506 against a comment claiming
+    # otherwise: put app (~14 min) first on bad evidence, let main move at
+    # t=10, and web is skipped where web-first would have landed web at t=8
+    # and dispatched app before the move. The trade is deliberate — the fixed
+    # order charged that cost to app every single time, forever — but it is a
+    # trade, not an absence of cost. test_staging_relay_orders_the_starved_
+    # service_first pins the skip path so it stays a known, announced outcome.
     assert set(re.findall(r'SERVICES="([^"]*)"', code)) == {"web app", "app web"}, (
         "SERVICES may only ever hold BOTH services; a single-service value "
         "would let the ordering read silently skip a deploy")
@@ -3707,7 +3717,17 @@ joined="$*"
 case "${args[0]}" in
   api)
     case "${args[1]}" in
-      *"/branches/main"*) printf '%s\n' "$FAKE_MAIN_SHA" ;;
+      *"/branches/main"*)
+        # Serve the built sha for the first $FAKE_TIP_OK_READS tip checks,
+        # then a newer one, so a scenario can move main BETWEEN services.
+        n=$(cat "$FAKE_TIP_FILE")
+        if [ "$n" -gt 0 ]; then
+          printf '%s' "$((n - 1))" > "$FAKE_TIP_FILE"
+          printf '%s\n' "$FAKE_MAIN_SHA"
+        else
+          printf '%s\n' "moved01"
+        fi
+        ;;
       *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
       *"/jobs"*)          printf '%s\n' "1" ;;
       *) echo "fake gh: unhandled api ${args[1]}" >&2; exit 9 ;;
@@ -3738,7 +3758,7 @@ esac
 
 def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                              relation="ahead", main_sha="deadbee",
-                             history_fails=False):
+                             history_fails=False, tip_ok_reads=99):
     """Execute the relay's ACTUAL dispatch script (extracted from the parsed
     YAML, never re-typed here) against a fake `gh`, and return
     (returncode, stdout, [(service, image_tag)] in dispatch order).
@@ -3777,6 +3797,8 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
 
         log = tmp / "dispatches.log"
         log.write_text("", encoding="utf-8")
+        tip_file = tmp / "tip"
+        tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
         script = tmp / "dispatch.sh"
         script.write_text(
             relay["jobs"]["dispatch"]["steps"][-1]["run"], encoding="utf-8")
@@ -3792,6 +3814,7 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             GH_TOKEN="fake-pat",
             HOME_TOKEN="fake-token",
             FAKE_MAIN_SHA=main_sha,
+            FAKE_TIP_FILE=str(tip_file),
             FAKE_RELATION=relation,
             FAKE_HISTORY=json.dumps(history),
             FAKE_HISTORY_FAILS="1" if history_fails else "0",
@@ -3870,6 +3893,24 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
         assert deployed == [("web", TAG), ("app", TAG)], (
             f"{name} must fall back to both services in the fixed order, "
             f"got {deployed}")
+
+    # THE COST OF REORDERING, PINNED RATHER THAN DENIED. Only the FIRST
+    # service is dispatched unconditionally; the second sits behind another
+    # tip re-check. So order decides WHO GETS SKIPPED when main moves, and a
+    # wrong read can therefore skip web where the fixed order would have
+    # skipped app. sol-critic RED round 2 on PR #506 was exactly this: an
+    # earlier comment claimed both services are always dispatched, and that
+    # was false. The trade is deliberate — the fixed order charged this cost
+    # to app every single time — but it must stay a KNOWN and ANNOUNCED
+    # outcome, so it is asserted here instead of asserted away.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
+        tip_ok_reads=1)
+    assert rc == 0
+    assert deployed == [("app", TAG)], deployed
+    assert "STAGING IS SPLIT" in out and "so web stays on its previous image" in out, (
+        "when reordering causes web to be the skipped service, the relay must "
+        "name web in the split warning rather than exit quietly")
 
     # And the stand-down still wins over ordering: main moved, nothing goes out.
     rc, out, deployed = _rehearse_relay_dispatch(
