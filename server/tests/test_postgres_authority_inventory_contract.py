@@ -1,4 +1,18 @@
-"""Contract checks for the machine-readable PostgreSQL authority inventory."""
+"""Contract checks for the machine-readable PostgreSQL authority inventory.
+
+WHAT THESE CHECKS CAN AND CANNOT DO. They verify the inventory's INTERNAL
+COHERENCE: that a status is one this file defines, that a value is consistent
+with the selector it describes, that a claim of completeness is not contradicted
+by the records under it. They CANNOT verify that a record is TRUE. Evidence is
+free text, so a record can name a real task-definition revision and a real image
+digest and still describe them falsely, and no static check over this JSON will
+notice. Nothing here reaches AWS.
+
+That is a boundary, not an oversight. The evidence strings exist so a human can
+re-run the two reads they name (the task definition and the pinned image config)
+and disprove the record. Treat a green contract as "this file does not
+contradict itself", never as "these values are what production runs".
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -50,6 +64,22 @@ REQUIRED_COVERAGE = {
     "customization",
     "tenant_repositories_leases",
 }
+# A selection status is a claim about HOW the value was established, so an
+# unrecognized one is a silent downgrade rather than a typo: "measurd" used to
+# pass every check while reading, to a human, like a measurement.
+#   unknown  - nothing recorded; value must be null.
+#   measured - the environment was OBSERVED selecting this value.
+#   verified - measured AND reconciled; the only status a "complete" inventory
+#              claim accepts.
+#   measured_no_override - the environment sets no override and the value is
+#              the repository default its image ships. Still a measurement, but
+#              NOT a selection anyone made for that environment, which is the
+#              distinction a cutover plan needs. Establishing it requires
+#              reading BOTH layers: a Docker image ENV stays in the process
+#              environment when the deployment supplies no override, so an
+#              absent task-definition variable does not by itself mean the
+#              code's own fallback is what runs.
+KNOWN_SELECTION_STATUSES = {"unknown", "measured", "measured_no_override", "verified"}
 REQUIRED_AUTHORITY_FIELDS = {
     "id",
     "coverage",
@@ -178,10 +208,56 @@ def _inventory_errors(inventory: dict) -> list[str]:
                 errors.append(f"{authority_id}: malformed {environment} selection")
             if not selection.get("evidence"):
                 errors.append(f"{authority_id}: {environment} selection lacks evidence")
+            if selection.get("status") not in KNOWN_SELECTION_STATUSES:
+                errors.append(
+                    f"{authority_id}: unknown {environment} selection status "
+                    f"{selection.get('status')!r}"
+                )
             if selection.get("status") == "unknown" and selection.get("value") is not None:
                 errors.append(f"{authority_id}: unknown {environment} selection has a value")
             if selection.get("status") == "verified" and selection.get("value") is None:
                 errors.append(f"{authority_id}: verified {environment} selection lacks a value")
+            if selection.get("status") == "measured_no_override":
+                # The value IS the default, so it must be present -- otherwise
+                # the record is indistinguishable from "unknown" and nothing
+                # downstream can scope a backfill from it.
+                if selection.get("value") is None:
+                    errors.append(
+                        f"{authority_id}: measured_no_override {environment} "
+                        "selection lacks the defaulted value"
+                    )
+                # STRUCTURAL, not prose. An earlier draft required the evidence
+                # to contain the word "absent", which evidence stating the
+                # OPPOSITE ("is not absent; it is set to postgres") satisfied
+                # just as well. The claim "no override, so this is the shipped
+                # default" is only coherent when the value IS that default, and
+                # that is checkable against the selector the authority declares.
+                #
+                # Exactly ONE selector, deliberately. A draft of this rule
+                # accepted the default of ANY selector the authority owns, which
+                # customization_r5 defeats: it owns LEAF_CUSTOMIZATION_R5_MODE
+                # (default "off") and LEAF_CUSTOMIZATION_STORE (default
+                # "sqlite"), so a record claiming the R5 mode shipped as
+                # "sqlite" passed. The deeper problem is that `value` is a
+                # single field with no way to name which selector it describes,
+                # so for a multi-selector authority it has no defined referent
+                # at all. Rather than guess, refuse the status there: such an
+                # authority needs a per-selector selection shape first.
+                elif len(authority["selectors"]) != 1:
+                    errors.append(
+                        f"{authority_id}: measured_no_override {environment} "
+                        "selection is ambiguous because the authority owns "
+                        f"{len(authority['selectors'])} selectors and the "
+                        "selection cannot name which one it describes"
+                    )
+                elif selection["value"] != authority["selectors"][0].get(
+                        "repository_default"):
+                    errors.append(
+                        f"{authority_id}: measured_no_override {environment} "
+                        f"value {selection['value']!r} is not the "
+                        "repository_default of its selector "
+                        f"{authority['selectors'][0].get('name')!r}"
+                    )
 
     if selectors != EXPECTED_SELECTOR_DEFAULTS:
         errors.append(
@@ -286,6 +362,88 @@ def test_contract_rejects_false_complete_claims() -> None:
         "backfill claims complete without a command" in error
         for error in _inventory_errors(false_backfill_claim)
     )
+
+
+def test_shipped_defaults_cannot_pose_as_production_selections() -> None:
+    """The fields this lane closed, and the rule that keeps them honest.
+
+    Production sets no override for any of these three, and the images it pins
+    bake all three to `legacy`. So the value is measured, but it is the shipped
+    default rather than a selection anyone made for production, and plain
+    `measured` would read as the latter.
+
+    Establishing that needed BOTH layers. Task-definition absence alone does not
+    imply the code fallback runs, because an image ENV survives an absent
+    override, so each evidence string names the image digest as well as the
+    task-definition revision.
+
+    This pins the recorded distinction. It does NOT detect live drift: a later
+    revision or image can change any of these and no test here would notice.
+    """
+    inventory = _load_inventory()
+    entries = {authority["id"]: authority for authority in inventory["authorities"]}
+
+    for authority_id in ("app_sessions_and_approvals", "callback_replay_nonces",
+                         "async_jobs"):
+        production = entries[authority_id]["current_selection"]["production"]
+        assert production["value"] == "legacy", authority_id
+        assert production["status"] == "measured_no_override", authority_id
+        evidence = production["evidence"]
+        # Both layers, or the record does not support its own status.
+        assert "leaf-automation-production-platform:98" in evidence, authority_id
+        assert "@sha256:" in evidence, authority_id
+
+    # Every branch fails the contract when violated, so none of the assertions
+    # above rests on a check that never fires.
+    typo = deepcopy(inventory)
+    typo["authorities"][0]["current_selection"]["production"]["status"] = "measurd"
+    assert any(
+        "unknown production selection status" in error
+        for error in _inventory_errors(typo)
+    )
+
+    valueless = deepcopy(inventory)
+    _production_of(valueless, "app_sessions_and_approvals")["value"] = None
+    assert any(
+        "measured_no_override production selection lacks the defaulted value" in error
+        for error in _inventory_errors(valueless)
+    )
+
+    # The regression that retired the previous rule: it only required the
+    # evidence to contain "absent", so evidence asserting the OPPOSITE passed.
+    # The replacement is structural, so the prose cannot buy its way out.
+    contradictory = deepcopy(inventory)
+    selection = _production_of(contradictory, "app_sessions_and_approvals")
+    selection["value"] = "postgres"
+    selection["evidence"] = (
+        "LEAF_SESSIONS_STORE is not absent; it is explicitly set to postgres."
+    )
+    assert any(
+        "is not the repository_default of its selector" in error
+        for error in _inventory_errors(contradictory)
+    )
+
+    # The regression that retired the FIRST structural draft: it accepted the
+    # default of any selector the authority owned. customization_r5 owns
+    # LEAF_CUSTOMIZATION_R5_MODE (default "off") and LEAF_CUSTOMIZATION_STORE
+    # (default "sqlite"), so a record claiming the R5 mode shipped as "sqlite"
+    # borrowed the sibling's default and passed with zero errors.
+    borrowed = deepcopy(inventory)
+    selection = _production_of(borrowed, "customization_r5")
+    selection["status"] = "measured_no_override"
+    selection["value"] = "sqlite"
+    selection["evidence"] = "Forged: borrows the sibling selector's default."
+    assert any(
+        "is ambiguous because the authority owns 2 selectors" in error
+        for error in _inventory_errors(borrowed)
+    )
+
+
+def _production_of(inventory: dict, authority_id: str) -> dict:
+    authority = next(
+        item for item in inventory["authorities"] if item["id"] == authority_id
+    )
+    return authority["current_selection"]["production"]
 
 
 def test_contract_rejects_upload_inventory_without_shared_drawing_tables() -> None:

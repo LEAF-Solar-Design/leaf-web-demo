@@ -32,12 +32,12 @@
       "0028"
     ],
     "completeness": "partial",
-    "reason": "Historical backfill commands and current live staging and production selector values are not present in this repository."
+    "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
   },
   "selection_evidence": {
     "repository_defaults": "Dockerfiles and Compose select legacy, file, memory, or disabled modes unless an operator overrides them.",
-    "staging": "No current staging task-definition environment receipt exists at this commit.",
-    "production": "No current production task-definition environment receipt records these selectors at this commit."
+    "staging": "Partial. A staging task-definition receipt is recorded for LEAF_SESSIONS_STORE only (leaf-platform-app-alt:27). Every other staging selection is still unrecorded.",
+    "production": "Partial. A production receipt for task definition leaf-automation-production-platform:98 AND the image digests it pins is recorded for LEAF_SESSIONS_STORE, LEAF_CALLBACK_REPLAY_STORE and LEAF_JOBS_STORE. All three carry status measured_no_override: the task definition sets none of them, and the pinned images bake all three to legacy, so the value is the shipped default with no deployment-layer override rather than a production selection. Reading a task definition alone is NOT sufficient for this, because an image ENV survives an absent override. Every other production selection is still unrecorded, including selectors revision 98 does override to postgres; recording those needs a per-selector check of which container process reads each one."
   },
   "selector_dependencies": [
     {
@@ -184,9 +184,9 @@
           "evidence": "Repository default is legacy, but live staging override is not recorded."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Repository default is legacy, but live production override is not recorded."
+          "value": "legacy",
+          "status": "measured_no_override",
+          "evidence": "MEASURED, and it is the shipped image default rather than a production selection. Read-only on 2026-08-07, account 807034087062, us-east-1. TWO LAYERS WERE READ, because a task definition alone cannot establish this: a Docker image ENV REMAINS in the process environment when ECS supplies no override, so an absent task-definition variable does NOT mean the code fallback is what runs. (1) DEPLOYMENT LAYER: task definition leaf-automation-production-platform:98 does NOT set LEAF_JOBS_STORE in any of its four container definitions, in environment, in secrets, or in environmentFiles, so no deployment-layer override exists. (2) IMAGE LAYER: both images that read it bake it to legacy, measured from the pinned digests: leaf-platform-app@sha256:1504240dffd3bc50321100ad21d81f5d968df7d4ae5ee0aaa6c0e8c307e6fce6 (config blob sha256:a41d004471f6) and leaf-platform-broker@sha256:d2e1c283795301499f0d04c5e573c4bf37d2fed2b5a6b8f1dd093ea0a8199f9d (config blob sha256:ed61d3fb595f), matching the ENV in deploy/Dockerfile.app and deploy/Dockerfile.broker. jobs.job_store_mode() therefore reads an explicit 'legacy' rather than taking its own fallback, and note that its docstring claim of 'rejecting implicit fallback' covers typos, not absence. REVISION 98 AND THIS IMAGE DIGEST WILL AGE; re-read both before relying on this. The app container sets JOBS_DB=/data/state/jobs.db on durable EFS, so the legacy job history persists across task replacement. WHAT THIS DOES NOT ESTABLISH, and it bounds every consequence above: this is a measurement of WRITE ROUTING under revision 98, not of table CONTENTS. Nobody queried either store. PostgreSQL may already hold production rows from an earlier revision, a canary, or a manual backfill, and this record is not evidence that the target is empty. Verify the target before any backfill or parity run rather than assuming a clean slate."
         }
       }
     },
@@ -233,9 +233,9 @@
           "evidence": "Live staging broker environment is not recorded."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Live production broker environment is not recorded."
+          "value": "legacy",
+          "status": "measured_no_override",
+          "evidence": "MEASURED, and it is the shipped image default rather than a production selection. Read-only on 2026-08-07, account 807034087062, us-east-1. TWO LAYERS WERE READ, because a task definition alone cannot establish this: a Docker image ENV REMAINS in the process environment when ECS supplies no override, so an absent task-definition variable does NOT mean the code fallback is what runs. (1) DEPLOYMENT LAYER: task definition leaf-automation-production-platform:98 does NOT set LEAF_CALLBACK_REPLAY_STORE in any of its four container definitions, in environment, in secrets, or in environmentFiles, so no deployment-layer override exists. (2) IMAGE LAYER: the broker container is pinned to leaf-platform-broker@sha256:d2e1c283795301499f0d04c5e573c4bf37d2fed2b5a6b8f1dd093ea0a8199f9d, whose linux/amd64 OCI config blob sha256:ed61d3fb595f bakes LEAF_CALLBACK_REPLAY_STORE=legacy, matching the ENV in deploy/Dockerfile.broker. The reader is da/callbacks.callback_replay_store_mode(), whose os.environ.get fallback is also 'legacy', so both paths agree and the effective mode is legacy. Note the app image does NOT bake this selector at all, so the broker image is the one that establishes it; the entry's older 'broker environment' phrasing is consistent with that. REVISION 98 AND THIS IMAGE DIGEST WILL AGE; re-read both before relying on this. Consequence: under this revision production consumes callback nonces in the JOBS_DB SQLite table only and writes none to PostgreSQL, so NO NEW production nonces are reaching callback_consumed_nonces. How much of the live nonce set the target already covers is UNKNOWN and unmeasured, so the reconciliation gap CANNOT be sized from this record. Size it against the target first, then apply the rollback_mode warning about stale legacy state permitting replay. WHAT THIS DOES NOT ESTABLISH, and it bounds every consequence above: this is a measurement of WRITE ROUTING under revision 98, not of table CONTENTS. Nobody queried either store. PostgreSQL may already hold production rows from an earlier revision, a canary, or a manual backfill, and this record is not evidence that the target is empty. Verify the target before any backfill or parity run rather than assuming a clean slate."
         }
       }
     },
@@ -290,9 +290,9 @@
           "evidence": "Read-only from `aws ecs describe-task-definition --task-definition leaf-platform-app-alt:27` (account 807034087062, us-east-1) on 2026-08-06. That revision is the one live service leaf-platform-app-alt is running at desired 1 / running 1; sibling service leaf-platform-app is at desired 0 and carries the same selector on leaf-platform-app:548. The same revision leaves SESSIONS_DB unset, so the legacy source resolves to the task-local default server/sessions.db rather than the EFS /data/state volume that deploy/README.md documents."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Live production app environment is not recorded."
+          "value": "legacy",
+          "status": "measured_no_override",
+          "evidence": "MEASURED, and it is the shipped image default rather than a production selection. Read-only on 2026-08-07, account 807034087062, us-east-1. TWO LAYERS WERE READ, because a task definition alone cannot establish this: a Docker image ENV REMAINS in the process environment when ECS supplies no override, so an absent task-definition variable does NOT mean the code fallback is what runs. (1) DEPLOYMENT LAYER: task definition leaf-automation-production-platform:98, which service leaf-platform runs at desired 1 / running 1, does NOT set LEAF_SESSIONS_STORE in any of its four container definitions, in environment, in secrets, or in environmentFiles (null on every container), so no deployment-layer override exists. (2) IMAGE LAYER: that revision pins the app container to leaf-platform-app@sha256:1504240dffd3bc50321100ad21d81f5d968df7d4ae5ee0aaa6c0e8c307e6fce6, whose linux/amd64 OCI config blob sha256:a41d004471f6 bakes LEAF_SESSIONS_STORE=legacy, matching the ENV in deploy/Dockerfile.app. The app therefore reads that explicit 'legacy' and does NOT fall through to the identically named default in session_store._store_mode(). Both paths yield legacy, so the effective mode is legacy either way. WHAT THIS IS NOT: nobody selected legacy for production. It is the value the image ships, left unoverridden, which is why the status is measured_no_override and not measured. The same revision DOES override LEAF_AGENT_STORE, LEAF_DRAWING_STORE, LEAF_UPLOAD_STORE and LEAF_BROKER_STORE to postgres over the same image defaults, so production deliberately cut those over and did not cut sessions over. REVISION 98 AND THIS IMAGE DIGEST WILL AGE; re-read both before relying on this. Consequence, and it is the opposite posture from staging: under this revision production performs NO PostgreSQL writes for sessions, so nothing is being mirrored forward as it is written. The app container sets SESSIONS_DB=/data/state/sessions.db on durable EFS, so the full legacy history accumulates there and survives task replacement, so the legacy SOURCE holds the ENTIRE production session history rather than a post-deploy remainder, which is the scope a cutover has to read from, whatever the target already contains, and the staging DISCARD decision recorded in backfill.note must not be reused here. WHAT THIS DOES NOT ESTABLISH, and it bounds every consequence above: this is a measurement of WRITE ROUTING under revision 98, not of table CONTENTS. Nobody queried either store. PostgreSQL may already hold production rows from an earlier revision, a canary, or a manual backfill, and this record is not evidence that the target is empty. Verify the target before any backfill or parity run rather than assuming a clean slate."
         }
       }
     },

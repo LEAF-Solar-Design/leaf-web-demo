@@ -43,7 +43,10 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     suites = {suite.id: suite for suite in g.build_suites()}
 
     inventory = suites["server-postgres-authority-inventory"]
-    assert inventory.expected == 6
+    # 7 since the production selections were recorded (was 6). Mirrors the floor
+    # in run-all-gates.py; BOTH must move together when the contract file gains
+    # a test, and only alongside a re-measured run-all-gates.py floor.
+    assert inventory.expected == 7
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     static = suites["platform-static"]

@@ -240,6 +240,41 @@ loss is not worth that.
 and the task definition; nobody read the database, and after the deploy nobody
 can.
 
+**Production is the opposite case, and this decision must not be reused there.**
+Production runs sessions on `legacy`, measured 2026-08-07 across two layers.
+`leaf-automation-production-platform:98`, the revision service `leaf-platform`
+runs at desired 1 / running 1, does not set `LEAF_SESSIONS_STORE` in any of its
+four container definitions, in `environment`, in `secrets`, or in
+`environmentFiles`. That alone would not settle it: **a Docker image `ENV` stays
+in the process environment when ECS supplies no override**, so an absent
+task-definition variable does not mean the code fallback runs. The image that
+revision pins, `leaf-platform-app@sha256:1504240d...`, bakes
+`LEAF_SESSIONS_STORE=legacy` in its config blob, matching
+`deploy/Dockerfile.app`. So the app reads an explicit `legacy`. Both paths agree,
+and the effective mode is `legacy` either way.
+
+`platform/authority-inventory.json` records this as `measured_no_override`
+rather than `measured`, because **nobody selected `legacy` for production**. It
+is the value the image ships, left unoverridden. The same revision *does*
+override `LEAF_AGENT_STORE`, `LEAF_DRAWING_STORE`, `LEAF_UPLOAD_STORE` and
+`LEAF_BROKER_STORE` to `postgres` over the same image defaults, so production
+deliberately cut those over and has not cut sessions over.
+
+Two consequences follow. Under this revision production performs no PostgreSQL
+writes for sessions, so nothing is mirrored forward as it is written, and a
+cutover has to account for the **entire** production history rather than a
+post-deploy remainder. Production also sets `SESSIONS_DB=/data/state/sessions.db`
+on the durable EFS volume instead of leaving it unset, so that history survives
+task replacement and the whole reason discard was cheap for staging is absent.
+
+**What this does not establish.** It is a measurement of write *routing*, not of
+table *contents*. Nobody queried either store. PostgreSQL may already hold
+production session or nonce rows from an earlier revision, a canary, or a manual
+backfill, and none of the above is evidence that the target is empty. Verify the
+target before any backfill or parity run rather than assuming a clean slate.
+Re-read the live revision **and** the image digest too: both age, and either
+layer can change the answer.
+
 **What a clean staging parity run does and does not prove.** After this deploy,
 `--mode parity` on staging compares only rows written since the NEW task
 started. Exit 0 there certifies agreement over that window. It is **not**
