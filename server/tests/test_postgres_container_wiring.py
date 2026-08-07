@@ -271,12 +271,28 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
             f"COPY of {parts[0]} uses --from=, so it does not come from the "
             "repository tree; teach this guard before using that form."
         )
-        name = PurePosixPath(parts[1]).name
+        # KEY ON THE REPOSITORY SOURCE, NOT THE DESTINATION. Keying on the
+        # destination basename asked only "does something land at this name",
+        # never "is it the right file". A one-token slip such as
+        #     COPY scripts/broker-container-smoke.py /app/scripts/reconcile_x.py
+        # builds fine and satisfies a destination-keyed map, while the operator
+        # running the documented arguments gets `unrecognized arguments` from
+        # whatever script actually shipped under that name.
+        source_name = PurePosixPath(parts[0]).name
+        destination_name = PurePosixPath(parts[1]).name
+        assert source_name == destination_name, (
+            f"COPY ships {parts[0]} as {parts[1]}, renaming it. This guard "
+            f"identifies a shipped script by its repository name, so a rename "
+            f"means the image holds one script's content under another's "
+            f"documented name. Teach this guard before using that form."
+        )
         # Carried over from the sessions-only guard #495 merged: two COPYs of
         # one basename make "the" image path ambiguous, and a dict would
         # silently keep the last one.
-        assert name not in copies, f"{name} is COPYed to more than one target"
-        copies[name] = parts[1]
+        assert source_name not in copies, (
+            f"{source_name} is COPYed to more than one target"
+        )
+        copies[source_name] = parts[1]
     return copies
 
 
