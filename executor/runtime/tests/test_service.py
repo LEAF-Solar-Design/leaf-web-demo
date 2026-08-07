@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import ssl
+import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from unittest.mock import Mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +22,7 @@ from executor.control_plane.runtime import HttpRuntimeClient
 from executor.runtime.service import (
     RuntimeTlsConfig,
     configure_host_registrar,
+    main,
     make_server,
     scrub_child_environment,
     serve_registered,
@@ -224,6 +228,72 @@ class ServiceTests(unittest.TestCase):
         }
         scrub_child_environment(environment)
         self.assertEqual({"LEAF_INSTANT_CONTROL_JWKS_FILE": "safe-path"}, environment)
+
+
+class DeployedEnvironmentLabelTests(unittest.TestCase):
+    """A deployed executor must refuse to boot without LEAF_INSTANT_ENV.
+
+    Every Leaf/InstantExecution metric this process feeds is dimensioned on
+    that label, and a record without it publishes NO datapoint -- while the
+    alarms above stay green, because absence is what they were configured to
+    tolerate. So the failure has to be moved somewhere an operator sees it,
+    and the only such place is a container that will not start.
+
+    Both directions are pinned. Asserting only that an unset variable exits
+    would pass against a `main()` that exits for some unrelated reason, so the
+    control asserts that SETTING the variable moves the failure on to the NEXT
+    precondition. Together they show this gate fires for this reason.
+    """
+
+    #: Enough configuration to reach the gate: a non-loopback host makes the
+    #: control-secret check (which sits immediately before it) pass.
+    BASE = {
+        "LEAF_INSTANT_RUNTIME_CONTROL_SECRET": "r" * 40,
+    }
+
+    def _main(self, environment: dict[str, str]) -> str:
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with mock.patch.object(sys, "argv", ["service", "--host", "0.0.0.0"]):
+                with self.assertRaises(SystemExit) as caught:
+                    main()
+        return str(caught.exception)
+
+    def test_a_non_loopback_listener_refuses_to_start_without_the_label(self) -> None:
+        message = self._main(dict(self.BASE))
+        self.assertIn("LEAF_INSTANT_ENV", message)
+
+    def test_the_gate_passes_once_the_label_is_set(self) -> None:
+        """Control. With the label present the boot proceeds PAST this gate and
+        stops at the TLS precondition instead, which is the next one in
+        `main()`. If this ever reports the LEAF_INSTANT_ENV message again, the
+        gate is refusing a correctly configured deployment.
+        """
+        message = self._main({**self.BASE, "LEAF_INSTANT_ENV": "staging"})
+        self.assertNotIn("LEAF_INSTANT_ENV", message)
+        self.assertIn("client CA", message)
+
+    def test_a_malformed_label_is_refused_rather_than_published(self) -> None:
+        """A label with a space would shift every field of the control plane's
+        space-delimited access line. The emitters downgrade it to the sentinel
+        so telemetry cannot fail an invocation; the boot must not be so
+        forgiving, or the deployment publishes under a label nothing watches.
+        """
+        message = self._main({**self.BASE, "LEAF_INSTANT_ENV": "two words"})
+        self.assertIn("LEAF_INSTANT_ENV", message)
+
+    def test_a_loopback_development_run_is_not_gated(self) -> None:
+        """The gate is scoped to non-loopback listeners, exactly like the
+        control secret, TLS and trust-bundle preconditions beside it. A local
+        run emits the sentinel instead of refusing to start.
+        """
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(sys, "argv", ["service", "--host", "127.0.0.1"]):
+                with self.assertRaises(SystemExit) as caught:
+                    main()
+        # It still exits, but on the trust-bundle precondition rather than on
+        # the environment label.
+        self.assertNotIn("LEAF_INSTANT_ENV", str(caught.exception))
+        self.assertIn("trust bundle", str(caught.exception))
 
 
 def _certificates(directory: Path) -> dict[str, str]:

@@ -20,6 +20,7 @@ from executor.registry import ArtifactReference, ArtifactRegistryError, Immutabl
 
 from .child import child_main
 from .accounting import AccountingEmissionError
+from .environment import resolve_environment_label
 from .contracts import ContractError, validate_contract
 from .ed25519 import verify
 
@@ -65,10 +66,23 @@ def emit_runtime_event(record: dict[str, Any]) -> None:
     Bounded and locked for the same reason the accounting emitter is: several
     slots can abandon a rebind at once, and two interleaved writes would
     produce lines no log consumer can parse.
+
+    `env` IS STAMPED HERE, not at the two record-construction sites, because
+    this function is the single writer of the `leaf.instant.runtime` envelope
+    and therefore the only place the field can be made unforgettable.  Both of
+    today's records (`capacity_sample`, `slot_rebind_failed`) reach CloudWatch
+    through this line and nothing else does, so stamping here means a record
+    type added later carries the dimension without its author knowing it has
+    to.  That matters more than it looks: the metric filters select
+    `$.record.env` as a DIMENSION, and a record missing the field publishes no
+    datapoint at all rather than an undimensioned one, so one forgetful record
+    type is a silently missing metric.  Stamping first also means a caller
+    cannot override it.
     """
     try:
         encoded = json.dumps(
-            {"event": "leaf.instant.runtime", "record": record},
+            {"event": "leaf.instant.runtime",
+             "record": {**record, "env": resolve_environment_label()}},
             sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         ).encode("ascii") + b"\n"
         if len(encoded) <= 4096:
