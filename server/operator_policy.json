@@ -102,7 +102,8 @@
           "expected_state": { "type": "string", "enum": ["enabled"] }
         },
         "required": ["tenant_id", "expected_state"],
-        "additionalProperties": false }
+        "additionalProperties": false },
+      "enabled": false
     },
     "operator.tenant_agent_resume": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
@@ -114,7 +115,8 @@
           "expected_state": { "type": "string", "enum": ["disabled"] }
         },
         "required": ["tenant_id", "expected_state"],
-        "additionalProperties": false }
+        "additionalProperties": false },
+      "enabled": false
     },
     "operator.tenant_overlay_set": {
       "class": "O4", "rung": 4, "policy": "always-confirm",

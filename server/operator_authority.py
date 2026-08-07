@@ -227,3 +227,65 @@ def redeem(authority_id: str, subject: str, role_revision: int,
                environment=environment)
         conn.commit()
     return {"authority_id": authority_id, "redeemed": True}
+
+
+def consume_in_tx(cur, authority_id: str, subject: str, role_revision: int,
+                  environment: str, action: str, args: Dict[str, Any],
+                  target_revision: Optional[str] = None) -> Dict[str, Any]:
+    """Consume the one-use authority on the CALLER's cursor, WITHOUT committing.
+
+    The caller's transaction provides single-transaction atomicity with the
+    downstream reversible action and the security audit: an exception raised
+    here (AuthorityDenied) rolls the whole transaction back, so the authority
+    is NOT consumed unless the action and audit also commit. Same conditional
+    UPDATE and deny classification as redeem(); every binding sits in the
+    WHERE clause, so a mismatched caller can never consume the row.
+    """
+    args_hash = operator_policy.canonical_args_hash(args)
+    policy_rev = operator_policy.policy_revision()
+    cur.execute(
+        """
+        UPDATE operator_authorities SET
+          used_count = used_count + 1,
+          status = 'consumed'
+        WHERE authority_id = %s AND used_count < max_uses
+          AND status = 'granted' AND expires_at > now()
+          AND subject = %s AND role_revision = %s AND action = %s
+          AND args_hash = %s AND policy_revision = %s
+          AND environment = %s
+          AND COALESCE(target_revision, '') = COALESCE(%s, '')
+        RETURNING authority_id
+        """,
+        (authority_id, subject, int(role_revision), action, args_hash,
+         policy_rev, environment, target_revision))
+    if cur.fetchone() is not None:
+        return {"authority_id": authority_id, "args_hash": args_hash,
+                "policy_revision": policy_rev}
+    # Classify the failure with a distinct reason (no commit; the caller's
+    # transaction rolls back regardless).
+    cur.execute(
+        "SELECT subject, role_revision, action, args_hash, policy_revision,"
+        " environment, status, used_count, max_uses,"
+        " expires_at <= now() AS expired"
+        " FROM operator_authorities WHERE authority_id = %s",
+        (authority_id,))
+    probe = cur.fetchone()
+    if probe is None:
+        raise AuthorityDenied("authority_absent")
+    if probe["status"] != "granted" or probe["used_count"] >= probe["max_uses"]:
+        raise AuthorityDenied("authority_replayed")
+    if probe["expired"]:
+        raise AuthorityDenied("authority_expired")
+    if probe["subject"] != subject:
+        raise AuthorityDenied("subject_mismatch")
+    if int(probe["role_revision"]) != int(role_revision):
+        raise AuthorityDenied("role_revision_mismatch")
+    if probe["action"] != action:
+        raise AuthorityDenied("action_mismatch")
+    if probe["args_hash"] != args_hash:
+        raise AuthorityDenied("args_mismatch")
+    if probe["policy_revision"] != policy_rev:
+        raise AuthorityDenied("policy_revision_drift")
+    if probe["environment"] != environment:
+        raise AuthorityDenied("environment_mismatch")
+    raise AuthorityDenied("target_drift")
