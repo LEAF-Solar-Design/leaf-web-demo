@@ -161,6 +161,60 @@ class ServiceTests(unittest.TestCase):
             events,
         )
 
+    def test_capacity_sampler_brackets_the_whole_advertised_window(self) -> None:
+        # The gauge must already be publishing before this host is advertised
+        # as usable, and must stop before the pool it reads is torn down.
+        events: list[str] = []
+        server, supervisor, registrar, sampler = Mock(), Mock(), Mock(), Mock()
+        sampler.start.side_effect = lambda: events.append("sample-start")
+        registrar.start.side_effect = lambda: events.append("register")
+        server.serve_forever.side_effect = lambda: events.append("serve")
+        sampler.stop.side_effect = lambda: events.append("sample-stop")
+        registrar.close.side_effect = lambda: events.append("registrar-close")
+        server.server_close.side_effect = lambda: events.append("server-close")
+        supervisor.close.side_effect = lambda: events.append("supervisor-close")
+
+        serve_registered(server, supervisor, registrar, sampler)
+
+        self.assertEqual(
+            ["sample-start", "register", "serve",
+             "sample-stop", "registrar-close", "server-close", "supervisor-close"],
+            events,
+        )
+
+    def test_a_registration_that_never_serves_still_stops_the_sampler(self) -> None:
+        server, supervisor, registrar, sampler = Mock(), Mock(), Mock(), Mock()
+        registrar.start.side_effect = RuntimeError("control plane refused the host")
+
+        with self.assertRaisesRegex(RuntimeError, "control plane refused"):
+            serve_registered(server, supervisor, registrar, sampler)
+
+        sampler.stop.assert_called_once()
+        server.serve_forever.assert_not_called()
+
+    def test_a_sampler_that_fails_to_stop_cannot_skip_teardown(self) -> None:
+        """Flat cleanup let one raising stop() strand the whole shutdown.
+
+        The sampler's own validation and its join can both raise, and with a
+        flat finally block that exception left the registrar registered, the
+        listening socket open, and every child process alive.
+        """
+        events: list[str] = []
+        server, supervisor, registrar, sampler = Mock(), Mock(), Mock(), Mock()
+        sampler.stop.side_effect = ValueError("Invalid value NaN (not a number)")
+        registrar.close.side_effect = lambda: events.append("registrar-close")
+        server.server_close.side_effect = lambda: events.append("server-close")
+        supervisor.close.side_effect = lambda: events.append("supervisor-close")
+
+        with self.assertRaisesRegex(ValueError, "NaN"):
+            serve_registered(server, supervisor, registrar, sampler)
+
+        self.assertEqual(
+            ["registrar-close", "server-close", "supervisor-close"],
+            events,
+            "a failing sampler stop skipped teardown; children would be orphaned",
+        )
+
     def test_parent_secrets_are_removed_before_child_spawn(self) -> None:
         environment = {
             "LEAF_INSTANT_RUNTIME_CONTROL_SECRET": "runtime",

@@ -108,9 +108,42 @@ allowlist, held to the same payload-free discipline as the accounting emitter
 and asserted against the fixture's real source, lease token, geometry ref,
 content digest, and params.
 
-**Known gap, outside this repo.** The four `Leaf/InstantExecution` CloudWatch
-alarms defined in the terraform repo have no emitter: the namespace has never
-received a datapoint, and all four sit in `OK` solely because
-`treat_missing_data = "notBreaching"`. Nothing here publishes CloudWatch
-metrics, so `slot_rebind_failed` is **discoverable in CloudWatch Logs, not
-alarmed**. Closing that needs a metric emitter and is infrastructure work.
+## The capacity gauge
+
+`health()` counts ready, bound, and total slots, and `/metrics` renders them in
+Prometheus form. Both are **pull-only on :8088**, and the executor's ECS task
+definition deliberately declares no `task_role_arn` ("Executor application code
+cannot obtain AWS credentials"). Nothing scrapes that port. So for as long as
+those were the only statements of free capacity, the free-slot count reached no
+monitoring surface at all, and the terraform root's `CapacityAvailableSlots`
+alarm named a metric nothing could ever publish.
+
+`CapacitySampler` closes that without touching the credential boundary. It
+drives `sample_capacity()` on a daemon thread, which writes `health()`'s own
+numbers as one `capacity_sample` record through the same `runtime_event_sink`.
+A log line is the only channel this process has that reaches AWS; the awslogs
+driver already configured on the task carries it to CloudWatch Logs, and a
+metric filter in the terraform root turns it into `CapacityAvailableSlots`.
+
+Three details are load-bearing:
+
+- **It samples on a timer, not on slot transitions.** An executor whose slots
+  are all bound produces no transitions, and that is exactly the state the
+  capacity alarm has to see. A gauge only alarms if it keeps arriving.
+- **It samples once at start**, so a metric exists within a second of boot
+  rather than one interval later. The interval defaults to 30s and is set by
+  `LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS`.
+- **The record is numbers and state only** — no tenant, session, assignment, or
+  source value is in scope — and the sink call is wrapped for the same reason
+  `_record_rebind_failure`'s is: a sampler thread that dies on a telemetry bug
+  would silently stop publishing the gauge an alarm is watching, failing toward
+  "quiet", which is the failure mode this exists to remove.
+
+**Companion change, in the terraform repo.** The metric filter that reads these
+lines, and the alarm on the resulting metric, live there. The filter selects
+`$.record.event_type = "capacity_sample"` and publishes `$.record.ready_slots`,
+so both field names are a cross-repo contract; `test_runtime.py` pins the
+record's exact field set and their JSON types for that reason. The ECS
+`LiveTaskCount` alarm is kept alongside it rather than replaced, because the two
+detect different failures: a dead task, versus a live task with every slot
+bound.

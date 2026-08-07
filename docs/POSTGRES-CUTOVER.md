@@ -438,9 +438,136 @@ because any task replacement takes that file. Expect checkpoint restores to 404
 and custom policies to fall back to `DEFAULT_POLICY = "confirm_all"`, which is
 the safe direction and is already inside the DISCARD class above. What IS new
 after the flip: a session outlives its own checkpoints for the first time, so
-this stops being invisible and starts looking like a regression to a user. Give
-those two tables a PostgreSQL home, or classify them as disposable staging state
-in writing.
+this stops being invisible and starts looking like a regression to a user.
+
+That choice is now closed. See the next section.
+
+## The session annex tables: DECIDED, migrate (2026-08-07)
+
+**Decision: give them a PostgreSQL home. They are NOT classified as disposable.**
+`platform/migrations/0029_session_annex.sql` creates `app_session_checkpoints`
+and `app_session_policies`, and both modules now dispatch on a store mode
+instead of resolving `SESSIONS_DB` and stopping there.
+
+**Why not "disposable".** The disposable reading is TRUE on staging and FALSE on
+production, and nothing in the code can tell the two apart. Staging leaves
+`SESSIONS_DB` unset, so the file is task-local and the rows genuinely are
+throwaway. Production sets `SESSIONS_DB=/data/state/sessions.db` on durable EFS,
+so the same two tables there hold restore points and non-default policies that
+have accumulated across task replacements. `checkpoints.py` and
+`session_policy.py` have no notion of environment, so a written classification
+would have been a claim no code could honour, and the first person to read it in
+a production context would read it as licence to discard real user state. A
+label that is only true in one environment is worse than no label.
+
+**APPLY 0029 BEFORE DEPLOYING THIS IMAGE ANYWHERE POSTGRESQL IS CONNECTED. It
+is a hard ordering requirement and it has nothing to do with the selector.**
+`migration_manifest()` globs every shipped `.sql` file and `schema_status()`
+fails on any `missing_migrations` entry, with no reference to any selector. So
+0029 makes `assert_schema_current()` fail for every PostgreSQL-connected
+deployment until it is applied, even with `LEAF_SESSION_ANNEX_STORE=legacy`.
+Staging sets `LEAF_PLATFORM_POSTGRES_REQUIRED=1` on both app containers
+(`terraform/environments/staging/us-east-1/leaf_platform.tf` in the
+infrastructure repository, read from remote `main` on 2026-08-07), which runs
+that assertion at startup and **fails closed**, so deploying this image to
+staging before applying 0029 means the app does not start. Read that as the
+ordering rule for any migration, not a property of this one.
+
+**Selector: its own, `LEAF_SESSION_ANNEX_STORE`, not `LEAF_SESSIONS_STORE`.**
+Both were arguable, and reusing the sessions selector has a real virtue: it
+makes the harmful combination unrepresentable in one stroke.
+
+*A retraction first, because this record originally led with it.* An earlier
+draft argued that reuse would retroactively fail `assert_schema_current()` on
+staging's current mode while a separate selector would not. **That is false**,
+for the reason stated immediately above: selector-scoped requirements cover
+columns and catalog contracts only, and the migration check is selector-blind.
+Review round 1 caught it. The correct consequence is the deploy-ordering rule,
+which applies either way.
+
+Three reasons survive.
+
+1. *The two authorities have different prerequisites, and coupling would hide
+   that.* Sessions has a backfill command and a parity command. This annex has
+   NEITHER, and no reverse writer. On one selector there is no second decision
+   to take, so flipping sessions would silently move an authority whose
+   prerequisites are unmet. A separate selector forces that decision to be made
+   explicitly, and refused where it is not ready — which is exactly the state
+   production is in.
+2. *Rollback would couple in the wrong direction.* The sessions rollback path
+   recorded above is `postgres` → `shadow` → `legacy`, and every mode but
+   `postgres` reads SQLite. This annex cannot follow that path at all: nothing
+   writes PostgreSQL back to SQLite. Shared, a sessions rollback would drag the
+   annex into an unreadable state with no separate decision point.
+3. *A selector cannot have two owners.* State this the right way round: the
+   inventory contract enforces one AUTHORITY per selector, not one selector per
+   authority. Seventeen authorities own nineteen selectors, because two
+   authorities each own more than one. Sharing `LEAF_SESSIONS_STORE` would give
+   a single selector two owning authorities, which the contract rejects.
+
+**The coupling is declared and ENFORCED, not left to the selector's shape.**
+`platform/authority-inventory.json` gains a `selector_dependencies` entry —
+`LEAF_SESSIONS_STORE=postgres` requires `LEAF_SESSION_ANNEX_STORE=postgres` —
+using the same mechanism `LEAF_UPLOAD_STORE` → `LEAF_DRAWING_STORE` already
+uses. `server/platform_link.validate_session_annex_authority` refuses to start an
+app in that combination, so this is a startup failure rather than a document.
+Note the requirement is `postgres` EXACTLY: under `dual_write` and both shadow
+modes the annex still READS SQLite, so those modes do not fix the ephemerality.
+
+**What this changes about step 5.** The staging flip must now set
+`LEAF_SESSION_ANNEX_STORE=postgres` in the SAME task-definition change that sets
+`LEAF_SESSIONS_STORE=postgres`. An app that gets one without the other does not
+start. Apply 0029 before either. Step 3's "resolve every `unknown`" requirement
+also now covers the new `session_annex` authority, whose selection is recorded
+`unknown` in both environments because the selector is introduced by this change
+and no deployed image bakes it yet; record `measured_no_override` against a real
+revision and image digest once one does, not from this document's intent.
+
+**What is deliberately NOT built, and what it blocks.**
+
+- *No backfill.* `scripts/reconcile_sessions_authority.py` covers three table
+  pairs and neither annex table is among them. Selecting a non-`legacy` mode
+  starts from an empty target.
+  **Task-local does not mean empty, and the difference is a real user-visible
+  loss.** The RUNNING staging task can hold up to one task-lifetime of
+  checkpoints and non-default policies, so flipping the annex straight to
+  `postgres` discards those rows while the mirrored session itself survives —
+  producing precisely the mismatch this section exists to remove, once, at
+  cutover. That is inside the discard class staging already accepted for
+  sessions, and it is bounded by one task lifetime rather than by history, but
+  it is not nothing. Do not read "no accumulated history across replacements" as
+  "no rows to lose".
+  **Production cannot skip this at all**: cutting it over without writing a
+  backfill would silently drop every existing restore point and every
+  non-default policy, accumulated on durable EFS.
+- *No reverse writer, so rollback is undesigned rather than merely awkward.*
+  There is no PostgreSQL-to-SQLite direction anywhere in this repository, in
+  either the sessions lane or this one. Once `postgres` is the annex authority,
+  leaving it makes every row written under it unreadable, permanently. On
+  staging that sits inside the discard class already accepted above and degrades
+  safely (empty checkpoint lists, `DEFAULT_POLICY = "confirm_all"`). On
+  production it is a blocker: the rollback would revert users to whatever the
+  EFS file held at cutover while newer rows survive unread in a table nothing
+  consults.
+
+So the supported end state today is staging on `postgres` and **production on
+`legacy`**. Production needs the backfill and the reverse writer first, and the
+inventory record says so in both the `backfill` and `rollback_mode` fields
+rather than leaving a future reader to infer it.
+
+**No foreign key to `app_sessions`, on purpose.** `app_session_events` has one;
+these do not. With independent selectors, `annex=postgres` while
+`sessions=legacy` is a representable configuration, and under an FK every
+checkpoint write in it would fail at INSERT time as a 500. The declared
+dependency covers the harmful direction at startup instead, and an orphaned
+annex row reads as an empty checkpoint list and a default policy — both
+harmless.
+
+**Unverified.** Nothing here was run against a live PostgreSQL. The tests cover
+dispatch, the emitted SQL, and the enforcement, against a fake in place of
+`platform.db`; 0029 itself has been applied nowhere. Treat the PostgreSQL paths
+as reviewed code, not as exercised code, until a real apply and a real request
+say otherwise.
 
 ## Which execution path, and what happens to SESSIONS_DB (decided 2026-08-07)
 
@@ -591,23 +718,53 @@ Leave it out until the condition disappears.
 What actually closes the drift is the flip itself. In `postgres` mode
 `get_or_create_session`, `get_session` and `append_event` all return at
 `if mode == "postgres"` before touching legacy SQLite or `_shadow_equal`, so the
-`app_sessions` path stops reading `SESSIONS_DB` entirely. Two consumers survive:
-`server/checkpoints.py` and `server/session_policy.py` each resolve
-`Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))`
-independently, consulting neither `_store_mode` nor `LEAF_SESSIONS_STORE`, and
-neither performs a shadow comparison. **That absence of a shadow compare is the
-whole reason the ordering matters**: after the flip, setting `SESSIONS_DB` can
-no longer create a mismatch, because nothing compares the two stores any more.
+`app_sessions` path stops reading `SESSIONS_DB` entirely.
+
+**Two consumers survive, and since 0029 they answer to a SECOND selector.** An
+earlier draft of this subsection said `server/checkpoints.py` and
+`server/session_policy.py` consult no store mode and never shadow-compare, so
+that after the flip nothing could compare the two stores any more. **The annex
+section above landed while this one was being written and made that false.**
+Both modules still resolve
+`Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))`, but they
+now dispatch on `LEAF_SESSION_ANNEX_STORE`, whose vocabulary is its own
+(`session_annex.SHADOW_READ_MODES = {"shadow", "dual_write_shadow"}`), and in
+those modes `checkpoints.py` calls
+`session_annex.shadow_equal("checkpoint", legacy, postgres)`, which raises on
+inequality exactly as `session_store` does.
+
+So the ordering rule needs BOTH selectors, not one:
+
+- `LEAF_SESSION_ANNEX_STORE` defaults to `legacy` (`os.environ.get(SELECTOR,
+  "legacy")`), and under `legacy` the annex is SQLite-only with no comparison.
+- It is **UNSET on both live staging revisions**, verified in the same
+  2026-08-07T06:57Z read as the table below, so today the annex genuinely cannot
+  mismatch and the conclusion still holds.
+- But it is now a lever someone can pull independently of the flip. If the annex
+  selector is moved to `shadow` or `dual_write_shadow` while `SESSIONS_DB` points
+  at a fresh durable path, that reproduces the original hazard on the annex
+  tables, for the same reason and with the same permanence.
+
+**Restated correctly: setting `SESSIONS_DB` is safe only when no selector that
+resolves it is in a shadow-reading mode.** Today that means
+`LEAF_SESSIONS_STORE=postgres` and `LEAF_SESSION_ANNEX_STORE` at `legacy` or
+`postgres`. Check both before touching the variable, and re-derive this list if a
+third consumer appears, because the earlier draft was wrong within hours purely
+because a second one did.
 
 So there is one forbidden ordering and two acceptable terminal states:
 
-- **Forbidden:** set `SESSIONS_DB` while the selector is still
-  `dual_write_shadow`. Permanent mismatch.
-- **Acceptable, preferred:** give `session_checkpoints` and `session_policies` a
-  PostgreSQL home, after which `SESSIONS_DB` has no consumers on staging at all
-  and the drift closes by deletion rather than by configuration.
-- **Acceptable, fallback:** after the flip lands, set `SESSIONS_DB` to durable
-  storage to stop those two tables dying with every task replacement.
+- **Forbidden:** set `SESSIONS_DB` while any selector resolving it is in a
+  shadow-reading mode. Permanent mismatch.
+- **Acceptable, preferred:** the annex tables move to PostgreSQL. **This is no
+  longer a proposal**: `platform/migrations/0029_session_annex.sql` and the
+  dispatch in both modules landed in the section above. Once that selector is
+  `postgres` as well, `SESSIONS_DB` has no consumers on staging at all and the
+  drift closes by deletion rather than by configuration. Note the annex section's
+  own caveat that those PostgreSQL paths are reviewed code, not exercised code.
+- **Acceptable, fallback:** after the flip lands and with both selectors clear of
+  shadow modes, set `SESSIONS_DB` to durable storage to stop those two tables
+  dying with every task replacement.
 
 The rollback requirement in the section above is the same rule read backwards
 and does not conflict with this: every mode on the return path except `postgres`

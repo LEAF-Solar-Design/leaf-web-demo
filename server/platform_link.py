@@ -149,6 +149,10 @@ _AUTHORITY_SELECTORS = {
         {"legacy", "dual_write", "dual_write_shadow", "shadow", "postgres"},
         {"dual_write", "dual_write_shadow", "shadow", "postgres"},
     ),
+    "LEAF_SESSION_ANNEX_STORE": (
+        {"legacy", "dual_write", "dual_write_shadow", "shadow", "postgres"},
+        {"dual_write", "dual_write_shadow", "shadow", "postgres"},
+    ),
     "LEAF_AGENT_STORE": ({"legacy", "postgres"}, {"postgres"}),
     "LEAF_GUEST_CAP_STORE": ({"memory", "postgres"}, {"postgres"}),
     "LEAF_DRAWING_STORE": ({"legacy", "postgres"}, {"postgres"}),
@@ -191,6 +195,36 @@ def validate_canonical_upload_authority() -> None:
             "LEAF_DRAWING_MUTATIONS_FENCE_FILE")
 
 
+def validate_session_annex_authority() -> None:
+    """A PostgreSQL sessions authority must not leave its annex on SQLite.
+
+    The failure this prevents is user-visible rather than internal. With
+    ``LEAF_SESSIONS_STORE=postgres`` a session survives task replacement, while
+    ``session_checkpoints`` and ``session_policies`` live in the SQLite file at
+    ``SESSIONS_DB`` for every annex mode except ``postgres`` -- and staging
+    leaves ``SESSIONS_DB`` unset, so that file is task-local. The session then
+    outlives its own restore points: checkpoint reads 404 and a custom policy
+    silently reverts to ``confirm_all``.
+
+    ``postgres`` exactly, not "any PostgreSQL-touching mode". Under
+    ``dual_write`` and both shadow modes the annex still READS SQLite, so they
+    do not fix the ephemerality; only authority does.
+
+    This is the executable half of the selector dependency recorded in
+    platform/authority-inventory.json, matching how
+    ``validate_canonical_upload_authority`` backs the upload/drawing one.
+    """
+    if os.environ.get("LEAF_SESSIONS_STORE", "legacy").strip().lower() != "postgres":
+        return
+    annex = os.environ.get("LEAF_SESSION_ANNEX_STORE", "legacy").strip().lower()
+    if annex != "postgres":
+        raise RuntimeError(
+            "LEAF_SESSIONS_STORE=postgres requires LEAF_SESSION_ANNEX_STORE=postgres"
+            f" (got {annex!r}); otherwise session checkpoints and policies stay on"
+            " the SQLite file at SESSIONS_DB and do not survive task replacement"
+        )
+
+
 def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     """Fail closed before serving when any selected authority needs PostgreSQL."""
     if (
@@ -202,6 +236,7 @@ def validate_postgres_startup() -> Optional[Dict[str, Any]]:
     if not postgres_startup_required():
         return None
     validate_canonical_upload_authority()
+    validate_session_annex_authority()
     if postgres_required():
         # Lazy: deps imports platform_link lazily too, so this cannot cycle.
         # deps.auth_live() is THE canonical LEAF_AUTH_LIVE parser (broker and

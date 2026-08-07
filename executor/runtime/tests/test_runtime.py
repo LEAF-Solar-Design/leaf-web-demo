@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import signal
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from executor.runtime import child
 from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
 from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
 from executor.runtime.ed25519 import sign
-from executor.runtime.supervisor import WarmExecutorSupervisor
+from executor.runtime.supervisor import (
+    CAPACITY_ALARM_PERIOD_SECONDS,
+    DEFAULT_CAPACITY_SAMPLE_SECONDS,
+    MAX_CAPACITY_SAMPLE_SECONDS,
+    CapacitySampler,
+    WarmExecutorSupervisor,
+    emit_runtime_event,
+)
 from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS, EXECUTOR_ID, documents, keys, lease
 
 
@@ -439,3 +449,339 @@ class SlotRebindObservabilityTests(unittest.TestCase):
                           docs["drawing_context"]["content_digest"],
                           str(docs["invocation"]["params"])):
             self.assertNotIn(forbidden, encoded)
+
+
+class HealthSnapshotConsistencyTests(unittest.TestCase):
+    """`health()` runs unlocked from /health, /metrics AND the sampler timer.
+
+    It used to count ready and bound in two separate passes. A concurrent
+    assign between them reported ready=1, bound=1, total=1 -- more slots than
+    exist -- and the sampler publishes that straight to CloudWatch. Reproduced
+    under a forced switch between the passes before this was changed.
+    """
+
+    class FlipSlot:
+        """A slot whose binding changes on every read, i.e. maximally racy."""
+
+        def __init__(self) -> None:
+            self._reads = 0
+            self.process = SimpleNamespace(is_alive=lambda: True)
+
+        @property
+        def assignment(self):
+            self._reads += 1
+            return {"assignment_id": "a"} if self._reads % 2 else None
+
+    def test_a_snapshot_can_never_report_more_slots_than_exist(self) -> None:
+        supervisor = WarmExecutorSupervisor.__new__(WarmExecutorSupervisor)
+        supervisor.executor_id = EXECUTOR_ID
+        supervisor._slots = [self.FlipSlot() for _ in range(4)]
+        for _ in range(20):
+            state = supervisor.health()
+            self.assertEqual(
+                state["total_slots"],
+                state["ready_slots"] + state["bound_slots"],
+                f"impossible snapshot {state!r}: every slot is alive, so ready "
+                "plus bound must equal total",
+            )
+
+
+class CapacityGaugeTests(unittest.TestCase):
+    """The free-slot count has to leave this process to be alarmable.
+
+    `health()` and `/metrics` are pull-only on :8088 and the executor task
+    definition declares no task role, so nothing in AWS can read them.  A
+    metric filter over the container log plane is the only channel, which
+    makes the exact shape of this line a contract with the terraform root.
+    """
+
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=self.events.append,
+        )
+
+    def tearDown(self) -> None:
+        self.supervisor.close()
+
+    def samples(self) -> list[dict]:
+        return [item for item in self.events if item["event_type"] == "capacity_sample"]
+
+    def test_sample_reports_the_supervisors_own_live_slot_numbers(self) -> None:
+        # A pinned payload would pass even if the record were a constant, so
+        # bind BOTH states: the numbers must move when a slot is really bound.
+        self.supervisor.sample_capacity()
+        docs = documents(COUNTER_SOURCE)
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.sample_capacity()
+
+        idle, busy = self.samples()
+        self.assertEqual((2, 0, 2), (idle["ready_slots"], idle["bound_slots"], idle["total_slots"]))
+        self.assertEqual((1, 1, 2), (busy["ready_slots"], busy["bound_slots"], busy["total_slots"]))
+        # ...and that they are health()'s numbers, not an independent count.
+        health = self.supervisor.health()
+        self.assertEqual(
+            (health["ready_slots"], health["bound_slots"], health["total_slots"], health["state"]),
+            (busy["ready_slots"], busy["bound_slots"], busy["total_slots"], busy["state"]),
+        )
+
+    def test_sample_carries_exactly_the_fields_the_metric_filter_selects(self) -> None:
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        self.assertEqual(
+            {"event_type", "executor_id", "state", "ready_slots",
+             "bound_slots", "total_slots", "observed_at"},
+            set(record),
+        )
+        # The filter reads $.record.ready_slots as a metric value, so it has to
+        # be a JSON number.  A stringified count publishes nothing at all.
+        for field in ("ready_slots", "bound_slots", "total_slots"):
+            self.assertIsInstance(record[field], int)
+
+    def test_sample_reaches_fd_two_in_the_runtime_envelope(self) -> None:
+        # The in-memory sink proves the record; only the real emitter proves
+        # the LINE, and the line is what CloudWatch Logs actually matches.
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        read_fd, write_fd = os.pipe()
+        saved = os.dup(2)
+        try:
+            os.dup2(write_fd, 2)
+            emit_runtime_event(record)
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as stream:
+            raw = stream.read()
+
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertLessEqual(len(raw), 4096)
+        line = json.loads(raw)
+        self.assertEqual("leaf.instant.runtime", line["event"])
+        self.assertEqual("capacity_sample", line["record"]["event_type"])
+        self.assertEqual(record["ready_slots"], line["record"]["ready_slots"])
+
+    def test_sample_carries_no_tenant_or_lease_material(self) -> None:
+        docs = documents(COUNTER_SOURCE)
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        encoded = str(record)
+        for forbidden in (docs["assignment"]["lease_token"],
+                          docs["assignment"]["tenant_id"],
+                          docs["assignment"]["session_id"],
+                          docs["drawing_context"]["geometry_ref"]):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_a_sink_that_raises_cannot_kill_the_gauge(self) -> None:
+        # The sampler is a bare thread: an escaping exception would end it and
+        # the metric would go quiet, which is the failure this change removes.
+        def explode(_record: dict) -> None:
+            raise RuntimeError("telemetry backend is down")
+
+        self.supervisor._runtime_event_sink = explode
+        self.supervisor.sample_capacity()  # must not raise
+        self.supervisor._runtime_event_sink = self.events.append
+        self.supervisor.sample_capacity()
+        self.assertEqual(1, len(self.samples()))
+
+
+class CapacitySamplerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=self.events.append,
+        )
+
+    def tearDown(self) -> None:
+        self.supervisor.close()
+
+    def test_sampler_publishes_repeatedly_and_stops_on_request(self) -> None:
+        sampler = CapacitySampler(self.supervisor, interval_seconds=0.02)
+        sampler.start()
+        deadline = time.monotonic() + 5
+        while len(self.events) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        sampler.stop()
+        published = len(self.events)
+
+        self.assertGreaterEqual(published, 3)
+        time.sleep(0.1)
+        # A stopped sampler must go silent, or `stop()` is decorative and the
+        # thread outlives the supervisor it reads.
+        self.assertEqual(published, len(self.events))
+
+    def test_sampler_publishes_immediately_rather_than_after_one_interval(self) -> None:
+        # At the ceiling interval the second sample is half an alarm period
+        # away, so without a boot sample the metric would be absent for the
+        # first period after every deploy.
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
+        sampler.start()
+        deadline = time.monotonic() + 5
+        while not self.events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        sampler.stop()
+        self.assertEqual(1, len(self.events))
+
+    def test_interval_comes_from_the_environment_and_rejects_nonsense(self) -> None:
+        self.assertEqual(30.0, CapacitySampler.from_environment(self.supervisor, {})._interval_seconds)
+        configured = CapacitySampler.from_environment(
+            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "5"})
+        self.assertEqual(5.0, configured._interval_seconds)
+        with self.assertRaisesRegex(ValueError, "must be a number"):
+            CapacitySampler.from_environment(
+                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "often"})
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            CapacitySampler.from_environment(
+                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "0"})
+
+    def test_non_finite_and_oversized_intervals_are_rejected_at_construction(self) -> None:
+        """`float()` accepts "nan" and "inf", and both slip past a bare <= 0.
+
+        Confirmed by execution, not inferred: Event.wait(nan) returns instantly,
+        so the sampler busy-loops and floods the log group; Thread.join(nan)
+        then raises ValueError and Thread.join(inf) raises OverflowError, and
+        either escapes stop() into serve_registered's cleanup. Rejecting the
+        value at construction is the only place that costs nothing.
+        """
+        for value in ("nan", "-nan", "inf", "-inf", "Infinity"):
+            with self.assertRaises(ValueError, msg=f"{value} was accepted"):
+                CapacitySampler.from_environment(
+                    self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": value})
+    def test_the_interval_ceiling_is_half_the_companion_alarms_period(self) -> None:
+        """The ceiling must be HALF the alarm's period, not the period itself.
+
+        A ceiling of, say, an hour would accept an interval that emits once and
+        then leaves 59 consecutive one-minute periods with no datapoint at all,
+        so the alarm can never accumulate consecutive breaching periods. The
+        gauge would exist and never be alarmable, which is exactly the defect
+        this feature removes -- so a too-loose ceiling silently reintroduces it.
+
+        A ceiling equal to the period is ALSO too loose, which an earlier
+        revision of this test missed by pinning the literal 60 instead of the
+        property. Samples land on the wall clock; alarm periods land on fixed
+        60-second boundaries. At exactly one period of spacing, any jitter puts
+        two samples in one bucket and none in the next, and missing data counts
+        as non-breaching -- so the empty period interrupts the consecutive-breach
+        run. 60 is therefore in the rejected list below, not the accepted one.
+        """
+        self.assertEqual(CAPACITY_ALARM_PERIOD_SECONDS / 2, MAX_CAPACITY_SAMPLE_SECONDS)
+        self.assertLessEqual(DEFAULT_CAPACITY_SAMPLE_SECONDS, MAX_CAPACITY_SAMPLE_SECONDS)
+
+        at_ceiling = CapacitySampler.from_environment(
+            self.supervisor,
+            {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": repr(MAX_CAPACITY_SAMPLE_SECONDS)})
+        self.assertEqual(MAX_CAPACITY_SAMPLE_SECONDS, at_ceiling._interval_seconds)
+        for over in ("30.5", "31", "60", "3600"):
+            with self.assertRaisesRegex(ValueError, "at most", msg=f"{over} was accepted"):
+                CapacitySampler.from_environment(
+                    self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": over})
+
+    def _spacing_at_ceiling(self, sample_costs: list[float], samples: int = 5) -> list[float]:
+        """Drive `_run()` on a stubbed clock and return the spacing it produces.
+
+        The clock is faked rather than slept through, so this measures the real
+        loop at the real ceiling in milliseconds. `time.monotonic` is patched
+        process-wide for the duration, which is safe only because `_run()` is
+        called directly here -- no sampler thread is started, and the stubbed
+        wait never blocks, so nothing else in the process is mid-measurement.
+        """
+        clock = [1000.0]
+        stamps: list[float] = []
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
+
+        def sample() -> None:
+            stamps.append(clock[0])
+            clock[0] += sample_costs[min(len(stamps) - 1, len(sample_costs) - 1)]
+            if len(stamps) >= samples:
+                sampler._stop.set()
+
+        def wait(timeout: float | None = None) -> bool:
+            self.assertIsNotNone(timeout, "the loop waited with no bound")
+            self.assertGreater(timeout, 0, "the loop waited on a non-positive timeout")
+            clock[0] += timeout
+            return sampler._stop.is_set()
+
+        self.supervisor.sample_capacity = sample
+        sampler._stop.wait = wait
+        with patch("time.monotonic", lambda: clock[0]):
+            sampler._run()
+
+        self.assertEqual(samples, len(stamps), "the loop did not run to completion")
+        return [b - a for a, b in zip(stamps, stamps[1:])]
+
+    def test_sample_spacing_is_the_interval_not_the_interval_plus_the_sample(self) -> None:
+        """The property the ceiling exists for, measured instead of asserted.
+
+        The previous revision pinned the ceiling's literal value and never
+        checked spacing, which let this through: `_run()` sampled and THEN
+        waited the whole interval, so real spacing was `interval + however long
+        the sample took` and drifted later every cycle. The sample writes to
+        fd 2 and that write can block, so the extra term is not negligible.
+        Charging the sample four seconds here makes the old behaviour visible --
+        it would space samples 34s apart at a 30s interval.
+
+        The bar is the one the alarm actually needs: every 60-second period must
+        contain a datapoint, so spacing must stay under a period with room to
+        spare for jitter.
+        """
+        spacings = self._spacing_at_ceiling([4.0])
+
+        self.assertEqual(
+            [MAX_CAPACITY_SAMPLE_SECONDS] * len(spacings), spacings,
+            "the sample's own duration leaked into the spacing")
+        self.assertLess(
+            max(spacings), CAPACITY_ALARM_PERIOD_SECONDS,
+            "a 60-second alarm period can contain no datapoint")
+
+    def test_recovering_from_one_slow_sample_does_not_fire_a_catch_up_burst(self) -> None:
+        """The overrun branch must re-baseline, not repay the missed intervals.
+
+        This needs a slow sample FOLLOWED BY fast ones; a uniformly slow sample
+        cannot show the defect, because samples can never arrive faster than
+        their own cost. One 100-second sample puts the deadline more than three
+        intervals in the past. Without the re-baseline the loop then computes a
+        negative remaining three times in a row and samples with no wait at all,
+        emitting three lines at the same instant -- flooding fd 2 at exactly the
+        moment fd 2 is the thing that was slow.
+        """
+        slow = MAX_CAPACITY_SAMPLE_SECONDS * 10 / 3
+        spacings = self._spacing_at_ceiling([slow, 0.0])
+
+        self.assertEqual(slow, spacings[0], "the slow sample itself sets the first gap")
+        for spacing in spacings[1:]:
+            self.assertGreaterEqual(
+                spacing, MAX_CAPACITY_SAMPLE_SECONDS,
+                f"recovery emitted at {spacing}s spacing: {spacings}")
+
+    def test_stop_does_not_wait_for_the_configured_interval(self) -> None:
+        """Shutdown must not be hostage to a telemetry write.
+
+        The sink writes to fd 2. A backed-up fd 2 blocks that write, so joining
+        for the CONFIGURED interval would stall every later teardown step for
+        as long as the operator set it to. The join is a fixed short bound.
+        """
+        sampler = CapacitySampler(self.supervisor, interval_seconds=MAX_CAPACITY_SAMPLE_SECONDS)
+        blocked = threading.Event()
+
+        def wedge(_record: dict) -> None:
+            blocked.set()
+            time.sleep(30)
+
+        self.supervisor._runtime_event_sink = wedge
+        sampler.start()
+        self.assertTrue(blocked.wait(5), "the sampler never reached the sink")
+        started = time.monotonic()
+        sampler.stop()
+        elapsed = time.monotonic() - started
+        self.assertLess(
+            elapsed,
+            MAX_CAPACITY_SAMPLE_SECONDS / 2,
+            f"stop() waited {elapsed:.1f}s on a wedged sink; it must not scale "
+            "with the configured interval",
+        )
