@@ -103,7 +103,13 @@ def _app_dockerfile() -> str:
 #     check that catches some spellings of a destruction while silently missing
 #     others is worse than no check, because its green manufactures confidence.
 #     The right home for that class is a runtime assertion in the image itself,
-#     not a static test. Tracked as follow-up, deliberately not re-attempted.
+#     not a static test. That assertion now EXISTS: deploy/Dockerfile.app runs a
+#     `RUN test -f && test -s` over every shipped script as its last
+#     filesystem-touching instruction (NOT its last instruction -- the
+#     per-commit ARG and the image metadata follow it), so a destruction of any
+#     spelling fails the BUILD, and
+#     `test_the_image_asserts_its_own_reconcilers_at_build_time` below pins it.
+#     Do not re-attempt the static version: the runtime one already decides it.
 #
 # What REMAINS parses only COPY, and every way it can be wrong is LOUD: a COPY
 # form it fails to understand empties the map, and an unmapped script then
@@ -234,6 +240,32 @@ def _instructions(dockerfile: str) -> list[tuple[str, str]]:
         match = _DOCKERFILE_INSTRUCTION.match(line)
         if match:
             parsed.append((match.group(1).upper(), match.group(2).strip()))
+    return parsed
+
+
+def _exec_argv(argument: str) -> list[str] | None:
+    """The argv of an exec-form instruction, or None when it is not one.
+
+    None rather than an exception for every non-exec-form argument, because the
+    caller compares against an expected argv: a shell-form instruction must
+    simply fail to match, not blow up the test that is scanning past it.
+
+    Docker accepts only a JSON array of strings here. Anything that parses to
+    something else is not exec form to Docker either, so returning None for it
+    keeps this in step with the builder rather than being lenient where the
+    builder is not.
+    """
+    text = argument.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    if not all(isinstance(item, str) for item in parsed):
+        return None
     return parsed
 
 
@@ -520,6 +552,135 @@ def test_documented_authority_commands_resolve_in_the_image():
     assert set(copies).issubset({PurePosixPath(t).name for _, t in checked}), (
         "an image-copied reconciler script is documented by no command: "
         f"copied={sorted(copies)}, exercised={sorted(checked)}"
+    )
+
+
+def test_the_image_asserts_its_own_reconcilers_at_build_time():
+    """The destruction class this repo could not close statically.
+
+    An instruction that removes a copied script leaves every check above green:
+    `_copied_scripts` still reads the COPY line, and the documented command
+    still resolves to its target. The post-COPY survival check that tried to
+    catch it is gone (module comment above) because deciding it needs the
+    WORKDIR in effect at each line, so a relative `RUN rm -rf scripts` in the
+    region where WORKDIR is still /app read as harmless.
+
+    The image decides it instead. A final `test -f` per shipped script runs
+    AFTER every instruction above it, knows nothing about spelling, and fails
+    the BUILD rather than a test.
+
+    WHAT IS BUILD-PROVEN AND WHAT IS NOT, because the two are not the same and
+    the difference is one instruction. The SHELL-form spelling of this guard
+    was mutation-proven with a real `docker build -f deploy/Dockerfile.app .`:
+    unmodified builds green; dropping the sessions COPY, and separately
+    inserting `RUN rm -rf scripts` under WORKDIR /app, each turned it red at
+    this exact step. The guard is now EXEC form, and that change has NOT been
+    re-proven against a daemon -- the host's Docker was down when it was made.
+    It rests instead on Docker's documented rule that SHELL does not affect the
+    exec form, which is precisely why the change was made. Anyone with a
+    working daemon should replay the same two mutations plus the SHELL one
+    below and delete this paragraph.
+
+    Keyed on the COPY map, so a reconciler added later is covered the day it is
+    copied rather than the day someone remembers to extend this list.
+
+    It is NOT the last instruction in the file, and must not be: a RUN below the
+    per-commit `ARG LEAF_SOURCE_SHA` re-executes on every merge, which
+    scripts/test_build_platform_images_workflow.py forbids outright. That was
+    caught by CI, not by review. THREE rules cover the positions between them,
+    and it takes all three -- a destructive instruction above the guard is
+    caught by the guard, a RUN below the ARG by that invariant, and anything
+    else below the guard by the allowlist here. A COPY or ONBUILD below the ARG
+    escapes the first two; only the allowlist stops it.
+
+    SCOPE, so this does not read as more than it is. It covers the app image's
+    reconcilers. deploy/Dockerfile.canonical-worker, deploy/Dockerfile.broker
+    and deploy/Dockerfile.harness ship operator-reachable scripts
+    (canonical-container-smoke.py, e2b-tool-exec.mjs, start-harness.sh) with the
+    same hole and no such guard.
+    """
+    dockerfile = _app_dockerfile()
+    _single_stage(dockerfile)
+
+    copies = _copied_scripts(dockerfile)
+    assert copies, "deploy/Dockerfile.app copies no scripts/ file"
+
+    # THE EXACT COMMAND, not a substring of it. Matching `"test -f" in argument`
+    # was the first version and it was wrong in the same way the git-install
+    # scan above was wrong. A review found the proof:
+    #     RUN rm -rf scripts
+    #     RUN echo test -f /app/scripts/reconcile_customization_authority.py \
+    #       && echo test -f /app/scripts/reconcile_sessions_authority.py
+    # Both instructions sit above the ARG, the second contains "test -f" and
+    # names every copied target, nothing writable follows it, and the ARG
+    # invariant sees no offender -- so the image shipped with both reconcilers
+    # DELETED and every static gate green. Confirmed by running it. Pinning the
+    # exact form makes that impossible rather than merely unlikely, which is the
+    # same trade `_PINNED_GIT_INSTALL` makes: changing HOW the guard is spelled
+    # now requires editing this pin, and that is a change a reviewer should see.
+    # EXEC FORM, pinned as such. Pinning the tokens was not enough on its own:
+    # shell-form RUN executes through whatever SHELL is in effect, so
+    #     RUN rm -rf /app/scripts
+    #     SHELL ["/bin/true"]
+    # ran the byte-identical guard as `/bin/true -c "test -f ..."`, which exits
+    # 0 having tested nothing. The image shipped with both reconcilers deleted
+    # and BOTH this test and test_documented_authority_commands_resolve_in_the_image
+    # passed. A review confirmed it by replaying the mutation. That attack sits
+    # ABOVE the guard, where the allowlist below cannot see it by construction,
+    # so no rule about what FOLLOWS the guard could ever have caught it. Naming
+    # the interpreter closes it outright instead of adding another position
+    # rule: exec form ignores SHELL, so nothing above the guard changes what
+    # the guard means.
+    command = " && ".join(
+        # `-s` as well as `-f`: `-f` alone accepts an EMPTY file, so a
+        # truncation ships a reconciler that exits 0 and emits no receipt.
+        f"test -f {target} && test -s {target}"
+        for target in sorted(copies.values())
+    )
+    expected = ["/bin/sh", "-c", command]
+
+    instructions = _instructions(dockerfile)
+    guarded = [
+        index for index, (keyword, argument) in enumerate(instructions)
+        if keyword == "RUN" and _exec_argv(argument) == expected
+    ]
+    assert len(guarded) == 1, (
+        "deploy/Dockerfile.app must hold exactly one existence guard, in EXEC "
+        f"form, spelled exactly:\n    RUN {json.dumps(expected)}\n"
+        f"found {len(guarded)}. A guard the image ships must assert every "
+        "script the COPY map ships, must name its own interpreter so a SHELL "
+        "above it cannot neuter it, and nothing else may impersonate it."
+    )
+
+    # ALLOWLIST, not a denylist of RUN/COPY/ADD. An instruction this guard does
+    # not recognise fails LOUD rather than being assumed harmless, which is the
+    # failure mode the deleted static check had.
+    #
+    # USER and VOLUME are deliberately NOT on it, though neither deletes a file.
+    # The guard runs as root at build time, so a later `USER 10001` can leave a
+    # 0600 script unreadable to the process that actually runs it, and a later
+    # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
+    # whose guard passed and whose documented command still fails. Adding
+    # either must therefore be a decision someone makes here, not a side effect.
+    #
+    # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
+    # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
+    # run arbitrary commands at RUNTIME, and ENV can point PATH or PYTHONPATH
+    # somewhere else. A `HEALTHCHECK CMD rm -rf /app/scripts/...` below the
+    # guard passes this test, passes the build, and deletes the script seconds
+    # into container life while the container reports healthy. No rule about
+    # POSITION can bind runtime behaviour, so that is a review class, not a gate.
+    cannot_remove = {
+        "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
+        "MAINTAINER", "SHELL", "STOPSIGNAL", "WORKDIR",
+    }
+    after = [keyword for keyword, _ in instructions[guarded[0] + 1:]]
+    offending = sorted({k for k in after if k.upper() not in cannot_remove})
+    assert not offending, (
+        f"deploy/Dockerfile.app runs {offending} AFTER the existence guard, so "
+        "those instructions ship unchecked. Put them above the guard, or teach "
+        "this allowlist why they cannot remove a file at BUILD time and cannot "
+        "mask or re-permission the path for the runtime process."
     )
 
 
