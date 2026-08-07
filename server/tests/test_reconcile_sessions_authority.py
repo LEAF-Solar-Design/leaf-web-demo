@@ -1239,13 +1239,58 @@ def test_an_empty_source_against_a_populated_target_withholds_a_clean_exit(
 
 
 @requires_database
-def test_an_empty_source_and_an_empty_target_still_pass(source):
-    """The flag must not be needed for a genuinely fresh pair."""
+def test_an_empty_source_and_an_empty_target_still_pass(source, monkeypatch):
+    """The flag must NOT be needed for a genuinely fresh pair.
+
+    The guard is deliberately global rather than tenant-scoped -- on a real
+    store the whole source matters -- so a shared test database always has rows
+    from sibling tests. The target is emptied at the snapshot seam instead of by
+    TRUNCATE, which would be destructive to those siblings.
+    """
     RECONCILE._ensure_source_schema(source.path)
+    empty = {table: [] for table in RECONCILE.TABLE_COLUMNS}
+    monkeypatch.setattr(RECONCILE, "_postgres_snapshot", lambda _c: dict(empty))
+
     receipt = RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
     assert receipt["reconciled"] is True
-    # Only true when the TARGET also has rows; a fresh pair is not suspicious.
-    assert receipt["empty_source_populated_target"] in (True, False)
+    assert receipt["empty_source_populated_target"] is False, (
+        "a fresh pair must not be treated as a destroyed source"
+    )
+    assert receipt["source_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
+    assert receipt["target_counts"] == {t: 0 for t in RECONCILE.TABLE_COLUMNS}
+
+
+@requires_database
+def test_backfill_also_refuses_a_clean_exit_on_an_empty_source(source, target):
+    """The guard must not be parity-only.
+
+    A backfill against a destroyed source inserts nothing and would otherwise
+    report success, which is the same manufactured receipt in the other mode.
+    """
+    RECONCILE._ensure_source_schema(source.path)
+    with target.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_sessions (session_id, tenant_id, drawing_id, status,"
+            " created_at, updated_at, last_seq) VALUES (%s,%s,%s,'active',1.0,1.0,0)",
+            (_unique("survivor"), _unique("tenant"), _unique("drawing")),
+        )
+
+    def run(*extra):
+        return subprocess.run(
+            [sys.executable, str(RECONCILE_PATH), "--mode", "backfill",
+             "--sqlite", str(source.path), *extra],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+
+    refused = run()
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "cutover receipt" in refused.stderr
+    receipt = json.loads(refused.stdout)
+    assert receipt["inserted_total"] == 0
+    assert receipt["empty_source_populated_target"] is True
+
+    allowed = run("--allow-empty-source")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
 
 
 @requires_database
