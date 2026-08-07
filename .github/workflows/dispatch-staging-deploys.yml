@@ -16,52 +16,9 @@ name: Dispatch staging deploys
 #
 # Docs-only no-op: a docs-only push's build run succeeds without building
 # (its noop gate skips the graph) and publishes a docs-noop marker artifact
-# instead of a supply set. Marker-without-manifest means RECONCILE, not skip
-# (see below); manifest-and-marker both absent stays a hard error, because a
+# instead of a supply set. This relay treats marker-without-manifest as a
+# clean skip; manifest-and-marker both absent stays a hard error, because a
 # successful build with no supply set means a partial run.
-#
-# Reconcile mode (2026-08-07) closes the residual PR #497 documented rather
-# than hid. A relay that stands down after one service went live leaves
-# staging split, and the newer commit's relay converges it ONLY if that
-# commit builds images — a docs-only commit builds none, so the split used to
-# survive until the next deployable merge. A docs-only merge landing inside
-# web's ~8-minute deploy is not rare here. So the docs-only arm no longer
-# exits: it asks whether the two services run the same image and, if not,
-# moves the behind one FORWARD onto the ahead one's tag, through the same
-# watched, one-at-a-time, fail-loudly loop the release path uses.
-#
-# Reconcile WAITS for the deploy workflow to go quiet before reading anything.
-# Without that it misses the split it exists to close: a docs-only build
-# finishes in a minute or two while the release it landed on top of takes ~8
-# minutes per service, so both services still show their pre-release tag,
-# reconcile calls that converged, and the stood-down relay's split is left
-# with nobody to fix it. Observed shape, not hypothetical: infra run 31144173570
-# deployed web (prod-d9306c3) at 03:22 on 2026-08-07 and no app deploy of that
-# tag was ever dispatched; staging ran mixed for about two hours until the next
-# CODE merge (prod-48204c4) happened to converge it.
-#
-# Which tag each service runs is read from the infra deploy workflow's own
-# run-name ("Deploy leaf-platform staging <service> (<image_tag|sha|live
-# baseline>)"), the contract this relay already depends on to find its runs —
-# no new contract and no AWS credential. The NEWEST successful run per
-# service is taken unconditionally, never the newest one that happens to
-# carry a prod tag: a manual build-from-source or live-baseline recovery
-# deploy names itself with a sha or a literal, and skipping past it would
-# read a service as older than it is and reconcile it BACKWARDS.
-#
-# The target is then chosen by ANCESTRY (compare/<web>...<app>), never by
-# recency, so "never deploy a tag older than what a service already runs" is
-# proven rather than assumed. Anything undecidable — an unreadable live tag,
-# a non-prod tag, two unrelated tags — is RED. Guessing there is precisely
-# the silent backwards deploy the whole design exists to prevent, and the
-# documented recovery (manual dispatch with an exact task-definition ARN) is
-# the right owner for it.
-#
-# Reconcile runs the SAME per-attempt ungated tip re-check, so it stands down
-# for a newer commit exactly as the release path does. A stand-down there
-# leaves the split in place, but that is now bounded by the same convergence
-# argument: whichever commit is the tip either releases both services or
-# reconciles them.
 #
 # Rerun semantics: rerunning a successful build (or this relay) deploys
 # both services again, deliberately. The deploys register a fresh task
@@ -82,6 +39,42 @@ name: Dispatch staging deploys
 # A run cancelled before any job started never reached AWS, so eviction is a
 # queueing loss rather than a deploy failure and is the one conclusion this
 # relay retries. Every other non-success fails the relay red.
+#
+# NEED-FIRST ORDERING (2026-08-07). The service loop used to be a hardcoded
+# `for SERVICE in web app`, so web won every race and app lost every race. A
+# relay superseded mid-release always dies before its SECOND service, so under
+# any merge rate faster than one full release (~8 min web plus ~14 min app)
+# app never advanced at all while web advanced every time. Observed: three
+# consecutive relays (d9306c3, 7056e2e, 48204c4) produced web deploys with no
+# app deploy between them, and staging ran a whole release split for over two
+# hours. The stand-down is correct and stays; what was wrong is that the
+# SAME service was always the one abandoned. Ordering by need hands the first
+# slot to whichever service was abandoned last time, so the two alternate and
+# neither can starve. That bounds a split to one release instead of letting it
+# grow without limit.
+#
+# THAT READ MAY ONLY AFFECT ORDER. It never chooses a tag and never drops a
+# service: both services are still dispatched with THIS relay's own build tag,
+# one at a time, watched, behind the ungated per-attempt tip re-check. Getting
+# the order wrong costs nothing, and that is the whole point. Inferring live
+# state from CI run history is NOT sound, and an earlier cut of this change
+# that used it to pick a DEPLOY TAG was returned RED by sol-critic on PR #506
+# for two reasons: a deploy that flips traffic and then fails or is cancelled
+# leaves the new colour live while its run reads as unsuccessful, so the read
+# can name an older tag as live; and the read/dispatch window is not atomic,
+# so a sibling deploy can move a service forward in between while main has not
+# moved. Both turn a tag DECISION into a silent backwards deploy. Neither can
+# do worse than pick the wrong order here. The task definitions are also
+# digest-pinned and staging app/web are blue/green, so "live" is a function of
+# ALB rule weights: no amount of run-name reading is authoritative about what
+# is serving, and this code must never pretend otherwise.
+#
+# Converging a split with NO new images (a docs-only tip builds none) would
+# need a sound read of live state, which means the relay reading ECS/ALB
+# directly through an OIDC role. That adds id-token: write, breaks the pinned
+# capability wall below, and needs an infra-repo trust change. Deliberately
+# out of scope here: a docs-only tip still skips, and the next code merge now
+# converges it promptly because the behind service goes first.
 #
 # Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
 # repo) — the same pattern the aws-* service repos use with
@@ -157,19 +150,13 @@ jobs:
           ' artifacts.json)
           if [ -z "$ARTIFACT_ID" ]; then
             # No supply set. A deliberate docs-only no-op run publishes a
-            # marker instead; that hands the dispatch step a RECONCILE job
-            # (no build tag: it resolves its own target from live state).
-            # Skipping here is what let a split left by an earlier relay's
-            # stand-down survive to the next deployable merge. Anything else
-            # is still a loud failure: a successful build without a manifest
-            # means a partial run and must never be silently swallowed.
+            # marker instead; that skips cleanly. Anything else is still a
+            # loud failure: a successful build without a manifest means a
+            # partial run and must never be silently swallowed.
             if jq -e --arg name "$NOOP_NAME" \
               'any(.artifacts[]; .name == $name)' artifacts.json >/dev/null; then
-              echo "::notice::Build run $BUILD_RUN_ID was a docs-only no-op; no images were built, so this relay reconciles staging instead of releasing."
-              {
-                echo "deploy=true"
-                echo "mode=reconcile"
-              } >> "$GITHUB_OUTPUT"
+              echo "::notice::Build run $BUILD_RUN_ID was a docs-only no-op; nothing to deploy."
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "::error::Supply-set artifact $ARTIFACT_NAME not found and no $NOOP_NAME marker present."
@@ -205,11 +192,8 @@ jobs:
             echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
             exit 1
           }
-          {
-            echo "deploy=true"
-            echo "mode=release"
-            echo "image_tag=$IMAGE_TAG"
-          } >> "$GITHUB_OUTPUT"
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Deploy each staging service in turn and prove each one landed
         if: >-
@@ -220,7 +204,6 @@ jobs:
           # The tip re-check reads THIS repo, which the infra-repo PAT is not
           # scoped for; the job's own token is.
           HOME_TOKEN: ${{ github.token }}
-          DEPLOY_MODE: ${{ steps.manifest.outputs.mode }}
           IMAGE_TAG: ${{ steps.manifest.outputs.image_tag }}
         run: |
           set -euo pipefail
@@ -262,18 +245,12 @@ jobs:
                    | sort_by(-.databaseId) | first | .databaseId // empty'
           }
 
-          # Newest SUCCESSFUL deploy run for one service, as its full run
-          # name. Every dispatch of the infra workflow names itself
+          # Newest SUCCESSFUL deploy run for one service, as its full run name.
+          # Every dispatch of the infra workflow names itself
           # "Deploy leaf-platform staging <service> (<image_tag|sha|live
-          # baseline>)", so the newest successful run carrying this prefix IS
-          # what that service currently runs.
-          #
-          # The newest one is taken UNCONDITIONALLY, not the newest one that
-          # happens to carry a prod tag. A manual build-from-source or
-          # live-baseline recovery deploy names itself with a sha or a
-          # literal; skipping past it would read the service as older than it
-          # is and reconcile it BACKWARDS. An unparseable newest run is an
-          # undecidable live identity, and undecidable is red.
+          # baseline>)". Best effort ONLY: this feeds the loop ORDER and
+          # nothing else, so every failure mode below falls back to the old
+          # fixed order rather than failing the release.
           newest_deploy_title() {
             gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
               --limit 200 --json databaseId,displayTitle,conclusion \
@@ -289,100 +266,26 @@ jobs:
             printf '%s' "${rest%\)}"
           }
 
-          require_prod_tag() {
-            [[ "$1" =~ ^prod-[0-9a-f]{7,40}$ ]] || {
-              echo "::error::$2"
-              exit 1
-            }
-          }
-
-          if [ "$DEPLOY_MODE" = "reconcile" ]; then
-            # This merge built no images, so there is no release to make.
-            # The only question is whether an earlier relay's stand-down left
-            # staging split, and if so which service is behind.
-            #
-            # WAIT FOR QUIESCENCE FIRST. A deploy in flight means the live tags
-            # are mid-change, and reading them early is how reconcile MISSES
-            # the very split it exists to close. The motivating race is exactly
-            # this shape: a docs-only build finishes in a minute or two while
-            # the release it landed on top of takes ~8 minutes per service, so
-            # at the moment this relay wakes up, web@A is often still
-            # deploying. Both services would still report their pre-A tag,
-            # reconcile would call that converged and exit green, and the
-            # stood-down relay's split would then have nobody left to fix it.
-            # Waiting also stops a duplicate dispatch racing a deploy that is
-            # already putting the service where we want it.
-            BUSY=-1
-            while before_deadline; do
-              BUSY=$(gh run list --repo "$INFRA_REPO" \
-                --workflow "$DEPLOY_WORKFLOW" --limit 100 --json status \
-                | jq -r '[.[] | select(.status != "completed")] | length')
-              if [ "$BUSY" -eq 0 ]; then
-                break
-              fi
-              echo "Waiting for $BUSY in-flight $DEPLOY_WORKFLOW run(s) to settle before reading staging's live image tags."
-              sleep "$POLL_SECONDS"
-            done
-            if [ "$BUSY" -ne 0 ]; then
-              echo "::error::Docs-only merge $BUILD_HEAD_SHA: $DEPLOY_WORKFLOW still had in-flight runs when the watch budget ran out, so staging's live image tags never settled and whether staging is split is undecidable. Recovery: manual workflow_dispatch of $DEPLOY_WORKFLOW with an exact task-definition ARN."
-              exit 1
+          # Hand the first slot to whichever service looks further behind, so
+          # the one abandoned by the last superseded relay is the one that
+          # advances now. Read the header: this may only reorder. Both
+          # services are always dispatched, always with $IMAGE_TAG, so an
+          # inaccurate read is harmless by construction.
+          SERVICES="web app"
+          WEB_TAG=$(tag_of_title "$(newest_deploy_title web || true)")
+          APP_TAG=$(tag_of_title "$(newest_deploy_title app || true)")
+          if [[ "$WEB_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
+            && [[ "$APP_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
+            && [ "$WEB_TAG" != "$APP_TAG" ]; then
+            # compare/<base>...<head> reports the HEAD side, so with web as
+            # base "behind" means APP is behind and app goes first.
+            RELATION=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/compare/${WEB_TAG#prod-}...${APP_TAG#prod-}" \
+              --jq '.status' || true)
+            if [ "$RELATION" = "behind" ]; then
+              SERVICES="app web"
+              echo "::notice::app ($APP_TAG) trails web ($WEB_TAG); deploying app first so a superseded release cannot starve it again."
             fi
-
-            WEB_TITLE=$(newest_deploy_title web)
-            APP_TITLE=$(newest_deploy_title app)
-            if [ -z "$WEB_TITLE" ] || [ -z "$APP_TITLE" ]; then
-              echo "::error::Docs-only merge $BUILD_HEAD_SHA: no successful $DEPLOY_WORKFLOW run names a live image for both staging services within the last 200 runs (web='$WEB_TITLE', app='$APP_TITLE'), so whether staging is split is undecidable. This relay refuses to guess rather than risk deploying a service backwards. Recovery: manual workflow_dispatch of $DEPLOY_WORKFLOW with an exact task-definition ARN."
-              exit 1
-            fi
-            WEB_TAG=$(tag_of_title "$WEB_TITLE")
-            APP_TAG=$(tag_of_title "$APP_TITLE")
-            require_prod_tag "$WEB_TAG" "Docs-only merge $BUILD_HEAD_SHA: the newest successful web deploy is '$WEB_TITLE', which does not name an immutable prod tag, so web's live identity cannot be compared and reconciling could deploy it backwards. Recovery: manual workflow_dispatch of $DEPLOY_WORKFLOW with an exact task-definition ARN."
-            require_prod_tag "$APP_TAG" "Docs-only merge $BUILD_HEAD_SHA: the newest successful app deploy is '$APP_TITLE', which does not name an immutable prod tag, so app's live identity cannot be compared and reconciling could deploy it backwards. Recovery: manual workflow_dispatch of $DEPLOY_WORKFLOW with an exact task-definition ARN."
-
-            SERVICES=""
-            if [ "$WEB_TAG" = "$APP_TAG" ]; then
-              echo "::notice::Docs-only merge $BUILD_HEAD_SHA builds no images and staging is already converged on $WEB_TAG; nothing to reconcile."
-            else
-              # ANCESTRY, never recency. compare/<base>...<head> reports the
-              # HEAD side, so with web as base: 'ahead' means APP is ahead and
-              # WEB is the service to move forward. Choosing by "whichever
-              # deployed most recently" would deploy the older tag over the
-              # newer one whenever the ahead service landed first, which is
-              # exactly the case reconcile exists to clean up.
-              RELATION=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                "repos/$GITHUB_REPOSITORY/compare/${WEB_TAG#prod-}...${APP_TAG#prod-}" \
-                --jq '.status' || true)
-              case "$RELATION" in
-                identical)
-                  echo "::notice::Docs-only merge $BUILD_HEAD_SHA: web=$WEB_TAG and app=$APP_TAG name the same commit; staging is converged and there is nothing to reconcile."
-                  ;;
-                ahead)
-                  SERVICES="web"
-                  IMAGE_TAG="$APP_TAG"
-                  ;;
-                behind)
-                  SERVICES="app"
-                  IMAGE_TAG="$WEB_TAG"
-                  ;;
-                *)
-                  echo "::error::STAGING IS SPLIT and cannot be reconciled forward: web=$WEB_TAG, app=$APP_TAG, and comparing them reports '$RELATION' rather than one being an ancestor of the other. Deploying either onto the other would risk rolling a service BACKWARDS, which this relay never does. Recovery: manual workflow_dispatch of $DEPLOY_WORKFLOW with an exact task-definition ARN."
-                  exit 1
-                  ;;
-              esac
-            fi
-            if [ -n "$SERVICES" ]; then
-              echo "::warning::STAGING IS SPLIT: web=$WEB_TAG, app=$APP_TAG. Docs-only merge $BUILD_HEAD_SHA builds no images, so this relay will reconcile it forward by deploying $SERVICES onto $IMAGE_TAG (unless the tip re-check below stands it down for a newer commit)."
-            fi
-          else
-            SERVICES="web app"
-          fi
-
-          # The empty-tag wall. Reaching a dispatch with no resolved tag was
-          # previously prevented by the step's own `if` guard; reconcile now
-          # enters that step deliberately without a build tag, so the check
-          # lives here, where it covers both modes.
-          if [ -n "$SERVICES" ]; then
-            require_prod_tag "$IMAGE_TAG" "Refusing to dispatch: the resolved image tag '$IMAGE_TAG' (mode '$DEPLOY_MODE') is not an immutable prod tag."
           fi
 
           DEPLOYED_ANY=false
@@ -404,14 +307,15 @@ jobs:
                 "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
                 if [ "$DEPLOYED_ANY" = "true" ]; then
-                  # Standing down here leaves staging on a mixed identity, and
-                  # that is still the lesser evil: finishing this release risks
+                  # KNOWN RESIDUAL, stated rather than hidden. Standing down
+                  # here leaves staging on a mixed identity. The newer commit's
+                  # relay converges it whenever that commit builds images, but
+                  # a docs-only commit builds none and its relay skips, so the
+                  # split can survive until the next deployable merge. Standing
+                  # down is still the lesser evil: finishing this release risks
                   # landing a stale tag over a newer deploy, which is silent
-                  # corruption rather than a visible gap. The newer commit's
-                  # relay now converges it either way — by releasing both
-                  # services if that commit builds images, or by reconciling
-                  # the split forward if it is docs-only.
-                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this, releasing if it builds images and reconciling if it is docs-only."
+                  # corruption rather than a visible gap.
+                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this unless that commit builds no images."
                 else
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
                 fi

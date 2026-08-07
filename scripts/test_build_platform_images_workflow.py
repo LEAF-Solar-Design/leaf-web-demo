@@ -2710,23 +2710,16 @@ def check_docs_noop_filter(text: str) -> None:
     # workflow's permissions block above still pins it read-only. This is a
     # read the step already had the right to make, not new capability — the
     # secret-reference count below remains the wall that matters.
-    # DEPLOY_MODE added 2026-08-07 with reconcile mode: a docs-only build now
-    # enters this step with no build tag and resolves its own target, so the
-    # step must know which of the two jobs it is doing. No new credential.
     assert dispatch_step["env"] == {
         "GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}",
         "HOME_TOKEN": "${{ github.token }}",
-        "DEPLOY_MODE": "${{ steps.manifest.outputs.mode }}",
         "IMAGE_TAG": "${{ steps.manifest.outputs.image_tag }}",
     }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
-    # This guard no longer carries the empty-tag protection: reconcile enters
-    # the step deliberately without a build tag. require_prod_tag inside the
-    # script is the wall now, pinned in check_staging_relay_convergence.
     assert dispatch_step["if"] == (
         "steps.tip.outputs.current == 'true' && "
         "steps.manifest.outputs.deploy == 'true'"
-    ), "the dispatch step stays gated on the manifest having reached a verdict"
+    ), "without this exact guard a docs-only run dispatches an empty tag"
 
     # The PAT appears EXACTLY once in the whole parsed workflow, at the
     # guarded dispatch step's GH_TOKEN. Walking parsed values (not raw
@@ -2767,26 +2760,24 @@ def check_docs_noop_filter(text: str) -> None:
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
-    # Hash updated 2026-08-07 (a): the dispatch step now deploys one service at
-    # a time and watches each run to a terminal state, instead of firing both
+    # Hash updated 2026-08-07: the dispatch step now deploys one service at a
+    # time and watches each run to a terminal state, instead of firing both
     # deploys two seconds apart and exiting. Reviewed for dispatch capability:
     # still exactly one `gh workflow run` site with the same four inputs, one
     # added read of THIS repo's tip on the workflow's own read-only token, and
     # no new secret reference (the count assertion above is unchanged).
     #
-    # Hash updated 2026-08-07 (b): reconcile mode. The manifest's docs-only arm
-    # hands down mode=reconcile instead of exiting, and the dispatch step gained
-    # a pre-loop block that waits for the deploy workflow to go quiet, reads
-    # each service's live tag from the infra deploy run names, picks the
-    # forward target by ancestry, and narrows the service list. Reviewed for
+    # Hash updated 2026-08-07 (b): need-first ordering. The dispatch step reads
+    # each service's newest successful infra deploy run name and, when the
+    # ancestry compare says app trails web, deploys app first. Reviewed for
     # dispatch capability: STILL exactly one `gh workflow run` site with the
-    # same four inputs; the added calls are three `gh run list` reads on the
+    # same four inputs; the added calls are two `gh run list` reads on the
     # infra repo the step already lists runs from, and one `compare` read of
     # THIS repo on the same read-only HOME_TOKEN the tip re-check already uses.
-    # No new secret reference, and the secret-count assertion above is
-    # unchanged.
+    # No new secret reference. The read may only REORDER — it never assigns
+    # IMAGE_TAG and never shortens SERVICES, both pinned above.
     assert frozen == (
-        "da510852d6a424a3999947d02264b6acd39d8b077bc39e7dc971257ab8f1add4"
+        "186e9ae769ac8913d37e49318544b0cd4bd7b75ee09819c461f90eca45966d26"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -2803,10 +2794,8 @@ def check_docs_noop_filter(text: str) -> None:
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
         in manifest_code
     )
-    # Both arms now reach the dispatch step; which JOB it does is the `mode`
-    # output. The docs-only skip is gone deliberately — see
-    # check_staging_relay_convergence for why that skip was the residual.
-    assert manifest_code.count('echo "deploy=true"') == 2
+    assert manifest_code.count('echo "deploy=false"') == 1
+    assert manifest_code.count('echo "deploy=true"') == 1
     assert manifest_code.count("artifacts?per_page=100") == 1
     assert "no $NOOP_NAME marker present" in manifest_code, (
         "manifest-and-marker both absent must stay a hard error: a "
@@ -3415,47 +3404,56 @@ def check_staging_relay_convergence(text: str) -> None:
     These pins are about the RELAY'S OBLIGATION, not about the lock: the
     shared group is legitimate and stays. What changed is that the relay now
     deploys one service at a time and watches each run to a terminal state.
-
-    2026-08-07 adds the second half of that obligation: a relay that stands
-    down mid-release leaves staging split, and until now only a commit that
-    BUILT images converged it. A docs-only commit builds none and its relay
-    exited, so the split outlived every docs merge in between. The docs-only
-    arm now reconciles instead — forward only, target chosen by ancestry,
-    every undecidable input red.
     """
     wf = _strict_yaml(text)
     job = wf["jobs"]["dispatch"]
     code = _executable_bash(job["steps"][-1]["run"])
-    manifest_code = _executable_bash(job["steps"][1]["run"])
 
-    # RECONCILE, added 2026-08-07, closes the residual PR #497 documented in
-    # this file's header rather than hid. Standing down mid-release leaves
-    # staging split, and the newer commit's relay converged it only if that
-    # commit BUILT something. A docs-only commit builds no images, its build
-    # run publishes a marker instead of a supply set, and the relay used to
-    # read that marker as "nothing to do" and exit — so the split survived
-    # until the next deployable merge. A docs-only merge landing inside web's
-    # ~8-minute deploy is not rare in this repo.
-    assert 'echo "deploy=false"' not in manifest_code, (
-        "a docs-only build must no longer skip the dispatch step: skipping is "
-        "exactly what let a half-deployed staging survive to the next code "
-        "merge, and reconcile mode exists to close it")
-    assert manifest_code.count("mode=reconcile") == 1
-    assert manifest_code.count("mode=release") == 1
-    assert manifest_code.count("image_tag=$IMAGE_TAG") == 1, (
-        "only the release path may hand down a build tag; reconcile has no "
-        "build to name and must resolve its target from live state")
-
-    # Both services stay covered in RELEASE mode, and every mode dispatches
-    # from a single site: a second one is a deploy that the watch below would
-    # not be looking at.
-    assert 'SERVICES="web app"' in code, (
-        "the relay must still deploy both staging services on a release")
+    # Both services stay covered, and from a single dispatch site: a second
+    # one is a deploy that the watch below would not be looking at.
+    #
+    # NEED-FIRST ORDERING (2026-08-07) replaced the literal `web app` loop.
+    # The order was hardcoded, so web won every race and app lost every race:
+    # a relay superseded mid-release always dies before its SECOND service, so
+    # under any merge rate faster than one full release app never advanced
+    # while web advanced every time. Three consecutive relays (d9306c3,
+    # 7056e2e, 48204c4) produced web deploys with no app deploy between them
+    # and staging ran a whole release split for over two hours.
+    #
+    # SERVICES may take exactly the two full-set orderings and nothing else.
+    # This is the pin that makes the ordering read safe: it cannot drop a
+    # service, so a wrong read costs a suboptimal order and nothing more.
+    assert set(re.findall(r'SERVICES="([^"]*)"', code)) == {"web app", "app web"}, (
+        "SERVICES may only ever hold BOTH services; a single-service value "
+        "would let the ordering read silently skip a deploy")
     assert "for SERVICE in $SERVICES; do" in code, (
-        "one loop serves both modes; a second would need its own watch")
+        "the relay must still deploy both staging services in one pass")
     assert code.count("gh workflow run") == 1, (
         "one dispatch site only: another would fire a deploy nobody watches")
     dispatch_at = code.index("gh workflow run")
+
+    # THE OTHER HALF OF THAT SAFETY: the ordering read may never choose a TAG.
+    # sol-critic returned RED on PR #506 round 1 against a version that read
+    # each service's live tag from infra run names and DEPLOYED to it. That is
+    # unsound two ways: a deploy that flips traffic and then fails or is
+    # cancelled leaves the new colour live while its run reads as
+    # unsuccessful, so the read can name an older tag as live; and the
+    # read/dispatch window is not atomic, so a sibling deploy can move a
+    # service forward while main has not moved, defeating the tip check. Both
+    # turn a tag decision into a silent backwards deploy. Reordering cannot.
+    # Staging app/web are also blue/green over digest-pinned task definitions,
+    # so "live" is a function of ALB rule weights and no run-name read is
+    # authoritative about it.
+    assert not re.search(r'^\s*IMAGE_TAG=', code, re.M), (
+        "the dispatch script must never assign IMAGE_TAG: the tag comes from "
+        "the verified supply-set manifest, and letting a live-state read pick "
+        "one is the backwards-deploy vector sol-critic caught")
+    assert re.search(r'^\s*behind\)?\s*$|"\$RELATION" = "behind"', code, re.M), (
+        "ordering must key off the ancestry compare, not recency")
+    assert re.search(
+        r'\[ "\$RELATION" = "behind" \]; then\n\s*SERVICES="app web"', code), (
+        "compare/<web>...<app> reporting 'behind' means APP trails, so app "
+        "takes the first slot; inverting this restores the starvation")
 
     # THE HEADLINE INVARIANT, asserted first so a regression says so: a
     # dispatch is followed by resolving the run it created and polling that
@@ -3490,68 +3488,6 @@ def check_staging_relay_convergence(text: str) -> None:
             < code.index("branches/main") < dispatch_at), (
         "the tip re-check must sit inside the loop and before each dispatch")
 
-    # RECONCILE PICKS ITS TARGET BY ANCESTRY, NEVER BY RECENCY. The whole
-    # point is to close a split without ever putting a service onto a tag
-    # older than the one it already runs, and "whichever deployed most
-    # recently wins" does exactly that whenever the AHEAD service landed
-    # first — which is the shape of every split reconcile will ever see,
-    # because the ahead service is the one the stood-down relay deployed.
-    #
-    # compare/<base>...<head> reports the HEAD side. With web as base:
-    # 'ahead' means APP is ahead, so WEB is the service to move forward onto
-    # APP's tag. Swapping these two arms deploys the older tag over the newer
-    # one, silently, on a green run.
-    assert "/compare/${WEB_TAG#prod-}...${APP_TAG#prod-}" in code, (
-        "reconcile must compare the two live tags to find the forward "
-        "direction, not assume one")
-    assert re.search(
-        r'^\s*ahead\)\s*\n\s*SERVICES="web"\s*\n\s*IMAGE_TAG="\$APP_TAG"',
-        code, re.M), "compare says app is ahead: web is what moves forward"
-    assert re.search(
-        r'^\s*behind\)\s*\n\s*SERVICES="app"\s*\n\s*IMAGE_TAG="\$WEB_TAG"',
-        code, re.M), "compare says app is behind: app is what moves forward"
-
-    # The live tag of each service is read from the newest SUCCESSFUL deploy
-    # run's name — unconditionally, not the newest one that happens to carry
-    # a prod tag. A manual build-from-source or live-baseline recovery deploy
-    # names itself with a sha or a literal; skipping past it would read the
-    # service as older than it is and reconcile it BACKWARDS.
-    assert 'select(.conclusion == "success")' in code, (
-        "a failed or cancelled deploy never changed what a service runs")
-    assert "startswith($prefix)" in code
-    assert "sort_by(-.databaseId) | first" in code, (
-        "the NEWEST successful run defines the live tag")
-
-    # Every undecidable reconcile input is RED. An unreadable live tag, a
-    # non-prod tag, or two unrelated tags all mean "cannot prove a forward
-    # move", and guessing there is the backwards deploy this file exists to
-    # prevent. The documented manual-ARN dispatch owns those cases.
-    assert 'require_prod_tag "$WEB_TAG"' in code
-    assert 'require_prod_tag "$APP_TAG"' in code
-    assert 'require_prod_tag "$IMAGE_TAG"' in code, (
-        "the empty/garbage-tag wall moved into the script when reconcile "
-        "started entering this step without a build tag")
-    assert re.search(r'^\s*\*\)\s*\n\s*echo "::error::STAGING IS SPLIT and '
-                     r'cannot be reconciled forward', code, re.M), (
-        "an unrelated pair of live tags must fail red, not pick one")
-
-    # Reconcile reads live state only once the deploy workflow is QUIET.
-    # Reading it mid-release is not a small inaccuracy: a docs-only build
-    # finishes in a minute or two against an ~8-minute-per-service release, so
-    # the common case is that both services still show their pre-release tag.
-    # Reconcile would call that converged, exit green, and leave the split it
-    # was built to close with nobody left to fix it.
-    assert 'select(.status != "completed")' in code, (
-        "reconcile must wait out in-flight deploys before reading live tags")
-    quiesce = code.index('select(.status != "completed")')
-    assert quiesce < code.index("newest_deploy_title web"), (
-        "the quiescence wait must come BEFORE the live-tag read it protects")
-
-    # A reconcile that decides to move a service must SAY it found a split.
-    # Silence here is how the residual went unnoticed in the first place.
-    assert '::warning::STAGING IS SPLIT: web=$WEB_TAG, app=$APP_TAG' in code, (
-        "reconciling a split must announce the split it is closing")
-
     # The tip read is the FIRST statement of every dispatch attempt and is
     # NEVER gated. sol-critic RED round 2 on PR #497 broke the tempting
     # alternative: gating it once a service had landed (to avoid leaving a
@@ -3567,17 +3503,11 @@ def check_staging_relay_convergence(text: str) -> None:
         f"found {first_stmt!r}")
 
     # And standing down after something went live must NAME the split rather
-    # than report a plain success. Anchored INSIDE the already-live arm, not
-    # as a bare substring of the whole script: reconcile mode below announces
-    # its own "STAGING IS SPLIT", and a loose search would let that text stand
-    # in for this one after it had been deleted.
-    standdown = re.search(
-        r'if \[ "\$DEPLOYED_ANY" = "true" \]; then\n(.*?)\n\s*else\b',
-        code, re.S)
-    assert standdown, (
-        "the split warning must be conditioned on a service already being live")
-    assert "::warning::STAGING IS SPLIT: main moved" in standdown.group(1), (
+    # than report a plain success.
+    assert "STAGING IS SPLIT" in code, (
         "standing down mid-release must announce the split it leaves behind")
+    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "true" \]', code), (
+        "the split warning must be conditioned on a service already being live")
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
@@ -3679,47 +3609,21 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original, "timeout-minutes: 105", "timeout-minutes: 5"),
         ),
         (
-            "one service quietly dropped from a release",
+            "one service quietly dropped from the loop",
             mutate(original, 'SERVICES="web app"', 'SERVICES="web"'),
         ),
         (
-            "docs-only build back to skipping, so a split outlives it",
+            "the ordering read promoted to choosing the deploy tag",
             mutate(original,
-                   '                echo "deploy=true"\n'
-                   '                echo "mode=reconcile"\n',
-                   '                echo "deploy=false"\n'),
+                   '              SERVICES="app web"\n',
+                   '              SERVICES="app web"\n'
+                   '              IMAGE_TAG="$WEB_TAG"\n'),
         ),
         (
-            "reconcile target picked backwards (older tag over newer)",
+            "ordering inverted, so the starved service stays starved",
             mutate(original,
-                   '                ahead)\n'
-                   '                  SERVICES="web"\n'
-                   '                  IMAGE_TAG="$APP_TAG"\n',
-                   '                ahead)\n'
-                   '                  SERVICES="app"\n'
-                   '                  IMAGE_TAG="$WEB_TAG"\n'),
-        ),
-        (
-            "two unrelated live tags reconciled anyway instead of failing red",
-            mutate(original,
-                   '                  echo "::error::STAGING IS SPLIT and cannot be reconciled forward',
-                   '                  SERVICES="app"\n'
-                   '                  IMAGE_TAG="$WEB_TAG"\n'
-                   '                  echo "::notice::STAGING IS SPLIT and cannot be reconciled forward'),
-        ),
-        (
-            "live tag read from any run, not the newest successful one",
-            mutate(original, "sort_by(-.databaseId) | first", "first"),
-        ),
-        (
-            "a failed deploy counted as what a service runs",
-            mutate(original, 'select(.conclusion == "success")', "select(true)"),
-        ),
-        (
-            "the empty/garbage tag wall removed from the dispatch script",
-            mutate(original,
-                   '            require_prod_tag "$IMAGE_TAG"',
-                   '            true "$IMAGE_TAG"'),
+                   '[ "$RELATION" = "behind" ]; then\n              SERVICES="app web"',
+                   '[ "$RELATION" = "behind" ]; then\n              SERVICES="web app"'),
         ),
         (
             "watch removed, back to dispatch-and-hope",
@@ -3741,18 +3645,6 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "mid-release stand-down reported as an ordinary success",
             mutate(original, "STAGING IS SPLIT: main moved", "main moved"),
-        ),
-        (
-            "live tags read mid-release, so the split reads as converged",
-            mutate(original,
-                   '[.[] | select(.status != "completed")] | length',
-                   "[.[]] | length - length"),
-        ),
-        (
-            "a reconciled split closed silently",
-            mutate(original,
-                   "STAGING IS SPLIT: web=$WEB_TAG, app=$APP_TAG",
-                   "Reconciling web=$WEB_TAG, app=$APP_TAG"),
         ),
         (
             "landed deploy no longer records that the release is partly live",
@@ -3826,19 +3718,10 @@ case "${args[0]}" in
       list)
         # The live-tag read is the only one asking for `conclusion`.
         if [[ "$joined" == *"conclusion"* ]]; then
+          if [ "${FAKE_HISTORY_FAILS:-0}" = "1" ]; then exit 4; fi
           printf '%s\n' "$FAKE_HISTORY"
         elif [[ "$joined" == *"displayTitle"* ]]; then
           printf '%s\n' "$FAKE_PENDING"
-        elif [[ "$joined" == *"status"* ]]; then
-          # Quiescence poll. Report FAKE_BUSY in-flight runs, one fewer each
-          # time, so a scenario can prove the relay actually WAITS.
-          n=$(cat "$FAKE_BUSY_FILE")
-          if [ "$n" -gt 0 ]; then
-            printf '%s\n' "$n" | awk '{for(i=0;i<$1;i++) printf "%s{\"status\":\"in_progress\"}", (i?",":"[")} END{print "]"}'
-            printf '%s' "$((n - 1))" > "$FAKE_BUSY_FILE"
-          else
-            printf '%s\n' '[{"status":"completed"}]'
-          fi
         else
           printf '%s\n' '[{"databaseId":1000}]'
         fi
@@ -3853,15 +3736,15 @@ esac
 '''
 
 
-def _rehearse_relay_dispatch(*, mode, image_tag="", web_title, app_title,
-                             relation="behind", main_sha="deadbee", busy=0):
+def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
+                             relation="ahead", main_sha="deadbee",
+                             history_fails=False):
     """Execute the relay's ACTUAL dispatch script (extracted from the parsed
     YAML, never re-typed here) against a fake `gh`, and return
-    (returncode, stdout, [dispatch command lines]).
+    (returncode, stdout, [(service, image_tag)] in dispatch order).
 
-    The static pins above prove the script SAYS the right thing. This proves
-    it DOES it: which service it deploys, onto which tag, and that the red
-    arms dispatch nothing at all.
+    The static pins prove the script SAYS the right thing. This proves it DOES
+    it: which services it deploys, in which order, onto which tag.
     """
     bash = shutil.which("bash")
     jq = shutil.which("jq")
@@ -3876,16 +3759,10 @@ def _rehearse_relay_dispatch(*, mode, image_tag="", web_title, app_title,
         for rid, title in ((10, web_title), (11, app_title))
         if title
     ]
-    # One resolvable run per name the relay might look for, all above the
-    # high-water mark the fake reports.
     pending = [
         {"databaseId": 2000 + i,
-         "displayTitle": f"Deploy leaf-platform staging {svc} ({tag})"}
-        for i, (svc, tag) in enumerate(
-            (svc, tag)
-            for svc in ("web", "app")
-            for tag in ("prod-1111111", "prod-2222222", image_tag or "prod-0")
-        )
+         "displayTitle": f"Deploy leaf-platform staging {svc} ({image_tag})"}
+        for i, svc in enumerate(("web", "app"))
     ]
 
     with tempfile.TemporaryDirectory() as tmp_name:
@@ -3894,16 +3771,12 @@ def _rehearse_relay_dispatch(*, mode, image_tag="", web_title, app_title,
         bindir.mkdir()
         (bindir / "gh").write_text(_FAKE_GH, encoding="utf-8")
         (bindir / "gh").chmod(0o755)
-        # A no-op sleep keeps the watch loop free; the loop's own deadline
-        # arithmetic is exercised by the static pins.
         (bindir / "sleep").write_text(
             "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         (bindir / "sleep").chmod(0o755)
 
         log = tmp / "dispatches.log"
         log.write_text("", encoding="utf-8")
-        busy_file = tmp / "busy"
-        busy_file.write_text(str(busy), encoding="utf-8")
         script = tmp / "dispatch.sh"
         script.write_text(
             relay["jobs"]["dispatch"]["steps"][-1]["run"], encoding="utf-8")
@@ -3915,130 +3788,97 @@ def _rehearse_relay_dispatch(*, mode, image_tag="", web_title, app_title,
             DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
             GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
             BUILD_HEAD_SHA="deadbee",
-            DEPLOY_MODE=mode,
             IMAGE_TAG=image_tag,
             GH_TOKEN="fake-pat",
             HOME_TOKEN="fake-token",
             FAKE_MAIN_SHA=main_sha,
             FAKE_RELATION=relation,
             FAKE_HISTORY=json.dumps(history),
+            FAKE_HISTORY_FAILS="1" if history_fails else "0",
             FAKE_PENDING=json.dumps(pending),
-            FAKE_BUSY_FILE=str(busy_file),
             DISPATCH_LOG=str(log),
         )
         proc = subprocess.run(
             [bash, str(script)], env=env, text=True, capture_output=True)
-        dispatched = [
-            line for line in log.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        return proc.returncode, proc.stdout, dispatched
 
-
-def _deployed(dispatches):
-    """[(service, image_tag)] in dispatch order, read off the real commands."""
-    out = []
-    for line in dispatches:
-        parts = line.split()
-        service = next(p for p in parts if p.startswith("service="))
-        tag = next(p for p in parts if p.startswith("image_tag="))
-        out.append((service.split("=", 1)[1], tag.split("=", 1)[1]))
-    return out
+        deployed = []
+        for line in log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            parts = line.split()
+            svc = next(p for p in parts if p.startswith("service="))
+            tag = next(p for p in parts if p.startswith("image_tag="))
+            deployed.append((svc.split("=", 1)[1], tag.split("=", 1)[1]))
+        return proc.returncode, proc.stdout, deployed
 
 
 WEB_OLD = "Deploy leaf-platform staging web (prod-1111111)"
 WEB_NEW = "Deploy leaf-platform staging web (prod-2222222)"
 APP_OLD = "Deploy leaf-platform staging app (prod-1111111)"
 APP_NEW = "Deploy leaf-platform staging app (prod-2222222)"
+TAG = "prod-9999999"
 
 
-def test_staging_relay_reconcile_never_deploys_backwards() -> None:
-    """The docs-only path converges staging instead of skipping — forward only.
+def test_staging_relay_orders_the_starved_service_first() -> None:
+    """The abandoned service takes the first slot, and ONLY the order moves.
 
-    THE RESIDUAL THIS CLOSES: relay A deploys web, a docs-only commit B lands
-    mid-deploy, A stands down before app, and B's relay used to no-op because
-    a docs-only build publishes no supply set. Staging then sat on
-    web@A / app@pre-A, every run green, until someone merged code again.
+    THE BUG: `for SERVICE in web app` was hardcoded, so web won every race.
+    A relay superseded mid-release always dies before its SECOND service, so
+    at any merge rate faster than one full release app never advanced while
+    web advanced every time. Observed 2026-08-07: three consecutive relays
+    produced web deploys with no app deploy between them, and staging ran a
+    whole release split for over two hours.
 
-    Each case runs the real extracted dispatch script and asserts on the
-    commands it actually issued.
+    Every case below runs the real extracted dispatch script and asserts on
+    the commands it actually issued.
     """
-    # A release still deploys BOTH services, in order, on the built tag.
-    rc, _, dispatches = _rehearse_relay_dispatch(
-        mode="release", image_tag="prod-1111111",
-        web_title=WEB_OLD, app_title=APP_OLD)
+    # app trails web -> app goes FIRST, and still onto THIS relay's tag.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind")
     assert rc == 0
-    assert _deployed(dispatches) == [
-        ("web", "prod-1111111"), ("app", "prod-1111111")]
+    assert deployed == [("app", TAG), ("web", TAG)], deployed
+    assert "trails web" in out
 
-    # THE MOTIVATING CASE. web is ahead (relay A put it there), app is behind.
-    # compare/<web>...<app> reports the app side: 'behind'. app moves FORWARD
-    # onto web's tag, and web is left alone.
-    rc, out, dispatches = _rehearse_relay_dispatch(
-        mode="reconcile", relation="behind",
-        web_title=WEB_NEW, app_title=APP_OLD)
-    assert rc == 0
-    assert _deployed(dispatches) == [("app", "prod-2222222")]
-    assert "STAGING IS SPLIT" in out
+    # web trails app -> the default order already puts web first.
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_OLD, app_title=APP_NEW, relation="ahead")
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
 
-    # The mirror image: app ahead, so WEB is the one that moves forward.
-    rc, _, dispatches = _rehearse_relay_dispatch(
-        mode="reconcile", relation="ahead",
-        web_title=WEB_OLD, app_title=APP_NEW)
-    assert _deployed(dispatches) == [("web", "prod-2222222")]
+    # Level pegging -> unchanged behaviour, no compare needed.
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_NEW)
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
 
-    # Already converged: nothing dispatched, and green.
-    rc, out, dispatches = _rehearse_relay_dispatch(
-        mode="reconcile", web_title=WEB_OLD, app_title=APP_OLD)
-    assert (rc, dispatches) == (0, [])
-    assert "already converged" in out
-
-    # Every undecidable input is RED and dispatches NOTHING. Deploying on a
-    # guess is the backwards deploy the whole design exists to prevent.
+    # THE READ IS BEST EFFORT AND MAY ONLY REORDER. Every degraded input still
+    # deploys BOTH services onto the manifest's tag; none may drop a service,
+    # change the tag, or fail the release.
     for name, kwargs in (
-        ("two unrelated tags",
-         dict(relation="diverged", web_title=WEB_NEW, app_title=APP_OLD)),
-        ("compare unavailable",
-         dict(relation="", web_title=WEB_NEW, app_title=APP_OLD)),
-        ("a recovery deploy that names no immutable tag",
-         dict(web_title="Deploy leaf-platform staging web (live baseline)",
-              app_title=APP_OLD)),
-        ("a build-from-source deploy that names a sha, not a tag",
-         dict(web_title="Deploy leaf-platform staging web (deadbeefcafe1234)",
-              app_title=APP_OLD)),
-        ("no successful deploy on record for a service",
-         dict(web_title=WEB_NEW, app_title="")),
+        ("history query fails outright", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, history_fails=True)),
+        ("compare unavailable", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, relation="")),
+        ("tags unrelated", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, relation="diverged")),
+        ("a recovery deploy names no immutable tag", dict(
+            web_title="Deploy leaf-platform staging web (live baseline)",
+            app_title=APP_OLD, relation="behind")),
+        ("no successful deploy on record for a service", dict(
+            web_title=WEB_NEW, app_title="", relation="behind")),
     ):
-        rc, out, dispatches = _rehearse_relay_dispatch(
-            mode="reconcile", **kwargs)
-        assert rc == 1, f"{name} must fail red, got rc={rc}"
-        assert dispatches == [], f"{name} dispatched anyway: {dispatches}"
-        assert "::error::" in out, f"{name} failed without saying why"
+        rc, _, deployed = _rehearse_relay_dispatch(**kwargs)
+        assert rc == 0, f"{name} must not fail the release, got rc={rc}"
+        assert deployed == [("web", TAG), ("app", TAG)], (
+            f"{name} must fall back to both services in the fixed order, "
+            f"got {deployed}")
 
-    # THE TIMING TRAP. A docs-only build finishes in a minute or two while the
-    # release it landed on top of takes ~8 minutes per service, so reconcile
-    # usually wakes up WHILE web@A is still deploying. Reading the live tags
-    # then shows both services on their pre-A tag, which looks converged — and
-    # the stood-down relay's split would be left with nobody to fix it.
-    # Reconcile must wait for the deploy workflow to go quiet first, then read.
-    rc, out, dispatches = _rehearse_relay_dispatch(
-        mode="reconcile", relation="behind", busy=3,
-        web_title=WEB_NEW, app_title=APP_OLD)
-    assert rc == 0
-    assert "Waiting for 3 in-flight" in out, (
-        "reconcile must wait out an in-flight deploy before reading live tags")
-    assert _deployed(dispatches) == [("app", "prod-2222222")], (
-        "after the wait, reconcile must still see and close the split")
-
-    # And reconcile obeys the same ungated tip re-check: if main moved while
-    # it was deciding, it stands down without dispatching.
-    rc, out, dispatches = _rehearse_relay_dispatch(
-        mode="reconcile", relation="behind",
-        web_title=WEB_NEW, app_title=APP_OLD, main_sha="0ther")
-    assert (rc, dispatches) == (0, [])
+    # And the stand-down still wins over ordering: main moved, nothing goes out.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
+        main_sha="0ther")
+    assert (rc, deployed) == (0, [])
     assert "standing down" in out
 
-    print("staging relay reconcile rehearsal: PASS")
+    print("staging relay need-first ordering rehearsal: PASS")
 
 
 def test_build_platform_images_workflow_invariants() -> None:
