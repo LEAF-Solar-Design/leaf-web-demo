@@ -1787,20 +1787,20 @@ def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
         base.update(extra)
         return base
 
-    # RESIDUAL RACE, STATED RATHER THAN HIDDEN. The check above reads the attempt
-    # here and `jobs.complete_callback` opens its transaction afterwards, so a lease
-    # reclaim landing in between can advance the job. For a SUCCESS that window is
-    # already closed inside the spine: `_validate_terminal_context` re-reads the
-    # durable attempt within the transaction and refuses when the provenance
-    # attempt disagrees. For a FAILURE it returns early, so nothing re-checks, and
-    # a stale attempt's failure could still fail a newer attempt.
+    # THE RACE THIS ONCE LEFT HALF OPEN IS NOW CLOSED ON BOTH HALVES. The check
+    # above reads the attempt here and `jobs.complete_callback` opens its
+    # transaction afterwards, so a lease reclaim landing in between can advance the
+    # job. `_validate_terminal_context` re-reads the durable attempt INSIDE that
+    # transaction and refuses a mismatch: for a SUCCESS always, and for a FAILURE
+    # whenever the provenance names an attempt. Everything this route emits names
+    # one, because `_provenance` below always sets it. A failure carrying no
+    # provenance at all is still accepted on purpose, since the orphan reaper
+    # raises those and has no attempt to name.
     #
-    # Closing that half needs one line in `server/jobs.py` — dropping the
-    # `if status != "complete": return` early-out so the attempt comparison also
-    # covers failures — and `jobs.py` is currently owned by three open PRs
-    # (#129, #130, #141). Editing it from this lane would collide with them, so it
-    # is left to whoever owns that file. The window is narrow and the guard above
-    # removes the ordinary (non-racing) case entirely.
+    # This block used to say the failure half was still open, and deferred the
+    # one-line fix in `server/jobs.py` to whoever owned that file, naming PRs #129,
+    # #130 and #141 as the reason not to touch it. All three merged and the fix
+    # landed; a stale deferral like that sends the next reader on a dead errand.
 
     raw_status = str(callback.get("status", "")).strip().lower()
     if raw_status in {"success", "complete"}:

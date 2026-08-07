@@ -516,8 +516,15 @@ def build_suites() -> List[Suite]:
         # ignored) — fixed and registered per the #29 fix-then-register rule.
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
+        # Floor 59, re-measured 2026-08-06, the third of the stale ones #490
+        # started on. It sat at 46 while the suite executed 59, so 13 could have
+        # vanished behind an "(executed-count drift: ...)" note and still reported
+        # green. 59 is safe on every runner for the same reason 41 is above: 39
+        # test functions plus three `parametrize` decorators over literal lists,
+        # and no skipif, pytest.skip, importorskip, or platform branching anywhere
+        # in the file, so no environment collects or executes fewer.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 46),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 59),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
               _py_pytest("tests/test_live_mutation_plan.py"), 30),
