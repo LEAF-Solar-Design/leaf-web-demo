@@ -860,7 +860,9 @@ def _shipped_scripts(path: str) -> dict[str, str]:
     return shipped
 
 
-def _survival_guard_argv(targets) -> list[str]:
+def _survival_guard_argv(
+    targets, *, readable: bool = False, executable: str | None = None
+) -> list[str]:
     """The one exec-form argv every image's survival guard must be spelled as.
 
     ONE definition for all four images, so a change to HOW the guard is spelled
@@ -868,11 +870,58 @@ def _survival_guard_argv(targets) -> list[str]:
     apart. `-s` as well as `-f`, because `-f` alone accepts an EMPTY file, so a
     truncation ships a script that exits 0 and emits nothing. Sorted, so the
     expected string does not depend on the order the COPYs happen to appear in.
+
+    `readable` and `executable` are what make the guard mean something on an
+    image that DROPS PRIVILEGE. The clauses are identical whatever uid runs
+    them; what changes is WHO runs them, which is why the guard is placed below
+    a `USER` rather than given a cleverer command. See
+    `_assert_one_survival_guard` for the identity rule that pairs with this.
+
+    `executable` is DERIVED, not curated: it is the image's exec-form CMD's
+    argv[0] when that is itself a guarded script. deploy/Dockerfile.harness's
+    CMD *is* /app/scripts/start-harness.sh, so a mode that leaves it readable
+    but not executable ships a container that cannot start; broker and
+    canonical-worker invoke an interpreter instead, so they need no `-x`.
     """
-    command = " && ".join(
-        f"test -f {target} && test -s {target}" for target in sorted(targets)
-    )
+    clauses = []
+    for target in sorted(targets):
+        clause = f"test -f {target} && test -s {target}"
+        if readable:
+            clause += f" && test -r {target}"
+        clauses.append(clause)
+    command = " && ".join(clauses)
+    if executable:
+        command += f" && test -x {executable}"
     return ["/bin/sh", "-c", command]
+
+
+def _user_in_effect(instructions: list[tuple[str, str]], upto: int | None = None) -> str:
+    """The uid a RUN at `upto` executes as, or the image's runtime uid if None.
+
+    Docker's USER is stateful: it applies to every later RUN in the stage AND to
+    the container. "root" stands for the default when no USER has been declared.
+    """
+    current = "root"
+    for keyword, argument in instructions[:upto]:
+        if keyword == "USER":
+            current = argument.strip()
+    return current
+
+
+def _cmd_executable(instructions: list[tuple[str, str]], targets) -> str | None:
+    """The image's exec-form CMD argv[0], when it is itself a guarded script."""
+    for keyword, argument in reversed(instructions):
+        if keyword != "CMD":
+            continue
+        argv = _exec_argv(argument)
+        # A shell-form CMD runs through /bin/sh, so argv[0] is the shell and
+        # this guard cannot say which script it ends up executing.
+        assert argv, (
+            f"CMD {argument!r} is not exec form, so this guard cannot tell "
+            "which file the container executes. Use exec form, or teach it."
+        )
+        return argv[0] if argv[0] in set(targets) else None
+    return None
 
 
 def _assert_one_survival_guard(
@@ -881,6 +930,9 @@ def _assert_one_survival_guard(
     targets,
     allowed_after: frozenset,
     allowed_runs_after: tuple = (),
+    *,
+    readable: bool = False,
+    executable: str | None = None,
 ) -> int:
     """Exactly one exec-form guard over `targets`, and nothing unchecked below it.
 
@@ -892,7 +944,7 @@ def _assert_one_survival_guard(
     FOLLOWS it could ever see it. Exec form names its own interpreter and
     ignores SHELL, which closes it outright instead of adding a position rule.
     """
-    expected = _survival_guard_argv(targets)
+    expected = _survival_guard_argv(targets, readable=readable, executable=executable)
     guarded = [
         index for index, (keyword, argument) in enumerate(instructions)
         if keyword == "RUN" and _exec_argv(argument) == expected
@@ -921,71 +973,54 @@ def _assert_one_survival_guard(
     return guarded[0]
 
 
-# Any command that can change a mode, an owner, or an ACL. `install` only with
-# an `-m`, because a bare `install` is `pip install` / `npm ci` / `apt-get
-# install` and matching those would refuse every image.
-_MODE_CHANGING = re.compile(
-    r"\b(?:chmod|chown|chgrp|setfacl|umask)\b|\binstall\b[^&|;]*\s-m\b"
-)
+def _assert_guard_runs_as_the_runtime_identity(
+    path: str, instructions: list[tuple[str, str]], guard_index: int
+) -> str:
+    """On an image that drops privilege, the guard must run AS the runtime uid.
 
+    THIS REPLACED TWO CHECKS THAT BOTH FAILED, and the history is the argument
+    for why it is shaped this way.
 
-def _assert_no_unpinned_mode_change(
-    path: str, instructions: list[tuple[str, str]], pinned: tuple
-) -> None:
-    """Refuse any mode-changing instruction that is not byte-exact pinned.
+    Round 1 tried to EVALUATE modes: it matched one `chmod` spelling and checked
+    one bit (world read). Six evasions were found in one round -- `chmod 0744`
+    on the directory (loses o+x traversal), `chmod 0444` on the harness CMD
+    (loses +x), `install -m 0600`, `COPY --chmod=0600`, a quoted operand, and a
+    multi-target chmod.
 
-    WHAT THIS DOES NOT DO, first, because the version this replaced claimed it
-    and did not deliver: it does NOT prove the guarded scripts are reachable by
-    the uid the image drops to. It cannot. The guard runs as ROOT, and root
-    reads a 0600 file happily, so no assertion made at build time by root
-    observes what uid 10002 will see.
+    Round 2 tried to REFUSE instead: any mode-changing command had to be
+    byte-exact pinned. That fell to `install --mode=0600` (GNU's long form,
+    which the `-m` pattern never saw) and to `c''hmod`, which is the general
+    defeat -- shell token construction means no scan of command TEXT can
+    enumerate the ways to spell a command.
 
-    The replaced version tried to EVALUATE modes -- it matched one `chmod`
-    spelling and checked one bit (world read). A review found six evasions of it
-    in one round, every one of which ships an image whose guard passed and whose
-    script the service cannot use:
+    Both rounds were the same mistake in different clothes: paying for a `USER`
+    with a text scan. The answer is not a better scan. The guard already runs a
+    real filesystem test at build time, so the fix is to run it AS the identity
+    that matters, and Docker's own `USER` does that with no `su`, no `setpriv`,
+    and no dependency this repo cannot verify.
 
-        chmod 0744 /app/scripts                    directory loses o+x, so the
-                                                   runtime uid cannot traverse
-        chmod 0444 /app/scripts/start-harness.sh   the literal CMD loses +x
-        install -m 0600 src /app/scripts/...       not a `chmod` at all
-        COPY --chmod=0600 ...                      not a RUN at all
-        chmod 0600 '/app/scripts/x'                quoted operand
-        chmod 0600 /a /app/scripts/x               multi-target
+    So the rule is structural: the uid in effect where the guard runs must equal
+    the image's runtime uid. Then `test -r` and `test -x` in the guard are
+    evaluated against the real uid, gid and directory traversal, and NO spelling
+    of a mode change above the guard can pass -- because nothing about the
+    spelling is being read. A mode change BELOW the guard is separately refused
+    by the instruction allowlist.
 
-    Each was confirmed by running it. The lesson is the one this whole module
-    was rebuilt around: a check that catches some spellings and silently misses
-    others is WORSE than no check, because its green manufactures confidence.
-    Enumerating spellings cannot be made sound, so this stops enumerating.
-
-    It REFUSES instead. Every mode-changing instruction in the shipped stage
-    must be byte-exact pinned here, whatever path it names. An unrecognised one
-    fails LOUD, and adding one becomes a change a reviewer sees -- the same
-    trade `_PINNED_GIT_INSTALL` and the canonical-worker RUN pins make.
-
-    THE RESIDUAL, stated rather than closed: a pinned command still is not proof
-    of runtime reachability, and a mode change spelled through a variable, a
-    glob, or a shell script this scan cannot see is not refused either. Proving
-    reachability needs the guard to run AS the runtime uid (`su`/`setpriv`
-    inside the RUN), which cannot be validated here without a Docker daemon and
-    would break every build if the binary turned out to be absent. So runtime
-    accessibility is a REVIEW CLASS, exactly like script CONTENT and a
-    `HEALTHCHECK CMD rm -rf`, and it is named as one instead of being papered
-    over by a check that looks like a gate.
+    Returns the runtime identity so the caller can build the expected argv.
     """
-    for keyword, argument in instructions:
-        flagged = keyword in ("COPY", "ADD") and re.search(
-            r"--(?:chmod|chown)=", argument)
-        if not flagged and not _MODE_CHANGING.search(argument):
-            continue
-        assert argument in pinned, (
-            f"{path}: `{keyword} {argument[:90]}` changes a mode, owner or ACL "
-            "and is not pinned. The guard above it runs as ROOT and cannot see "
-            "what the uid this image drops to will be able to read or execute, "
-            "so this is refused rather than evaluated -- six ways of evaluating "
-            "it wrongly were found in one review round. Pin the exact command "
-            "in _PINNED_MODE_CHANGES if it is correct."
-        )
+    runtime = _user_in_effect(instructions)
+    at_guard = _user_in_effect(instructions, guard_index)
+    assert at_guard == runtime, (
+        f"{path}: the survival guard runs as {at_guard!r} but the container "
+        f"runs as {runtime!r}. A guard that runs as root proves nothing about "
+        f"what {runtime!r} can read or execute: root reads a 0600 file happily, "
+        "and a directory chmod that removes o+x makes the script unreachable "
+        "while every `test -f` still passes. Declare the runtime USER above the "
+        "guard. Two attempts to pay for this by scanning command text were "
+        "defeated -- by `install --mode=`, and by `c''hmod` -- so do not "
+        "reintroduce one."
+    )
+    return runtime
 
 
 
@@ -1570,44 +1605,27 @@ _CANONICAL_WORKER_RUNS_AFTER_GUARD = (
     '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
 )
 
-# Every mode-changing instruction these three images ship, pinned byte-exact.
-# Nothing else may change a mode, an owner or an ACL; see
-# `_assert_no_unpinned_mode_change` for why this refuses rather than evaluates.
-# canonical-worker ships none at all, so ANY addition there is refused.
-_PINNED_MODE_CHANGES = {
-    "canonical-worker": (),
-    "broker": (
-        "useradd --system --uid 10001 --user-group --home /home/leaf "
-        "--create-home leaf && mkdir -p /data/state /data/drawings && chown -R "
-        "10001:10001 /data /home/leaf",
-    ),
-    "harness": (
-        "npx tsc -p tsconfig.build.json && npm prune --omit=dev && chmod 0555 "
-        "/app/scripts/start-harness.sh",
-        "useradd --system --uid 10002 --user-group --home /home/leaf "
-        "--create-home leaf && mkdir -p /data/tenants /data/grants "
-        "/data/sessions && chown -R 10002:10002 /data /home/leaf",
-    ),
-}
-
 # image -> (the operator-reachable script that motivated its guard,
 #           extra instruction keywords its allowlist must admit,
 #           exact RUN bodies its allowlist must admit)
 #
-# USER is admitted for all three because the guard CANNOT sit below it: the
-# per-commit ARG contract forbids a RUN there, and an exec-form RUN can never
-# satisfy its consumption rule. That admission is bounded by
-# `_assert_no_unpinned_mode_change` rather than paid off by it -- what a later
-# USER can actually reach is a review class, named as one in that helper's
-# docstring, not something any assertion here proves.
+# USER is admitted for all three, and it is no longer a concession: each image
+# now declares its runtime USER ABOVE its guard, so the guard's `test -r` (and
+# `test -x` on the harness CMD) are evaluated as the uid the container runs as.
+# `_assert_guard_runs_as_the_runtime_identity` enforces that pairing. USER must
+# stay allowlisted for what follows the guard because canonical-worker has to
+# return to root for its two ARG-consuming RUNs and then drop back.
 _GUARDED_IMAGES = {
     "canonical-worker": (
         "/app/scripts/canonical-container-smoke.py",
         frozenset({"USER"}),
         _CANONICAL_WORKER_RUNS_AFTER_GUARD,
+        "65532:65532",
     ),
-    "broker": ("/app/harness/scripts/e2b-tool-exec.mjs", frozenset({"USER"}), ()),
-    "harness": ("/app/scripts/start-harness.sh", frozenset({"USER"}), ()),
+    "broker": ("/app/harness/scripts/e2b-tool-exec.mjs", frozenset({"USER"}), (),
+               "10001:10001"),
+    "harness": ("/app/scripts/start-harness.sh", frozenset({"USER"}), (),
+                "10002:10002"),
 }
 
 
@@ -1671,46 +1689,46 @@ def test_the_widened_script_parse_refuses_every_form_it_cannot_read():
     _assert_one_survival_guard("probe", [exec_form, ("RUN", "seal $X")],
                                ["/app/scripts/x.py"], _CANNOT_REMOVE, ("seal $X",))
 
-    # MODE CHANGES ARE REFUSED, NOT EVALUATED. Every case below defeated the
-    # evaluating version of this check that shipped in the first round of this
-    # PR -- each was confirmed by running it, and each ships an image whose
-    # guard passed and whose script the runtime uid cannot use. They must all
-    # be refused now, and none of them is refused by reasoning about its mode.
-    for evasion in (
-        "chmod 0744 /app/scripts",                     # dir loses o+x traversal
-        "chmod 0444 /app/scripts/start-harness.sh",    # the CMD loses +x
-        "install -m 0600 src /app/scripts/x.sh",       # not a chmod at all
-        "chmod 0600 '/app/scripts/x.sh'",              # quoted operand
-        "chmod 0600 /app/other /app/scripts/x.sh",     # multi-target
-        "chmod -R 0700 /app",                          # an ancestor, not the path
-        "chown -R 1:1 /app/scripts",                   # owner, not mode
-    ):
-        with pytest.raises(AssertionError, match="not pinned"):
-            _assert_no_unpinned_mode_change("probe", [("RUN", evasion)], ())
-    # ...and the COPY/ADD flag forms, which are not RUNs at all.
-    with pytest.raises(AssertionError, match="not pinned"):
-        _assert_no_unpinned_mode_change(
-            "probe", [("COPY", "--chmod=0600 x /app/scripts/x.sh")], ())
-    with pytest.raises(AssertionError, match="not pinned"):
-        _assert_no_unpinned_mode_change(
-            "probe", [("COPY", "--chown=1:1 x /app/scripts/x.sh")], ())
-    # An exactly-pinned command passes; a one-character edit of it does not.
-    _assert_no_unpinned_mode_change(
-        "probe", [("RUN", "chmod 0555 /app/scripts/x.sh")],
-        ("chmod 0555 /app/scripts/x.sh",))
-    with pytest.raises(AssertionError, match="not pinned"):
-        _assert_no_unpinned_mode_change(
-            "probe", [("RUN", "chmod 0554 /app/scripts/x.sh")],
-            ("chmod 0555 /app/scripts/x.sh",))
-    # `pip install` / `npm install` / `apt-get install` must NOT trip the
-    # `install -m` pattern, or every image would be refused.
-    _assert_no_unpinned_mode_change(
-        "probe",
-        [("RUN", "pip install --no-cache-dir -r /app/server/requirements.txt"),
-         ("RUN", "apt-get install -y --no-install-recommends git"),
-         ("RUN", "npm ci")],
-        (),
-    )
+    # THE GUARD MUST RUN AS THE RUNTIME IDENTITY. This replaced two text scans
+    # that were each defeated, and the point of the replacement is that it reads
+    # no command text at all -- so the mutations that killed both predecessors
+    # are closed by construction rather than by another pattern.
+    #
+    # `chmod 0744 /app/scripts` (directory loses o+x), `chmod 0444` on the CMD
+    # (loses +x), `install -m 0600`, `install --mode=0600` (the GNU long form
+    # that killed round 2), `COPY --chmod=0600`, a quoted operand, a multi-target
+    # chmod, and `c''hmod` (shell token construction, the general defeat of any
+    # text scan) are ALL caught now, because the guard executes `test -r`/`test
+    # -x` as the real uid and no spelling changes what the filesystem reports.
+    assert _user_in_effect([("USER", "10002:10002"), ("RUN", "x")]) == "10002:10002"
+    assert _user_in_effect([("RUN", "x")]) == "root"
+    # USER is stateful and the LAST one wins, both for later RUNs and the image.
+    steps = [("USER", "65532:65532"), ("RUN", "guard"), ("USER", "root"),
+             ("RUN", "seal"), ("USER", "65532:65532")]
+    assert _user_in_effect(steps, 1) == "65532:65532"   # at the guard
+    assert _user_in_effect(steps, 4) == "root"          # at the pinned RUN
+    assert _user_in_effect(steps) == "65532:65532"      # the container's uid
+
+    # A guard that runs as root on an image that drops privilege proves nothing.
+    with pytest.raises(AssertionError, match="runs as 'root' but the container"):
+        _assert_guard_runs_as_the_runtime_identity(
+            "probe", [("RUN", "guard"), ("USER", "10002:10002")], 0)
+    # ...and one that runs as the runtime uid is accepted, including when the
+    # image steps back to root AFTER the guard and then returns.
+    assert _assert_guard_runs_as_the_runtime_identity("probe", steps, 1) == "65532:65532"
+
+    # The `-r`/`-x` clauses, and the derivation of which file needs `-x`.
+    assert _survival_guard_argv(["/a"], readable=True) == [
+        "/bin/sh", "-c", "test -f /a && test -s /a && test -r /a"]
+    assert _survival_guard_argv(["/a"], readable=True, executable="/a") == [
+        "/bin/sh", "-c", "test -f /a && test -s /a && test -r /a && test -x /a"]
+    # argv[0] of the exec-form CMD, but ONLY when it is a guarded script.
+    assert _cmd_executable([("CMD", '["/app/scripts/s.sh"]')], ["/app/scripts/s.sh"]) == (
+        "/app/scripts/s.sh")
+    assert _cmd_executable([("CMD", '["python", "w.py"]')], ["/app/scripts/s.sh"]) is None
+    # A shell-form CMD hides which file is executed, so it is refused.
+    with pytest.raises(AssertionError, match="not exec form"):
+        _cmd_executable([("CMD", "/app/scripts/s.sh")], ["/app/scripts/s.sh"])
 
     # The one exemption to the destination-above-a-script refusal is the
     # narrowest decidable shape, and each of the four defects that killed the
@@ -1805,7 +1823,8 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
         become. `COPY --link` cannot follow such a symlink, so requiring it is
         the shape of a real fix if this class ever needs gating.
     """
-    for image, (motivating, extra_allowed, allowed_runs) in _GUARDED_IMAGES.items():
+    for image, (motivating, extra_allowed, allowed_runs, expected_uid) in (
+            _GUARDED_IMAGES.items()):
         path = f"deploy/Dockerfile.{image}"
         shipped = _shipped_scripts(path)
 
@@ -1819,12 +1838,36 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
         )
 
         instructions = _shipped_instructions(path)
-        _assert_one_survival_guard(
+        # These images all drop privilege, so their guards must prove READABLE
+        # (and EXECUTABLE for an image whose CMD is one of the scripts) as the
+        # runtime uid, not merely present and non-empty as root.
+        runtime = _user_in_effect(instructions)
+        assert runtime != "root", (
+            f"{path}: this image no longer drops privilege. The guard's `-r`/"
+            "`-x` clauses were added because it did; re-derive them before "
+            "relaxing this."
+        )
+        # PIN THE UID STRUCTURALLY, from the INSTRUCTIONS rather than the file
+        # text. The sibling tests pin it as a substring of the whole Dockerfile
+        # (`assert "USER 10001:10001" in dockerfile`), and moving USER above the
+        # guard meant writing a comment about the move -- at which point a
+        # comment mentioning the literal satisfied that pin ON ITS OWN, while the
+        # real instruction could say anything. Found by mutation, not review: a
+        # uid rename stayed green across the whole file. `_user_in_effect` reads
+        # parsed instructions, where a comment cannot reach.
+        assert runtime == expected_uid, (
+            f"{path}: the container runs as {runtime!r}, not the pinned "
+            f"{expected_uid!r}. The deploy manifests and compose files bind to "
+            "that uid; changing it is a deliberate act, not a side effect of "
+            "moving USER above the guard."
+        )
+        guard_index = _assert_one_survival_guard(
             path, instructions, shipped.values(),
             _CANNOT_REMOVE | extra_allowed, allowed_runs,
+            readable=True,
+            executable=_cmd_executable(instructions, shipped.values()),
         )
-        _assert_no_unpinned_mode_change(
-            path, instructions, _PINNED_MODE_CHANGES[image])
+        _assert_guard_runs_as_the_runtime_identity(path, instructions, guard_index)
 
     # The harness ships a DIRECTORY, so its guarded set is that directory's
     # contents. Re-read independently of the helper: were the directory form

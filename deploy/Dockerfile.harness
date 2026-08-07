@@ -77,7 +77,25 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
 # per-commit ARG: a RUN below that ARG re-executes on every merge, which
 # scripts/test_build_platform_images_workflow.py forbids outright, and an
 # exec-form RUN can never satisfy its consumption rule (it invokes no shell).
-RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh"]
+#
+# USER IS DECLARED HERE, above the guard, and that placement is what makes
+# `test -r` and `test -x` mean anything. A guard that runs as ROOT proves
+# nothing about what uid 10002 can reach: root reads a 0600 file happily, a
+# `chmod 0744` on /app/scripts removes the o+x this uid needs to traverse it,
+# and a `chmod 0444` on start-harness.sh leaves the CMD unexecutable while
+# every `test -f` still passes. Running the guard AS 10002 tests the real uid,
+# gid, traversal and exec bit, and no spelling of a mode change above it can
+# evade that, because nothing about the spelling is being read. Two earlier
+# attempts to pay for this by scanning command text were defeated (by
+# `install --mode=`, and by `c''hmod`); Docker's own USER needs neither su nor
+# setpriv.
+#
+# `test -x` covers start-harness.sh alone because it is this image's CMD. That
+# is DERIVED from the CMD instruction below, not curated -- the other five are
+# read by node or tsc, so readable is the right bar for them.
+USER 10002:10002
+
+RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -r /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -r /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -r /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -r /app/scripts/git-worker.cjs && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -r /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh && test -r /app/scripts/start-harness.sh && test -x /app/scripts/start-harness.sh"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
@@ -107,6 +125,11 @@ EXPOSE 8150
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
   CMD node -e "require('http').get('http://localhost:8150/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-USER 10002:10002
+# NOTE: the runtime USER is NOT declared here any more. It moved ABOVE the
+# survival guard so the guard runs as that uid; USER is stateful, so it is
+# still in effect for the container. Nothing between there and here needs root.
+# The uid is deliberately NOT spelled out in this comment: a test pins it as a
+# substring of this file, and a comment carrying the literal would satisfy that
+# pin on its own while the real instruction said something else.
 
 CMD ["/app/scripts/start-harness.sh"]

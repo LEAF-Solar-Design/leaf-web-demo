@@ -38,7 +38,28 @@ COPY --from=autofill_solver . /opt/leaf/autofill-solver/
 # guard, so unlike the app's they are not covered by "nothing may run after the
 # guard". Both are pinned BYTE-EXACT in that test instead, so a third RUN here,
 # or an edit to either of these two, fails rather than shipping unchecked.
-RUN ["/bin/sh", "-c", "test -f /app/scripts/canonical-container-smoke.py && test -s /app/scripts/canonical-container-smoke.py"]
+#
+# USER IS DECLARED HERE, above the guard, and that placement is the whole point
+# of `test -r`. A guard that runs as ROOT proves nothing about what uid 65532
+# can reach: root reads a 0600 file happily, and a `chmod 0700` on the
+# directory leaves every `test -f` passing while the operator's containerised
+# smoke cannot open its own script. Running the guard AS 65532 tests the real
+# uid, gid and directory traversal, and no spelling of a mode change above it
+# can evade that, because nothing about the spelling is being read. Two earlier
+# attempts to pay for this by scanning command text were defeated (by
+# `install --mode=`, and by `c''hmod`); Docker's own USER needs neither su nor
+# setpriv, and a numeric uid needs no /etc/passwd entry.
+USER 65532:65532
+
+RUN ["/bin/sh", "-c", "test -f /app/scripts/canonical-container-smoke.py && test -s /app/scripts/canonical-container-smoke.py && test -r /app/scripts/canonical-container-smoke.py"]
+
+# Back to root for the two ARG-consuming RUNs below, which the per-commit ARG
+# contract forces beneath the guard. The second writes .leaf-source-revision
+# into root-owned /opt/leaf and /app, so it cannot run as 65532. USER returns
+# to 65532 before CMD, and the test asserts the uid in effect AT THE GUARD
+# equals the uid the container ends up running as -- so this round trip cannot
+# quietly leave the guard proving something about the wrong identity.
+USER root
 
 # Declared below every non-consuming instruction, deliberately: LEAF_SOURCE_SHA
 # is a new commit sha on every build, and a changed in-scope ARG is a buildx
