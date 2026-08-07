@@ -125,6 +125,15 @@ def _legacy_get_checkpoint(session_id: str, tenant_id: str,
     return _row_to_checkpoint(row) if row is not None else None
 
 
+def _legacy_checkpoint_count(session_id: str) -> int:
+    with _lock:
+        conn = _db()
+        return conn.execute(
+            "SELECT COUNT(*) FROM session_checkpoints WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+
+
 def _pg_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Project a PostgreSQL row into the SAME shape and types SQLite returns.
 
@@ -202,6 +211,17 @@ def _pg_create_checkpoint(
     return _pg_row(row)
 
 
+def _pg_checkpoint_count(session_id: str) -> int:
+    db = session_annex.platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM {session_annex.PG_CHECKPOINTS_TABLE}"
+            " WHERE session_id = %s",
+            (session_id,),
+        )
+        return cur.fetchone()["n"]
+
+
 def _pg_list_checkpoints(session_id: str, tenant_id: str) -> List[Dict[str, Any]]:
     db = session_annex.platform_db()
     with db.cursor() as cur:
@@ -228,6 +248,38 @@ def _pg_get_checkpoint(session_id: str, tenant_id: str,
     return _pg_row(row) if row is not None else None
 
 
+def _refuse_a_full_mirror(session_id: str) -> None:
+    """Raise BEFORE the legacy write when the mirror is fuller than the source.
+
+    Do not mutate the legacy authority when its required mirror is already known
+    to be unusable -- the same rule ``session_store.append_event`` applies to a
+    missing mirror, for the same reason.
+
+    Review round 2 caught this raise happening AFTER the legacy insert had
+    committed. That ordering was actively harmful, not merely late. The two
+    counts do not diverge by one in practice: on staging the SQLite file is
+    task-local and starts EMPTY after every task replacement while PostgreSQL
+    keeps its rows, so the realistic divergence is 0 against 50. Each retry then
+    committed one more legacy row and still answered 500, so a client retrying
+    to exhaustion wrote fifty invisible checkpoints before the counts finally
+    agreed and the cap reported normally. Checking first makes every one of
+    those attempts a pure refusal.
+
+    Only a DIVERGENCE raises. When both stores are at the cap they agree, and
+    the caller gets the ordinary ``None`` (a 409) from the legacy path below.
+
+    This does NOT close the window, and nothing here can: the mirror may still
+    fill between this count and the mirrored insert. The post-write raise stays
+    as the backstop for exactly that residue, which is bounded by one row per
+    caller rather than by the size of the divergence.
+    """
+    if _pg_checkpoint_count(session_id) < CHECKPOINT_CAP:
+        return
+    if _legacy_checkpoint_count(session_id) >= CHECKPOINT_CAP:
+        return
+    raise RuntimeError("checkpoint mirror is at its cap while legacy is not")
+
+
 def create_checkpoint(session_id: str, tenant_id: str, drawing_id: str,
                       drawing_version: Any, transcript_seq: int,
                       label: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -243,6 +295,7 @@ def create_checkpoint(session_id: str, tenant_id: str, drawing_id: str,
         # atomic transaction, exactly as session_store records for its own dual
         # write, so a source-only row remains possible.
         session_annex.ensure_started()
+        _refuse_a_full_mirror(session_id)
     legacy = _legacy_create_checkpoint(
         session_id, tenant_id, drawing_id, drawing_version, transcript_seq, label)
     if legacy is None:
@@ -254,18 +307,20 @@ def create_checkpoint(session_id: str, tenant_id: str, drawing_id: str,
             transcript_seq, label,
             checkpoint_id=legacy["checkpoint_id"], created_at=legacy["created_at"])
         if postgres is None:
-            # The mirror hit its own cap while the legacy store did not, so the
-            # two already disagree about how full this session is (legacy 49,
-            # PostgreSQL 50) before this call started.
+            # THE BACKSTOP, not the main guard. `_refuse_a_full_mirror` already
+            # rejected a mirror that was full before this call, without writing
+            # legacy. Reaching here means the mirror filled in the window
+            # between that count and this insert, so a concurrent writer took
+            # the last slot.
             #
             # BE PRECISE ABOUT WHAT THIS RAISE DOES. The legacy row is ALREADY
             # COMMITTED on the line above and this cannot roll it back, so the
             # unmirrored row exists either way. Review round 1 rightly rejected
             # an earlier comment here that claimed raising prevented it. What
             # the raise buys is that the divergence is REPORTED rather than
-            # returned as success, which is the only useful move left: the
-            # caller sees a 500, and a retry then reports the cap normally
-            # because the legacy store is now full too.
+            # returned as success. A retry now refuses at the pre-check instead
+            # of committing another legacy row, so this costs at most one
+            # unmirrored row per caller.
             raise RuntimeError("checkpoint mirror is at its cap while legacy is not")
         session_annex.shadow_equal(
             "checkpoint identity", legacy["checkpoint_id"], postgres["checkpoint_id"])

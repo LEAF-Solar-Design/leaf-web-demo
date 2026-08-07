@@ -32,8 +32,13 @@ The reasons that survive:
    SQLite, and on staging the legacy target is an empty task-local file. Shared,
    a sessions rollback would drag the annex into an unreadable state with no
    separate decision point.
-3. The repository owns exactly one selector per authority, and the inventory
-   contract treats a twice-owned selector as an error.
+3. A SELECTOR CANNOT HAVE TWO OWNERS. Review round 2 caught this stated
+   backwards. The rule the inventory contract enforces is one AUTHORITY per
+   selector ("selector ... is owned more than once"), NOT one selector per
+   authority: an authority may own several, and two of the seventeen do, which
+   is why the repository carries nineteen selectors. Sharing
+   `LEAF_SESSIONS_STORE` would give one selector two owning authorities, which
+   the contract rejects outright.
 
 The harmful COMBINATION that sharing a selector would have made unrepresentable
 is `sessions=postgres` with `annex=legacy` -- a session that outlives its own

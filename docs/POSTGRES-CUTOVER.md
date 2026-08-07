@@ -450,9 +450,11 @@ Three reasons survive.
    `postgres` reads SQLite. This annex cannot follow that path at all: nothing
    writes PostgreSQL back to SQLite. Shared, a sessions rollback would drag the
    annex into an unreadable state with no separate decision point.
-3. *One selector per authority is the repository's only pattern.* Sixteen
-   authorities, eighteen selectors, and the inventory contract already treats a
-   twice-owned selector as an error.
+3. *A selector cannot have two owners.* State this the right way round: the
+   inventory contract enforces one AUTHORITY per selector, not one selector per
+   authority. Seventeen authorities own nineteen selectors, because two
+   authorities each own more than one. Sharing `LEAF_SESSIONS_STORE` would give
+   a single selector two owning authorities, which the contract rejects.
 
 **The coupling is declared and ENFORCED, not left to the selector's shape.**
 `platform/authority-inventory.json` gains a `selector_dependencies` entry —

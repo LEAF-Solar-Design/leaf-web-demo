@@ -334,9 +334,11 @@ def test_dual_write_returns_legacy_and_mirrors_the_same_identity(
         monkeypatch, fake_db):
     monkeypatch.setenv(session_annex.SELECTOR, "dual_write")
     session_id, tenant_id = _ids()
-    # ensure_started's to_regclass probe must report both tables present.
+    # ensure_started's to_regclass probe must report both tables present, then
+    # the pre-check counts the mirror and finds it well under the cap.
     fake_db.queue([{"checkpoints": "app_session_checkpoints",
                     "policies": "app_session_policies"}])
+    fake_db.queue([{"n": 0}])
     captured = {}
 
     real = checkpoints._pg_create_checkpoint
@@ -520,15 +522,43 @@ def test_cap_is_enforced_in_both_backends(monkeypatch, fake_db):
 
 def test_a_full_mirror_against_an_unfull_legacy_is_loud(monkeypatch, fake_db):
     """Silently returning the legacy row would leave a checkpoint the mirror
-    will never hold, and no later parity read would explain why."""
+    will never hold, and no later parity read would explain why.
+
+    It must ALSO refuse without writing. Round 2 caught the raise landing after
+    the legacy insert had committed, so a client retrying against the realistic
+    staging divergence (empty task-local SQLite, full PostgreSQL) wrote one
+    hidden checkpoint per 500 until the two counts met.
+    """
     monkeypatch.setenv(session_annex.SELECTOR, "dual_write")
     session_id, tenant_id = _ids()
+    # ensure_started(), then the pre-check's PostgreSQL count: already full.
     fake_db.queue([{"checkpoints": "app_session_checkpoints",
                     "policies": "app_session_policies"}])
+    fake_db.queue([{"n": checkpoints.CHECKPOINT_CAP}])
     monkeypatch.setattr(checkpoints, "_pg_create_checkpoint", lambda *a, **k: None)
 
     with pytest.raises(RuntimeError, match="mirror is at its cap"):
         _make_checkpoint(session_id, tenant_id)
+
+    # The legacy authority was NOT mutated, so a retry refuses the same way
+    # instead of committing another row.
+    assert checkpoints._legacy_checkpoint_count(session_id) == 0
+    assert not any("INSERT" in statement for statement in fake_db.sql())
+
+
+def test_both_stores_at_the_cap_report_the_cap_rather_than_a_divergence(
+        monkeypatch, fake_db):
+    """Agreement is not divergence: a full session is a 409, not a 500."""
+    monkeypatch.setenv(session_annex.SELECTOR, "legacy")
+    session_id, tenant_id = _ids()
+    for _ in range(checkpoints.CHECKPOINT_CAP):
+        assert _make_checkpoint(session_id, tenant_id) is not None
+
+    monkeypatch.setenv(session_annex.SELECTOR, "dual_write")
+    fake_db.queue([{"checkpoints": "app_session_checkpoints",
+                    "policies": "app_session_policies"}])
+    fake_db.queue([{"n": checkpoints.CHECKPOINT_CAP}])
+    assert _make_checkpoint(session_id, tenant_id) is None
 
 
 # --------------------------------------------------------------------------
