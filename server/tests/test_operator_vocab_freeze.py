@@ -108,8 +108,9 @@ def _parse_md_matrix_table():
         if ln.strip().startswith("|") and "Action" in ln and "Policy" in ln)
     headers = [c.strip().lower()
                for c in lines[header_idx].strip().strip("|").split("|")]
+    delimiter = lines[header_idx + 1]  # the |---| separator row, validated below
     rows = []
-    for ln in lines[header_idx + 2:]:  # skip the |---| separator row
+    for ln in lines[header_idx + 2:]:  # data rows only
         if not ln.strip().startswith("|"):
             break  # end of this contiguous table
         cells = [c.strip() for c in ln.strip().strip("|").split("|")]
@@ -119,7 +120,7 @@ def _parse_md_matrix_table():
         row = dict(zip(headers, cells))
         m = re.search(r"`(operator\.[a-z_]+)`", row.get("action", ""))
         rows.append((m.group(1) if m else None, row))
-    return headers, rows
+    return headers, delimiter, rows
 
 
 def test_matrix_is_committed_and_content_pinned():
@@ -182,14 +183,31 @@ def test_operator_md_table_fields_match_json():
     O7 'not mounted' row so structural table edits cannot escape."""
     matrix = _load_matrix()["actions"]
     not_mounted = set(_load_matrix()["not_mounted"])
-    headers, rows = _parse_md_matrix_table()
+    headers, delimiter, rows = _parse_md_matrix_table()
 
     # (a) exact header set — an added/removed/reordered column fails here.
     assert headers == EXPECTED_MD_HEADERS, ("md headers drifted", headers)
 
+    # (a2) the Markdown delimiter row is a proper separator with the exact
+    #      column count — a tampered/miscounted delimiter fails.
+    delim_cells = [c.strip() for c in delimiter.strip().strip("|").split("|")]
+    assert len(delim_cells) == len(headers), (
+        "delimiter column count != header count", delimiter)
+    assert all(re.fullmatch(r":?-{3,}:?", c) for c in delim_cells), (
+        "malformed Markdown delimiter row", delimiter)
+
     # (b) no malformed row may hide in the table region.
     malformed = [r["_malformed"] for n, r in rows if r.get("_malformed")]
     assert not malformed, ("malformed §4.1 table row(s)", malformed)
+
+    # (b2) every well-formed data row must be either a recognized operator
+    #      action or the single O7 row — no unrecognized junk row is ignored.
+    unrecognized = [r.get("action") for n, r in rows
+                    if n is None and not r.get("_malformed")
+                    and "production promotion" not in r.get("action", "").lower()]
+    assert not unrecognized, (
+        "unrecognized §4.1 table row(s) (not an operator action, not O7)",
+        unrecognized)
 
     # (c) duplicate action rows are rejected (a contradictory duplicate placed
     #     before the valid row would otherwise overwrite silently).
