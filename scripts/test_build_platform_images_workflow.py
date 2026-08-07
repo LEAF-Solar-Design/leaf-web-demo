@@ -3744,6 +3744,17 @@ def check_staging_relay_convergence(text: str) -> None:
     assert 'if VERDICT=$(classify_superseder_once "$1"); then' in code, (
         "the polling wrapper must take its verdict straight from the "
         "classifier call")
+    # EXACTLY ONE DEFINITION EACH. Bash resolves a function at CALL time, so a
+    # second definition placed anywhere later silently wins. The executable
+    # rehearsal lifts only the slice from BUILD_WORKFLOW_PATH through the end
+    # of superseder_deploys, so a redefinition after that slice would answer
+    # `yes` at runtime while every rehearsal case still passed.
+    for fn in ("classify_superseder_once", "superseder_deploys"):
+        defs = code.count(f"{fn}() {{")
+        assert defs == 1, (
+            f"{fn} must be defined exactly once; bash resolves the LAST "
+            f"definition at call time, so a second one silently wins "
+            f"(found {defs})")
     assert code.count("VERDICT=") == 1, (
         "VERDICT may be assigned exactly once, by the classifier call; a "
         "second assignment overrides an undecided result while leaving every "
@@ -4023,6 +4034,13 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
                    'CONVERGER=$(superseder_deploys "$MAIN_SHA")\n'
                    "                CONVERGER=yes"),
+        ),
+        (
+            "the classifier REDEFINED after the rehearsal's extracted slice, "
+            "so bash resolves the override at call time",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          classify_superseder_once() { echo yes; }\n"
+                   "          DEPLOYED_ANY=false\n"),
         ),
         (
             "the forwarded verdict overridden inside the polling wrapper, "
