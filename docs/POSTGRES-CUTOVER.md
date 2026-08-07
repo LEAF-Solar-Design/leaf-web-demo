@@ -338,13 +338,47 @@ one store and not the other. Two shapes, and the second is the easy one to miss:
   existed long before the flip is still exposed, with no new session and no
   legacy write anywhere in the sequence.
 
-Mitigation: flip the DRAINED color first, verify it through the color-addressed
-header rules, then drain the live color and flip it, so the two modes never
-serve overlapping traffic. That is the operational form of the "quiesce legacy
-writes" prerequisite above. **Re-read the live desired counts immediately before
-acting rather than trusting any recorded value, including this document.** Which
-color is drained flips with every blue/green cycle, and the counts in
-`platform/authority-inventory.json` disagreed with a live read on 2026-08-06.
+**The obvious mitigation, flipping the drained color first, is NOT AVAILABLE.**
+An earlier revision of this section prescribed it. That was wrong, and the
+correction is recorded here rather than quietly deleted, because the idea is
+attractive enough that the next reader will propose it again.
+
+`deploy-leaf-platform-staging.yml` cannot apply
+`app_deploy_intent=configuration` to a drained color. Three gates, in order:
+
+1. `configuration` always downgrades the strategy to `direct`
+   ("always runs direct; strategy downgraded").
+2. In direct mode `LIVE_SERVICE="$DEPLOY_SERVICE"`, so the live-service check
+   inspects the DEPLOY TARGET, and a drained one fails on `desiredCount < 1`
+   with "refusing an image deploy to an inactive service".
+3. The only escape is barred by name: "A configuration deployment cannot
+   activate a drained service".
+
+A fourth, independent blocker sits behind those: the rollback baseline requires
+a RUNNING task ("No running task is available for a digest-pinned rollback
+baseline"), which a drained service has none of.
+
+Two further traps in the same area. `expected_task_definition` does NOT select
+the color: it is pattern-validated and used for the rollback-baseline
+comparison only. Routing is `target_color`, which **defaults to `live`**, so a
+dispatch that names the drained color's ARN and omits `target_color` deploys to
+the LIVE color while appearing to target the other one. And both app services
+run `minimumHealthyPercent=100, maximumPercent=200` (measured 2026-08-07), so a
+direct rolling deploy starts the new task BEFORE stopping the old one: the
+overlap window above is inherent to the only executable path, not something
+ordering can remove.
+
+So the executable shape is: flip the LIVE color and accept a bounded mixed-mode
+rollout. The drained color would inherit the selector on its next warm, since a
+forward blue/green deploy clones the live environment. **That inheritance is
+read from the operations context and is NOT yet verified against this workflow;
+verify it before relying on it.**
+
+**Re-read the live desired counts immediately before acting rather than trusting
+any recorded value, including this document.** Which color is drained flips with
+every blue/green cycle: three distinct states were observed within a few hours
+on 2026-08-07, and the counts in `platform/authority-inventory.json` disagreed
+with a live read on 2026-08-06.
 
 **2. Rollback has a mandatory ordering, and getting it backwards recreates this
 incident.** The return path is `postgres` to `shadow` to `legacy`. Every mode on
