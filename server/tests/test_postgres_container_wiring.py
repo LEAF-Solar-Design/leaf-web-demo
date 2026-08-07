@@ -7,6 +7,7 @@ can run the separate migration and cutover stages.
 from pathlib import Path, PurePosixPath
 import ast
 import json
+import posixpath
 import re
 import shlex
 
@@ -114,6 +115,28 @@ def _app_dockerfile() -> str:
 # What REMAINS parses only COPY, and every way it can be wrong is LOUD: a COPY
 # form it fails to understand empties the map, and an unmapped script then
 # raises "no COPY ... was found" rather than passing quietly.
+#
+# A SECOND KNOWN GAP, raised in review and consciously accepted rather than
+# half-closed: a destination reached through a SYMLINK created earlier in the
+# build. `RUN ln -s /app/scripts /alias` followed by `COPY data/blob /alias/x.py`
+# replaces a tracked script, and every check below compares paths lexically, so
+# none of them sees it. Closing it statically means knowing which directories are
+# symlinks at each line, which means interpreting RUN's shell -- the exact thing
+# the deleted survival check tried and could not do correctly. Matching `ln -s`
+# with a regex would catch that spelling and miss `ln --symbolic`, a symlink made
+# inside a script, or one already present in the base image, which is the failure
+# mode that made the survival check worse than nothing: its green manufactured
+# confidence. Deliberately not attempted here.
+#
+# AND IT IS NOT COVERED BY THE RUNTIME ASSERTION ABOVE, which is the easy wrong
+# conclusion to draw now that one exists. `test -f && test -s` decides that a
+# shipped script is PRESENT and NON-EMPTY, so it closes the DESTRUCTION class
+# completely. An overwrite leaves a file that is present and non-empty and simply
+# holds the wrong bytes, so it passes that assertion untouched. Closing THIS
+# class in the image needs an assertion on CONTENT -- a digest of each shipped
+# script compared against the repository's -- which does not exist yet in any
+# lane. Nothing currently decides it. Do not read the runtime guard as covering
+# it; the two classes look alike and are stopped by different things.
 _DOCKERFILE_INSTRUCTION = re.compile(r"^([A-Za-z]+)\s+(\S.*)$")
 _ESCAPE_DIRECTIVE = re.compile(r"^#\s*escape\s*=", re.IGNORECASE)
 _HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
@@ -163,7 +186,23 @@ def _logical_lines(dockerfile: str) -> list[str]:
     return lines
 
 
-_SHELL_FENCE = re.compile(r"```(?:shell|bash|sh)\n(.*?)```", re.DOTALL)
+# The info string after the backticks is not just a language: markdown lets it
+# carry attributes, and nothing forbids indenting the fence or capitalising it.
+# The exact-spelling version silently skipped ` ```shell ` (one trailing space),
+# ` ```shell title=x ` and ` ```SHELL `, so a NEW worked example spelled any of
+# those ways would go unchecked while the anti-vacuity count stayed green.
+#
+# The tag must END here, and `\b` is not enough to say so: `\b` is satisfied by
+# the hyphen in ```shell-session, so a TRANSCRIPT fence -- whose lines carry a
+# `$ ` prompt and quote commands as a user typed them, relative paths included --
+# was read as a list of runnable commands and then failed for using one. That is
+# a false positive on ordinary documentation. `(?![\w-])` ends the tag at a real
+# boundary, so ```shell-session, ```sh-session and ```bash-repl stay unread while
+# ```shell title=x is still read.
+_SHELL_FENCE = re.compile(
+    r"^[ \t]*```[ \t]*(?:shell|bash|sh)(?![\w-])[^\n]*\n(.*?)^[ \t]*```",
+    re.DOTALL | re.MULTILINE | re.IGNORECASE,
+)
 
 
 def _command_tokens(command: str, origin: str) -> list[str]:
@@ -185,6 +224,45 @@ def _command_tokens(command: str, origin: str) -> list[str]:
             f"{origin} is not parseable as a shell command ({exc}), so this "
             f"guard cannot tell what it runs: {command!r}"
         ) from exc
+
+
+def _assert_not_a_near_miss(origin: str, token: str, repo_scripts: set[str]) -> None:
+    """Refuse a token that MEANT a repository script but does not name one.
+
+    Selection is exact, so a near miss is invisible -- and a near miss IS the
+    defect, not a step away from it. A documented command naming a script that
+    does not exist under that exact spelling fails for the same operator, in the
+    same image, as the relative-path defect this guard was built for; it just
+    fails with "No such file or directory" instead. Without this, such a token
+    is dropped silently: never asserted absolute, never compared to the COPY
+    target, and never counted, so the anti-vacuity floor still sees eight and
+    the whole guard reports green over a command that cannot run.
+
+    Two independent nets, because each catches what the other cannot.
+    """
+    name = PurePosixPath(token).name
+    # The image filesystem is case-SENSITIVE while the authoring machine's
+    # usually is not, so a capital slip that resolves fine locally -- and that
+    # `Path.exists()` would confirm on Windows or macOS -- is a missing file in
+    # the container.
+    actual = {script.lower(): script for script in repo_scripts}.get(name.lower())
+    assert actual is None, (
+        f"{origin} names {token!r}, but the repository file is scripts/{actual} "
+        f"-- the same name in different case. The image filesystem is "
+        f"case-sensitive, so this command finds no such file in the only place "
+        f"it is ever run."
+    )
+    # A plain typo keeps its case, so case alone cannot catch it. Any .py named
+    # inside a scripts/ directory has to be one of ours: there is nowhere else
+    # such a token could legitimately point.
+    assert not (
+        name.endswith(".py") and PurePosixPath(token).parent.name == "scripts"
+    ), (
+        f"{origin} names {token!r}, a .py under a scripts/ directory that this "
+        f"repository does not have. Either it is a typo, or the script was "
+        f"renamed and this command was not. Repository scripts/: "
+        f"{sorted(repo_scripts)}"
+    )
 
 
 def _documented_shell_commands(markdown: str) -> list[str]:
@@ -269,60 +347,152 @@ def _exec_argv(argument: str) -> list[str] | None:
     return parsed
 
 
-def _copied_scripts(dockerfile: str) -> dict[str, str]:
-    """basename -> absolute in-image path, for single-file `COPY scripts/...`.
+def _image_path(destination: str) -> str:
+    """The path the image really holds, from a COPY/ADD destination as written.
 
-    Deliberately restricted to explicit single-file copies out of scripts/.
-    Directory copies such as `COPY server/ /app/server/` are a different shape,
-    and the pytest/npm parity commands in the inventory are documented for a
-    source checkout rather than for the image, so keying on these lines is what
-    keeps this guard aimed at the commands that really do run in the container.
+    THE ASYMMETRY HERE IS THE POINT, and getting it backwards is what let a
+    COPY land on a tracked script in silence. The COMMAND side is never
+    normalized -- the operator's shell takes `/app/scripts/x.py/` literally and
+    the kernel refuses it with ENOTDIR -- but the DESTINATION side must be,
+    because docker resolves `.`, `//` and `..` lexically before it writes. So
+    `/app/scripts/./x.py` and `/app/scripts/x.py` are two spellings of ONE file
+    in the image, and comparing them as raw strings said they were different.
+    Measured against docker: every dotted, doubled and traversing spelling of a
+    tracked script's path escaped the lands-on check below.
+    """
+    resolved = posixpath.normpath(destination)
+    # POSIX leaves a LEADING exactly-double slash implementation-defined, and
+    # normpath preserves it; Linux does not, so `//app/scripts/x.py` is the
+    # same file as `/app/scripts/x.py` and must compare equal to it.
+    if resolved.startswith("//") and not resolved.startswith("///"):
+        resolved = resolved[1:]
+    return resolved
+
+
+def _copy_operands(keyword: str, argument: str) -> tuple[list[str], list[str], str, bool]:
+    """(flags, sources, normalized destination, destination-is-a-directory).
+
+    Reads BOTH `COPY` and `ADD`: they write to the image identically, and
+    reading only COPY meant `ADD data/blob /app/scripts/reconcile_x.py` shipped
+    other content under a documented script's path with the guard silent.
+    """
+    # The JSON ("exec") form is a different grammar. `.split()` half-reads it --
+    # `COPY ["a", "/app/scripts/x.py"]` yields a destination still wearing its
+    # bracket and quote, which then matches nothing -- so the instruction slid
+    # past the lands-on check looking like a checked one. Refuse it loudly
+    # instead; deploy/Dockerfile.app does not use it.
+    assert not argument.lstrip().startswith("["), (
+        f"{keyword} uses the JSON form ({argument!r}); this guard reads the "
+        "shell form only, and half-reading this one hides its destination. "
+        "Teach this guard before using that form."
+    )
+    fields = argument.split()
+    flags = [field for field in fields if field.startswith("--")]
+    # COPY takes flags before its operands (`--chown=`, `--from=`, `--link=`,
+    # ...). Requiring exactly two fields silently skipped every flagged form,
+    # which is how a script could be shipped and never checked. Split flags off
+    # rather than counting fields.
+    operands = [field for field in fields if not field.startswith("--")]
+    assert len(operands) >= 2, (
+        f"{keyword} {argument!r} has fewer than two operands, which docker "
+        "rejects; this guard cannot tell what it writes."
+    )
+    destination = operands[-1]
+    sources = operands[:-1]
+    # REFUSE what this guard cannot resolve, rather than resolving it wrongly.
+    #
+    # Docker builds a COPY destination in ways this parser deliberately does not
+    # model: it expands ENV and ARG variables, and it resolves a RELATIVE
+    # destination against the WORKDIR in effect at that line. So
+    #     ENV TARGET=/app/scripts   +   COPY data/blob $TARGET/x.py
+    #     WORKDIR /app              +   COPY data/blob scripts/x.py
+    # both write /app/scripts/x.py, and both compared unequal to it as strings,
+    # so each slipped the lands-on check in silence.
+    #
+    # NOTE FOR ANYONE TEMPTED TO FIX THIS BY TRACKING WORKDIR: that component
+    # existed, was wrong three times, and was deleted on purpose (see the note
+    # above `_DOCKERFILE_INSTRUCTION`). It gated no assertion and every one of
+    # its bugs failed OPEN. This is the opposite move: it does not compute the
+    # WORKDIR, it declines to accept any line whose meaning depends on knowing
+    # it. Refusing is sound with no interpreter; resolving is not.
+    assert "$" not in destination and "$" not in " ".join(sources), (
+        f"{keyword} {argument!r} builds a path from a variable, which docker "
+        "expands and this guard does not. Teach this guard before using that "
+        "form, or write the path literally."
+    )
+    assert destination.startswith("/"), (
+        f"{keyword} {argument!r} has a RELATIVE destination, which docker "
+        f"resolves against the WORKDIR in effect at that line. This guard does "
+        f"not track the WORKDIR -- on purpose -- so it cannot tell where "
+        f"{destination!r} lands. Write the destination absolutely."
+    )
+    # A trailing slash is the ONE thing that must be read before normalizing,
+    # because it is what distinguishes "write this file" from "write into this
+    # directory", and normpath drops it.
+    is_directory = destination.endswith("/") or len(sources) > 1
+    assert len(sources) == 1 or destination.endswith("/"), (
+        f"{keyword} {argument!r} has several sources but its destination is "
+        "not written as a directory; docker requires a trailing slash there."
+    )
+    return flags, sources, _image_path(destination), is_directory
+
+
+def _copied_scripts(dockerfile: str) -> dict[str, str]:
+    """basename -> absolute in-image path, for each `scripts/...` file shipped.
+
+    Deliberately restricted to explicit file copies out of scripts/. Directory
+    copies such as `COPY server/ /app/server/` are a different shape, and the
+    pytest/npm parity commands in the inventory are documented for a source
+    checkout rather than for the image, so keying on these lines is what keeps
+    this guard aimed at the commands that really do run in the container.
     """
     copies: dict[str, str] = {}
-    destinations: list[tuple[str, str]] = []
+    destinations: list[tuple[str, str, bool]] = []
     for keyword, argument in _instructions(dockerfile):
-        if keyword != "COPY":
+        if keyword not in ("COPY", "ADD"):
             continue
-        # COPY takes flags before its operands (`--chown=`, `--from=`,
-        # `--link=`, ...). Requiring exactly two fields silently skipped every
-        # flagged form, which is how a script could be shipped and never
-        # checked. Split flags off rather than counting fields.
-        parts = [part for part in argument.split() if not part.startswith("--")]
-        flags = [part for part in argument.split() if part.startswith("--")]
-        if len(parts) != 2:
-            continue
-        destinations.append((parts[0], parts[1]))
-        if not parts[0].startswith("scripts/"):
-            continue
-        # `--from=` sources another stage or an external image, so the path is
-        # not this repository's scripts/ tree and the reasoning below does not
-        # hold. Refuse rather than assume.
-        assert not any(flag.startswith("--from=") for flag in flags), (
-            f"COPY of {parts[0]} uses --from=, so it does not come from the "
-            "repository tree; teach this guard before using that form."
-        )
-        # KEY ON THE REPOSITORY SOURCE, NOT THE DESTINATION. Keying on the
-        # destination basename asked only "does something land at this name",
-        # never "is it the right file". A one-token slip such as
-        #     COPY scripts/broker-container-smoke.py /app/scripts/reconcile_x.py
-        # builds fine and satisfies a destination-keyed map, while the operator
-        # running the documented arguments gets `unrecognized arguments` from
-        # whatever script actually shipped under that name.
-        source_name = PurePosixPath(parts[0]).name
-        destination_name = PurePosixPath(parts[1]).name
-        assert source_name == destination_name, (
-            f"COPY ships {parts[0]} as {parts[1]}, renaming it. This guard "
-            f"identifies a shipped script by its repository name, so a rename "
-            f"means the image holds one script's content under another's "
-            f"documented name. Teach this guard before using that form."
-        )
-        # Carried over from the sessions-only guard #495 merged: two COPYs of
-        # one basename make "the" image path ambiguous, and a dict would
-        # silently keep the last one.
-        assert source_name not in copies, (
-            f"{source_name} is COPYed to more than one target"
-        )
-        copies[source_name] = parts[1]
+        flags, sources, destination, is_directory = _copy_operands(keyword, argument)
+        for source in sources:
+            destinations.append((source, destination, is_directory))
+            if not source.startswith("scripts/"):
+                continue
+            # `--from=` sources another stage or an external image, so the path
+            # is not this repository's scripts/ tree and the reasoning below
+            # does not hold. Refuse rather than assume.
+            assert not any(flag.startswith("--from=") for flag in flags), (
+                f"{keyword} of {source} uses --from=, so it does not come from "
+                "the repository tree; teach this guard before using that form."
+            )
+            # KEY ON THE REPOSITORY SOURCE, NOT THE DESTINATION. Keying on the
+            # destination basename asked only "does something land at this
+            # name", never "is it the right file". A one-token slip such as
+            #     COPY scripts/broker-container-smoke.py /app/scripts/reconcile_x.py
+            # builds fine and satisfies a destination-keyed map, while the
+            # operator running the documented arguments gets `unrecognized
+            # arguments` from whatever script actually shipped under that name.
+            source_name = PurePosixPath(source).name
+            if is_directory:
+                # `COPY scripts/x.py /app/scripts/` is a DIRECTORY destination,
+                # which docker resolves to /app/scripts/x.py. Reading its
+                # basename as the shipped name called that a rename and refused
+                # a correct, ordinary line.
+                landing = posixpath.join(destination, source_name)
+            else:
+                landing = destination
+                assert PurePosixPath(landing).name == source_name, (
+                    f"{keyword} ships {source} as {landing}, renaming it. This "
+                    f"guard identifies a shipped script by its repository name, "
+                    f"so a rename means the image holds one script's content "
+                    f"under another's documented name. Teach this guard before "
+                    f"using that form."
+                )
+            # Carried over from the sessions-only guard #495 merged: two COPYs
+            # of one basename make "the" image path ambiguous, and a dict would
+            # silently keep the last one.
+            assert source_name not in copies, (
+                f"{source_name} is COPYed to more than one target"
+            )
+            copies[source_name] = landing
 
     # A COPY does not have to come FROM scripts/ to land ON a tracked script.
     # `COPY data/rooftop_demo.intake.json /app/scripts/reconcile_x.py` has a
@@ -333,20 +503,69 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
     # this needs no WORKDIR reasoning: a COPY destination is absolute and
     # literal, unlike a RUN's shell, which is why this class is checkable and
     # the post-COPY-deletion class was not.
+    #
+    # EVERY ARITY, not just two operands. A multi-source `COPY data/a.py
+    # data/b.json /app/scripts/` was dropped before it was ever recorded as a
+    # destination, and docker merges it straight over the scripts directory --
+    # built and confirmed against the real daemon, not merely read.
     for target in copies.values():
-        parent = str(PurePosixPath(target).parent)
-        for source, destination in destinations:
+        parent = posixpath.dirname(target)
+        for source, destination, _ in destinations:
             if source.startswith("scripts/"):
                 continue
-            landed = destination.rstrip("/")
-            assert landed not in (target, parent), (
+            assert destination not in (target, parent), (
                 f"COPY writes {source} to {destination}, which lands on "
                 f"{target}. The image would ship that content under a "
                 f"documented script's path, so the operator's command runs the "
                 f"wrong file. This guard identifies a script by its repository "
                 f"source; teach it before overwriting a tracked destination."
             )
+            # A destination ABOVE the script's directory still reaches it, and
+            # this guard REFUSES that shape rather than adjudicating it.
+            #
+            # Docker merges a directory copy recursively and auto-extracts a
+            # local tar, so `COPY overlay/ /app/` and `ADD payload.tar /app/` can
+            # both replace a tracked script while naming a destination that
+            # equals neither it nor its parent.
+            #
+            # A previous attempt DID adjudicate this, by asking the repository
+            # tree whether the source carried a colliding path. Review found four
+            # defects in that one check within a single round: `--from=` sources
+            # a tree that is not this repository at all; docker detects an
+            # archive by its CONTENT, so a tar named `payload.bin` extracted
+            # anyway; the suffix rule refused the repo's real
+            # `web/vendor/node_modules-linux-x64.tar.gz` even under COPY, which
+            # never extracts; and globs, `--exclude=`, and .dockerignore all made
+            # a legitimate source look absent. Two false negatives and two false
+            # positives, in twenty lines.
+            #
+            # That is the pattern this whole module was rebuilt around: every one
+            # of the review findings against it has been in the Dockerfile parse,
+            # never in the contract it protects. So this stops parsing and
+            # refuses, exactly as it already does for multi-stage builds, the
+            # JSON form, `--from=` out of scripts/, and an escape directive.
+            # deploy/Dockerfile.app copies into no ancestor of /app/scripts
+            # today, so this costs nothing; the day it needs to, the message says
+            # what to write instead.
+            assert not _contains(destination, target), (
+                f"{keyword} writes into {destination}, which is ABOVE {target}. "
+                f"Docker merges a directory copy recursively and extracts a "
+                f"local archive, so content under {source} could replace that "
+                f"script and the operator's documented command would run the "
+                f"wrong file. This guard deliberately does not try to decide "
+                f"whether it actually does -- four ways of getting that wrong "
+                f"were found in one review round. Copy to a destination that is "
+                f"not above a shipped script, or teach this guard."
+            )
     return copies
+
+
+def _contains(directory: str, path: str) -> bool:
+    """Whether `path` sits anywhere beneath `directory`."""
+    prefix = directory.rstrip("/") + "/"
+    return path.startswith(prefix) and path != directory.rstrip("/")
+
+
 
 
 def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
@@ -408,21 +627,219 @@ def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
     # A COPY need not come FROM scripts/ to land ON a tracked script. Both the
     # file form and the directory form must be refused, or the image ships
     # other content under a documented script's path.
-    with pytest.raises(AssertionError, match="lands on"):
-        _copied_scripts(
-            "COPY scripts/x.py /app/scripts/x.py\n"
-            "COPY data/blob.json /app/scripts/x.py\n"
-        )
-    with pytest.raises(AssertionError, match="lands on"):
-        _copied_scripts(
-            "COPY scripts/x.py /app/scripts/x.py\n"
-            "COPY vendor/ /app/scripts/\n"
-        )
+    #
+    # EVERY ONE of the spellings below was measured GREEN against the merged
+    # guard, and two of them were built against a real docker daemon and the
+    # overwritten file read back out of the image. They are pinned individually
+    # rather than as one case because they escaped for THREE different reasons:
+    # an arity the parse dropped, a spelling the kernel resolves and a raw
+    # string comparison did not, and an instruction keyword never read at all.
+    shipped = "COPY scripts/x.py /app/scripts/x.py\n"
+    for escape in (
+        # ...the two the merged fix already caught, kept as the control.
+        "COPY data/blob.json /app/scripts/x.py\n",
+        "COPY vendor/ /app/scripts/\n",
+        # ...arity: three operands were dropped before being recorded at all.
+        "COPY data/a.py data/b.json /app/scripts/\n",
+        "COPY --chown=1:1 data/a.py data/b.json /app/scripts/\n",
+        # ...spelling: docker resolves these, raw string comparison did not.
+        "COPY data/blob /app/scripts/./x.py\n",
+        "COPY data/blob //app/scripts/x.py\n",
+        "COPY data/blob /app/server/../scripts/x.py\n",
+        "COPY data/blob /app/scripts//x.py\n",
+        # ...keyword: ADD writes to the image exactly as COPY does.
+        "ADD data/blob /app/scripts/x.py\n",
+        "ADD data/blob /app/scripts/\n",
+    ):
+        with pytest.raises(AssertionError, match="lands on"):
+            _copied_scripts(shipped + escape)
+
+    # The JSON form is a different grammar, and `.split()` half-read it into a
+    # destination wearing a bracket that matched nothing. Refuse, do not guess.
+    with pytest.raises(AssertionError, match="JSON form"):
+        _copied_scripts(shipped + 'COPY ["data/blob", "/app/scripts/x.py"]\n')
+
+    # A destination docker BUILDS rather than reads literally must be refused,
+    # not resolved. Both of these write /app/scripts/x.py in the image and both
+    # compared unequal to it as strings, so both landed on a tracked script in
+    # silence. Refusing is sound without a Dockerfile interpreter; tracking the
+    # WORKDIR to resolve them is the component that was deleted for failing open.
+    for unresolvable in (
+        "ENV TARGET=/app/scripts\nCOPY data/blob $TARGET/x.py\n",
+        "ENV TARGET=/app/scripts\nCOPY data/blob ${TARGET}/x.py\n",
+    ):
+        with pytest.raises(AssertionError, match="from a variable"):
+            _copied_scripts(shipped + unresolvable)
+    for unresolvable in (
+        "WORKDIR /app\nCOPY data/blob scripts/x.py\n",
+        "WORKDIR /app\nCOPY vendor/ scripts/\n",
+    ):
+        with pytest.raises(AssertionError, match="RELATIVE destination"):
+            _copied_scripts(shipped + unresolvable)
+
+    # A destination ABOVE the script's directory reaches it too: docker merges a
+    # directory copy recursively and auto-extracts a local tar, so neither
+    # equals the target or its parent while both replace the target. REFUSED as
+    # a shape, without asking what the source contains -- deciding that was
+    # tried and produced two false negatives and two false positives in one
+    # review round. Every form below is refused by the same single assertion,
+    # which is the point: none of them needs its own reasoning.
+    for above in (
+        "ADD data/payload.tar /app/\n",          # auto-extracted by content
+        "ADD data/payload.bin /app/\n",          # a tar that is not named one
+        "COPY overlay/ /app/\n",                 # not in the repository tree
+        "COPY docs/ /app/\n",                    # in the tree, no collision
+        "COPY . /app/\n",                        # the whole build context
+        "COPY docs/*.md /app/\n",                # a glob
+        "COPY --from=other docs/ /app/\n",       # a tree that is not this repo
+        "COPY --exclude=scripts/x.py . /app/\n",  # an exclusion this cannot read
+        "ADD https://example.com/a.tar /app/\n",  # remote, not unpacked
+    ):
+        with pytest.raises(AssertionError, match="which is ABOVE"):
+            _copied_scripts(shipped + above)
+
+    # A SIBLING is not an ancestor and must stay allowed, or this refusal would
+    # swallow deploy/Dockerfile.app's own `COPY server/ /app/server/`.
+    assert _copied_scripts(shipped + "COPY docs/ /app/docs/\n") == {
+        "x.py": "/app/scripts/x.py"
+    }
+    assert _copied_scripts(shipped + "COPY server/ /app/server/\n") == {
+        "x.py": "/app/scripts/x.py"
+    }
+    # An archive copied to a sibling is ordinary and correct: COPY never
+    # extracts, and this is a real path in this repository.
+    assert _copied_scripts(
+        shipped + "COPY web/vendor/node_modules-linux-x64.tar.gz /app/web/\n"
+    ) == {"x.py": "/app/scripts/x.py"}
+
+    # `_contains` decides WHICH copies get the ancestor treatment, so pin its
+    # boundary directly. A prefix is not a parent: /app/script must not be read
+    # as containing /app/scripts/x.py, and a directory does not contain itself.
+    assert _contains("/app", "/app/scripts/x.py")
+    assert _contains("/app/scripts", "/app/scripts/x.py")
+    assert _contains("/app/", "/app/scripts/x.py")
+    assert not _contains("/app/script", "/app/scripts/x.py")
+    assert not _contains("/app/docs", "/app/scripts/x.py")
+    assert not _contains("/app/scripts/x.py", "/app/scripts/x.py")
+
+    # And pin it through the real path too: a SIBLING copy whose source would
+    # collide only if the boundary were lost must stay allowed. Without the
+    # boundary, `/app/docs` reads as an ancestor, the relative path becomes
+    # ../scripts/<name>, and that resolves to a file that really does exist.
+    assert _copied_scripts(
+        "COPY scripts/reconcile_customization_authority.py "
+        "/app/scripts/reconcile_customization_authority.py\n"
+        "COPY docs/ /app/docs/\n"
+    ) == {
+        "reconcile_customization_authority.py":
+            "/app/scripts/reconcile_customization_authority.py"
+    }
+
+    # A DIRECTORY destination is not a rename: docker resolves
+    # `COPY scripts/x.py /app/scripts/` to /app/scripts/x.py. Refusing it was a
+    # false positive that would have blocked an ordinary, correct line.
+    assert _copied_scripts("COPY scripts/x.py /app/scripts/\n") == {
+        "x.py": "/app/scripts/x.py"
+    }
+    # ...and the multi-source form of the same thing maps every source.
+    assert _copied_scripts("COPY scripts/a.py scripts/b.py /app/scripts/\n") == {
+        "a.py": "/app/scripts/a.py",
+        "b.py": "/app/scripts/b.py",
+    }
+    # A destination spelled oddly still resolves to the one path the image
+    # holds, so a documented command naming that path must still match it.
+    assert _copied_scripts("COPY scripts/x.py /app/scripts/./x.py\n") == {
+        "x.py": "/app/scripts/x.py"
+    }
 
     # Multi-stage is refused rather than guessed at.
     _single_stage("FROM python:3.12-slim AS app\nWORKDIR /app\n")
     with pytest.raises(AssertionError, match="now has 2 stages"):
         _single_stage("FROM python AS build\nFROM python AS app\n")
+
+
+def test_a_documented_command_that_names_no_real_script_is_not_skipped():
+    """The selection step must fail loudly on a near miss, not drop it.
+
+    This is the hole the anti-vacuity count cannot cover. The count is 8 because
+    there are 8 commands: ADD a ninth with a typo'd script name and it is
+    neither checked nor counted, so every assertion in the guard stays green
+    while the new documented command dies in the image. Both reconcilers are
+    named explicitly further down, but naming proves the RIGHT commands are
+    still reached -- it says nothing about a WRONG one arriving beside them.
+    """
+    scripts = {"reconcile_customization_authority.py", "reconcile_sessions_authority.py"}
+
+    # A capital slip. Plausible precisely because it is invisible to the author:
+    # Windows and macOS resolve it, the case-sensitive image does not.
+    with pytest.raises(AssertionError, match="different case"):
+        _assert_not_a_near_miss(
+            "docs/POSTGRES-CUTOVER.md",
+            "/app/scripts/Reconcile_customization_authority.py",
+            scripts,
+        )
+    # A dropped letter. Same case, so the net above cannot see it.
+    with pytest.raises(AssertionError, match="does not have"):
+        _assert_not_a_near_miss(
+            "docs/POSTGRES-CUTOVER.md",
+            "/app/scripts/reconcil_customization_authority.py",
+            scripts,
+        )
+    # A script that was renamed while its documented command was not.
+    with pytest.raises(AssertionError, match="does not have"):
+        _assert_not_a_near_miss(
+            "authority-inventory.json x backfill", "scripts/old_name.py", scripts
+        )
+
+    # And it must NOT cry wolf. These tokens are not trying to be repo scripts,
+    # and forcing them through the absolute-path rule would be wrong: the pytest
+    # parity commands really are documented for a source checkout.
+    for innocent in (
+        "server/tests/test_jobs_callbacks_postgres.py",
+        "test/sessionStoreFactory.test.ts",
+        "docker-compose.canonical.yml",
+        "--mode",
+        "/data/state/customization.db",
+        "scripts/compose.harness-smoke.yml",
+    ):
+        _assert_not_a_near_miss("authority-inventory.json x parity", innocent, scripts)
+
+
+def test_a_shell_fence_is_found_however_it_is_spelled():
+    """A worked example must not escape by how its fence is written.
+
+    Selection from the document is the only reason the cutover doc is guarded at
+    all, and the exact-spelling regex skipped four ordinary spellings in
+    silence. A skipped fence does not fail: it just is not there, and the
+    document's floor of two is already met by the fences that do parse.
+    """
+    body = "python /app/scripts/reconcile_customization_authority.py --mode parity\n"
+    for fence in (
+        "```shell",
+        "```shell ",
+        "```bash",
+        "```sh",
+        "```SHELL",
+        "```shell title=cutover",
+        "```shell {.highlight}",
+    ):
+        assert _documented_shell_commands(f"{fence}\n{body}```\n") == [body.strip()], fence
+
+    # An indented fence is still a fence.
+    assert _documented_shell_commands(f"  ```shell\n  {body}  ```\n") == [body.strip()]
+
+    # A language this guard does not read stays unread, deliberately: the prose
+    # around these blocks quotes the WRONG form on purpose to explain it.
+    assert _documented_shell_commands(f"```text\n{body}```\n") == []
+    assert _documented_shell_commands(f"```python\n{body}```\n") == []
+
+    # A TRANSCRIPT is not a list of runnable commands. Its lines carry a `$ `
+    # prompt and quote what a user typed, relative paths and all, so reading one
+    # as commands makes this guard fail ordinary documentation. The tag must end
+    # at a real boundary: `\b` is satisfied by the hyphen and let these through.
+    transcript = "$ python scripts/reconcile_customization_authority.py --mode parity\n"
+    for tag in ("shell-session", "sh-session", "bash-repl", "shellscript"):
+        assert _documented_shell_commands(f"```{tag}\n{transcript}```\n") == [], tag
 
 
 def test_documented_authority_commands_resolve_in_the_image():
@@ -487,6 +904,7 @@ def test_documented_authority_commands_resolve_in_the_image():
         for token in _command_tokens(command, origin):
             name = PurePosixPath(token).name
             if name not in repo_scripts:
+                _assert_not_a_near_miss(origin, token, repo_scripts)
                 continue
 
             # A script that is documented but that the Dockerfile is not seen
@@ -501,12 +919,18 @@ def test_documented_authority_commands_resolve_in_the_image():
                 f"understand the form used. Both are blockers."
             )
 
-            # COMPARE THE RAW STRING, NEVER A NORMALIZED PATH. PurePosixPath
-            # quietly rewrites what the shell would take literally: a trailing
-            # slash and a `/./` segment both vanish, so `/app/scripts/x.py/`
-            # compared equal while the kernel would refuse it with ENOTDIR
-            # (a trailing slash demands a directory). Normalizing here means
-            # judging a string the operator will never run.
+            # COMPARE THE TOKEN RAW, NEVER NORMALIZED. PurePosixPath quietly
+            # rewrites what the shell would take literally: a trailing slash and
+            # a `/./` segment both vanish, so `/app/scripts/x.py/` compared
+            # equal while the kernel would refuse it with ENOTDIR (a trailing
+            # slash demands a directory). Normalizing here means judging a
+            # string the operator will never run.
+            #
+            # The DESTINATION side is the opposite case and is normalized in
+            # `_image_path`: docker resolves the spelling before it writes, so
+            # `target` is already the one path the image really holds. Raw on
+            # the command side, resolved on the image side -- that asymmetry is
+            # deliberate, and collapsing it either way reopens a hole.
             assert token.startswith("/"), (
                 f"{origin} names {token!r} by a repository-relative path. The "
                 f"image does NOT run from the repository root -- Dockerfile.app "
@@ -519,9 +943,9 @@ def test_documented_authority_commands_resolve_in_the_image():
             assert token == target, (
                 f"{origin} names {token!r}, but deploy/Dockerfile.app copies "
                 f"that script to {target}. The command must name that path "
-                f"exactly, character for character: a trailing slash, a doubled "
-                f"or dotted segment, or any other spelling the shell takes "
-                f"literally will fail in the image even though it 'looks' right."
+                f"exactly, character for character: the shell hands the token "
+                f"to the kernel as written, and a trailing slash alone is "
+                f"enough to fail with ENOTDIR even though it 'looks' right."
             )
             checked.append((origin, token))
 

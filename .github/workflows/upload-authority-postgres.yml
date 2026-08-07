@@ -437,10 +437,27 @@ jobs:
           # inside the floored modules, plus that whole 3-test module. The
           # floors complement this total; they do not replace it.
           #
-          # 227 is measured on this runner and locally on PostgreSQL 16.14
+          # 227 was measured on this runner and locally on PostgreSQL 16.14
           # (61 + 38 + 14 + 59 + 41 + 11 + 3). It is a floor, so adding tests
           # never trips it and only a DROP does. Deleting a test on purpose
           # means lowering this number in the same commit, deliberately.
+          #
+          # Raised 227 -> 230 on 2026-08-07, in two steps. +2 for the post-merge
+          # review of the WORKDIR/COPY guard, and +1 more after merging
+          # origin/main, which added
+          # test_the_image_asserts_its_own_reconcilers_at_build_time to the same
+          # module and did NOT raise this number. Raising by exactly the count of
+          # tests added is safe whatever the true total is, because all three are
+          # unconditional -- that module carries no skipif, pytest.skip or
+          # importorskip, so no runner executes fewer. Adding them without
+          # raising this would have been safe too, and useless: the floor's
+          # whole value is being tight enough that a later DROP trips it.
+          #
+          # The parenthetical breakdown above is stale and deliberately left
+          # as-written rather than re-derived by arithmetic: its 41 term predates
+          # commits that changed that module's count, and re-measuring it needs
+          # this runner's PostgreSQL, not a local box where the guest and broker
+          # modules skip. Re-measure it there before trusting the addends.
           if ! out=$(python -m pytest -q -rs \
               tests/test_guest_uploads.py \
               tests/test_guest_fail_closed.py \
@@ -462,9 +479,9 @@ jobs:
           # under `bash -e`: an unmatched grep leaves `ran` empty, which the
           # `${ran:-0}` default turns into a loud 0 rather than a silent pass.
           ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
-          if [ "${ran:-0}" -lt 227 ]; then
+          if [ "${ran:-0}" -lt 230 ]; then
             printf '%s\n' "$out"
-            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 227 - tests stopped being collected without reporting a skip."
+            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 230 - tests stopped being collected without reporting a skip."
             exit 1
           fi
 
