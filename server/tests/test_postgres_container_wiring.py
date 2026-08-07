@@ -247,6 +247,7 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
     keeps this guard aimed at the commands that really do run in the container.
     """
     copies: dict[str, str] = {}
+    destinations: list[tuple[str, str]] = []
     for keyword, argument in _instructions(dockerfile):
         if keyword != "COPY":
             continue
@@ -256,7 +257,10 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
         # checked. Split flags off rather than counting fields.
         parts = [part for part in argument.split() if not part.startswith("--")]
         flags = [part for part in argument.split() if part.startswith("--")]
-        if len(parts) != 2 or not parts[0].startswith("scripts/"):
+        if len(parts) != 2:
+            continue
+        destinations.append((parts[0], parts[1]))
+        if not parts[0].startswith("scripts/"):
             continue
         # `--from=` sources another stage or an external image, so the path is
         # not this repository's scripts/ tree and the reasoning below does not
@@ -287,6 +291,29 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
             f"{source_name} is COPYed to more than one target"
         )
         copies[source_name] = parts[1]
+
+    # A COPY does not have to come FROM scripts/ to land ON a tracked script.
+    # `COPY data/rooftop_demo.intake.json /app/scripts/reconcile_x.py` has a
+    # non-scripts source, so the loop above skips it entirely, while in the
+    # image it replaces the tracked script's content at the documented path and
+    # the operator's command runs the wrong file. Same for a directory copy
+    # landing on the scripts directory. Checked here, on DESTINATIONS, because
+    # this needs no WORKDIR reasoning: a COPY destination is absolute and
+    # literal, unlike a RUN's shell, which is why this class is checkable and
+    # the post-COPY-deletion class was not.
+    for target in copies.values():
+        parent = str(PurePosixPath(target).parent)
+        for source, destination in destinations:
+            if source.startswith("scripts/"):
+                continue
+            landed = destination.rstrip("/")
+            assert landed not in (target, parent), (
+                f"COPY writes {source} to {destination}, which lands on "
+                f"{target}. The image would ship that content under a "
+                f"documented script's path, so the operator's command runs the "
+                f"wrong file. This guard identifies a script by its repository "
+                f"source; teach it before overwriting a tracked destination."
+            )
     return copies
 
 
@@ -345,6 +372,20 @@ def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
         _copied_scripts("COPY scripts/a.py /app/scripts/b.py\n")
     with pytest.raises(AssertionError, match="--from="):
         _copied_scripts("COPY --from=build scripts/x.py /app/scripts/x.py\n")
+
+    # A COPY need not come FROM scripts/ to land ON a tracked script. Both the
+    # file form and the directory form must be refused, or the image ships
+    # other content under a documented script's path.
+    with pytest.raises(AssertionError, match="lands on"):
+        _copied_scripts(
+            "COPY scripts/x.py /app/scripts/x.py\n"
+            "COPY data/blob.json /app/scripts/x.py\n"
+        )
+    with pytest.raises(AssertionError, match="lands on"):
+        _copied_scripts(
+            "COPY scripts/x.py /app/scripts/x.py\n"
+            "COPY vendor/ /app/scripts/\n"
+        )
 
     # Multi-stage is refused rather than guessed at.
     _single_stage("FROM python:3.12-slim AS app\nWORKDIR /app\n")
