@@ -96,3 +96,22 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
 # uvicorn binds 0.0.0.0 so the container is reachable on the compose network
 # (python app.py already binds 0.0.0.0, but uvicorn is the documented run form).
 CMD ["/app/server/start-app.sh"]
+
+# --- Runtime proof that the reconcilers survived the build. -------------------
+# The image is the only place the documented reconciliation commands ever run
+# (platform/authority-inventory.json ships `python /app/scripts/reconcile_*.py`),
+# so a script that failed to land fails in an operator cutover rather than here.
+#
+# Deliberately the LAST instruction, and it must STAY last: it proves the state of
+# the filesystem AFTER every instruction above it, so a later RUN or COPY that
+# removed /app/scripts breaks the BUILD. No static check can do this job -- a text
+# scan of this file does not know the WORKDIR in effect at each line, so a relative
+# `rm -rf scripts` under WORKDIR /app reads as harmless. That approach was tried
+# and removed in dbd6e5d; see the module comment in
+# server/tests/test_postgres_container_wiring.py. New instructions go ABOVE this.
+#
+# Below the ARG on purpose, which costs one uncached exec of two `test -f` calls
+# per build. The cache concern that ARG comment describes is the apt/pip layers,
+# and those stay above the ARG with their cache intact.
+RUN test -f /app/scripts/reconcile_customization_authority.py \
+ && test -f /app/scripts/reconcile_sessions_authority.py

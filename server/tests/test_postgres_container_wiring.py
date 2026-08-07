@@ -103,7 +103,11 @@ def _app_dockerfile() -> str:
 #     check that catches some spellings of a destruction while silently missing
 #     others is worse than no check, because its green manufactures confidence.
 #     The right home for that class is a runtime assertion in the image itself,
-#     not a static test. Tracked as follow-up, deliberately not re-attempted.
+#     not a static test. That assertion now EXISTS -- deploy/Dockerfile.app ends
+#     in a `RUN test -f` over every shipped script, so a destruction of any
+#     spelling fails the BUILD -- and
+#     `test_the_image_asserts_its_own_reconcilers_at_build_time` below pins it.
+#     Do not re-attempt the static version: the runtime one already decides it.
 #
 # What REMAINS parses only COPY, and every way it can be wrong is LOUD: a COPY
 # form it fails to understand empties the map, and an unmapped script then
@@ -480,6 +484,48 @@ def test_documented_authority_commands_resolve_in_the_image():
         "an image-copied reconciler script is documented by no command: "
         f"copied={sorted(copies)}, exercised={sorted(checked)}"
     )
+
+
+def test_the_image_asserts_its_own_reconcilers_at_build_time():
+    """The destruction class this repo could not close statically.
+
+    An instruction that removes a copied script leaves every check above green:
+    `_copied_scripts` still reads the COPY line, and the documented command
+    still resolves to its target. The post-COPY survival check that tried to
+    catch it is gone (module comment above) because deciding it needs the
+    WORKDIR in effect at each line, so a relative `RUN rm -rf scripts` in the
+    region where WORKDIR is still /app read as harmless.
+
+    The image decides it instead. A final `test -f` per shipped script runs
+    AFTER every instruction above it, knows nothing about spelling, and fails
+    the BUILD rather than a test. Mutation-proven with a real `docker build -f
+    deploy/Dockerfile.app .`: unmodified builds green; dropping the sessions
+    COPY, and separately inserting `RUN rm -rf scripts` under WORKDIR /app,
+    each turn it red at this exact step.
+
+    Keyed on the COPY map, so a reconciler added later is covered the day it is
+    copied rather than the day someone remembers to extend this list.
+    """
+    dockerfile = _app_dockerfile()
+    _single_stage(dockerfile)
+
+    copies = _copied_scripts(dockerfile)
+    assert copies, "deploy/Dockerfile.app copies no scripts/ file"
+
+    # LAST, not merely present. The guard's whole value is that nothing runs
+    # after it; an appended instruction is unchecked, so this fails loudly and
+    # makes moving the guard down a deliberate, reviewed act.
+    keyword, argument = _instructions(dockerfile)[-1]
+    assert keyword == "RUN", (
+        f"deploy/Dockerfile.app now ends in {keyword}, not the runtime "
+        "existence guard. The guard proves the filesystem AFTER every "
+        "instruction above it, so anything below it ships unchecked."
+    )
+    for target in sorted(copies.values()):
+        assert f"test -f {target}" in argument, (
+            f"the final RUN does not assert {target} exists, so an instruction "
+            f"that removed it would ship a broken image: {argument!r}"
+        )
 
 
 def test_required_config_manifests_fail_closed_for_postgres_authority():
