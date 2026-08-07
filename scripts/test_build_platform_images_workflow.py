@@ -3736,6 +3736,19 @@ def check_staging_relay_convergence(text: str) -> None:
     assert "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
         "the marker name must be bound to the run's CURRENT attempt")
 
+    # THE FORWARDED VERDICT IS PART OF THE CLASSIFICATION, so it needs the
+    # same single-assignment rule as CONVERGER. `VERDICT=yes` placed just
+    # inside `if VERDICT=$(classify_superseder_once ...)` preserves the jq
+    # filter, the single CONVERGER assignment and every other pin, passes
+    # `bash -n`, and turns an UNDECIDED poll into a green stand-down.
+    assert 'if VERDICT=$(classify_superseder_once "$1"); then' in code, (
+        "the polling wrapper must take its verdict straight from the "
+        "classifier call")
+    assert code.count("VERDICT=") == 1, (
+        "VERDICT may be assigned exactly once, by the classifier call; a "
+        "second assignment overrides an undecided result while leaving every "
+        f"other pin intact (found {code.count('VERDICT=')})")
+
     # `yes` MUST BE EARNED BY THE SUPPLY SET, NOT BY A GREEN CONCLUSION.
     #
     # sol-critic round 2, reproduced: a build can conclude success and publish
@@ -4010,6 +4023,14 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
                    'CONVERGER=$(superseder_deploys "$MAIN_SHA")\n'
                    "                CONVERGER=yes"),
+        ),
+        (
+            "the forwarded verdict overridden inside the polling wrapper, "
+            "turning an UNDECIDED poll into a green stand-down",
+            mutate(original,
+                   'if VERDICT=$(classify_superseder_once "$1"); then\n',
+                   'if VERDICT=$(classify_superseder_once "$1"); then\n'
+                   "                VERDICT=yes\n"),
         ),
         (
             "the `yes` finding acted on the pre-poll tip snapshot, so a "
