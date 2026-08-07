@@ -360,13 +360,29 @@ jobs:
             # candidate whose commit is NOT an ancestor (history rewritten, or an
             # artifact that outlived its branch) is skipped; an unreadable compare
             # yields an empty relation and is skipped too, so this fails closed.
-            RELATION=$(gh api \
+            # A transient compare failure must NOT be treated as a
+            # non-ancestor: `|| true` would blank RELATION, skip this
+            # candidate, and fall back to an older tag -- a backwards deploy
+            # (sol-critic RED round 2 on PR #519). Only an explicitly read
+            # non-ancestor status may skip; an unreadable compare fails closed.
+            if ! RELATION=$(gh api \
               "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$BUILD_HEAD_SHA" \
-              --jq '.status' || true)
-            if [ "$RELATION" != "ahead" ]; then
-              echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): the compare against the tip reports '$RELATION', not 'ahead', so that commit is not an ancestor of $BUILD_HEAD_SHA and its images are not what this tip describes."
-              continue
+              --jq '.status'); then
+              echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: the ancestry compare of candidate run $RUN_ID ($CANDIDATE_SHA) against the tip $BUILD_HEAD_SHA could not be read. Skipping it could fall back to an older tag and roll a service backwards, so failing closed rather than guessing. Retry, or dispatch $DEPLOY_WORKFLOW by hand with an exact task-definition ARN."
+              exit 1
             fi
+            case "$RELATION" in
+              ahead)
+                ;;
+              behind|identical|diverged)
+                echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): the compare against the tip reports '$RELATION', not 'ahead', so that commit is not an ancestor of $BUILD_HEAD_SHA and its images are not what this tip describes."
+                continue
+                ;;
+              *)
+                echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: the ancestry compare of candidate run $RUN_ID ($CANDIDATE_SHA) returned an unexpected status '$RELATION'. Failing closed rather than risk a backwards deploy."
+                exit 1
+                ;;
+            esac
             IMAGE_TAG=$(supply_set_tag)
             TARGET_SHA="$CANDIDATE_SHA"
             break
@@ -663,8 +679,6 @@ jobs:
               # relay; it does not order two relays against each other.
               MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
                 "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-              # Set only when this attempt dispatches DESPITE a moved tip.
-              NOOP_FINISH_FROM=""
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
                 if [ "$DEPLOYED_ANY" != "true" ]; then
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
@@ -674,112 +688,53 @@ jobs:
                 # leaves staging on a mixed identity. Whether that is benign
                 # turns entirely on whether the superseder converges it.
                 CONVERGER=$(superseder_deploys "$MAIN_SHA")
-                if [ "$CONVERGER" = "no" ]; then
-                  # The classification POLLS, so MAIN_SHA is a snapshot taken
-                  # before that wait. Re-read the tip and refuse to act on a
-                  # stale finding: while we classified $MAIN_SHA, a DEPLOYABLE
-                  # commit could have merged and its relay could have deployed
-                  # a newer tag to both services. Dispatching afterwards would
-                  # land $IMAGE_TAG last, which is the backwards deploy the
-                  # whole latest-main-only rule exists to stop.
-                  #
-                  # The shared concurrency group does NOT save us here, and
-                  # the tempting argument that it does is wrong at the source.
-                  # GitHub's concurrency docs state that FIFO is based on when
-                  # a run "started waiting on the concurrency group, not the
-                  # time each workflow was dispatched", and that "ordering is
-                  # not guaranteed". So the group orders neither by dispatch
-                  # time nor reliably at all: an earlier-dispatched run can
-                  # reach the group after a later one and execute last. There
-                  # is no serialization argument that makes a stale tag safe;
-                  # only a fresh tip read does.
-                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
-                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the docs-noop finding is stale and finishing $SERVICE on $IMAGE_TAG could land it on top of a newer deploy. Standing down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                    exit 1
-                  fi
-                  # The superseder builds NO images, so its relay dispatches
-                  # nothing and there is no newer deploy for $IMAGE_TAG to
-                  # land on top of. The hazard that makes standing down
-                  # correct does not exist here, and standing down would
-                  # strand the split with no converger, so finish the
-                  # release. This does NOT reopen the sol-critic RED from
-                  # PR #497 (relay A's older app landing over relay B's):
-                  # that needs a competing deploy, and a docs-only
-                  # superseder has none.
-                  #
-                  # KNOWN RESIDUAL, not closed here and deliberately named.
-                  # The re-read shrinks the window to the gap between it and
-                  # the dispatch below, but does not remove it: a DEPLOYABLE
-                  # commit C can merge inside that gap, C's own relay can
-                  # deploy newer images, and because the shared group orders
-                  # neither by dispatch time nor reliably at all, this relay's
-                  # older tag can still execute last. The same residual
-                  # predates this arm and covers a third commit merging while
-                  # a dispatched run is already being watched. No read taken
-                  # BEFORE a dispatch can close it, because the truth can
-                  # change after the read and before the deploy acts. The
-                  # durable fix is to validate deploy authority INSIDE the
-                  # deploy workflow while it already holds the staging
-                  # mutation lock, comparing the requested tag against the
-                  # tip at that moment; that lives in the infra repo and is
-                  # out of scope for this one. Until then the window is
-                  # seconds rather than the classifier's minutes, and the
-                  # failure it can still produce is the one this relay now
-                  # reports loudly rather than the one it used to hide.
-                  # Remember that this dispatch happens on a tip we had to
-                  # clear, so the landing check below can prove it stayed put.
-                  NOOP_FINISH_FROM="$MAIN_SHA"
-                  echo "::warning::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, but $MAIN_SHA published a docs-noop marker: it builds no images and its relay dispatches nothing, so no newer deploy exists and nothing else would converge staging. Finishing $SERVICE on $IMAGE_TAG is what closes the split."
-                elif [ "$CONVERGER" = "yes" ]; then
-                  # SYMMETRY WITH THE DOCS-NOOP ARM: this classification also
-                  # POLLED, so $MAIN_SHA is a snapshot taken before the wait,
-                  # and `yes` is a claim about a commit that may no longer be
-                  # the tip. sol-critic reproduced the consequence: A deploys
-                  # web and starts polling deployable B; docs-only C lands
-                  # while B is still building; B completes with its supply
-                  # set so A answers `yes` and exits green; B's own relay then
-                  # SKIPS because C is the tip; C's relay skips on its own
-                  # docs-noop marker. Nothing converges and A, B and C are all
-                  # green. That is the original incident displaced by one hop.
-                  # A supply set proves B COULD deploy, never that its relay
-                  # WILL. Fail CLOSED when the tip moved under the poll.
-                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
-                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                    exit 1
-                  fi
-                  # THE FRESH TIP READ ABOVE IS NECESSARY AND NOT SUFFICIENT.
-                  # It proves $MAIN_SHA is the tip at that instant and nothing
-                  # more. sol-critic carried the incident one hop further: A
-                  # reads TIP_NOW=B and classifies `yes`, docs-only C pushes
-                  # immediately AFTER that read, A exits green, B's relay then
-                  # skips on its latest-main-only check because C is the tip,
-                  # and C's relay dispatches nothing on its own docs-noop
-                  # marker. A's split survives with A, B and C all green. No
-                  # read taken before A exits can close that, so the proof has
-                  # to come from B ACTUALLY LANDING.
-                  #
-                  # So wait for B's receipt, bounded by this relay's own
-                  # existing deadline. A superseded B publishes none, and this
-                  # relay then fails RED rather than assuming.
-                  SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
-                  if [ -z "$SUP_ATTEMPT_SEEN" ]; then
-                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                    exit 1
-                  fi
-                  if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
-                    echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
-                    exit 0
-                  fi
-                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its build produced a supply set, but its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                  exit 1
-                else
+                if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then
+                  # `unknown`: the superseder's build failed, never appeared, or
+                  # outlived this watch, so nothing is KNOWN to converge staging.
+                  # Stand down RED rather than finish this older tag on top of
+                  # whatever it may deploy.
                   echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
                   exit 1
                 fi
+                # CONVERGE-AND-WAIT. Both a deployable superseder (`yes`) and,
+                # since PR #519, a DOCS-ONLY superseder (`no`) converge staging:
+                # the deployable one deploys its own images, the docs-only one
+                # RECONCILES both services onto the last built tag, and BOTH
+                # publish the same staging-converged receipt. So this relay no
+                # longer finishes its own remaining service on a moved tip -- that
+                # would race the superseder's deploy and could land this older tag
+                # last, the sol-critic RED #497/#508 race reopened by making
+                # docs-only commits dispatch (sol-critic RED round 2 on PR #519).
+                # It stands down on PROOF the superseder converged, exactly as the
+                # deployable case already did. #508's fail-red-on-split principle
+                # is unchanged: no receipt within budget is still RED.
+                #
+                # The classification POLLED, so $MAIN_SHA is a snapshot. Re-read
+                # the tip and fail CLOSED if it moved: the superseder we are about
+                # to trust may no longer be the tip, and its own relay may then
+                # stand down and converge nothing.
+                TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                  "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+                if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
+                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                  exit 1
+                fi
+                # A fresh tip read proves $MAIN_SHA is the tip at that instant and
+                # nothing more, so the proof of convergence has to come from the
+                # superseder ACTUALLY LANDING both services: its receipt. Wait for
+                # it, bounded by this relay's own deadline. A superseder that was
+                # itself superseded publishes none and this relay then fails RED.
+                SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
+                if [ -z "$SUP_ATTEMPT_SEEN" ]; then
+                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                  exit 1
+                fi
+                if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
+                  echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
+                  exit 0
+                fi
+                echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                exit 1
               fi
 
               BEFORE=$(latest_any_run_id)
@@ -825,26 +780,6 @@ jobs:
               fi
               if [ "$CONCLUSION" = "success" ]; then
                 DEPLOYED_ANY=true
-                # THE READ-TO-DISPATCH WINDOW, closed for REPORTING.
-                #
-                # Only the docs-noop arm dispatches after main has already
-                # moved, and no read taken BEFORE a dispatch can prove the tip
-                # held across it. So check now that the deploy has landed. If a
-                # third commit merged inside that window it may build images
-                # and deploy them, and this older tag could have landed last,
-                # leaving staging BACKWARDS. We cannot prove staging is
-                # forward, so say so loudly instead of concluding success.
-                # Preventing the stale write (rather than reporting it) needs
-                # authority validated inside the deploy workflow while it holds
-                # the staging mutation lock, which lives in the infra repo.
-                if [ -n "$NOOP_FINISH_FROM" ]; then
-                  TIP_AFTER=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                    "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-                  if [ "$TIP_AFTER" != "$NOOP_FINISH_FROM" ]; then
-                    echo "::error::STAGING MAY BE BACKWARDS: $SERVICE was finished on $IMAGE_TAG after main had already moved to $NOOP_FINISH_FROM, and main moved again to $TIP_AFTER while that deploy was in flight. If $TIP_AFTER builds images, its relay may have deployed them before this one landed, leaving staging on an OLDER release. Staging is NOT provably converged on $BUILD_HEAD_SHA; check the live images and converge with a successful main build."
-                    exit 1
-                  fi
-                fi
                 echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
                 break
               fi
