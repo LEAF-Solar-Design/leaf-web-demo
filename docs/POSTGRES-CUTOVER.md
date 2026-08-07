@@ -441,3 +441,152 @@ after the flip: a session outlives its own checkpoints for the first time, so
 this stops being invisible and starts looking like a regression to a user. Give
 those two tables a PostgreSQL home, or classify them as disposable staging state
 in writing.
+
+## Which execution path, and what happens to SESSIONS_DB (decided 2026-08-07)
+
+The section above establishes that the drained-color-first ordering cannot be
+executed. It stops there, at "the executable shape is: flip the LIVE color and
+accept a bounded mixed-mode rollout", and it explicitly leaves the other color
+unsettled. This section closes both questions.
+
+### The decision: option A
+
+Four paths were considered.
+
+- **A. One configuration deploy against the LIVE color**, accepting a bounded
+  mixed-mode rollout window. The idle color picks the selector up later.
+- **B. Build a control that can flip a DRAINED color**, then do both colors with
+  no overlap at all. Needs a workflow change, so it is not available today.
+- **C. Two-cycle.** Flip the live color now, then flip the other color the next
+  time IT is live. Never touches a drained service and needs no new control, but
+  leaves the fleet mixed-mode between cycles.
+- **D. Do not flip.** Leave the defect recorded.
+
+**Chosen: A.**
+
+Why the others lose.
+
+- **C loses because its extra step is either redundant or harmful, never
+  neutral.** Its whole appeal is avoiding a mixed-mode fleet, and there is no
+  mixed-mode fleet to avoid: the idle color sits at desired 0 between cycles, so
+  its stale `dual_write_shadow` revision is a configuration artifact that no
+  request can reach. Confirmed live rather than reasoned: at 2026-08-07T06:57Z
+  the drained color's target group was EMPTY, with zero registered targets. So
+  if the next warm inherits `postgres`, C's second flip does nothing; if it does
+  not inherit, C opens a SECOND rollout window identical to A's. C is A plus a
+  coin flip between waste and repetition.
+- **B loses on availability, not on merit.** It is the only zero-overlap answer
+  and it is the right long-term shape, but it needs a reviewed workflow change.
+  It is recorded as the follow-up, not the path.
+- **D loses because the defect is live and recurring.** It fired ten times in
+  fourteen minutes on 2026-08-06 and its trigger is ordinary traffic after any
+  task replacement, which blue/green performs routinely.
+
+Independent support: the same fork was put to Codex, Kimi and DeepSeek on one
+prompt on 2026-08-07. Codex and DeepSeek both returned A, independently, and
+both gave the same deciding reason recorded above, that C's second flip is
+redundant or harmful. Kimi timed out and cast no vote. Neither lane argued for
+B, C or D.
+
+### The overlap window, measured rather than argued
+
+The two lanes that answered disagreed on the size of the window, so it was
+measured directly against the live target group on 2026-08-07 rather than taken
+from either. All four numbers below are from `describe-target-groups`,
+`describe-target-group-attributes` and `describe-services` on the LIVE color:
+
+- health check interval **10s**, healthy threshold **2**, so roughly **20s** for
+  a new task to be marked healthy,
+- `deregistration_delay.timeout_seconds` = **30s**,
+- `minimumHealthyPercent=100`, `maximumPercent=200`, strategy `ROLLING`.
+
+One lane read a 30s interval and a 300s deregistration delay from the Terraform
+module defaults and concluded the window was seconds. **The live values are 10s
+and 30s, so that reading was wrong on both numbers**, and the module default is
+not what is deployed. Read the live target group, not the module.
+
+The honest shape of the exposure: new requests stop being routed to the old task
+when ECS deregisters it, but the 30s deregistration drain lets requests already
+riding an established keep-alive connection continue to reach the old
+`dual_write_shadow` task. So the exposure is **bounded by the 30s drain**, not
+by the workflow's 12 minute stability budget and not by the 300s module default.
+It is not "a few seconds of scheduler latency" either, because keep-alive is
+exactly how a polling front end behaves.
+
+Note also that the live service runs with `deploymentCircuitBreaker` **disabled**
+and `rollback: false`. ECS will not undo a bad rollout on its own; the workflow's
+own rollback script is the only automatic path, and per the section above a
+rollback off `postgres` is an incident path rather than a safe undo.
+
+### The SESSIONS_DB drift is deliberate until the flip, and the flip is what closes it
+
+Staging omits `SESSIONS_DB`, so it falls back to the task-local
+`server/sessions.db` that dies with the task. Production sets
+`SESSIONS_DB=/data/state/sessions.db` on EFS. That difference is the mechanism
+behind the mismatch, and the obvious repair is the wrong one.
+
+**Do not set `SESSIONS_DB` on staging before the flip.** A fresh durable path is
+an EMPTY SQLite database facing a POPULATED PostgreSQL, and
+`scripts/reconcile_sessions_authority.py` runs SQLite to PostgreSQL only,
+insert-only, with the source opened `mode=ro`. There is no reverse direction. So
+that change converts a mismatch that self-clears at the next task replacement
+into one that never clears.
+
+**For the same reason, do not add `SESSIONS_DB` to
+`deploy/required-config.app.json`.** That file requires `LEAF_SESSIONS_STORE`
+and `JOBS_DB` but not `SESSIONS_DB`, which is how the omission survived config
+validation, so adding it looks like the tidy fix. It is not a fix. It would make
+the harmful state mandatory at validation time, on every environment, with no
+way to decline it.
+
+What actually closes the drift is the flip itself. In `postgres` mode
+`get_or_create_session`, `get_session` and `append_event` all return at
+`if mode == "postgres"` before touching legacy SQLite or `_shadow_equal`, so the
+`app_sessions` path stops reading `SESSIONS_DB` entirely. Two consumers survive:
+`server/checkpoints.py` and `server/session_policy.py` each resolve
+`Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))`
+independently, consulting neither `_store_mode` nor `LEAF_SESSIONS_STORE`, and
+neither performs a shadow comparison. **That absence of a shadow compare is the
+whole reason the ordering matters**: after the flip, setting `SESSIONS_DB` can
+no longer create a mismatch, because nothing compares the two stores any more.
+
+So there is one forbidden ordering and two acceptable terminal states:
+
+- **Forbidden:** set `SESSIONS_DB` while the selector is still
+  `dual_write_shadow`. Permanent mismatch.
+- **Acceptable, preferred:** give `session_checkpoints` and `session_policies` a
+  PostgreSQL home, after which `SESSIONS_DB` has no consumers on staging at all
+  and the drift closes by deletion rather than by configuration.
+- **Acceptable, fallback:** after the flip lands, set `SESSIONS_DB` to durable
+  storage to stop those two tables dying with every task replacement.
+
+The rollback requirement in the section above is the same rule read backwards
+and does not conflict with this: every mode on the return path except `postgres`
+reads legacy SQLite, so any rollback off `postgres` must set `SESSIONS_DB`
+durable in the same transaction, before or with the selector change, never after.
+
+### Live state this decision was made against
+
+Read read-only from account `807034087062`, `us-east-1`, 2026-08-07T06:57Z:
+
+| service | desired/running | task definition | target group |
+|---|---|---|---|
+| `leaf-platform-app-alt` | 1/1 | `leaf-platform-app-alt:31` | 1 healthy target |
+| `leaf-platform-app` | 0/0 | `leaf-platform-app:552` | EMPTY |
+
+Both revisions still carry `LEAF_SESSIONS_STORE=dual_write_shadow` with
+`SESSIONS_DB` unset, so the defect is unfixed as of that read.
+
+**The colors have inverted since the earlier passages of this document were
+written**, which is the fourth distinct topology observed inside one day. The
+warning above bears repeating with teeth: re-read the live desired counts
+immediately before acting, including against this table.
+
+### What is NOT authorized here
+
+No deploy was dispatched. The staging flip is not operator-authorized, and this
+section decides only which path to take once it is. When that authorization
+arrives, the dispatch targets `target_color=live` with
+`configuration_delta=LEAF_SESSIONS_STORE=postgres`, against whichever color a
+fresh read shows is live at that moment, which is not necessarily the one in the
+table above.
