@@ -306,10 +306,18 @@ jobs:
                   # commit could have merged and its relay could have deployed
                   # a newer tag to both services. Dispatching afterwards would
                   # land $IMAGE_TAG last, which is the backwards deploy the
-                  # whole latest-main-only rule exists to stop. The shared
-                  # concurrency group does NOT save us here: it serializes
-                  # runs that overlap, and it does not order a dispatch that
-                  # arrives after the group has already drained.
+                  # whole latest-main-only rule exists to stop.
+                  #
+                  # The shared concurrency group does NOT save us here, and
+                  # the tempting argument that it does is wrong at the source.
+                  # GitHub's concurrency docs state that FIFO is based on when
+                  # a run "started waiting on the concurrency group, not the
+                  # time each workflow was dispatched", and that "ordering is
+                  # not guaranteed". So the group orders neither by dispatch
+                  # time nor reliably at all: an earlier-dispatched run can
+                  # reach the group after a later one and execute last. There
+                  # is no serialization argument that makes a stale tag safe;
+                  # only a fresh tip read does.
                   TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
                     "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
                   if [ "$TIP_NOW" != "$MAIN_SHA" ]; then

@@ -3533,8 +3533,11 @@ def check_staging_relay_convergence(text: str) -> None:
     # the dispatch there was no second tip read, so a DEPLOYABLE commit
     # merging during the poll could deploy a newer tag to both services and
     # this relay would then dispatch its older tag last. The shared
-    # concurrency group does not prevent that: it serializes runs that
-    # overlap, and does not order a dispatch arriving after the group drained.
+    # concurrency group does not prevent that, and an independent lane
+    # refuted the claim that it does against GitHub's own concurrency docs:
+    # FIFO is based on when a run "started waiting on the concurrency group,
+    # not the time each workflow was dispatched", and "ordering is not
+    # guaranteed". An earlier-dispatched run can therefore execute last.
     # Fail CLOSED on a moved tip rather than re-classify, so the arm cannot
     # spin on a fast-moving main.
     assert re.search(
