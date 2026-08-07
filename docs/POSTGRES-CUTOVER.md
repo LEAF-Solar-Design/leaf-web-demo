@@ -338,13 +338,62 @@ one store and not the other. Two shapes, and the second is the easy one to miss:
   existed long before the flip is still exposed, with no new session and no
   legacy write anywhere in the sequence.
 
-Mitigation: flip the DRAINED color first, verify it through the color-addressed
-header rules, then drain the live color and flip it, so the two modes never
-serve overlapping traffic. That is the operational form of the "quiesce legacy
-writes" prerequisite above. **Re-read the live desired counts immediately before
-acting rather than trusting any recorded value, including this document.** Which
-color is drained flips with every blue/green cycle, and the counts in
-`platform/authority-inventory.json` disagreed with a live read on 2026-08-06.
+**The obvious mitigation, flipping the drained color first, is NOT AVAILABLE.**
+An earlier revision of this section prescribed it. That was wrong, and the
+correction is recorded here rather than quietly deleted, because the idea is
+attractive enough that the next reader will propose it again.
+
+`deploy-leaf-platform-staging.yml` cannot apply
+`app_deploy_intent=configuration` to a drained color. Three gates, in order:
+
+1. `configuration` always downgrades the strategy to `direct`
+   ("always runs direct; strategy downgraded").
+2. In direct mode `LIVE_SERVICE="$DEPLOY_SERVICE"`, so the live-service check
+   inspects the DEPLOY TARGET, and a drained one fails on `desiredCount < 1`
+   with "refusing an image deploy to an inactive service".
+3. The only escape is barred by name: "A configuration deployment cannot
+   activate a drained service".
+
+A later gate would also stop it, though the run never reaches that far: the
+rollback baseline requires a RUNNING task ("No running task is available for a
+digest-pinned rollback baseline"), which a drained service has none of. It is a
+second mechanism on the same path, not an independent escape route, because the
+desired-count refusal above fires first.
+
+**`expected_task_definition` does not route the color, but do not read that as
+"it only matters for the baseline check".** It has three jobs: it is
+pattern-validated against the family, it gates the rollback baseline, and under
+configuration intent it also SELECTS the configuration source, because
+`CONFIG_TD="${CONFIG_TD:-$EXPECTED_TD}"` when `configuration_task_definition` is
+omitted. Routing is `target_color`, which **defaults to `live`**.
+
+The consequence of getting that wrong is a REFUSAL, not a silent misdeploy. A
+dispatch naming the drained color's ARN with `target_color` omitted routes to
+the live color, and the rollback baseline then compares that service's current
+task definition against the supplied ARN and exits: "Live task definition
+changed after review. Expected ...; found ...". The two colors use different
+task-definition families, so the mismatch is guaranteed. An earlier draft of
+this section called that a silent wrong-target deploy. It is not; it fails loudly.
+
+Both app services run `minimumHealthyPercent=100, maximumPercent=200` (measured
+2026-08-07), so a direct rolling deploy starts the new task BEFORE stopping the
+old one. The overlap window above is therefore inherent to the only executable
+path, not something the ordering could have removed.
+
+So the executable shape is: flip the LIVE color and accept a bounded mixed-mode
+rollout. **What happens to the other color afterwards is not settled.** A
+forward deploy clones whatever configuration baseline it is given, and
+`configuration_task_definition` can name any ACTIVE revision, so the drained
+color inherits the live selector only when no alternate baseline is supplied.
+Do not plan on automatic inheritance: confirm the idle color's registered
+revision carries `LEAF_SESSIONS_STORE=postgres` after its next warm, and flip it
+explicitly if it does not.
+
+**Re-read the live desired counts immediately before acting rather than trusting
+any recorded value, including this document.** Which color is drained flips with
+every blue/green cycle: three distinct states were observed within a few hours
+on 2026-08-07, and the counts in `platform/authority-inventory.json` disagreed
+with a live read on 2026-08-06.
 
 **2. Rollback has a mandatory ordering, and getting it backwards recreates this
 incident.** The return path is `postgres` to `shadow` to `legacy`. Every mode on
@@ -519,3 +568,479 @@ dispatch, the emitted SQL, and the enforcement, against a fake in place of
 `platform.db`; 0029 itself has been applied nowhere. Treat the PostgreSQL paths
 as reviewed code, not as exercised code, until a real apply and a real request
 say otherwise.
+
+## Which execution path, and what happens to SESSIONS_DB (decided 2026-08-07)
+
+The section above establishes that the drained-color-first ordering cannot be
+executed. It stops there, at "the executable shape is: flip the LIVE color and
+accept a bounded mixed-mode rollout", and it explicitly leaves the other color
+unsettled. This section closes both questions.
+
+**It also retracts one word from the sentence it just quoted.** That section, and
+an earlier draft of this one, called the rollout window "bounded". It is not, and
+the measured subsection below shows why. Read every earlier "bounded mixed-mode
+rollout" in this document as "single mixed-mode rollout": what option A buys is
+that there is ONE such window rather than two, not that the window has a known
+maximum.
+
+### The decision: option A
+
+Four paths were considered.
+
+- **A. One configuration deploy against the LIVE color**, accepting ONE
+  mixed-mode rollout window. The idle color picks the selector up later. The
+  window is single, not bounded; see the measured section below, which retracts
+  the word "bounded" wherever this document used it of that window.
+- **B. Build a control that can flip a DRAINED color**, then do both colors with
+  no overlap at all. Needs a workflow change, so it is not available today.
+- **C. Two-cycle.** Flip the live color now, then flip the other color the next
+  time IT is live. Never touches a drained service and needs no new control, but
+  leaves the fleet mixed-mode between cycles.
+- **D. Do not flip.** Leave the defect recorded.
+
+**Chosen: A.**
+
+Why the others lose.
+
+- **C loses because A already contains C's second flip, as a conditional instead
+  of a commitment.** The section above already prescribes the corrective step:
+  confirm the idle color's registered revision carries
+  `LEAF_SESSIONS_STORE=postgres` after its next warm, and flip it explicitly if
+  it does not. So the second flip is not the difference between the two paths.
+  The difference is that C schedules it unconditionally, while A performs it only
+  when the inheritance check fails. Since the workflow permits an alternate ACTIVE
+  configuration baseline, inheritance is genuinely not guaranteed, and that
+  corrective flip may well be needed. **When it is needed it is necessary
+  remediation, not waste.** What C buys with its unconditional second flip is
+  nothing, because its stated appeal is avoiding a mixed-mode fleet and there is
+  no reachable mixed-mode fleet to avoid: the idle color sits at desired 0
+  between cycles, and at 2026-08-07T06:57Z its target group was EMPTY, with zero
+  registered targets. C therefore pays a second rollout window in the case where
+  A pays none, and matches A in the case where the check fails.
+- **B loses on availability, not on merit.** It is the only zero-overlap answer
+  and it is the right long-term shape, but it needs a reviewed workflow change.
+  It is recorded as the follow-up, not the path.
+- **D loses because the defect is live and recurring.** It fired ten times in
+  fourteen minutes on 2026-08-06 and its trigger is ordinary traffic after any
+  task replacement, which blue/green performs routinely.
+
+Independent support, with its limits stated: the same fork was put to Codex,
+Kimi and DeepSeek on one shared prompt on 2026-08-07. Codex and DeepSeek both
+returned A independently; Kimi timed out and cast no vote; neither answering
+lane argued for B, C or D. Weigh that at what it is worth. Both lanes reached A
+partly by calling C's second flip redundant, which is the reasoning corrected
+above, and both were wrong about the overlap window in the ways corrected below.
+**Agreement on the choice is not agreement on the argument**, and here the
+choice survived while much of the shared reasoning did not.
+
+### The two-selector dispatch, and the blocker that WAS here (closed 2026-08-07)
+
+**Read this heading before the subsection: the blocker described below is
+CLOSED.** It said option A was undispatchable because the deploy workflow could
+not carry the second selector. That was true when written and was fixed roughly
+three hours later by `leaf-automation-aws-terraform` **PR #534**, "let the delta
+rail carry `LEAF_SESSION_ANNEX_STORE`", merged **2026-08-07T11:50:05Z**, which
+added both `LEAF_SESSION_ANNEX_STORE=legacy` and `=postgres` to
+`allowed_delta_pair()`, pinned them in
+`test_allowlist_is_positive_and_value_exact`, and documented them in the
+workflow README. Verified against that repository's `main`, not inferred.
+
+The mechanism is kept rather than deleted, because it is still the reason the
+dispatch must name BOTH selectors, and because a reader who plans a
+single-selector delta needs to know why it fails. Only the "cannot be executed"
+conclusion has expired.
+
+Found while re-reviewing this section after `0029` landed. It was not a caveat
+on the decision, it was a prerequisite that lived in the OTHER repository, and
+without it a release-complete go would have failed.
+
+**Half of this is already recorded above and is deliberate.** The annex section
+documents the coupling and its enforcement: a `selector_dependencies` entry in
+`platform/authority-inventory.json`, plus
+`server/platform_link.validate_session_annex_authority` refusing to start an app
+in the wrong combination, with the requirement being `postgres` EXACTLY. That is
+a good design and this section does not argue with it.
+
+What follows is the part that section does not cover, because it lives in
+another repository.
+
+**The coupling is reachable on the ordinary serving path, and it is armed by the
+very change being made.** `server/app.py` calls
+`platform_link.validate_postgres_startup()`, which calls
+`validate_session_annex_authority()`, and
+`postgres_startup_required()` becomes true BECAUSE `LEAF_SESSIONS_STORE=postgres`
+was just set. So a delta carrying only the sessions selector produces a task that
+refuses to serve, and it is the flip itself that arms the refusal.
+
+**And for about three hours the deploy workflow WOULD NOT carry the second
+selector.** Past tense throughout the rest of this subsection: all of it
+describes terraform `main` at `4e86975` (2026-08-07T08:34:56Z) and was fixed by
+PR #534 at 11:50:05Z.
+
+At that commit, `allowed_delta_pair()` in `deploy-leaf-platform-staging.yml`
+was a closed allowlist whose entire contents were `LEAF_JOBS_STORE=postgres`
+and the five `LEAF_SESSIONS_STORE` values. `LEAF_SESSION_ANNEX_STORE` did not
+appear anywhere in that workflow, zero occurrences in the file, so a delta
+naming it exited with
+`"configuration_delta pair is not on the reviewed migration-variable allowlist"`.
+
+So both dispatches available AT THAT COMMIT failed, in opposite ways:
+
+| dispatch | outcome at `4e86975` | outcome now |
+|---|---|---|
+| `LEAF_SESSIONS_STORE=postgres` alone | workflow accepts, new task raises at startup | unchanged, still raises |
+| both selectors together | workflow refuses the delta before deploying | **accepted, this is the correct dispatch** |
+
+**PR #534 closed the second row, and it is the row you act on.** The first row
+still holds and always will: a single-selector delta still produces a task that
+refuses to start, because that refusal is the application's deliberate gate, not
+a gap.
+
+So the surviving rule is not "wait for terraform" but **name both pairs in one
+dispatch**. `allowed_delta_pair()` now accepts the annex selector at `legacy`
+and `postgres`, and the workflow's own duplicate-name check is per NAME, so two
+different names in one delta is fine.
+
+**Kept because it is the kind of thing that gets lost between repositories:**
+`0029` made the staging flip require two selectors while the deploy workflow
+could carry only one, and for about three hours that left the staging flip
+undispatchable with no gate anywhere saying so. Nothing was done wrong. The
+enforcement was correct, the allowlist was correctly closed, they were written
+in different repositories, and no gate spans both. **That last sentence is the
+durable lesson and it is not closed by #534**: the cross-repository seam still
+has no automated check, so the next selector added on one side can silently
+strip dispatchability on the other.
+
+The decision itself was never affected. A was always the path; it briefly had a
+prerequisite, and the prerequisite has landed.
+
+### The overlap window, measured rather than argued
+
+The two lanes that answered disagreed on the size of the window, so it was
+measured directly against the live target group on 2026-08-07 rather than taken
+from either. All four numbers below are from `describe-target-groups`,
+`describe-target-group-attributes` and `describe-services` on the LIVE color:
+
+- health check interval **10s**, timeout 5s, healthy threshold **2**,
+- `deregistration_delay.timeout_seconds` = **30s**,
+- `minimumHealthyPercent=100`, `maximumPercent=200`, strategy `ROLLING`.
+
+One lane read a 30s interval and a 300s deregistration delay from the Terraform
+module defaults and concluded the window was seconds. **The live values are 10s
+and 30s, so that reading was wrong on both numbers**, and the module default is
+not what is deployed. Read the live target group, not the module.
+
+**Do not multiply the interval by the healthy threshold to predict how long the
+new task takes to start serving.** That threshold does not apply to a newly
+registered target. AWS is explicit: "After your target is registered, it must
+pass one health check to be considered healthy", and `HealthyThresholdCount` is
+defined as the consecutive successes required "before considering an UNHEALTHY
+target healthy". So a first registration costs roughly one interval plus
+registration time, not two intervals.
+
+**The exposure window is NOT bounded by the 30s drain, and an earlier draft of
+this section said it was.** That draft argued a client keep-alive connection
+could keep delivering new requests to the old task during the drain. It cannot,
+and the error was reading the client connection as if it terminated on the task.
+The client's persistent connection is to the load balancer, not to the target.
+AWS: "The load balancer stops routing requests to a target as soon as you
+deregister it", and connection draining is only the balancer waiting "until
+in-flight requests have completed". So the 30s delay covers work already in
+progress, and no new request reaches a draining target.
+
+The real window is the interval **between the new task becoming healthy and
+being routed to, and ECS beginning deregistration of the old one**. In that
+interval both targets are registered and healthy, so the load balancer spreads
+traffic across both, and a request can land on either mode. **AWS documents no
+maximum for it.** It is ECS scheduler behavior, not a configured value, so no
+measurement of this target group can bound it and none of the numbers above do.
+
+That leaves the honest position: the pieces are measured, the window itself is
+not bounded by anything we control or can cite. Treat it as short but open, plan
+to watch it rather than to wait it out, and do not put a number on it in a
+runbook. It is also not "a few seconds of scheduler latency", because that
+phrasing claims the same unbounded quantity is small.
+
+Note also that the live service runs with `deploymentCircuitBreaker` **disabled**
+and `rollback: false`. ECS will not undo a bad rollout on its own; the workflow's
+own rollback script is the only automatic path, and per the section above a
+rollback off `postgres` is an incident path rather than a safe undo.
+
+### The SESSIONS_DB drift is deliberate until the flip, and the flip is what closes it
+
+Staging omits `SESSIONS_DB`, so it falls back to the task-local
+`server/sessions.db` that dies with the task. Production sets
+`SESSIONS_DB=/data/state/sessions.db` on EFS. That difference is the mechanism
+behind the mismatch, and the obvious repair is the wrong one.
+
+**Do not set `SESSIONS_DB` on staging before the flip.** A fresh durable path is
+an EMPTY SQLite database facing a POPULATED PostgreSQL, and
+`scripts/reconcile_sessions_authority.py` runs SQLite to PostgreSQL only,
+insert-only, with the source opened `mode=ro`. There is no reverse direction. So
+that change converts a mismatch that self-clears at the next task replacement
+into one that never clears.
+
+**Adding `SESSIONS_DB` to `deploy/required-config.app.json` is not the fix
+either, though not for the reason an earlier draft gave.** That draft claimed it
+would make the harmful state mandatory. It would not, and the manifest is weaker
+than that: it is a flat list of NAMES, and the gate only asserts membership. See
+`test_required_config_manifests_fail_closed_for_postgres_authority`, whose whole
+check is `}.issubset(app_environment)`. It never inspects a value, so it cannot
+tell a durable EFS path from the task-local default, and an explicit task-local
+path would satisfy it while changing nothing.
+
+That is precisely why it does not help. The requirement here is conditional,
+"durable if and only if the selector still reads legacy SQLite", and a flat
+name list cannot express a condition. Adding the name would buy no safety and
+would invite the next reader to satisfy it with a durable path while the
+selector is still `dual_write_shadow`, which is the forbidden ordering above.
+Leave it out until the condition disappears.
+
+What actually closes the drift is the flip itself. In `postgres` mode
+`get_or_create_session`, `get_session` and `append_event` all return at
+`if mode == "postgres"` before touching legacy SQLite or `_shadow_equal`, so the
+`app_sessions` path stops reading `SESSIONS_DB` entirely.
+
+**Two SERVING-PATH consumers survive, and since 0029 they answer to a SECOND
+selector.** Serving-path is doing real work in that sentence: a third shipped
+reader exists, the operator-run reconciler, and it is described further down. An
+earlier draft of this subsection said `server/checkpoints.py` and
+`server/session_policy.py` consult no store mode and never shadow-compare, so
+that after the flip nothing could compare the two stores any more. **The annex
+section above landed while this one was being written and made that false.**
+Both modules still resolve
+`Path(os.environ.get("SESSIONS_DB", str(SERVER_DIR / "sessions.db")))`, but they
+now dispatch on `LEAF_SESSION_ANNEX_STORE`, whose vocabulary is its own
+(`session_annex.SHADOW_READ_MODES = {"shadow", "dual_write_shadow"}`), and in
+those modes `checkpoints.py` calls
+`session_annex.shadow_equal("checkpoint", legacy, postgres)`, which raises on
+inequality exactly as `session_store` does.
+
+So the ordering rule needs BOTH selectors, not one:
+
+- `LEAF_SESSION_ANNEX_STORE` defaults to `legacy` (`os.environ.get(SELECTOR,
+  "legacy")`), and under `legacy` the annex is SQLite-only with no comparison.
+- It is **UNSET on both live staging revisions**, verified in the same
+  2026-08-07T06:57Z read as the table below, so today the annex genuinely cannot
+  mismatch and the conclusion still holds.
+- But it is now a lever someone can pull independently of the flip. If the annex
+  selector is moved to `shadow` or `dual_write_shadow` while `SESSIONS_DB` points
+  at a fresh durable path, that reproduces the original hazard on the annex
+  tables, for the same reason and with the same permanence.
+
+**Restated: setting `SESSIONS_DB` needs `LEAF_SESSIONS_STORE=postgres`, with
+`LEAF_SESSION_ANNEX_STORE` at `legacy` or `postgres`.** Do NOT compress that
+into "no selector is in a shadow-reading mode": an earlier draft did, and that
+phrasing admits plain `dual_write`, which compares. The exact rule, and the
+reason it is asymmetric between the two selectors, is derived below under "not
+comparing is not the same as being inert". Check both before touching the
+variable, and re-derive the list if a
+third consumer appears, because the earlier draft was wrong within hours purely
+because a second one did.
+
+**The replacement argument is weaker than the one it replaced, and that is worth
+saying rather than leaving a reader to infer they are equivalent.** The old
+reason was a property of the CODE: no shadow compare existed on those two
+modules, so only a merged, reviewed change could falsify it. The new reason is a
+property of the ENVIRONMENT: `LEAF_SESSION_ANNEX_STORE` happens to be unset.
+
+Be accurate about how much weaker that is, because an earlier draft of this
+paragraph overstated it as "anyone can falsify that by setting a variable, with
+no pull request and no review". Not on this deployment. A task-definition
+override takes a reviewed terraform change or a `configuration_delta`, and **the
+delta rail cannot introduce the hazard at all**: PR #534 admitted exactly
+`LEAF_SESSION_ANNEX_STORE=legacy` and `=postgres`, the two values that never
+compare, and deliberately omitted the three that do. So the comparison hazard on
+the annex tables cannot arrive through the rail this document is about. It would
+take a terraform task-definition change or an image change naming one of the
+three omitted modes. (An earlier draft of this clause said the allowlist "does
+not even carry the annex selector today", which was true when written and was
+retracted above.) That
+draft also wrote the list as "means either", which is not exhaustive:
+`deploy/Dockerfile.app` bakes `LEAF_SESSION_ANNEX_STORE=legacy` into the image,
+so a reviewed application change moves it too, and the effective value is
+whichever of image default and task-definition override wins.
+
+The real difference is narrower than "no review" and still worth having. The old
+reason was fully visible to a reader of this repository. The new one is only
+half visible here: the baked default is in this tree, any override is not. So a
+reader here cannot confirm the EFFECTIVE value and must go and look at the live
+environment, which is what the unset observation above actually is.
+
+So state the condition rather than the observation. A first attempt at that
+condition said "outside `session_annex.SHADOW_READ_MODES` and
+`session_store._SHADOW_READ_MODES`", **and it was wrong, because it let
+`dual_write` through.** Plain `dual_write` is not a shadow-read mode and still
+compares: `session_store.get_or_create_session` runs
+`_shadow_equal("session identity", legacy["session_id"], postgres["session_id"])`
+for every mode in `_DUAL_WRITE_MODES = {"dual_write", "dual_write_shadow"}`,
+with only the whole-row compare gated behind the shadow set. `checkpoints.py`
+has the identical shape around
+`session_annex.shadow_equal("checkpoint identity", ...)`. A review probe run at
+`LEAF_SESSIONS_STORE=dual_write` with a fresh legacy identity against an existing
+PostgreSQL identity raised `RuntimeError: session identity shadow mismatch`,
+which is precisely the failure the condition claimed to exclude.
+
+The second attempt then failed the opposite way. It read "safe only while every
+selector that resolves it is `legacy` or `postgres`", which is right about
+COMPARISON and wrong about SAFETY, because it admits
+`LEAF_SESSIONS_STORE=legacy`. **Not comparing is not the same as being inert**,
+and blurring those two is what made both attempts wrong.
+
+There are two independent hazards, and `SESSIONS_DB` is only safe when neither
+applies:
+
+1. **The comparison hazard.** A selector in `dual_write`, `dual_write_shadow` or
+   `shadow` compares the two stores and raises on disagreement. Only `legacy`
+   and `postgres` never compare: `legacy` never consults PostgreSQL at all, and
+   `postgres` short-circuits before the legacy read.
+2. **The authority hazard, which the earlier drafts missed entirely.** Any mode
+   that still READS the SQLite file makes `SESSIONS_DB` a live authority
+   pointer, so repointing it swaps the authority and abandons whatever the old
+   path held. That covers `legacy`, `dual_write`, `dual_write_shadow` and
+   `shadow`. Only `postgres` makes the variable inert for its own tables.
+
+So the rule is ASYMMETRIC between the two selectors, exactly as the earlier
+paragraph in this section already said:
+
+- `LEAF_SESSIONS_STORE` must be `postgres`. Under `legacy` there is no mismatch
+  to create, and repointing still moves the live session authority to an empty
+  file, which is a different failure and not an acceptable one.
+- `LEAF_SESSION_ANNEX_STORE` may be `legacy` or `postgres` for the comparison
+  rule, but under `legacy` the annex tables are still read from the file, so
+  repointing abandons them. On staging that adds **no loss beyond what task
+  replacement already causes**, which is the accurate phrasing and not "costs
+  nothing": the annex section above is explicit that a running task can hold up
+  to one task-lifetime of checkpoints and non-default policies, that discarding
+  them is a real user-visible loss, and that it "is not nothing". Bounded by one
+  task lifetime rather than by history, and inside the discard class staging
+  already accepted. On production, where the file is durable EFS, it would not
+  be bounded and would not be acceptable.
+
+And the startup gate above then narrows every EXECUTABLE state to both selectors
+at `postgres`, which is the only combination where `SESSIONS_DB` is inert for
+sessions and annex alike. Prefer naming the behaviour to naming a mode set: the
+first attempt reasoned from `_SHADOW_READ_MODES` and never checked what that set
+excluded.
+
+Re-read the live task definition for BOTH selectors immediately before touching
+`SESSIONS_DB`, exactly as this document already says to re-read the desired
+counts, and for the same reason: a recorded environment fact is evidence about
+the past, not a guarantee about the present.
+
+More generally, and this is the reusable half: **a claim about what COVERS
+something decays faster than a claim about what something IS.** "These tables
+live in SQLite" survived months here. "And nothing compares them" died the day a
+peer shipped the comparison. Both of the claims corrected in this section were
+coverage claims. When you write one, write its expiry condition next to it.
+
+So there are two forbidden cases and exactly one acceptable terminal state:
+
+- **Forbidden on the sessions selector:** set `SESSIONS_DB` while
+  `LEAF_SESSIONS_STORE` is anything but `postgres`. In `dual_write`,
+  `dual_write_shadow` or `shadow` it is a permanent mismatch; in `legacy` it is
+  not a mismatch at all but it moves the live session authority to an empty
+  file, which is worse rather than better. Note the forbidden set is NOT "the
+  shadow-reading modes": plain `dual_write` compares too.
+- **Forbidden on the annex selector:** set `SESSIONS_DB` while
+  `LEAF_SESSION_ANNEX_STORE` is `dual_write`, `dual_write_shadow` or `shadow`.
+  Same mechanism, same permanence, on `app_session_checkpoints` and
+  `app_session_policies` instead. Only `legacy` and `postgres` are clear here,
+  and `legacy` only for the comparison hazard, subject to the abandonment
+  caveat above.
+- **Acceptable, and the ONLY terminal state:** both selectors reach
+  `postgres` together. **This is no longer a proposal**:
+  `platform/migrations/0029_session_annex.sql` and the dispatch in both modules
+  landed in the section above, and the startup gate documented earlier makes it
+  the only legal combination once the sessions selector moves. At that point the
+  annex tables are on PostgreSQL and **no serving operation touches the SQLite
+  file**. Say it that way and not "nothing resolves `SESSIONS_DB`": all three
+  modules still RESOLVE it at import, unconditionally and regardless of mode
+  (`session_store.py:114`, `checkpoints.py:25`, `session_policy.py:48`). The
+  variable keeps a resolved value; what stops is any read or write through it.
+  Note the annex section's own caveat that those PostgreSQL paths are reviewed
+  code, not exercised code.
+
+**An earlier draft listed a third state, "after the flip, set `SESSIONS_DB` to
+durable storage so those two tables stop dying with every task replacement".
+Delete that idea; it is unreachable.** It assumed a world where
+`LEAF_SESSIONS_STORE=postgres` coexists with an annex still reading SQLite, and
+`validate_session_annex_authority()` rejects exactly that combination at
+startup. In the only state the gate permits, the annex is already on PostgreSQL
+and a durable `SESSIONS_DB` would preserve nothing.
+
+**And "no consumers at all" was too strong even then.** A third shipped reader
+survives: `scripts/reconcile_sessions_authority.py`, whose
+`default_sqlite_path()` returns `session_store.DB_PATH` precisely so the
+reconciler resolves the legacy file the same way the app does, and which
+`deploy/Dockerfile.app` COPYs to `/app/scripts/`. State it as **no serving-path
+consumers**, not none.
+
+It is not a request-path hazard, because it is operator-run and nothing about it
+can raise on a user request. **But do not describe it as read-only, which an
+earlier draft of this paragraph did.** That holds for `parity` mode only. In
+`backfill`, `reconcile()` calls `_ensure_source_schema()`, which yields
+`store._db()`, the app's own WRITABLE connection, to run the lazy schema
+bootstrap; its docstring says outright that this "runs against the SAME database
+the live app is serving from, so a write lock held by a concurrent request is
+expected and recoverable". The `mode=ro` URI cited earlier governs the snapshot
+read, not the whole command. The direction claim is unaffected: it still never
+writes PostgreSQL back to SQLite, and it still has no UPDATE or DELETE path.
+
+The rollback requirement in the section above is the same rule read backwards
+and does not conflict with this: every mode on the return path except `postgres`
+reads legacy SQLite, so any rollback off `postgres` must set `SESSIONS_DB`
+durable in the same transaction, before or with the selector change, never after.
+
+### Live state this decision was made against
+
+Read read-only from account `807034087062`, `us-east-1`, 2026-08-07T06:57Z.
+These are observations, not artifacts committed here, so re-derive rather than
+cite them. The exact reads were `aws ecs describe-services --cluster
+leaf-automation-staging --services leaf-platform-app leaf-platform-app-alt`,
+then `aws elbv2 describe-target-health` on each service's
+`loadBalancers[0].targetGroupArn`, then `aws ecs describe-task-definition` on
+each reported revision. The timing values above came from
+`aws elbv2 describe-target-groups` and
+`aws elbv2 describe-target-group-attributes` on the LIVE color's target group
+`leaf-stg-platform-app-alt/5f41a0a56acd6ab6`, and the deployment percentages
+from `describe-services … --query 'services[0].deploymentConfiguration'`.
+
+| service | desired/running | task definition | target group |
+|---|---|---|---|
+| `leaf-platform-app-alt` | 1/1 | `leaf-platform-app-alt:31` | 1 healthy target |
+| `leaf-platform-app` | 0/0 | `leaf-platform-app:552` | EMPTY |
+
+Both revisions still carry `LEAF_SESSIONS_STORE=dual_write_shadow` with
+`SESSIONS_DB` unset, so the defect is unfixed as of that read.
+
+**The colors have inverted since the earlier passages of this document were
+written**, which is the fourth distinct topology observed inside one day. The
+warning above bears repeating with teeth: re-read the live desired counts
+immediately before acting, including against this table.
+
+### What is NOT authorized here
+
+No deploy was dispatched. The staging flip is not operator-authorized, and this
+section decides only which path to take once it is.
+
+**Do not copy an earlier draft's dispatch line.** It read
+`configuration_delta=LEAF_SESSIONS_STORE=postgres`, which is the single-selector
+delta that produces a task refusing to start. The correct delta names both
+selectors. It can now be sent: terraform PR #534 added the annex selector to the
+allowlist on 2026-08-07T11:50:05Z, so the only remaining gate is the operator's.
+In order:
+
+1. ~~Land the allowlist change in `leaf-automation-aws-terraform`.~~ **Done**,
+   PR #534, merged 2026-08-07T11:50:05Z. Re-confirm it is still on that
+   repository's `main` rather than trusting this line, which is exactly the
+   mistake this document keeps recording.
+2. Wait for operator release-complete.
+3. Re-read the live desired counts and pick the color that is live AT THAT
+   MOMENT, which is not necessarily the one in the table above.
+4. Dispatch with `target_color=live` and a delta naming BOTH
+   `LEAF_SESSIONS_STORE=postgres` and `LEAF_SESSION_ANNEX_STORE=postgres`.
+   Naming only the first is the failure mode this section exists to prevent.
+5. Verify the idle color's next warm on BOTH selectors, not just the sessions
+   one. The inheritance check described earlier is incomplete as written for the
+   same reason the dispatch was.
