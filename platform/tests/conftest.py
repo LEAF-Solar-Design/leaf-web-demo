@@ -68,9 +68,15 @@ def pytest_ignore_collect(collection_path, config):
 
     The existing integration suite intentionally imports psycopg and needs a
     PostgreSQL URL.  Without either, avoid importing it at collection time while
-    preserving the ``*_static.py`` proof modules (ledger, hashing, replay):
-    those load their targets by file path, import nothing DB-shaped, and are
-    exactly the tests that must run everywhere.
+    preserving the ``*_static.py`` proof modules.  Those either load their
+    targets by file path (ledger, hashing, replay, evidence, db_readiness) or
+    import ``leaf_platform.db`` for its source-level constants and pure
+    helpers (db_primitives, db_schema_proof, overlay_store).  Those two
+    groupings together account for all eight files in the suite.  The second
+    grouping does pull in ``psycopg`` at import time, so "static" here means
+    *needs no DATABASE_URL and opens no connection*, not *imports nothing
+    DB-shaped*.  Either way they are exactly the tests that must run
+    everywhere.
     """
     path = pathlib.Path(str(collection_path))
     if not _DB_CONFIGURED and path.parent == _TESTS_DIR \
