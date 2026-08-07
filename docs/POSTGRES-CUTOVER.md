@@ -900,15 +900,21 @@ live in SQLite" survived months here. "And nothing compares them" died the day a
 peer shipped the comparison. Both of the claims corrected in this section were
 coverage claims. When you write one, write its expiry condition next to it.
 
-So there is one forbidden ordering and two acceptable terminal states:
+So there are two forbidden cases and exactly one acceptable terminal state:
 
-- **Forbidden:** set `SESSIONS_DB` while `LEAF_SESSIONS_STORE` is anything but
-  `postgres`. In `dual_write`, `dual_write_shadow` or `shadow` it is a permanent
-  mismatch; in `legacy` it is not a mismatch at all but it moves the live
-  session authority to an empty file, which is worse rather than better. Note
-  the forbidden set is NOT "the shadow-reading modes": plain `dual_write`
-  compares too.
-- **Acceptable, and now the ONLY terminal state:** both selectors reach
+- **Forbidden on the sessions selector:** set `SESSIONS_DB` while
+  `LEAF_SESSIONS_STORE` is anything but `postgres`. In `dual_write`,
+  `dual_write_shadow` or `shadow` it is a permanent mismatch; in `legacy` it is
+  not a mismatch at all but it moves the live session authority to an empty
+  file, which is worse rather than better. Note the forbidden set is NOT "the
+  shadow-reading modes": plain `dual_write` compares too.
+- **Forbidden on the annex selector:** set `SESSIONS_DB` while
+  `LEAF_SESSION_ANNEX_STORE` is `dual_write`, `dual_write_shadow` or `shadow`.
+  Same mechanism, same permanence, on `app_session_checkpoints` and
+  `app_session_policies` instead. Only `legacy` and `postgres` are clear here,
+  and `legacy` only for the comparison hazard, subject to the abandonment
+  caveat above.
+- **Acceptable, and the ONLY terminal state:** both selectors reach
   `postgres` together. **This is no longer a proposal**:
   `platform/migrations/0029_session_annex.sql` and the dispatch in both modules
   landed in the section above, and the startup gate documented earlier makes it
