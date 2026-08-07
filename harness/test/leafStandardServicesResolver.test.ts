@@ -12,8 +12,10 @@ import type {
   AgentRunner,
   OAuthGrantProvider,
 } from "../src/ports/index.js";
-import { composeRunnerCapabilities } from "../src/vendor/mushy-author/ports/impl/runnerCapabilities.js";
-import { STANDARD_SERVICES_FACADE_TOOLS } from "../src/vendor/mushy-author/ports/impl/standardServicesFacade.js";
+import {
+  composeRunnerCapabilities,
+  STANDARD_SERVICES_FACADE_TOOLS,
+} from "../src/vendor/mushy-author/index.js";
 
 const context = {
   tenant_id: "tenant-a",

@@ -77,7 +77,7 @@ import {
   StandardServicesOAuthGrantProvider,
   standardServicesResolverFromEnv,
 } from "../src/ports/impl/leafStandardServicesResolver.js";
-import type { StandardServicesResolver } from "../src/vendor/mushy-author/ports/impl/standardServicesRuntime.js";
+import type { StandardServicesResolver } from "../src/vendor/mushy-author/index.js";
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";

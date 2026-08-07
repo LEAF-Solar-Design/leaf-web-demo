@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isAllowedMcpHost, isForbiddenMcpAddress } from "../src/ports/impl/mcpBridge.js";
+import { isAllowedMcpHost, isForbiddenMcpAddress } from "../src/ports/impl/mcpProxy.js";
 
 /**
  * Round-1 review found a REAL bypass, reproduced here in the exact spelling the
@@ -112,6 +112,24 @@ describe("scope: live runners mount only the tenant broker facade", () => {
     const { fileURLToPath } = await import("node:url");
     return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
   };
+
+  it("uses the public proxy export and contains no raw attachment module", async () => {
+    const { existsSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const vendorImpl = (name: string) => fileURLToPath(new URL(
+      `../src/vendor/mushy-author/ports/impl/${name}`,
+      import.meta.url,
+    ));
+    expect(existsSync(vendorImpl("mcpBridge.ts"))).toBe(false);
+    expect(existsSync(vendorImpl("mcpNetworkPolicy.ts"))).toBe(true);
+    expect(existsSync(fileURLToPath(new URL(
+      "../src/ports/impl/mcpBridge.ts",
+      import.meta.url,
+    )))).toBe(false);
+    const wrapper = await read("../src/ports/impl/mcpProxy.ts");
+    expect(wrapper).toMatch(/from "\.\.\/\.\.\/vendor\/mushy-author\/index\.js"/);
+    expect(wrapper).not.toMatch(/vendor\/mushy-author\/ports\/impl/);
+  });
 
   it("ConverseSdkRunner composes the spine plus resolver facade and never touches the bridge", async () => {
     const source = await read("../src/vendor/mushy-author/ports/impl/converseSdkRunner.ts");

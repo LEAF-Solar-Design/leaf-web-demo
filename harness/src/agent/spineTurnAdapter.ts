@@ -63,7 +63,7 @@ import type {
   SpineConverseRunner,
   InstantExecutorClient,
 } from "../ports/index.js";
-import type { StandardServicesResolver } from "../vendor/mushy-author/ports/impl/standardServicesRuntime.js";
+import type { StandardServicesResolver } from "../vendor/mushy-author/index.js";
 
 /** The 9 event types the frozen wire admits (ports/converse.ts). The loop's
  *  turn_started / confirmation_resolved / session_state are the turn engine's

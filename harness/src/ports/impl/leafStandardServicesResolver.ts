@@ -11,13 +11,11 @@ import type {
 import type {
   RunnerCapabilityProfileId,
   StandardServiceIdentity,
-} from "../../vendor/mushy-author/ports/impl/standardServices.js";
-import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/ports/impl/tenantBrokerStandardServiceProvider.js";
-import type {
   StandardServicesResolver,
   StandardServicesSessionAttachment,
   TrustedStandardServicesContext,
-} from "../../vendor/mushy-author/ports/impl/standardServicesRuntime.js";
+} from "../../vendor/mushy-author/index.js";
+import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/index.js";
 
 const MAX_ATTACHMENT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;

@@ -1,8 +1,8 @@
 /**
  * The guarded upstream transport for tenant MCP servers.
  *
- * WHY THIS EXISTS. mcpBridge validates a tenant MCP server's HOST — at set time
- * and again by DNS at mount time. Host validation alone cannot make a
+ * WHY THIS EXISTS. The network policy validates a tenant MCP server's HOST.
+ * Host validation alone cannot make a
  * tenant-controlled URL safe, and PR #360's review proved it twice over:
  *
  *   1. REDIRECTS. Handing the Agent SDK `{ type: "http", url }` means the SDK
@@ -86,13 +86,13 @@ import {
   ListToolsResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpBridge.js";
+import { isForbiddenMcpAddress, type McpServerConfig } from "./mcpNetworkPolicy.js";
 export {
   isAllowedMcpHost,
   isForbiddenMcpAddress,
   resolveAllowedMcpHost,
-} from "./mcpBridge.js";
-export type { McpHostResolver, McpServerConfig } from "./mcpBridge.js";
+} from "./mcpNetworkPolicy.js";
+export type { McpHostResolver, McpServerConfig } from "./mcpNetworkPolicy.js";
 
 /** How long to wait for the upstream handshake before giving up on a server. */
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -230,8 +230,7 @@ export function guardedFetch(
  *
  * Returns null when the upstream cannot be reached or does not complete the
  * handshake in time — a tenant server being down must degrade the turn, never
- * fail it, which is the same posture resolveMcpAttachment already takes for a
- * server it refuses.
+ * fail it. A refused server is omitted from the contained proxy set.
  */
 export async function proxyTenantMcpServer(
   config: McpServerConfig,

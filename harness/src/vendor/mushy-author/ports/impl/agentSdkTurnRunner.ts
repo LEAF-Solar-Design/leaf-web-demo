@@ -89,6 +89,7 @@ import type {
   TrustedStandardServicesContext,
 } from "./standardServicesRuntime.js";
 import { findTool } from "../../registry/registerTool.js";
+import { grantSecrets, redactSecrets } from "../../redact.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces this file relies on (documented above,
@@ -507,7 +508,67 @@ function summarizeEnvelope(envelope: ResultEnvelope): string {
     const text = JSON.stringify(envelope.result ?? {});
     return text.length > RESULT_SUMMARY_MAX_CHARS ? `${text.slice(0, RESULT_SUMMARY_MAX_CHARS)}… (truncated)` : text;
   }
-  return envelope.error?.message ?? "the tool run failed with no error detail.";
+  // The broker detail and error code are untrusted remote text. The legacy
+  // transcript needs only the stable failure state, not a credential-bearing
+  // backend diagnostic.
+  return "the tool run failed.";
+}
+
+const STABLE_RUNNER_ERRORS = new Set([
+  "agent_sdk_turn_broker_failed",
+  "agent_sdk_turn_failed",
+  "agent_sdk_turn_query_failed",
+  "agent_sdk_turn_sdk_setup_failed",
+  "standard_services_attachment_expired",
+  "standard_services_attachment_identity_mismatch",
+  "standard_services_attachment_incomplete",
+  "standard_services_context_turn_mismatch",
+  "standard_services_resolver_setup_failed",
+]);
+const STABLE_CONTEXT_ERROR = /^standard_services_context_invalid:(tenant_id|session_id|subscription_mount_id|authority_session_id|authority_turn_id)$/;
+
+function isStableRunnerError(message: string): boolean {
+  return STABLE_RUNNER_ERRORS.has(message) || STABLE_CONTEXT_ERROR.test(message);
+}
+
+function stageError(error: unknown, fallback: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(isStableRunnerError(message) ? message : fallback);
+}
+
+function publicRunnerError(error: unknown, grant: AgentGrant): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+  // Exact allowlisted codes are public protocol values. Check them before the
+  // token-shaped fallback pass, which would otherwise redact a long underscore
+  // code as if it were a credential.
+  const scrubbed = redactSecrets(raw, grantSecrets(grant));
+  const message = isStableRunnerError(raw)
+    ? raw
+    : isStableRunnerError(scrubbed) ? scrubbed : "agent_sdk_turn_failed";
+  const wrapped = new Error(message);
+  wrapped.stack = `${wrapped.name}: ${message}`;
+  return wrapped;
+}
+
+function validateStandardServicesContext(
+  input: ConverseTurnInput,
+  context: TrustedStandardServicesContext | undefined,
+): void {
+  if (context && (
+    context.tenant_id !== input.tenant_id
+    || context.session_id !== input.session_id
+    || context.authority_turn_id !== input.turn_id
+  )) {
+    throw new Error("standard_services_context_turn_mismatch");
+  }
+}
+
+async function* guardedQuery(query: AsyncIterable<unknown>): AsyncIterable<unknown> {
+  try {
+    yield* query;
+  } catch (error) {
+    throw stageError(error, "agent_sdk_turn_query_failed");
+  }
 }
 
 /** Best-effort job id extraction. ResultEnvelope (CONTRACT section 3) has no dedicated
@@ -526,30 +587,38 @@ export class AgentSdkTurnRunner implements ConverseRunner {
   ) {}
 
   async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
+    // Product authority must match the requested turn before any credential,
+    // repository, broker, resolver, or SDK dependency is touched. In particular,
+    // an approved confirmation is not permission to execute under swapped context.
+    validateStandardServicesContext(input, opts?.standardServicesContext);
+
     // Resolve the tenant's Agent SDK grant FIRST, before any yield: a thrown
     // GrantRequiredError propagates un-caught out of this generator's first next()
     // call, so the HTTP shell (server.ts /turn route) sees it before any NDJSON output
     // has started and can answer with a clean non-stream 401 (converse.ts doc: "401
     // {grant_required:true,...}") - the SAME mechanism /author already relies on.
     const grant = await this.ports.oauth.getGrant(input.tenant_id);
-
-    if (input.confirm) {
-      yield* this.runConfirm(
+    try {
+      if (input.confirm) {
+        yield* this.runConfirm(
+          input,
+          grant,
+          opts?.signal,
+          opts?.planFirst === true,
+          opts?.standardServicesContext,
+        );
+        return;
+      }
+      yield* this.driveSession(
         input,
         grant,
         opts?.signal,
         opts?.planFirst === true,
         opts?.standardServicesContext,
       );
-      return;
+    } catch (error) {
+      throw publicRunnerError(error, grant);
     }
-    yield* this.driveSession(
-      input,
-      grant,
-      opts?.signal,
-      opts?.planFirst === true,
-      opts?.standardServicesContext,
-    );
   }
 
   private async *runConfirm(
@@ -598,17 +667,16 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     const maxTurns = this.opts.maxTurns ?? 24;
     const maxTotalTokens = this.opts.maxTotalTokens ?? 500_000;
     const approvalTools = this.opts.approvalTools ?? DEFAULT_APPROVAL_TOOLS;
-    if (standardServicesContext && (
-      standardServicesContext.tenant_id !== input.tenant_id
-      || standardServicesContext.session_id !== input.session_id
-      || standardServicesContext.authority_turn_id !== input.turn_id
-    )) {
-      throw new Error("standard_services_context_turn_mismatch");
-    }
 
     const childEnv = buildScrubbedEnv(grant, process.env);
-    const sdk = (await (this.opts.sdkImport?.() ?? dynImport(["@anthropic-ai", "claude-agent-sdk"]))) as SdkModule;
-    const { z } = (await (this.opts.zodImport?.() ?? dynImport(["zod"]))) as ZodModule;
+    let sdk: SdkModule;
+    let z: ZodModule["z"];
+    try {
+      sdk = (await (this.opts.sdkImport?.() ?? dynImport(["@anthropic-ai", "claude-agent-sdk"]))) as SdkModule;
+      ({ z } = (await (this.opts.zodImport?.() ?? dynImport(["zod"]))) as ZodModule);
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_sdk_setup_failed");
+    }
 
     const toolUseNames = new Map<string, string>();
     const pending: HarnessTurnEvent[] = [];
@@ -655,8 +723,10 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     );
 
     const server = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, version: "1.0.0", tools: [apsTestRunTool, askUserTool] });
-    const services = this.opts.standardServicesResolver && standardServicesContext
-      ? createStandardServicesFacade({
+    let services: ReturnType<typeof createStandardServicesFacade> | undefined;
+    if (this.opts.standardServicesResolver && standardServicesContext) {
+      try {
+        services = createStandardServicesFacade({
           sdk,
           z,
           ...(await resolveStandardServicesSession(
@@ -665,8 +735,11 @@ export class AgentSdkTurnRunner implements ConverseRunner {
             "spine",
           )),
           profile: "spine",
-        })
-      : undefined;
+        });
+      } catch (error) {
+        throw stageError(error, "standard_services_resolver_setup_failed");
+      }
+    }
     const standardServiceTools = new Set(services?.allowed_tools ?? []);
 
     const canUseTool = async (
@@ -713,25 +786,30 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // One guarded mount is the whole design; a second unguarded one is how the
     // guard gets lost. If this runner is ever revived, mount through the same
     // path ConverseSdkRunner uses, settings included.
-    const q = sdk.query({
-      prompt: buildPrompt(input),
-      options: buildTurnOptions({
-        childEnv,
-        model: this.opts.model,
-        maxTurns,
-        abortController: abort,
-        server,
-        ...(services ? { services } : {}),
-        planFirst: planFirst === true,
-        // This list stays the APS tool only; the money-gated canUseTool
-        // envelope below is unchanged.
-        canUseTool,
-      }),
-    });
+    let q: AsyncIterable<unknown>;
+    try {
+      q = sdk.query({
+        prompt: buildPrompt(input),
+        options: buildTurnOptions({
+          childEnv,
+          model: this.opts.model,
+          maxTurns,
+          abortController: abort,
+          server,
+          ...(services ? { services } : {}),
+          planFirst: planFirst === true,
+          // This list stays the APS tool only; the money-gated canUseTool
+          // envelope below is unchanged.
+          canUseTool,
+        }),
+      });
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_query_failed");
+    }
 
     let turnCount = 0;
     let cumulativeTokens = 0;
-    for await (const raw of q) {
+    for await (const raw of guardedQuery(q)) {
       const msg = raw as Record<string, unknown>;
       if (msg.type === "assistant") {
         turnCount += 1;
@@ -788,20 +866,24 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     input: ConverseTurnInput,
     proposal: ConfirmProposal,
   ): Promise<{ ok: boolean; summary: string; jobId?: string }> {
-    const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
-    const pkg = findTool(repo.dir, proposal.tool);
-    if (!pkg) {
-      return { ok: false, summary: `no registered tool named "${proposal.tool}" was found in this tenant's registry.` };
+    try {
+      const repo = await this.ports.tenantRepo.checkout(input.tenant_id);
+      const pkg = findTool(repo.dir, proposal.tool);
+      if (!pkg) {
+        return { ok: false, summary: `no registered tool named "${proposal.tool}" was found in this tenant's registry.` };
+      }
+      const envelope = await this.ports.broker.runTool({
+        tenantId: input.tenant_id,
+        tool: pkg,
+        params: proposal.params ?? {},
+        dwg: input.drawing_id,
+        apsLive: false,
+      });
+      const jobId = extractJobId(envelope);
+      return { ok: envelope.ok, summary: summarizeEnvelope(envelope), ...(jobId ? { jobId } : {}) };
+    } catch (error) {
+      throw stageError(error, "agent_sdk_turn_broker_failed");
     }
-    const envelope = await this.ports.broker.runTool({
-      tenantId: input.tenant_id,
-      tool: pkg,
-      params: proposal.params ?? {},
-      dwg: input.drawing_id,
-      apsLive: false,
-    });
-    const jobId = extractJobId(envelope);
-    return { ok: envelope.ok, summary: summarizeEnvelope(envelope), ...(jobId ? { jobId } : {}) };
   }
 }
 

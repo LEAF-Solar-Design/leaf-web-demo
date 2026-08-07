@@ -21,7 +21,7 @@
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "c65dadd5142705fa11a10b30b6992d648f983d9481539b63af0c68d1d5e14d06",
     "ports/impl/agentSdkRunner.ts": "de088e4fdde2028bad42bfe3a4eb56dca8936290cac47586a3351c85229fcc70",
-    "ports/impl/agentSdkTurnRunner.ts": "61b3d5bc29cee3a05412a981c81c473cab2d8846635b06f891fddb5e8823d7d6",
+    "ports/impl/agentSdkTurnRunner.ts": "0e3a620e05ad3249c19c8f6fb92aa3307c48a03b7d7ed3465cfb7fcd966ce933",
     "ports/impl/converseSdkRunner.ts": "c77fde86fb1530fb6a51abc69ff91162c465c702d157477f0aca8f197da8fac5",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
@@ -29,8 +29,8 @@
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
     "ports/impl/httpUpstreamSink.ts": "2e4266b675e3726a28c9da24f6b88a314d4a857de76bfb2c45f2ba7ee22c1a08",
-    "ports/impl/mcpBridge.ts": "6c5c46bf0da73011515ca50813e22f44f9bec300894914d5b308abba14509c1e",
-    "ports/impl/mcpProxy.ts": "ca40c055b75dd211e214b4474d2002c46fb2c55a6b3059995e3d14edf25654b0",
+    "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
+    "ports/impl/mcpProxy.ts": "f60f5cbe27fdf2fc0825c9adbabbdbbb8cb4177fd004b84e12e57f18906cd2e4",
     "ports/impl/oauthGrantProvider.ts": "0b211d1ba3e1a6a4817fe591f65426e4d69f86a15eba1f06a00ce166576f6ef0",
     "ports/impl/pgSessionStore.ts": "fc903254d6a07a671cb15a7e14b7bef19abd7219b4ff7cbfda2503208d9e32dd",
     "ports/impl/repoEditRunner.ts": "d31f4f22613b653feff534c194f5247308e8c3053905f1b7469969ae0324b98b",
@@ -56,5 +56,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "3bcb2bedb3686e102c58241893a7d904eff8accf"
+  "upstream_commit": "1d9c996e0c38504171ae521fe270d7bdd9344f3a"
 }
