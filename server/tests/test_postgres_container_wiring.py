@@ -862,6 +862,43 @@ def test_documented_authority_commands_resolve_in_the_image():
     regardless of WORKDIR, which is the whole property being bought, so
     requiring it first means no future parser hole can readmit the original
     defect. The COPY-target comparison is a second, weaker check on top.
+
+    WHAT A DAEMON HAS ACTUALLY RUN. This test decides resolution by PARSING the
+    Dockerfile and the documented sources; a daemon has now EXECUTED the
+    documented commands in the BUILT release image, which is the gap #509 left
+    open. #509 demonstrated the customization command against a filesystem
+    layout REPLAYED from this Dockerfile's COPY lines and final WORKDIR, not the
+    release image, and never touched PostgreSQL. On tree
+    465cbd5fddc1d0d290eef1e13f4a4b172d57e359 (the tree of main, `git rev-parse
+    HEAD^{tree}`, not a commit id), a daemon built `leaf-app:reconciler-proof`
+    from deploy/Dockerfile.app -- `docker image inspect` reported WorkingDir
+    /app/server -- and ran each documented command with `--entrypoint sh` so the
+    WORKDIR was left untouched and the echoed cwd is the command's own, against a
+    live postgres:16 migrated by the image's /app/platform/db module:
+
+      * Both customization commands (backfill, parity) ran from cwd /app/server
+        and emitted `leaf.customization-authority-reconciliation.v2` receipts;
+        `reconcile_sessions_authority.py --mode backfill` emitted
+        `leaf.sessions-authority-reconciliation.v2`. The absolute /app/scripts
+        path resolved and the script ran, in the only environment it is ever run.
+      * The CONTRAST held on a real case-sensitive image: the repo-relative
+        `python scripts/<name>` and the miscased `/app/scripts/Reconcile_*` each
+        exited non-zero with "No such file or directory". The miscase only a
+        Linux image decides; the Windows host resolves it, so only a daemon here
+        can prove it.
+      * `reconcile_sessions_authority.py --mode parity` RESOLVED and ran from
+        /app/server, then declined the bare image rather than fabricate a
+        result: it reads SESSIONS_DB (default /app/server/sessions.db), which
+        deploy/Dockerfile.app deliberately ships none of, so it exited 2 with no
+        receipt. That is the documented posture, not a defect -- authority-
+        inventory.json app_sessions parity records "a cutover receipt cannot be
+        manufactured out of a source that is simply gone" and status
+        implemented_not_run. A meaningful sessions parity needs production's
+        durable SESSIONS_DB=/data/state/sessions.db and stays unrun here.
+
+    The receipt came from a daemon harness (prove_reconcilers_in_image.py, not
+    committed). Once it is gone nothing here re-proves it; the static assertions
+    below are what stand.
     """
     dockerfile = _app_dockerfile()
     _single_stage(dockerfile)
