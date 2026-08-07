@@ -205,9 +205,21 @@ def _copied_scripts(dockerfile: str) -> dict[str, str]:
     for keyword, argument in _instructions(dockerfile):
         if keyword != "COPY":
             continue
-        parts = argument.split()
+        # COPY takes flags before its operands (`--chown=`, `--from=`,
+        # `--link=`, ...). Requiring exactly two fields silently skipped every
+        # flagged form, which is how a script could be shipped and never
+        # checked. Split flags off rather than counting fields.
+        parts = [part for part in argument.split() if not part.startswith("--")]
+        flags = [part for part in argument.split() if part.startswith("--")]
         if len(parts) != 2 or not parts[0].startswith("scripts/"):
             continue
+        # `--from=` sources another stage or an external image, so the path is
+        # not this repository's scripts/ tree and the reasoning below does not
+        # hold. Refuse rather than assume.
+        assert not any(flag.startswith("--from=") for flag in flags), (
+            f"COPY of {parts[0]} uses --from=, so it does not come from the "
+            "repository tree; teach this guard before using that form."
+        )
         name = PurePosixPath(parts[1]).name
         # Carried over from the sessions-only guard #495 merged: two COPYs of
         # one basename make "the" image path ambiguous, and a dict would
@@ -332,6 +344,17 @@ def test_documented_authority_commands_resolve_in_the_image():
     copies = _copied_scripts(dockerfile)
     assert copies, "deploy/Dockerfile.app copies no scripts/ file"
 
+    # WHAT TO CHECK IS CHOSEN FROM THE REPOSITORY, NOT FROM THE DOCKERFILE.
+    # Selecting on the COPY map made a parse gap invisible twice over: a script
+    # the parse missed was neither checked NOR counted, so both anti-vacuity
+    # assertions stayed green while a broken command shipped. Keying on "this
+    # token names a real file in scripts/" cannot miss that way, whatever COPY
+    # form the Dockerfile uses.
+    repo_scripts = {
+        path.name for path in (REPO_ROOT / "scripts").iterdir() if path.is_file()
+    }
+    assert repo_scripts, "no files in scripts/"
+
     inventory = json.loads(_read("platform/authority-inventory.json"))
 
     checked: list[tuple[str, str, str]] = []
@@ -341,9 +364,22 @@ def test_documented_authority_commands_resolve_in_the_image():
             if not command:
                 continue
             for token in command.split():
-                target = copies.get(PurePosixPath(token).name)
-                if target is None:
+                name = PurePosixPath(token).name
+                if name not in repo_scripts:
                     continue
+
+                # A script the inventory documents but the Dockerfile is not
+                # seen to copy is a blocker either way: either it does not ship
+                # and the command cannot run, or the COPY parse missed the form
+                # used and this guard is blind. Do not skip it.
+                target = copies.get(name)
+                assert target is not None, (
+                    f"{authority['id']} {phase} command names {token!r}, but no "
+                    f"COPY of scripts/{name} into the image was found in "
+                    f"deploy/Dockerfile.app. Either the script is not shipped, "
+                    f"or this guard's COPY parse does not understand the form "
+                    f"used. Both are blockers."
+                )
 
                 # Primary: parse-free, so no Dockerfile-reading bug can weaken
                 # it. `final_workdir` appears only in the message.
@@ -363,11 +399,15 @@ def test_documented_authority_commands_resolve_in_the_image():
                 )
                 checked.append((authority["id"], phase, token))
 
-    # Anti-vacuity: if the Dockerfile or inventory parse ever drifts, this
-    # test must go red rather than silently check nothing. Both reconcilers
-    # are documented for backfill and parity, across three authority entries.
+    # Anti-vacuity: if the inventory parse ever drifts, this test must go red
+    # rather than silently check nothing. Both reconcilers are documented for
+    # backfill and parity, across three authority entries.
     assert len(checked) >= 6, f"guard checked too few commands: {checked}"
-    assert {PurePosixPath(token).name for _, _, token in checked} == set(copies), (
+    # Every script the image ships must be reached by a documented command.
+    # This direction is now the only one keyed on the COPY map, and it is the
+    # safe direction: a COPY the parse MISSES cannot hide a command here,
+    # because selection above comes from the repository tree instead.
+    assert set(copies).issubset({PurePosixPath(t).name for _, _, t in checked}), (
         "an image-copied reconciler script is documented by no authority "
         f"command: copied={sorted(copies)}, exercised={sorted(checked)}"
     )
