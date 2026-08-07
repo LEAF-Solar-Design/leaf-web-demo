@@ -163,8 +163,16 @@ def _logical_lines(dockerfile: str) -> list[str]:
 # The exact-spelling version silently skipped ` ```shell ` (one trailing space),
 # ` ```shell title=x ` and ` ```SHELL `, so a NEW worked example spelled any of
 # those ways would go unchecked while the anti-vacuity count stayed green.
+#
+# The tag must END here, and `\b` is not enough to say so: `\b` is satisfied by
+# the hyphen in ```shell-session, so a TRANSCRIPT fence -- whose lines carry a
+# `$ ` prompt and quote commands as a user typed them, relative paths included --
+# was read as a list of runnable commands and then failed for using one. That is
+# a false positive on ordinary documentation. `(?![\w-])` ends the tag at a real
+# boundary, so ```shell-session, ```sh-session and ```bash-repl stay unread while
+# ```shell title=x is still read.
 _SHELL_FENCE = re.compile(
-    r"^[ \t]*```[ \t]*(?:shell|bash|sh)\b[^\n]*\n(.*?)^[ \t]*```",
+    r"^[ \t]*```[ \t]*(?:shell|bash|sh)(?![\w-])[^\n]*\n(.*?)^[ \t]*```",
     re.DOTALL | re.MULTILINE | re.IGNORECASE,
 )
 
@@ -337,6 +345,33 @@ def _copy_operands(keyword: str, argument: str) -> tuple[list[str], list[str], s
     )
     destination = operands[-1]
     sources = operands[:-1]
+    # REFUSE what this guard cannot resolve, rather than resolving it wrongly.
+    #
+    # Docker builds a COPY destination in ways this parser deliberately does not
+    # model: it expands ENV and ARG variables, and it resolves a RELATIVE
+    # destination against the WORKDIR in effect at that line. So
+    #     ENV TARGET=/app/scripts   +   COPY data/blob $TARGET/x.py
+    #     WORKDIR /app              +   COPY data/blob scripts/x.py
+    # both write /app/scripts/x.py, and both compared unequal to it as strings,
+    # so each slipped the lands-on check in silence.
+    #
+    # NOTE FOR ANYONE TEMPTED TO FIX THIS BY TRACKING WORKDIR: that component
+    # existed, was wrong three times, and was deleted on purpose (see the note
+    # above `_DOCKERFILE_INSTRUCTION`). It gated no assertion and every one of
+    # its bugs failed OPEN. This is the opposite move: it does not compute the
+    # WORKDIR, it declines to accept any line whose meaning depends on knowing
+    # it. Refusing is sound with no interpreter; resolving is not.
+    assert "$" not in destination and "$" not in " ".join(sources), (
+        f"{keyword} {argument!r} builds a path from a variable, which docker "
+        "expands and this guard does not. Teach this guard before using that "
+        "form, or write the path literally."
+    )
+    assert destination.startswith("/"), (
+        f"{keyword} {argument!r} has a RELATIVE destination, which docker "
+        f"resolves against the WORKDIR in effect at that line. This guard does "
+        f"not track the WORKDIR -- on purpose -- so it cannot tell where "
+        f"{destination!r} lands. Write the destination absolutely."
+    )
     # A trailing slash is the ONE thing that must be read before normalizing,
     # because it is what distinguishes "write this file" from "write into this
     # directory", and normpath drops it.
@@ -525,6 +560,24 @@ def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
     with pytest.raises(AssertionError, match="JSON form"):
         _copied_scripts(shipped + 'COPY ["data/blob", "/app/scripts/x.py"]\n')
 
+    # A destination docker BUILDS rather than reads literally must be refused,
+    # not resolved. Both of these write /app/scripts/x.py in the image and both
+    # compared unequal to it as strings, so both landed on a tracked script in
+    # silence. Refusing is sound without a Dockerfile interpreter; tracking the
+    # WORKDIR to resolve them is the component that was deleted for failing open.
+    for unresolvable in (
+        "ENV TARGET=/app/scripts\nCOPY data/blob $TARGET/x.py\n",
+        "ENV TARGET=/app/scripts\nCOPY data/blob ${TARGET}/x.py\n",
+    ):
+        with pytest.raises(AssertionError, match="from a variable"):
+            _copied_scripts(shipped + unresolvable)
+    for unresolvable in (
+        "WORKDIR /app\nCOPY data/blob scripts/x.py\n",
+        "WORKDIR /app\nCOPY vendor/ scripts/\n",
+    ):
+        with pytest.raises(AssertionError, match="RELATIVE destination"):
+            _copied_scripts(shipped + unresolvable)
+
     # A DIRECTORY destination is not a rename: docker resolves
     # `COPY scripts/x.py /app/scripts/` to /app/scripts/x.py. Refusing it was a
     # false positive that would have blocked an ordinary, correct line.
@@ -622,6 +675,14 @@ def test_a_shell_fence_is_found_however_it_is_spelled():
     # around these blocks quotes the WRONG form on purpose to explain it.
     assert _documented_shell_commands(f"```text\n{body}```\n") == []
     assert _documented_shell_commands(f"```python\n{body}```\n") == []
+
+    # A TRANSCRIPT is not a list of runnable commands. Its lines carry a `$ `
+    # prompt and quote what a user typed, relative paths and all, so reading one
+    # as commands makes this guard fail ordinary documentation. The tag must end
+    # at a real boundary: `\b` is satisfied by the hyphen and let these through.
+    transcript = "$ python scripts/reconcile_customization_authority.py --mode parity\n"
+    for tag in ("shell-session", "sh-session", "bash-repl", "shellscript"):
+        assert _documented_shell_commands(f"```{tag}\n{transcript}```\n") == [], tag
 
 
 def test_documented_authority_commands_resolve_in_the_image():
