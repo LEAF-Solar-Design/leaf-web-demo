@@ -321,16 +321,45 @@ jobs:
             [ -n "${RUN_ID:-}" ] || continue
             [ "$RUN_ID" != "$BUILD_RUN_ID" ] || continue
             SCANNED=$((SCANNED + 1))
-            fetch_supply_set "$RUN_ID" \
-              "staging-supply-set-$RUN_SHA-attempt-$RUN_ATTEMPT" || continue
+            if ! fetch_supply_set "$RUN_ID" \
+              "staging-supply-set-$RUN_SHA-attempt-$RUN_ATTEMPT"; then
+              # This successful build run published no supply set under its own
+              # name. Only ONE reason is safe to scan past: it published its
+              # docs-noop marker, so it built no images and left nothing to
+              # deploy. Any other absence -- an expired, deleted, or
+              # partially-uploaded supply set on a DEPLOYABLE run -- must FAIL
+              # CLOSED, because that run may have deployed a NEWER tag than the
+              # older ancestor the scan would otherwise fall back to, and landing
+              # the older one would roll a service BACKWARDS. This is the same
+              # rule the ordinary path applies to THIS build; the newest-first
+              # reachability argument below holds only when every run we skip
+              # provably built nothing (sol-critic RED on PR #519, defect 1).
+              if jq -e --arg name "docs-noop-$RUN_SHA-attempt-$RUN_ATTEMPT" \
+                'any(.artifacts[]; .name == $name)' artifacts.json >/dev/null; then
+                continue
+              fi
+              echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: successful main build run $RUN_ID ($RUN_SHA) published neither a supply set nor a docs-noop marker (expired, deleted, or a partial upload), so its images cannot be read. Scanning past it to an older tag could roll a service backwards, so failing closed. Converge staging with a successful main build, or dispatch $DEPLOY_WORKFLOW by hand with an exact task-definition ARN."
+              exit 1
+            fi
             CANDIDATE_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+            # Bind the supply set to its run. The ordinary path requires
+            # source_revision == the build head; the reconcile requires the same
+            # of every candidate, so an artifact that names a DIFFERENT (possibly
+            # older) revision than the run it hangs off cannot smuggle an older
+            # tag past the ancestor check below (sol-critic RED on PR #519,
+            # defect 2).
+            [ "$CANDIDATE_SHA" = "$RUN_SHA" ] || {
+              echo "::error::Supply set for run $RUN_ID names source_revision $CANDIDATE_SHA, not the run's head $RUN_SHA; refusing to reconcile onto a manifest whose provenance does not match its run."
+              exit 1
+            }
             # REACHABILITY IS THE NEVER-BACKWARDS ARGUMENT. Runs are scanned
-            # newest-first and the FIRST ancestor wins, so every commit between
-            # the winner and the tip published no supply set, which means no
-            # newer main-derived image exists to be older than. A manifest whose
-            # commit is NOT an ancestor (history rewritten, or an artifact that
-            # outlived its branch) is skipped. An unreadable compare yields an
-            # empty relation and is skipped too, so this fails closed.
+            # newest-first; every run skipped above provably built no images (it
+            # carried a docs-noop marker) and every unreadable deployable run
+            # failed the release closed, so the FIRST ancestor found is the newest
+            # main-derived image and nothing newer exists to be older than. A
+            # candidate whose commit is NOT an ancestor (history rewritten, or an
+            # artifact that outlived its branch) is skipped; an unreadable compare
+            # yields an empty relation and is skipped too, so this fails closed.
             RELATION=$(gh api \
               "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$BUILD_HEAD_SHA" \
               --jq '.status' || true)

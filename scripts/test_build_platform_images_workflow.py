@@ -2966,7 +2966,19 @@ def check_docs_noop_filter(text: str) -> None:
     # credential; deploy=false is gone and deploy=true now appears twice, both
     # asserted above.
     assert frozen == (
-        "bf15a46f574f5381c0b57937d555516cff9000d3cac1107c16d44cd070ccffee"
+        # Hash updated 2026-08-07 (g): sol-critic RED round 2 on PR #519.
+        # The reconcile scan now (1) fails CLOSED when a successful build run
+        # has neither a supply set nor its docs-noop marker (an expired,
+        # deleted, or partial-upload artifact on a DEPLOYABLE run), instead of
+        # skipping past it to an older ancestor and risking a backwards
+        # deploy, and (2) requires each candidate supply set's source_revision
+        # to equal the candidate run's head sha, so an artifact naming an older
+        # revision cannot smuggle an older tag past the ancestor check.
+        # Reviewed for dispatch capability: UNCHANGED -- one added local
+        # jq read of the already-fetched artifacts.json (the marker check),
+        # no new gh call, no new secret, one `gh workflow run` still in the
+        # deploy step.
+        "e54ead0065a92b46ce39289691fb4d2546e5d29b0cf6439a7f5b0224e0c18a51"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5102,14 +5114,20 @@ case "${args[0]}" in
           printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$BUILD_HEAD_SHA"'-attempt-'"$BUILD_RUN_ATTEMPT"'","id":1,"expired":false}]}'
         else
           entry=$(printf '%s' "$FAKE_SUPPLY_SETS" | jq -c --arg id "$run_id" '.[$id] // empty')
+          marker=$(printf '%s' "$FAKE_MARKERS" | jq -c --arg id "$run_id" '.[$id] // empty')
           if [ -n "$entry" ]; then
             sha=$(printf '%s' "$entry" | jq -r '.sha')
             att=$(printf '%s' "$entry" | jq -r '.attempt')
             tag=$(printf '%s' "$entry" | jq -r '.tag')
-            jq -n --arg sha "$sha" --arg tag "$tag" \
-              '{schema:"leaf.staging-supply-set.v2",source_revision:$sha,build_tag:$tag}' \
+            rev=$(printf '%s' "$entry" | jq -r '.rev // .sha')
+            jq -n --arg rev "$rev" --arg tag "$tag" \
+              '{schema:"leaf.staging-supply-set.v2",source_revision:$rev,build_tag:$tag}' \
               > .pending_supply_set.json
             printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-'"$sha"'-attempt-'"$att"'","id":'"$run_id"',"expired":false}]}'
+          elif [ -n "$marker" ]; then
+            msha=$(printf '%s' "$marker" | jq -r '.sha')
+            matt=$(printf '%s' "$marker" | jq -r '.attempt')
+            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$msha"'-attempt-'"$matt"'","id":1,"expired":false}]}'
           else
             printf '%s\n' '{"total_count":0,"artifacts":[]}'
           fi
@@ -5123,7 +5141,7 @@ esac
 """
 
 
-def _rehearse_relay_manifest(*, rows, supply_sets, relations,
+def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
                              build_run_id="100", build_head_sha="docshead",
                              build_attempt="1"):
     """Execute the relay's ACTUAL manifest script (extracted from the parsed
@@ -5172,6 +5190,7 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations,
             FAKE_ROWS="\n".join(rows),
             FAKE_SUPPLY_SETS=json.dumps(supply_sets),
             FAKE_RELATIONS=json.dumps(relations),
+            FAKE_MARKERS=json.dumps(markers or {}),
         )
         proc = subprocess.run(
             [bash, str(script)], env=env, text=True, capture_output=True,
@@ -5232,6 +5251,47 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
     assert rc3 != 0, out3
     assert "has nothing to reconcile onto" in out3, out3
     assert outputs3.get("deploy") != "true", outputs3
+
+    # A newer DOCS-ONLY run (marker present, no supply set) between the tip
+    # and the deployable ancestor must be SKIPPED, not mistaken for a
+    # rollback risk -- otherwise the reconcile could never see past the first
+    # docs-only commit.
+    rc4, out4, outputs4 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docsonly99 1", "98 ancestor 1"],
+        supply_sets={"98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"},
+        markers={"99": {"sha": "docsonly99", "attempt": "1"}})
+    assert rc4 == 0, out4
+    assert outputs4.get("image_tag") == "prod-abc1234", (out4, outputs4)
+
+    # DEFECT 1 (sol-critic RED round 2): a newer DEPLOYABLE run whose supply
+    # set is missing (deleted / partial upload, and NO docs-noop marker) must
+    # FAIL CLOSED, never fall back to the older ancestor -- that fallback is a
+    # backwards deploy. The old `|| continue` skipped it and shipped prod-abc.
+    rc5, out5, outputs5 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 gonerun 1", "98 ancestor 1"],
+        supply_sets={"98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"})
+    assert rc5 != 0, out5
+    assert "cannot reconcile safely" in out5, out5
+    assert "neither a supply set nor a docs-noop marker" in out5, out5
+    assert outputs5.get("deploy") != "true", outputs5
+    assert outputs5.get("image_tag") != "prod-abc1234", (
+        "must not fall back to the older ancestor tag", outputs5)
+
+    # DEFECT 2 (sol-critic RED round 2): a supply set whose internal
+    # source_revision does not equal its run's head sha must FAIL CLOSED -- it
+    # could name an older revision and tag than the run it hangs off.
+    rc6, out6, outputs6 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 run99head 1"],
+        supply_sets={"99": {"sha": "run99head", "attempt": "1",
+                            "tag": "prod-abc1234", "rev": "olderrev"}},
+        relations={"olderrev": "ahead", "run99head": "ahead"})
+    assert rc6 != 0, out6
+    assert "not the run's head" in out6, out6
+    assert outputs6.get("deploy") != "true", outputs6
 
 
 def test_build_platform_images_workflow_invariants() -> None:
