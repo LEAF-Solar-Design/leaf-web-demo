@@ -53,14 +53,19 @@ REQUIRED_COVERAGE = {
 # A selection status is a claim about HOW the value was established, so an
 # unrecognized one is a silent downgrade rather than a typo: "measurd" used to
 # pass every check while reading, to a human, like a measurement.
-#   unknown          - nothing recorded; value must be null.
-#   measured         - the selector was OBSERVED set to this value.
-#   unset_defaulting - the selector was observed ABSENT and the value is the
-#                      repository default the code resolves in its place. It is
-#                      an inference from absence, never an observed setting.
-#   verified         - measured AND reconciled; the only status a "complete"
-#                      inventory claim accepts.
-KNOWN_SELECTION_STATUSES = {"unknown", "measured", "unset_defaulting", "verified"}
+#   unknown  - nothing recorded; value must be null.
+#   measured - the environment was OBSERVED selecting this value.
+#   verified - measured AND reconciled; the only status a "complete" inventory
+#              claim accepts.
+#   measured_no_override - the environment sets no override and the value is
+#              the repository default its image ships. Still a measurement, but
+#              NOT a selection anyone made for that environment, which is the
+#              distinction a cutover plan needs. Establishing it requires
+#              reading BOTH layers: a Docker image ENV stays in the process
+#              environment when the deployment supplies no override, so an
+#              absent task-definition variable does not by itself mean the
+#              code's own fallback is what runs.
+KNOWN_SELECTION_STATUSES = {"unknown", "measured", "measured_no_override", "verified"}
 REQUIRED_AUTHORITY_FIELDS = {
     "id",
     "coverage",
@@ -198,22 +203,29 @@ def _inventory_errors(inventory: dict) -> list[str]:
                 errors.append(f"{authority_id}: unknown {environment} selection has a value")
             if selection.get("status") == "verified" and selection.get("value") is None:
                 errors.append(f"{authority_id}: verified {environment} selection lacks a value")
-            if selection.get("status") == "unset_defaulting":
-                # The value IS the resolved default, so it must be present --
-                # otherwise the record is indistinguishable from "unknown" and
-                # nothing downstream can scope a backfill from it.
+            if selection.get("status") == "measured_no_override":
+                # The value IS the default, so it must be present -- otherwise
+                # the record is indistinguishable from "unknown" and nothing
+                # downstream can scope a backfill from it.
                 if selection.get("value") is None:
                     errors.append(
-                        f"{authority_id}: unset_defaulting {environment} selection "
-                        "lacks the defaulted value"
+                        f"{authority_id}: measured_no_override {environment} "
+                        "selection lacks the defaulted value"
                     )
-                # The whole point of the status is that a later reader cannot
-                # mistake an inferred default for an observed setting, and that
-                # only holds if the evidence says the selector was absent.
-                if "absent" not in (selection.get("evidence") or "").lower():
+                # STRUCTURAL, not prose. An earlier draft required the evidence
+                # to contain the word "absent", which evidence stating the
+                # OPPOSITE ("is not absent; it is set to postgres") satisfied
+                # just as well. The claim "no override, so this is the shipped
+                # default" is only coherent when the value IS that default, and
+                # that is checkable against the selector the authority declares.
+                elif selection["value"] not in {
+                    declared.get("repository_default")
+                    for declared in authority["selectors"]
+                }:
                     errors.append(
-                        f"{authority_id}: unset_defaulting {environment} selection "
-                        "evidence does not state that the selector is absent"
+                        f"{authority_id}: measured_no_override {environment} "
+                        f"value {selection['value']!r} is not the "
+                        "repository_default of any of its selectors"
                     )
 
     if selectors != EXPECTED_SELECTOR_DEFAULTS:
@@ -321,16 +333,21 @@ def test_contract_rejects_false_complete_claims() -> None:
     )
 
 
-def test_inferred_production_defaults_cannot_pose_as_observed_settings() -> None:
+def test_shipped_defaults_cannot_pose_as_production_selections() -> None:
     """The fields this lane closed, and the rule that keeps them honest.
 
-    All three selectors are ABSENT from the live production task definition, so
-    `legacy` is the repository default the code resolves, NOT a value anything
-    in production was measured to say. `measured` would overstate exactly that.
+    Production sets no override for any of these three, and the images it pins
+    bake all three to `legacy`. So the value is measured, but it is the shipped
+    default rather than a selection anyone made for production, and plain
+    `measured` would read as the latter.
+
+    Establishing that needed BOTH layers. Task-definition absence alone does not
+    imply the code fallback runs, because an image ENV survives an absent
+    override, so each evidence string names the image digest as well as the
+    task-definition revision.
 
     This pins the recorded distinction. It does NOT detect live drift: a later
-    task-definition revision can set any of these and no test here would notice,
-    which is why each evidence string names the revision it was read from.
+    revision or image can change any of these and no test here would notice.
     """
     inventory = _load_inventory()
     entries = {authority["id"]: authority for authority in inventory["authorities"]}
@@ -339,12 +356,14 @@ def test_inferred_production_defaults_cannot_pose_as_observed_settings() -> None
                          "async_jobs"):
         production = entries[authority_id]["current_selection"]["production"]
         assert production["value"] == "legacy", authority_id
-        assert production["status"] == "unset_defaulting", authority_id
-        assert "leaf-automation-production-platform:98" in production["evidence"]
-        assert "ABSENT" in production["evidence"], authority_id
+        assert production["status"] == "measured_no_override", authority_id
+        evidence = production["evidence"]
+        # Both layers, or the record does not support its own status.
+        assert "leaf-automation-production-platform:98" in evidence, authority_id
+        assert "@sha256:" in evidence, authority_id
 
-    # Each branch of the rule fails the contract when violated, so none of the
-    # three assertions above is resting on a check that never fires.
+    # Every branch fails the contract when violated, so none of the assertions
+    # above rests on a check that never fires.
     typo = deepcopy(inventory)
     typo["authorities"][0]["current_selection"]["production"]["status"] = "measurd"
     assert any(
@@ -353,26 +372,32 @@ def test_inferred_production_defaults_cannot_pose_as_observed_settings() -> None
     )
 
     valueless = deepcopy(inventory)
-    entry = next(
-        authority for authority in valueless["authorities"]
-        if authority["id"] == "app_sessions_and_approvals"
-    )
-    entry["current_selection"]["production"]["value"] = None
+    _production_of(valueless, "app_sessions_and_approvals")["value"] = None
     assert any(
-        "unset_defaulting production selection lacks the defaulted value" in error
+        "measured_no_override production selection lacks the defaulted value" in error
         for error in _inventory_errors(valueless)
     )
 
-    vague = deepcopy(inventory)
-    entry = next(
-        authority for authority in vague["authorities"]
-        if authority["id"] == "app_sessions_and_approvals"
+    # The regression that retired the previous rule: it only required the
+    # evidence to contain "absent", so evidence asserting the OPPOSITE passed.
+    # The replacement is structural, so the prose cannot buy its way out.
+    contradictory = deepcopy(inventory)
+    selection = _production_of(contradictory, "app_sessions_and_approvals")
+    selection["value"] = "postgres"
+    selection["evidence"] = (
+        "LEAF_SESSIONS_STORE is not absent; it is explicitly set to postgres."
     )
-    entry["current_selection"]["production"]["evidence"] = "Production is legacy."
     assert any(
-        "evidence does not state that the selector is absent" in error
-        for error in _inventory_errors(vague)
+        "is not the repository_default of any of its selectors" in error
+        for error in _inventory_errors(contradictory)
     )
+
+
+def _production_of(inventory: dict, authority_id: str) -> dict:
+    authority = next(
+        item for item in inventory["authorities"] if item["id"] == authority_id
+    )
+    return authority["current_selection"]["production"]
 
 
 def test_contract_rejects_upload_inventory_without_shared_drawing_tables() -> None:

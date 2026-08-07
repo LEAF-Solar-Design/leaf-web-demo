@@ -241,21 +241,33 @@ and the task definition; nobody read the database, and after the deploy nobody
 can.
 
 **Production is the opposite case, and this decision must not be reused there.**
+Production runs sessions on `legacy`, measured 2026-08-07 across two layers.
 `leaf-automation-production-platform:98`, the revision service `leaf-platform`
-runs at desired 1 / running 1, does not set `LEAF_SESSIONS_STORE` at all, so
-`session_store._store_mode()` resolves the repository default `legacy`.
-`platform/authority-inventory.json` records that with status
-`unset_defaulting` rather than `measured`, because nothing in production was
-observed to say `legacy`. Only the absence of the selector was observed, and
-that absence holds across all four container definitions in `environment`, in
-`secrets`, and in `environmentFiles`. Two consequences follow. Production writes
-nothing to PostgreSQL for sessions, so there is no dual-write mirror and no
-partial coverage to reconcile against, and a cutover must backfill the **entire**
-production history rather than a post-deploy remainder. Production also sets
-`SESSIONS_DB=/data/state/sessions.db` on the durable EFS volume instead of
-leaving it unset, so that history survives task replacement and the whole reason
-discard was cheap for staging is absent. Re-read the live revision before
-relying on this: 98 will age, and a later revision may set the selector.
+runs at desired 1 / running 1, does not set `LEAF_SESSIONS_STORE` in any of its
+four container definitions, in `environment`, in `secrets`, or in
+`environmentFiles`. That alone would not settle it: **a Docker image `ENV` stays
+in the process environment when ECS supplies no override**, so an absent
+task-definition variable does not mean the code fallback runs. The image that
+revision pins, `leaf-platform-app@sha256:1504240d...`, bakes
+`LEAF_SESSIONS_STORE=legacy` in its config blob, matching
+`deploy/Dockerfile.app`. So the app reads an explicit `legacy`. Both paths agree,
+and the effective mode is `legacy` either way.
+
+`platform/authority-inventory.json` records this as `measured_no_override`
+rather than `measured`, because **nobody selected `legacy` for production**. It
+is the value the image ships, left unoverridden. The same revision *does*
+override `LEAF_AGENT_STORE`, `LEAF_DRAWING_STORE`, `LEAF_UPLOAD_STORE` and
+`LEAF_BROKER_STORE` to `postgres` over the same image defaults, so production
+deliberately cut those over and has not cut sessions over.
+
+Two consequences follow. Production writes nothing to PostgreSQL for sessions,
+so there is no dual-write mirror and no partial coverage to reconcile against,
+and a cutover must backfill the **entire** production history rather than a
+post-deploy remainder. Production also sets `SESSIONS_DB=/data/state/sessions.db`
+on the durable EFS volume instead of leaving it unset, so that history survives
+task replacement and the whole reason discard was cheap for staging is absent.
+Re-read the live revision **and** the image digest before relying on this: both
+age, and either layer can change the answer.
 
 **What a clean staging parity run does and does not prove.** After this deploy,
 `--mode parity` on staging compares only rows written since the NEW task
