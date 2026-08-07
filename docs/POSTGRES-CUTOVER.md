@@ -69,11 +69,22 @@ and target counts, target-only counts, `source_incorporated`, and
 `exact_equal`. A strict PostgreSQL superset is incorporated but not equal:
 
 ```shell
-python scripts/reconcile_customization_authority.py --mode backfill \
+python /app/scripts/reconcile_customization_authority.py --mode backfill \
   --sqlite /data/state/customization.db
-python scripts/reconcile_customization_authority.py --mode parity \
+python /app/scripts/reconcile_customization_authority.py --mode parity \
   --sqlite /data/state/customization.db
 ```
+
+The script path is absolute on purpose. `deploy/Dockerfile.app` COPYs the
+script to `/app/scripts/` but its final `WORKDIR` is `/app/server`, so a
+repo-relative `python scripts/reconcile_customization_authority.py` resolves
+to `/app/server/scripts/...`, which does not exist. Because these commands are
+run from the release image and nowhere else, the relative form fails in the
+only place it is used, while still working from a source checkout — which is
+why it went unnoticed. Do not tidy it back. The `--sqlite` path is a runtime
+volume, not a path into the image, and is correct as written.
+`server/tests/test_postgres_container_wiring.py` enforces this for every
+authority command whose script the app Dockerfile copies.
 
 Run both commands from the exact release image while SQLite writes are dark,
 before selecting PostgreSQL. The historical `parity` mode name now proves

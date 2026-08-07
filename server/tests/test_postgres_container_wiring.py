@@ -4,10 +4,11 @@ These checks do not need a Docker daemon or a live database. They protect the
 legacy defaults and process trust boundaries that must hold before an operator
 can run the separate migration and cutover stages.
 """
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import ast
 import json
 import re
+import shlex
 
 import pytest
 
@@ -74,6 +75,411 @@ def _assert_customization_postgres_gate(workflow: str) -> None:
         if fragment not in workflow
     ]
     assert not missing, f"customization PostgreSQL gate omitted: {missing}"
+
+
+def _app_dockerfile() -> str:
+    return _read("deploy/Dockerfile.app")
+
+
+# Reading a Dockerfile by hand is the part of this guard that kept being wrong:
+# across thirteen review findings, EVERY ONE was in this parse and none was in
+# the contract it protects. So the guard was rebuilt to need it as little as
+# possible, and what survives here is deliberately bounded.
+#
+# What was DELETED, and why, so nobody restores it thinking it was an oversight:
+#
+#   * `_final_workdir`. It gated no assertion. The guard requires an ABSOLUTE
+#     path, which is correct whatever the WORKDIR is, so nothing ever needed to
+#     know what the WORKDIR was; it only appeared in a failure message. Three
+#     findings (keyword case, `\`-continuations, heredoc bodies) were fixes to
+#     a component that decided nothing.
+#   * The post-COPY survival check, which asked whether a later instruction
+#     deletes a copied script. It could not be made correct. It matched the
+#     literal string `/app/scripts`, so `RUN rm -rf scripts` in the region
+#     where WORKDIR is still `/app` deleted both reconcilers and passed; so did
+#     `./scripts`; so did a heredoc body line beginning with the word `copy`,
+#     which the COPY exemption swallowed whole. Closing those needs the WORKDIR
+#     in effect AT EACH LINE, i.e. an actual Dockerfile interpreter, and a
+#     check that catches some spellings of a destruction while silently missing
+#     others is worse than no check, because its green manufactures confidence.
+#     The right home for that class is a runtime assertion in the image itself,
+#     not a static test. Tracked as follow-up, deliberately not re-attempted.
+#
+# What REMAINS parses only COPY, and every way it can be wrong is LOUD: a COPY
+# form it fails to understand empties the map, and an unmapped script then
+# raises "no COPY ... was found" rather than passing quietly.
+_DOCKERFILE_INSTRUCTION = re.compile(r"^([A-Za-z]+)\s+(\S.*)$")
+_ESCAPE_DIRECTIVE = re.compile(r"^#\s*escape\s*=", re.IGNORECASE)
+_HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+
+
+def _logical_lines(dockerfile: str) -> list[str]:
+    """Instruction lines: continuations joined, comments and heredocs dropped."""
+    # The `escape` parser directive can change the continuation character, which
+    # would silently invalidate the joining below. Fail closed instead of
+    # guessing; deploy/Dockerfile.app does not use one.
+    assert not any(
+        _ESCAPE_DIRECTIVE.match(line.strip()) for line in dockerfile.splitlines()
+    ), "Dockerfile sets an escape directive; this parser assumes a backslash"
+
+    raw_lines = dockerfile.splitlines()
+    lines: list[str] = []
+    index = 0
+    while index < len(raw_lines):
+        pending = raw_lines[index].strip()
+        index += 1
+        if not pending or pending.startswith("#"):
+            continue
+
+        while pending.endswith("\\") and index < len(raw_lines):
+            pending = pending[:-1].rstrip()
+            nxt = raw_lines[index].strip()
+            index += 1
+            # A comment or blank line inside a continuation is removed and does
+            # NOT end it, so put the marker back and keep consuming.
+            if not nxt or nxt.startswith("#"):
+                pending = f"{pending} \\"
+                continue
+            pending = f"{pending} {nxt}"
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+
+        # Heredoc BODIES belong to the instruction, not to the file. Docker
+        # keeps every line up to the delimiter inside e.g. `RUN <<EOF`, so a
+        # body line reading `WORKDIR /app` is not a WORKDIR at all — treating
+        # it as one is how this guard failed open a third time.
+        for delimiter in _HEREDOC.findall(pending):
+            while index < len(raw_lines) and raw_lines[index].strip() != delimiter:
+                index += 1
+            index += 1  # drop the delimiter line itself
+
+        lines.append(pending)
+    return lines
+
+
+_SHELL_FENCE = re.compile(r"```(?:shell|bash|sh)\n(.*?)```", re.DOTALL)
+
+
+def _command_tokens(command: str, origin: str) -> list[str]:
+    """Tokenise as the operator's shell will, not with a naive `.split()`.
+
+    `.split()` reads a QUOTED path as a distinct token that no longer matches
+    a bare script name, and reads the text of an inline `#` comment as real
+    arguments. Both matter: a documented
+        python 'scripts/reconcile_x.py' --mode parity  # /app/scripts/reconcile_x.py
+    passed a `.split()` guard, because the quoted relative path was skipped
+    while the absolute path in the comment was counted as the real one. The
+    shell strips the quotes and drops the comment, so the operator runs the
+    relative form and hits the missing path.
+    """
+    try:
+        return shlex.split(command, comments=True, posix=True)
+    except ValueError as exc:
+        raise AssertionError(
+            f"{origin} is not parseable as a shell command ({exc}), so this "
+            f"guard cannot tell what it runs: {command!r}"
+        ) from exc
+
+
+def _documented_shell_commands(markdown: str) -> list[str]:
+    """Runnable commands from ```shell fences, `\\`-continuations joined.
+
+    FENCED BLOCKS ONLY, deliberately. The prose around them quotes the WRONG
+    (repository-relative) form on purpose to explain why the right one is
+    absolute, and treating that explanation as a command would make the guard
+    cry wolf about its own documentation.
+    """
+    commands: list[str] = []
+    for block in _SHELL_FENCE.findall(markdown):
+        pending = ""
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            pending = f"{pending} {stripped}".strip() if pending else stripped
+            if pending.endswith("\\"):
+                pending = pending[:-1].rstrip()
+                continue
+            commands.append(pending)
+            pending = ""
+        if pending:
+            commands.append(pending)
+    return commands
+
+
+def _single_stage(dockerfile: str) -> None:
+    """Refuse to reason about a multi-stage build instead of guessing wrong.
+
+    `_copied_scripts` folds every instruction together, but
+    each `FROM` starts a fresh stage: a later stage inherits nothing unless it
+    copies it, so a COPY in an earlier stage says nothing about the published
+    image. Rather than re-implement stage inheritance, fail closed and make a
+    human re-examine this guard when a stage is added. deploy/Dockerfile.app
+    has exactly one stage today.
+    """
+    stages = [argument for keyword, argument in _instructions(dockerfile)
+              if keyword == "FROM"]
+    assert len(stages) == 1, (
+        f"deploy/Dockerfile.app now has {len(stages)} stages ({stages}). This "
+        "guard folds all instructions together and cannot tell which stage "
+        "reaches the published image. Teach it stage inheritance before "
+        "relaxing this assertion."
+    )
+
+
+def _instructions(dockerfile: str) -> list[tuple[str, str]]:
+    """(KEYWORD, argument-text) for each instruction, keyword upper-cased."""
+    parsed: list[tuple[str, str]] = []
+    for line in _logical_lines(dockerfile):
+        match = _DOCKERFILE_INSTRUCTION.match(line)
+        if match:
+            parsed.append((match.group(1).upper(), match.group(2).strip()))
+    return parsed
+
+
+def _copied_scripts(dockerfile: str) -> dict[str, str]:
+    """basename -> absolute in-image path, for single-file `COPY scripts/...`.
+
+    Deliberately restricted to explicit single-file copies out of scripts/.
+    Directory copies such as `COPY server/ /app/server/` are a different shape,
+    and the pytest/npm parity commands in the inventory are documented for a
+    source checkout rather than for the image, so keying on these lines is what
+    keeps this guard aimed at the commands that really do run in the container.
+    """
+    copies: dict[str, str] = {}
+    for keyword, argument in _instructions(dockerfile):
+        if keyword != "COPY":
+            continue
+        # COPY takes flags before its operands (`--chown=`, `--from=`,
+        # `--link=`, ...). Requiring exactly two fields silently skipped every
+        # flagged form, which is how a script could be shipped and never
+        # checked. Split flags off rather than counting fields.
+        parts = [part for part in argument.split() if not part.startswith("--")]
+        flags = [part for part in argument.split() if part.startswith("--")]
+        if len(parts) != 2 or not parts[0].startswith("scripts/"):
+            continue
+        # `--from=` sources another stage or an external image, so the path is
+        # not this repository's scripts/ tree and the reasoning below does not
+        # hold. Refuse rather than assume.
+        assert not any(flag.startswith("--from=") for flag in flags), (
+            f"COPY of {parts[0]} uses --from=, so it does not come from the "
+            "repository tree; teach this guard before using that form."
+        )
+        # KEY ON THE REPOSITORY SOURCE, NOT THE DESTINATION. Keying on the
+        # destination basename asked only "does something land at this name",
+        # never "is it the right file". A one-token slip such as
+        #     COPY scripts/broker-container-smoke.py /app/scripts/reconcile_x.py
+        # builds fine and satisfies a destination-keyed map, while the operator
+        # running the documented arguments gets `unrecognized arguments` from
+        # whatever script actually shipped under that name.
+        source_name = PurePosixPath(parts[0]).name
+        destination_name = PurePosixPath(parts[1]).name
+        assert source_name == destination_name, (
+            f"COPY ships {parts[0]} as {parts[1]}, renaming it. This guard "
+            f"identifies a shipped script by its repository name, so a rename "
+            f"means the image holds one script's content under another's "
+            f"documented name. Teach this guard before using that form."
+        )
+        # Carried over from the sessions-only guard #495 merged: two COPYs of
+        # one basename make "the" image path ambiguous, and a dict would
+        # silently keep the last one.
+        assert source_name not in copies, (
+            f"{source_name} is COPYed to more than one target"
+        )
+        copies[source_name] = parts[1]
+    return copies
+
+
+def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
+    """The COPY map is only as good as this parse, so pin the parse itself.
+
+    Scope note: this used to pin WORKDIR parsing too. That went with
+    `_final_workdir`, which gated no assertion -- the guard requires an
+    ABSOLUTE path, which is correct whatever the WORKDIR is, so nothing needed
+    to know what the WORKDIR was. What remains protects `_copied_scripts`,
+    whose failures are LOUD (a missed COPY raises "no COPY ... was found"),
+    never silent.
+    """
+    dockerfile = (
+        "# a comment mentioning COPY scripts/decoy.py /app/scripts/decoy.py\n"
+        "FROM python:3.12-slim\n"
+        "  copy scripts/reconcile_demo.py /app/scripts/reconcile_demo.py\n"
+        "ENV APP_PORT=8130 \\\n"
+        "    PYTHONUNBUFFERED=1\n"
+    )
+
+    # Case-insensitive, indented, and a commented decoy must not register.
+    assert _copied_scripts(dockerfile) == {
+        "reconcile_demo.py": "/app/scripts/reconcile_demo.py"
+    }
+    # A continuation line must never be read as an instruction named APP.
+    assert "APP" not in {keyword for keyword, _ in _instructions(dockerfile)}
+    # A directory copy is a different shape and must stay out of the mapping.
+    assert _copied_scripts("COPY server/ /app/server/\n") == {}
+    # A flagged COPY still registers; counting fields once missed these.
+    assert _copied_scripts(
+        "COPY --chown=10001:10001 scripts/x.py /app/scripts/x.py\n"
+    ) == {"x.py": "/app/scripts/x.py"}
+
+    # The real Dockerfile contains this shape: HEALTHCHECK continues onto a CMD
+    # line, which a per-line parse reports as a separate CMD instruction.
+    health = (
+        "HEALTHCHECK --interval=10s \\\n"
+        '  CMD python -c "import urllib.request"\n'
+    )
+    assert [keyword for keyword, _ in _instructions(health)] == ["HEALTHCHECK"]
+
+    # An escape directive would change the continuation character, so the
+    # parser must refuse rather than silently mis-join.
+    with pytest.raises(AssertionError, match="escape directive"):
+        _instructions("# escape=`\nCOPY scripts/x.py /app/scripts/x.py\n")
+
+    # A heredoc BODY belongs to its instruction, so a COPY faked inside one is
+    # not a COPY.
+    assert _copied_scripts(
+        "RUN <<EOF\nCOPY scripts/fake.py /app/scripts/fake.py\nEOF\n"
+    ) == {}
+
+    # A renaming COPY is refused rather than mapped, and so is --from=.
+    with pytest.raises(AssertionError, match="renaming it"):
+        _copied_scripts("COPY scripts/a.py /app/scripts/b.py\n")
+    with pytest.raises(AssertionError, match="--from="):
+        _copied_scripts("COPY --from=build scripts/x.py /app/scripts/x.py\n")
+
+    # Multi-stage is refused rather than guessed at.
+    _single_stage("FROM python:3.12-slim AS app\nWORKDIR /app\n")
+    with pytest.raises(AssertionError, match="now has 2 stages"):
+        _single_stage("FROM python AS build\nFROM python AS app\n")
+
+
+def test_documented_authority_commands_resolve_in_the_image():
+    """Every documented reconciler command must resolve to the file the image
+    actually holds, for EVERY authority rather than one hand-picked entry.
+
+    The class defect this closes: the repo pinned both halves of the contract
+    independently and never compared them. One test asserted the
+    `COPY ... /app/scripts/...` line, another asserted the command string, and
+    nothing knew about WORKDIR. Both passed while the documented command
+    resolved to /app/server/scripts/..., which does not exist, so it failed in
+    the only place it is ever run. A per-authority copy of this check would
+    re-open the same hole for the next authority, so this loops instead.
+
+    ORDER MATTERS HERE. The primary assertion is that the path is ABSOLUTE,
+    and it deliberately does not depend on the Dockerfile parse at all. Three
+    review rounds found three ways to fool that parse -- case, continuations,
+    heredocs -- and every one of them failed OPEN by mis-computing the WORKDIR
+    and letting a relative path look correct. An absolute path is right
+    regardless of WORKDIR, which is the whole property being bought, so
+    requiring it first means no future parser hole can readmit the original
+    defect. The COPY-target comparison is a second, weaker check on top.
+    """
+    dockerfile = _app_dockerfile()
+    _single_stage(dockerfile)
+
+    copies = _copied_scripts(dockerfile)
+    assert copies, "deploy/Dockerfile.app copies no scripts/ file"
+
+    # WHAT TO CHECK IS CHOSEN FROM THE REPOSITORY, NOT FROM THE DOCKERFILE.
+    # Selecting on the COPY map made a parse gap invisible twice over: a script
+    # the parse missed was neither checked NOR counted, so both anti-vacuity
+    # assertions stayed green while a broken command shipped. Keying on "this
+    # token names a real file in scripts/" cannot miss that way, whatever COPY
+    # form the Dockerfile uses. Restricted to .py so that a future documented
+    # `docker compose -f scripts/compose.harness-smoke.yml ...` is not forced
+    # absolute and then reported as unshipped.
+    repo_scripts = {
+        path.name for path in (REPO_ROOT / "scripts").iterdir()
+        if path.is_file() and path.suffix == ".py"
+    }
+    assert repo_scripts, "no .py files in scripts/"
+
+    # EVERY PLACE A HUMAN COPIES THE COMMAND FROM, not just the inventory.
+    # The inventory is the machine-readable source, but the cutover operator
+    # follows docs/POSTGRES-CUTOVER.md, so a relative path there is the same
+    # defect with the same reachable caller. Checking only one of the two left
+    # the other free to rot.
+    sources: list[tuple[str, str]] = []
+    inventory = json.loads(_read("platform/authority-inventory.json"))
+    for authority in inventory["authorities"]:
+        for phase in ("backfill", "parity"):
+            command = authority.get(phase, {}).get("command")
+            if command:
+                sources.append((f"authority-inventory.json {authority['id']} {phase}",
+                                command))
+    documented = _documented_shell_commands(_read("docs/POSTGRES-CUTOVER.md"))
+    sources.extend(("docs/POSTGRES-CUTOVER.md", command) for command in documented)
+
+    checked: list[tuple[str, str]] = []
+    for origin, command in sources:
+        for token in _command_tokens(command, origin):
+            name = PurePosixPath(token).name
+            if name not in repo_scripts:
+                continue
+
+            # A script that is documented but that the Dockerfile is not seen
+            # to copy is a blocker either way: either it does not ship and the
+            # command cannot run, or the COPY parse missed the form used and
+            # this guard is blind. Do not skip it.
+            target = copies.get(name)
+            assert target is not None, (
+                f"{origin} names {token!r}, but no COPY of scripts/{name} into "
+                f"the image was found in deploy/Dockerfile.app. Either the "
+                f"script is not shipped, or this guard's COPY parse does not "
+                f"understand the form used. Both are blockers."
+            )
+
+            # COMPARE THE RAW STRING, NEVER A NORMALIZED PATH. PurePosixPath
+            # quietly rewrites what the shell would take literally: a trailing
+            # slash and a `/./` segment both vanish, so `/app/scripts/x.py/`
+            # compared equal while the kernel would refuse it with ENOTDIR
+            # (a trailing slash demands a directory). Normalizing here means
+            # judging a string the operator will never run.
+            assert token.startswith("/"), (
+                f"{origin} names {token!r} by a repository-relative path. The "
+                f"image does NOT run from the repository root -- Dockerfile.app "
+                f"ends on a WORKDIR under /app -- so a relative path resolves "
+                f"somewhere the script is not, while the script is at {target}. "
+                f"Use the absolute path: it is correct whatever the WORKDIR "
+                f"turns out to be, which is exactly why this check does not "
+                f"read the WORKDIR to decide."
+            )
+            assert token == target, (
+                f"{origin} names {token!r}, but deploy/Dockerfile.app copies "
+                f"that script to {target}. The command must name that path "
+                f"exactly, character for character: a trailing slash, a doubled "
+                f"or dotted segment, or any other spelling the shell takes "
+                f"literally will fail in the image even though it 'looks' right."
+            )
+            checked.append((origin, token))
+
+    # Anti-vacuity: if either source's parse ever drifts, this test must go red
+    # rather than silently check nothing. Six inventory commands across three
+    # authority entries, plus both worked-example commands in the cutover doc.
+    assert len(checked) >= 8, f"guard checked too few commands: {checked}"
+    assert sum(1 for origin, _ in checked if origin.startswith("docs/")) >= 2, (
+        "the cutover document's worked example was not reached; its shell "
+        f"fences parsed to {documented}"
+    )
+    # NAME the reconcilers rather than trusting the count. A typo'd path drops
+    # out of `repo_scripts` selection and goes unchecked, and today only the
+    # count catches that, because 8 is exactly the number of commands there
+    # are. Document a ninth and that protection would silently vanish. Naming
+    # them costs two lines and does not decay.
+    assert {
+        "reconcile_customization_authority.py",
+        "reconcile_sessions_authority.py",
+    } <= {PurePosixPath(token).name for _, token in checked}, (
+        "a known reconciler was not reached by any documented command; "
+        f"reached={sorted({PurePosixPath(t).name for _, t in checked})}"
+    )
+    # Every script the image ships must be reached by a documented command.
+    # This direction is now the only one keyed on the COPY map, and it is the
+    # safe direction: a COPY the parse MISSES cannot hide a command here,
+    # because selection above comes from the repository tree instead.
+    assert set(copies).issubset({PurePosixPath(t).name for _, t in checked}), (
+        "an image-copied reconciler script is documented by no command: "
+        f"copied={sorted(copies)}, exercised={sorted(checked)}"
+    )
 
 
 def test_required_config_manifests_fail_closed_for_postgres_authority():
