@@ -99,10 +99,11 @@ def _app_dockerfile() -> str:
 # not change. So join logical lines first, then match.
 _DOCKERFILE_INSTRUCTION = re.compile(r"^([A-Za-z]+)\s+(\S.*)$")
 _ESCAPE_DIRECTIVE = re.compile(r"^#\s*escape\s*=", re.IGNORECASE)
+_HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 
 
 def _logical_lines(dockerfile: str) -> list[str]:
-    """Instruction lines with `\\`-continuations joined, comments dropped."""
+    """Instruction lines: continuations joined, comments and heredocs dropped."""
     # The `escape` parser directive can change the continuation character, which
     # would silently invalidate the joining below. Fail closed instead of
     # guessing; deploy/Dockerfile.app does not use one.
@@ -110,27 +111,59 @@ def _logical_lines(dockerfile: str) -> list[str]:
         _ESCAPE_DIRECTIVE.match(line.strip()) for line in dockerfile.splitlines()
     ), "Dockerfile sets an escape directive; this parser assumes a backslash"
 
+    raw_lines = dockerfile.splitlines()
     lines: list[str] = []
-    pending: str | None = None
-    for raw in dockerfile.splitlines():
-        stripped = raw.strip()
-        if pending is None:
-            if not stripped or stripped.startswith("#"):
+    index = 0
+    while index < len(raw_lines):
+        pending = raw_lines[index].strip()
+        index += 1
+        if not pending or pending.startswith("#"):
+            continue
+
+        while pending.endswith("\\") and index < len(raw_lines):
+            pending = pending[:-1].rstrip()
+            nxt = raw_lines[index].strip()
+            index += 1
+            # A comment or blank line inside a continuation is removed and does
+            # NOT end it, so put the marker back and keep consuming.
+            if not nxt or nxt.startswith("#"):
+                pending = f"{pending} \\"
                 continue
-            pending = stripped
-        else:
-            # A comment inside a continuation is removed and does NOT end it.
-            if stripped.startswith("#"):
-                continue
-            pending = f"{pending} {stripped}"
+            pending = f"{pending} {nxt}"
         if pending.endswith("\\"):
             pending = pending[:-1].rstrip()
-        else:
-            lines.append(pending)
-            pending = None
-    if pending is not None:
+
+        # Heredoc BODIES belong to the instruction, not to the file. Docker
+        # keeps every line up to the delimiter inside e.g. `RUN <<EOF`, so a
+        # body line reading `WORKDIR /app` is not a WORKDIR at all — treating
+        # it as one is how this guard failed open a third time.
+        for delimiter in _HEREDOC.findall(pending):
+            while index < len(raw_lines) and raw_lines[index].strip() != delimiter:
+                index += 1
+            index += 1  # drop the delimiter line itself
+
         lines.append(pending)
     return lines
+
+
+def _single_stage(dockerfile: str) -> None:
+    """Refuse to reason about a multi-stage build instead of guessing wrong.
+
+    `_final_workdir` and `_copied_scripts` fold every instruction together, but
+    each `FROM` starts a fresh stage: a later stage inherits nothing unless it
+    copies it, so a COPY in an earlier stage says nothing about the published
+    image. Rather than re-implement stage inheritance, fail closed and make a
+    human re-examine this guard when a stage is added. deploy/Dockerfile.app
+    has exactly one stage today.
+    """
+    stages = [argument for keyword, argument in _instructions(dockerfile)
+              if keyword == "FROM"]
+    assert len(stages) == 1, (
+        f"deploy/Dockerfile.app now has {len(stages)} stages ({stages}). This "
+        "guard folds all instructions together and cannot tell which stage "
+        "reaches the published image. Teach it stage inheritance before "
+        "relaxing this assertion."
+    )
 
 
 def _instructions(dockerfile: str) -> list[tuple[str, str]]:
@@ -246,6 +279,29 @@ def test_dockerfile_instruction_parsing_survives_case_and_indentation():
     with pytest.raises(AssertionError, match="escape directive"):
         _instructions("# escape=`\nWORKDIR /app\n")
 
+    # A heredoc BODY belongs to its instruction. Docker keeps every line up to
+    # the delimiter inside `RUN <<EOF`, so the WORKDIR below is not one.
+    heredoc = (
+        "WORKDIR /app/server\n"
+        "RUN <<EOF\n"
+        "WORKDIR /app\n"
+        "EOF\n"
+    )
+    assert _final_workdir(heredoc) == "/app/server"
+    # ...including the quoted and dash forms, and a COPY faked in a body.
+    assert _final_workdir(
+        "WORKDIR /app/server\nRUN <<-'EOF'\n\tWORKDIR /app\n\tEOF\n"
+    ) == "/app/server"
+    assert _copied_scripts(
+        "RUN <<EOF\nCOPY scripts/fake.py /app/scripts/fake.py\nEOF\n"
+    ) == {}
+
+    # Multi-stage is refused rather than guessed at: a COPY in an earlier stage
+    # says nothing about what the published image holds.
+    _single_stage("FROM python:3.12-slim AS app\nWORKDIR /app\n")
+    with pytest.raises(AssertionError, match="now has 2 stages"):
+        _single_stage("FROM python AS build\nFROM python AS app\n")
+
 
 def test_documented_authority_commands_resolve_in_the_image():
     """Every documented reconciler command must resolve to the file the image
@@ -258,8 +314,18 @@ def test_documented_authority_commands_resolve_in_the_image():
     resolved to /app/server/scripts/..., which does not exist, so it failed in
     the only place it is ever run. A per-authority copy of this check would
     re-open the same hole for the next authority, so this loops instead.
+
+    ORDER MATTERS HERE. The primary assertion is that the path is ABSOLUTE,
+    and it deliberately does not depend on the Dockerfile parse at all. Three
+    review rounds found three ways to fool that parse -- case, continuations,
+    heredocs -- and every one of them failed OPEN by mis-computing the WORKDIR
+    and letting a relative path look correct. An absolute path is right
+    regardless of WORKDIR, which is the whole property being bought, so
+    requiring it first means no future parser hole can readmit the original
+    defect. The COPY-target comparison is a second, weaker check on top.
     """
     dockerfile = _app_dockerfile()
+    _single_stage(dockerfile)
     final_workdir = _final_workdir(dockerfile)
     assert PurePosixPath(final_workdir).is_absolute()
 
@@ -278,17 +344,22 @@ def test_documented_authority_commands_resolve_in_the_image():
                 target = copies.get(PurePosixPath(token).name)
                 if target is None:
                     continue
-                resolved = str(
-                    PurePosixPath(token)
-                    if PurePosixPath(token).is_absolute()
-                    else PurePosixPath(final_workdir) / token
+
+                # Primary: parse-free, so no Dockerfile-reading bug can weaken
+                # it. `final_workdir` appears only in the message.
+                assert PurePosixPath(token).is_absolute(), (
+                    f"{authority['id']} {phase} command names {token!r} by a "
+                    f"repository-relative path. The image's effective WORKDIR "
+                    f"is {final_workdir}, so it resolves to "
+                    f"{PurePosixPath(final_workdir) / token} while the script "
+                    f"is at {target}, and the documented command cannot run in "
+                    f"the image. Use the absolute path: it is correct whatever "
+                    f"the WORKDIR turns out to be."
                 )
-                assert resolved == target, (
-                    f"{authority['id']} {phase} command names {token!r}, which "
-                    f"resolves to {resolved} from the image WORKDIR "
-                    f"{final_workdir}, but deploy/Dockerfile.app puts that "
-                    f"script at {target}. The documented command cannot run in "
-                    f"the image. Use the absolute path."
+                # Secondary: absolute, but is it where the image put it?
+                assert str(PurePosixPath(token)) == target, (
+                    f"{authority['id']} {phase} command names {token!r}, but "
+                    f"deploy/Dockerfile.app copies that script to {target}."
                 )
                 checked.append((authority["id"], phase, token))
 
