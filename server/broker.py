@@ -77,7 +77,11 @@ from envelopes import (  # noqa: E402
     ok_envelope,
     with_envelope_fields,
 )
-from tool_loader import is_trusted_builtin_tool, run_tool_dynamic  # noqa: E402
+from tool_loader import (  # noqa: E402
+    _sandbox_tier as _tool_sandbox_tier,
+    is_trusted_builtin_tool,
+    run_tool_dynamic,
+)
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 
@@ -675,12 +679,44 @@ def _authored_execution_enabled() -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _authored_execution_explicitly_armed() -> bool:
+    """True only when LEAF_AUTHORED_EXECUTION is EXPLICITLY set to a truthy value.
+
+    Distinct from `_authored_execution_enabled()`, which defaults ON outside the
+    production posture. The posture-independent sandbox floor in
+    `validate_runtime_safety` keys on the EXPLICIT flag so local/demo deployments
+    (authored execution defaulted on, sandbox off) keep their existing in-process
+    behavior byte-for-byte, while any deployment that DELIBERATELY arms authored
+    execution must have a real out-of-process sandbox tier engaged.
+    """
+    raw = os.environ.get("LEAF_AUTHORED_EXECUTION")
+    return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _sandbox_configured() -> bool:
     return os.environ.get("LEAF_TOOL_SANDBOX_PROVIDER", "").strip().lower() == "e2b"
 
 
 def validate_runtime_safety() -> None:
     """Reject unsafe or ambiguous production broker configuration."""
+    # Posture-INDEPENDENT fail-closed floor (staging, production, or any explicit
+    # deployment). Tenant-authored tool code must NEVER execute in-process in this
+    # credential-holding broker. When authored execution is EXPLICITLY armed, a
+    # real out-of-process sandbox tier must be engaged. This catches the silent
+    # footgun where LEAF_SANDBOX="1" reads as tier "off" (or a truthy-but-invalid
+    # value reads as "invalid") in EVERY posture -- not only when
+    # LEAF_RUNTIME_ENV=production -- turning a silent-disable into a loud boot
+    # refusal. Keyed on the explicit flag so local/demo (authored default-on,
+    # sandbox off) is unaffected.
+    if _authored_execution_explicitly_armed():
+        tier = _tool_sandbox_tier()
+        if tier not in ("subprocess", "microvm"):
+            raise RuntimeError(
+                "authored execution is armed (LEAF_AUTHORED_EXECUTION=1) without an "
+                "engaged sandbox tier: set LEAF_TOOL_SANDBOX_PROVIDER=e2b (or "
+                "LEAF_SANDBOX=e2b|e2b-microvm). Refusing to start with tenant tool "
+                f"code able to execute in-process (sandbox tier={tier!r})."
+            )
     if not _production_runtime():
         return
     if not os.environ.get(BROKER_SECRET_ENV, "").strip():

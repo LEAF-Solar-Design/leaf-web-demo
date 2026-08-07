@@ -159,7 +159,16 @@ def _sandbox_tier() -> str:
         return "subprocess"
     if val == "e2b-microvm":
         return "microvm"
-    return "off"
+    # Explicit disable values (and unset) keep the in-process default. Any OTHER
+    # non-empty value -- e.g. "1", "true", "on", "yes" -- is a truthy-but-invalid
+    # enum footgun: it LOOKS like the sandbox is on but names no real tier. Fail
+    # CLOSED as "invalid" rather than silently reading as "off" and running
+    # tenant code in-process. Mirrors the "invalid" branch for a bad
+    # LEAF_TOOL_SANDBOX_PROVIDER above, and is caught early by the broker boot
+    # invariant (validate_runtime_safety) when authored execution is armed.
+    if val in ("", "off", "0", "false", "no", "none", "disabled"):
+        return "off"
+    return "invalid"
 
 
 def _sandbox_timeout_s() -> float:
