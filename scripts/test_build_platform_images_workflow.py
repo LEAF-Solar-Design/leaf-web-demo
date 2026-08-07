@@ -2757,6 +2757,31 @@ def check_docs_noop_filter(text: str) -> None:
     # readable failures; the hash is the contract, and the capability
     # wall means the unguarded scripts hold no credential able to
     # dispatch even if edited.
+    # A COMMENT IS NOT ALWAYS INERT, so the freeze cannot assume it is.
+    #
+    # Bash removes backslash-newline BEFORE it processes comments, so a
+    # full-line comment placed after a continued line is spliced INTO that
+    # command and comments out the remainder of it. `_executable_bash` instead
+    # drops comment lines and joins the continuation to the next CODE line, so
+    # such an edit changes what bash actually runs while leaving the frozen
+    # hash below byte-identical. sol-critic demonstrated exactly that on
+    # PR #508: the mutated script failed under bash and still hashed to
+    # 97ae6184…9214a. Refuse the construct in the frozen scripts outright,
+    # which is stricter than modelling it and cannot itself drift.
+    for step_name, raw in (("tip", tip_step["run"]),
+                           ("manifest", manifest_step["run"]),
+                           ("dispatch", dispatch_step["run"])):
+        raw_lines = raw.splitlines()
+        for idx, line in enumerate(raw_lines[:-1]):
+            if (line.rstrip().endswith("\\")
+                    and raw_lines[idx + 1].lstrip().startswith("#")):
+                raise AssertionError(
+                    f"{step_name} step line {idx + 2}: a full-line comment "
+                    "follows a line continuation. Bash splices it into the "
+                    "continued command and comments out the rest, so this "
+                    "changes behaviour while the frozen hash stays identical. "
+                    "Put the comment above the statement instead.")
+
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
@@ -2789,8 +2814,94 @@ def check_docs_noop_filter(text: str) -> None:
     # new command, no new read, no new token. Verified by recomputation, not
     # assumed: the only diff in the extracted script text is inside two echo
     # arguments.
+    # Hash updated 2026-08-07 (second edit, same day): the dispatch step now
+    # classifies a mid-release superseder from its own build receipt, fails
+    # RED when it leaves staging split with no converger, and finishes the
+    # release when the superseder is a docs-only no-op that would deploy
+    # nothing. Reviewed for dispatch capability: still exactly ONE
+    # `gh workflow run` site with the same four inputs (the count assertion
+    # above is unchanged), no new secret reference, and the three added calls
+    # are read-only `gh api` GETs against THIS repo — runs, run artifacts,
+    # and one run — each explicitly re-bound to the workflow's own read-only
+    # token with `GH_TOKEN="$HOME_TOKEN"`, matching the existing tip read, so
+    # the infra-repo PAT gains no new command.
+    # Hash updated again 2026-08-07 (third edit): the docs-noop arm now
+    # re-reads the tip AFTER its classification poll and fails RED on a moved
+    # tip, closing an interleaving an external review found and this repo
+    # reproduced. Reviewed for dispatch capability: no change to the dispatch
+    # itself, still ONE `gh workflow run` with the same four inputs, no new
+    # secret reference; the one added call is a read-only GET of this repo's
+    # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
+    # to the tip read already at the top of the loop.
+    # Hash updated again 2026-08-07 (fourth edit): sol-critic returned RED on
+    # PR #508 against the third edit, and all three P1s reproduced. The
+    # classifier now (a) fails CLOSED on every read instead of suppressing a
+    # failed artifact listing with `|| true`, which let a docs-only superseder
+    # classify as `yes` on the strength of its build concluding success, (b)
+    # binds the docs-noop marker to the run's CURRENT attempt, since artifacts
+    # are keyed by run id and an attempt-1 marker otherwise outlives a rerun
+    # whose attempt 2 built real images, and (c) selects the superseding build
+    # by workflow PATH rather than display name, which any other workflow can
+    # also carry. Marker absence is additionally only trusted against a
+    # listing proven whole. Reviewed for dispatch capability: UNCHANGED. Still
+    # exactly ONE `gh workflow run` with the same four inputs, still exactly
+    # one secret reference, and the classifier still makes the same THREE
+    # read-only `gh api` GETs against THIS repo — the run list, one run
+    # record, and that run's artifacts — on `GH_TOKEN="$HOME_TOKEN"`. No new
+    # endpoint, no new repo, no new credential: only the handling of their
+    # failures and the strictness of their matching changed.
+    # Hash updated again 2026-08-07 (fifth edit): sol-critic round 2 on PR
+    # #508. `yes` no longer rests on a green conclusion alone — it now
+    # requires the superseder's exact attempt-bound supply-set artifact,
+    # because a build can conclude success and publish nothing, in which case
+    # the manifest step above fails LOUD on the missing supply set and that
+    # relay converges nothing. Artifact completeness additionally requires the
+    # response to carry a numeric `total_count` and an array of artifacts, and
+    # both JSON parses now fail closed explicitly. Finally, a deploy dispatched
+    # over a tip we had to clear re-reads the tip AFTER it lands and fails RED
+    # if it moved, which closes the read-to-dispatch window for REPORTING
+    # (preventing the stale write needs in-lock validation in the infra repo).
+    # Reviewed for dispatch capability: still exactly ONE `gh workflow run`
+    # with the same four inputs and still exactly one secret reference. One
+    # call is added, a read-only GET of this repo's own branch tip on
+    # `GH_TOKEN="$HOME_TOKEN"`, identical in form and token to the two tip
+    # reads already present. No new endpoint, repo or credential.
+    # Hash updated again 2026-08-07 (sixth edit): sol-critic round 3 on PR
+    # #508. The `yes` arm now re-reads the tip after its classification poll
+    # and fails RED if main moved, because `yes` was a claim about a commit
+    # that could already have stopped being the tip: A polls deployable B,
+    # docs-only C lands during the poll, B's relay then SKIPS on the moved tip
+    # and C's relay skips on its own marker, so nothing converges and all
+    # three runs are green. A supply set proves B COULD deploy, never that its
+    # relay WILL. The supply-set match additionally rejects an EXPIRED
+    # artifact, which is a name the superseder's manifest step can no longer
+    # download. Reviewed for dispatch capability: still exactly ONE
+    # `gh workflow run` with the same four inputs and still exactly one secret
+    # reference. The one added call is a fourth read-only GET of this repo's
+    # own branch tip on `GH_TOKEN="$HOME_TOKEN"`, identical in form and token
+    # to the three already present. No new endpoint, repo or credential.
+    # Hash updated again 2026-08-07 (seventh edit): sol-critic round 4 on PR
+    # #508. The supply-set expiry test tightened from `.expired != true` to
+    # `.expired == false`, because jq reads a MISSING field as null and
+    # `null != true` is true, so the loose form accepted a partial artifact
+    # object that never proved the artifact is still downloadable. Comment and
+    # filter change only; the dispatch is untouched, still ONE
+    # `gh workflow run` with the same four inputs, one secret reference, and
+    # the same four read-only GETs on `GH_TOKEN="$HOME_TOKEN"`.
+    #
+    # Hash updated 2026-08-07 (d): PR #508 merged with #506's need-first
+    # ordering. Both changes rewrite this step and each moved this hash alone,
+    # so this value covers the COMBINED script: #506's ordering read plus
+    # #508's superseder classification, its two stale-tip guards and its
+    # post-landing check. Reviewed for dispatch capability on the MERGED text:
+    # still exactly one `gh workflow run` site with the same four inputs,
+    # still exactly one `secrets.` reference, and every call either side adds
+    # is a read-only GET on the workflow's own `GH_TOKEN="$HOME_TOKEN"`. No new
+    # endpoint, repo, command or credential arises from combining them. The
+    # `yes`-arm warning was also reworded here to drop the convergence promise
+    # #506 was RED'd for three rounds running.
     assert frozen == (
-        "6a02086737fa03a80512c66384a0864e43a6cfd91574415cc422a6c0874d8ae2"
+        "cf2521780db4c7cbd7aa46595fe9ad6d47e2ed5c94113f17f98b659085b7bd8e"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3529,20 +3640,305 @@ def check_staging_relay_convergence(text: str) -> None:
     # than report a plain success.
     assert "STAGING IS SPLIT" in code, (
         "standing down mid-release must announce the split it leaves behind")
-    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "true" \]', code), (
-        "the split warning must be conditioned on a service already being live")
+    assert re.search(r'if \[ "\$DEPLOYED_ANY" != "true" \]', code), (
+        "the split handling must be conditioned on a service already being live")
+
+    # A KNOWINGLY UNCONVERGED SPLIT MUST NOT CONCLUDE SUCCESS.
+    #
+    # Observed 2026-08-07: relay run 31144164225 deployed web, was superseded
+    # mid-release by docs-only 7056e2e8, stood down with an accurate
+    # ::warning:: naming the split, and concluded SUCCESS. A warning on a
+    # green run pages nobody and gates nothing, so staging served
+    # prod-d9306c3 on leaf-platform-web-alt and prod-87294a9 on
+    # leaf-platform-app-alt with no alarm and a clean relay history.
+    #
+    # Red is conditioned on the split being LEFT UNCONVERGED, not on standing
+    # down: being superseded by a commit that does build images is normal and
+    # its own relay converges staging, so that path stays green on purpose.
+    assert code.count("CONVERGER=$(superseder_deploys") == 1, (
+        "a mid-release stand-down must classify whether the superseding "
+        "commit converges staging, from exactly one place")
+    # ...and that call must be the ONLY thing that ever sets it. A second
+    # assignment placed after it (`CONVERGER=yes`) leaves the call in place,
+    # satisfies the count above, and silently overrides the classification.
+    converger_writes = re.findall(r"^\s*CONVERGER=", code, re.M)
+    assert len(converger_writes) == 1, (
+        "CONVERGER may be assigned exactly once, by the classifier call; "
+        f"found {len(converger_writes)} assignments, so one can override it")
+    unconverged = re.search(
+        r'else\n\s*echo "::error::STAGING IS SPLIT AND UNCONVERGED:.*?\n\s*exit 1\n',
+        code, re.S)
+    assert unconverged, (
+        "leaving staging split with no known converger must fail the relay "
+        "RED; a ::warning:: on a green run is the reporting hole itself")
+    converged = re.search(
+        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*exit 0\n', code, re.S)
+    assert converged, "the converging-superseder arm must be able to exit 0"
+    # Bind this to the WARNING, not to the arm. The arm now also carries a
+    # stale-tip `::error::STAGING IS SPLIT AND UNCONVERGED`, and a whole-arm
+    # substring check would let that second site satisfy the pin while the
+    # stand-down warning itself stopped naming the split.
+    converged_warning = re.search(r'echo "::warning::([^"]*)"', converged.group(1))
+    assert converged_warning and "STAGING IS SPLIT" in converged_warning.group(1), (
+        "standing down for a superseder that DOES build images may exit 0, "
+        "and its WARNING must still name the split it leaves for that relay "
+        "to close")
+
+    # A DOCS-ONLY SUPERSESSION MUST NOT STRAND A PARTIAL RELEASE.
+    #
+    # The old warning named its own escape hatch — "unless that commit builds
+    # no images" — and that is exactly what fired. A docs-only commit is
+    # deploy-neutral alone but not mid-release: it moves the tip, its own
+    # relay skips on the marker, and nothing is left to converge. Because it
+    # dispatches NOTHING, there is no newer deploy for this release's tag to
+    # land over, so finishing is safe and is the only thing that converges.
+    docs_noop_arm = re.search(
+        r'if \[ "\$CONVERGER" = "no" \]; then\n(.*?)\n\s*elif ', code, re.S)
+    assert docs_noop_arm, "the docs-noop superseder needs its own arm"
+    arm = docs_noop_arm.group(1)
+    assert docs_noop_arm.end() < dispatch_at, (
+        "the fall-through must reach the dispatch below it")
+
+    # The arm must FALL THROUGH on its success path. Its only exit may be the
+    # stale-classification guard below; an unconditional exit here strands
+    # staging split exactly as run 31144164225 did.
+    arm_exits = [ln.strip() for ln in arm.splitlines()
+                 if re.match(r"^\s*exit\b", ln)]
+    assert arm_exits == ["exit 1"], (
+        "the docs-noop arm may contain exactly one exit, the stale-tip guard; "
+        f"found {arm_exits}")
+    assert not re.match(r"^\s*exit\b", arm.splitlines()[-1]), (
+        "the docs-noop arm must not END in an exit; it has to reach the "
+        "dispatch that converges staging")
+
+    # THE CLASSIFICATION IS A POLL, SO ITS INPUT TIP IS A SNAPSHOT.
+    #
+    # sol@medium found this and it reproduced: between the classifier call and
+    # the dispatch there was no second tip read, so a DEPLOYABLE commit
+    # merging during the poll could deploy a newer tag to both services and
+    # this relay would then dispatch its older tag last. The shared
+    # concurrency group does not prevent that, and an independent lane
+    # refuted the claim that it does against GitHub's own concurrency docs:
+    # FIFO is based on when a run "started waiting on the concurrency group,
+    # not the time each workflow was dispatched", and "ordering is not
+    # guaranteed". An earlier-dispatched run can therefore execute last.
+    # Fail CLOSED on a moved tip rather than re-classify, so the arm cannot
+    # spin on a fast-moving main.
+    assert re.search(
+        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
+        r'"repos/\$GITHUB_REPOSITORY/branches/main"', arm), (
+        "the docs-noop arm must re-read the tip AFTER the classification poll; "
+        "acting on the pre-poll snapshot can land a stale tag over a newer "
+        "deploy")
+    stale_guard = re.search(
+        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', arm, re.S)
+    assert stale_guard, "the re-read needs a guard that acts on a moved tip"
+    assert "::error::" in stale_guard.group(1) and "exit 1" in stale_guard.group(1), (
+        "a stale docs-noop finding must fail RED, not proceed and not exit 0")
+
+    # THE `yes` FINDING IS A POLL RESULT TOO, so it needs the same guard.
+    #
+    # sol-critic reproduced the consequence of leaving it out: A deploys web
+    # and polls deployable B; docs-only C lands during the poll; B completes
+    # with its supply set so A answers `yes` and exits GREEN; B's own relay
+    # then skips because C is the tip, and C's relay skips on its docs-noop
+    # marker. Nothing converges and all three runs are green -- the original
+    # incident displaced by one hop. A supply set proves B COULD deploy, never
+    # that its relay WILL.
+    converger_arm = re.search(
+        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*else\b', code, re.S)
+    assert converger_arm, "the converging-superseder arm must exist"
+    yes_body = converger_arm.group(1)
+    assert re.search(
+        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
+        r'"repos/\$GITHUB_REPOSITORY/branches/main"', yes_body), (
+        "the converging-superseder arm must re-read the tip AFTER its "
+        "classification poll; `yes` about a commit that is no longer the tip "
+        "is a claim about a relay that will itself stand down")
+    yes_stale = re.search(
+        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', yes_body, re.S)
+    assert yes_stale, "the converging-superseder re-read needs a guard"
+    assert ("::error::" in yes_stale.group(1)
+            and "exit 1" in yes_stale.group(1)), (
+        "a stale `converges` finding must fail RED, not exit 0")
+
+    # The classifier reads the superseding build's OWN receipt. Re-deriving
+    # the docs-only verdict from a compare API would be a second copy of a
+    # rule the build computes from the real push diff with rename detection
+    # disabled, and the two would drift.
+    assert "docs-noop-$SUP_SHA-attempt-" in code, (
+        "the superseder must be classified by its docs-noop marker artifact")
+    assert '"completed success") echo yes' in code, (
+        "only a SUCCEEDED superseding build proves a supply set exists to "
+        "converge staging")
+    assert re.search(r"^\s*echo unknown\n\s*\}", code, re.M), (
+        "exhausting the classifier budget must fall to 'unknown', which is "
+        "the RED path; defaulting to 'yes' would restore the silent split")
+
+    # EVERY READ IN THE CLASSIFIER FAILS CLOSED.
+    #
+    # sol-critic RED, reproduced: `|| true` on the artifact listing emptied
+    # the result on any transient API failure, the marker check was then
+    # skipped, and a DOCS-ONLY superseder classified as `yes` on the strength
+    # of its build concluding success. That is precisely the green-on-a-split
+    # outcome this guard exists to stop, reachable through one dropped
+    # request. An unproven read must retry, never decide.
+    classifier = re.search(
+        r"^classify_superseder_once\(\) \{\n(.*?)\n\}$", code, re.S | re.M)
+    assert classifier, "the per-poll classification must be its own function"
+    once = classifier.group(1)
+    assert "|| true" not in once, (
+        "no read in the classifier may be suppressed with `|| true`: an "
+        "unproven read must retry, never fall through to a decision")
+    assert once.count("|| return 1") >= 4, (
+        "the run list, the run record, the artifact listing and the "
+        "completeness check must each fail closed with `return 1`; found "
+        f"{once.count('|| return 1')}")
+
+    # A NAME IS NOT AN IDENTITY. Selecting the superseding build by display
+    # name lets any other workflow also called "Build platform images" supply
+    # a colliding marker or conclusion, and adding one would not touch this
+    # file or its frozen hash.
+    assert "select(.path == $path)" in once, (
+        "the superseding build must be selected by workflow PATH, not by its "
+        "display name")
+    assert "BUILD_WORKFLOW_PATH=" in code, "the pinned build path must be declared"
+
+    # ABSENCE ONLY COUNTS AGAINST A LISTING PROVEN WHOLE. A truncated page
+    # says nothing about the entries it did not return, and marker absence is
+    # exactly what promotes the answer to `yes`.
+    assert "(.total_count <= (.artifacts | length))" in once, (
+        "artifact absence may only be trusted when the listing is proven "
+        "complete")
+    assert '(.total_count | type == "number")' in once, (
+        "a response missing `total_count` proves nothing about completeness "
+        "and must not be treated as whole")
+    assert '(.artifacts | type == "array")' in once, (
+        "the artifact listing must be proven to BE a listing")
+
+    # THE MARKER IS BOUND TO THE RUN'S CURRENT ATTEMPT. Artifacts are keyed by
+    # run id and NOT by attempt, so an attempt-1 docs marker outlives a rerun
+    # whose attempt 2 built real images. A prefix match would call that rerun
+    # `no` and finish this release on the older tag, landing it on top of the
+    # images the rerun is about to deploy.
+    assert "any(.artifacts[]; .name == $n)" in once, (
+        "the marker must match by EXACT name, not by prefix across attempts")
+    assert "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
+        "the marker name must be bound to the run's CURRENT attempt")
+
+    # THE FORWARDED VERDICT IS PART OF THE CLASSIFICATION, so it needs the
+    # same single-assignment rule as CONVERGER. `VERDICT=yes` placed just
+    # inside `if VERDICT=$(classify_superseder_once ...)` preserves the jq
+    # filter, the single CONVERGER assignment and every other pin, passes
+    # `bash -n`, and turns an UNDECIDED poll into a green stand-down.
+    assert 'if VERDICT=$(classify_superseder_once "$1"); then' in code, (
+        "the polling wrapper must take its verdict straight from the "
+        "classifier call")
+    # EXACTLY ONE DEFINITION EACH. Bash resolves a function at CALL time, so a
+    # second definition placed anywhere later silently wins. The executable
+    # rehearsal lifts only the slice from BUILD_WORKFLOW_PATH through the end
+    # of superseder_deploys, so a redefinition after that slice would answer
+    # `yes` at runtime while every rehearsal case still passed.
+    for fn in ("classify_superseder_once", "superseder_deploys"):
+        # Count BOTH spellings: bash also accepts `function name { ... }`, and
+        # counting only `name() {` let the alternate form slip past.
+        defs = (code.count(f"{fn}() {{")
+                + len(re.findall(rf"^\s*function\s+{fn}\b", code, re.M)))
+        assert defs == 1, (
+            f"{fn} must be defined exactly once; bash resolves the LAST "
+            f"definition at call time, so a second one silently wins "
+            f"(found {defs})")
+    assert code.count("VERDICT=") == 1, (
+        "VERDICT may be assigned exactly once, by the classifier call; a "
+        "second assignment overrides an undecided result while leaving every "
+        f"other pin intact (found {code.count('VERDICT=')})")
+
+    # `yes` MUST BE EARNED BY THE SUPPLY SET, NOT BY A GREEN CONCLUSION.
+    #
+    # sol-critic round 2, reproduced: a build can conclude success and publish
+    # NO artifacts (a partial run, a failed upload). The completeness check
+    # passes on {"total_count":0,"artifacts":[]}, no marker is found, and the
+    # old code answered `yes`. But the manifest step of THIS very workflow
+    # treats a missing supply set with no marker as a hard failure, so that
+    # superseder's relay deploys nothing and the split never converges, while
+    # this relay exited green on its success. `yes` claims the superseder
+    # converges staging, so it has to require the artifact that makes that
+    # true.
+    assert "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" in once, (
+        "`yes` must require the superseder's exact attempt-bound supply-set "
+        "artifact, not merely a successful conclusion")
+    yes_arm = re.search(
+        r'staging-supply-set-\$SUP_SHA-attempt-\$SUP_ATTEMPT"(.*?)\n\s*fi\n',
+        once, re.S)
+    assert yes_arm and "echo yes" in yes_arm.group(1), (
+        "the `yes` answer must sit INSIDE the supply-set check")
+    # An expired artifact is a name with nothing behind it; the superseder's
+    # manifest step still has to DOWNLOAD this supply set.
+    # `.expired == false`, not `!= true`: jq reads a MISSING field as null and
+    # `null != true` is true, so the loose form would accept a partial artifact
+    # object that never proved the artifact is still downloadable. This
+    # classifier fails closed on an unproven response, and that includes an
+    # artifact whose expiry it cannot read.
+    assert "(.expired == false)" in once, (
+        "an expired -- or unproven -- supply-set artifact must not earn `yes`")
+    assert ".expired != true" not in once, (
+        "`.expired != true` accepts a missing field; require `== false`")
+    # The CONDITION itself must stay falsifiable. sol-critic showed an
+    # always-true guard (`... >/dev/null || :`) passed every other pin while
+    # removing the requirement entirely, so pin the condition, not just the
+    # presence of the text inside it.
+    supply_condition = re.search(
+        r'if printf[^\n]*\n(?:[^\n]*\n)*?[^\n]*staging-supply-set[^\n]*\n'
+        r'(?:[^\n]*\n)*?[^\n]*; then\n', once)
+    assert supply_condition, "the supply-set requirement must gate `yes`"
+    assert "||" not in supply_condition.group(0), (
+        "the supply-set check must carry no `||` fallback: that makes the "
+        "condition unconditionally true and silently drops the requirement")
+    # A shell-level `||` is not the only way to make the guard vacuous: the jq
+    # FILTER can be made a tautology from the inside. Pin the filter exactly.
+    assert (
+        "'any(.artifacts[]; (.name == $n) and (.expired == false))'"
+        in supply_condition.group(0)), (
+        "the supply-set jq filter must be exactly the membership test; a "
+        "disjunction such as `any(...) or true` accepts a missing supply set")
+
+    # THE READ-TO-DISPATCH WINDOW IS CLOSED FOR REPORTING.
+    #
+    # Only the docs-noop arm dispatches after main has already moved, and no
+    # read taken BEFORE a dispatch can prove the tip held across it. A third,
+    # deployable commit merging inside that window can deploy newer images
+    # that this older tag then lands on top of. The relay cannot prove staging
+    # is forward, so it must not conclude success.
+    assert re.search(r"^\s*NOOP_FINISH_FROM=\"\$MAIN_SHA\"", code, re.M), (
+        "the docs-noop arm must record the tip it dispatched over")
+    landing_check = re.search(
+        r'if \[ -n "\$NOOP_FINISH_FROM" \]; then\n(.*?)\n\s*fi\n', code, re.S)
+    assert landing_check, (
+        "a landed deploy that was dispatched over a moved tip must re-check "
+        "the tip")
+    assert "TIP_AFTER" in landing_check.group(1), "the landing check needs a fresh tip read"
+    assert ("::error::" in landing_check.group(1)
+            and "exit 1" in landing_check.group(1)), (
+        "a deploy that cannot be proven forward must fail RED, not exit 0")
+    assert code.index("NOOP_FINISH_FROM=\"$MAIN_SHA\"") < code.index(
+        'if [ -n "$NOOP_FINISH_FROM" ]; then'), (
+        "the flag must be set before the landing check reads it")
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
     # line", so ordinary edits inside the arm stay legal.
+    # The close is anchored to the OPENING indentation so a nested `if` inside
+    # the arm (the post-landing tip check) cannot truncate the match and let
+    # `break` slip out of view.
     success_arm = re.search(
-        r'if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\s*fi\b', code, re.S)
+        r'^(\s*)if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\1fi\b',
+        code, re.S | re.M)
     assert success_arm, "the watch needs an explicit success arm"
-    assert re.search(r"^\s*break\b", success_arm.group(1), re.M), (
+    assert re.search(r"^\s*break\b", success_arm.group(2), re.M), (
         "the loop may only advance past a service whose deploy concluded success")
-    assert "landed (run $RUN_ID)" in success_arm.group(1), (
+    assert "landed (run $RUN_ID)" in success_arm.group(2), (
         "the success arm must say which run landed the deploy")
-    assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(1), re.M), (
+    assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(2), re.M), (
         "a landed deploy must record that this release is now partly live, so "
         "the stand-down above cannot abandon it half-deployed")
 
@@ -3559,11 +3955,20 @@ def check_staging_relay_convergence(text: str) -> None:
             f"::error:: on line {i + 1} is not followed by `exit 1`; "
             f"found {following[:1]}")
 
-    # The only clean early exit is standing down for a newer commit.
-    assert code.count("exit 0") == 1, (
-        "the relay may exit 0 early only when a newer commit owns the deploy")
-    assert "standing down" in code[:code.index("exit 0")][-500:], (
-        "the single exit 0 must be the latest-main-only stand-down")
+    # Every clean early exit is a stand-down for a newer commit, and there
+    # are exactly two: nothing was live yet, or the superseder converges.
+    # Counting them pins the shape; requiring each to be a stand-down is what
+    # keeps a future `exit 0` from swallowing a failure.
+    exit_zeros = [i for i, ln in enumerate(code.splitlines())
+                  if ln.strip() == "exit 0"]
+    assert len(exit_zeros) == 2, (
+        "the relay may exit 0 early only for the two stand-downs (nothing "
+        f"live yet, or a converging superseder); found {len(exit_zeros)}")
+    for i in exit_zeros:
+        preceding = "\n".join(code.splitlines()[:i])[-700:]
+        assert "standing down" in preceding.lower(), (
+            f"the exit 0 on line {i + 1} is not a stand-down; every clean "
+            "early exit must say why it is leaving the deploy to someone else")
 
     # Retry covers QUEUE EVICTION ONLY. Zero started jobs proves the run
     # never reached AWS; re-dispatching a run that started and then failed
@@ -3679,6 +4084,155 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
                    'landed (run $RUN_ID)."\n                break\n',
                    'landed (run $RUN_ID)."\n'),
         ),
+        # --- the 2026-08-07 reporting hole and its escape hatch ---
+        (
+            "an unconverged split reported green (run 31144164225 exactly)",
+            mutate(original,
+                   "                  exit 1\n                fi\n              fi\n",
+                   "                  exit 0\n                fi\n              fi\n"),
+        ),
+        (
+            "docs-noop superseder stands down, stranding the partial release",
+            mutate(original,
+                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n',
+                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n'
+                   "                  exit 0\n"),
+        ),
+        (
+            "classifier budget exhaustion defaults to 'converges' instead of red",
+            mutate(original, "            echo unknown\n          }",
+                   "            echo yes\n          }"),
+        ),
+        (
+            "any completed superseding build counted as a converger",
+            mutate(original,
+                   '                "completed success") echo yes; return 0 ;;\n',
+                   "                completed*) echo yes; return 0 ;;\n"),
+        ),
+        # --- sol-critic round 2 on PR #508 ---
+        (
+            "the supply-set requirement neutralised by an always-true guard, "
+            "so a build that published NOTHING counts as a converger",
+            mutate(original,
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))' \\\n"
+                   "                  >/dev/null; then\n",
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))' \\\n"
+                   "                  >/dev/null || :; then\n"),
+        ),
+        (
+            "an EXPIRED supply set, which the superseder's relay cannot "
+            "download, counted as a converger",
+            mutate(original, " and (.expired == false)", ""),
+        ),
+        (
+            "expiry test loosened so a partial artifact object with no "
+            "`expired` field still earns `yes`",
+            mutate(original, "(.expired == false)", "(.expired != true)"),
+        ),
+        (
+            "the jq membership test made a tautology from the inside",
+            mutate(original,
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false))'",
+                   "'any(.artifacts[]; (.name == $n) and (.expired == false)) or true'"),
+        ),
+        (
+            "the classification silently overridden by a second assignment",
+            mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
+                   'CONVERGER=$(superseder_deploys "$MAIN_SHA")\n'
+                   "                CONVERGER=yes"),
+        ),
+        (
+            "the classifier REDEFINED after the rehearsal's extracted slice, "
+            "so bash resolves the override at call time",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          classify_superseder_once() { echo yes; }\n"
+                   "          DEPLOYED_ANY=false\n"),
+        ),
+        (
+            "the same late override written in bash's ALTERNATE function "
+            "syntax, which an exact-spelling count misses",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          function superseder_deploys { echo yes; }\n"
+                   "          DEPLOYED_ANY=false\n"),
+        ),
+        (
+            "the forwarded verdict overridden inside the polling wrapper, "
+            "turning an UNDECIDED poll into a green stand-down",
+            mutate(original,
+                   'if VERDICT=$(classify_superseder_once "$1"); then\n',
+                   'if VERDICT=$(classify_superseder_once "$1"); then\n'
+                   "                VERDICT=yes\n"),
+        ),
+        (
+            "the `yes` finding acted on the pre-poll tip snapshot, so a "
+            "docs-only commit landing during the poll strands the split",
+            mutate(original,
+                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \\\n'
+                   '                    "repos/$GITHUB_REPOSITORY/branches/main" --jq \'.commit.sha\')\n'
+                   '                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then\n'
+                   '                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale.',
+                   '                  if false; then\n'
+                   '                    echo "::error::stale.'),
+        ),
+        (
+            "artifact listing trusted without proving it carries a count",
+            mutate(original, '(.total_count | type == "number")', "true"),
+        ),
+        (
+            "a deploy dispatched over a moved tip reported green without "
+            "re-checking the tip after it landed",
+            mutate(original, 'NOOP_FINISH_FROM="$MAIN_SHA"',
+                   'NOOP_FINISH_FROM=""'),
+        ),
+        # --- sol-critic RED on PR #508: the classifier's own read paths ---
+        (
+            "a failed artifact listing suppressed, so absence is assumed and "
+            "a docs-only superseder classifies as `yes`",
+            mutate(original, "|| return 1", "|| true"),
+        ),
+        (
+            "the superseding build selected by display name, which any other "
+            "workflow can also carry",
+            mutate(original, "select(.path == $path)",
+                   'select(.name == "Build platform images")'),
+        ),
+        (
+            "marker absence trusted against a truncated artifact page",
+            mutate(original, "(.total_count <= (.artifacts | length))",
+                   "(.total_count >= 0)"),
+        ),
+        (
+            "marker matched across rerun attempts, so an attempt-1 docs "
+            "marker outlives a rerun whose attempt 2 built real images",
+            mutate(
+                mutate(original, "any(.artifacts[]; .name == $n)",
+                       "any(.artifacts[]; .name | startswith($n))"),
+                "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT",
+                "docs-noop-$SUP_SHA-attempt-"),
+        ),
+        (
+            "superseder classification skipped, split assumed benign",
+            mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
+                   "CONVERGER=yes"),
+        ),
+        (
+            "marker check replaced by a re-derived diff that can drift",
+            mutate(original, 'docs-noop-$SUP_SHA-attempt-', "noop-guess-"),
+        ),
+        (
+            "acting on the pre-poll tip snapshot (sol@medium's interleaving)",
+            mutate(original,
+                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+',
+                   '                  TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
+'),
+        ),
+        (
+            "stale docs-noop finding proceeds instead of failing red",
+            mutate(original,
+                   'if [ "$TIP_NOW" != "$MAIN_SHA" ]; then',
+                   'if [ "$TIP_NOW" = "$TIP_NOW" ] && false; then'),
+        ),
     ]
     for name, mutant in negatives:
         assert mutant != original
@@ -3743,6 +4297,17 @@ case "${args[0]}" in
         ;;
       *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
       *"/jobs"*)          printf '%s\n' "1" ;;
+      # PR #508's superseder classifier runs inside THIS step whenever a
+      # scenario moves main after a service is already live. It polls to a
+      # 95-minute deadline, and this stub no-ops `sleep`, so an unanswered
+      # endpoint spins the rehearsal for the full budget instead of failing
+      # it. Answer all three reads so the classification resolves at once.
+      *"/actions/runs?head_sha="*)
+        printf '%s\n' '{"workflow_runs":[{"id":77,"path":".github/workflows/build-platform-images.yml","name":"Build platform images"}]}' ;;
+      *"/artifacts?per_page=100")
+        printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-moved01-attempt-1","expired":false}]}' ;;
+      *"/actions/runs/"*)
+        printf '%s\n' '{"status":"completed","conclusion":"success","run_attempt":1}' ;;
       *) echo "fake gh: unhandled api ${args[1]}" >&2; exit 9 ;;
     esac
     ;;
@@ -3935,6 +4500,216 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
     print("staging relay need-first ordering rehearsal: PASS")
 
 
+# REHEARSAL_BUDGET is the classifier's wall-clock deadline for one case.
+# Cases that DECIDE return in well under a second; cases that must fall to
+# `unknown` do so by exhausting this budget, so it is the per-case cost of
+# every failed-read scenario. It started at 2s and that was too tight once
+# this suite also ran #506's ordering rehearsal: a decisive case could
+# spend its whole budget on jq startup and answer `unknown`, failing the
+# test for a reason that had nothing to do with the classifier. 8s is far
+# above the observed sub-second decide path and still bounds the suite.
+_CLASSIFIER_HARNESS = """set -euo pipefail
+GITHUB_REPOSITORY=owner/repo
+HOME_TOKEN=token
+POLL_SECONDS=0.05
+_END=$(( $(date +%%s) + ${REHEARSAL_BUDGET:-8} ))
+before_deadline() { [ "$(date +%%s)" -lt "$_END" ]; }
+%(classifier)s
+superseder_deploys "$REHEARSAL_SHA"
+"""
+
+# The stub ROUTES on the requested sha and run id rather than answering
+# every call the same way. Without that, a classifier that hardcoded the
+# sha or the run id would be served the right fixture anyway and every
+# case would pass while the lookup was broken.
+_CLASSIFIER_FAKE_GH = """#!/usr/bin/env bash
+url="$2"
+case "$url" in
+  *"/actions/runs?head_sha="*)
+    if [ "${FAIL_RUNS:-0}" = 1 ]; then exit 1; fi
+    req="${url#*head_sha=}"; req="${req%%&*}"
+    if [ "$req" != "$WANT_SHA" ]; then printf '{"workflow_runs":[]}'; exit 0; fi
+    printf '%s' "$RUNS_JSON" ;;
+  *"/artifacts?per_page=100")
+    if [ "${FAIL_ARTIFACTS:-0}" = 1 ]; then exit 1; fi
+    rest="${url#*/actions/runs/}"; req="${rest%%/*}"
+    if [ "$req" != "$WANT_RUN" ]; then
+      printf '{"total_count":0,"artifacts":[]}'; exit 0
+    fi
+    printf '%s' "$ARTIFACTS_JSON" ;;
+  *"/actions/runs/"*)
+    if [ "${FAIL_RECORD:-0}" = 1 ]; then exit 1; fi
+    req="${url##*/actions/runs/}"
+    if [ "$req" != "$WANT_RUN" ]; then
+      printf '{"status":"queued","conclusion":null,"run_attempt":1}'; exit 0
+    fi
+    printf '%s' "$RECORD_JSON" ;;
+  *) exit 9 ;;
+esac
+"""
+
+
+def check_staging_relay_classifier_behaviour(text: str) -> None:
+    """EXECUTE the real classifier against stubbed API responses.
+
+    WHY THIS EXISTS. Every guard below was previously pinned only as
+    text, and sol-critic kept finding edits that changed behaviour while
+    satisfying every pin: an always-true jq filter, a second
+    `CONVERGER=`/`VERDICT=` assignment, a redefinition of
+    `classify_superseder_once`, and an early `|| { echo yes; return 0; }`
+    that still left four `|| return 1` occurrences behind. Pinning text
+    was not converging, because the property that matters is what the
+    function ANSWERS, not what it says.
+
+    So this drives the actual bash lifted from the parsed YAML. The
+    invariant is one line: NOTHING may answer `yes` unless the
+    superseding build really published an unexpired, attempt-bound
+    supply set. A redefinition or an early `echo yes` fails here no
+    matter where it is hidden.
+    """
+    bash = shutil.which("bash")
+    jq_bin = shutil.which("jq")
+    assert bash and jq_bin, "the classifier rehearsal needs bash and jq on PATH"
+
+    wf = _strict_yaml(text)
+    run_steps = [s for s in wf["jobs"]["dispatch"]["steps"] if "run" in s]
+    code = run_steps[-1]["run"]
+    start = code.index("BUILD_WORKFLOW_PATH=")
+    end = re.search(r"^superseder_deploys\(\) \{\n.*?^\}$", code[start:],
+                    re.S | re.M)
+    assert end, "the classifier and its polling wrapper must be extractable"
+    classifier = code[start:start + end.end()]
+
+    sha = "abc123"
+    other_sha = "def456"
+    supply = f"staging-supply-set-{sha}-attempt-2"
+    other_supply = f"staging-supply-set-{other_sha}-attempt-2"
+    marker = f"docs-noop-{sha}-attempt-2"
+    build_path = ".github/workflows/build-platform-images.yml"
+    good_run = ('{"workflow_runs":[{"id":11,"path":"%s",'
+                '"name":"Build platform images"}]}' % build_path)
+    ok_record = '{"status":"completed","conclusion":"success","run_attempt":2}'
+
+    def arts(*names_expired, total=None):
+        items = ",".join(
+            '{"name":"%s","expired":%s}' % (n, "true" if e else "false")
+            for n, e in names_expired)
+        count = len(names_expired) if total is None else total
+        return '{"total_count":%d,"artifacts":[%s]}' % (count, items)
+
+    # (name, env overrides, expected answer)
+    cases = [
+        ("run-list read fails", {"FAIL_RUNS": "1", "BUDGET": "2"}, "unknown"),
+        ("run-record read fails", {"FAIL_RECORD": "1", "BUDGET": "2"}, "unknown"),
+        ("artifact read fails", {"FAIL_ARTIFACTS": "1", "BUDGET": "2"}, "unknown"),
+        ("no build run for the sha",
+         {"RUNS_JSON": '{"workflow_runs":[]}', "BUDGET": "2"}, "unknown"),
+        ("a same-NAMED run at a different path is not our build",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":11,"path":'
+                       '".github/workflows/impostor.yml",'
+                       '"name":"Build platform images"}]}', "BUDGET": "2"}, "unknown"),
+        ("success but NO artifacts at all",
+         {"ARTIFACTS_JSON": arts()}, "unknown"),
+        ("success with an unexpired supply set",
+         {"ARTIFACTS_JSON": arts((supply, False))}, "yes"),
+        ("success with an EXPIRED supply set",
+         {"ARTIFACTS_JSON": arts((supply, True))}, "unknown"),
+        ("artifact listing truncated",
+         {"ARTIFACTS_JSON": arts((supply, False), total=9), "BUDGET": "2"}, "unknown"),
+        ("artifact listing carries no total_count",
+         {"ARTIFACTS_JSON": '{"artifacts":[]}', "BUDGET": "2"}, "unknown"),
+        ("docs-noop marker for the CURRENT attempt",
+         {"ARTIFACTS_JSON": arts((marker, False))}, "no"),
+        ("a PREVIOUS attempt's marker must not outlive a rerun that built",
+         {"ARTIFACTS_JSON": arts((f"docs-noop-{sha}-attempt-1", False),
+                                 (supply, False))}, "yes"),
+        ("the build concluded failure",
+         {"ARTIFACTS_JSON": arts((supply, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"failure",'
+                         '"run_attempt":2}'}, "unknown"),
+        # THE ATTEMPT MUST COME FROM THE RUN RECORD, NOT FROM THE FIXTURE.
+        # Every case above happens to sit on run_attempt 2, so a classifier
+        # that hardcoded `SUP_ATTEMPT=2` would satisfy all of them. These two
+        # move the record's attempt to 3 so only a classifier that actually
+        # reads it can tell them apart.
+        ("attempt 3 in flight, only the PREVIOUS attempt's supply set",
+         {"ARTIFACTS_JSON": arts((supply, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "unknown"),
+        ("attempt 3 in flight with its OWN supply set",
+         {"ARTIFACTS_JSON": arts((f"staging-supply-set-{sha}-attempt-3", False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "yes"),
+        ("attempt 3 in flight, only the PREVIOUS attempt's docs marker",
+         {"ARTIFACTS_JSON": arts((marker, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"success",'
+                         '"run_attempt":3}'}, "unknown"),
+        # THE REQUESTED SHA MUST COME FROM THE ARGUMENT. Every case above asks
+        # for the same sha, so a classifier that hardcoded it would be served
+        # the right fixture regardless.
+        ("a DIFFERENT sha is asked for, and only the other sha's supply set "
+         "exists",
+         {"SHA": other_sha, "WANT_SHA": other_sha,
+          "ARTIFACTS_JSON": arts((supply, False))}, "unknown"),
+        ("a DIFFERENT sha is asked for, with its OWN supply set",
+         {"SHA": other_sha, "WANT_SHA": other_sha,
+          "ARTIFACTS_JSON": arts((other_supply, False))}, "yes"),
+        # THE RUN ID MUST COME FROM THE RUN LIST. Every case above resolves to
+        # run 11, so a classifier that hardcoded the id would still be served.
+        ("the build resolves to run 12 while only run 11 is served",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
+                       '"name":"Build platform images"}]}' % build_path,
+          "WANT_RUN": "11", "BUDGET": "2"}, "unknown"),
+        ("the build resolves to run 12 and run 12 is served",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
+                       '"name":"Build platform images"}]}' % build_path,
+          "WANT_RUN": "12"}, "yes"),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        fake_dir = tmp / "bin"
+        fake_dir.mkdir()
+        gh = fake_dir / "gh"
+        gh.write_text(_CLASSIFIER_FAKE_GH, encoding="utf-8", newline="\n")
+        gh.chmod(0o755)
+        script = tmp / "rehearse.sh"
+        script.write_text(
+            _CLASSIFIER_HARNESS % {"classifier": classifier},
+            encoding="utf-8", newline="\n")
+
+        for name, overrides, expected in cases:
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
+            env["REHEARSAL_SHA"] = overrides.get("SHA", sha)
+            env["WANT_SHA"] = overrides.get("WANT_SHA", sha)
+            env["WANT_RUN"] = overrides.get("WANT_RUN", "11")
+            env["RUNS_JSON"] = overrides.get("RUNS_JSON", good_run)
+            env["RECORD_JSON"] = overrides.get("RECORD_JSON", ok_record)
+            env["ARTIFACTS_JSON"] = overrides.get(
+                "ARTIFACTS_JSON", arts((supply, False)))
+            for key in ("FAIL_RUNS", "FAIL_RECORD", "FAIL_ARTIFACTS"):
+                env[key] = overrides.get(key, "0")
+            # Cases that must EXPIRE to answer `unknown` pay their budget
+            # in wall clock, so they get a short one. Cases that must
+            # DECIDE get a generous one: the decide path is sub-second,
+            # and an expiry there would fail the test for a reason that
+            # has nothing to do with the classifier.
+            env["REHEARSAL_BUDGET"] = overrides.get("BUDGET", "10")
+            proc = subprocess.run(
+                [bash, str(script)], env=env, text=True, capture_output=True)
+            assert proc.returncode == 0, (
+                f"classifier rehearsal {name!r} crashed rc={proc.returncode}\n"
+                f"{proc.stdout}\n{proc.stderr}")
+            answer = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+            assert answer == expected, (
+                f"classifier rehearsal {name!r}: expected {expected!r}, got "
+                f"{answer!r}. Answering `yes` without a proven unexpired "
+                f"supply set is the reporting hole itself.")
+
+    print(f"staging relay classifier rehearsal ({len(cases)} cases): PASS")
+
+
 def test_build_platform_images_workflow_invariants() -> None:
     # Pytest entry point: the gate runner counts collected tests, and a bare
     # main() collects as zero.
@@ -3948,6 +4723,7 @@ def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
     relay = WORKFLOW.parent / "dispatch-staging-deploys.yml"
     check_staging_relay_convergence(relay.read_text(encoding="utf-8"))
     check_staging_relay_convergence_battery(relay)
+    check_staging_relay_classifier_behaviour(relay.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
