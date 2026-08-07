@@ -569,17 +569,27 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     AFTER every instruction above it, knows nothing about spelling, and fails
     the BUILD rather than a test.
 
-    WHAT IS BUILD-PROVEN AND WHAT IS NOT, because the two are not the same and
-    the difference is one instruction. The SHELL-form spelling of this guard
-    was mutation-proven with a real `docker build -f deploy/Dockerfile.app .`:
-    unmodified builds green; dropping the sessions COPY, and separately
-    inserting `RUN rm -rf scripts` under WORKDIR /app, each turned it red at
-    this exact step. The guard is now EXEC form, and that change has NOT been
-    re-proven against a daemon -- the host's Docker was down when it was made.
-    It rests instead on Docker's documented rule that SHELL does not affect the
-    exec form, which is precisely why the change was made. Anyone with a
-    working daemon should replay the same two mutations plus the SHELL one
-    below and delete this paragraph.
+    WHAT IS BUILD-PROVEN, stated as evidence rather than as an absence, because
+    an absence decays the moment someone runs the build. Two different daemons
+    have now executed this guard:
+
+      * SHELL form, mutation-proven locally with `docker build -f
+        deploy/Dockerfile.app .`: unmodified green; dropping the sessions COPY,
+        and separately inserting `RUN rm -rf scripts` under WORKDIR /app, each
+        turned it red at this exact step.
+      * EXEC form, the spelling that actually ships, executed green in CI on the
+        PR that introduced it -- run 31157638863, `speculate (app)`, logging
+        `#31 [21/21] RUN ["/bin/sh", "-c", "test -f ..."]` then `#31 DONE 0.1s`.
+        Look for `DONE`, not merely a green job: the post-merge build of the
+        same tree reported `#31 CACHED`, which proves only that some earlier
+        build succeeded, never that this one ran the guard.
+
+    NOT yet daemon-proven: the mutations against the EXEC form specifically --
+    the two above plus the `SHELL ["/bin/true"]` neutering that motivated exec
+    form. Those are covered by this test statically (revert-to-shell-form and
+    wrong-interpreter both observed red) and by Docker's documented rule that
+    SHELL does not affect the exec form. Replaying them against a daemon would
+    retire this paragraph.
 
     Keyed on the COPY map, so a reconciler added later is covered the day it is
     copied rather than the day someone remembers to extend this list.
