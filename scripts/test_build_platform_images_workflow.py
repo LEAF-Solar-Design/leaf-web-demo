@@ -19,6 +19,7 @@ edits still pass.
 
 from pathlib import Path
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -97,7 +98,11 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
     """True only where the shell would actually expand a per-commit ARG.
 
     Exec-form RUN (a JSON array, with or without leading --flags such as
-    --mount) never invokes a shell, so nothing expands. In shell form, a
+    --mount) invokes no shell, so nothing expands -- with ONE exception: an
+    explicit shell invocation, `["/bin/sh", "-c", "<script>"]` (or /bin/bash),
+    whose third element IS a shell script the shell expands exactly as a
+    shell-form RUN would, so that element is parsed out and scanned. In shell
+    form, a
     $NAME / ${NAME} reference expands except inside single quotes or with
     a backslash-escaped dollar; double quotes (including apostrophes
     nested inside them) do expand. Known scope boundary, named here on
@@ -115,7 +120,25 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
             return False
         body = parts[1].lstrip()
     if body.startswith("["):
-        return False
+        # Exec form. Almost all exec-form RUNs invoke no shell and expand
+        # nothing -- but `["/bin/sh", "-c", "<script>"]` and its /bin/bash
+        # twin DO run a shell over their third element, so parse the argv and
+        # fall through to the expansion scan on that script. Anything else in
+        # exec form still consumes nothing.
+        try:
+            argv = json.loads(body)
+        except (ValueError, TypeError):
+            return False
+        if (
+            isinstance(argv, list)
+            and len(argv) == 3
+            and argv[0] in ("/bin/sh", "/bin/bash")
+            and argv[1] == "-c"
+            and isinstance(argv[2], str)
+        ):
+            body = argv[2]
+        else:
+            return False
     in_single = in_double = False
     i = 0
     while i < len(body):
@@ -1245,6 +1268,18 @@ def main() -> None:
         ("RUN test -n $LEAF_SOURCE_SHA", False),
         ("RUN seal ${LEAF_SOURCE_SHA}", False),
         ("RUN python -c \"attest('${LEAF_SOURCE_SHA}')\"", False),
+        # The one exec form that DOES run a shell: `["/bin/sh","-c","<script>"]`
+        # (and /bin/bash). Its third element is scanned like a shell-form body,
+        # so it consumes when the script references the ARG and offends when it
+        # does not (canonical-worker's survival guard is the real user of this).
+        # `-lc` is not `-c`, so it is not treated as a shell invocation.
+        (
+            'RUN ["/bin/sh", "-c", "test -f /a && test -n \\"${LEAF_SOURCE_SHA}\\""]',
+            False,
+        ),
+        ('RUN ["/bin/sh", "-c", "echo no-arg-here"]', True),
+        ('RUN ["/bin/bash", "-c", "seal ${LEAF_SOURCE_SHA}"]', False),
+        ('RUN ["/bin/sh", "-lc", "echo ${LEAF_SOURCE_SHA}"]', True),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (

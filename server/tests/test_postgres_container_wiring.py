@@ -861,7 +861,8 @@ def _shipped_scripts(path: str) -> dict[str, str]:
 
 
 def _survival_guard_argv(
-    targets, *, readable: bool = False, executable: str | None = None
+    targets, *, readable: bool = False, executable: str | None = None,
+    consume_arg: str | None = None,
 ) -> list[str]:
     """The one exec-form argv every image's survival guard must be spelled as.
 
@@ -892,6 +893,14 @@ def _survival_guard_argv(
     command = " && ".join(clauses)
     if executable:
         command += f" && test -x {executable}"
+    # `consume_arg` appends a reference to a per-commit ARG so the guard may sit
+    # BELOW that ARG without tripping the build-workflow cache contract (every
+    # RUN below a per-commit ARG must reference one). Only canonical-worker needs
+    # it: its per-commit ARGs are forced high in the file, so its guard -- which
+    # must run LAST, after the root RUNs those ARGs feed -- is necessarily below
+    # them. `test -n`, so an empty value also fails the build.
+    if consume_arg:
+        command += f' && test -n "${{{consume_arg}}}"'
     return ["/bin/sh", "-c", command]
 
 
@@ -933,6 +942,7 @@ def _assert_one_survival_guard(
     *,
     readable: bool = False,
     executable: str | None = None,
+    consume_arg: str | None = None,
 ) -> int:
     """Exactly one exec-form guard over `targets`, and nothing unchecked below it.
 
@@ -944,7 +954,8 @@ def _assert_one_survival_guard(
     FOLLOWS it could ever see it. Exec form names its own interpreter and
     ignores SHELL, which closes it outright instead of adding a position rule.
     """
-    expected = _survival_guard_argv(targets, readable=readable, executable=executable)
+    expected = _survival_guard_argv(
+        targets, readable=readable, executable=executable, consume_arg=consume_arg)
     guarded = [
         index for index, (keyword, argument) in enumerate(instructions)
         if keyword == "RUN" and _exec_argv(argument) == expected
@@ -1549,11 +1560,13 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
     # whose guard passed and whose documented command still fails. This image
     # declares neither, so it needs no exception. The three images that DO drop
-    # privilege must admit USER -- the guard cannot sit below it -- and bound
-    # that admission by refusing every unpinned mode change
-    # (`_assert_no_unpinned_mode_change`). Note BOUND, not paid off: what a
-    # later USER can actually reach is a review class, for the reasons that
-    # helper's docstring records.
+    # privilege declare their runtime USER ABOVE the guard, so the guard runs as
+    # that uid and `_assert_guard_runs_as_the_runtime_identity` enforces the
+    # pairing; `test -r`/`test -x` then observe what the runtime uid can actually
+    # reach at BUILD time rather than merely bounding it (no command text is
+    # read, so the evasions that beat two earlier mode scanners do not apply).
+    # What a later CMD/HEALTHCHECK can do at RUNTIME remains a review class,
+    # recorded in test_every_image_asserts_its_shipped_scripts_at_build_time.
     #
     # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
     # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
@@ -1570,62 +1583,45 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     )
 
 
-# The two RUNs deploy/Dockerfile.canonical-worker is FORCED to place below its
-# survival guard, pinned byte-exact.
-#
-# Every other image can put its guard last among the filesystem-touching
-# instructions. This one cannot. It declares its per-commit ARGs near the TOP,
-# and scripts/test_build_platform_images_workflow.py requires every RUN below
-# them to CONSUME one through a real shell expansion -- which an exec-form RUN
-# can never do, because it invokes no shell and that checker returns False for
-# the JSON form by construction. So the guard must sit above the ARG, and these
-# two ARG-consuming RUNs necessarily follow it. Verified rather than assumed:
-# moving the guard below the ARG makes `_runs_after_per_commit_arg` report it.
-#
-# Pinning their exact text is what keeps that from being a hole. Both were read:
-# the first attests the copied solver source against the checked-in
-# commit-to-digest map, the second validates two commit shas and writes two
-# revision files. Neither writes under /app/scripts. A THIRD RUN here, or any
-# edit to either of these two, fails rather than shipping unchecked -- the same
-# trade `_PINNED_GIT_INSTALL` makes, and for the same reason: changing what runs
-# after a guard should be a change a reviewer sees.
-_CANONICAL_WORKER_RUNS_AFTER_GUARD = (
-    'PYTHONPATH=/app/server python -c "from pathlib import Path; from '
-    "solver_adapters.autofill import attest_source; attest_source("
-    "Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', "
-    "Path('/app/deploy/autofill-solver-sources.json'))\"",
-    'python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
-    "re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must "
-    "be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\""
-    ' && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
-    "re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an "
-    "exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf "
-    "'%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > "
-    "/opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' "
-    '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
-)
-
 # image -> (the operator-reachable script that motivated its guard,
 #           extra instruction keywords its allowlist must admit,
-#           exact RUN bodies its allowlist must admit)
+#           exact RUN bodies its allowlist must admit,
+#           the runtime uid the guard must run as,
+#           the per-commit ARG the guard must consume, or None)
 #
-# USER is admitted for all three, and it is no longer a concession: each image
-# now declares its runtime USER ABOVE its guard, so the guard's `test -r` (and
-# `test -x` on the harness CMD) are evaluated as the uid the container runs as.
-# `_assert_guard_runs_as_the_runtime_identity` enforces that pairing. USER must
-# stay allowlisted for what follows the guard because canonical-worker has to
-# return to root for its two ARG-consuming RUNs and then drop back.
+# All three images declare their runtime USER ABOVE their guard, so the guard's
+# `test -r` (and `test -x` on the harness CMD) are evaluated as the uid the
+# container runs as; `_assert_guard_runs_as_the_runtime_identity` enforces that
+# pairing. broker and harness admit USER after the guard defensively; each
+# already has its guard as the last filesystem-touching instruction and needs no
+# pinned RUN after it.
+#
+# canonical-worker is the one image whose guard consumes a per-commit ARG, and
+# the reason is #514 round 3. Its per-commit ARGs are forced high in the file (a
+# layer-cache contract), and two RUNs below them run as ROOT -- one imports
+# mutable Python (solver_adapters.autofill.attest_source). Round 3 sat the guard
+# ABOVE those RUNs and byte-pinned them, but a byte pin binds the Dockerfile
+# text, not the code that RUN imports: an edit to attest_source could `chmod`
+# /app/scripts as root after the guard passed, and the image shipped with uid
+# 65532 locked out while every static check stayed green (sol-critic). The fix
+# is the module's own thesis applied once more -- do not scan or pin text, run
+# the real filesystem test as the real identity: the guard now runs LAST, as uid
+# 65532, AFTER the root window, observing whatever those RUNs left on disk.
+# Sitting below the ARG it must reference one, so it consumes LEAF_SOURCE_SHA;
+# its allowlist admits NOTHING after it (empty extra, no pinned RUNs), which is
+# exactly what forces it past the two root RUNs.
 _GUARDED_IMAGES = {
     "canonical-worker": (
         "/app/scripts/canonical-container-smoke.py",
-        frozenset({"USER"}),
-        _CANONICAL_WORKER_RUNS_AFTER_GUARD,
+        frozenset(),
+        (),
         "65532:65532",
+        "LEAF_SOURCE_SHA",
     ),
     "broker": ("/app/harness/scripts/e2b-tool-exec.mjs", frozenset({"USER"}), (),
-               "10001:10001"),
+               "10001:10001", None),
     "harness": ("/app/scripts/start-harness.sh", frozenset({"USER"}), (),
-                "10002:10002"),
+                "10002:10002", None),
 }
 
 
@@ -1722,6 +1718,12 @@ def test_the_widened_script_parse_refuses_every_form_it_cannot_read():
         "/bin/sh", "-c", "test -f /a && test -s /a && test -r /a"]
     assert _survival_guard_argv(["/a"], readable=True, executable="/a") == [
         "/bin/sh", "-c", "test -f /a && test -s /a && test -r /a && test -x /a"]
+    # consume_arg appends a per-commit ARG reference (canonical-worker) so the
+    # guard may legally sit below that ARG; it is `test -n`, appended last.
+    assert _survival_guard_argv(
+        ["/a"], readable=True, consume_arg="LEAF_SOURCE_SHA") == [
+        "/bin/sh", "-c",
+        'test -f /a && test -s /a && test -r /a && test -n "${LEAF_SOURCE_SHA}"']
     # argv[0] of the exec-form CMD, but ONLY when it is a guarded script.
     assert _cmd_executable([("CMD", '["/app/scripts/s.sh"]')], ["/app/scripts/s.sh"]) == (
         "/app/scripts/s.sh")
@@ -1799,15 +1801,21 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
     rm -rf /app/scripts/...` below the guard passes the build and deletes the
     script seconds into container life. Both are review classes, not gates.
 
-    TWO MORE REVIEW CLASSES, named because a review round found them and it
-    would be dishonest to leave a reader thinking they are closed:
+    ONE MORE REVIEW CLASS, plus one this design CLOSED that used to sit here:
 
-      * RUNTIME REACHABILITY as the dropped uid. All three images declare a USER
-        below their guard, the guard runs as root, and no assertion made by root
-        at build time observes what uid 10002 can read or execute.
-        `_assert_no_unpinned_mode_change` BOUNDS this by refusing every unpinned
-        mode change; it does not prove it. That docstring records why evaluating
-        modes was tried, was defeated six ways in one round, and was removed.
+      * CLOSED -- build-time reachability as the dropped uid. Each image now
+        declares its runtime USER ABOVE its guard, so the guard runs as that uid
+        and its `test -r` (and `test -x` on the harness CMD) observe the real
+        uid, gid and directory traversal; `_assert_guard_runs_as_the_runtime_identity`
+        enforces the pairing. Nothing reads a mode's spelling, so the six
+        evasions that beat the mode-evaluating predecessor and the two
+        (`install --mode=`, `c''hmod`) that beat its byte-pinning successor are
+        closed by construction. For canonical-worker, whose two root RUNs are
+        forced below the per-commit ARG, the guard runs LAST -- after that root
+        window -- so a `chmod` of /app/scripts made by the mutable Python those
+        RUNs import is caught as well (the gap sol-critic found in #514 round 3).
+        What remains uncovered is RUNTIME, not build time: a `HEALTHCHECK`/`CMD`
+        that re-permissions the path seconds into container life, named above.
       * A SYMLINKED DESTINATION. Every destination check in this module,
         including `_copied_scripts`, compares the destination as WRITTEN, while
         ordinary COPY follows a destination symlink. So
@@ -1823,8 +1831,8 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
         become. `COPY --link` cannot follow such a symlink, so requiring it is
         the shape of a real fix if this class ever needs gating.
     """
-    for image, (motivating, extra_allowed, allowed_runs, expected_uid) in (
-            _GUARDED_IMAGES.items()):
+    for image, (motivating, extra_allowed, allowed_runs, expected_uid,
+                consume_arg) in _GUARDED_IMAGES.items():
         path = f"deploy/Dockerfile.{image}"
         shipped = _shipped_scripts(path)
 
@@ -1866,6 +1874,7 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
             _CANNOT_REMOVE | extra_allowed, allowed_runs,
             readable=True,
             executable=_cmd_executable(instructions, shipped.values()),
+            consume_arg=consume_arg,
         )
         _assert_guard_runs_as_the_runtime_identity(path, instructions, guard_index)
 
