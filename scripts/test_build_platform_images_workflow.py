@@ -2766,7 +2766,7 @@ def check_docs_noop_filter(text: str) -> None:
     # added read of THIS repo's tip on the workflow's own read-only token, and
     # no new secret reference (the count assertion above is unchanged).
     assert frozen == (
-        "1aba114045e52a7ad3102b3030b25444e1d732c80cceafc2a92dc81ad56a2511"
+        "39e47e1a24a7770d2d6ca1a28f21a706040eaab2f6e135562d56865e110deb72"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3439,14 +3439,26 @@ def check_staging_relay_convergence(text: str) -> None:
     assert code.index("for SERVICE in web app") < code.index("branches/main") < dispatch_at, (
         "the tip re-check must sit inside the loop and before each dispatch")
 
-    # ...but standing down is only legal while NOTHING of this release is live.
-    # kimi-adversary on PR #497: once web has landed, standing down leaves
-    # staging on a mixed identity and calls it success, and a superseding
-    # docs-only commit builds no images, so its relay skips and never
-    # converges the split. Finishing the release is the safer end state.
-    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "false" \]', code), (
-        "the stand-down must be gated on nothing of this release being live, "
-        "or a superseding docs-only commit leaves staging silently split")
+    # The tip read is the FIRST statement of every dispatch attempt and is
+    # NEVER gated. sol-critic RED round 2 on PR #497 broke the tempting
+    # alternative: gating it once a service had landed (to avoid leaving a
+    # split) lets relay A hold a queued app deploy across newer relay B's
+    # whole web-then-app sequence, each eviction retried, so A's OLDER app
+    # lands on top of B's and both relays finish green. Deploying web before
+    # app orders services within one relay, not two relays against each other.
+    # A visible split is survivable; a silent backwards deploy is not.
+    loop_body = code[code.index("while :; do"):].splitlines()[1:]
+    first_stmt = next(ln.strip() for ln in loop_body if ln.strip())
+    assert first_stmt.startswith("MAIN_SHA="), (
+        "every dispatch attempt must re-read the tip FIRST and ungated; "
+        f"found {first_stmt!r}")
+
+    # And standing down after something went live must NAME the split rather
+    # than report a plain success.
+    assert "STAGING IS SPLIT" in code, (
+        "standing down mid-release must announce the split it leaves behind")
+    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "true" \]', code), (
+        "the split warning must be conditioned on a service already being live")
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
@@ -3562,10 +3574,15 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
                    'RUN_ID=$(newest_run_since "$BEFORE" || true)'),
         ),
         (
-            "stand-down ungated, abandoning a half-deployed release",
+            "tip re-check gated, letting a stale tag land on a newer deploy",
             mutate(original,
-                   '              if [ "$DEPLOYED_ANY" = "false" ]; then\n',
-                   '              if true; then\n'),
+                   '              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\',
+                   '              if [ "$DEPLOYED_ANY" = "false" ]; then\n'
+                   '              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\'),
+        ),
+        (
+            "mid-release stand-down reported as an ordinary success",
+            mutate(original, "STAGING IS SPLIT: main moved", "main moved"),
         ),
         (
             "landed deploy no longer records that the release is partly live",

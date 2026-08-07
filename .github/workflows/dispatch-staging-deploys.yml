@@ -216,27 +216,31 @@ jobs:
             ATTEMPT=0
 
             while :; do
-              # Stand down for a newer commit ONLY while this release has put
-              # nothing live yet. Serial deploys widen the window in which main
-              # can move, and starting a release whose tag is already stale
-              # would roll staging BACKWARDS.
-              #
-              # Once a service of this release HAS landed, standing down would
-              # leave staging on a MIXED identity (web on this tree, app on the
-              # previous one) and call it success. Nothing reliably converges
-              # that: a superseding docs-only commit builds no images, so its
-              # own relay skips without deploying anything, and the split then
-              # survives until the next deployable merge. Finishing the release
-              # is the safer end state. It cannot land behind a newer relay
-              # either, because every relay deploys web before app, so a newer
-              # one reaches each service after we do and lands on top.
-              if [ "$DEPLOYED_ANY" = "false" ]; then
-                MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                  "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-                if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+              # Re-read the tip as the FIRST thing in every dispatch attempt,
+              # retries included, and never gate it. Dispatching a tag that is
+              # no longer current rolls staging BACKWARDS, and that is not
+              # hypothetical: relay A can hold a queued app deploy across a
+              # newer relay B's whole web-then-app sequence, each eviction
+              # dutifully retried, and A's older app then lands on top of B's.
+              # Deploying web before app orders the two services within ONE
+              # relay; it does not order two relays against each other.
+              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+              if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+                if [ "$DEPLOYED_ANY" = "true" ]; then
+                  # KNOWN RESIDUAL, stated rather than hidden. Standing down
+                  # here leaves staging on a mixed identity. The newer commit's
+                  # relay converges it whenever that commit builds images, but
+                  # a docs-only commit builds none and its relay skips, so the
+                  # split can survive until the next deployable merge. Standing
+                  # down is still the lesser evil: finishing this release risks
+                  # landing a stale tag over a newer deploy, which is silent
+                  # corruption rather than a visible gap.
+                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this unless that commit builds no images."
+                else
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
-                  exit 0
                 fi
+                exit 0
               fi
 
               BEFORE=$(latest_any_run_id)
