@@ -2776,8 +2776,21 @@ def check_docs_noop_filter(text: str) -> None:
     # THIS repo on the same read-only HOME_TOKEN the tip re-check already uses.
     # No new secret reference. The read may only REORDER — it never assigns
     # IMAGE_TAG and never shortens SERVICES, both pinned above.
+    #
+    # Hash updated 2026-08-07 (c): TEXT ONLY, and deliberately not exempted
+    # from the freeze. Two operator-facing strings changed — the app-first
+    # notice and the STAGING IS SPLIT warning — because both promised a
+    # convergence the relay cannot guarantee (review rounds 2, 3 and 4 of
+    # PR #506 were all RED for that same overclaim, in four different
+    # places). Message text lives inside the executable script, so it moves
+    # this hash even though no control flow changed. Reviewed for dispatch
+    # capability: STILL exactly one `gh workflow run` site with the same four
+    # inputs, still exactly one `secrets.` reference in the whole workflow, no
+    # new command, no new read, no new token. Verified by recomputation, not
+    # assumed: the only diff in the extracted script text is inside two echo
+    # arguments.
     assert frozen == (
-        "186e9ae769ac8913d37e49318544b0cd4bd7b75ee09819c461f90eca45966d26"
+        "6a02086737fa03a80512c66384a0864e43a6cfd91574415cc422a6c0874d8ae2"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"

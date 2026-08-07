@@ -105,8 +105,18 @@ name: Dispatch staging deploys
 # need a sound read of live state, which means the relay reading ECS/ALB
 # directly through an OIDC role. That adds id-token: write, breaks the pinned
 # capability wall below, and needs an infra-repo trust change. Deliberately
-# out of scope here: a docs-only tip still skips, and the next code merge now
-# converges it promptly because the behind service goes first.
+# out of scope here: a docs-only tip still skips, so the split waits for the
+# next DEPLOYABLE merge, and even that one only converges it if its own relay
+# is not itself superseded and its own need-first read decides. Need-first
+# ordering makes prompt convergence more likely; it does not make it certain.
+#
+# CLAIM DISCIPLINE, because this file keeps getting this wrong. Rounds 2, 3
+# and 4 of review on PR #506 were all RED for the same reason: a comment
+# promising convergence, alternation, or non-starvation that the code cannot
+# deliver. Every one of those guarantees is conditional on a best-effort read
+# and on the tip holding still, and NEITHER is guaranteed. Before adding any
+# sentence with "converges", "alternates", "cannot starve" or "bounded",
+# check it against the fallbacks at the ordering site and the tip re-check.
 #
 # Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
 # repo) — the same pattern the aws-* service repos use with
@@ -317,7 +327,7 @@ jobs:
               --jq '.status' || true)
             if [ "$RELATION" = "behind" ]; then
               SERVICES="app web"
-              echo "::notice::app ($APP_TAG) trails web ($WEB_TAG); deploying app first so a superseded release cannot starve it again."
+              echo "::notice::app ($APP_TAG) trails web ($WEB_TAG); deploying app first so the service that lost the last race is the one that advances now. This does not guarantee app lands: if main moves before its dispatch, this relay stands down and web is the service left behind instead."
             fi
           fi
 
@@ -341,14 +351,16 @@ jobs:
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
                 if [ "$DEPLOYED_ANY" = "true" ]; then
                   # KNOWN RESIDUAL, stated rather than hidden. Standing down
-                  # here leaves staging on a mixed identity. The newer commit's
-                  # relay converges it whenever that commit builds images, but
-                  # a docs-only commit builds none and its relay skips, so the
-                  # split can survive until the next deployable merge. Standing
-                  # down is still the lesser evil: finishing this release risks
-                  # landing a stale tag over a newer deploy, which is silent
-                  # corruption rather than a visible gap.
-                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this unless that commit builds no images."
+                  # here leaves staging on a mixed identity, and NOTHING here
+                  # guarantees when that ends. The newer commit's relay clears
+                  # it only if that commit builds images AND that relay is not
+                  # itself superseded before it reaches the behind service. A
+                  # docs-only commit builds none and its relay skips outright.
+                  # So the split can survive several relays, not just one.
+                  # Standing down is still the lesser evil: finishing this
+                  # release risks landing a stale tag over a newer deploy,
+                  # which is silent corruption rather than a visible gap.
+                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay clears this only if that commit builds images AND its own relay is not superseded before it reaches $SERVICE; a docs-only commit builds none and skips. This split is not guaranteed to clear on the next merge."
                 else
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
                 fi
