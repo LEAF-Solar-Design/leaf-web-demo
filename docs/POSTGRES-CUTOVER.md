@@ -354,25 +354,40 @@ attractive enough that the next reader will propose it again.
 3. The only escape is barred by name: "A configuration deployment cannot
    activate a drained service".
 
-A fourth, independent blocker sits behind those: the rollback baseline requires
-a RUNNING task ("No running task is available for a digest-pinned rollback
-baseline"), which a drained service has none of.
+A later gate would also stop it, though the run never reaches that far: the
+rollback baseline requires a RUNNING task ("No running task is available for a
+digest-pinned rollback baseline"), which a drained service has none of. It is a
+second mechanism on the same path, not an independent escape route, because the
+desired-count refusal above fires first.
 
-Two further traps in the same area. `expected_task_definition` does NOT select
-the color: it is pattern-validated and used for the rollback-baseline
-comparison only. Routing is `target_color`, which **defaults to `live`**, so a
-dispatch that names the drained color's ARN and omits `target_color` deploys to
-the LIVE color while appearing to target the other one. And both app services
-run `minimumHealthyPercent=100, maximumPercent=200` (measured 2026-08-07), so a
-direct rolling deploy starts the new task BEFORE stopping the old one: the
-overlap window above is inherent to the only executable path, not something
-ordering can remove.
+**`expected_task_definition` does not route the color, but do not read that as
+"it only matters for the baseline check".** It has three jobs: it is
+pattern-validated against the family, it gates the rollback baseline, and under
+configuration intent it also SELECTS the configuration source, because
+`CONFIG_TD="${CONFIG_TD:-$EXPECTED_TD}"` when `configuration_task_definition` is
+omitted. Routing is `target_color`, which **defaults to `live`**.
+
+The consequence of getting that wrong is a REFUSAL, not a silent misdeploy. A
+dispatch naming the drained color's ARN with `target_color` omitted routes to
+the live color, and the rollback baseline then compares that service's current
+task definition against the supplied ARN and exits: "Live task definition
+changed after review. Expected ...; found ...". The two colors use different
+task-definition families, so the mismatch is guaranteed. An earlier draft of
+this section called that a silent wrong-target deploy. It is not; it fails loudly.
+
+Both app services run `minimumHealthyPercent=100, maximumPercent=200` (measured
+2026-08-07), so a direct rolling deploy starts the new task BEFORE stopping the
+old one. The overlap window above is therefore inherent to the only executable
+path, not something the ordering could have removed.
 
 So the executable shape is: flip the LIVE color and accept a bounded mixed-mode
-rollout. The drained color would inherit the selector on its next warm, since a
-forward blue/green deploy clones the live environment. **That inheritance is
-read from the operations context and is NOT yet verified against this workflow;
-verify it before relying on it.**
+rollout. **What happens to the other color afterwards is not settled.** A
+forward deploy clones whatever configuration baseline it is given, and
+`configuration_task_definition` can name any ACTIVE revision, so the drained
+color inherits the live selector only when no alternate baseline is supplied.
+Do not plan on automatic inheritance: confirm the idle color's registered
+revision carries `LEAF_SESSIONS_STORE=postgres` after its next warm, and flip it
+explicitly if it does not.
 
 **Re-read the live desired counts immediately before acting rather than trusting
 any recorded value, including this document.** Which color is drained flips with
