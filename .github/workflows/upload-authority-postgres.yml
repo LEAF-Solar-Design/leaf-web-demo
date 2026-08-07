@@ -352,7 +352,13 @@ jobs:
           # This proves pytest itself observed it: the integration module is
           # skipif'd on PG_CUSTOMIZATION_TEST_URL, and the two modules beside
           # it are ungated today but nothing stops a gate appearing there. Same
-          # assertion shape as the steps above.
+          # assertion shape as the steps above, plus the executed-count floor
+          # the boundary step below justifies in full: three modules run in ONE
+          # invocation here, and a `pytest_collection_modifyitems` hook that
+          # REMOVES items produces a clean exit 0 that never prints "skipped".
+          # run-all-gates.py floors only two of the three (9 and 26 against the
+          # 10 + 7 + 39 that run), and test_customization_postgres_integration
+          # has no floor there at all, so 21 tests sit unpinned.
           if ! out=$(PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath" \
               python -m pytest -q -rs \
               "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py" \
@@ -365,6 +371,12 @@ jobs:
           if [[ "${out,,}" == *skipped* ]]; then
             printf '%s\n' "$out"
             echo 'FAIL: customization authority tests skipped - PG_CUSTOMIZATION_TEST_URL is not reaching pytest.'
+            exit 1
+          fi
+          ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
+          if [ "${ran:-0}" -lt 56 ]; then
+            printf '%s\n' "$out"
+            echo "FAIL: only ${ran:-0} customization tests executed, floor is 56 - tests stopped being collected without reporting a skip."
             exit 1
           fi
 
@@ -403,12 +415,28 @@ jobs:
           # modules, and the runner image ceasing to be posix, which would
           # genuinely stop verifying the fcntl contract.
           #
-          # It asserts that nothing REPORTED a skip. It does not pin how many
-          # tests executed, and it is not trying to: scripts/run-all-gates.py
-          # already carries per-module executed-count floors for six of these
-          # seven modules (57, 36, 14, 59, 41, 9), which is a tighter check than
-          # any aggregate count here could be, and run-all-gates runs on the
-          # same pull request.
+          # The skip match alone is NOT enough, so this step also pins the
+          # total. A skip-only assertion sees nothing when items are REMOVED
+          # rather than marked: `pytest_collection_modifyitems` runs even for
+          # files named explicitly on the command line (unlike
+          # `pytest_ignore_collect`, which pytest bypasses for explicit initial
+          # args). Demonstrated on this exact step -- a hook dropping the three
+          # cutover-marker items yields "224 passed", exit 0, and the word
+          # "skipped" never appears. Three tests stop running and the step
+          # stays green.
+          #
+          # scripts/run-all-gates.py does carry per-module floors, but they do
+          # NOT cover this: they are 57, 36, 14, 59, 41, 9 for six of these
+          # seven modules, summing to 216 against the 227 that actually run,
+          # test_drawing_authority_cutover_marker has no floor at all, and the
+          # runner tolerates counts above a floor as drift. So 11 tests plus a
+          # whole module sit unpinned there. The floors complement this total;
+          # they do not replace it.
+          #
+          # 227 is measured on this runner and locally on PostgreSQL 16.14
+          # (61 + 38 + 14 + 59 + 41 + 11 + 3). It is a floor, so adding tests
+          # never trips it and only a DROP does. Deleting a test on purpose
+          # means lowering this number in the same commit, deliberately.
           if ! out=$(python -m pytest -q -rs \
               tests/test_guest_uploads.py \
               tests/test_guest_fail_closed.py \
@@ -424,6 +452,15 @@ jobs:
           if [[ "${out,,}" == *skipped* ]]; then
             printf '%s\n' "$out"
             echo 'FAIL: upload and authored-mutation boundary tests skipped - a new gate appeared, or the runner stopped being posix.'
+            exit 1
+          fi
+          # `cut` ends the pipeline, so this assignment cannot abort the step
+          # under `bash -e`: an unmatched grep leaves `ran` empty, which the
+          # `${ran:-0}` default turns into a loud 0 rather than a silent pass.
+          ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
+          if [ "${ran:-0}" -lt 227 ]; then
+            printf '%s\n' "$out"
+            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 227 - tests stopped being collected without reporting a skip."
             exit 1
           fi
 
