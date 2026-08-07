@@ -3750,7 +3750,10 @@ def check_staging_relay_convergence(text: str) -> None:
     # of superseder_deploys, so a redefinition after that slice would answer
     # `yes` at runtime while every rehearsal case still passed.
     for fn in ("classify_superseder_once", "superseder_deploys"):
-        defs = code.count(f"{fn}() {{")
+        # Count BOTH spellings: bash also accepts `function name { ... }`, and
+        # counting only `name() {` let the alternate form slip past.
+        defs = (code.count(f"{fn}() {{")
+                + len(re.findall(rf"^\s*function\s+{fn}\b", code, re.M)))
         assert defs == 1, (
             f"{fn} must be defined exactly once; bash resolves the LAST "
             f"definition at call time, so a second one silently wins "
@@ -4040,6 +4043,13 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             "so bash resolves the override at call time",
             mutate(original, "          DEPLOYED_ANY=false\n",
                    "          classify_superseder_once() { echo yes; }\n"
+                   "          DEPLOYED_ANY=false\n"),
+        ),
+        (
+            "the same late override written in bash's ALTERNATE function "
+            "syntax, which an exact-spelling count misses",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          function superseder_deploys { echo yes; }\n"
                    "          DEPLOYED_ANY=false\n"),
         ),
         (
