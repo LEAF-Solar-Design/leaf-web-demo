@@ -106,9 +106,40 @@ not grow:
   stage_release_candidate`); production promotion is NOT MOUNTED and stays
   with the canonical production deployment transaction and a separate owner.
 
-The v1 action set and per-action rung/policy/rate/spend/timeout/
-precondition/reversal matrix is the W0.2 architecture record's §4 table,
-adopted normatively at first landing.
+### 4.1 The v1 action matrix (normative, self-contained)
+
+The complete action set and its security-critical fields are declared here
+and in the machine-readable normative copy `contract/operator_action_matrix.v1.json`
+(the two must agree; the freeze gate pins the JSON). No entry is reachable to
+production, and production promotion is not an action at all — it is absent
+from the matrix (`operator.promote_production` is listed under `not_mounted`),
+enforcing §7.
+
+| Action | Class | Rung | Policy | Handler | Reversal | Prod-reachable | v1 |
+|---|---|---|---|---|---|---|---|
+| `operator.read_fleet_state` | O1 | 1 | auto | `read_fleet_state` | n/a (read) | no | on |
+| `operator.read_tenant_state` | O1 | 1 | auto | `read_tenant_state` | n/a (read) | no | on |
+| `operator.read_jobs` | O1 | 1 | auto | `read_jobs` | n/a (read) | no | on |
+| `operator.read_sessions` | O1 | 1 | auto | `read_sessions` | n/a (read) | no | on |
+| `operator.read_audit` | O1 | 1 | auto | `read_audit` | n/a (read) | no | on |
+| `operator.read_worker_status` | O1 | 1 | auto | `read_worker_status` | n/a (read) | no | on |
+| `operator.worker_submit_job` | O2 | 2 | auto | `worker_submit_job` | cancel; workspace disposable | no | on |
+| `operator.worker_cancel_job` | O2 | 2 | auto | `worker_cancel_job` | n/a (idempotent) | no | on |
+| `operator.repo_propose_change` | O3 | 3 | auto | `repo_propose_change` | delete the `operator/<subject>/<uuid>` branch | no | on |
+| `operator.tenant_agent_pause` | O4 | 4 | always-confirm | `tenant_agent_pause` | `operator.tenant_agent_resume` | no | off |
+| `operator.tenant_agent_resume` | O4 | 4 | always-confirm | `tenant_agent_resume` | `operator.tenant_agent_pause` | no | off |
+| `operator.tenant_overlay_set` | O4 | 4 | always-confirm | `tenant_overlay_set` | restore prior overlay (on receipt) | no | off |
+| `operator.worker_credential_rotate` | O4 | 4 | always-confirm | `worker_credential_rotate` | re-issue previous scope | no | off |
+| `operator.external_write` | O5 | 5 | always-confirm | `external_write` | per-adapter, or does not ship | no | off |
+| `operator.stage_release_candidate` | O6 | 6 | always-confirm | `stage_release_candidate` | staging auto-rollback to previous task-def | no | off |
+| (O7 production promotion) | O7 | — | — | — | — | — | **not mounted** |
+
+"v1 on" = enabled in the first release (the read-only O1 surface plus the
+disposable-worker O2/O3 lanes); "v1 off" = declared in the contract but ships
+dark, enabled per its own Wave gate. Every mounted action maps to exactly one
+sealed handler named above (the §4 startup seal). Mutating any rung, policy,
+handler, reversal, or the production-reachability of any row — or adding a
+production-reachable action — fails `test_operator_vocab_freeze.py`.
 
 ## 5. Execution authority
 

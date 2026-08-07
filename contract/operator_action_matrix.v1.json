@@ -1,0 +1,100 @@
+{
+  "_note": "Durable, machine-readable operator action matrix (contract/OPERATOR.md section 4). This file is the normative source for the per-action security fields; contract/OPERATOR.md inlines a human-readable copy and points here. Freeze gate: server/tests/test_operator_vocab_freeze.py pins every field below and fails on any mutation. Growing or changing this matrix follows the AUTH.md section 11 promotion ritual (amend this file, the OPERATOR.md table, and the gate in one PR).",
+  "version": 1,
+  "production_promotion_mounted": false,
+  "not_mounted": [
+    "operator.promote_production"
+  ],
+  "actions": {
+    "operator.read_fleet_state": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_fleet_state",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.read_tenant_state": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_tenant_state",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.read_jobs": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_jobs",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.read_sessions": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_sessions",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.read_audit": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_audit",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.read_worker_status": {
+      "class": "O1", "rung": 1, "policy": "auto",
+      "handler": "read_worker_status",
+      "reversal": "n/a (read-only)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.worker_submit_job": {
+      "class": "O2", "rung": 2, "policy": "auto",
+      "handler": "worker_submit_job",
+      "reversal": "cancel job; workspace is disposable and destroyed on completion",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.worker_cancel_job": {
+      "class": "O2", "rung": 2, "policy": "auto",
+      "handler": "worker_cancel_job",
+      "reversal": "n/a (idempotent)",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.repo_propose_change": {
+      "class": "O3", "rung": 3, "policy": "auto",
+      "handler": "repo_propose_change",
+      "reversal": "delete the operator/<subject>/<uuid> branch; never touches main",
+      "production_reachable": false, "enabled_v1": true
+    },
+    "operator.tenant_agent_pause": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "handler": "tenant_agent_pause",
+      "reversal": "operator.tenant_agent_resume",
+      "production_reachable": false, "enabled_v1": false
+    },
+    "operator.tenant_agent_resume": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "handler": "tenant_agent_resume",
+      "reversal": "operator.tenant_agent_pause",
+      "production_reachable": false, "enabled_v1": false
+    },
+    "operator.tenant_overlay_set": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "handler": "tenant_overlay_set",
+      "reversal": "restore the prior overlay recorded on the authority receipt",
+      "production_reachable": false, "enabled_v1": false
+    },
+    "operator.worker_credential_rotate": {
+      "class": "O4", "rung": 4, "policy": "always-confirm",
+      "handler": "worker_credential_rotate",
+      "reversal": "re-issue the previous scope (not the previous secret)",
+      "production_reachable": false, "enabled_v1": false
+    },
+    "operator.external_write": {
+      "class": "O5", "rung": 5, "policy": "always-confirm",
+      "handler": "external_write",
+      "reversal": "per-adapter documented reversal, or the adapter does not ship",
+      "production_reachable": false, "enabled_v1": false
+    },
+    "operator.stage_release_candidate": {
+      "class": "O6", "rung": 6, "policy": "always-confirm",
+      "handler": "stage_release_candidate",
+      "reversal": "staging auto-rollback to the previous ECS task-def revision",
+      "production_reachable": false, "enabled_v1": false
+    }
+  }
+}

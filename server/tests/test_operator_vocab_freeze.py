@@ -16,12 +16,15 @@ Lands with the contract-only operator PR (Wave 0). Load-bearing negative tests:
    no-oracle) instead of route-absent 404.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SERVER_DIR.parent
+MATRIX_PATH = REPO_ROOT / "contract" / "operator_action_matrix.v1.json"
 
 # --- 1. Frozen identity vocabularies: no operator entry appeared -----------
 
@@ -34,6 +37,89 @@ FROZEN_CAPABILITIES = {
     "run_read", "run_write", "solve", "build", "converse",
     "agent_write_autopilot", "deploy", "platform_customize", "upload",
 }
+
+
+# --- 0. Operator action matrix is self-contained and security-pinned -------
+#
+# The committed contract must carry its own action matrix (no dependency on an
+# external/temp artifact). This block pins the whole matrix by content SHA AND
+# asserts each security-critical field per action, so mutating any rung,
+# policy, handler, reversal, or production-reachability fails the gate — and
+# so does adding a production-reachable action or mounting production
+# promotion.
+
+FROZEN_MATRIX_SHA256 = (
+    "0c7dfcc7703321ede315927a43681c32839422713670a30b39d926ffbdd12831")
+
+# {action: (class, rung, policy, handler, reversal_substring)}
+FROZEN_MATRIX_FIELDS = {
+    "operator.read_fleet_state": ("O1", 1, "auto", "read_fleet_state", "read"),
+    "operator.read_tenant_state": ("O1", 1, "auto", "read_tenant_state", "read"),
+    "operator.read_jobs": ("O1", 1, "auto", "read_jobs", "read"),
+    "operator.read_sessions": ("O1", 1, "auto", "read_sessions", "read"),
+    "operator.read_audit": ("O1", 1, "auto", "read_audit", "read"),
+    "operator.read_worker_status": ("O1", 1, "auto", "read_worker_status", "read"),
+    "operator.worker_submit_job": ("O2", 2, "auto", "worker_submit_job", "disposable"),
+    "operator.worker_cancel_job": ("O2", 2, "auto", "worker_cancel_job", "idempotent"),
+    "operator.repo_propose_change": ("O3", 3, "auto", "repo_propose_change", "branch"),
+    "operator.tenant_agent_pause": ("O4", 4, "always-confirm", "tenant_agent_pause", "resume"),
+    "operator.tenant_agent_resume": ("O4", 4, "always-confirm", "tenant_agent_resume", "pause"),
+    "operator.tenant_overlay_set": ("O4", 4, "always-confirm", "tenant_overlay_set", "overlay"),
+    "operator.worker_credential_rotate": ("O4", 4, "always-confirm", "worker_credential_rotate", "scope"),
+    "operator.external_write": ("O5", 5, "always-confirm", "external_write", "adapter"),
+    "operator.stage_release_candidate": ("O6", 6, "always-confirm", "stage_release_candidate", "rollback"),
+}
+
+
+def _load_matrix():
+    return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+
+
+def test_matrix_is_committed_and_content_pinned():
+    assert MATRIX_PATH.exists(), (
+        "contract/operator_action_matrix.v1.json is missing — the operator "
+        "contract must carry its own matrix, not reference an external file")
+    canon = json.dumps(_load_matrix(), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    assert digest == FROZEN_MATRIX_SHA256, (
+        "operator action matrix content drifted; if intentional, re-pin this "
+        "SHA in the same PR (promotion ritual)")
+
+
+def test_matrix_security_fields_pinned_per_action():
+    matrix = _load_matrix()
+    actions = matrix["actions"]
+    assert set(actions) == set(FROZEN_MATRIX_FIELDS), (
+        "operator action set changed", set(actions) ^ set(FROZEN_MATRIX_FIELDS))
+    for name, (cls, rung, policy, handler, rev_sub) in FROZEN_MATRIX_FIELDS.items():
+        entry = actions[name]
+        assert entry["class"] == cls, (name, "class", entry["class"])
+        assert entry["rung"] == rung, (name, "rung", entry["rung"])
+        assert entry["policy"] == policy, (name, "policy", entry["policy"])
+        assert entry["handler"] == handler, (name, "handler", entry["handler"])
+        assert rev_sub in entry["reversal"].lower(), (name, "reversal")
+
+
+def test_matrix_has_no_production_reachable_action():
+    matrix = _load_matrix()
+    assert matrix["production_promotion_mounted"] is False
+    assert "operator.promote_production" in matrix["not_mounted"]
+    for name, entry in matrix["actions"].items():
+        assert entry["production_reachable"] is False, (
+            f"{name} declares production_reachable=true; production promotion "
+            "must stay off every operator surface (contract section 7)")
+        blob = json.dumps(entry).lower()
+        assert "deploy-platform" not in blob
+        # 'production' may appear only inside a reversal note, never as a route
+        assert "/api/production" not in blob
+
+
+def test_matrix_agrees_with_operator_md_table():
+    """Every action in the JSON must also appear in the OPERATOR.md inline
+    table, so the human and machine copies cannot silently diverge."""
+    md = (REPO_ROOT / "contract" / "OPERATOR.md").read_text(encoding="utf-8")
+    for name in _load_matrix()["actions"]:
+        assert f"`{name}`" in md, f"{name} missing from OPERATOR.md table"
 
 
 def test_tier_vocabulary_gained_no_operator_entry():
