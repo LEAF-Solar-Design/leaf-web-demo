@@ -225,6 +225,24 @@ def _mount_platform_router() -> None:
 _mount_platform_router()
 
 
+# --- operator control plane (contract/OPERATOR.md; Wave 1, dark by default) --- #
+# Mounted ONLY when LEAF_OPERATOR_ENABLED=1: the release sequence merges the
+# foundations behind a disabled flag, and the contract freeze gate
+# (tests/test_operator_vocab_freeze.py) proves a default app registers no
+# /api/operator route. A mount failure with the flag ON raises — a half-mounted
+# operator surface must never boot.
+def _mount_operator_router() -> None:
+    if os.environ.get("LEAF_OPERATOR_ENABLED", "").strip() != "1":
+        return
+    from routers import operator_sessions as operator_sessions_router
+
+    app.include_router(operator_sessions_router.router)
+    print("[leaf-demo] operator control plane mounted (/api/operator/*)")
+
+
+_mount_operator_router()
+
+
 def _drawing_mutation_fence_state() -> str:
     """Report the live shared-fence state without changing liveness."""
     configured = os.environ.get(
