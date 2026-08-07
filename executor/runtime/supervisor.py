@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -28,6 +29,8 @@ DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
 DEFAULT_CAPACITY_SAMPLE_SECONDS = 30.0
+MAX_CAPACITY_SAMPLE_SECONDS = 3600.0
+STOP_JOIN_SECONDS = 5.0
 
 
 _RUNTIME_EVENT_LOCK = threading.Lock()
@@ -169,8 +172,17 @@ class WarmExecutorSupervisor:
         return {slot.slot_id: slot.process.pid for slot in self._slots}
 
     def health(self) -> dict[str, Any]:
-        ready = sum(slot.process.is_alive() and slot.assignment is None for slot in self._slots)
-        bound = sum(slot.process.is_alive() and slot.assignment is not None for slot in self._slots)
+        # ONE pass, reading each slot's liveness and binding exactly once.
+        # Two passes could be torn by a concurrent assign or release between
+        # them and report ready=1, bound=1, total=1 -- an impossible snapshot,
+        # reproduced under a forced switch between the passes.  This runs
+        # unlocked from three callers now (/health, /metrics, and the capacity
+        # sampler's timer), so it has to be self-consistent without a lock:
+        # reading each slot once guarantees ready + bound <= total and that no
+        # slot is double-counted or dropped.
+        observed = [(slot.process.is_alive(), slot.assignment is not None) for slot in self._slots]
+        ready = sum(alive and not bound for alive, bound in observed)
+        bound = sum(alive and bound for alive, bound in observed)
         return {"contract": "leaf.instant-execution/v1", "executor_id": self.executor_id,
                 "state": "ready" if ready or bound else "not_ready", "ready_slots": ready,
                 "bound_slots": bound, "total_slots": len(self._slots), "observed_at": _now()}
@@ -596,8 +608,22 @@ class CapacitySampler:
 
     def __init__(self, supervisor: WarmExecutorSupervisor,
                  interval_seconds: float = DEFAULT_CAPACITY_SAMPLE_SECONDS) -> None:
+        # Non-finite values pass a bare `<= 0` test and then break in ways that
+        # are much worse than a rejected config.  `nan` makes Event.wait return
+        # instantly, so the sampler busy-loops and floods the log group, and
+        # Thread.join(nan) then raises ValueError out of stop(); `inf` makes
+        # Thread.join(inf) raise OverflowError.  Either exception escapes
+        # serve_registered's cleanup.  All four behaviours were reproduced.
+        if not math.isfinite(interval_seconds):
+            raise ValueError("interval_seconds must be a finite number")
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
+        if interval_seconds > MAX_CAPACITY_SAMPLE_SECONDS:
+            # An interval longer than this cannot keep a 60s-period alarm fed,
+            # so the gauge would silently stop being alarmable. Fail at startup
+            # instead, where it is visible.
+            raise ValueError(
+                f"interval_seconds must be at most {MAX_CAPACITY_SAMPLE_SECONDS:g}")
         self._supervisor = supervisor
         self._interval_seconds = interval_seconds
         self._stop = threading.Event()
@@ -623,13 +649,20 @@ class CapacitySampler:
         self._thread.start()
 
     def stop(self) -> None:
+        # A FIXED short join, not `interval + 1`.  The sink writes to fd 2, and
+        # a backed-up fd 2 makes that write block, so joining for the configured
+        # interval would stall every later step of shutdown for as long as the
+        # operator set the interval to.  Shutdown must not be hostage to a
+        # telemetry write.  Past the timeout the thread is a daemon, and its
+        # only remaining act is one more sample -- which reads liveness and
+        # bindings, never a closed pipe -- so letting it go is safe.
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self._interval_seconds + 1)
-            self._thread = None
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=STOP_JOIN_SECONDS)
 
     def _run(self) -> None:
-        while True:
+        while not self._stop.is_set():
             self._supervisor.sample_capacity()
             if self._stop.wait(self._interval_seconds):
                 return

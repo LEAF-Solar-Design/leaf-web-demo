@@ -4,8 +4,10 @@ import copy
 import json
 import os
 import signal
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from executor.runtime import child
@@ -442,6 +444,41 @@ class SlotRebindObservabilityTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
 
+class HealthSnapshotConsistencyTests(unittest.TestCase):
+    """`health()` runs unlocked from /health, /metrics AND the sampler timer.
+
+    It used to count ready and bound in two separate passes. A concurrent
+    assign between them reported ready=1, bound=1, total=1 -- more slots than
+    exist -- and the sampler publishes that straight to CloudWatch. Reproduced
+    under a forced switch between the passes before this was changed.
+    """
+
+    class FlipSlot:
+        """A slot whose binding changes on every read, i.e. maximally racy."""
+
+        def __init__(self) -> None:
+            self._reads = 0
+            self.process = SimpleNamespace(is_alive=lambda: True)
+
+        @property
+        def assignment(self):
+            self._reads += 1
+            return {"assignment_id": "a"} if self._reads % 2 else None
+
+    def test_a_snapshot_can_never_report_more_slots_than_exist(self) -> None:
+        supervisor = WarmExecutorSupervisor.__new__(WarmExecutorSupervisor)
+        supervisor.executor_id = EXECUTOR_ID
+        supervisor._slots = [self.FlipSlot() for _ in range(4)]
+        for _ in range(20):
+            state = supervisor.health()
+            self.assertEqual(
+                state["total_slots"],
+                state["ready_slots"] + state["bound_slots"],
+                f"impossible snapshot {state!r}: every slot is alive, so ready "
+                "plus bound must equal total",
+            )
+
+
 class CapacityGaugeTests(unittest.TestCase):
     """The free-slot count has to leave this process to be alarmable.
 
@@ -594,3 +631,46 @@ class CapacitySamplerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be positive"):
             CapacitySampler.from_environment(
                 self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "0"})
+
+    def test_non_finite_and_oversized_intervals_are_rejected_at_construction(self) -> None:
+        """`float()` accepts "nan" and "inf", and both slip past a bare <= 0.
+
+        Confirmed by execution, not inferred: Event.wait(nan) returns instantly,
+        so the sampler busy-loops and floods the log group; Thread.join(nan)
+        then raises ValueError and Thread.join(inf) raises OverflowError, and
+        either escapes stop() into serve_registered's cleanup. Rejecting the
+        value at construction is the only place that costs nothing.
+        """
+        for value in ("nan", "-nan", "inf", "-inf", "Infinity"):
+            with self.assertRaises(ValueError, msg=f"{value} was accepted"):
+                CapacitySampler.from_environment(
+                    self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": value})
+        # An interval this long cannot keep a 60s-period alarm fed, so the gauge
+        # would exist and never be alarmable -- the defect this feature removes.
+        with self.assertRaisesRegex(ValueError, "at most"):
+            CapacitySampler.from_environment(
+                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "3601"})
+        self.assertEqual(3600.0, CapacitySampler.from_environment(
+            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "3600"})._interval_seconds)
+
+    def test_stop_does_not_wait_for_the_configured_interval(self) -> None:
+        """Shutdown must not be hostage to a telemetry write.
+
+        The sink writes to fd 2. A backed-up fd 2 blocks that write, so joining
+        for the CONFIGURED interval would stall every later teardown step for
+        as long as the operator set it to. The join is a fixed short bound.
+        """
+        sampler = CapacitySampler(self.supervisor, interval_seconds=3600)
+        blocked = threading.Event()
+
+        def wedge(_record: dict) -> None:
+            blocked.set()
+            time.sleep(30)
+
+        self.supervisor._runtime_event_sink = wedge
+        sampler.start()
+        self.assertTrue(blocked.wait(5), "the sampler never reached the sink")
+        started = time.monotonic()
+        sampler.stop()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 10, f"stop() waited {elapsed:.1f}s on a wedged sink")

@@ -218,12 +218,18 @@ def serve_registered(
             registrar.start()
         server.serve_forever()
     finally:
-        if sampler is not None:
-            sampler.stop()
-        if registrar is not None:
-            registrar.close()
-        server.server_close()
-        supervisor.close()
+        # Nested, so a sampler that fails to stop cannot skip the teardown that
+        # actually matters. Flat cleanup let one raising `stop()` leave the
+        # registrar registered, the listening socket open, and every child
+        # process alive.
+        try:
+            if sampler is not None:
+                sampler.stop()
+        finally:
+            if registrar is not None:
+                registrar.close()
+            server.server_close()
+            supervisor.close()
 
 
 def scrub_child_environment(environ: dict[str, str] | None = None) -> None:
