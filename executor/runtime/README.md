@@ -162,9 +162,13 @@ are also stated:
   is emitted only when the run length is a power of two (1, 2, 4, 8, …), so the
   first failure is immediate and a permanently broken `health()` costs log2(n)
   lines instead of one per interval into the same log group the gauge uses.
-- `capacity_sample_recovered` closes the run and states its length, so the
-  newest failure line is bounded in time. A healthy sampler is otherwise silent
-  about its own health.
+- `capacity_sample_recovered` closes the run, so the newest failure line is
+  bounded in time. A healthy sampler is otherwise silent about its own health.
+  It carries `consecutive_failures: 0` and puts the run's length in
+  `recovered_after_failures`, which keeps `consecutive_failures` meaning the
+  same thing on both event types: one filter on `$.record.consecutive_failures`
+  then sees the count climb while the sampler is blind and a 0 the moment it
+  recovers, which is what lets an alarm on it clear.
 - The exception **message** is deliberately omitted. The gauge record promises
   it carries no tenant, session, assignment, or source value; an uncontrolled
   exception string would put that promise back in play.

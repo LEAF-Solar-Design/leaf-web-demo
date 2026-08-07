@@ -930,7 +930,27 @@ class CapacitySamplerTests(unittest.TestCase):
              "capacity_sample_recovered"],
             [record["event_type"] for record in records])
         # Three failures, reported at 1 and 2; the recovery states all three.
-        self.assertEqual(3, records[-1]["consecutive_failures"])
+        self.assertEqual(3, records[-1]["recovered_after_failures"])
+
+    def test_recovery_publishes_a_zero_not_the_run_length(self) -> None:
+        """`consecutive_failures` must mean the same thing on both event types.
+
+        A metric filter selecting `$.record.consecutive_failures` from both is
+        the natural way to alarm on a blind sampler, and it needs the count to
+        climb while the sampler is failing and to hit 0 the moment it recovers,
+        or the alarm can never clear. An earlier revision published the RUN
+        LENGTH under that name, so the one event meaning "the gauge is back"
+        carried the largest breaching value of the whole incident.
+        """
+        *_, recovery = self._drive([False, False, False, True])
+
+        self.assertEqual("capacity_sample_recovered", recovery["event_type"])
+        self.assertEqual(0, recovery["consecutive_failures"])
+        self.assertEqual(3, recovery["recovered_after_failures"])
+        self.assertEqual(
+            {"event_type", "executor_id", "consecutive_failures",
+             "recovered_after_failures", "occurred_at"},
+            set(recovery))
 
     def test_the_failure_run_restarts_after_a_recovery(self) -> None:
         # A counter that recovery did not reset would make the second run's
@@ -939,9 +959,13 @@ class CapacitySamplerTests(unittest.TestCase):
         records = self._drive([False, True, False])
 
         self.assertEqual(
-            [("capacity_sample_failed", 1), ("capacity_sample_recovered", 1),
-             ("capacity_sample_failed", 1)],
-            [(record["event_type"], record["consecutive_failures"]) for record in records])
+            ["capacity_sample_failed", "capacity_sample_recovered",
+             "capacity_sample_failed"],
+            [record["event_type"] for record in records])
+        self.assertEqual(1, records[0]["consecutive_failures"])
+        self.assertEqual(1, records[1]["recovered_after_failures"])
+        # The second run's first failure is a 1, not a 2.
+        self.assertEqual(1, records[2]["consecutive_failures"])
 
     def test_a_healthy_sampler_says_nothing_about_itself(self) -> None:
         # Recovery must fire only after a failure. A line every interval would

@@ -738,6 +738,16 @@ class CapacitySampler:
         still going, because a healthy sampler is silent about its own health.
         This fires at most once per run of failures, and never on a sampler that
         has not failed.
+
+        `consecutive_failures` is ZERO here, and the run's length rides in
+        `recovered_after_failures` instead.  The two fields are not
+        interchangeable and an earlier revision published the run length under
+        the first name, which reads as a still-failing sampler on the one event
+        that means the opposite.  A metric filter selecting
+        `$.record.consecutive_failures` from both event types now gets exactly
+        what an alarm needs -- the count climbing while the sampler is blind and
+        a 0 datapoint the moment it recovers, which is what lets that alarm
+        clear.  Reading the run's length is then a second, separate filter.
         """
         if not self._consecutive_failures:
             return
@@ -745,7 +755,8 @@ class CapacitySampler:
         self._emit({
             "event_type": "capacity_sample_recovered",
             "executor_id": self._supervisor.executor_id,
-            "consecutive_failures": recovered_after,
+            "consecutive_failures": 0,
+            "recovered_after_failures": recovered_after,
             "occurred_at": _now(),
         })
 

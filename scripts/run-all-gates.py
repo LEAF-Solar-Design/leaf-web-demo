@@ -758,12 +758,19 @@ def build_suites() -> List[Suite]:
         # keeps that cwd OFF sys.path, so the repo's platform/ package cannot
         # shadow the stdlib during pytest plugin import — the window before
         # executor/conftest.py runs and appends the repo root for `executor.*`.
-        # Floor 111 is the Windows executed count (117 collected − 2 opt-in
+        # Floor 136 is the Windows executed count (142 collected − 2 opt-in
         # Postgres skips − 4 Windows-only environment skips), re-measured
-        # 2026-08-06 after the five SlotRebindObservabilityTests cases.
-        # Linux CI executes 115 (the POSIX/chmod/symlink probes run there) and
+        # 2026-08-07 on this tree.
+        # Linux CI executes 140 (the POSIX/chmod/symlink probes run there) and
         # reports upward drift — the same min-across-environments convention
         # as server-customization-adversarial.
+        #
+        # The previous floor of 111 was set 2026-08-06 by #487 and then drifted
+        # 25 tests, so for a day any executor suite could have lost 25 cases
+        # without the gate noticing. Only 8 of those are the capacity-sampler
+        # work (#512 plus this change); the other 17 landed between #487 and
+        # 2026-08-07 without a re-measure. Measured, not computed: edd41b0
+        # executed 128 and this tree executes 136.
         # The two PostgreSQL adapter integration tests gate on the suite's own
         # POSTGRES_CONTROL_PLANE_TEST_URL opt-in (never a general
         # DATABASE_URL), so they skip on the hermetic gate by design:
@@ -772,7 +779,7 @@ def build_suites() -> List[Suite]:
         Suite("executor", "executor unit tests (bootstrap+control-plane+runtime+registry+bench)",
               "pytest", REPO,
               [sys.executable, "-P", "-m", "pytest", "executor", "-q", "--color=no",
-               "-r", "s", "-p", "no:cacheprovider"], 111,
+               "-r", "s", "-p", "no:cacheprovider"], 136,
               allowed_skip_reasons=(
                   r"set POSTGRES_CONTROL_PLANE_TEST_URL to run the PostgreSQL "
                   r"integration test",
