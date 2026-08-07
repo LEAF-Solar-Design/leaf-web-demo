@@ -624,7 +624,7 @@ def build_suites() -> List[Suite]:
         # "(executed-count drift: ...)" note, so 34 of these could have vanished
         # and the gate would still have reported green. Raising it with the
         # tests, in the same commit, is what keeps that from happening again.
-        # 45 is safe on every runner because the suite is fully static -- it
+        # 46 is safe on every runner because the suite is fully static -- it
         # reads files and parses AST, and carries no skipif, pytest.skip or
         # importorskip at all, so there is no environment where it executes
         # fewer. That is also why it needs no allowed_skip_reasons.
