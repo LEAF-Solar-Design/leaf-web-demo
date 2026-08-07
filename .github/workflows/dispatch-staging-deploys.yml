@@ -176,6 +176,11 @@ jobs:
       DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
       BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
       BUILD_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      # Job-level, not step-level: the manifest step names the build's own
+      # supply set and docs-noop marker with it, and the receipt publish step
+      # names the CONVERGENCE RECEIPT with it. One definition so those names
+      # cannot drift apart.
+      BUILD_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
 
     steps:
       - name: Skip when the built commit is no longer the tip of main
@@ -197,7 +202,6 @@ jobs:
         if: steps.tip.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           ARTIFACT_NAME="staging-supply-set-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
@@ -255,6 +259,7 @@ jobs:
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Deploy each staging service in turn and prove each one landed
+        id: deploy
         if: >-
           steps.tip.outputs.current == 'true' &&
           steps.manifest.outputs.deploy == 'true'
@@ -354,6 +359,14 @@ jobs:
             SUP_STATE=$(printf '%s' "$SUP_RECORD" \
               | jq -r '"\(.status) \(.conclusion // "")"') || return 1
             [ -n "$SUP_ATTEMPT" ] || return 1
+            # Hand the attempt back to the CALLER. superseder_deploys runs this
+            # function in a command substitution, so every variable set here
+            # dies with that subshell, and a `yes` verdict alone does not carry
+            # the one number the receipt wait below needs to name the receipt.
+            # The file is written by the SAME read that produced the verdict, so
+            # the receipt we wait for is bound to the exact attempt whose supply
+            # set earned `yes`, never to a re-read a rerun could move.
+            printf '%s' "$SUP_ATTEMPT" > superseder-attempt
             SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100") \
               || return 1
@@ -466,6 +479,50 @@ jobs:
             fi
           fi
 
+          # THE CONVERGENCE RECEIPT, waited for. Returns 0 only once the
+          # superseding release has PUBLISHED proof that both of its services
+          # landed, and 1 when this relay's own deadline runs out first.
+          #
+          # A supply set proves the superseder COULD deploy. Only the receipt
+          # proves its relay DID. Nothing read before this relay exits can
+          # substitute, because the superseder's relay can still stand down
+          # after any read we take -- that is the whole race.
+          #
+          # Read from the REPOSITORY artifact endpoint, filtered by exact
+          # name, because the receipt is published by the superseder's RELAY
+          # run and we cannot name that run: a workflow_run run carries the tip
+          # at trigger time as its own head_sha, not the commit that triggered
+          # it. The name is the identity, and it is bound to the BUILD's sha
+          # and attempt precisely so this relay can compute it from what the
+          # classifier already read.
+          #
+          # NO COMPLETENESS CHECK, deliberately, and this is not the
+          # classifier's rule relaxed. That check exists because the classifier
+          # reasons from artifact ABSENCE, and a truncated page says nothing
+          # about what it did not return. This function reasons only from
+          # PRESENCE: a match on any page is a real match, and no match keeps
+          # polling until the deadline and then fails RED. It already fails
+          # closed, so proving the page whole would add nothing.
+          wait_for_receipt() {
+            WANT_RECEIPT="staging-converged-$1-attempt-$2"
+            echo "Waiting for the superseder's convergence receipt $WANT_RECEIPT."
+            while before_deadline; do
+              if RECEIPTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100&name=$WANT_RECEIPT"); then
+                # Re-match the name locally. The server-side filter is a
+                # narrowing convenience, never the proof.
+                if printf '%s' "$RECEIPTS" \
+                  | jq -e --arg n "$WANT_RECEIPT" \
+                      'any(.artifacts[]; (.name == $n) and (.expired == false))' \
+                      >/dev/null; then
+                  return 0
+                fi
+              fi
+              sleep "$POLL_SECONDS"
+            done
+            return 1
+          }
+
           DEPLOYED_ANY=false
 
           for SERVICE in $SERVICES; do
@@ -571,8 +628,31 @@ jobs:
                     echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
                     exit 1
                   fi
-                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. That commit's build succeeded with an unexpired supply set bound to its own run and attempt, so its relay has something to deploy. That is not a guarantee this clears: its relay must also survive its own supersession before it reaches $SERVICE. This split is not guaranteed to clear on the next merge."
-                  exit 0
+                  # THE FRESH TIP READ ABOVE IS NECESSARY AND NOT SUFFICIENT.
+                  # It proves $MAIN_SHA is the tip at that instant and nothing
+                  # more. sol-critic carried the incident one hop further: A
+                  # reads TIP_NOW=B and classifies `yes`, docs-only C pushes
+                  # immediately AFTER that read, A exits green, B's relay then
+                  # skips on its latest-main-only check because C is the tip,
+                  # and C's relay dispatches nothing on its own docs-noop
+                  # marker. A's split survives with A, B and C all green. No
+                  # read taken before A exits can close that, so the proof has
+                  # to come from B ACTUALLY LANDING.
+                  #
+                  # So wait for B's receipt, bounded by this relay's own
+                  # existing deadline. A superseded B publishes none, and this
+                  # relay then fails RED rather than assuming.
+                  SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
+                  if [ -z "$SUP_ATTEMPT_SEEN" ]; then
+                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                    exit 1
+                  fi
+                  if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
+                    echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
+                    exit 0
+                  fi
+                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its build produced a supply set, but its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                  exit 1
                 else
                   echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
                   exit 1
@@ -663,3 +743,44 @@ jobs:
               exit 1
             done
           done
+
+          # EVERY service landed, so this release converged staging. Record
+          # that as an artifact the NEXT superseded relay can wait on, which is
+          # the only evidence that distinguishes a relay that COULD have
+          # deployed from one that DID.
+          #
+          # Reached only by falling out of the loop. Every stand-down and every
+          # failure above exits first, so the receipt cannot be written by a
+          # relay that skipped, stood down, or left a service behind. Keyed by
+          # the BUILD's sha and attempt, exactly like the supply set and the
+          # docs-noop marker, so a superseded relay can compute this name from
+          # the build record it already reads. The services array records the
+          # ACTUAL order this relay deployed, not a hardcoded pair.
+          jq -n \
+            --arg sha "$BUILD_HEAD_SHA" \
+            --arg attempt "$BUILD_RUN_ATTEMPT" \
+            --arg tag "$IMAGE_TAG" \
+            --arg relay "$GITHUB_RUN_ID" \
+            --arg services "$SERVICES" \
+            '{schema: "leaf.staging-converged.v1",
+              source_revision: $sha,
+              build_run_attempt: $attempt,
+              build_tag: $tag,
+              relay_run_id: $relay,
+              services: ($services | split(" "))}' > staging-converged.json
+          echo "converged=true" >> "$GITHUB_OUTPUT"
+
+      # Publishing is a SEPARATE step because the deploy step above exits
+      # non-zero on every unconverged path, and a step that has failed cannot
+      # upload anything. The `converged` output is written on the single line
+      # that follows a completed service loop, so the receipt exists if and
+      # only if both services provably landed. This step runs NO script and
+      # holds NO token: it is a pure upload of a file the guarded step already
+      # wrote, so it cannot be the place a dispatch is smuggled in.
+      - name: Publish the convergence receipt
+        if: steps.deploy.outputs.converged == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-converged-${{ github.event.workflow_run.head_sha }}-attempt-${{ github.event.workflow_run.run_attempt }}
+          path: staging-converged.json
+          if-no-files-found: error

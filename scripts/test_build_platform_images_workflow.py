@@ -2679,11 +2679,16 @@ def check_docs_noop_filter(text: str) -> None:
     # step's own 95-minute deadline; check_staging_relay_convergence asserts
     # that relationship rather than the literal.
     assert dispatch_job["timeout-minutes"] == 105
+    # BUILD_RUN_ATTEMPT moved from the manifest step to the JOB on 2026-08-07
+    # with the convergence receipt. The manifest step names the build's own
+    # supply set and marker with it, and the receipt publish step names the
+    # RECEIPT with it; one definition keeps those names on the same key.
     assert dispatch_job["env"] == {
         "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
         "DEPLOY_WORKFLOW": "deploy-leaf-platform-staging.yml",
         "BUILD_RUN_ID": "${{ github.event.workflow_run.id }}",
         "BUILD_HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
+        "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
     }
     assert dispatch_job["if"] == (
         "github.event.workflow_run.conclusion == 'success' && "
@@ -2691,20 +2696,30 @@ def check_docs_noop_filter(text: str) -> None:
         "github.event.workflow_run.head_branch == 'main'"
     )
     relay_steps = dispatch_job["steps"]
-    assert [s.get("id") for s in relay_steps] == ["tip", "manifest", None]
-    tip_step, manifest_step, dispatch_step = relay_steps
-    # Step KEY SETS are exact: no uses:, no shell:, no working-directory:,
+    # FOUR steps since 2026-08-07: tip check, manifest read, guarded dispatch,
+    # receipt publish. The fourth is the ONLY step permitted to carry `uses:`,
+    # asserted exactly below. Adding a fifth, importing another action, or
+    # reordering must break this harness and force a co-review.
+    assert [s.get("id") for s in relay_steps] == [
+        "tip", "manifest", "deploy", None]
+    tip_step, manifest_step, dispatch_step, receipt_step = relay_steps
+    # Step KEY SETS are exact: no shell:, no working-directory:,
     # no continue-on-error: may appear on any step without breaking this.
     assert set(tip_step) == {"name", "id", "env", "run"}
     assert set(manifest_step) == {"name", "id", "if", "env", "run"}
-    assert set(dispatch_step) == {"name", "if", "env", "run"}
+    assert set(dispatch_step) == {"name", "id", "if", "env", "run"}
+    # THE RECEIPT STEP RUNS NO SCRIPT AND HOLDS NO TOKEN. It is a pure upload
+    # of a file the guarded step already wrote, so it carries no `env:` at all
+    # and cannot be the place a dispatch is smuggled in. Its `uses`, `if` and
+    # `with` are pinned inside check_staging_relay_convergence, where the decoy
+    # battery exercises them; a receipt published by a relay that stood down is
+    # a lie every future waiter believes, so it belongs to the convergence
+    # contract.
+    assert set(receipt_step) == {"name", "if", "uses", "with"}
     # Step ENV dicts are exact: the unguarded steps hold only the
     # read-scoped workflow token, never the infra-repo PAT.
     assert tip_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
-    assert manifest_step["env"] == {
-        "GH_TOKEN": "${{ github.token }}",
-        "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
-    }
+    assert manifest_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
     # HOME_TOKEN added 2026-08-07. The per-service tip re-check reads THIS
     # repo, which the infra PAT is not scoped for; github.token is, and the
     # workflow's permissions block above still pins it read-only. This is a
@@ -2900,8 +2915,37 @@ def check_docs_noop_filter(text: str) -> None:
     # endpoint, repo, command or credential arises from combining them. The
     # `yes`-arm warning was also reworded here to drop the convergence promise
     # #506 was RED'd for three rounds running.
+    #
+    # Hash updated 2026-08-07 (e): THE CONVERGENCE RECEIPT, the behaviour change
+    # PR #508 deliberately deferred and named as this residual's in-repo fix. A
+    # relay that lands both services now writes staging-converged.json and sets
+    # `converged=true`; the fourth step uploads it under
+    # staging-converged-<sha>-attempt-<n>. A relay standing down on a `yes`
+    # classification no longer exits green on the superseder's supply set -- it
+    # WAITS for that superseder's receipt, bounded by the same 95-minute
+    # deadline, and fails RED if none appears. The classifier additionally
+    # persists the attempt that earned `yes` to a file, because it runs inside a
+    # command substitution and that number would otherwise die with the subshell.
+    #
+    # REVIEWED FOR DISPATCH CAPABILITY. Unchanged. Still exactly ONE executable
+    # `gh workflow run` with the same four inputs and still exactly one secret
+    # reference, at the guarded step's GH_TOKEN. One call is added: a read-only
+    # GET of THIS repo's own artifact list, filtered by exact name, on
+    # `GH_TOKEN="$HOME_TOKEN"` -- the workflow's own token, which the permissions
+    # block still pins to actions: read / contents: read. It is a new ENDPOINT
+    # (repository artifacts rather than one run's artifacts) but the same repo,
+    # token and read scope the relay already exercises; the repo-level form is
+    # required because the receipt is published by the superseder's RELAY run,
+    # whose id this relay cannot name. Two local file writes are added
+    # (superseder-attempt, staging-converged.json) in the runner workspace, plus
+    # one `jq -n` that makes no network call. The new fourth step holds NO env
+    # and NO token and runs first-party actions/upload-artifact@v4, already used
+    # across build-platform-images.yml; artifact upload uses the runner's own
+    # results service, so it needs no addition to the permissions block and the
+    # read-only capability wall stands. The infra-repo PAT gains no new command,
+    # no new endpoint and no new repo.
     assert frozen == (
-        "cf2521780db4c7cbd7aa46595fe9ad6d47e2ed5c94113f17f98b659085b7bd8e"
+        "e377f0ca6bf8d2bc76ccf8433916f6ddd3212a724fa44d15350127f1b27f5f3a"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3531,7 +3575,11 @@ def check_staging_relay_convergence(text: str) -> None:
     """
     wf = _strict_yaml(text)
     job = wf["jobs"]["dispatch"]
-    code = _executable_bash(job["steps"][-1]["run"])
+    # Selected by ID, not by position. The relay grew a fourth step that
+    # carries `uses:` and no `run:`, so `steps[-1]` both crashes and, worse,
+    # would silently start checking the wrong script if another step were ever
+    # appended. `deploy` is the guarded step's identity.
+    code = _executable_bash(_relay_deploy_step(job)["run"])
 
     # Both services stay covered, and from a single dispatch site: a second
     # one is a deploy that the watch below would not be looking at.
@@ -3671,18 +3719,148 @@ def check_staging_relay_convergence(text: str) -> None:
     assert unconverged, (
         "leaving staging split with no known converger must fail the relay "
         "RED; a ::warning:: on a green run is the reporting hole itself")
+    # THE STAND-DOWN MUST BE EARNED BY THE SUPERSEDER'S RECEIPT.
+    #
+    # Until 2026-08-07 this arm exited 0 on the superseder's SUPPLY SET and a
+    # fresh tip read, and the pin here only required it to WARN about the split
+    # it left behind. sol-critic (PR #508) showed that is not enough: the tip
+    # read proves B is the tip at that instant and nothing more, so docs-only C
+    # can push immediately after it, B's own relay then skips on the moved tip,
+    # C's relay dispatches nothing on its marker, and A, B and C are all green
+    # over a live split. A supply set proves B COULD deploy, never that its
+    # relay WILL, and no read taken before A exits can close that.
+    #
+    # So the exit 0 must now sit INSIDE the receipt wait. Pinned as
+    # containment, not adjacency, so ordinary edits inside the arm stay legal
+    # while moving the exit out of the wait cannot.
+    #
+    # The WHOLE arm, anchored to the `else` at its own indentation. `[ ]*`, not
+    # `\s*`: `\s` matches newlines, so a backreferenced `\s*` group can start
+    # anywhere and turns a non-matching mutant into catastrophic backtracking.
     converged = re.search(
-        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*exit 0\n', code, re.S)
-    assert converged, "the converging-superseder arm must be able to exit 0"
-    # Bind this to the WARNING, not to the arm. The arm now also carries a
-    # stale-tip `::error::STAGING IS SPLIT AND UNCONVERGED`, and a whole-arm
-    # substring check would let that second site satisfy the pin while the
-    # stand-down warning itself stopped naming the split.
-    converged_warning = re.search(r'echo "::warning::([^"]*)"', converged.group(1))
-    assert converged_warning and "STAGING IS SPLIT" in converged_warning.group(1), (
-        "standing down for a superseder that DOES build images may exit 0, "
-        "and its WARNING must still name the split it leaves for that relay "
-        "to close")
+        r'^([ ]*)elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\1else\n',
+        code, re.S | re.M)
+    assert converged, "the converging-superseder arm must be extractable"
+    converged_arm = converged.group(2)
+    assert re.search(r"^\s*exit 0\b", converged_arm, re.M), (
+        "the converging-superseder arm must be able to exit 0")
+    receipt_gate = re.search(
+        r'^([ ]*)if wait_for_receipt "\$MAIN_SHA" "\$SUP_ATTEMPT_SEEN"; then\n'
+        r'(.*?)\n\1fi\b', code, re.S | re.M)
+    assert receipt_gate, (
+        "the converging-superseder stand-down must be gated on waiting for "
+        "that superseder's convergence receipt; exiting 0 on its supply set "
+        "alone is the one-hop displacement of the original incident")
+    # The gate lives INSIDE the `yes` arm, not somewhere else that mentions the
+    # same call.
+    assert converged.start() < receipt_gate.start() < converged.end(), (
+        "the receipt wait must gate the converging-superseder arm itself")
+    assert re.search(r"^\s*exit 0\b", receipt_gate.group(2), re.M), (
+        "the clean exit must sit INSIDE the receipt wait, so a relay that "
+        "never saw the receipt cannot reach it")
+    # And it must be the ONLY exit 0 in that arm: a second one outside the wait
+    # would make the gate decorative.
+    assert len(re.findall(r"^\s*exit 0\b", converged_arm, re.M)) == 1, (
+        "the `yes` arm may exit 0 exactly once, inside its receipt wait; a "
+        "second one stands down without the proof the wait exists to get")
+    # And the announcement must say the split CLOSED, on proof. A stand-down
+    # that still merely warns about a split it hopes someone else closes is the
+    # pre-receipt behaviour returning.
+    converged_notice = re.search(
+        r'echo "::notice::([^"]*)"', receipt_gate.group(2))
+    assert converged_notice and "CONVERGED" in converged_notice.group(1), (
+        "the receipt-backed stand-down must announce that staging converged, "
+        "naming the proof it stood down on")
+    # A MISSING RECEIPT IS RED. The wait is bounded by the step's own deadline,
+    # so a superseder that was itself superseded (and therefore published
+    # nothing) fails this relay rather than exiting green.
+    no_receipt = re.search(
+        r'echo "::error::STAGING IS SPLIT AND UNCONVERGED:[^"]*never published '
+        r'a convergence receipt[^"]*"\n[ ]*exit 1\b', converged_arm)
+    assert no_receipt, (
+        "a converging-superseder stand-down whose receipt never arrives must "
+        "fail RED and say the receipt is what was missing")
+    # The attempt the receipt is named for comes from the classifier's own
+    # read. Without it the receipt cannot be named at all, so an unrecorded
+    # attempt is its own explicit error rather than a wait for an artifact
+    # nobody publishes.
+    assert 'SUP_ATTEMPT_SEEN=$(cat superseder-attempt' in code, (
+        "the receipt must be named from the attempt the classifier actually "
+        "read, not from a re-read a rerun could move")
+    assert re.search(
+        r'if \[ -z "\$SUP_ATTEMPT_SEEN" \]; then\n[ ]*echo "::error::[^"]*"\n'
+        r'[ ]*exit 1\b', code), (
+        "an unrecorded superseder attempt must fail RED explicitly, not fall "
+        "through to a wait for an artifact that can never appear")
+    # The WRITER of that attempt must exist too. Without it the reader above
+    # always sees an empty file, every converging stand-down fails red for the
+    # wrong reason, and the protocol is dead while every other pin still passes.
+    assert re.search(
+        r"printf '%s' \"\$SUP_ATTEMPT\" > superseder-attempt", code), (
+        "the classifier must persist the attempt that earned `yes`; it runs in "
+        "a command substitution, so the value dies with that subshell")
+    # `wait_for_receipt` gets the same single-definition rule as the
+    # classifier: bash resolves a function at CALL time, so a later
+    # redefinition returning 0 would stand down on no receipt at all while
+    # every containment pin above still matched.
+    for fn in ("wait_for_receipt",):
+        defs = (code.count(f"{fn}() {{")
+                + len(re.findall(rf"^\s*function\s+{fn}\b", code, re.M)))
+        assert defs == 1, (
+            f"{fn} must be defined exactly once; bash resolves the LAST "
+            f"definition at call time, so a second one silently wins "
+            f"(found {defs})")
+
+    # THE RECEIPT IS WRITTEN ONLY BY FALLING OUT OF THE SERVICE LOOP.
+    #
+    # Everything that stands down or fails exits before this point, so the
+    # single `converged=true` write is what makes the receipt mean "both
+    # services provably landed". A second write anywhere inside the loop would
+    # publish that claim for a release that deployed one service.
+    converged_writes = re.findall(r'^[ ]*echo "converged=true"', code, re.M)
+    assert len(converged_writes) == 1, (
+        "`converged=true` may be written exactly once; a second write inside "
+        "the service loop publishes a receipt for a partial release "
+        f"(found {len(converged_writes)})")
+    loop_ends = [m.end() for m in re.finditer(r"^[ ]*done\b", code, re.M)]
+    assert loop_ends, "the service loop must close"
+    assert code.index('echo "converged=true"') > loop_ends[-1], (
+        "the convergence receipt may only be recorded AFTER the service loop "
+        "completes; recorded inside it, a relay that later fails or stands "
+        "down has already claimed both services landed")
+    assert re.search(r'staging-converged\.json', code), (
+        "the guarded step must write the receipt payload the publish step "
+        "uploads")
+
+    # THE PUBLISH STEP ITSELF. Pinned here, inside the convergence contract, so
+    # the decoy battery exercises it: a receipt published by a relay that stood
+    # down is a lie every future waiter believes.
+    receipt_steps = [s for s in job["steps"] if s.get("id") is None]
+    assert len(receipt_steps) == 1, (
+        f"exactly one relay step publishes the receipt; found "
+        f"{len(receipt_steps)}")
+    receipt_step = receipt_steps[0]
+    assert receipt_step["uses"] == "actions/upload-artifact@v4", (
+        "the receipt publisher is pinned to the first-party action version the "
+        "build workflow already uses")
+    assert receipt_step["if"] == "steps.deploy.outputs.converged == 'true'", (
+        "the receipt may be published ONLY when the guarded step recorded "
+        "convergence; any weaker condition lets a relay that stood down or "
+        "skipped assert a convergence it never performed")
+    assert receipt_step["with"] == {
+        "name": (
+            "staging-converged-"
+            "${{ github.event.workflow_run.head_sha }}"
+            "-attempt-${{ github.event.workflow_run.run_attempt }}"
+        ),
+        "path": "staging-converged.json",
+        "if-no-files-found": "error",
+    }, (
+        "the receipt NAME is the protocol. It is keyed by the BUILD's sha and "
+        "attempt, exactly like the supply set and the docs-noop marker, "
+        "because that is the only key a superseded relay can compute from the "
+        "build record its classifier already reads. Drifting it publishes a "
+        "receipt nobody is waiting for and strands every waiter")
 
     # A DOCS-ONLY SUPERSESSION MUST NOT STRAND A PARTIAL RELEASE.
     #
@@ -3993,6 +4171,21 @@ def check_staging_relay_convergence(text: str) -> None:
     print("staging relay convergence invariants: PASS")
 
 
+def _relay_deploy_step(job: dict) -> dict:
+    """The relay's ONE guarded step, resolved by id and proven unique.
+
+    The receipt step added on 2026-08-07 carries `uses:` and no `run:`, so
+    positional selection (`steps[-1]`) no longer names the guarded script.
+    Resolving by id also means a future reordering cannot quietly point these
+    checks at a different script while every assertion below still passes.
+    """
+    matches = [s for s in job["steps"] if s.get("id") == "deploy"]
+    assert len(matches) == 1, (
+        f"exactly one relay step may carry id `deploy`; found {len(matches)}")
+    assert "run" in matches[0], "the guarded deploy step must carry a script"
+    return matches[0]
+
+
 def check_staging_relay_convergence_battery(relay_path: Path) -> None:
     """Decoy battery: each negative reintroduces a real regression vector.
 
@@ -4072,7 +4265,8 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         (
             "mid-release stand-down reported as an ordinary success",
-            mutate(original, "STAGING IS SPLIT: main moved", "main moved"),
+            mutate(original, "STAGING IS SPLIT AND UNCONVERGED: main moved",
+                   "main moved"),
         ),
         (
             "landed deploy no longer records that the release is partly live",
@@ -4233,6 +4427,89 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
                    'if [ "$TIP_NOW" != "$MAIN_SHA" ]; then',
                    'if [ "$TIP_NOW" = "$TIP_NOW" ] && false; then'),
         ),
+        # --- THE CONVERGENCE RECEIPT (2026-08-07). Each negative below is the
+        # receipt protocol defeated in one specific way, and each one reopens
+        # the exact race the receipt exists to close.
+        (
+            "THE RESIDUAL ITSELF: the `yes` arm stands down on the supply set "
+            "again, without ever waiting for the superseder's receipt",
+            mutate(original,
+                   'if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then',
+                   "if true; then"),
+        ),
+        (
+            "a receipt that never arrives swallowed as success, so a "
+            "superseder that was itself superseded still exits this relay green",
+            mutate(original,
+                   "it may itself have been superseded and stood down. "
+                   "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
+                   'with a successful main build."\n                  exit 1\n',
+                   "it may itself have been superseded and stood down. "
+                   "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
+                   'with a successful main build."\n                  exit 0\n'),
+        ),
+        (
+            "`wait_for_receipt` REDEFINED later to return 0, so the wait is "
+            "satisfied by no receipt at all",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          wait_for_receipt() { return 0; }\n"
+                   "          DEPLOYED_ANY=false\n"),
+        ),
+        (
+            "the same override in bash's ALTERNATE function syntax",
+            mutate(original, "          DEPLOYED_ANY=false\n",
+                   "          function wait_for_receipt { return 0; }\n"
+                   "          DEPLOYED_ANY=false\n"),
+        ),
+        (
+            "the classifier stops recording the attempt, so the receipt can "
+            "never be named and the protocol is silently dead",
+            mutate(original,
+                   "            printf '%s' \"$SUP_ATTEMPT\" > superseder-attempt\n",
+                   ""),
+        ),
+        (
+            "an unrecorded attempt falls through to the wait instead of "
+            "failing red, so the relay burns its deadline and blames the receipt",
+            mutate(original, 'if [ -z "$SUP_ATTEMPT_SEEN" ]; then',
+                   "if false; then"),
+        ),
+        (
+            "the receipt published unconditionally, so a relay that STOOD "
+            "DOWN certifies a convergence it never performed",
+            mutate(original,
+                   "        if: steps.deploy.outputs.converged == 'true'\n",
+                   "        if: always()\n"),
+        ),
+        (
+            "convergence recorded INSIDE the service loop, so a release that "
+            "lands web and then fails on app still publishes a receipt",
+            mutate(original,
+                   '                DEPLOYED_ANY=true\n',
+                   '                DEPLOYED_ANY=true\n'
+                   '                echo "converged=true" >> "$GITHUB_OUTPUT"\n'),
+        ),
+        (
+            "the receipt NAME keyed by the relay run instead of the build, "
+            "which no superseded relay can compute",
+            mutate(original,
+                   "staging-converged-${{ github.event.workflow_run.head_sha }}"
+                   "-attempt-${{ github.event.workflow_run.run_attempt }}",
+                   "staging-converged-${{ github.sha }}"
+                   "-attempt-${{ github.run_attempt }}"),
+        ),
+        (
+            "the publisher swapped for a different action, new supply chain "
+            "under a workflow that holds the infra PAT",
+            mutate(original, "uses: actions/upload-artifact@v4",
+                   "uses: some-org/upload@main"),
+        ),
+        (
+            "an empty upload tolerated, so the receipt name exists with no "
+            "payload behind it",
+            mutate(original, "if-no-files-found: error",
+                   "if-no-files-found: ignore"),
+        ),
     ]
     for name, mutant in negatives:
         assert mutant != original
@@ -4297,6 +4574,15 @@ case "${args[0]}" in
         ;;
       *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
       *"/jobs"*)          printf '%s\n' "1" ;;
+      # PR #508 follow-up: the `yes` arm now waits for the superseder's
+      # convergence receipt at the repository artifact endpoint, filtered by
+      # exact name. Echo a matching receipt so a converging-superseder scenario
+      # resolves at once instead of spinning to the deadline (sleep is a
+      # no-op). The name is read back out of the query so the relay's own local
+      # re-match on `.name == $n` succeeds.
+      *"/actions/artifacts?per_page=100&name="*)
+        want="${args[1]##*name=}"
+        printf '%s\n' '{"total_count":1,"artifacts":[{"name":"'"$want"'","expired":false}]}' ;;
       # PR #508's superseder classifier runs inside THIS step whenever a
       # scenario moves main after a service is already live. It polls to a
       # 95-minute deadline, and this stub no-ops `sleep`, so an unanswered
@@ -4379,7 +4665,8 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
         tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
         script = tmp / "dispatch.sh"
         script.write_text(
-            relay["jobs"]["dispatch"]["steps"][-1]["run"], encoding="utf-8")
+            _relay_deploy_step(relay["jobs"]["dispatch"])["run"],
+            encoding="utf-8")
 
         env = dict(os.environ)
         env.update(
@@ -4388,6 +4675,13 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
             GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
             BUILD_HEAD_SHA="deadbee",
+            # Job-level env in the real workflow; the receipt payload and the
+            # publish step name are both keyed on the build attempt, and the
+            # `converged=true` line writes to GITHUB_OUTPUT. Unset, `set -u`
+            # would abort the script the moment the loop completes.
+            BUILD_RUN_ATTEMPT="1",
+            GITHUB_RUN_ID="424242",
+            GITHUB_OUTPUT=str(tmp / "github_output"),
             IMAGE_TAG=image_tag,
             GH_TOKEN="fake-pat",
             HOME_TOKEN="fake-token",
@@ -4399,8 +4693,12 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             FAKE_PENDING=json.dumps(pending),
             DISPATCH_LOG=str(log),
         )
+        # cwd=tmp so the relay's own file writes (superseder-attempt, the
+        # staging-converged.json receipt payload) land in the throwaway dir
+        # rather than leaking into wherever pytest was invoked.
         proc = subprocess.run(
-            [bash, str(script)], env=env, text=True, capture_output=True)
+            [bash, str(script)], env=env, text=True, capture_output=True,
+            cwd=str(tmp))
 
         deployed = []
         for line in log.read_text(encoding="utf-8").splitlines():
@@ -4486,9 +4784,18 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
         tip_ok_reads=1)
     assert rc == 0
     assert deployed == [("app", TAG)], deployed
-    assert "STAGING IS SPLIT" in out and "so web stays on its previous image" in out, (
-        "when reordering causes web to be the skipped service, the relay must "
-        "name web in the split warning rather than exit quietly")
+    # Web is the service skipped THIS relay, but the superseder that moved the
+    # tip is a converger and the fake serves its convergence receipt, so the
+    # relay stands down GREEN on that PROOF (the 2026-08-07 receipt) rather than
+    # on the old bare `STAGING IS SPLIT` warning. Web ends up on the
+    # superseder's newer image, so "web stays on its previous image" is no
+    # longer even true here. The receipt-ABSENT path that does strand web is
+    # pinned red statically and in the decoy battery; its 95-minute wait cannot
+    # be rehearsed in-process, exactly as the classifier's own timeout is only
+    # covered statically for the same reason.
+    assert "CONVERGED" in out, (
+        "when reordering skips web and the superseder publishes its "
+        "convergence receipt, the relay stands down green on that proof")
 
     # And the stand-down still wins over ordering: main moved, nothing goes out.
     rc, out, deployed = _rehearse_relay_dispatch(
@@ -4572,8 +4879,7 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
     assert bash and jq_bin, "the classifier rehearsal needs bash and jq on PATH"
 
     wf = _strict_yaml(text)
-    run_steps = [s for s in wf["jobs"]["dispatch"]["steps"] if "run" in s]
-    code = run_steps[-1]["run"]
+    code = _relay_deploy_step(wf["jobs"]["dispatch"])["run"]
     start = code.index("BUILD_WORKFLOW_PATH=")
     end = re.search(r"^superseder_deploys\(\) \{\n.*?^\}$", code[start:],
                     re.S | re.M)
@@ -4696,8 +5002,13 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
             # and an expiry there would fail the test for a reason that
             # has nothing to do with the classifier.
             env["REHEARSAL_BUDGET"] = overrides.get("BUDGET", "10")
+            # cwd=tmp so the classifier's `superseder-attempt` write (added with
+            # the convergence receipt, so the `yes` arm can name the receipt it
+            # waits for) lands in the throwaway dir rather than dropping an
+            # untracked file into wherever pytest ran.
             proc = subprocess.run(
-                [bash, str(script)], env=env, text=True, capture_output=True)
+                [bash, str(script)], env=env, text=True, capture_output=True,
+                cwd=str(tmp))
             assert proc.returncode == 0, (
                 f"classifier rehearsal {name!r} crashed rc={proc.returncode}\n"
                 f"{proc.stdout}\n{proc.stderr}")
