@@ -26,7 +26,7 @@ type GatewayToolResult = {
   isError?: boolean;
 };
 
-interface GatewayClient {
+export interface GatewayClient {
   connect(): Promise<void>;
   callTool(name: string, args: Record<string, unknown>): Promise<GatewayToolResult>;
   close(): Promise<void>;
@@ -49,11 +49,19 @@ interface ArtifactRecord {
 
 export interface GatewayStandardServiceProviderOptions {
   endpoint: string;
+  /** Local-development compatibility only. Production should use authorization. */
   authToken?: string;
+  /** Resolve a separate, short-lived gateway bearer for this exact identity. */
+  authorization?: (
+    identity: StandardServiceIdentity,
+  ) => Promise<{ bearer_token: string; expires_at: string }>;
   artifactDir: string;
   screenshotRoot?: string;
   catalog?: StandardServiceCatalog;
-  clientFactory?: () => Promise<GatewayClient>;
+  clientFactory?: (context: {
+    identity: StandardServiceIdentity;
+    authToken?: string;
+  }) => Promise<GatewayClient>;
   now?: () => number;
   visualBackend?: "browser-session" | "playwright-single-operator";
   sensitiveValues?: string[];
@@ -63,6 +71,7 @@ function sameIdentity(a: StandardServiceIdentity, b: StandardServiceIdentity): b
   return a.tenant_id === b.tenant_id
     && a.subject_id === b.subject_id
     && a.session_id === b.session_id
+    && a.subscription_mount_id === b.subscription_mount_id
     && a.runner_profile_id === b.runner_profile_id;
 }
 
@@ -98,6 +107,7 @@ function gatewayError(value: Record<string, unknown>): void {
 export class GatewayStandardServiceProvider implements StandardServiceProvider {
   private readonly endpoint: string;
   private readonly authToken?: string;
+  private readonly authorization?: GatewayStandardServiceProviderOptions["authorization"];
   private readonly artifactDir: string;
   private readonly screenshotRoot: string;
   private readonly serviceCatalog: StandardServiceCatalog;
@@ -109,12 +119,16 @@ export class GatewayStandardServiceProvider implements StandardServiceProvider {
   private readonly artifacts = new Map<string, ArtifactRecord>();
 
   constructor(options: GatewayStandardServiceProviderOptions) {
+    if (options.authToken && options.authorization) {
+      throw new Error("standard_service_gateway_authorization_ambiguous");
+    }
     const endpoint = new URL(options.endpoint);
     if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
       throw new Error("standard_service_gateway_endpoint_invalid");
     }
     this.endpoint = endpoint.toString();
     this.authToken = options.authToken;
+    this.authorization = options.authorization;
     this.artifactDir = resolve(options.artifactDir);
     this.screenshotRoot = resolve(options.screenshotRoot ?? join(
       process.env.USERPROFILE ?? process.env.HOME ?? "",
@@ -187,7 +201,7 @@ export class GatewayStandardServiceProvider implements StandardServiceProvider {
       return this.visualInspectWithPlaywright(identity, target, viewport);
     }
 
-    const client = await this.openClient();
+    const client = await this.openClient(identity);
     let browserSessionId: string | null = null;
     try {
       const started = parseToolResult(await client.callTool("browser_session__cw_walk_start", {
@@ -246,7 +260,7 @@ export class GatewayStandardServiceProvider implements StandardServiceProvider {
     target: IssuedInspectionTarget,
     viewport: "desktop" | "mobile",
   ): Promise<StandardServiceVisualResult> {
-    const client = await this.openClient();
+    const client = await this.openClient(identity);
     try {
       const size = viewport === "mobile" ? { width: 390, height: 844 } : { width: 1280, height: 900 };
       await this.requireToolSuccess(client, "playwright__browser_resize", size);
@@ -299,7 +313,7 @@ export class GatewayStandardServiceProvider implements StandardServiceProvider {
       target.expires_at_ms > this.now() && sameIdentity(identity, target.identity));
     let gateway: "ready" | "unavailable" = "unavailable";
     try {
-      const client = await this.openClient();
+      const client = await this.openClient(identity);
       gateway = "ready";
       await client.close().catch(() => {});
     } catch {
@@ -313,14 +327,23 @@ export class GatewayStandardServiceProvider implements StandardServiceProvider {
     };
   }
 
-  private async openClient(): Promise<GatewayClient> {
+  private async openClient(identity: StandardServiceIdentity): Promise<GatewayClient> {
+    let authToken = this.authToken;
+    if (this.authorization) {
+      const authorization = await this.authorization(structuredClone(identity));
+      const expiresAt = Date.parse(authorization?.expires_at ?? "");
+      if (!authorization?.bearer_token || !Number.isFinite(expiresAt) || expiresAt <= this.now()) {
+        throw new Error("standard_service_gateway_authorization_invalid_or_expired");
+      }
+      authToken = authorization.bearer_token;
+    }
     if (this.clientFactory) {
-      const client = await this.clientFactory();
+      const client = await this.clientFactory({ identity: structuredClone(identity), ...(authToken ? { authToken } : {}) });
       await client.connect();
       return client;
     }
     const transport = new StreamableHTTPClientTransport(new URL(this.endpoint), {
-      requestInit: this.authToken ? { headers: { Authorization: `Bearer ${this.authToken}` } } : {},
+      requestInit: authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {},
     });
     const client = new Client({ name: "mushy-standard-services", version: "1.0.0" });
     const adapter: GatewayClient = {

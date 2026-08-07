@@ -463,6 +463,8 @@ export interface AgentRunInput {
   repoDir: string;
   grant: AgentGrant;
   toolset: AuthorToolset;
+  /** Trusted product authority. Never sourced from model arguments. */
+  standardServicesContext?: import("./impl/standardServicesRuntime.js").TrustedStandardServicesContext;
 }
 
 export interface AgentRunResult {
@@ -647,6 +649,8 @@ export interface ConverseRunInput {
   images?: Array<{ media_type: string; data: string }>;
   tools: ToolExecutor;
   canUseTool: CanUseTool;
+  /** Trusted product authority. Never sourced from model arguments. */
+  standardServicesContext?: import("./impl/standardServicesRuntime.js").TrustedStandardServicesContext;
 }
 
 /**

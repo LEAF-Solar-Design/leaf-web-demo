@@ -36,6 +36,7 @@ export * from "./ports/impl/mcpProxy.js";
 export * from "./ports/impl/repoEditRunner.js";
 export * from "./ports/impl/httpUpstreamSink.js";
 export * from "./ports/impl/standardServices.js";
+export * from "./ports/impl/standardServicesRuntime.js";
 export * from "./ports/impl/runnerCapabilities.js";
 export * from "./ports/impl/standardServicesFacade.js";
 export * from "./ports/impl/gatewayStandardServiceProvider.js";

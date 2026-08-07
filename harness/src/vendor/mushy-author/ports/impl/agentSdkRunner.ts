@@ -42,6 +42,9 @@ import { acceptBrokerTestResult } from "../../agent/tools/toolExecutionReceipt.j
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { scrubSecrets } from "./envScrub.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
+import { createStandardServicesFacade } from "./standardServicesFacade.js";
+import { resolveStandardServicesSession } from "./standardServicesRuntime.js";
+import type { StandardServicesResolver } from "./standardServicesRuntime.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces we rely on (documented, not
@@ -66,6 +69,8 @@ interface ZodModule {
     string(): unknown;
     enum(v: string[]): unknown;
     array(inner: unknown): unknown;
+    record(inner: unknown): unknown;
+    unknown(): unknown;
     [k: string]: unknown;
   };
 }
@@ -133,6 +138,8 @@ export interface AgentSdkRunnerOptions {
   maxWallTimeMs?: number;
   /** Bounded reasoning effort for authoring. Defaults to LEAF_AUTHOR_EFFORT, then low. */
   effort?: AuthorEffort;
+  /** Product-wide resolver. A complete trusted run context mounts services automatically. */
+  standardServicesResolver?: StandardServicesResolver;
 }
 
 export type AuthorEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -568,14 +575,27 @@ export class AgentSdkRunner implements AgentRunner {
     const abort = new AbortController();
     const registry = registryMcpAttachment();
     const allowedNames = registry ? [...AUTHOR_TOOL_NAMES, ...registry.toolNames] : AUTHOR_TOOL_NAMES;
-    const allowed = new Set(allowedNames);
+    const services = this.opts.standardServicesResolver && input.standardServicesContext
+      ? createStandardServicesFacade({
+          sdk,
+          z,
+          ...(await resolveStandardServicesSession(
+            this.opts.standardServicesResolver,
+            input.standardServicesContext,
+            "author",
+          )),
+          profile: "author",
+        })
+      : undefined;
     const composition = composeRunnerCapabilities({
       profile: "author",
       private_mcp_servers: registry
         ? { author: server, registry: registry.serverConfig }
         : { author: server },
       private_allowed_tools: allowedNames,
+      ...(services ? { services } : {}),
     });
+    const allowed = new Set(composition.allowedTools ?? []);
     const q = sdk.query({
       prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
       options: {

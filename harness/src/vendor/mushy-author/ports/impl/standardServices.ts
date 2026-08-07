@@ -36,6 +36,8 @@ export interface StandardServiceIdentity {
   tenant_id: string;
   subject_id: string;
   session_id: string;
+  /** Opaque account id selected by the grant router. Never a model credential. */
+  subscription_mount_id: string;
   runner_profile_id: RunnerCapabilityProfileId;
 }
 
@@ -145,7 +147,13 @@ export const RUNNER_CAPABILITY_PROFILES: Readonly<Record<RunnerCapabilityProfile
 const ID = /^[a-z][a-z0-9._-]{0,63}$/;
 const VERSION = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
-const CLAIMS = new Set(["tenant_id", "subject_id", "session_id", "runner_profile_id"]);
+const CLAIMS = new Set([
+  "tenant_id",
+  "subject_id",
+  "session_id",
+  "subscription_mount_id",
+  "runner_profile_id",
+]);
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -228,7 +236,13 @@ export const STANDARD_SERVICE_CATALOG_V1: StandardServiceCatalog = validateStand
       effect: "observe-contained",
       egress: "issued-target",
       principal: "tenant-human",
-      required_identity_claims: ["tenant_id", "subject_id", "session_id", "runner_profile_id"],
+      required_identity_claims: [
+        "tenant_id",
+        "subject_id",
+        "session_id",
+        "subscription_mount_id",
+        "runner_profile_id",
+      ],
       approval: "none",
       audit: { retention: "security-default", immutable_receipt: true },
       environments: ["local", "staging", "production"],
