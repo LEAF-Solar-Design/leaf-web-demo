@@ -246,6 +246,15 @@ def test_registry_rejects_credential_shaped_kind(tmp_path, monkeypatch):
         broker.list_handles()
 
 
+def test_registry_rejects_credential_shaped_handle_key(tmp_path, monkeypatch):
+    # The handle KEY is echoed in the receipt/audit, so a credential-shaped key
+    # must be refused at load.
+    _write_registry(tmp_path, monkeypatch, {"ghp_AbC123SecretKey": {
+        "scope": "s", "environment": "staging", "kind": "k", "ttl_s": 900}})
+    with pytest.raises(broker.SecretBrokerError):
+        broker.list_handles()
+
+
 def test_registry_rejects_nested_value_in_scope(tmp_path, monkeypatch):
     bad = {"handles": {"h": {"scope": {"token": "REGISTRY-CANARY"},
                              "environment": "staging", "kind": "k"}}}

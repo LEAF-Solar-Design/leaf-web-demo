@@ -69,6 +69,12 @@ def _load_registry() -> Dict[str, Dict[str, Any]]:
     if not isinstance(handles, dict):
         raise SecretBrokerError("secrets registry: handles must be a mapping")
     for handle, meta in handles.items():
+        # The handle KEY is echoed in the receipt and the audit reason, so it
+        # too must be a bounded identifier, never a smuggled value.
+        if not isinstance(handle, str) or not _IDENT_RE.match(handle):
+            raise SecretBrokerError(
+                "secrets registry: handle keys must match "
+                "[a-z0-9_.:-]{1,64} so a value cannot be smuggled into a key")
         if not isinstance(meta, dict):
             raise SecretBrokerError(f"secrets registry: {handle} must be a mapping")
         if set(meta) != _ALLOWED_META:
