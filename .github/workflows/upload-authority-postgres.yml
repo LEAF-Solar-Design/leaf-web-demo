@@ -159,14 +159,58 @@ jobs:
       # assert_schema_current() raises on at startup.
       - name: Run platform authority schema_status gate
         working-directory: server
-        run: >-
-          python -m pytest --import-mode=importlib -q
-          ../platform/tests/test_schema_status_postgres_authority.py
+        run: |
+          # Did-not-skip assertion in the same shape as the overlay step below,
+          # whose comment carries the full reason for the bash string match
+          # over `... | grep -q`. Both halves are load-bearing HERE, and the
+          # `if !` is the half that does the work today. MEASURED, not assumed:
+          # with DATABASE_URL unset this module does not skip, it FAILS --
+          # "13 failed, 13 passed", each failure a
+          # `RuntimeError: DATABASE_URL is not set` raised from platform/db.py.
+          # A bare `out=$(pytest ...)` would abort the step under `bash -e {0}`
+          # with all 13 tracebacks trapped inside `$out`, so the log would show
+          # a red step and no reason. The `if !` prints them. The string match
+          # then covers the other mode, a future skipif that exits 0.
+          #
+          # Note for anyone extending this: the platform conftest's
+          # pytest_ignore_collect does NOT apply here. pytest consults that hook
+          # when it recurses into a directory, not for a file named explicitly
+          # on the command line, and this step names its module explicitly.
+          # Verified against pytest 9.1.1 with a known-positive control.
+          if ! out=$(python -m pytest --import-mode=importlib -q -rs \
+              ../platform/tests/test_schema_status_postgres_authority.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: schema_status authority tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
 
       - name: Run T1 overlay store PostgreSQL suite
         working-directory: platform
         run: |
-          python -m pytest -q tests/test_overlay_store_static.py
+          # The static half carries the assertion; the live half deliberately
+          # does NOT. The next step re-runs `tests/test_overlay_store_postgres.py`
+          # for the sole purpose of asserting it did not skip, so adding a
+          # second copy of that assertion here would gate the same command
+          # twice and buy nothing. The static proofs are the ones nothing else
+          # covers, and they are meant to run in every environment: measured,
+          # this module reports "22 passed" with DATABASE_URL unset. So a skip
+          # here means a test-level gate appeared and the dependency-free
+          # proofs quietly stopped being proofs.
+          if ! out=$(python -m pytest -q -rs tests/test_overlay_store_static.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: overlay static proofs skipped - they must run everywhere.'
+            exit 1
+          fi
           # -p no:randomly keeps the concurrency tests deterministic.
           python -m pytest -q tests/test_overlay_store_postgres.py
 
@@ -206,10 +250,36 @@ jobs:
             exit 1
           fi
 
+      # This file has ALREADY reported vacuous green once: it read "4 passed,
+      # 16 skipped" locally while two of its tests called a nonexistent
+      # `postgres_authority.connect()` (the real API is `connection()`), and
+      # only CI caught it. Its 22 race tests are gated on DATABASE_URL by both
+      # a `requires_database` skipif and a fixture-level `pytest.skip`, so
+      # losing the environment variable turns the whole authority-and-race
+      # proof into a green no-op. That is what this assertion refuses.
       - name: Run PostgreSQL authority and race tests
         working-directory: server
-        run: python -m pytest -q tests/test_drawing_upload_authority_postgres.py
+        run: |
+          if ! out=$(python -m pytest -q -rs tests/test_drawing_upload_authority_postgres.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: upload authority race tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
 
+      # EXEMPT from the did-not-skip assertion, and it is the one step here
+      # that must stay exempt: this test is gated on LEAF_RESTORE_PG_PROOF_DB,
+      # which this workflow deliberately does not set. Its skipif reason spells
+      # out why -- the test applies every migration and leaves randomized
+      # manifest, version and checkout rows behind, so a generic ambient
+      # DATABASE_URL must NEVER trigger it. Measured output here is
+      # "1 skipped, 26 deselected", so a blanket assertion would red-fail the
+      # workflow on every run. Skipping IS the correct behaviour; the step is
+      # kept so that an operator who exports a disposable URL gets the proof.
       - name: Run PostgreSQL live-DWG version restore proof
         working-directory: server
         run: >-
@@ -218,7 +288,20 @@ jobs:
 
       - name: Run observability read-model PostgreSQL verifier
         working-directory: server
-        run: python -m pytest -q tests/test_ops_metrics_pg.py
+        run: |
+          # Whole-module skipif on DATABASE_URL, so all three tests vanish
+          # together and the read-model verifier reports green having verified
+          # nothing. Same assertion shape as the steps above.
+          if ! out=$(python -m pytest -q -rs tests/test_ops_metrics_pg.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: ops metrics read-model tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
 
       # Nine of this suite's ten tests need DATABASE_URL, and its run-all-gates
       # floor is 1, so on the hermetic test-gate workflow it reports green with
@@ -265,11 +348,37 @@ jobs:
           mkdir -p "$RUNNER_TEMP/leaf-customization-pythonpath"
           ln -s "$GITHUB_WORKSPACE/scripts" \
             "$RUNNER_TEMP/leaf-customization-pythonpath/scripts"
-          PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath" \
-            python -m pytest -q \
-            "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py" \
-            "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py" \
-            "$GITHUB_WORKSPACE/server/tests/test_customization_runtime.py"
+          # The `test -n` above proves the variable exists in the STEP's shell.
+          # This proves pytest itself observed it: the integration module is
+          # skipif'd on PG_CUSTOMIZATION_TEST_URL, and the two modules beside
+          # it are ungated today but nothing stops a gate appearing there. Same
+          # assertion shape as the steps above, plus the executed-count floor
+          # the boundary step below justifies in full: three modules run in ONE
+          # invocation here, and a `pytest_collection_modifyitems` hook that
+          # REMOVES items produces a clean exit 0 that never prints "skipped".
+          # run-all-gates.py floors only two of the three (9 and 26 against the
+          # 10 + 7 + 39 that run), and test_customization_postgres_integration
+          # has no floor there at all, so 21 tests sit unpinned.
+          if ! out=$(PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath" \
+              python -m pytest -q -rs \
+              "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py" \
+              "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_integration.py" \
+              "$GITHUB_WORKSPACE/server/tests/test_customization_runtime.py"); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: customization authority tests skipped - PG_CUSTOMIZATION_TEST_URL is not reaching pytest.'
+            exit 1
+          fi
+          ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
+          if [ "${ran:-0}" -lt 56 ]; then
+            printf '%s\n' "$out"
+            echo "FAIL: only ${ran:-0} customization tests executed, floor is 56 - tests stopped being collected without reporting a skip."
+            exit 1
+          fi
 
       # The gate a LEAF_SESSIONS_STORE promotion out of dual_write_shadow rests
       # on. DATABASE_URL is set at job level, so the live half of this suite
@@ -294,18 +403,87 @@ jobs:
 
       - name: Run upload and authored-mutation boundary tests
         working-directory: server
-        run: >-
-          python -m pytest -q
-          tests/test_guest_uploads.py
-          tests/test_guest_fail_closed.py
-          tests/test_guest_session_auth.py
-          tests/test_broker_boundary.py
-          tests/test_postgres_container_wiring.py
-          tests/test_deployment_source_identity.py
-          tests/test_drawing_authority_cutover_marker.py
+        run: |
+          # Unlike every other assertion in this job, this one is NOT a
+          # database-wiring check, and the message says so. Measured: these
+          # seven modules report "227 passed" with DATABASE_URL entirely
+          # unset, so losing the database would not skip them. Exactly one
+          # conditional skip exists across the set -- test_guest_fail_closed.py
+          # gates a test on `os.name != "posix"` because fcntl is a Linux
+          # deployment contract -- and it cannot fire on ubuntu-latest. So what
+          # this assertion buys is a NEW skip gate appearing in any of the seven
+          # modules, and the runner image ceasing to be posix, which would
+          # genuinely stop verifying the fcntl contract.
+          #
+          # The skip match alone is NOT enough, so this step also pins the
+          # total. A skip-only assertion sees nothing when items are REMOVED
+          # rather than marked: `pytest_collection_modifyitems` runs even for
+          # files named explicitly on the command line (unlike
+          # `pytest_ignore_collect`, which pytest bypasses for explicit initial
+          # args). Demonstrated on this exact step -- a hook dropping the three
+          # cutover-marker items yields "224 passed", exit 0, and the word
+          # "skipped" never appears. Three tests stop running and the step
+          # stays green.
+          #
+          # scripts/run-all-gates.py does carry per-module floors, but they do
+          # NOT cover this. They are 57, 36, 14, 59, 41, 9 for six of these
+          # seven modules, summing to 216 while those same six actually run
+          # 224; test_drawing_authority_cutover_marker has no floor there at
+          # all and runs 3; and the runner tolerates counts above a floor as
+          # drift rather than failing. So 11 tests are unpinned there -- 8
+          # inside the floored modules, plus that whole 3-test module. The
+          # floors complement this total; they do not replace it.
+          #
+          # 227 is measured on this runner and locally on PostgreSQL 16.14
+          # (61 + 38 + 14 + 59 + 41 + 11 + 3). It is a floor, so adding tests
+          # never trips it and only a DROP does. Deleting a test on purpose
+          # means lowering this number in the same commit, deliberately.
+          if ! out=$(python -m pytest -q -rs \
+              tests/test_guest_uploads.py \
+              tests/test_guest_fail_closed.py \
+              tests/test_guest_session_auth.py \
+              tests/test_broker_boundary.py \
+              tests/test_postgres_container_wiring.py \
+              tests/test_deployment_source_identity.py \
+              tests/test_drawing_authority_cutover_marker.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: upload and authored-mutation boundary tests skipped - a new gate appeared, or the runner stopped being posix.'
+            exit 1
+          fi
+          # `cut` ends the pipeline, so this assignment cannot abort the step
+          # under `bash -e`: an unmatched grep leaves `ran` empty, which the
+          # `${ran:-0}` default turns into a loud 0 rather than a silent pass.
+          ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
+          if [ "${ran:-0}" -lt 227 ]; then
+            printf '%s\n' "$out"
+            echo "FAIL: only ${ran:-0} boundary tests executed, floor is 227 - tests stopped being collected without reporting a skip."
+            exit 1
+          fi
 
       - name: Run canonical drawing import gate tests
         working-directory: server
-        run: >-
-          python -m pytest --import-mode=importlib -q
-          ../platform/tests/test_drawing_import.py
+        run: |
+          # The other `platform/tests/` module run from `server/`, but its
+          # failure mode is the opposite of the schema_status step's. MEASURED:
+          # with DATABASE_URL unset this reports "17 skipped" -- the `make_org`
+          # fixture in platform/tests/conftest.py calls pytest.skip -- so the
+          # whole gate becomes a green no-op and the STRING MATCH is the half
+          # that catches it. As at that step, pytest_ignore_collect is not
+          # involved: it is not consulted for a file named explicitly on the
+          # command line.
+          if ! out=$(python -m pytest --import-mode=importlib -q -rs \
+              ../platform/tests/test_drawing_import.py); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: canonical drawing import gate tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
