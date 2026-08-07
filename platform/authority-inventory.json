@@ -32,12 +32,12 @@
       "0028"
     ],
     "completeness": "partial",
-    "reason": "Historical backfill commands and current live staging and production selector values are not present in this repository."
+    "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. The few that are recorded name the task-definition revision they were read from; a value whose status is unset_defaulting was inferred from an absent selector rather than observed, and every such revision ages."
   },
   "selection_evidence": {
     "repository_defaults": "Dockerfiles and Compose select legacy, file, memory, or disabled modes unless an operator overrides them.",
-    "staging": "No current staging task-definition environment receipt exists at this commit.",
-    "production": "No current production task-definition environment receipt records these selectors at this commit."
+    "staging": "Partial. A staging task-definition receipt is recorded for LEAF_SESSIONS_STORE only (leaf-platform-app-alt:27). Every other staging selection is still unrecorded.",
+    "production": "Partial. A production task-definition receipt from leaf-automation-production-platform:98 is recorded for LEAF_SESSIONS_STORE, LEAF_CALLBACK_REPLAY_STORE, and LEAF_JOBS_STORE, all three of which are ABSENT from that revision and therefore carry status unset_defaulting rather than measured. Every other production selection is still unrecorded, including selectors that revision 98 does set; recording those needs a per-selector check of which container process reads each one, which this receipt does not perform."
   },
   "selector_dependencies": [
     {
@@ -184,9 +184,9 @@
           "evidence": "Repository default is legacy, but live staging override is not recorded."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Repository default is legacy, but live production override is not recorded."
+          "value": "legacy",
+          "status": "unset_defaulting",
+          "evidence": "NOT AN OBSERVED SETTING. LEAF_JOBS_STORE is ABSENT from production, so the recorded value is the repository default that jobs.py job_store_mode() resolves via os.environ.get('LEAF_JOBS_STORE', 'legacy'). Nothing in production was measured to say 'legacy'; only the absence of the selector was measured, and note that job_store_mode's docstring claim of 'rejecting implicit fallback' covers typos, not absence. Same read as app_sessions_and_approvals: task definition leaf-automation-production-platform:98 (the revision service leaf-platform runs at desired 1 / running 1), read-only on 2026-08-07 in account 807034087062, us-east-1, absent across ALL FOUR container definitions in environment, secrets, and environmentFiles. REVISION 98 WILL AGE. The app container does set JOBS_DB=/data/state/jobs.db on the durable EFS volume, so the legacy job history persists across task replacement."
         }
       }
     },
@@ -233,9 +233,9 @@
           "evidence": "Live staging broker environment is not recorded."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Live production broker environment is not recorded."
+          "value": "legacy",
+          "status": "unset_defaulting",
+          "evidence": "NOT AN OBSERVED SETTING. LEAF_CALLBACK_REPLAY_STORE is ABSENT from production, so the recorded value is the repository default that da/callbacks.py callback_replay_store_mode() resolves via os.environ.get('LEAF_CALLBACK_REPLAY_STORE', 'legacy'). Nothing in production was measured to say 'legacy'; only the absence of the selector was measured. Same read as app_sessions_and_approvals: task definition leaf-automation-production-platform:98 (the revision service leaf-platform runs at desired 1 / running 1), read-only on 2026-08-07 in account 807034087062, us-east-1. The absence holds across ALL FOUR container definitions in environment, secrets, and environmentFiles, so the result does not depend on which process reads the selector and the earlier 'broker environment' phrasing is not relied on. REVISION 98 WILL AGE. Consequence: production consumes callback nonces in the JOBS_DB SQLite table only, so callback_consumed_nonces holds no production rows and the backfill gap named here is the entire live nonce set, which the rollback_mode warning about stale legacy state and replay applies to directly."
         }
       }
     },
@@ -290,9 +290,9 @@
           "evidence": "Read-only from `aws ecs describe-task-definition --task-definition leaf-platform-app-alt:27` (account 807034087062, us-east-1) on 2026-08-06. That revision is the one live service leaf-platform-app-alt is running at desired 1 / running 1; sibling service leaf-platform-app is at desired 0 and carries the same selector on leaf-platform-app:548. The same revision leaves SESSIONS_DB unset, so the legacy source resolves to the task-local default server/sessions.db rather than the EFS /data/state volume that deploy/README.md documents."
         },
         "production": {
-          "value": null,
-          "status": "unknown",
-          "evidence": "Live production app environment is not recorded."
+          "value": "legacy",
+          "status": "unset_defaulting",
+          "evidence": "NOT AN OBSERVED SETTING. LEAF_SESSIONS_STORE is ABSENT from production, so the recorded value is the repository default that session_store._store_mode() resolves via os.environ.get('LEAF_SESSIONS_STORE', 'legacy'). Nothing in production was measured to say 'legacy'; only the absence of the selector was measured. Read-only on 2026-08-07 (account 807034087062, us-east-1) from `aws ecs describe-services --cluster leaf-automation-production --services leaf-platform`, which reports task definition leaf-automation-production-platform:98 at desired 1 / running 1, and `aws ecs describe-task-definition --task-definition leaf-automation-production-platform:98`. The absence was checked across ALL FOUR container definitions (init-platform-data, broker, harness, app) in environment, in secrets, and in environmentFiles (null on every container), so no injection path supplies it. REVISION 98 WILL AGE: a later revision may set the selector, and this record is only evidence about revision 98. CONTRAST WITH STAGING, and it is the opposite posture: production legacy writes NOTHING to PostgreSQL for sessions, so there is no dual-write mirror and no partial coverage to reconcile against. The app container also sets SESSIONS_DB=/data/state/sessions.db on the durable EFS volume rather than leaving it unset, so the legacy source survives task replacement and the full history accumulates there. Any future cutover must therefore backfill the ENTIRE production session history, not a post-deploy remainder, and the staging DISCARD decision recorded in backfill.note must not be reused here."
         }
       }
     },

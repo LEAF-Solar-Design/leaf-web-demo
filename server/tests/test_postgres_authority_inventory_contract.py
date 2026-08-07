@@ -50,6 +50,17 @@ REQUIRED_COVERAGE = {
     "customization",
     "tenant_repositories_leases",
 }
+# A selection status is a claim about HOW the value was established, so an
+# unrecognized one is a silent downgrade rather than a typo: "measurd" used to
+# pass every check while reading, to a human, like a measurement.
+#   unknown          - nothing recorded; value must be null.
+#   measured         - the selector was OBSERVED set to this value.
+#   unset_defaulting - the selector was observed ABSENT and the value is the
+#                      repository default the code resolves in its place. It is
+#                      an inference from absence, never an observed setting.
+#   verified         - measured AND reconciled; the only status a "complete"
+#                      inventory claim accepts.
+KNOWN_SELECTION_STATUSES = {"unknown", "measured", "unset_defaulting", "verified"}
 REQUIRED_AUTHORITY_FIELDS = {
     "id",
     "coverage",
@@ -178,10 +189,32 @@ def _inventory_errors(inventory: dict) -> list[str]:
                 errors.append(f"{authority_id}: malformed {environment} selection")
             if not selection.get("evidence"):
                 errors.append(f"{authority_id}: {environment} selection lacks evidence")
+            if selection.get("status") not in KNOWN_SELECTION_STATUSES:
+                errors.append(
+                    f"{authority_id}: unknown {environment} selection status "
+                    f"{selection.get('status')!r}"
+                )
             if selection.get("status") == "unknown" and selection.get("value") is not None:
                 errors.append(f"{authority_id}: unknown {environment} selection has a value")
             if selection.get("status") == "verified" and selection.get("value") is None:
                 errors.append(f"{authority_id}: verified {environment} selection lacks a value")
+            if selection.get("status") == "unset_defaulting":
+                # The value IS the resolved default, so it must be present --
+                # otherwise the record is indistinguishable from "unknown" and
+                # nothing downstream can scope a backfill from it.
+                if selection.get("value") is None:
+                    errors.append(
+                        f"{authority_id}: unset_defaulting {environment} selection "
+                        "lacks the defaulted value"
+                    )
+                # The whole point of the status is that a later reader cannot
+                # mistake an inferred default for an observed setting, and that
+                # only holds if the evidence says the selector was absent.
+                if "absent" not in (selection.get("evidence") or "").lower():
+                    errors.append(
+                        f"{authority_id}: unset_defaulting {environment} selection "
+                        "evidence does not state that the selector is absent"
+                    )
 
     if selectors != EXPECTED_SELECTOR_DEFAULTS:
         errors.append(
@@ -285,6 +318,60 @@ def test_contract_rejects_false_complete_claims() -> None:
     assert any(
         "backfill claims complete without a command" in error
         for error in _inventory_errors(false_backfill_claim)
+    )
+
+
+def test_inferred_production_defaults_cannot_pose_as_observed_settings() -> None:
+    """The fields this lane closed, and the rule that keeps them honest.
+
+    All three selectors are ABSENT from the live production task definition, so
+    `legacy` is the repository default the code resolves, NOT a value anything
+    in production was measured to say. `measured` would overstate exactly that.
+
+    This pins the recorded distinction. It does NOT detect live drift: a later
+    task-definition revision can set any of these and no test here would notice,
+    which is why each evidence string names the revision it was read from.
+    """
+    inventory = _load_inventory()
+    entries = {authority["id"]: authority for authority in inventory["authorities"]}
+
+    for authority_id in ("app_sessions_and_approvals", "callback_replay_nonces",
+                         "async_jobs"):
+        production = entries[authority_id]["current_selection"]["production"]
+        assert production["value"] == "legacy", authority_id
+        assert production["status"] == "unset_defaulting", authority_id
+        assert "leaf-automation-production-platform:98" in production["evidence"]
+        assert "ABSENT" in production["evidence"], authority_id
+
+    # Each branch of the rule fails the contract when violated, so none of the
+    # three assertions above is resting on a check that never fires.
+    typo = deepcopy(inventory)
+    typo["authorities"][0]["current_selection"]["production"]["status"] = "measurd"
+    assert any(
+        "unknown production selection status" in error
+        for error in _inventory_errors(typo)
+    )
+
+    valueless = deepcopy(inventory)
+    entry = next(
+        authority for authority in valueless["authorities"]
+        if authority["id"] == "app_sessions_and_approvals"
+    )
+    entry["current_selection"]["production"]["value"] = None
+    assert any(
+        "unset_defaulting production selection lacks the defaulted value" in error
+        for error in _inventory_errors(valueless)
+    )
+
+    vague = deepcopy(inventory)
+    entry = next(
+        authority for authority in vague["authorities"]
+        if authority["id"] == "app_sessions_and_approvals"
+    )
+    entry["current_selection"]["production"]["evidence"] = "Production is legacy."
+    assert any(
+        "evidence does not state that the selector is absent" in error
+        for error in _inventory_errors(vague)
     )
 
 

@@ -240,6 +240,23 @@ loss is not worth that.
 and the task definition; nobody read the database, and after the deploy nobody
 can.
 
+**Production is the opposite case, and this decision must not be reused there.**
+`leaf-automation-production-platform:98`, the revision service `leaf-platform`
+runs at desired 1 / running 1, does not set `LEAF_SESSIONS_STORE` at all, so
+`session_store._store_mode()` resolves the repository default `legacy`.
+`platform/authority-inventory.json` records that with status
+`unset_defaulting` rather than `measured`, because nothing in production was
+observed to say `legacy`. Only the absence of the selector was observed, and
+that absence holds across all four container definitions in `environment`, in
+`secrets`, and in `environmentFiles`. Two consequences follow. Production writes
+nothing to PostgreSQL for sessions, so there is no dual-write mirror and no
+partial coverage to reconcile against, and a cutover must backfill the **entire**
+production history rather than a post-deploy remainder. Production also sets
+`SESSIONS_DB=/data/state/sessions.db` on the durable EFS volume instead of
+leaving it unset, so that history survives task replacement and the whole reason
+discard was cheap for staging is absent. Re-read the live revision before
+relying on this: 98 will age, and a later revision may set the selector.
+
 **What a clean staging parity run does and does not prove.** After this deploy,
 `--mode parity` on staging compares only rows written since the NEW task
 started. Exit 0 there certifies agreement over that window. It is **not**
