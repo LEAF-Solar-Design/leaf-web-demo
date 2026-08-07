@@ -103,9 +103,10 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
     whose third element IS a shell script the shell expands exactly as a
     shell-form RUN would, so that element is parsed out and scanned. In shell
     form, a
-    $NAME / ${NAME} reference expands except inside single quotes or with
-    a backslash-escaped dollar; double quotes (including apostrophes
-    nested inside them) do expand. Known scope boundary, named here on
+    $NAME / ${NAME} reference expands except inside single quotes, with
+    a backslash-escaped dollar, or after an unquoted `#` that begins a
+    shell comment; double quotes (including apostrophes nested inside
+    them) do expand. Known scope boundary, named here on
     purpose: heredoc RUN bodies, $$ self-escapes, and BuildKit's own
     expansion inside --flag values are not modeled — no checked
     Dockerfile uses them, and a false trip fails loud, never silently
@@ -150,6 +151,16 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
             in_single = not in_single
         elif ch == '"' and not in_single:
             in_double = not in_double
+        elif (ch == "#" and not in_single and not in_double
+              and (i == 0 or body[i - 1] in " \t\n;&|(`")):
+            # An unquoted '#' at a word boundary starts a shell comment; the
+            # shell never expands what follows it. This matters most for the
+            # JSON exec form, whose argv[2] is a raw shell script that
+            # _executable_bash does not pre-strip (and a '#' after ';' is not
+            # preceded by whitespace, so its regex would miss it). sol-critic
+            # #514 round 4: `["/bin/sh","-c","true;# ${LEAF_SOURCE_SHA}"]` runs
+            # `true` and never expands the reference.
+            break
         elif ch == "$" and not in_single and _PER_COMMIT_REF.match(body, i):
             return True
         i += 1
@@ -1280,6 +1291,11 @@ def main() -> None:
         ('RUN ["/bin/sh", "-c", "echo no-arg-here"]', True),
         ('RUN ["/bin/bash", "-c", "seal ${LEAF_SOURCE_SHA}"]', False),
         ('RUN ["/bin/sh", "-lc", "echo ${LEAF_SOURCE_SHA}"]', True),
+        # A reference the shell never expands because it sits in a comment does
+        # NOT consume (sol-critic #514 r4): `#` after `;` starts a comment, so
+        # `true` runs and LEAF_SOURCE_SHA stays unset -- this RUN must offend.
+        ('RUN ["/bin/sh", "-c", "true;# ${LEAF_SOURCE_SHA:?expanded}"]', True),
+        ('RUN echo hi  # ${LEAF_SOURCE_SHA}', True),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (

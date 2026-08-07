@@ -1625,6 +1625,58 @@ _GUARDED_IMAGES = {
 }
 
 
+# The two root RUNs canonical-worker runs BEFORE it drops to uid 65532 for the
+# trailing survival guard. Round 3 pinned these byte-exact only as "allowed after
+# the guard"; the round-4 guard move deleted that coupling, and sol-critic round
+# 4 caught the consequence. With the guard no longer above them AND their text no
+# longer pinned, DELETING the attestation RUN shipped an image that builds a
+# mutable, UNATTESTED solver context as the claimed revision, while
+# `assert "attest_source" in dockerfile` (test_canonical_worker.py) rode on a
+# comment. Provenance is a SEPARATE contract from script survival, so it gets its
+# own pin here: both RUNs must be present verbatim as parsed RUN instructions --
+# a comment cannot satisfy this, and editing either is a change a reviewer sees.
+_CANONICAL_WORKER_ATTESTATION_RUNS = (
+    'PYTHONPATH=/app/server python -c "from pathlib import Path; from '
+    "solver_adapters.autofill import attest_source; attest_source("
+    "Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', "
+    "Path('/app/deploy/autofill-solver-sources.json'))\"",
+    'python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
+    "re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must "
+    "be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\""
+    ' && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
+    "re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an "
+    "exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf "
+    "'%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > "
+    "/opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' "
+    '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
+)
+
+
+def test_canonical_worker_pins_its_solver_attestation_runs():
+    """Provenance: canonical-worker must attest its solver source and seal the
+    revision, and neither RUN may be deleted or edited unnoticed.
+
+    DECOUPLED from the survival guard on purpose. The guard proves the smoke
+    script survived the build as uid 65532; it says nothing about whether the
+    solver source was attested. Round 3 conflated the two by pinning these RUNs
+    as "allowed after the guard"; the round-4 move (guard last) dropped that
+    coupling and with it the only real provenance enforcement -- so deleting the
+    attestation RUN built an image with a mutable, unattested solver context
+    labelled as the claimed revision, while the substring pin in
+    test_canonical_worker.py rode on a comment. Byte-exact PARSED RUNs close it:
+    a comment cannot satisfy this, and any edit reddens here.
+    """
+    run_args = [arg for kw, arg in
+                _instructions(_read("deploy/Dockerfile.canonical-worker"))
+                if kw == "RUN"]
+    for pinned in _CANONICAL_WORKER_ATTESTATION_RUNS:
+        assert pinned in run_args, (
+            "deploy/Dockerfile.canonical-worker no longer runs this attestation/"
+            f"revision-sealing RUN verbatim:\n    {pinned}\nparsed RUNs:\n    "
+            + "\n    ".join(run_args)
+        )
+
+
 def test_the_widened_script_parse_refuses_every_form_it_cannot_read():
     """The three images' guards are only as good as this parse, so pin it.
 
@@ -1768,38 +1820,49 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
     COPY line is still there to read; the failure surfaced in an operator
     cutover instead.
 
-    Same answer, same spelling: `test -f && test -s` per shipped script, in EXEC
-    form, above the per-commit ARG. Derived from each Dockerfile's own COPY map
-    rather than a curated list, so a script added later is covered the day it is
-    copied -- and for the harness, whose COPY is a DIRECTORY, that means the day
-    it lands in harness/scripts/.
+    Same spelling for all four via `_survival_guard_argv`: `test -f && test -s`
+    per shipped script, plus `test -r` as the runtime uid (and `test -x` where the
+    CMD is a guarded script), in EXEC form. app/broker/harness place it ABOVE
+    their per-commit ARG so it stays cached; canonical-worker cannot -- its two
+    root RUNs are forced below that ARG -- so its guard runs LAST and carries one
+    extra clause, `test -n "${LEAF_SOURCE_SHA}"`, to consume the ARG it now sits
+    below (#514 round 3/4). Derived from each Dockerfile's own COPY map rather
+    than a curated list, so a script added later is covered the day it is copied
+    -- and for the harness, whose COPY is a DIRECTORY, that means the day it lands
+    in harness/scripts/.
 
-    WHAT A DAEMON HAS ACTUALLY RUN, for THESE three: NOTHING. No Docker daemon
-    was reachable when they were written -- neither their PASS path nor any FAIL
-    path has been built, in either spelling. This is a WEAKER footing than the
-    app image's guard has, and it must not be described as if it were the same;
-    do not copy that test's build-proof language onto these instructions. What
-    they rest on is Docker's documented rule that SHELL does not affect the exec
-    form, that `test -f` and `test -s` do not change meaning with the
-    interpreter, and that an exec-form RUN whose command exits nonzero fails the
-    build. Those are the same properties the app image's SHELL-form guard was
-    mutation-proven on locally, in a spelling no daemon has executed here.
-    Building these three unmodified, then replaying deletion, truncation and the
-    `SHELL ["/bin/true"]` neutering against each, is what retires this
-    paragraph. Do not delete it on the strength of a green CI job: a CACHED
-    layer proves only that some earlier build of an identical layer succeeded.
+    WHAT A DAEMON HAS ACTUALLY RUN. The guard MECHANICS are now daemon-proven
+    (Docker server 29.6.2, #514 round 4): a Dockerfile reproducing
+    canonical-worker's structure -- guard LAST, as uid 65532, after two root RUNs
+    -- builds green unmodified, and FAILS at the guard step under a root
+    `chmod 700 /app/scripts` in the window, under `SHELL ["/bin/true"]` above the
+    guard plus a deletion, and under a `: >` truncation. That proves the runtime
+    identity, exec-form SHELL-immunity, and the round-4 post-root-window closure
+    on a real engine. What was NOT built is the BYTE-EXACT production image: its
+    attestation RUN needs the exact external solver context, not reproduced here,
+    so the stubbed build swaps that RUN for a trivial root RUN. Do not read this
+    as a full production build-proof; the byte-exact PASS/FAIL paths of the real
+    four images still rest on Docker's documented rules (SHELL does not affect the
+    exec form; `test -f`/`-s`/`-r` do not change meaning with the interpreter; an
+    exec-form RUN that exits nonzero fails the build). Do not trust a CACHED layer
+    as proof: it only shows some earlier identical layer succeeded.
 
-    WHAT IS STATICALLY PROVEN: every assertion here was mutation-checked. The
-    exec->shell downgrade, an interpreter swap, dropping `test -s`, deleting the
-    guard, adding an unpinned RUN below it, chmod-ing a guarded path unreadable,
-    and adding a file to harness/scripts/ each turn this test red; moving the
-    guard below the per-commit ARG turns the build gate red.
+    WHAT IS STATICALLY PROVEN here, AS OPPOSED TO at build time: every assertion
+    was mutation-checked. The exec->shell downgrade, an interpreter swap, dropping
+    `test -s` or `test -r`, deleting the guard, adding a RUN after it, a uid
+    rename, and adding a file to harness/scripts/ each turn this test red; for
+    canonical-worker specifically, moving the guard above its root window (so a
+    RUN follows it) turns it red, and dropping its ARG-consuming clause turns both
+    this test and the build-workflow gate red. What this STATIC test does NOT
+    catch is a `chmod`, deletion or truncation of a guarded path: those pass every
+    text assertion and are caught at BUILD time by the guard RUN itself
+    (daemon-proven above), never here.
 
-    NOT covered, the same as the app's: content. `-s` closes the zero-byte case
-    and NOTHING WIDER -- a one-byte overwrite is a valid program that exits 0.
-    And no rule about POSITION binds runtime behaviour, so a `HEALTHCHECK CMD
-    rm -rf /app/scripts/...` below the guard passes the build and deletes the
-    script seconds into container life. Both are review classes, not gates.
+    NOT covered by anything: content. `-s` closes the zero-byte case and NOTHING
+    WIDER -- a one-byte overwrite is a valid program that exits 0. And no BUILD-
+    time guard binds RUNTIME behaviour, so a `HEALTHCHECK CMD rm -rf
+    /app/scripts/...` passes the build and deletes the script seconds into
+    container life. Both are review classes, not gates.
 
     ONE MORE REVIEW CLASS, plus one this design CLOSED that used to sit here:
 
