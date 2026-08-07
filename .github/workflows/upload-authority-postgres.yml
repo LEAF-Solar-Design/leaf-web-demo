@@ -426,12 +426,13 @@ jobs:
           # stays green.
           #
           # scripts/run-all-gates.py does carry per-module floors, but they do
-          # NOT cover this: they are 57, 36, 14, 59, 41, 9 for six of these
-          # seven modules, summing to 216 against the 227 that actually run,
-          # test_drawing_authority_cutover_marker has no floor at all, and the
-          # runner tolerates counts above a floor as drift. So 11 tests plus a
-          # whole module sit unpinned there. The floors complement this total;
-          # they do not replace it.
+          # NOT cover this. They are 57, 36, 14, 59, 41, 9 for six of these
+          # seven modules, summing to 216 while those same six actually run
+          # 224; test_drawing_authority_cutover_marker has no floor there at
+          # all and runs 3; and the runner tolerates counts above a floor as
+          # drift rather than failing. So 11 tests are unpinned there -- 8
+          # inside the floored modules, plus that whole 3-test module. The
+          # floors complement this total; they do not replace it.
           #
           # 227 is measured on this runner and locally on PostgreSQL 16.14
           # (61 + 38 + 14 + 59 + 41 + 11 + 3). It is a floor, so adding tests
