@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import signal
 import time
@@ -11,7 +12,7 @@ from executor.runtime import child
 from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
 from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
 from executor.runtime.ed25519 import sign
-from executor.runtime.supervisor import WarmExecutorSupervisor
+from executor.runtime.supervisor import CapacitySampler, WarmExecutorSupervisor, emit_runtime_event
 from executor.runtime.tests.helpers import CHILD_LOAD_WINDOW_SECONDS, EXECUTOR_ID, documents, keys, lease
 
 
@@ -439,3 +440,157 @@ class SlotRebindObservabilityTests(unittest.TestCase):
                           docs["drawing_context"]["content_digest"],
                           str(docs["invocation"]["params"])):
             self.assertNotIn(forbidden, encoded)
+
+
+class CapacityGaugeTests(unittest.TestCase):
+    """The free-slot count has to leave this process to be alarmable.
+
+    `health()` and `/metrics` are pull-only on :8088 and the executor task
+    definition declares no task role, so nothing in AWS can read them.  A
+    metric filter over the container log plane is the only channel, which
+    makes the exact shape of this line a contract with the terraform root.
+    """
+
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=2, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=self.events.append,
+        )
+
+    def tearDown(self) -> None:
+        self.supervisor.close()
+
+    def samples(self) -> list[dict]:
+        return [item for item in self.events if item["event_type"] == "capacity_sample"]
+
+    def test_sample_reports_the_supervisors_own_live_slot_numbers(self) -> None:
+        # A pinned payload would pass even if the record were a constant, so
+        # bind BOTH states: the numbers must move when a slot is really bound.
+        self.supervisor.sample_capacity()
+        docs = documents(COUNTER_SOURCE)
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.sample_capacity()
+
+        idle, busy = self.samples()
+        self.assertEqual((2, 0, 2), (idle["ready_slots"], idle["bound_slots"], idle["total_slots"]))
+        self.assertEqual((1, 1, 2), (busy["ready_slots"], busy["bound_slots"], busy["total_slots"]))
+        # ...and that they are health()'s numbers, not an independent count.
+        health = self.supervisor.health()
+        self.assertEqual(
+            (health["ready_slots"], health["bound_slots"], health["total_slots"], health["state"]),
+            (busy["ready_slots"], busy["bound_slots"], busy["total_slots"], busy["state"]),
+        )
+
+    def test_sample_carries_exactly_the_fields_the_metric_filter_selects(self) -> None:
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        self.assertEqual(
+            {"event_type", "executor_id", "state", "ready_slots",
+             "bound_slots", "total_slots", "observed_at"},
+            set(record),
+        )
+        # The filter reads $.record.ready_slots as a metric value, so it has to
+        # be a JSON number.  A stringified count publishes nothing at all.
+        for field in ("ready_slots", "bound_slots", "total_slots"):
+            self.assertIsInstance(record[field], int)
+
+    def test_sample_reaches_fd_two_in_the_runtime_envelope(self) -> None:
+        # The in-memory sink proves the record; only the real emitter proves
+        # the LINE, and the line is what CloudWatch Logs actually matches.
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        read_fd, write_fd = os.pipe()
+        saved = os.dup(2)
+        try:
+            os.dup2(write_fd, 2)
+            emit_runtime_event(record)
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as stream:
+            raw = stream.read()
+
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertLessEqual(len(raw), 4096)
+        line = json.loads(raw)
+        self.assertEqual("leaf.instant.runtime", line["event"])
+        self.assertEqual("capacity_sample", line["record"]["event_type"])
+        self.assertEqual(record["ready_slots"], line["record"]["ready_slots"])
+
+    def test_sample_carries_no_tenant_or_lease_material(self) -> None:
+        docs = documents(COUNTER_SOURCE)
+        self.supervisor.assign({key: docs[key] for key in ("assignment", "code_load", "catalog", "source", "drawing_context")})
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        encoded = str(record)
+        for forbidden in (docs["assignment"]["lease_token"],
+                          docs["assignment"]["tenant_id"],
+                          docs["assignment"]["session_id"],
+                          docs["drawing_context"]["geometry_ref"]):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_a_sink_that_raises_cannot_kill_the_gauge(self) -> None:
+        # The sampler is a bare thread: an escaping exception would end it and
+        # the metric would go quiet, which is the failure this change removes.
+        def explode(_record: dict) -> None:
+            raise RuntimeError("telemetry backend is down")
+
+        self.supervisor._runtime_event_sink = explode
+        self.supervisor.sample_capacity()  # must not raise
+        self.supervisor._runtime_event_sink = self.events.append
+        self.supervisor.sample_capacity()
+        self.assertEqual(1, len(self.samples()))
+
+
+class CapacitySamplerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self.supervisor = WarmExecutorSupervisor(
+            EXECUTOR_ID, keys(), pool_size=1, trusted_development_fixtures=True,
+            child_load_timeout_seconds=CHILD_LOAD_WINDOW_SECONDS,
+            runtime_event_sink=self.events.append,
+        )
+
+    def tearDown(self) -> None:
+        self.supervisor.close()
+
+    def test_sampler_publishes_repeatedly_and_stops_on_request(self) -> None:
+        sampler = CapacitySampler(self.supervisor, interval_seconds=0.02)
+        sampler.start()
+        deadline = time.monotonic() + 5
+        while len(self.events) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        sampler.stop()
+        published = len(self.events)
+
+        self.assertGreaterEqual(published, 3)
+        time.sleep(0.1)
+        # A stopped sampler must go silent, or `stop()` is decorative and the
+        # thread outlives the supervisor it reads.
+        self.assertEqual(published, len(self.events))
+
+    def test_sampler_publishes_immediately_rather_than_after_one_interval(self) -> None:
+        # An hour-long interval would otherwise leave the metric absent for an
+        # hour after every deploy, and absent is what the alarm treats as bad.
+        sampler = CapacitySampler(self.supervisor, interval_seconds=3600)
+        sampler.start()
+        deadline = time.monotonic() + 5
+        while not self.events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        sampler.stop()
+        self.assertEqual(1, len(self.events))
+
+    def test_interval_comes_from_the_environment_and_rejects_nonsense(self) -> None:
+        self.assertEqual(30.0, CapacitySampler.from_environment(self.supervisor, {})._interval_seconds)
+        configured = CapacitySampler.from_environment(
+            self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "5"})
+        self.assertEqual(5.0, configured._interval_seconds)
+        with self.assertRaisesRegex(ValueError, "must be a number"):
+            CapacitySampler.from_environment(
+                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "often"})
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            CapacitySampler.from_environment(
+                self.supervisor, {"LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS": "0"})
