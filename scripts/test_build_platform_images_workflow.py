@@ -19,6 +19,7 @@ edits still pass.
 
 from pathlib import Path
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -2784,6 +2785,35 @@ def check_docs_noop_filter(text: str) -> None:
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
+    # Hash updated 2026-08-07: the dispatch step now deploys one service at a
+    # time and watches each run to a terminal state, instead of firing both
+    # deploys two seconds apart and exiting. Reviewed for dispatch capability:
+    # still exactly one `gh workflow run` site with the same four inputs, one
+    # added read of THIS repo's tip on the workflow's own read-only token, and
+    # no new secret reference (the count assertion above is unchanged).
+    #
+    # Hash updated 2026-08-07 (b): need-first ordering. The dispatch step reads
+    # each service's newest successful infra deploy run name and, when the
+    # ancestry compare says app trails web, deploys app first. Reviewed for
+    # dispatch capability: STILL exactly one `gh workflow run` site with the
+    # same four inputs; the added calls are two `gh run list` reads on the
+    # infra repo the step already lists runs from, and one `compare` read of
+    # THIS repo on the same read-only HOME_TOKEN the tip re-check already uses.
+    # No new secret reference. The read may only REORDER — it never assigns
+    # IMAGE_TAG and never shortens SERVICES, both pinned above.
+    #
+    # Hash updated 2026-08-07 (c): TEXT ONLY, and deliberately not exempted
+    # from the freeze. Two operator-facing strings changed — the app-first
+    # notice and the STAGING IS SPLIT warning — because both promised a
+    # convergence the relay cannot guarantee (review rounds 2, 3 and 4 of
+    # PR #506 were all RED for that same overclaim, in four different
+    # places). Message text lives inside the executable script, so it moves
+    # this hash even though no control flow changed. Reviewed for dispatch
+    # capability: STILL exactly one `gh workflow run` site with the same four
+    # inputs, still exactly one `secrets.` reference in the whole workflow, no
+    # new command, no new read, no new token. Verified by recomputation, not
+    # assumed: the only diff in the extracted script text is inside two echo
+    # arguments.
     # Hash updated 2026-08-07 (second edit, same day): the dispatch step now
     # classifies a mid-release superseder from its own build receipt, fails
     # RED when it leaves staging split with no converger, and finishes the
@@ -2858,8 +2888,20 @@ def check_docs_noop_filter(text: str) -> None:
     # filter change only; the dispatch is untouched, still ONE
     # `gh workflow run` with the same four inputs, one secret reference, and
     # the same four read-only GETs on `GH_TOKEN="$HOME_TOKEN"`.
+    #
+    # Hash updated 2026-08-07 (d): PR #508 merged with #506's need-first
+    # ordering. Both changes rewrite this step and each moved this hash alone,
+    # so this value covers the COMBINED script: #506's ordering read plus
+    # #508's superseder classification, its two stale-tip guards and its
+    # post-landing check. Reviewed for dispatch capability on the MERGED text:
+    # still exactly one `gh workflow run` site with the same four inputs,
+    # still exactly one `secrets.` reference, and every call either side adds
+    # is a read-only GET on the workflow's own `GH_TOKEN="$HOME_TOKEN"`. No new
+    # endpoint, repo, command or credential arises from combining them. The
+    # `yes`-arm warning was also reworded here to drop the convergence promise
+    # #506 was RED'd for three rounds running.
     assert frozen == (
-        "ae799ff5341ddd617cfc89632155aeb4136634877e0da91eb807c88b87f5b9b5"
+        "cf2521780db4c7cbd7aa46595fe9ad6d47e2ed5c94113f17f98b659085b7bd8e"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3493,11 +3535,59 @@ def check_staging_relay_convergence(text: str) -> None:
 
     # Both services stay covered, and from a single dispatch site: a second
     # one is a deploy that the watch below would not be looking at.
-    assert "for SERVICE in web app; do" in code, (
+    #
+    # NEED-FIRST ORDERING (2026-08-07) replaced the literal `web app` loop.
+    # The order was hardcoded, so web won every race and app lost every race:
+    # a relay superseded mid-release always dies before its SECOND service, so
+    # under any merge rate faster than one full release app never advanced
+    # while web advanced every time. Three consecutive relays (d9306c3,
+    # 7056e2e, 48204c4) produced web deploys with no app deploy between them
+    # and staging ran a whole release split for over two hours.
+    #
+    # SERVICES may take exactly the two full-set orderings and nothing else,
+    # so the ordering read cannot drop a service from the list.
+    #
+    # BE PRECISE ABOUT WHAT THAT BUYS. It does NOT make a wrong read free.
+    # Only the FIRST service is dispatched unconditionally; the second sits
+    # behind another tip re-check, so ORDER DECIDES WHO GETS SKIPPED when main
+    # moves. sol-critic RED round 2 on PR #506 against a comment claiming
+    # otherwise: put app (~14 min) first on bad evidence, let main move at
+    # t=10, and web is skipped where web-first would have landed web at t=8
+    # and dispatched app before the move. The trade is deliberate — the fixed
+    # order charged that cost to app every single time, forever — but it is a
+    # trade, not an absence of cost. test_staging_relay_orders_the_starved_
+    # service_first pins the skip path so it stays a known, announced outcome.
+    assert set(re.findall(r'SERVICES="([^"]*)"', code)) == {"web app", "app web"}, (
+        "SERVICES may only ever hold BOTH services; a single-service value "
+        "would let the ordering read silently skip a deploy")
+    assert "for SERVICE in $SERVICES; do" in code, (
         "the relay must still deploy both staging services in one pass")
     assert code.count("gh workflow run") == 1, (
         "one dispatch site only: another would fire a deploy nobody watches")
     dispatch_at = code.index("gh workflow run")
+
+    # THE OTHER HALF OF THAT SAFETY: the ordering read may never choose a TAG.
+    # sol-critic returned RED on PR #506 round 1 against a version that read
+    # each service's live tag from infra run names and DEPLOYED to it. That is
+    # unsound two ways: a deploy that flips traffic and then fails or is
+    # cancelled leaves the new colour live while its run reads as
+    # unsuccessful, so the read can name an older tag as live; and the
+    # read/dispatch window is not atomic, so a sibling deploy can move a
+    # service forward while main has not moved, defeating the tip check. Both
+    # turn a tag decision into a silent backwards deploy. Reordering cannot.
+    # Staging app/web are also blue/green over digest-pinned task definitions,
+    # so "live" is a function of ALB rule weights and no run-name read is
+    # authoritative about it.
+    assert not re.search(r'^\s*IMAGE_TAG=', code, re.M), (
+        "the dispatch script must never assign IMAGE_TAG: the tag comes from "
+        "the verified supply-set manifest, and letting a live-state read pick "
+        "one is the backwards-deploy vector sol-critic caught")
+    assert re.search(r'^\s*behind\)?\s*$|"\$RELATION" = "behind"', code, re.M), (
+        "ordering must key off the ancestry compare, not recency")
+    assert re.search(
+        r'\[ "\$RELATION" = "behind" \]; then\n\s*SERVICES="app web"', code), (
+        "compare/<web>...<app> reporting 'behind' means APP trails, so app "
+        "takes the first slot; inverting this restores the starvation")
 
     # THE HEADLINE INVARIANT, asserted first so a regression says so: a
     # dispatch is followed by resolving the run it created and polling that
@@ -3526,10 +3616,10 @@ def check_staging_relay_convergence(text: str) -> None:
     # Deploying serially widens the window in which main can move, and
     # dispatching an older tag behind a newer relay would roll staging
     # BACKWARDS — the exact thing latest-main-only staging exists to stop.
-    assert "for SERVICE in web app" in code
     assert "branches/main" in code, (
         "each dispatch must be preceded by a fresh tip-of-main read")
-    assert code.index("for SERVICE in web app") < code.index("branches/main") < dispatch_at, (
+    assert (code.index("for SERVICE in $SERVICES")
+            < code.index("branches/main") < dispatch_at), (
         "the tip re-check must sit inside the loop and before each dispatch")
 
     # The tip read is the FIRST statement of every dispatch attempt and is
@@ -3948,7 +4038,20 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         (
             "one service quietly dropped from the loop",
-            mutate(original, "for SERVICE in web app; do", "for SERVICE in web; do"),
+            mutate(original, 'SERVICES="web app"', 'SERVICES="web"'),
+        ),
+        (
+            "the ordering read promoted to choosing the deploy tag",
+            mutate(original,
+                   '              SERVICES="app web"\n',
+                   '              SERVICES="app web"\n'
+                   '              IMAGE_TAG="$WEB_TAG"\n'),
+        ),
+        (
+            "ordering inverted, so the starved service stays starved",
+            mutate(original,
+                   '[ "$RELATION" = "behind" ]; then\n              SERVICES="app web"',
+                   '[ "$RELATION" = "behind" ]; then\n              SERVICES="web app"'),
         ),
         (
             "watch removed, back to dispatch-and-hope",
@@ -4169,11 +4272,247 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
     print("staging relay convergence decoy battery: PASS")
 
 
+_FAKE_GH = r'''#!/usr/bin/env bash
+# Fake `gh` for the relay dispatch rehearsal. Answers from the scenario in the
+# environment and records every dispatch to $DISPATCH_LOG, so the assertion is
+# on what the relay ACTUALLY deploys, not on what its text looks like.
+set -uo pipefail
+
+args=("$@")
+joined="$*"
+
+case "${args[0]}" in
+  api)
+    case "${args[1]}" in
+      *"/branches/main"*)
+        # Serve the built sha for the first $FAKE_TIP_OK_READS tip checks,
+        # then a newer one, so a scenario can move main BETWEEN services.
+        n=$(cat "$FAKE_TIP_FILE")
+        if [ "$n" -gt 0 ]; then
+          printf '%s' "$((n - 1))" > "$FAKE_TIP_FILE"
+          printf '%s\n' "$FAKE_MAIN_SHA"
+        else
+          printf '%s\n' "moved01"
+        fi
+        ;;
+      *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
+      *"/jobs"*)          printf '%s\n' "1" ;;
+      # PR #508's superseder classifier runs inside THIS step whenever a
+      # scenario moves main after a service is already live. It polls to a
+      # 95-minute deadline, and this stub no-ops `sleep`, so an unanswered
+      # endpoint spins the rehearsal for the full budget instead of failing
+      # it. Answer all three reads so the classification resolves at once.
+      *"/actions/runs?head_sha="*)
+        printf '%s\n' '{"workflow_runs":[{"id":77,"path":".github/workflows/build-platform-images.yml","name":"Build platform images"}]}' ;;
+      *"/artifacts?per_page=100")
+        printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-moved01-attempt-1","expired":false}]}' ;;
+      *"/actions/runs/"*)
+        printf '%s\n' '{"status":"completed","conclusion":"success","run_attempt":1}' ;;
+      *) echo "fake gh: unhandled api ${args[1]}" >&2; exit 9 ;;
+    esac
+    ;;
+  run)
+    case "${args[1]}" in
+      list)
+        # The live-tag read is the only one asking for `conclusion`.
+        if [[ "$joined" == *"conclusion"* ]]; then
+          if [ "${FAKE_HISTORY_FAILS:-0}" = "1" ]; then exit 4; fi
+          printf '%s\n' "$FAKE_HISTORY"
+        elif [[ "$joined" == *"displayTitle"* ]]; then
+          printf '%s\n' "$FAKE_PENDING"
+        else
+          printf '%s\n' '[{"databaseId":1000}]'
+        fi
+        ;;
+      view) printf '%s\n' "completed success" ;;
+      *) echo "fake gh: unhandled run ${args[1]}" >&2; exit 9 ;;
+    esac
+    ;;
+  workflow) printf '%s\n' "$joined" >> "$DISPATCH_LOG" ;;
+  *) echo "fake gh: unhandled ${args[0]}" >&2; exit 9 ;;
+esac
+'''
+
+
+def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
+                             relation="ahead", main_sha="deadbee",
+                             history_fails=False, tip_ok_reads=99):
+    """Execute the relay's ACTUAL dispatch script (extracted from the parsed
+    YAML, never re-typed here) against a fake `gh`, and return
+    (returncode, stdout, [(service, image_tag)] in dispatch order).
+
+    The static pins prove the script SAYS the right thing. This proves it DOES
+    it: which services it deploys, in which order, onto which tag.
+    """
+    bash = shutil.which("bash")
+    jq = shutil.which("jq")
+    assert bash and jq, "the relay dispatch rehearsal needs bash and jq on PATH"
+
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"))
+
+    history = [
+        {"databaseId": rid, "displayTitle": title, "conclusion": "success"}
+        for rid, title in ((10, web_title), (11, app_title))
+        if title
+    ]
+    pending = [
+        {"databaseId": 2000 + i,
+         "displayTitle": f"Deploy leaf-platform staging {svc} ({image_tag})"}
+        for i, svc in enumerate(("web", "app"))
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(_FAKE_GH, encoding="utf-8")
+        (bindir / "gh").chmod(0o755)
+        (bindir / "sleep").write_text(
+            "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        (bindir / "sleep").chmod(0o755)
+
+        log = tmp / "dispatches.log"
+        log.write_text("", encoding="utf-8")
+        tip_file = tmp / "tip"
+        tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
+        script = tmp / "dispatch.sh"
+        script.write_text(
+            relay["jobs"]["dispatch"]["steps"][-1]["run"], encoding="utf-8")
+
+        env = dict(os.environ)
+        env.update(
+            PATH=f"{bindir}{os.pathsep}{env['PATH']}",
+            INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
+            DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
+            GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+            BUILD_HEAD_SHA="deadbee",
+            IMAGE_TAG=image_tag,
+            GH_TOKEN="fake-pat",
+            HOME_TOKEN="fake-token",
+            FAKE_MAIN_SHA=main_sha,
+            FAKE_TIP_FILE=str(tip_file),
+            FAKE_RELATION=relation,
+            FAKE_HISTORY=json.dumps(history),
+            FAKE_HISTORY_FAILS="1" if history_fails else "0",
+            FAKE_PENDING=json.dumps(pending),
+            DISPATCH_LOG=str(log),
+        )
+        proc = subprocess.run(
+            [bash, str(script)], env=env, text=True, capture_output=True)
+
+        deployed = []
+        for line in log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            parts = line.split()
+            svc = next(p for p in parts if p.startswith("service="))
+            tag = next(p for p in parts if p.startswith("image_tag="))
+            deployed.append((svc.split("=", 1)[1], tag.split("=", 1)[1]))
+        return proc.returncode, proc.stdout, deployed
+
+
+WEB_OLD = "Deploy leaf-platform staging web (prod-1111111)"
+WEB_NEW = "Deploy leaf-platform staging web (prod-2222222)"
+APP_OLD = "Deploy leaf-platform staging app (prod-1111111)"
+APP_NEW = "Deploy leaf-platform staging app (prod-2222222)"
+TAG = "prod-9999999"
+
+
+def test_staging_relay_orders_the_starved_service_first() -> None:
+    """The abandoned service takes the first slot, and ONLY the order moves.
+
+    THE BUG: `for SERVICE in web app` was hardcoded, so web won every race.
+    A relay superseded mid-release always dies before its SECOND service, so
+    at any merge rate faster than one full release app never advanced while
+    web advanced every time. Observed 2026-08-07: three consecutive relays
+    produced web deploys with no app deploy between them, and staging ran a
+    whole release split for over two hours.
+
+    Every case below runs the real extracted dispatch script and asserts on
+    the commands it actually issued.
+    """
+    # app trails web -> app goes FIRST, and still onto THIS relay's tag.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind")
+    assert rc == 0
+    assert deployed == [("app", TAG), ("web", TAG)], deployed
+    assert "trails web" in out
+
+    # web trails app -> the default order already puts web first.
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_OLD, app_title=APP_NEW, relation="ahead")
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
+
+    # Level pegging -> unchanged behaviour, no compare needed.
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_NEW)
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
+
+    # THE READ IS BEST EFFORT AND MAY ONLY REORDER. Every degraded input still
+    # deploys BOTH services onto the manifest's tag; none may drop a service,
+    # change the tag, or fail the release.
+    for name, kwargs in (
+        ("history query fails outright", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, history_fails=True)),
+        ("compare unavailable", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, relation="")),
+        ("tags unrelated", dict(
+            web_title=WEB_NEW, app_title=APP_OLD, relation="diverged")),
+        ("a recovery deploy names no immutable tag", dict(
+            web_title="Deploy leaf-platform staging web (live baseline)",
+            app_title=APP_OLD, relation="behind")),
+        ("no successful deploy on record for a service", dict(
+            web_title=WEB_NEW, app_title="", relation="behind")),
+    ):
+        rc, _, deployed = _rehearse_relay_dispatch(**kwargs)
+        assert rc == 0, f"{name} must not fail the release, got rc={rc}"
+        assert deployed == [("web", TAG), ("app", TAG)], (
+            f"{name} must fall back to both services in the fixed order, "
+            f"got {deployed}")
+
+    # THE COST OF REORDERING, PINNED RATHER THAN DENIED. Only the FIRST
+    # service is dispatched unconditionally; the second sits behind another
+    # tip re-check. So order decides WHO GETS SKIPPED when main moves, and a
+    # wrong read can therefore skip web where the fixed order would have
+    # skipped app. sol-critic RED round 2 on PR #506 was exactly this: an
+    # earlier comment claimed both services are always dispatched, and that
+    # was false. The trade is deliberate — the fixed order charged this cost
+    # to app every single time — but it must stay a KNOWN and ANNOUNCED
+    # outcome, so it is asserted here instead of asserted away.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
+        tip_ok_reads=1)
+    assert rc == 0
+    assert deployed == [("app", TAG)], deployed
+    assert "STAGING IS SPLIT" in out and "so web stays on its previous image" in out, (
+        "when reordering causes web to be the skipped service, the relay must "
+        "name web in the split warning rather than exit quietly")
+
+    # And the stand-down still wins over ordering: main moved, nothing goes out.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
+        main_sha="0ther")
+    assert (rc, deployed) == (0, [])
+    assert "standing down" in out
+
+    print("staging relay need-first ordering rehearsal: PASS")
+
+
+# REHEARSAL_BUDGET is the classifier's wall-clock deadline for one case.
+# Cases that DECIDE return in well under a second; cases that must fall to
+# `unknown` do so by exhausting this budget, so it is the per-case cost of
+# every failed-read scenario. It started at 2s and that was too tight once
+# this suite also ran #506's ordering rehearsal: a decisive case could
+# spend its whole budget on jq startup and answer `unknown`, failing the
+# test for a reason that had nothing to do with the classifier. 8s is far
+# above the observed sub-second decide path and still bounds the suite.
 _CLASSIFIER_HARNESS = """set -euo pipefail
 GITHUB_REPOSITORY=owner/repo
 HOME_TOKEN=token
 POLL_SECONDS=0.05
-_END=$(( $(date +%%s) + 2 ))
+_END=$(( $(date +%%s) + ${REHEARSAL_BUDGET:-8} ))
 before_deadline() { [ "$(date +%%s)" -lt "$_END" ]; }
 %(classifier)s
 superseder_deploys "$REHEARSAL_SHA"
@@ -4183,7 +4522,7 @@ superseder_deploys "$REHEARSAL_SHA"
 # every call the same way. Without that, a classifier that hardcoded the
 # sha or the run id would be served the right fixture anyway and every
 # case would pass while the lookup was broken.
-_FAKE_GH = """#!/usr/bin/env bash
+_CLASSIFIER_FAKE_GH = """#!/usr/bin/env bash
 url="$2"
 case "$url" in
   *"/actions/runs?head_sha="*)
@@ -4260,15 +4599,15 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
 
     # (name, env overrides, expected answer)
     cases = [
-        ("run-list read fails", {"FAIL_RUNS": "1"}, "unknown"),
-        ("run-record read fails", {"FAIL_RECORD": "1"}, "unknown"),
-        ("artifact read fails", {"FAIL_ARTIFACTS": "1"}, "unknown"),
+        ("run-list read fails", {"FAIL_RUNS": "1", "BUDGET": "2"}, "unknown"),
+        ("run-record read fails", {"FAIL_RECORD": "1", "BUDGET": "2"}, "unknown"),
+        ("artifact read fails", {"FAIL_ARTIFACTS": "1", "BUDGET": "2"}, "unknown"),
         ("no build run for the sha",
-         {"RUNS_JSON": '{"workflow_runs":[]}'}, "unknown"),
+         {"RUNS_JSON": '{"workflow_runs":[]}', "BUDGET": "2"}, "unknown"),
         ("a same-NAMED run at a different path is not our build",
          {"RUNS_JSON": '{"workflow_runs":[{"id":11,"path":'
                        '".github/workflows/impostor.yml",'
-                       '"name":"Build platform images"}]}'}, "unknown"),
+                       '"name":"Build platform images"}]}', "BUDGET": "2"}, "unknown"),
         ("success but NO artifacts at all",
          {"ARTIFACTS_JSON": arts()}, "unknown"),
         ("success with an unexpired supply set",
@@ -4276,9 +4615,9 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
         ("success with an EXPIRED supply set",
          {"ARTIFACTS_JSON": arts((supply, True))}, "unknown"),
         ("artifact listing truncated",
-         {"ARTIFACTS_JSON": arts((supply, False), total=9)}, "unknown"),
+         {"ARTIFACTS_JSON": arts((supply, False), total=9), "BUDGET": "2"}, "unknown"),
         ("artifact listing carries no total_count",
-         {"ARTIFACTS_JSON": '{"artifacts":[]}'}, "unknown"),
+         {"ARTIFACTS_JSON": '{"artifacts":[]}', "BUDGET": "2"}, "unknown"),
         ("docs-noop marker for the CURRENT attempt",
          {"ARTIFACTS_JSON": arts((marker, False))}, "no"),
         ("a PREVIOUS attempt's marker must not outlive a rerun that built",
@@ -4320,7 +4659,7 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
         ("the build resolves to run 12 while only run 11 is served",
          {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
                        '"name":"Build platform images"}]}' % build_path,
-          "WANT_RUN": "11"}, "unknown"),
+          "WANT_RUN": "11", "BUDGET": "2"}, "unknown"),
         ("the build resolves to run 12 and run 12 is served",
          {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
                        '"name":"Build platform images"}]}' % build_path,
@@ -4332,7 +4671,7 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
         fake_dir = tmp / "bin"
         fake_dir.mkdir()
         gh = fake_dir / "gh"
-        gh.write_text(_FAKE_GH, encoding="utf-8", newline="\n")
+        gh.write_text(_CLASSIFIER_FAKE_GH, encoding="utf-8", newline="\n")
         gh.chmod(0o755)
         script = tmp / "rehearse.sh"
         script.write_text(
@@ -4351,6 +4690,12 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
                 "ARTIFACTS_JSON", arts((supply, False)))
             for key in ("FAIL_RUNS", "FAIL_RECORD", "FAIL_ARTIFACTS"):
                 env[key] = overrides.get(key, "0")
+            # Cases that must EXPIRE to answer `unknown` pay their budget
+            # in wall clock, so they get a short one. Cases that must
+            # DECIDE get a generous one: the decide path is sub-second,
+            # and an expiry there would fail the test for a reason that
+            # has nothing to do with the classifier.
+            env["REHEARSAL_BUDGET"] = overrides.get("BUDGET", "10")
             proc = subprocess.run(
                 [bash, str(script)], env=env, text=True, capture_output=True)
             assert proc.returncode == 0, (

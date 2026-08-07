@@ -611,17 +611,26 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-postgres-startup",
               "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
               _py_pytest("tests/test_platform_postgres_startup.py"), 13),
-        # Floor 41, re-measured 2026-08-06. It sat at 7 while the suite executed
-        # 41, which is the exact hazard the note at the top of this list
-        # describes: a low floor PASSes with an "(executed-count drift: ...)"
-        # note, so 34 of these could have vanished and the gate would still have
-        # reported green. 41 is safe on every runner because the suite is fully
-        # static -- it reads files and parses AST, and carries no skipif,
-        # pytest.skip or importorskip at all, so there is no environment where
-        # it executes fewer. That is also why it needs no allowed_skip_reasons.
+        # Floor 46, re-measured 2026-08-07 after merging origin/main. THE MERGE
+        # IS WHY THIS LINE NEEDS READING TWICE: this branch raised it 43 -> 45
+        # for two new cases, main separately added
+        # test_the_image_asserts_its_own_reconcilers_at_build_time to the same
+        # file without raising it, and git auto-merged the two edits to 45 with
+        # no conflict. The suite executes 46. A floor left silently one low is
+        # precisely the drift this comment exists to prevent, so it is
+        # re-MEASURED here rather than inferred from either side of the merge.
+        # It sat at 7 while the suite executed 41, which is the exact hazard the
+        # note at the top of this list describes: a low floor PASSes with an
+        # "(executed-count drift: ...)" note, so 34 of these could have vanished
+        # and the gate would still have reported green. Raising it with the
+        # tests, in the same commit, is what keeps that from happening again.
+        # 46 is safe on every runner because the suite is fully static -- it
+        # reads files and parses AST, and carries no skipif, pytest.skip or
+        # importorskip at all, so there is no environment where it executes
+        # fewer. That is also why it needs no allowed_skip_reasons.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 41),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 46),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
@@ -684,9 +693,9 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics_pg.py"), 1, db_gated=True),
         # The gate a LEAF_SESSIONS_STORE promotion out of dual_write_shadow will
         # rest on. Floor is the OFFLINE EXECUTED count (46, measured): the other
-        # 38 need a live database and are skip-gated, and a floor of 84 would
-        # red-fail every runner without DATABASE_URL. Re-measured after six
-        # review rounds added offline cases -- a floor left at the original 15
+        # 41 need a live database and are skip-gated (87 collected), and a floor
+        # of 87 would red-fail every runner without DATABASE_URL. Re-measured
+        # after six review rounds added offline cases -- a floor left at 15
         # would let most of them vanish and still report green, which is the
         # exact hazard the note at the top of this list describes.
         # upload-authority-postgres.yml asserts separately that the live half
@@ -696,14 +705,21 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 46,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
-        # Floor 7, re-measured when the production selections were recorded. It
-        # was 6; the added case is the one that stops an inferred repository
+        # Floor 8, re-measured when the session_annex dependency was added. It
+        # was 7; the earlier added case is the one that stops an inferred default
         # default from being re-labelled as an observed setting, so letting it
         # vanish silently would retire the guard and still report green. Moves
         # in lockstep with the assertion in scripts/test_gate_runner.py.
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 7),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 8),
+        # The annex authority the sessions flip strands without. Fully
+        # offline: the PostgreSQL halves run against a fake in place of
+        # platform.db, so nothing here skips on a no-DB host and the floor
+        # is the exact collected count.
+        Suite("server-session-annex-store",
+              "server tests/test_session_annex_store.py", "pytest",
+              SERVER, _py_pytest("tests/test_session_annex_store.py"), 27),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
@@ -891,9 +907,14 @@ def build_suites() -> List[Suite]:
         # (a dispatched service is always accounted for, or the relay goes
         # red) is its own named test, so a scoreboard failure says which
         # invariant broke instead of pointing at the mega-test.
+        # 2 -> 3 on 2026-08-07: the relay now orders its two services so the
+        # one a superseded release abandoned goes first, and that one is
+        # EXECUTED — the real dispatch script against a fake gh — so the named
+        # test says which service the relay actually deploys first and onto
+        # which tag, not merely whether its text still reads that way.
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 2),
+              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 3),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the

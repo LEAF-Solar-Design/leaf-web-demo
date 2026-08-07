@@ -30,12 +30,22 @@ def _store() -> str:
 # --------------------------------------------------------------------------- #
 # Migration shape
 # --------------------------------------------------------------------------- #
-def test_migration_exists_and_is_next_in_sequence():
-    """0027 is the highest migration on main; a duplicate number would make
-    apply_migration's sorted order ambiguous."""
+def test_migration_exists_and_its_number_is_unique():
+    """A duplicate number would make apply_migration's sorted order ambiguous.
+
+    This deliberately does NOT pin 0028 as the highest migration. It used to,
+    and that pin was already wrong on its own terms: the docstring claimed 0027
+    was the highest while the assertion named 0028, so it had been hand-bumped
+    at least once. A tail pin fails for EVERY future migration by any lane --
+    0029_session_annex.sql broke it -- while proving nothing about the
+    ambiguity it exists to catch. Uniqueness is that property; being last is
+    not.
+    """
     names = sorted(p.name for p in (PLATFORM_DIR / "migrations").glob("00*.sql"))
     assert MIGRATION.name in names
-    assert names[-1] == "0028_overlay_tokens.sql"
+    numbers = [name.split("_", 1)[0] for name in names]
+    duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+    assert not duplicates, f"duplicate migration numbers: {duplicates}"
 
 
 def test_migration_is_idempotent_like_every_other_one():

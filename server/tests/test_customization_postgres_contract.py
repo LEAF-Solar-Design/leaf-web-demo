@@ -119,8 +119,19 @@ def test_reconciliation_source_writes_are_schema_init_only() -> None:
 
 def test_inventory_declares_postgres_selector_backfill_and_parity() -> None:
     assert '"name": "LEAF_CUSTOMIZATION_STORE"' in INVENTORY
-    assert "scripts/reconcile_customization_authority.py --mode backfill" in INVENTORY
-    assert "scripts/reconcile_customization_authority.py --mode parity" in INVENTORY
+    # Absolute, because the image's final WORKDIR is /app/server while the
+    # script is copied to /app/scripts/. A bare "scripts/..." substring would
+    # match the absolute form too, so it would keep passing even if the
+    # command reverted to the unrunnable relative path; the leading "/app/"
+    # is the whole point of the assertion.
+    assert (
+        "python /app/scripts/reconcile_customization_authority.py --mode backfill"
+        in INVENTORY
+    )
+    assert (
+        "python /app/scripts/reconcile_customization_authority.py --mode parity"
+        in INVENTORY
+    )
 
 
 def test_app_image_contains_the_reconciliation_command() -> None:

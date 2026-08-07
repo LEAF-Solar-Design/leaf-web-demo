@@ -24,13 +24,14 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 29)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 30)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
     "LEAF_JOBS_STORE": "legacy",
     "LEAF_CALLBACK_REPLAY_STORE": "legacy",
     "LEAF_SESSIONS_STORE": "legacy",
+    "LEAF_SESSION_ANNEX_STORE": "legacy",
     "LEAF_AGENT_STORE": "legacy",
     "LEAF_BROKER_STORE": "legacy",
     "LEAF_GUEST_CAP_STORE": "memory",
@@ -50,10 +51,15 @@ EXPECTED_SELECTOR_DEPENDENCIES = [
         "when": {"name": "LEAF_UPLOAD_STORE", "value": "postgres"},
         "requires": {"name": "LEAF_DRAWING_STORE", "value": "postgres"},
     },
+    {
+        "when": {"name": "LEAF_SESSIONS_STORE", "value": "postgres"},
+        "requires": {"name": "LEAF_SESSION_ANNEX_STORE", "value": "postgres"},
+    },
 ]
 REQUIRED_COVERAGE = {
     "jobs",
     "sessions_approvals",
+    "session_annex",
     "agent_state",
     "broker_tenants_ledger",
     "guest_caps",
@@ -96,6 +102,7 @@ REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
     "LEAF_JOBS_STORE": {"async_jobs", "async_job_terminal_conflicts"},
     "LEAF_CALLBACK_REPLAY_STORE": {"callback_consumed_nonces"},
     "LEAF_SESSIONS_STORE": {"app_sessions", "app_session_events", "app_approvals"},
+    "LEAF_SESSION_ANNEX_STORE": {"app_session_checkpoints", "app_session_policies"},
     "LEAF_AGENT_STORE": {
         "agent_approvals", "agent_session_grants", "agent_rate_counters",
         "agent_fleet_state", "agent_gate_audit_events", "agent_tenant_state",
@@ -296,7 +303,13 @@ def _inventory_errors(inventory: dict) -> list[str]:
 
     scope = inventory.get("scope", {})
     if scope.get("migration_ids") != EXPECTED_MIGRATIONS:
-        errors.append("scope migration_ids must be exactly 0001 through 0025")
+        # Derived, not spelled out: the previous literal message said "0001
+        # through 0025" long after the constant above reached 0028, so a
+        # failure reported a range that had not been the rule for three
+        # migrations.
+        errors.append(
+            "scope migration_ids must be exactly "
+            f"{EXPECTED_MIGRATIONS[0]} through {EXPECTED_MIGRATIONS[-1]}")
     if scope.get("completeness") == "complete":
         unresolved = [
             authority["id"]
@@ -470,19 +483,49 @@ def test_contract_rejects_upload_inventory_without_shared_drawing_tables() -> No
 
 def test_contract_requires_postgres_drawing_authority_for_postgres_uploads() -> None:
     inventory = _load_inventory()
-    assert inventory["selector_dependencies"] == [
-        {
-            **EXPECTED_SELECTOR_DEPENDENCIES[0],
-            "reason": (
-                "The PostgreSQL upload lifecycle creates and advances drawing "
-                "manifests and versions, so upload and drawing metadata must "
-                "share one PostgreSQL authority."
-            ),
-        }
-    ]
+    assert inventory["selector_dependencies"][0] == {
+        **EXPECTED_SELECTOR_DEPENDENCIES[0],
+        "reason": (
+            "The PostgreSQL upload lifecycle creates and advances drawing "
+            "manifests and versions, so upload and drawing metadata must "
+            "share one PostgreSQL authority."
+        ),
+    }
 
 
-def test_contract_rejects_missing_or_weakened_upload_dependency() -> None:
+def test_contract_requires_postgres_annex_authority_for_postgres_sessions() -> None:
+    """The combination that strands a user's restore points is unrepresentable.
+
+    `sessions=postgres` with any other annex mode means the session survives
+    task replacement while its checkpoints and policy do not, because every
+    annex mode except `postgres` reads the SQLite file at SESSIONS_DB, which
+    staging leaves task-local. `dual_write` and the shadow modes do NOT fix it:
+    they mirror or compare, and still READ SQLite.
+
+    The record and the runtime check must agree, so this pins both. A
+    dependency recorded here and not enforced at startup is a comment.
+    """
+    inventory = _load_inventory()
+    dependency = inventory["selector_dependencies"][1]
+    assert {"when": dependency["when"], "requires": dependency["requires"]} == (
+        EXPECTED_SELECTOR_DEPENDENCIES[1])
+    assert "confirm_all" in dependency["reason"]
+    assert "validate_session_annex_authority" in dependency["reason"], (
+        "the recorded dependency must name the check that enforces it")
+
+    enforcement = (REPO_ROOT / "server" / "platform_link.py").read_text(
+        encoding="utf-8")
+    assert "def validate_session_annex_authority()" in enforcement
+    assert (
+        "LEAF_SESSIONS_STORE=postgres requires LEAF_SESSION_ANNEX_STORE=postgres"
+        in enforcement
+    )
+    # Called, not merely defined. An unreferenced validator passes every
+    # definition check and gates nothing.
+    assert enforcement.count("validate_session_annex_authority()") >= 2
+
+
+def test_contract_rejects_missing_or_weakened_dependencies() -> None:
     inventory = _load_inventory()
 
     missing = deepcopy(inventory)
@@ -492,9 +535,10 @@ def test_contract_rejects_missing_or_weakened_upload_dependency() -> None:
         for error in _inventory_errors(missing)
     )
 
-    weakened = deepcopy(inventory)
-    weakened["selector_dependencies"][0]["requires"]["value"] = "legacy"
-    assert any(
-        "selector dependency mismatch" in error
-        for error in _inventory_errors(weakened)
-    )
+    for index in range(len(EXPECTED_SELECTOR_DEPENDENCIES)):
+        weakened = deepcopy(inventory)
+        weakened["selector_dependencies"][index]["requires"]["value"] = "legacy"
+        assert any(
+            "selector dependency mismatch" in error
+            for error in _inventory_errors(weakened)
+        ), f"weakening dependency {index} was not detected"

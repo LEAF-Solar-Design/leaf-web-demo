@@ -69,11 +69,22 @@ and target counts, target-only counts, `source_incorporated`, and
 `exact_equal`. A strict PostgreSQL superset is incorporated but not equal:
 
 ```shell
-python scripts/reconcile_customization_authority.py --mode backfill \
+python /app/scripts/reconcile_customization_authority.py --mode backfill \
   --sqlite /data/state/customization.db
-python scripts/reconcile_customization_authority.py --mode parity \
+python /app/scripts/reconcile_customization_authority.py --mode parity \
   --sqlite /data/state/customization.db
 ```
+
+The script path is absolute on purpose. `deploy/Dockerfile.app` COPYs the
+script to `/app/scripts/` but its final `WORKDIR` is `/app/server`, so a
+repo-relative `python scripts/reconcile_customization_authority.py` resolves
+to `/app/server/scripts/...`, which does not exist. Because these commands are
+run from the release image and nowhere else, the relative form fails in the
+only place it is used, while still working from a source checkout — which is
+why it went unnoticed. Do not tidy it back. The `--sqlite` path is a runtime
+volume, not a path into the image, and is correct as written.
+`server/tests/test_postgres_container_wiring.py` enforces this for every
+authority command whose script the app Dockerfile copies.
 
 Run both commands from the exact release image while SQLite writes are dark,
 before selecting PostgreSQL. The historical `parity` mode name now proves
@@ -378,6 +389,133 @@ because any task replacement takes that file. Expect checkpoint restores to 404
 and custom policies to fall back to `DEFAULT_POLICY = "confirm_all"`, which is
 the safe direction and is already inside the DISCARD class above. What IS new
 after the flip: a session outlives its own checkpoints for the first time, so
-this stops being invisible and starts looking like a regression to a user. Give
-those two tables a PostgreSQL home, or classify them as disposable staging state
-in writing.
+this stops being invisible and starts looking like a regression to a user.
+
+That choice is now closed. See the next section.
+
+## The session annex tables: DECIDED, migrate (2026-08-07)
+
+**Decision: give them a PostgreSQL home. They are NOT classified as disposable.**
+`platform/migrations/0029_session_annex.sql` creates `app_session_checkpoints`
+and `app_session_policies`, and both modules now dispatch on a store mode
+instead of resolving `SESSIONS_DB` and stopping there.
+
+**Why not "disposable".** The disposable reading is TRUE on staging and FALSE on
+production, and nothing in the code can tell the two apart. Staging leaves
+`SESSIONS_DB` unset, so the file is task-local and the rows genuinely are
+throwaway. Production sets `SESSIONS_DB=/data/state/sessions.db` on durable EFS,
+so the same two tables there hold restore points and non-default policies that
+have accumulated across task replacements. `checkpoints.py` and
+`session_policy.py` have no notion of environment, so a written classification
+would have been a claim no code could honour, and the first person to read it in
+a production context would read it as licence to discard real user state. A
+label that is only true in one environment is worse than no label.
+
+**APPLY 0029 BEFORE DEPLOYING THIS IMAGE ANYWHERE POSTGRESQL IS CONNECTED. It
+is a hard ordering requirement and it has nothing to do with the selector.**
+`migration_manifest()` globs every shipped `.sql` file and `schema_status()`
+fails on any `missing_migrations` entry, with no reference to any selector. So
+0029 makes `assert_schema_current()` fail for every PostgreSQL-connected
+deployment until it is applied, even with `LEAF_SESSION_ANNEX_STORE=legacy`.
+Staging sets `LEAF_PLATFORM_POSTGRES_REQUIRED=1` on both app containers
+(`terraform/environments/staging/us-east-1/leaf_platform.tf` in the
+infrastructure repository, read from remote `main` on 2026-08-07), which runs
+that assertion at startup and **fails closed**, so deploying this image to
+staging before applying 0029 means the app does not start. Read that as the
+ordering rule for any migration, not a property of this one.
+
+**Selector: its own, `LEAF_SESSION_ANNEX_STORE`, not `LEAF_SESSIONS_STORE`.**
+Both were arguable, and reusing the sessions selector has a real virtue: it
+makes the harmful combination unrepresentable in one stroke.
+
+*A retraction first, because this record originally led with it.* An earlier
+draft argued that reuse would retroactively fail `assert_schema_current()` on
+staging's current mode while a separate selector would not. **That is false**,
+for the reason stated immediately above: selector-scoped requirements cover
+columns and catalog contracts only, and the migration check is selector-blind.
+Review round 1 caught it. The correct consequence is the deploy-ordering rule,
+which applies either way.
+
+Three reasons survive.
+
+1. *The two authorities have different prerequisites, and coupling would hide
+   that.* Sessions has a backfill command and a parity command. This annex has
+   NEITHER, and no reverse writer. On one selector there is no second decision
+   to take, so flipping sessions would silently move an authority whose
+   prerequisites are unmet. A separate selector forces that decision to be made
+   explicitly, and refused where it is not ready — which is exactly the state
+   production is in.
+2. *Rollback would couple in the wrong direction.* The sessions rollback path
+   recorded above is `postgres` → `shadow` → `legacy`, and every mode but
+   `postgres` reads SQLite. This annex cannot follow that path at all: nothing
+   writes PostgreSQL back to SQLite. Shared, a sessions rollback would drag the
+   annex into an unreadable state with no separate decision point.
+3. *A selector cannot have two owners.* State this the right way round: the
+   inventory contract enforces one AUTHORITY per selector, not one selector per
+   authority. Seventeen authorities own nineteen selectors, because two
+   authorities each own more than one. Sharing `LEAF_SESSIONS_STORE` would give
+   a single selector two owning authorities, which the contract rejects.
+
+**The coupling is declared and ENFORCED, not left to the selector's shape.**
+`platform/authority-inventory.json` gains a `selector_dependencies` entry —
+`LEAF_SESSIONS_STORE=postgres` requires `LEAF_SESSION_ANNEX_STORE=postgres` —
+using the same mechanism `LEAF_UPLOAD_STORE` → `LEAF_DRAWING_STORE` already
+uses. `server/platform_link.validate_session_annex_authority` refuses to start an
+app in that combination, so this is a startup failure rather than a document.
+Note the requirement is `postgres` EXACTLY: under `dual_write` and both shadow
+modes the annex still READS SQLite, so those modes do not fix the ephemerality.
+
+**What this changes about step 5.** The staging flip must now set
+`LEAF_SESSION_ANNEX_STORE=postgres` in the SAME task-definition change that sets
+`LEAF_SESSIONS_STORE=postgres`. An app that gets one without the other does not
+start. Apply 0029 before either. Step 3's "resolve every `unknown`" requirement
+also now covers the new `session_annex` authority, whose selection is recorded
+`unknown` in both environments because the selector is introduced by this change
+and no deployed image bakes it yet; record `measured_no_override` against a real
+revision and image digest once one does, not from this document's intent.
+
+**What is deliberately NOT built, and what it blocks.**
+
+- *No backfill.* `scripts/reconcile_sessions_authority.py` covers three table
+  pairs and neither annex table is among them. Selecting a non-`legacy` mode
+  starts from an empty target.
+  **Task-local does not mean empty, and the difference is a real user-visible
+  loss.** The RUNNING staging task can hold up to one task-lifetime of
+  checkpoints and non-default policies, so flipping the annex straight to
+  `postgres` discards those rows while the mirrored session itself survives —
+  producing precisely the mismatch this section exists to remove, once, at
+  cutover. That is inside the discard class staging already accepted for
+  sessions, and it is bounded by one task lifetime rather than by history, but
+  it is not nothing. Do not read "no accumulated history across replacements" as
+  "no rows to lose".
+  **Production cannot skip this at all**: cutting it over without writing a
+  backfill would silently drop every existing restore point and every
+  non-default policy, accumulated on durable EFS.
+- *No reverse writer, so rollback is undesigned rather than merely awkward.*
+  There is no PostgreSQL-to-SQLite direction anywhere in this repository, in
+  either the sessions lane or this one. Once `postgres` is the annex authority,
+  leaving it makes every row written under it unreadable, permanently. On
+  staging that sits inside the discard class already accepted above and degrades
+  safely (empty checkpoint lists, `DEFAULT_POLICY = "confirm_all"`). On
+  production it is a blocker: the rollback would revert users to whatever the
+  EFS file held at cutover while newer rows survive unread in a table nothing
+  consults.
+
+So the supported end state today is staging on `postgres` and **production on
+`legacy`**. Production needs the backfill and the reverse writer first, and the
+inventory record says so in both the `backfill` and `rollback_mode` fields
+rather than leaving a future reader to infer it.
+
+**No foreign key to `app_sessions`, on purpose.** `app_session_events` has one;
+these do not. With independent selectors, `annex=postgres` while
+`sessions=legacy` is a representable configuration, and under an FK every
+checkpoint write in it would fail at INSERT time as a 500. The declared
+dependency covers the harmful direction at startup instead, and an orphaned
+annex row reads as an empty checkpoint list and a default policy — both
+harmless.
+
+**Unverified.** Nothing here was run against a live PostgreSQL. The tests cover
+dispatch, the emitted SQL, and the enforcement, against a fake in place of
+`platform.db`; 0029 itself has been applied nowhere. Treat the PostgreSQL paths
+as reviewed code, not as exercised code, until a real apply and a real request
+say otherwise.

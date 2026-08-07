@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -27,6 +28,27 @@ MAX_INPUT_BYTES = 1_048_576
 DEFAULT_IDEMPOTENCY_TTL_SECONDS = 300.0
 DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 10_000
 DEFAULT_CHILD_LOAD_TIMEOUT_SECONDS = 2.0
+DEFAULT_CAPACITY_SAMPLE_SECONDS = 30.0
+# Bounded by HALF the companion alarm's period, not by a round number and not by
+# the period itself. The staging `capacity_slots` alarm evaluates 60-second
+# periods, so a period with no datapoint at all breaks the consecutive-breach
+# count and the alarm can never fire: the gauge would exist and never be
+# alarmable, which is the defect this whole feature removes.
+#
+# One sample per period is NOT enough to prevent that, for two reasons, and an
+# earlier revision of this ceiling was equal to the period and was wrong on both:
+#   1. Samples land on the wall clock, alarm periods land on fixed 60-second
+#      boundaries. Exactly-one-period spacing puts two samples in one bucket and
+#      none in the next the moment anything jitters.
+#   2. `CapacitySampler._run()` samples and THEN waits, so real spacing is the
+#      wait plus the sample's own duration -- necessarily more than the interval.
+#      The deadline in `_run()` absorbs that term while the sample is quicker
+#      than one interval, but the ceiling must not depend on it being so.
+# At half a period both go away: every 60-second period holds two samples, and
+# emptying one would take a sample that itself ran longer than 30 seconds.
+CAPACITY_ALARM_PERIOD_SECONDS = 60.0
+MAX_CAPACITY_SAMPLE_SECONDS = CAPACITY_ALARM_PERIOD_SECONDS / 2
+STOP_JOIN_SECONDS = 5.0
 
 
 _RUNTIME_EVENT_LOCK = threading.Lock()
@@ -168,11 +190,60 @@ class WarmExecutorSupervisor:
         return {slot.slot_id: slot.process.pid for slot in self._slots}
 
     def health(self) -> dict[str, Any]:
-        ready = sum(slot.process.is_alive() and slot.assignment is None for slot in self._slots)
-        bound = sum(slot.process.is_alive() and slot.assignment is not None for slot in self._slots)
+        # ONE pass, reading each slot's liveness and binding exactly once.
+        # Two passes could be torn by a concurrent assign or release between
+        # them and report ready=1, bound=1, total=1 -- an impossible snapshot,
+        # reproduced under a forced switch between the passes.  This runs
+        # unlocked from three callers now (/health, /metrics, and the capacity
+        # sampler's timer), so it has to be self-consistent without a lock:
+        # reading each slot once guarantees ready + bound <= total and that no
+        # slot is double-counted or dropped.
+        observed = [(slot.process.is_alive(), slot.assignment is not None) for slot in self._slots]
+        ready = sum(alive and not bound for alive, bound in observed)
+        bound = sum(alive and bound for alive, bound in observed)
         return {"contract": "leaf.instant-execution/v1", "executor_id": self.executor_id,
                 "state": "ready" if ready or bound else "not_ready", "ready_slots": ready,
                 "bound_slots": bound, "total_slots": len(self._slots), "observed_at": _now()}
+
+    def sample_capacity(self) -> None:
+        """Publish the slot gauge `health()` already computes to the log plane.
+
+        WHY THIS EXISTS.  `health()` and `/metrics` are the only places the
+        free-slot count is ever stated, and both are pull-only on :8088.  The
+        executor task definition deliberately declares no `task_role_arn`
+        ("Executor application code cannot obtain AWS credentials"), and
+        nothing scrapes that port, so those numbers reached no monitoring
+        surface at all.  The consequence was a `CapacityAvailableSlots` alarm
+        naming a metric nothing could ever publish.
+
+        Writing the gauge as a runtime event solves that without touching the
+        credential boundary: the line goes to fd 2, the awslogs driver already
+        configured on the task carries it to CloudWatch Logs, and a metric
+        filter in the terraform root turns it into a real metric.  A log line
+        is the ONLY channel this process has that reaches AWS at all.
+
+        The record repeats every field of `health()` that is a number or a
+        state, and nothing else: no tenant, session, assignment, or source
+        value is in scope here, so this line cannot leak one.
+        """
+        state = self.health()
+        try:
+            self._runtime_event_sink({
+                "event_type": "capacity_sample",
+                "executor_id": self.executor_id,
+                "state": state["state"],
+                "ready_slots": state["ready_slots"],
+                "bound_slots": state["bound_slots"],
+                "total_slots": state["total_slots"],
+                "observed_at": state["observed_at"],
+            })
+        except Exception:  # noqa: BLE001
+            # Same contract as _record_rebind_failure: the default sink cannot
+            # raise, but the sink is injectable, and a sampler thread that dies
+            # on a caller's telemetry bug would silently stop publishing the
+            # very gauge an alarm is watching -- which fails toward "quiet", the
+            # exact failure mode this whole change exists to remove.
+            pass
 
     def metrics(self) -> str:
         state = self.health()
@@ -538,3 +609,93 @@ class WarmExecutorSupervisor:
                 "status": "failed", "code_digest": body.get("code_digest", "sha256:" + "0" * 64),
                 "completed_at": _now(), "error": {"code": code, "message": message[:512],
                 "retryable": retryable, "execution_disposition": disposition}}
+
+
+class CapacitySampler:
+    """Drives `sample_capacity()` on a daemon thread for the life of the server.
+
+    A gauge only alarms if it keeps arriving, so this publishes on a fixed
+    interval rather than on slot transitions: an executor whose slots are all
+    bound produces no transitions at all, and that is precisely the state the
+    capacity alarm has to see.  It samples on start too, so a metric exists
+    within a second of boot instead of one interval later.
+
+    The thread is a daemon and waits on an Event, so `stop()` returns promptly
+    and an un-stopped sampler can never hold the process open.
+    """
+
+    def __init__(self, supervisor: WarmExecutorSupervisor,
+                 interval_seconds: float = DEFAULT_CAPACITY_SAMPLE_SECONDS) -> None:
+        # Non-finite values pass a bare `<= 0` test and then break in ways that
+        # are much worse than a rejected config.  `nan` makes Event.wait return
+        # instantly, so the sampler busy-loops and floods the log group, and
+        # Thread.join(nan) then raises ValueError out of stop(); `inf` makes
+        # Thread.join(inf) raise OverflowError.  Either exception escapes
+        # serve_registered's cleanup.  All four behaviours were reproduced.
+        if not math.isfinite(interval_seconds):
+            raise ValueError("interval_seconds must be a finite number")
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        if interval_seconds > MAX_CAPACITY_SAMPLE_SECONDS:
+            raise ValueError(
+                f"interval_seconds must be at most {MAX_CAPACITY_SAMPLE_SECONDS:g}, "
+                f"half the companion alarm's {CAPACITY_ALARM_PERIOD_SECONDS:g}s period; "
+                "a longer interval can leave a period with no datapoint and the "
+                "alarm can never fire")
+        self._supervisor = supervisor
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_environment(cls, supervisor: WarmExecutorSupervisor,
+                         environ: dict[str, str] | None = None) -> "CapacitySampler":
+        source = os.environ if environ is None else environ
+        raw = source.get("LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS", "").strip()
+        if not raw:
+            return cls(supervisor)
+        try:
+            interval = float(raw)
+        except ValueError as exc:
+            raise ValueError("LEAF_INSTANT_CAPACITY_SAMPLE_SECONDS must be a number") from exc
+        return cls(supervisor, interval)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("capacity sampler already started")
+        self._thread = threading.Thread(target=self._run, name="capacity-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        # A FIXED short join, not `interval + 1`.  The sink writes to fd 2, and
+        # a backed-up fd 2 makes that write block, so joining for the configured
+        # interval would stall every later step of shutdown for as long as the
+        # operator set the interval to.  Shutdown must not be hostage to a
+        # telemetry write.  Past the timeout the thread is a daemon, and its
+        # only remaining act is one more sample -- which reads liveness and
+        # bindings, never a closed pipe -- so letting it go is safe.
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=STOP_JOIN_SECONDS)
+
+    def _run(self) -> None:
+        # Wait to a DEADLINE, not for a fixed duration. Sampling then waiting the
+        # full interval spaces samples by `interval + however long the sample
+        # took`, which drifts later every cycle -- and the sample writes to fd 2,
+        # which can block. Subtracting the sample's own cost keeps spacing at the
+        # interval instead of above it, so the ceiling's guarantee holds against
+        # the interval rather than against the interval plus unbounded work.
+        deadline = time.monotonic()
+        while not self._stop.is_set():
+            self._supervisor.sample_capacity()
+            deadline += self._interval_seconds
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # The sample outran a whole interval. Resync rather than firing a
+                # catch-up burst into the log group; the next sample is already
+                # overdue, so take it now and re-baseline from here.
+                deadline = time.monotonic()
+                continue
+            if self._stop.wait(remaining):
+                return
