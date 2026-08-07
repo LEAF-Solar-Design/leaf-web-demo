@@ -175,10 +175,14 @@ def test_operator_md_table_fields_match_json():
         "rate": "rate", "spend": "spend", "timeout(s)": "timeout_s",
         "precondition": "precondition", "reversal": "reversal",
     }
-    for col in list(COLUMN_MAP) + ["handler", "prod-reachable"]:
+    for col in list(COLUMN_MAP) + ["handler", "prod-reachable", "v1"]:
         assert col in headers, f"OPERATOR.md §4.1 table missing '{col}' column"
+    # Bidirectional membership: neither a JSON action missing from the table
+    # nor a Markdown-only action row may slip through.
+    assert set(table) == set(matrix), (
+        "OPERATOR.md table and JSON action sets differ",
+        set(table) ^ set(matrix))
     for name, entry in matrix.items():
-        assert name in table, f"{name} missing from the OPERATOR.md table"
         row = table[name]
         for md_col, json_key in COLUMN_MAP.items():
             assert row[md_col] == str(entry[json_key]), (
@@ -188,6 +192,9 @@ def test_operator_md_table_fields_match_json():
             name, "handler", row["handler"])
         assert row["prod-reachable"].lower() == "no", (
             name, "prod-reachable", row["prod-reachable"])
+        # enabled_v1 is bool in JSON, rendered on/off in the table.
+        assert row["v1"] == ("on" if entry["enabled_v1"] else "off"), (
+            name, "v1", row["v1"], entry["enabled_v1"])
 
 
 def test_tier_vocabulary_gained_no_operator_entry():
