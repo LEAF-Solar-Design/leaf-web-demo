@@ -621,7 +621,7 @@ def build_suites() -> List[Suite]:
         # it executes fewer. That is also why it needs no allowed_skip_reasons.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 41),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 42),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
