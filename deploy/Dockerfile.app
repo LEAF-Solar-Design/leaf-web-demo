@@ -79,14 +79,25 @@ WORKDIR /app/server
 # harmless. That approach was tried and removed in dbd6e5d; see the module
 # comment in server/tests/test_postgres_container_wiring.py.
 #
+# `-s` as well as `-f`, because `-f` alone accepts an EMPTY file: a truncation
+# above this line (`: > .../reconcile_sessions_authority.py`) left both tests
+# green while the operator's parity run became a program that exits 0 and emits
+# no receipt. What this still does NOT prove: that the file is the RIGHT script
+# (a substitution of equal-looking content passes), or that the runtime identity
+# can read it. Those are separate contracts -- the COPY-map guard in
+# server/tests/test_postgres_container_wiring.py covers the first.
+#
 # ABOVE the per-commit ARG deliberately, and it belongs nowhere else. A RUN below
 # that ARG re-executes on every merge, which
 # scripts/test_build_platform_images_workflow.py forbids outright (it fails the
-# build gate, not merely the cache). The two rules interlock: a destructive RUN
-# appended at the end of this file is either above this guard, where the guard
-# catches it, or below the ARG, where that invariant catches it.
+# build gate, not merely the cache). Three rules cover the positions between
+# them: a destructive instruction above this guard is caught by the guard; a RUN
+# below the ARG is caught by that invariant; and anything else below this guard
+# is caught by the allowlist in test_the_image_asserts_its_own_reconcilers_at_build_time.
 RUN test -f /app/scripts/reconcile_customization_authority.py \
- && test -f /app/scripts/reconcile_sessions_authority.py
+ && test -s /app/scripts/reconcile_customization_authority.py \
+ && test -f /app/scripts/reconcile_sessions_authority.py \
+ && test -s /app/scripts/reconcile_sessions_authority.py
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache

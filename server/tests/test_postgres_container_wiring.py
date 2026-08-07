@@ -103,9 +103,11 @@ def _app_dockerfile() -> str:
 #     check that catches some spellings of a destruction while silently missing
 #     others is worse than no check, because its green manufactures confidence.
 #     The right home for that class is a runtime assertion in the image itself,
-#     not a static test. That assertion now EXISTS -- deploy/Dockerfile.app ends
-#     in a `RUN test -f` over every shipped script, so a destruction of any
-#     spelling fails the BUILD -- and
+#     not a static test. That assertion now EXISTS: deploy/Dockerfile.app runs a
+#     `RUN test -f && test -s` over every shipped script as its last
+#     filesystem-touching instruction (NOT its last instruction -- the
+#     per-commit ARG and the image metadata follow it), so a destruction of any
+#     spelling fails the BUILD, and
 #     `test_the_image_asserts_its_own_reconcilers_at_build_time` below pins it.
 #     Do not re-attempt the static version: the runtime one already decides it.
 #
@@ -509,11 +511,17 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     It is NOT the last instruction in the file, and must not be: a RUN below the
     per-commit `ARG LEAF_SOURCE_SHA` re-executes on every merge, which
     scripts/test_build_platform_images_workflow.py forbids outright. That was
-    caught by CI, not by review. The two rules interlock rather than conflict --
-    a destructive RUN appended to this file is either above the guard, where the
-    guard catches it, or below the ARG, where that invariant catches it -- so
-    what this pins is the property that actually matters: nothing that can TOUCH
-    the filesystem comes after the guard.
+    caught by CI, not by review. THREE rules cover the positions between them,
+    and it takes all three -- a destructive instruction above the guard is
+    caught by the guard, a RUN below the ARG by that invariant, and anything
+    else below the guard by the allowlist here. A COPY or ONBUILD below the ARG
+    escapes the first two; only the allowlist stops it.
+
+    SCOPE, so this does not read as more than it is. It covers the app image's
+    reconcilers. deploy/Dockerfile.canonical-worker, deploy/Dockerfile.broker
+    and deploy/Dockerfile.harness ship operator-reachable scripts
+    (canonical-container-smoke.py, e2b-tool-exec.mjs, start-harness.sh) with the
+    same hole and no such guard.
     """
     dockerfile = _app_dockerfile()
     _single_stage(dockerfile)
@@ -521,37 +529,59 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     copies = _copied_scripts(dockerfile)
     assert copies, "deploy/Dockerfile.app copies no scripts/ file"
 
+    # THE EXACT COMMAND, not a substring of it. Matching `"test -f" in argument`
+    # was the first version and it was wrong in the same way the git-install
+    # scan above was wrong. A review found the proof:
+    #     RUN rm -rf scripts
+    #     RUN echo test -f /app/scripts/reconcile_customization_authority.py \
+    #       && echo test -f /app/scripts/reconcile_sessions_authority.py
+    # Both instructions sit above the ARG, the second contains "test -f" and
+    # names every copied target, nothing writable follows it, and the ARG
+    # invariant sees no offender -- so the image shipped with both reconcilers
+    # DELETED and every static gate green. Confirmed by running it. Pinning the
+    # exact form makes that impossible rather than merely unlikely, which is the
+    # same trade `_PINNED_GIT_INSTALL` makes: changing HOW the guard is spelled
+    # now requires editing this pin, and that is a change a reviewer should see.
+    expected: list[str] = []
+    for target in sorted(copies.values()):
+        # `-s` as well as `-f`: `-f` alone accepts an EMPTY file, so a
+        # truncation ships a reconciler that exits 0 and emits no receipt.
+        expected += ["test", "-f", target, "&&", "test", "-s", target, "&&"]
+    expected = expected[:-1]
+
     instructions = _instructions(dockerfile)
     guarded = [
         index for index, (keyword, argument) in enumerate(instructions)
-        if keyword == "RUN" and "test -f" in argument
+        if keyword == "RUN" and argument.split() == expected
     ]
     assert len(guarded) == 1, (
-        "deploy/Dockerfile.app must hold exactly one `RUN test -f` existence "
-        f"guard; found {len(guarded)}. Two of them make 'the' guard ambiguous "
-        "and let the later one be the only real check."
+        "deploy/Dockerfile.app must hold exactly one existence guard, spelled "
+        f"exactly:\n    RUN {' '.join(expected)}\n"
+        f"found {len(guarded)}. A guard the image ships must assert every "
+        "script the COPY map ships, and nothing else may impersonate it."
     )
-    argument = instructions[guarded[0]][1]
-    for target in sorted(copies.values()):
-        assert f"test -f {target}" in argument, (
-            f"the existence guard does not assert {target}, so an instruction "
-            f"that removed it would ship a broken image: {argument!r}"
-        )
 
     # ALLOWLIST, not a denylist of RUN/COPY/ADD. An instruction this guard does
     # not recognise fails LOUD rather than being assumed harmless, which is the
     # failure mode the deleted static check had.
-    cannot_write = {
+    #
+    # USER and VOLUME are deliberately NOT on it, though neither deletes a file.
+    # The guard runs as root at build time, so a later `USER 10001` can leave a
+    # 0600 script unreadable to the process that actually runs it, and a later
+    # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
+    # whose guard passed and whose documented command still fails. Adding
+    # either must therefore be a decision someone makes here, not a side effect.
+    cannot_remove = {
         "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
-        "MAINTAINER", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+        "MAINTAINER", "SHELL", "STOPSIGNAL", "WORKDIR",
     }
     after = [keyword for keyword, _ in instructions[guarded[0] + 1:]]
-    offending = sorted({k for k in after if k.upper() not in cannot_write})
+    offending = sorted({k for k in after if k.upper() not in cannot_remove})
     assert not offending, (
         f"deploy/Dockerfile.app runs {offending} AFTER the existence guard, so "
-        "those instructions ship unchecked. Put filesystem-touching "
-        "instructions above the guard, or teach this allowlist why they cannot "
-        "write."
+        "those instructions ship unchecked. Put them above the guard, or teach "
+        "this allowlist why they can neither remove a file nor make one "
+        "unreachable to the runtime process."
     )
 
 
