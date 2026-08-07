@@ -4148,20 +4148,34 @@ POLL_SECONDS=0.05
 _END=$(( $(date +%%s) + 2 ))
 before_deadline() { [ "$(date +%%s)" -lt "$_END" ]; }
 %(classifier)s
-superseder_deploys "%(sha)s"
+superseder_deploys "$REHEARSAL_SHA"
 """
 
+# The stub ROUTES on the requested sha and run id rather than answering
+# every call the same way. Without that, a classifier that hardcoded the
+# sha or the run id would be served the right fixture anyway and every
+# case would pass while the lookup was broken.
 _FAKE_GH = """#!/usr/bin/env bash
 url="$2"
 case "$url" in
   *"/actions/runs?head_sha="*)
     if [ "${FAIL_RUNS:-0}" = 1 ]; then exit 1; fi
+    req="${url#*head_sha=}"; req="${req%%&*}"
+    if [ "$req" != "$WANT_SHA" ]; then printf '{"workflow_runs":[]}'; exit 0; fi
     printf '%s' "$RUNS_JSON" ;;
   *"/artifacts?per_page=100")
     if [ "${FAIL_ARTIFACTS:-0}" = 1 ]; then exit 1; fi
+    rest="${url#*/actions/runs/}"; req="${rest%%/*}"
+    if [ "$req" != "$WANT_RUN" ]; then
+      printf '{"total_count":0,"artifacts":[]}'; exit 0
+    fi
     printf '%s' "$ARTIFACTS_JSON" ;;
   *"/actions/runs/"*)
     if [ "${FAIL_RECORD:-0}" = 1 ]; then exit 1; fi
+    req="${url##*/actions/runs/}"
+    if [ "$req" != "$WANT_RUN" ]; then
+      printf '{"status":"queued","conclusion":null,"run_attempt":1}'; exit 0
+    fi
     printf '%s' "$RECORD_JSON" ;;
   *) exit 9 ;;
 esac
@@ -4200,7 +4214,9 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
     classifier = code[start:start + end.end()]
 
     sha = "abc123"
+    other_sha = "def456"
     supply = f"staging-supply-set-{sha}-attempt-2"
+    other_supply = f"staging-supply-set-{other_sha}-attempt-2"
     marker = f"docs-noop-{sha}-attempt-2"
     build_path = ".github/workflows/build-platform-images.yml"
     good_run = ('{"workflow_runs":[{"id":11,"path":"%s",'
@@ -4261,6 +4277,26 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
          {"ARTIFACTS_JSON": arts((marker, False)),
           "RECORD_JSON": '{"status":"completed","conclusion":"success",'
                          '"run_attempt":3}'}, "unknown"),
+        # THE REQUESTED SHA MUST COME FROM THE ARGUMENT. Every case above asks
+        # for the same sha, so a classifier that hardcoded it would be served
+        # the right fixture regardless.
+        ("a DIFFERENT sha is asked for, and only the other sha's supply set "
+         "exists",
+         {"SHA": other_sha, "WANT_SHA": other_sha,
+          "ARTIFACTS_JSON": arts((supply, False))}, "unknown"),
+        ("a DIFFERENT sha is asked for, with its OWN supply set",
+         {"SHA": other_sha, "WANT_SHA": other_sha,
+          "ARTIFACTS_JSON": arts((other_supply, False))}, "yes"),
+        # THE RUN ID MUST COME FROM THE RUN LIST. Every case above resolves to
+        # run 11, so a classifier that hardcoded the id would still be served.
+        ("the build resolves to run 12 while only run 11 is served",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
+                       '"name":"Build platform images"}]}' % build_path,
+          "WANT_RUN": "11"}, "unknown"),
+        ("the build resolves to run 12 and run 12 is served",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":12,"path":"%s",'
+                       '"name":"Build platform images"}]}' % build_path,
+          "WANT_RUN": "12"}, "yes"),
     ]
 
     with tempfile.TemporaryDirectory() as tmp_name:
@@ -4272,15 +4308,15 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
         gh.chmod(0o755)
         script = tmp / "rehearse.sh"
         script.write_text(
-            _CLASSIFIER_HARNESS % {"classifier": classifier, "sha": sha},
+            _CLASSIFIER_HARNESS % {"classifier": classifier},
             encoding="utf-8", newline="\n")
 
         for name, overrides, expected in cases:
             env = dict(os.environ)
             env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
-            env.setdefault("RUNS_JSON", good_run)
-            env.setdefault("RECORD_JSON", ok_record)
-            env.setdefault("ARTIFACTS_JSON", arts((supply, False)))
+            env["REHEARSAL_SHA"] = overrides.get("SHA", sha)
+            env["WANT_SHA"] = overrides.get("WANT_SHA", sha)
+            env["WANT_RUN"] = overrides.get("WANT_RUN", "11")
             env["RUNS_JSON"] = overrides.get("RUNS_JSON", good_run)
             env["RECORD_JSON"] = overrides.get("RECORD_JSON", ok_record)
             env["ARTIFACTS_JSON"] = overrides.get(
