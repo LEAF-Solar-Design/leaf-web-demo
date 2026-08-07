@@ -59,13 +59,19 @@ def _reserve_rate(cur, subject: str, action: str, category: str,
     if ceiling <= 0:
         return False
     hour_key = datetime.now(timezone.utc).strftime(f"{action}@%Y%m%d%H")
+    # Adopt the CURRENT ceiling (EXCLUDED.ceiling) on every reservation and
+    # guard against it, so a tightened policy (e.g. 240 -> 12) takes effect
+    # immediately within the running hour rather than only at the next hour
+    # key. A loosened ceiling likewise applies at once.
     cur.execute(
         """
         INSERT INTO operator_budgets (subject, scope, scope_key, used, ceiling)
         VALUES (%s, 'action_hour', %s, 1, %s)
         ON CONFLICT (subject, scope, scope_key) DO UPDATE
-          SET used = operator_budgets.used + 1, updated_at = now()
-          WHERE operator_budgets.used < operator_budgets.ceiling
+          SET used = operator_budgets.used + 1,
+              ceiling = EXCLUDED.ceiling,
+              updated_at = now()
+          WHERE operator_budgets.used < EXCLUDED.ceiling
         RETURNING used
         """,
         (subject, hour_key, ceiling))

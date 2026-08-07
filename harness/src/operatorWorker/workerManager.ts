@@ -32,6 +32,7 @@ export interface WorkerArtifact {
 
 export interface WorkerJobReceipt {
   jobId: string;
+  principalSubject: string;
   status: "succeeded" | "failed" | "cancelled" | "timeout";
   exitCodes: number[];
   stdoutTail: string;
@@ -60,14 +61,24 @@ export interface WorkspaceHandle {
 }
 
 export interface WorkspaceSubstrate {
+  /** True ONLY for a substrate that enforces real OS-level filesystem AND
+   * network isolation (a microVM/container). The manager refuses broad
+   * execution on a non-isolating substrate unless explicitly opted in for
+   * tests — env scrubbing and an advisory network allowlist are necessary
+   * but NOT sufficient, so they never substitute for a real jail. */
+  readonly isolating: boolean;
   create(jobId: string): Promise<WorkspaceHandle>;
 }
 
-/** Local disposable directory + child process substrate. Real isolation in
- * production comes from the microVM substrate; this one still enforces the
- * scrubbed env, the cwd jail (by convention of the command runner), the
- * timeout tree-kill, and cleanup — which is what the tests pin. */
+/** TEST-ONLY substrate: a plain child process in a scratch directory. It is
+ * NOT an isolation boundary — `spawn(shell)` can still read absolute host
+ * paths and reach the network, so `isolating = false`. Env scrubbing and the
+ * timeout tree-kill are defense-in-depth, not a sandbox. A real isolating
+ * substrate (microVM/container, the plan's E2B lane) is a prerequisite before
+ * the O2/O3 disposable-execution actions may run untrusted commands. */
 export class LocalProcessSubstrate implements WorkspaceSubstrate {
+  readonly isolating = false;
+
   constructor(private readonly root: string) {}
 
   async create(jobId: string): Promise<WorkspaceHandle> {
@@ -120,11 +131,17 @@ export class OperatorWorkerManager {
   private readonly jobs = new Map<string, WorkerJobReceipt>();
   private readonly byIdempotency = new Map<string, string>();
   private readonly aborts = new Map<string, AbortController>();
+  private readonly jobSubjects = new Map<string, string>();
+  private readonly allowNonIsolated: boolean;
 
   constructor(
     private readonly substrate: WorkspaceSubstrate,
     private readonly artifactRoot: string,
+    opts?: { allowNonIsolatedSubstrate?: boolean },
   ) {
+    // Fail closed: a non-isolating substrate may run untrusted commands ONLY
+    // when a test explicitly opts in. In any other context, submit() refuses.
+    this.allowNonIsolated = opts?.allowNonIsolatedSubstrate === true;
     fs.mkdirSync(artifactRoot, { recursive: true });
   }
 
@@ -156,6 +173,12 @@ export class OperatorWorkerManager {
   }
 
   async submit(envelope: WorkerJobEnvelope): Promise<WorkerJobReceipt> {
+    // Fail closed on isolation: broad command execution requires a substrate
+    // that enforces real filesystem + network isolation. The manager NEVER
+    // runs untrusted commands on a non-isolating substrate outside tests.
+    if (!this.substrate.isolating && !this.allowNonIsolated) {
+      throw new Error("substrate_not_isolating");
+    }
     const invalid = this.validate(envelope);
     if (invalid) throw new Error(invalid);
 
@@ -166,6 +189,7 @@ export class OperatorWorkerManager {
 
     const jobId = `opjob-${randomUUID()}`;
     this.byIdempotency.set(idemKey, jobId);
+    this.jobSubjects.set(jobId, envelope.principalSubject);
     const abort = new AbortController();
     this.aborts.set(jobId, abort);
 
@@ -197,7 +221,8 @@ export class OperatorWorkerManager {
         : exitCodes.every((c) => c === 0) && exitCodes.length ===
             envelope.commands.length ? "succeeded" : "failed";
       const receipt: WorkerJobReceipt = {
-        jobId, status, exitCodes, stdoutTail, artifacts,
+        jobId, principalSubject: envelope.principalSubject, status,
+        exitCodes, stdoutTail, artifacts,
         workspaceRemoved: false, terminatedBy,
       };
       this.jobs.set(jobId, receipt);
@@ -210,16 +235,22 @@ export class OperatorWorkerManager {
     }
   }
 
-  cancel(jobId: string, _subject: string): boolean {
-    const receipt = this.jobs.get(jobId);
-    // Only the submitting principal's live job can be cancelled.
+  /** Ownership-enforced: only the submitting principal may cancel. A
+   * mismatched or unknown subject gets `false` — never another principal's
+   * job, and no existence oracle. */
+  cancel(jobId: string, subject: string): boolean {
+    if (this.jobSubjects.get(jobId) !== subject) return false;
     const abort = this.aborts.get(jobId);
-    if (!abort) return receipt?.status === "cancelled";
+    if (!abort) return this.jobs.get(jobId)?.status === "cancelled";
     abort.abort();
     return true;
   }
 
-  status(jobId: string): WorkerJobReceipt | undefined {
+  /** Ownership-enforced: only the submitting principal may read a job's
+   * receipt (which carries stdout tail and artifact paths). A mismatched or
+   * unknown subject gets `undefined` — no cross-principal read, no oracle. */
+  status(jobId: string, subject: string): WorkerJobReceipt | undefined {
+    if (this.jobSubjects.get(jobId) !== subject) return undefined;
     return this.jobs.get(jobId);
   }
 

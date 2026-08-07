@@ -328,3 +328,25 @@ def test_denied_mint_writes_audit_and_burns_no_rate(op):
             " AND scope_key LIKE 'operator.not_a_real_action@%%'",
             (op.subject,))
         assert cur.fetchone()["n"] == 0
+
+
+@needs_pg
+def test_rate_ceiling_tightening_applies_within_the_hour(op):
+    """A tightened rate ceiling denies immediately in the running hour
+    (regression for the EXCLUDED.ceiling fix), and a looser one still admits."""
+    import operator_authority
+    from operator_principals import _db
+
+    catalog3 = {"rate_limits_per_hour": {"low": 3}}
+    catalog1 = {"rate_limits_per_hour": {"low": 1}}
+    action = f"operator.rate_probe_{op.subject[-6:]}"
+    db = _db()
+    with db.connection() as conn, conn.cursor() as cur:
+        # Three reservations succeed under ceiling 3.
+        ok = [operator_authority._reserve_rate(cur, op.subject, action, "low",
+                                               catalog3) for _ in range(3)]
+        assert ok == [True, True, True]
+        # Tighten to 1 mid-hour: used (3) >= new ceiling (1) -> denied now.
+        assert operator_authority._reserve_rate(
+            cur, op.subject, action, "low", catalog1) is False
+        conn.commit()

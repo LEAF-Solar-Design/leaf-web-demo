@@ -27,8 +27,10 @@ function envelope(partial: Partial<WorkerJobEnvelope>): WorkerJobEnvelope {
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "op-worker-test-"));
+  // The local substrate is NON-isolating, so tests must opt in explicitly.
   manager = new OperatorWorkerManager(
-    new LocalProcessSubstrate(root), path.join(root, "_artifacts"));
+    new LocalProcessSubstrate(root), path.join(root, "_artifacts"),
+    { allowNonIsolatedSubstrate: true });
 });
 
 afterEach(() => {
@@ -141,5 +143,41 @@ describe("orphan reaping", () => {
     const reaped = OperatorWorkerManager.reapOrphans(root, new Set());
     expect(reaped).toEqual(["op-worker-dead-job"]);
     expect(fs.existsSync(orphan)).toBe(false);
+  });
+});
+
+describe("isolation is fail-closed", () => {
+  it("the local substrate is marked non-isolating", () => {
+    expect(new LocalProcessSubstrate(root).isolating).toBe(false);
+  });
+
+  it("submit refuses a non-isolating substrate without the explicit opt-in", async () => {
+    const strict = new OperatorWorkerManager(
+      new LocalProcessSubstrate(root), path.join(root, "_artifacts2"));
+    await expect(strict.submit(envelope({ commands: ["echo hi"] })))
+      .rejects.toThrow("substrate_not_isolating");
+  });
+});
+
+describe("job ownership is enforced", () => {
+  it("only the submitting principal can read a job's receipt", async () => {
+    const receipt = await manager.submit(envelope({
+      principalSubject: "auth0|owner", commands: ["echo owned"],
+    }));
+    expect(manager.status(receipt.jobId, "auth0|owner")?.jobId)
+      .toBe(receipt.jobId);
+    // A different principal (or an unknown subject) gets nothing — no oracle.
+    expect(manager.status(receipt.jobId, "auth0|attacker")).toBeUndefined();
+    expect(manager.status("opjob-does-not-exist", "auth0|owner"))
+      .toBeUndefined();
+  });
+
+  it("only the submitting principal can cancel a job", async () => {
+    const receipt = await manager.submit(envelope({
+      principalSubject: "auth0|owner", commands: ["echo owned"],
+    }));
+    // Wrong principal cannot cancel; the receipt carries the owner subject.
+    expect(manager.cancel(receipt.jobId, "auth0|attacker")).toBe(false);
+    expect(receipt.principalSubject).toBe("auth0|owner");
   });
 });
