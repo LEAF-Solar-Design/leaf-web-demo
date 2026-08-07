@@ -76,9 +76,20 @@ def is_valid_policy(value: object) -> bool:
     return isinstance(value, str) and value in POLICIES
 
 
-def _legacy_set_policy(session_id: str, tenant_id: str, policy: str,
-                       updated_at: float) -> None:
+def _legacy_set_policy(session_id: str, tenant_id: str, policy: str) -> float:
+    """Write the legacy row and return the timestamp it stored.
+
+    THE TIMESTAMP IS SAMPLED INSIDE THE LOCK, and returned rather than passed
+    in, because those are the same requirement. Sampling before the lock lets
+    two concurrent setters commit in the opposite order from their timestamps,
+    so ``updated_at`` moves backwards -- a real change from the pre-dispatch
+    behaviour, which sampled it under the lock immediately before the upsert
+    (review round 1). Returning it is then what lets the mirror store the SAME
+    value, without which every dual_write_shadow read would compare two rows
+    differing only on ``updated_at`` and read as corruption.
+    """
     with _lock:
+        updated_at = time.time()
         conn = _db()
         conn.execute(
             "INSERT INTO session_policies (session_id, tenant_id, policy, updated_at)"
@@ -88,6 +99,7 @@ def _legacy_set_policy(session_id: str, tenant_id: str, policy: str,
             (session_id, str(tenant_id), policy, updated_at),
         )
         conn.commit()
+    return updated_at
 
 
 def _legacy_get_policy(session_id: str, tenant_id: str) -> Optional[str]:
@@ -140,18 +152,18 @@ def set_policy(session_id: str, tenant_id: str, policy: str) -> None:
     this refuses anyway rather than storing garbage."""
     if not is_valid_policy(policy):
         raise ValueError(f"invalid policy {policy!r}")
-    updated_at = time.time()
     mode = session_annex.store_mode()
     if mode == "postgres":
-        _pg_set_policy(session_id, tenant_id, policy, updated_at)
+        _pg_set_policy(session_id, tenant_id, policy, time.time())
         return
     if mode in session_annex.DUAL_WRITE_MODES:
         # Pre-flight only; the two stores share no atomic transaction, so a
         # committed legacy row can still outrun its mirror.
         session_annex.ensure_started()
-    # One timestamp for both stores. Calling time.time() per backend would make
-    # every dual_write_shadow read compare two rows that differ on updated_at.
-    _legacy_set_policy(session_id, tenant_id, policy, updated_at)
+    # The legacy writer samples the timestamp under its own lock and hands it
+    # back, so the mirror stores the SAME value without moving the sample
+    # outside the lock. See _legacy_set_policy.
+    updated_at = _legacy_set_policy(session_id, tenant_id, policy)
     if mode in session_annex.DUAL_WRITE_MODES:
         _pg_set_policy(session_id, tenant_id, policy, updated_at)
     # `shadow` deliberately does not compare here — see checkpoints.create_checkpoint.

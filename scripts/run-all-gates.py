@@ -711,7 +711,7 @@ def build_suites() -> List[Suite]:
         # is the exact collected count.
         Suite("server-session-annex-store",
               "server tests/test_session_annex_store.py", "pytest",
-              SERVER, _py_pytest("tests/test_session_annex_store.py"), 26),
+              SERVER, _py_pytest("tests/test_session_annex_store.py"), 27),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),

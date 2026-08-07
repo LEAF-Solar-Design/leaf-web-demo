@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 _TMP_DIR = Path(tempfile.mkdtemp(prefix="session-annex-test-"))
@@ -242,8 +243,16 @@ def test_postgres_mode_reads_and_writes_only_postgres(monkeypatch, fake_db):
     assert fake_db.transactions == 1, "the cap count and the insert must share one"
     joined = " ".join(fake_db.sql())
     assert "app_session_checkpoints" in joined
-    assert "FOR UPDATE" in joined, (
-        "a plain COUNT sees a snapshot, so two creates at 49 could both insert")
+    # An ADVISORY lock, not SELECT ... FOR UPDATE. A row lock has no target on a
+    # session with zero rows, so an empty session would serialize nothing and
+    # concurrent creates could overshoot the cap (review round 1).
+    assert "pg_advisory_xact_lock" in joined, (
+        "the cap needs a lock on the session KEY, which holds when the session "
+        "has no rows yet")
+    assert "FOR UPDATE" not in joined, (
+        "a row lock cannot serialize the empty-session case; see round 1")
+    # Taken BEFORE the count, or the count can still read a stale snapshot.
+    assert fake_db.sql()[0].startswith("SELECT pg_advisory_xact_lock")
     # The legacy file must not have gained a row.
     monkeypatch.setenv(session_annex.SELECTOR, "legacy")
     assert checkpoints.list_checkpoints(session_id, tenant_id) == []
@@ -372,6 +381,40 @@ def test_dual_write_refuses_when_the_mirror_schema_is_absent(monkeypatch, fake_d
     # And the legacy authority was not mutated first.
     monkeypatch.setenv(session_annex.SELECTOR, "legacy")
     assert checkpoints.list_checkpoints(session_id, tenant_id) == []
+
+
+def test_the_legacy_policy_timestamp_is_sampled_under_the_lock(monkeypatch, fake_db):
+    """Sampling before the lock lets two setters commit in the opposite order
+    from their timestamps, so updated_at moves backwards -- a real change from
+    the pre-dispatch behaviour (review round 1). The writer must sample inside
+    its own lock and hand the value back for the mirror."""
+    session_id, tenant_id = _ids()
+    observed = []
+    real_time = time.time
+
+    # Captured BEFORE the monkeypatch, or the wrapper resolves the module
+    # attribute it just replaced and recurses into itself.
+    real_lock = session_policy._lock
+
+    class _Recorder:
+        def __enter__(self):
+            observed.append("lock")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    def spy_time():
+        observed.append("time")
+        return real_time()
+
+    monkeypatch.setattr(session_policy, "_lock", _Recorder())
+    monkeypatch.setattr(session_policy.time, "time", spy_time)
+    stamped = session_policy._legacy_set_policy(session_id, tenant_id, "plan_first")
+
+    assert observed[:2] == ["lock", "time"], (
+        f"timestamp was sampled outside the lock: {observed}")
+    assert isinstance(stamped, float), "the writer must return the value it stored"
 
 
 def test_dual_write_policy_uses_one_timestamp_for_both_stores(monkeypatch, fake_db):
@@ -566,15 +609,36 @@ def test_migration_policy_check_matches_the_python_policy_set():
         "0029's policy CHECK and session_policy.POLICIES disagree")
 
 
-def test_the_selector_is_required_config_and_ships_a_legacy_default():
-    """PR #499's lesson applied to the new selector: an omitted store selector
-    is not a neutral default, it is a silently task-local authority."""
+def test_the_image_ships_a_legacy_default_and_the_manifest_stays_out_of_it():
+    """The image bakes the selector; `required-config.app.json` deliberately
+    does NOT require it yet, and that asymmetry is the finding this pins.
+
+    PR #499 required `LEAF_SESSIONS_STORE` in the manifest because its absence
+    means task-local SQLite and real loss. The same move here would WEDGE the
+    pipeline: the staging deploy's manifest check compares the manifest against
+    a configuration baseline cloned from the previously live task definition,
+    which cannot contain a brand-new variable, and the configuration-delta lane
+    cannot introduce it either because its allowlist is positive and
+    value-exact (`LEAF_JOBS_STORE=postgres` and the five `LEAF_SESSIONS_STORE`
+    values only).
+
+    The safety the manifest entry would buy is close to zero here, which is why
+    the sequencing wins: an absent selector resolves to `legacy`, which is
+    byte-identical to current behaviour, and the combination that actually harms
+    a user is refused at startup by validate_session_annex_authority whether or
+    not the manifest names the variable.
+
+    Re-add it only after the infrastructure repository carries the variable, in
+    that order. See docs/POSTGRES-CUTOVER.md.
+    """
     import json
 
     required = json.loads(
         (REPO_ROOT / "deploy" / "required-config.app.json").read_text(
             encoding="utf-8"))
-    assert "LEAF_SESSION_ANNEX_STORE" in required["required"]["environment"]
+    assert "LEAF_SESSION_ANNEX_STORE" not in required["required"]["environment"], (
+        "requiring the selector before the task definitions carry it blocks the "
+        "next app deploy; see the docstring")
 
     dockerfile = (REPO_ROOT / "deploy" / "Dockerfile.app").read_text(encoding="utf-8")
     assert "LEAF_SESSION_ANNEX_STORE=legacy" in dockerfile

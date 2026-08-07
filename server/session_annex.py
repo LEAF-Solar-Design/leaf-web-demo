@@ -7,14 +7,33 @@ shared parts live here so the two cannot drift apart, and so a third annex table
 inherits them for free.
 
 WHY ITS OWN SELECTOR, AND NOT `LEAF_SESSIONS_STORE`. Both were arguable and the
-tradeoff is recorded in docs/POSTGRES-CUTOVER.md. The deciding reason is
-`platform/db.py._AUTHORITY_SELECTORS`: schema readiness is keyed by selector
-VALUE, so reusing the sessions selector would make these two tables required the
-moment sessions reaches `dual_write` -- retroactively failing
-`assert_schema_current()` for the configuration staging is already deployed on.
-A code change must not move the readiness verdict for a running config. The
-repository also owns exactly one selector per authority, and the inventory
-contract treats a twice-owned selector as an error.
+tradeoff is recorded in docs/POSTGRES-CUTOVER.md.
+
+RETRACTED, because it was the reason first given here and it is FALSE: that
+reuse would retroactively fail `assert_schema_current()` for staging's current
+mode while a separate selector would not. Selector-scoped requirements cover
+columns and catalog contracts only. `migration_manifest()` globs EVERY shipped
+`.sql`, and `schema_status()` fails on any `missing_migrations` entry with no
+reference to a selector, so adding 0029 moves the readiness verdict for every
+PostgreSQL-connected deployment until it is applied, whatever this selector is
+named. Caught in review round 1. The real consequence is a deploy-ORDERING one
+and belongs in the doc, not in a selector argument.
+
+The reasons that survive:
+
+1. The two authorities have DIFFERENT PREREQUISITES, and coupling would hide
+   that. Sessions has a backfill command and a parity command. This annex has
+   NEITHER, and no reverse writer. On one selector, flipping sessions would
+   silently move an authority whose prerequisites are unmet, because there
+   would be no second decision to make. A separate selector forces that
+   decision to be taken explicitly and refused where it is not ready.
+2. ROLLBACK ASYMMETRY. The sessions rollback path is `postgres` -> `shadow` ->
+   `legacy`. This annex cannot follow it: nothing writes PostgreSQL back to
+   SQLite, and on staging the legacy target is an empty task-local file. Shared,
+   a sessions rollback would drag the annex into an unreadable state with no
+   separate decision point.
+3. The repository owns exactly one selector per authority, and the inventory
+   contract treats a twice-owned selector as an error.
 
 The harmful COMBINATION that sharing a selector would have made unrepresentable
 is `sessions=postgres` with `annex=legacy` -- a session that outlives its own

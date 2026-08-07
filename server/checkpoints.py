@@ -150,25 +150,34 @@ def _pg_create_checkpoint(
     transcript_seq: int, label: Optional[str], *,
     checkpoint_id: Optional[str] = None, created_at: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Count and insert inside ONE transaction.
+    """Count and insert inside ONE transaction, serialized per session.
 
     The legacy path reads the count and inserts under a process-local
     ``threading.Lock``, which bounds nothing across tasks. Here the cap is
-    enforced with a row-level lock the whole ECS fleet observes, so two
-    concurrent creates on a session at 49 cannot both see 49 and both insert.
+    enforced with a lock the whole ECS fleet observes.
+
+    THE LOCK IS ADVISORY, NOT ``SELECT ... FOR UPDATE``, and the difference is
+    the whole point. A row lock has no target when the session has NO rows yet,
+    so an empty session serializes nothing: enough concurrent creates could each
+    read 0 and each insert, overshooting the cap. Review round 1 caught exactly
+    that, against an earlier version whose comment claimed the row lock
+    serialized every case. ``pg_advisory_xact_lock`` takes a lock on the session
+    KEY rather than on rows, so it holds when the session is empty, and it
+    releases on commit or rollback with no unlock path to leak.
+
+    A ``hashtext`` collision serializes two unrelated sessions. That costs
+    contention and never correctness.
     """
     checkpoint_id = checkpoint_id or str(uuid.uuid4())
     created_at = time.time() if created_at is None else created_at
     db = session_annex.platform_db()
     with db.transaction() as conn:
-        # A plain COUNT sees a snapshot, so two concurrent transactions can both
-        # read 49. Locking the session's existing rows serializes them: the
-        # second waits for the first to commit and then counts 50.
         conn.execute(
-            f"SELECT checkpoint_id FROM {session_annex.PG_CHECKPOINTS_TABLE}"
-            " WHERE session_id = %s FOR UPDATE",
-            (session_id,),
+            "SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (session_id,),
         ).fetchall()
+        # Now safe: every writer for this session is behind the lock above, so a
+        # READ COMMITTED snapshot taken here already reflects every committed
+        # predecessor.
         count = conn.execute(
             f"SELECT COUNT(*) AS n FROM {session_annex.PG_CHECKPOINTS_TABLE}"
             " WHERE session_id = %s",
@@ -246,8 +255,17 @@ def create_checkpoint(session_id: str, tenant_id: str, drawing_id: str,
             checkpoint_id=legacy["checkpoint_id"], created_at=legacy["created_at"])
         if postgres is None:
             # The mirror hit its own cap while the legacy store did not, so the
-            # two disagree about how full this session is. Fail loudly: a silent
-            # return would leave a legacy row the mirror will never hold.
+            # two already disagree about how full this session is (legacy 49,
+            # PostgreSQL 50) before this call started.
+            #
+            # BE PRECISE ABOUT WHAT THIS RAISE DOES. The legacy row is ALREADY
+            # COMMITTED on the line above and this cannot roll it back, so the
+            # unmirrored row exists either way. Review round 1 rightly rejected
+            # an earlier comment here that claimed raising prevented it. What
+            # the raise buys is that the divergence is REPORTED rather than
+            # returned as success, which is the only useful move left: the
+            # caller sees a 500, and a retry then reports the cap normally
+            # because the legacy store is now full too.
             raise RuntimeError("checkpoint mirror is at its cap while legacy is not")
         session_annex.shadow_equal(
             "checkpoint identity", legacy["checkpoint_id"], postgres["checkpoint_id"])

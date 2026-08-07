@@ -50,9 +50,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     annex = suites["server-session-annex-store"]
-    # 26 collected, 0 skipped: the PostgreSQL halves run against a fake in
+    # 27 collected, 0 skipped: the PostgreSQL halves run against a fake in
     # place of platform.db, so a no-DB host executes every one of them.
-    assert annex.expected == 26
+    assert annex.expected == 27
     assert "tests/test_session_annex_store.py" in annex.argv
 
     static = suites["platform-static"]
