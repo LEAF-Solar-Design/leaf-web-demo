@@ -77,7 +77,15 @@ def postgres_authority(monkeypatch):
         spec.loader.exec_module(loaded)
     from leaf_platform import db
 
-    db.apply_migration(package / "migrations" / "0011_jobs_callbacks.sql")
+    # The whole one-shot chain staging uses, not 0011 alone. 0011 creates
+    # `async_jobs`, but the terminal write mirrors into the platform `jobs` table
+    # (0001) inside the SAME transaction, and `terminal_in_transaction` raises by
+    # design. The in-process tests hide this because the fixture stubs the
+    # platform_link hooks; the subprocess test cannot inherit those stubs, so
+    # against a fresh database it failed with `relation "jobs" does not exist`.
+    # Applying only one migration made this file depend on some other suite having
+    # migrated the database first, which is test-order luck, not provisioning.
+    db.apply_migration()
     monkeypatch.setenv("LEAF_JOBS_STORE", "postgres")
     monkeypatch.setenv("LEAF_CALLBACK_REPLAY_STORE", "postgres")
     monkeypatch.setattr(jobs, "_reaper_started", True)
@@ -352,7 +360,13 @@ def test_broker_callback_process_completes_app_postgres_job(postgres_authority):
         idempotency_key="broker-callback-" + uuid.uuid4().hex,
         authority_mode="postgres_canonical",
     )
-    assert jobs.claim_lease(job_id, "callback-owner") == 1
+    # The claim returns the attempt this callback describes. Carry it rather than
+    # a literal: `_complete_callback_job` refuses a callback that does not name an
+    # int attempt (409), and refuses one naming an attempt other than the running
+    # one, so the value has to come from the claim to stay true if this setup grows
+    # a retry. The adapter, the only real emitter on this route, signs it the same way.
+    attempt = jobs.claim_lease(job_id, "callback-owner")
+    assert attempt == 1
     secret = "process-callback-secret"
     nonce = "process-callback-" + uuid.uuid4().hex
     script = r"""
@@ -365,6 +379,7 @@ import broker
 from fastapi.testclient import TestClient
 callbacks = broker._get_callbacks()
 body = json.dumps({"job_id": sys.argv[2], "status": "success",
+                   "attempt": int(sys.argv[5]),
                    "result": {"source": "broker-process"}}).encode()
 timestamp = str(time.time())
 signature = callbacks.sign_payload(body, timestamp, sys.argv[4])
@@ -384,7 +399,8 @@ print(response.json()["completion"])
         "LEAF_CALLBACK_SECRET": secret,
     })
     process = subprocess.run(
-        [sys.executable, "-c", script, str(SERVER_DIR), job_id, secret, nonce],
+        [sys.executable, "-c", script, str(SERVER_DIR), job_id, secret, nonce,
+         str(attempt)],
         capture_output=True, text=True, timeout=45, env=environment,
     )
     assert process.returncode == 0, process.stderr

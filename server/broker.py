@@ -1787,20 +1787,29 @@ def _complete_callback_job(job_id: str, callback: Dict[str, Any]) -> str:
         base.update(extra)
         return base
 
-    # RESIDUAL RACE, STATED RATHER THAN HIDDEN. The check above reads the attempt
-    # here and `jobs.complete_callback` opens its transaction afterwards, so a lease
-    # reclaim landing in between can advance the job. For a SUCCESS that window is
-    # already closed inside the spine: `_validate_terminal_context` re-reads the
-    # durable attempt within the transaction and refuses when the provenance
-    # attempt disagrees. For a FAILURE it returns early, so nothing re-checks, and
-    # a stale attempt's failure could still fail a newer attempt.
+    # THE RACE THIS ONCE LEFT HALF OPEN IS NOW CLOSED, BUT NOT WHERE THIS COMMENT
+    # USED TO SAY. The check above reads the attempt here, and a lease reclaim can
+    # advance the job before the terminal write lands. Two mechanisms bear on that
+    # window and only the SECOND one closes it, so they are worth naming apart:
     #
-    # Closing that half needs one line in `server/jobs.py` — dropping the
-    # `if status != "complete": return` early-out so the attempt comparison also
-    # covers failures — and `jobs.py` is currently owned by three open PRs
-    # (#129, #130, #141). Editing it from this lane would collide with them, so it
-    # is left to whoever owns that file. The window is narrow and the guard above
-    # removes the ordinary (non-racing) case entirely.
+    #   1. `jobs.complete_callback` re-reads the DURABLE attempt and runs
+    #      `_validate_terminal_context` against it. This happens BEFORE the store
+    #      opens its transaction, not inside it, so on its own it only narrows the
+    #      window. It is what binds a FAILURE that names an attempt, which is the
+    #      half this block used to call unfixed.
+    #   2. The transaction itself is attempt-qualified: `job_pg_store.complete`
+    #      updates `WHERE ... AND attempt = %(attempt)s`, so an attempt that moved
+    #      after step 1 matches no row and the terminal write refuses. THIS is what
+    #      actually closes the race, and the earlier text credited step 1 with it.
+    #
+    # Everything this route emits names an attempt, because `_provenance` below
+    # always sets it. A failure carrying no provenance at all is still accepted on
+    # purpose, since the orphan reaper raises those and has no attempt to name.
+    #
+    # This block also used to defer the failure-half fix to whoever owned
+    # `server/jobs.py`, naming PRs #129, #130 and #141 as the reason not to touch
+    # it. All three merged and the fix landed; a stale deferral sends the next
+    # reader on a dead errand.
 
     raw_status = str(callback.get("status", "")).strip().lower()
     if raw_status in {"success", "complete"}:
