@@ -816,13 +816,19 @@ property of the ENVIRONMENT: `LEAF_SESSION_ANNEX_STORE` happens to be unset.
 
 Be accurate about how much weaker that is, because an earlier draft of this
 paragraph overstated it as "anyone can falsify that by setting a variable, with
-no pull request and no review". Not on this deployment. The selector lives in a
-task definition, so changing it means either a reviewed terraform change or a
-`configuration_delta`, and the allowlist described above does not even carry the
-annex selector today. The real difference is narrower and still worth having: the
-old reason was visible to anyone reading the application repository, and the new
-one is not. It can change with no diff in this repository at all, so a reader
-here cannot confirm it and must go and look at the live environment.
+no pull request and no review". Not on this deployment. A task-definition
+override takes a reviewed terraform change or a `configuration_delta`, and the
+allowlist described above does not even carry the annex selector today. That
+draft also wrote the list as "means either", which is not exhaustive:
+`deploy/Dockerfile.app` bakes `LEAF_SESSION_ANNEX_STORE=legacy` into the image,
+so a reviewed application change moves it too, and the effective value is
+whichever of image default and task-definition override wins.
+
+The real difference is narrower than "no review" and still worth having. The old
+reason was fully visible to a reader of this repository. The new one is only
+half visible here: the baked default is in this tree, any override is not. So a
+reader here cannot confirm the EFFECTIVE value and must go and look at the live
+environment, which is what the unset observation above actually is.
 
 So state the condition rather than the observation. A first attempt at that
 condition said "outside `session_annex.SHADOW_READ_MODES` and
@@ -838,12 +844,41 @@ has the identical shape around
 PostgreSQL identity raised `RuntimeError: session identity shadow mismatch`,
 which is precisely the failure the condition claimed to exclude.
 
-**Stated correctly, and simply: setting `SESSIONS_DB` is safe only while EVERY
-selector that resolves it is `legacy` or `postgres`.** Those are the only two of
-the five modes that never compare the stores: `legacy` never consults
-PostgreSQL, `postgres` short-circuits before the legacy read, and `dual_write`,
-`dual_write_shadow` and `shadow` all compare. Prefer that formulation to any
-list of mode-set names, since the naming is what produced the error.
+The second attempt then failed the opposite way. It read "safe only while every
+selector that resolves it is `legacy` or `postgres`", which is right about
+COMPARISON and wrong about SAFETY, because it admits
+`LEAF_SESSIONS_STORE=legacy`. **Not comparing is not the same as being inert**,
+and blurring those two is what made both attempts wrong.
+
+There are two independent hazards, and `SESSIONS_DB` is only safe when neither
+applies:
+
+1. **The comparison hazard.** A selector in `dual_write`, `dual_write_shadow` or
+   `shadow` compares the two stores and raises on disagreement. Only `legacy`
+   and `postgres` never compare: `legacy` never consults PostgreSQL at all, and
+   `postgres` short-circuits before the legacy read.
+2. **The authority hazard, which the earlier drafts missed entirely.** Any mode
+   that still READS the SQLite file makes `SESSIONS_DB` a live authority
+   pointer, so repointing it swaps the authority and abandons whatever the old
+   path held. That covers `legacy`, `dual_write`, `dual_write_shadow` and
+   `shadow`. Only `postgres` makes the variable inert for its own tables.
+
+So the rule is ASYMMETRIC between the two selectors, exactly as the earlier
+paragraph in this section already said:
+
+- `LEAF_SESSIONS_STORE` must be `postgres`. Under `legacy` there is no mismatch
+  to create, and repointing still moves the live session authority to an empty
+  file, which is a different failure and not an acceptable one.
+- `LEAF_SESSION_ANNEX_STORE` may be `legacy` or `postgres` for the comparison
+  rule, but under `legacy` the annex tables are still read from the file, so
+  repointing abandons them. On staging that content is already lost at every
+  task replacement, so it costs nothing; on production it would not be.
+
+And the startup gate above then narrows every EXECUTABLE state to both selectors
+at `postgres`, which is the only combination where `SESSIONS_DB` is inert for
+sessions and annex alike. Prefer naming the behaviour to naming a mode set: the
+first attempt reasoned from `_SHADOW_READ_MODES` and never checked what that set
+excluded.
 
 Re-read the live task definition for BOTH selectors immediately before touching
 `SESSIONS_DB`, exactly as this document already says to re-read the desired
