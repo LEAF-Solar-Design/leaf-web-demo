@@ -125,11 +125,11 @@
       "args_schema": { "type": "object",
         "properties": {
           "tenant_id": { "type": "string" },
-          "overlay": { "type": "object" },
-          "expected_revision": { "type": "integer" }
+          "overlay": { "type": "object" }
         },
-        "required": ["tenant_id", "overlay", "expected_revision"],
-        "additionalProperties": false }
+        "required": ["tenant_id", "overlay"],
+        "additionalProperties": false },
+      "enabled": false
     },
     "operator.worker_credential_rotate": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
