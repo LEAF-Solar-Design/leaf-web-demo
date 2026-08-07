@@ -90,7 +90,7 @@ def test_broker_manifest_requires_explicit_production_posture():
     } <= required
 
 
-def test_manifests_do_not_require_the_legacy_sandbox_variable():
+def test_manifests_keep_standard_services_selector_and_drop_legacy_sandbox():
     """The runtime tool sandbox contract is provider-based and conditional.
 
     ``LEAF_SANDBOX`` is the legacy tool_loader flag; terraform #561 strips the
@@ -104,6 +104,10 @@ def test_manifests_do_not_require_the_legacy_sandbox_variable():
     ``assertAuthoredSandboxBoundary``, and the terraform render script's
     ``_assert_target_posture``. The provider variable is therefore not
     unconditionally required either: a dark posture legitimately omits it.
+
+    The harness still needs ``LEAF_STANDARD_SERVICES_ENV``. Without that
+    selector, staging service URLs are interpreted under production endpoint
+    rules and an otherwise valid task can fail during boot.
     """
     for service in ("broker", "harness"):
         manifest = json.loads(
@@ -114,6 +118,9 @@ def test_manifests_do_not_require_the_legacy_sandbox_variable():
         required = set(manifest["required"]["environment"])
         assert "LEAF_SANDBOX" not in required, service
         assert "LEAF_TOOL_SANDBOX_PROVIDER" not in required, service
+
+        if service == "harness":
+            assert "LEAF_STANDARD_SERVICES_ENV" in required
 
 
 def test_credential_holding_services_require_runtime_posture():
