@@ -107,14 +107,29 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
     apostrophes nested inside them) do expand.
 
     A `#` gets NO expansion decision here. _executable_bash has already
-    removed real full-line and trailing shell comments, so any `#`
-    reaching this scanner is ambiguous (a glued mid-word hash, or a
-    comment inside a substitution or backtick the line stripper cannot
-    see), and this returns False on it so the caller reports the RUN as
-    offending: a LOUD false-offend, never a silent false-accept. See the
-    `if "#" in body` guard below. Other scope boundaries, fail-loud not
-    silent: heredoc bodies, $$ self-escapes, and BuildKit --flag
-    expansion are not modeled; no checked Dockerfile uses them.
+    removed real full-line and trailing shell comments, so a `#` reaching
+    this scanner is ambiguous (a glued mid-word hash, or a comment inside
+    a substitution or backtick the line stripper cannot see), and this
+    returns False on it so the caller reports the RUN as offending: a
+    LOUD false-offend on that class. See the `if "#" in body` guard.
+
+    KNOWN FALSE-ACCEPT LIMITS (operator-accepted, PR #514 r9 -- do not
+    re-file as bugs). This is a best-effort scanner, not a shell parser.
+    It CAN silently mis-accept a per-commit ref that bash would not
+    actually expand when the ref sits inside nested quoting or
+    substitution, e.g. `"$(printf '%s' '${LEAF_SOURCE_SHA}')"` (single-
+    quoted inside a command substitution inside double quotes), inside a
+    heredoc body, or beside a `$$` self-escape; `_executable_bash` can
+    likewise drop a `#` that is really inside a double-quoted value and
+    skew the scan. Every such form needs adversarial RUN text: NO guarded
+    Dockerfile has a `#`, a `$(...)`, a backtick, a heredoc or a `$$` in
+    any post-ARG RUN (all six use simple `${REF}` forms), so the scanner
+    is offense-free and correct on every real input. The residual is a
+    SILENT cache-efficiency regression on contrived text only (one extra
+    rebuild), never a correctness or security fault. Closing it fully
+    needs a real shell parser or a fail-loud whitelist of allowed
+    constructs; rounds 4-9 showed patch-per-corner does not terminate, so
+    the residual is accepted rather than chased.
     """
     body = run_body.strip()
     # RUN flags (--mount/--network/--security[=value]) precede either
