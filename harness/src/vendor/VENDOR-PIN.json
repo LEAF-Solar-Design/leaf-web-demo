@@ -28,7 +28,7 @@
     "ports/impl/gatewayStandardServiceProvider.ts": "12dd13ef59bc0a928b1a82fef3f296999ca17078bd3d0032beeee6f09258c1d4",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
-    "ports/impl/httpUpstreamSink.ts": "c936a9e2246ed8efab0abb837b5d2187f29e71034b4bf1755cf7b61f71e7e33c",
+    "ports/impl/httpUpstreamSink.ts": "2e4266b675e3726a28c9da24f6b88a314d4a857de76bfb2c45f2ba7ee22c1a08",
     "ports/impl/mcpBridge.ts": "6c5c46bf0da73011515ca50813e22f44f9bec300894914d5b308abba14509c1e",
     "ports/impl/mcpProxy.ts": "ca40c055b75dd211e214b4474d2002c46fb2c55a6b3059995e3d14edf25654b0",
     "ports/impl/oauthGrantProvider.ts": "0b211d1ba3e1a6a4817fe591f65426e4d69f86a15eba1f06a00ce166576f6ef0",
@@ -56,5 +56,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "898d39514648616a174f957537b3c852a6e435f8"
+  "upstream_commit": "3bcb2bedb3686e102c58241893a7d904eff8accf"
 }
