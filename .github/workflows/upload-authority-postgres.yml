@@ -43,6 +43,10 @@ on:
       # The async-job authority and its callback route. `server/broker.py` was
       # already listed, so a change to the callback attempt guard already
       # triggered this workflow while no step here ran the suite that covers it.
+      # `server/da/callbacks.py` is loaded by `broker._get_callbacks()` and does
+      # the signing and PostgreSQL replay consumption the live subprocess test
+      # drives end to end, so a PR touching only that file must start this job.
+      - 'server/da/callbacks.py'
       - 'server/job_pg_store.py'
       - 'server/jobs.py'
       - 'server/ops_metrics_read.py'
@@ -226,6 +230,12 @@ jobs:
           # Same bash string match as the overlay and sessions steps, for the
           # reason written out in full at the overlay skip-check above.
           # `${out,,}` keeps it as case-insensitive as `grep -qi`.
+          # The match is deliberately broad, so a passing run whose output happened
+          # to contain the word "skipped" (a warning, say) would fail this step.
+          # That direction is accepted: a false FAIL is loud and fixed in one edit,
+          # a false PASS is the vacuous green this step exists to prevent. Keeping
+          # the same form as the two steps around it is worth more than a tighter
+          # pattern that only this one uses.
           if [[ "${out,,}" == *skipped* ]]; then
             printf '%s\n' "$out"
             echo 'FAIL: async-job callback tests skipped - DATABASE_URL is not reaching pytest.'
