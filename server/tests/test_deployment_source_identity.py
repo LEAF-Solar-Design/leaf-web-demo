@@ -226,6 +226,55 @@ def test_configuration_baseline_validation_precedes_identity_injection():
     assert deployment_identity(runtime) == receipt
 
 
+def test_app_manifest_requires_an_explicit_session_authority():
+    """An absent LEAF_SESSIONS_STORE silently selects an EPHEMERAL authority.
+
+    ``session_store._store_mode`` defaults to ``legacy``, and ``legacy`` reads
+    and writes SQLite alone at ``SESSIONS_DB``, which itself defaults to the
+    task-local ``server/sessions.db``. A deploy that omits the selector
+    therefore lands an app whose session authority dies with the ECS task, and
+    nothing in the manifest notices. Absence is also not readable from the task
+    definition alone: ``deploy/Dockerfile.app`` bakes a value into the image, so
+    a task definition that sets nothing still runs an unstated mode.
+
+    Same shape as ``test_broker_manifest_requires_explicit_production_posture``
+    above: a variable whose ABSENCE picks the unsafe branch has to be required,
+    so the deployment states its authority instead of inheriting one.
+    """
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )
+
+    assert "LEAF_SESSIONS_STORE" in set(manifest["required"]["environment"])
+
+
+def test_app_manifest_deliberately_does_not_require_sessions_db():
+    """SESSIONS_DB is intentionally absent, and this records why.
+
+    It reads as a gap next to ``JOBS_DB``, and requiring it is the obvious
+    "fix". It is the wrong one, in both directions:
+
+    * Under a legacy-touching mode, pointing SESSIONS_DB at a fresh durable path
+      leaves an EMPTY SQLite against a populated PostgreSQL. Every existing
+      ``(tenant_id, drawing_id)`` then fails ``_shadow_equal`` on every request,
+      PERMANENTLY, rather than until the next task replacement. There is no
+      PostgreSQL to SQLite direction: ``scripts/reconcile_sessions_authority.py``
+      is insert-only and opens its source ``mode=ro``.
+    * Under ``postgres`` the variable has no reader at all, so requiring it
+      would demand configuration that nothing consumes.
+
+    The durable answer is the store selector above, not the path. If a future
+    change does require the path, it must be conditional on the mode, which this
+    flat manifest cannot express -- so it belongs in the app's own startup
+    validation, not here.
+    """
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )
+
+    assert "SESSIONS_DB" not in set(manifest["required"]["environment"])
+
+
 def test_web_image_writes_source_identity_health_file():
     dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(encoding="utf-8")
     assert "ARG LEAF_SOURCE_SHA=unknown" in dockerfile
