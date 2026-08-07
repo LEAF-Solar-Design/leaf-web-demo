@@ -18,9 +18,11 @@ name: Dispatch staging deploys
 #
 # Docs-only no-op: a docs-only push's build run succeeds without building
 # (its noop gate skips the graph) and publishes a docs-noop marker artifact
-# instead of a supply set. This relay treats marker-without-manifest as a
-# clean skip; manifest-and-marker both absent stays a hard error, because a
-# successful build with no supply set means a partial run.
+# instead of a supply set. This build has no images of its own, so the
+# manifest step's docs-only reconcile arm resolves the last tag built from
+# main and deploys BOTH services onto it (see that arm below for the
+# never-backwards reasoning); manifest-and-marker both absent stays a hard
+# error, because a successful build with no supply set means a partial run.
 #
 # Rerun semantics: rerunning a successful build (or this relay) deploys
 # both services again, deliberately. The deploys register a fresh task
@@ -45,16 +47,23 @@ name: Dispatch staging deploys
 # Superseded mid-release: being overtaken by a newer merge after one service
 # is already live leaves staging split, so the relay asks whether the newer
 # commit will converge it, using that commit's OWN build receipt rather than
-# a re-derived diff. A docs-only push publishes a docs-noop marker and no
-# supply set, and the manifest step above turns that marker into
-# deploy=false, so a marker proves the superseder dispatches NOTHING: no
-# newer deploy exists to land on top of, and nothing else would ever close
-# the split, so this release finishes its remaining services instead of
-# standing down. A superseder whose build SUCCEEDED without a marker
-# produced a supply set, so its own relay converges staging and standing
-# down is both safe and silent-free. Anything else (its build failed, never
-# appeared, or outlived the watch budget) leaves staging split with no known
-# converger and fails this relay RED. Observed 2026-08-07: relay
+# a re-derived diff. Since PR #519 BOTH kinds of superseder converge staging,
+# so this relay STANDS DOWN on proof rather than finishing its own older tag
+# on a moved tip. A superseder whose build SUCCEEDED without a marker produced
+# a supply set, so its own relay deploys those images (`yes`). A DOCS-ONLY
+# superseder publishes a docs-noop marker and no supply set (`no`); it builds
+# no images of its own, but its relay now RECONCILES both services onto the
+# last tag built from main (the manifest step's reconcile arm below). Both
+# publish the SAME staging-converged receipt, so in either case this relay
+# waits for that receipt and stands down only once it lands. Anything else
+# (its build failed, never appeared, or outlived the watch budget), or a
+# receipt that never arrives within budget, leaves staging split with no known
+# converger and fails this relay RED. The older behaviour -- finishing the
+# remaining services on a `no` verdict -- was itself a reopened backwards-
+# deploy race, because once docs-only commits reconcile they can deploy, so a
+# stood-down relay finishing its older tag could land it on top of the
+# superseder's newer deploy (sol-critic RED round 2 on PR #519). Observed
+# 2026-08-07 under the ORIGINAL stand-down-and-finish behaviour: relay
 # 31144164225 stood down after deploying web, the superseding commit was
 # docs-only, nothing converged, and the run still concluded success, so
 # leaf-platform-web-alt ran prod-d9306c3 while leaf-platform-app-alt ran
@@ -118,14 +127,19 @@ name: Dispatch staging deploys
 # ALB rule weights: no amount of run-name reading is authoritative about what
 # is serving, and this code must never pretend otherwise.
 #
-# Converging a split with NO new images (a docs-only tip builds none) would
-# need a sound read of live state, which means the relay reading ECS/ALB
-# directly through an OIDC role. That adds id-token: write, breaks the pinned
-# capability wall below, and needs an infra-repo trust change. Deliberately
-# out of scope here: a docs-only tip still skips, so the split waits for the
-# next DEPLOYABLE merge, and even that one only converges it if its own relay
-# is not itself superseded and its own need-first read decides. Need-first
-# ordering makes prompt convergence more likely; it does not make it certain.
+# Reconciling a split with NO new images of its own: a docs-only tip builds
+# none, so its relay cannot deploy its OWN images. Since PR #519 it instead
+# RECONCILES -- it resolves the last tag built from main (the newest ancestor
+# supply set, see the manifest step below) and deploys both services onto that
+# existing image through the one watched dispatch site. What stays out of scope
+# is any decision that would need a SOUND read of live state: this relay never
+# reads ECS/ALB (that would add id-token: write, break the pinned capability
+# wall below, and need an infra-repo trust change), so when the newest valid
+# supply set is NON-ancestral -- it may be live but the relay cannot prove it --
+# the reconcile FAILS CLOSED rather than guess, and never rolls a service
+# backwards onto an older ancestor. Convergence is therefore likelier than the
+# old skip-and-wait, but still not certain: a reconcile that fails closed, or a
+# tip that keeps moving, leaves the split for a later merge.
 #
 # CLAIM DISCIPLINE, because this file keeps getting this wrong. Rounds 2, 3
 # and 4 of review on PR #506 were all RED for the same reason: a comment
@@ -353,18 +367,28 @@ jobs:
               exit 1
             }
             # REACHABILITY IS THE NEVER-BACKWARDS ARGUMENT. Runs are scanned
-            # newest-first; every run skipped above provably built no images (it
-            # carried a docs-noop marker) and every unreadable deployable run
-            # failed the release closed, so the FIRST ancestor found is the newest
-            # main-derived image and nothing newer exists to be older than. A
-            # candidate whose commit is NOT an ancestor (history rewritten, or an
-            # artifact that outlived its branch) is skipped; an unreadable compare
-            # yields an empty relation and is skipped too, so this fails closed.
-            # A transient compare failure must NOT be treated as a
-            # non-ancestor: `|| true` would blank RELATION, skip this
-            # candidate, and fall back to an older tag -- a backwards deploy
-            # (sol-critic RED round 2 on PR #519). Only an explicitly read
-            # non-ancestor status may skip; an unreadable compare fails closed.
+            # newest-first. Every run skipped above provably built no images (it
+            # carried a docs-noop marker), and every deployable run whose supply
+            # set was unreadable or whose provenance did not match already failed
+            # the release closed, so the only candidates reaching this compare
+            # carry a VALID, provenance-matched supply set. Among those, the FIRST
+            # whose commit is a strict ANCESTOR of the tip ('ahead') is the newest
+            # main-derived image the tip is built on, and it wins.
+            #
+            # A valid candidate that is NOT an ancestor ('behind' or 'diverged')
+            # is, by the newest-first order, NEWER than any ancestor still to
+            # come, and may be LIVE (a deployable merge landed after this
+            # docs-only tip, or a commit deployed before main was rewritten under
+            # it). It therefore FAILS THE RELAY CLOSED rather than skipping:
+            # skipping it to deploy an older ancestor is exactly the backwards
+            # deploy this guard exists to stop (sol-critic RED round 3 on PR
+            # #519). Only 'identical' (the tip commit itself, which is docs-only
+            # and carries no images) keeps scanning.
+            #
+            # A transient compare failure must NOT be treated as a non-ancestor:
+            # `|| true` would blank RELATION, skip this candidate, and fall back
+            # to an older tag -- a backwards deploy (sol-critic RED round 2 on PR
+            # #519). An unreadable compare fails closed too.
             if ! RELATION=$(gh api \
               "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$BUILD_HEAD_SHA" \
               --jq '.status'); then
@@ -373,10 +397,32 @@ jobs:
             fi
             case "$RELATION" in
               ahead)
+                # CANDIDATE_SHA is a strict ANCESTOR of the tip (the tip is
+                # built on top of it), so its images are exactly what this tip
+                # describes. Newest-first, this is the newest such ancestor.
                 ;;
-              behind|identical|diverged)
-                echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): the compare against the tip reports '$RELATION', not 'ahead', so that commit is not an ancestor of $BUILD_HEAD_SHA and its images are not what this tip describes."
+              identical)
+                # Same commit as the tip. The tip is docs-only (this IS the
+                # reconcile arm) and built no images of its own, so a run on the
+                # same commit carries nothing deployable and nothing NEWER than
+                # an ancestor -- there is no backwards risk here. Keep scanning.
+                # In practice unreachable: a same-sha run is docs-only too, so it
+                # published a marker not a supply set and was skipped above.
+                echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): its commit is identical to the tip $BUILD_HEAD_SHA, which is docs-only and built no images of its own, so there is nothing newer here to roll back from."
                 continue
+                ;;
+              behind|diverged)
+                # A READABLE, provenance-matched supply set whose commit is NOT
+                # an ancestor of the tip: it is a descendant ('behind'), or on a
+                # line main was rewritten away from ('diverged'). Scanned
+                # newest-first, this candidate is NEWER than any ancestor the
+                # reconcile could still fall back to, and it MAY BE LIVE. Skipping
+                # it to deploy an older ancestor is exactly the backwards deploy
+                # this guard exists to stop, so FAIL CLOSED (sol-critic RED round
+                # 3 on PR #519: 'behind'/'diverged' were lumped with a clean skip
+                # and the scan shipped the older ancestor).
+                echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: candidate run $RUN_ID ($CANDIDATE_SHA) has a valid staging supply set but compares '$RELATION' against the tip $BUILD_HEAD_SHA, so it is not an ancestor and, scanned newest-first, is NEWER than any tag the reconcile could fall back to. That commit may be live (a deployable merge after this docs-only tip, or a commit deployed before main was rewritten under it), and deploying an older ancestor over it would roll a staging service BACKWARDS. Failing closed. Converge staging with a successful main build, or dispatch $DEPLOY_WORKFLOW by hand with an exact task-definition ARN."
+                exit 1
                 ;;
               *)
                 echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: the ancestry compare of candidate run $RUN_ID ($CANDIDATE_SHA) returned an unexpected status '$RELATION'. Failing closed rather than risk a backwards deploy."

@@ -2991,7 +2991,19 @@ def check_docs_noop_filter(text: str) -> None:
         # within budget is still RED). Reviewed for dispatch capability: one
         # `gh workflow run` still in the deploy step, no new secret, and the
         # only added reads are the reconcile's existing gh api GETs.
-        "a54f43e929d5d084d66710165647203357815efe9863c5d76dd8701bcbee7c1a"
+        # Hash updated 2026-08-07 (i): sol-critic RED round 3 on PR #519. The
+        # reconcile compare's `behind|identical|diverged` skip branch is split:
+        # a NON-ancestor candidate carrying a valid, provenance-matched supply
+        # set ('behind' or 'diverged') now FAILS CLOSED, because scanned
+        # newest-first it is NEWER than any ancestor the reconcile could fall
+        # back to and may be live, so skipping it to deploy an older ancestor
+        # was a backwards deploy. Only 'identical' (the docs-only tip commit
+        # itself, which carries no images) still continues. Control-flow + text
+        # change inside the manifest script; no dispatch change: still exactly
+        # ONE `gh workflow run` in the deploy step with the same four inputs, no
+        # new secret reference, and no new gh call -- the compare read is
+        # unchanged, only its non-ancestor outcome moved from skip to exit 1.
+        "d67e511824679788c9a92ed481b39ace2d76e4ad911b3595c8323943f1162c86"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5129,30 +5141,24 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
 
     Runs the extracted manifest script against a fake gh: the docs-only build
     published a marker and no supply set, so the reconcile scans main's
-    successful build runs newest-first, skips the newer NON-ancestor tag, takes
-    the newest tag whose commit IS an ancestor of the tip, and sets deploy=true
-    onto it. Then feeds that tag to the real dispatch script and asserts BOTH
-    staging services deploy onto it -- the split-closing behaviour end to end.
-    This is the DOES half of the static pins in the invariants test.
+    successful build runs newest-first and takes the newest tag whose commit IS
+    an ancestor of the tip, setting deploy=true onto it. Then feeds that tag to
+    the real dispatch script and asserts BOTH staging services deploy onto it --
+    the split-closing behaviour end to end. This is the DOES half of the static
+    pins in the invariants test.
     """
-    # Rows newest-first: 100 is the docs-only build itself (skipped), 99 carries
-    # a NEWER tag whose commit diverged from the tip (must be refused), 98
-    # carries the newest tag whose commit is an ancestor (must win).
-    rows = ["100 docshead 1", "99 notanc 1", "98 ancestor 1"]
-    supply = {"99": {"sha": "notanc", "attempt": "1", "tag": "prod-bad4567"},
-              "98": {"sha": "ancestor", "attempt": "1", "tag": "prod-abc1234"}}
-    relations = {"notanc": "diverged", "ancestor": "ahead"}
+    # Rows newest-first: 100 is the docs-only build itself (skipped), 98 carries
+    # the newest tag whose commit IS an ancestor of the tip (must win). No newer
+    # non-ancestor sits above it, so the reconcile lands on 98.
+    rows = ["100 docshead 1", "98 ancestor 1"]
+    supply = {"98": {"sha": "ancestor", "attempt": "1", "tag": "prod-abc1234"}}
+    relations = {"ancestor": "ahead"}
 
     rc, out, outputs = _rehearse_relay_manifest(
         rows=rows, supply_sets=supply, relations=relations)
     assert rc == 0, out
     assert outputs.get("deploy") == "true", (out, outputs)
-    # The newest ANCESTOR tag wins; the newer non-ancestor tag is refused. That
-    # refusal IS the never-backwards guarantee, so assert both.
     assert outputs.get("image_tag") == "prod-abc1234", (out, outputs)
-    assert "not 'ahead'" in out, (
-        "the non-ancestor candidate must be explicitly refused")
-    assert "prod-bad4567" != outputs.get("image_tag")
 
     # END TO END: hand the resolved tag to the REAL dispatch script; both
     # services land on it through the single watched dispatch site.
@@ -5162,16 +5168,56 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
     assert rc2 == 0, out2
     assert deployed == [("web", "prod-abc1234"), ("app", "prod-abc1234")], deployed
 
-    # NEGATIVE: a docs-only build with no reachable ancestor fails RED rather
-    # than skipping -- skipping is exactly how a split used to survive.
+    # NEVER-BACKWARDS (sol-critic RED round 3 on PR #519). A NEWER valid supply
+    # set whose commit is NON-ancestral -- 'diverged' (main was rewritten under
+    # a deployed commit) or 'behind' (a deployable merge landed after this
+    # docs-only tip) -- MUST fail closed, never skip to the older ancestor. That
+    # skip IS the backwards deploy: run 99's newer tag may be live, so shipping
+    # run 98's older tag rolls both services back. The old code lumped
+    # 'behind'/'diverged' with a clean skip and shipped prod-abc1234.
+    for newer_relation in ("diverged", "behind"):
+        rc_nb, out_nb, outputs_nb = _rehearse_relay_manifest(
+            rows=["100 docshead 1", "99 newer 1", "98 ancestor 1"],
+            supply_sets={"99": {"sha": "newer", "attempt": "1",
+                                "tag": "prod-new9999"},
+                         "98": {"sha": "ancestor", "attempt": "1",
+                                "tag": "prod-abc1234"}},
+            relations={"newer": newer_relation, "ancestor": "ahead"})
+        assert rc_nb != 0, (newer_relation, out_nb)
+        assert "cannot reconcile safely" in out_nb, (newer_relation, out_nb)
+        assert "may be live" in out_nb, (newer_relation, out_nb)
+        assert outputs_nb.get("deploy") != "true", (newer_relation, outputs_nb)
+        assert outputs_nb.get("image_tag") != "prod-abc1234", (
+            "must not fall back to the older ancestor tag",
+            newer_relation, outputs_nb)
+        assert outputs_nb.get("image_tag") != "prod-new9999", (
+            "and must not deploy the unproven newer tag either",
+            newer_relation, outputs_nb)
+
+    # NEGATIVE: a docs-only build whose ONLY candidate is a non-ancestor with a
+    # valid supply set fails RED at the divergence -- it may be live, so the
+    # reconcile refuses rather than skip-and-strand or deploy backwards.
     rc3, out3, outputs3 = _rehearse_relay_manifest(
         rows=["100 docshead 1", "97 orphan 1"],
         supply_sets={"97": {"sha": "orphan", "attempt": "1",
                             "tag": "prod-dead999"}},
         relations={"orphan": "diverged"})
     assert rc3 != 0, out3
-    assert "has nothing to reconcile onto" in out3, out3
+    assert "cannot reconcile safely" in out3, out3
+    assert "may be live" in out3, out3
     assert outputs3.get("deploy") != "true", outputs3
+
+    # And a scan that finds ONLY docs-noop markers above (no ancestor supply
+    # set at all) still fails RED at the END rather than exiting green
+    # undeployed -- skipping was how a split used to survive a docs-only merge.
+    rc3b, out3b, outputs3b = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docsonly99 1"],
+        supply_sets={},
+        relations={},
+        markers={"99": {"sha": "docsonly99", "attempt": "1"}})
+    assert rc3b != 0, out3b
+    assert "has nothing to reconcile onto" in out3b, out3b
+    assert outputs3b.get("deploy") != "true", outputs3b
 
     # A newer DOCS-ONLY run (marker present, no supply set) between the tip
     # and the deployable ancestor must be SKIPPED, not mistaken for a
