@@ -141,6 +141,7 @@ def verify_subscription_mount(tenant_id: str, mount_id: str) -> None:
             url,
             headers={"X-Harness-Secret": secret},
             timeout=5,
+            allow_redirects=False,
         )
     except Exception as exc:  # noqa: BLE001 - provider errors are sanitized
         raise McpAuthorityError("subscription mount authority is unavailable") from exc

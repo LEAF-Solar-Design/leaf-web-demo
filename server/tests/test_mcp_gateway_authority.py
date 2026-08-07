@@ -168,8 +168,13 @@ def test_subscription_mount_uses_separate_grant_admin_authority(monkeypatch):
                 ],
             }
 
-    def get(url, *, headers, timeout):
-        seen.update(url=url, headers=headers, timeout=timeout)
+    def get(url, *, headers, timeout, allow_redirects):
+        seen.update(
+            url=url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
         return Response()
 
     monkeypatch.setattr("requests.get", get)
@@ -180,6 +185,7 @@ def test_subscription_mount_uses_separate_grant_admin_authority(monkeypatch):
         "url": f"http://harness.internal:8120/grants/{TENANT}",
         "headers": {"X-Harness-Secret": "harness-admin-secret"},
         "timeout": 5,
+        "allow_redirects": False,
     }
     with pytest.raises(mcp_authority.McpMountDenied):
         mcp_authority.verify_subscription_mount(TENANT, "ineligible")
@@ -189,6 +195,24 @@ def test_subscription_mount_fails_closed_without_independent_verifier(monkeypatc
     monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
     monkeypatch.delenv("LEAF_HARNESS_SECRET", raising=False)
 
+    with pytest.raises(mcp_authority.McpAuthorityError):
+        mcp_authority.verify_subscription_mount(TENANT, MOUNT)
+
+
+def test_subscription_mount_never_forwards_secret_across_redirect(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8120")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "harness-admin-secret")
+
+    class Redirect:
+        status_code = 302
+
+    def get(_url, *, headers, timeout, allow_redirects):
+        assert headers == {"X-Harness-Secret": "harness-admin-secret"}
+        assert timeout == 5
+        assert allow_redirects is False
+        return Redirect()
+
+    monkeypatch.setattr("requests.get", get)
     with pytest.raises(mcp_authority.McpAuthorityError):
         mcp_authority.verify_subscription_mount(TENANT, MOUNT)
 
