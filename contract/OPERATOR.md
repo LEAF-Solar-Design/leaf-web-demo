@@ -123,7 +123,7 @@ enforcing §7.
 | `operator.read_sessions` | O1 | 1 | auto | low | none | 10 | none | `read_sessions` | n/a (read-only) | no | on |
 | `operator.read_audit` | O1 | 1 | auto | low | none | 10 | none | `read_audit` | n/a (read-only) | no | on |
 | `operator.read_worker_status` | O1 | 1 | auto | low | none | 10 | none | `read_worker_status` | n/a (read-only) | no | on |
-| `operator.worker_submit_job` | O2 | 2 | auto | medium | cost_tokens | 1800 | no prod credential in job env (structural); disposable workspace | `worker_submit_job` | cancel job; workspace is disposable and destroyed on completion | no | on |
+| `operator.worker_submit_job` | O2 | 2 | auto | medium | cost_tokens | 1800 | no production credential in job env (structural); disposable workspace | `worker_submit_job` | cancel job; workspace is disposable and destroyed on completion | no | on |
 | `operator.worker_cancel_job` | O2 | 2 | auto | medium | none | 30 | job exists and is owned by the principal | `worker_cancel_job` | n/a (idempotent) | no | on |
 | `operator.repo_propose_change` | O3 | 3 | auto | medium | none | 1800 | branch namespace operator/<subject>/<uuid>; base SHA named | `repo_propose_change` | delete the operator/<subject>/<uuid> branch; never touches main | no | on |
 | `operator.tenant_agent_pause` | O4 | 4 | always-confirm | high | none | 30 | tenant exists; current enabled-state revision named | `tenant_agent_pause` | operator.tenant_agent_resume | no | off |

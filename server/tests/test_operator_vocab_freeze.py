@@ -164,22 +164,28 @@ def test_matrix_has_no_production_reachable_action():
 
 
 def test_operator_md_table_fields_match_json():
-    """Load-bearing JSON<->Markdown agreement: the OPERATOR.md table's
-    rung / policy / handler / reversal / prod-reachable cells must equal the
-    JSON for every action. Editing a field in EITHER copy fails the gate."""
+    """Load-bearing JSON<->Markdown agreement: EVERY shared column of the
+    OPERATOR.md §4.1 table must equal the JSON for every action, compared
+    exactly. Editing any field in either copy fails the gate."""
     matrix = _load_matrix()["actions"]
     headers, table = _parse_md_matrix_table()
-    for col in ("rung", "policy", "handler", "reversal", "prod-reachable"):
+    # md-header -> json-key (exact string compare of str(json_value))
+    COLUMN_MAP = {
+        "class": "class", "rung": "rung", "policy": "policy",
+        "rate": "rate", "spend": "spend", "timeout(s)": "timeout_s",
+        "precondition": "precondition", "reversal": "reversal",
+    }
+    for col in list(COLUMN_MAP) + ["handler", "prod-reachable"]:
         assert col in headers, f"OPERATOR.md §4.1 table missing '{col}' column"
     for name, entry in matrix.items():
         assert name in table, f"{name} missing from the OPERATOR.md table"
         row = table[name]
-        assert row["rung"] == str(entry["rung"]), (name, "rung", row["rung"])
-        assert row["policy"] == entry["policy"], (name, "policy", row["policy"])
+        for md_col, json_key in COLUMN_MAP.items():
+            assert row[md_col] == str(entry[json_key]), (
+                name, md_col, "md=", row[md_col], "json=", entry[json_key])
         # handler cell may be backtick-wrapped; compare on the bare name
         assert entry["handler"] == row["handler"].strip("`"), (
             name, "handler", row["handler"])
-        assert row["reversal"], (name, "reversal cell empty in Markdown")
         assert row["prod-reachable"].lower() == "no", (
             name, "prod-reachable", row["prod-reachable"])
 
