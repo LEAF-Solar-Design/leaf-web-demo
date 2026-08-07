@@ -4141,6 +4141,149 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
     print("staging relay convergence decoy battery: PASS")
 
 
+_CLASSIFIER_HARNESS = """set -euo pipefail
+GITHUB_REPOSITORY=owner/repo
+HOME_TOKEN=token
+POLL_SECONDS=0.05
+_END=$(( $(date +%%s) + 2 ))
+before_deadline() { [ "$(date +%%s)" -lt "$_END" ]; }
+%(classifier)s
+superseder_deploys "%(sha)s"
+"""
+
+_FAKE_GH = """#!/usr/bin/env bash
+url="$2"
+case "$url" in
+  *"/actions/runs?head_sha="*)
+    if [ "${FAIL_RUNS:-0}" = 1 ]; then exit 1; fi
+    printf '%s' "$RUNS_JSON" ;;
+  *"/artifacts?per_page=100")
+    if [ "${FAIL_ARTIFACTS:-0}" = 1 ]; then exit 1; fi
+    printf '%s' "$ARTIFACTS_JSON" ;;
+  *"/actions/runs/"*)
+    if [ "${FAIL_RECORD:-0}" = 1 ]; then exit 1; fi
+    printf '%s' "$RECORD_JSON" ;;
+  *) exit 9 ;;
+esac
+"""
+
+
+def check_staging_relay_classifier_behaviour(text: str) -> None:
+    """EXECUTE the real classifier against stubbed API responses.
+
+    WHY THIS EXISTS. Every guard below was previously pinned only as
+    text, and sol-critic kept finding edits that changed behaviour while
+    satisfying every pin: an always-true jq filter, a second
+    `CONVERGER=`/`VERDICT=` assignment, a redefinition of
+    `classify_superseder_once`, and an early `|| { echo yes; return 0; }`
+    that still left four `|| return 1` occurrences behind. Pinning text
+    was not converging, because the property that matters is what the
+    function ANSWERS, not what it says.
+
+    So this drives the actual bash lifted from the parsed YAML. The
+    invariant is one line: NOTHING may answer `yes` unless the
+    superseding build really published an unexpired, attempt-bound
+    supply set. A redefinition or an early `echo yes` fails here no
+    matter where it is hidden.
+    """
+    bash = shutil.which("bash")
+    jq_bin = shutil.which("jq")
+    assert bash and jq_bin, "the classifier rehearsal needs bash and jq on PATH"
+
+    wf = _strict_yaml(text)
+    run_steps = [s for s in wf["jobs"]["dispatch"]["steps"] if "run" in s]
+    code = run_steps[-1]["run"]
+    start = code.index("BUILD_WORKFLOW_PATH=")
+    end = re.search(r"^superseder_deploys\(\) \{\n.*?^\}$", code[start:],
+                    re.S | re.M)
+    assert end, "the classifier and its polling wrapper must be extractable"
+    classifier = code[start:start + end.end()]
+
+    sha = "abc123"
+    supply = f"staging-supply-set-{sha}-attempt-2"
+    marker = f"docs-noop-{sha}-attempt-2"
+    build_path = ".github/workflows/build-platform-images.yml"
+    good_run = ('{"workflow_runs":[{"id":11,"path":"%s",'
+                '"name":"Build platform images"}]}' % build_path)
+    ok_record = '{"status":"completed","conclusion":"success","run_attempt":2}'
+
+    def arts(*names_expired, total=None):
+        items = ",".join(
+            '{"name":"%s","expired":%s}' % (n, "true" if e else "false")
+            for n, e in names_expired)
+        count = len(names_expired) if total is None else total
+        return '{"total_count":%d,"artifacts":[%s]}' % (count, items)
+
+    # (name, env overrides, expected answer)
+    cases = [
+        ("run-list read fails", {"FAIL_RUNS": "1"}, "unknown"),
+        ("run-record read fails", {"FAIL_RECORD": "1"}, "unknown"),
+        ("artifact read fails", {"FAIL_ARTIFACTS": "1"}, "unknown"),
+        ("no build run for the sha",
+         {"RUNS_JSON": '{"workflow_runs":[]}'}, "unknown"),
+        ("a same-NAMED run at a different path is not our build",
+         {"RUNS_JSON": '{"workflow_runs":[{"id":11,"path":'
+                       '".github/workflows/impostor.yml",'
+                       '"name":"Build platform images"}]}'}, "unknown"),
+        ("success but NO artifacts at all",
+         {"ARTIFACTS_JSON": arts()}, "unknown"),
+        ("success with an unexpired supply set",
+         {"ARTIFACTS_JSON": arts((supply, False))}, "yes"),
+        ("success with an EXPIRED supply set",
+         {"ARTIFACTS_JSON": arts((supply, True))}, "unknown"),
+        ("artifact listing truncated",
+         {"ARTIFACTS_JSON": arts((supply, False), total=9)}, "unknown"),
+        ("artifact listing carries no total_count",
+         {"ARTIFACTS_JSON": '{"artifacts":[]}'}, "unknown"),
+        ("docs-noop marker for the CURRENT attempt",
+         {"ARTIFACTS_JSON": arts((marker, False))}, "no"),
+        ("a PREVIOUS attempt's marker must not outlive a rerun that built",
+         {"ARTIFACTS_JSON": arts((f"docs-noop-{sha}-attempt-1", False),
+                                 (supply, False))}, "yes"),
+        ("the build concluded failure",
+         {"ARTIFACTS_JSON": arts((supply, False)),
+          "RECORD_JSON": '{"status":"completed","conclusion":"failure",'
+                         '"run_attempt":2}'}, "unknown"),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        fake_dir = tmp / "bin"
+        fake_dir.mkdir()
+        gh = fake_dir / "gh"
+        gh.write_text(_FAKE_GH, encoding="utf-8", newline="\n")
+        gh.chmod(0o755)
+        script = tmp / "rehearse.sh"
+        script.write_text(
+            _CLASSIFIER_HARNESS % {"classifier": classifier, "sha": sha},
+            encoding="utf-8", newline="\n")
+
+        for name, overrides, expected in cases:
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_dir}{os.pathsep}{env.get('PATH', '')}"
+            env.setdefault("RUNS_JSON", good_run)
+            env.setdefault("RECORD_JSON", ok_record)
+            env.setdefault("ARTIFACTS_JSON", arts((supply, False)))
+            env["RUNS_JSON"] = overrides.get("RUNS_JSON", good_run)
+            env["RECORD_JSON"] = overrides.get("RECORD_JSON", ok_record)
+            env["ARTIFACTS_JSON"] = overrides.get(
+                "ARTIFACTS_JSON", arts((supply, False)))
+            for key in ("FAIL_RUNS", "FAIL_RECORD", "FAIL_ARTIFACTS"):
+                env[key] = overrides.get(key, "0")
+            proc = subprocess.run(
+                [bash, str(script)], env=env, text=True, capture_output=True)
+            assert proc.returncode == 0, (
+                f"classifier rehearsal {name!r} crashed rc={proc.returncode}\n"
+                f"{proc.stdout}\n{proc.stderr}")
+            answer = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+            assert answer == expected, (
+                f"classifier rehearsal {name!r}: expected {expected!r}, got "
+                f"{answer!r}. Answering `yes` without a proven unexpired "
+                f"supply set is the reporting hole itself.")
+
+    print(f"staging relay classifier rehearsal ({len(cases)} cases): PASS")
+
+
 def test_build_platform_images_workflow_invariants() -> None:
     # Pytest entry point: the gate runner counts collected tests, and a bare
     # main() collects as zero.
@@ -4154,6 +4297,7 @@ def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
     relay = WORKFLOW.parent / "dispatch-staging-deploys.yml"
     check_staging_relay_convergence(relay.read_text(encoding="utf-8"))
     check_staging_relay_convergence_battery(relay)
+    check_staging_relay_classifier_behaviour(relay.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
