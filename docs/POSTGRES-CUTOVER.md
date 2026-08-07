@@ -633,11 +633,26 @@ above, and both were wrong about the overlap window in the ways corrected below.
 **Agreement on the choice is not agreement on the argument**, and here the
 choice survived while much of the shared reasoning did not.
 
-### Option A is decided but NOT dispatchable today, and this is a hard blocker
+### The two-selector dispatch, and the blocker that WAS here (closed 2026-08-07)
 
-Found while re-reviewing this section after `0029` landed. It is not a caveat on
-the decision, it is a prerequisite that lives in the OTHER repository, and
-without it a release-complete go would fail.
+**Read this heading before the subsection: the blocker described below is
+CLOSED.** It said option A was undispatchable because the deploy workflow could
+not carry the second selector. That was true when written and was fixed roughly
+three hours later by `leaf-automation-aws-terraform` **PR #534**, "let the delta
+rail carry `LEAF_SESSION_ANNEX_STORE`", merged **2026-08-07T11:50:05Z**, which
+added both `LEAF_SESSION_ANNEX_STORE=legacy` and `=postgres` to
+`allowed_delta_pair()`, pinned them in
+`test_allowlist_is_positive_and_value_exact`, and documented them in the
+workflow README. Verified against that repository's `main`, not inferred.
+
+The mechanism is kept rather than deleted, because it is still the reason the
+dispatch must name BOTH selectors, and because a reader who plans a
+single-selector delta needs to know why it fails. Only the "cannot be executed"
+conclusion has expired.
+
+Found while re-reviewing this section after `0029` landed. It was not a caveat
+on the decision, it was a prerequisite that lived in the OTHER repository, and
+without it a release-complete go would have failed.
 
 **Half of this is already recorded above and is deliberate.** The annex section
 documents the coupling and its enforcement: a `selector_dependencies` entry in
@@ -672,22 +687,29 @@ So both dispatches available today fail, in opposite ways:
 | `LEAF_SESSIONS_STORE=postgres` alone | workflow accepts, new task raises at startup |
 | both selectors together | workflow refuses the delta before deploying |
 
-**The prerequisite** is therefore a reviewed change in
-`LEAF-Solar-Design/leaf-automation-aws-terraform` adding
-`LEAF_SESSION_ANNEX_STORE=postgres` to `allowed_delta_pair()`. Until it merges,
-option A cannot be executed, and neither can B or C, because all three need the
-same delta. This blocker is independent of the operator's release hold: lifting
-the hold does not make the dispatch work.
+Both rows of that table were true on terraform `main` at `4e86975`
+(2026-08-07T08:34:56Z), where `LEAF_SESSION_ANNEX_STORE` occurred zero times in
+the workflow file. **PR #534 closed the second row.** The first row still holds
+and always will: a single-selector delta still produces a task that refuses to
+start, because that refusal is the application's deliberate gate, not a gap.
 
-**Stated plainly, because it is the kind of thing that gets lost between
-repositories:** `0029` made the staging flip require two selectors, and the
-deploy workflow can carry only one, so `0029` left the staging flip
-undispatchable. Nothing was done wrong. The enforcement is correct and the
-allowlist is correctly closed; they were simply written in different repositories
-and no gate spans both. This document is the only place that currently says so.
+So the surviving rule is not "wait for terraform" but **name both pairs in one
+dispatch**. `allowed_delta_pair()` now accepts the annex selector at `legacy`
+and `postgres`, and the workflow's own duplicate-name check is per NAME, so two
+different names in one delta is fine.
 
-The decision itself is unaffected. A is still the path; it now has a named,
-locatable prerequisite instead of an assumed-clear runway.
+**Kept because it is the kind of thing that gets lost between repositories:**
+`0029` made the staging flip require two selectors while the deploy workflow
+could carry only one, and for about three hours that left the staging flip
+undispatchable with no gate anywhere saying so. Nothing was done wrong. The
+enforcement was correct, the allowlist was correctly closed, they were written
+in different repositories, and no gate spans both. **That last sentence is the
+durable lesson and it is not closed by #534**: the cross-repository seam still
+has no automated check, so the next selector added on one side can silently
+strip dispatchability on the other.
+
+The decision itself was never affected. A was always the path; it briefly had a
+prerequisite, and the prerequisite has landed.
 
 ### The overlap window, measured rather than argued
 
@@ -995,16 +1017,20 @@ section decides only which path to take once it is.
 **Do not copy an earlier draft's dispatch line.** It read
 `configuration_delta=LEAF_SESSIONS_STORE=postgres`, which is the single-selector
 delta that produces a task refusing to start. The correct delta names both
-selectors, and cannot be sent until the terraform allowlist accepts the second
-one. In order:
+selectors. It can now be sent: terraform PR #534 added the annex selector to the
+allowlist on 2026-08-07T11:50:05Z, so the only remaining gate is the operator's.
+In order:
 
-1. Land the allowlist change in `leaf-automation-aws-terraform` adding
-   `LEAF_SESSION_ANNEX_STORE=postgres` to `allowed_delta_pair()`.
+1. ~~Land the allowlist change in `leaf-automation-aws-terraform`.~~ **Done**,
+   PR #534, merged 2026-08-07T11:50:05Z. Re-confirm it is still on that
+   repository's `main` rather than trusting this line, which is exactly the
+   mistake this document keeps recording.
 2. Wait for operator release-complete.
 3. Re-read the live desired counts and pick the color that is live AT THAT
    MOMENT, which is not necessarily the one in the table above.
 4. Dispatch with `target_color=live` and a delta naming BOTH
    `LEAF_SESSIONS_STORE=postgres` and `LEAF_SESSION_ANNEX_STORE=postgres`.
+   Naming only the first is the failure mode this section exists to prevent.
 5. Verify the idle color's next warm on BOTH selectors, not just the sessions
    one. The inheritance check described earlier is incomplete as written for the
    same reason the dispatch was.
