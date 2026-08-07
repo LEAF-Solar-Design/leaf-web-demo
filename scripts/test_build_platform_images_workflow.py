@@ -152,14 +152,16 @@ def _consumes_per_commit_arg(run_body: str) -> bool:
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif (ch == "#" and not in_single and not in_double
-              and (i == 0 or body[i - 1] in " \t\n;&|(){}`")):
-            # An unquoted '#' at a word boundary starts a shell comment; the
-            # shell never expands what follows it. This matters most for the
-            # JSON exec form, whose argv[2] is a raw shell script that
-            # _executable_bash does not pre-strip (and a '#' after ';' is not
-            # preceded by whitespace, so its regex would miss it). sol-critic
-            # #514 round 4: `["/bin/sh","-c","true;# ${LEAF_SOURCE_SHA}"]` runs
-            # `true` and never expands the reference.
+              and (i == 0 or body[i - 1] in " \t\n;&|()")):
+            # A '#' starts a shell comment only when it BEGINS A WORD: at the
+            # start, or right after whitespace or a word-ending operator
+            # (; & | and the subshell parens). The set is exactly those, and no
+            # more -- `{`, `}` and backtick do NOT end a word, so `${PATH}#x`,
+            # `{#x` and `` `cmd`#x `` keep `#` mid-word and the shell expands what
+            # follows (sol-critic #514 r5 added `)`, r6 removed the over-broad
+            # `{}` and backtick that caused false CI failures on such forms).
+            # This matters most for the JSON exec form, whose argv[2] is a raw
+            # shell script _executable_bash does not pre-strip.
             break
         elif ch == "$" and not in_single and _PER_COMMIT_REF.match(body, i):
             return True
@@ -1300,6 +1302,12 @@ def main() -> None:
         # JSON form alike -- the reference is never expanded, so both offend.
         ('RUN ["/bin/sh", "-c", "(true)# ${LEAF_SOURCE_SHA:?expanded}"]', True),
         ('RUN (true)# ${LEAF_SOURCE_SHA:?expanded}', True),
+        # ...but `#` MID-WORD is NOT a comment (sol-critic #514 r6): `}` and
+        # backtick and `{` do not end a word, so the reference after them still
+        # expands and the RUN consumes -- these must NOT offend.
+        ('RUN echo ${PATH}# ${LEAF_SOURCE_SHA}', False),
+        ('RUN {# ${LEAF_SOURCE_SHA}', False),
+        ('RUN `printf x`# ${LEAF_SOURCE_SHA}', False),
     ):
         offended = bool(_runs_after_per_commit_arg(probe_header + probe_run + "\n"))
         assert offended == must_offend, (
