@@ -921,34 +921,71 @@ def _assert_one_survival_guard(
     return guarded[0]
 
 
-def _assert_guarded_paths_survive_a_later_user(
-    path: str, instructions: list[tuple[str, str]], targets
-) -> None:
-    """A USER below the guard is only safe while the guarded paths stay readable.
+# Any command that can change a mode, an owner, or an ACL. `install` only with
+# an `-m`, because a bare `install` is `pip install` / `npm ci` / `apt-get
+# install` and matching those would refuse every image.
+_MODE_CHANGING = re.compile(
+    r"\b(?:chmod|chown|chgrp|setfacl|umask)\b|\binstall\b[^&|;]*\s-m\b"
+)
 
-    The guard runs as ROOT, so it cannot observe what the runtime uid will see:
-    root reads a 0600 file happily and the image still ships a script the
-    service cannot execute. deploy/Dockerfile.app never faced this -- it
-    declares no USER, which is why USER is off its allowlist -- but the broker,
-    harness and canonical-worker all drop privilege BELOW the guard and so must
-    admit it. This is what pays for that admission: it turns "USER is presumably
-    fine here" into an assertion about the modes these files actually set.
+
+def _assert_no_unpinned_mode_change(
+    path: str, instructions: list[tuple[str, str]], pinned: tuple
+) -> None:
+    """Refuse any mode-changing instruction that is not byte-exact pinned.
+
+    WHAT THIS DOES NOT DO, first, because the version this replaced claimed it
+    and did not deliver: it does NOT prove the guarded scripts are reachable by
+    the uid the image drops to. It cannot. The guard runs as ROOT, and root
+    reads a 0600 file happily, so no assertion made at build time by root
+    observes what uid 10002 will see.
+
+    The replaced version tried to EVALUATE modes -- it matched one `chmod`
+    spelling and checked one bit (world read). A review found six evasions of it
+    in one round, every one of which ships an image whose guard passed and whose
+    script the service cannot use:
+
+        chmod 0744 /app/scripts                    directory loses o+x, so the
+                                                   runtime uid cannot traverse
+        chmod 0444 /app/scripts/start-harness.sh   the literal CMD loses +x
+        install -m 0600 src /app/scripts/...       not a `chmod` at all
+        COPY --chmod=0600 ...                      not a RUN at all
+        chmod 0600 '/app/scripts/x'                quoted operand
+        chmod 0600 /a /app/scripts/x               multi-target
+
+    Each was confirmed by running it. The lesson is the one this whole module
+    was rebuilt around: a check that catches some spellings and silently misses
+    others is WORSE than no check, because its green manufactures confidence.
+    Enumerating spellings cannot be made sound, so this stops enumerating.
+
+    It REFUSES instead. Every mode-changing instruction in the shipped stage
+    must be byte-exact pinned here, whatever path it names. An unrecognised one
+    fails LOUD, and adding one becomes a change a reviewer sees -- the same
+    trade `_PINNED_GIT_INSTALL` and the canonical-worker RUN pins make.
+
+    THE RESIDUAL, stated rather than closed: a pinned command still is not proof
+    of runtime reachability, and a mode change spelled through a variable, a
+    glob, or a shell script this scan cannot see is not refused either. Proving
+    reachability needs the guard to run AS the runtime uid (`su`/`setpriv`
+    inside the RUN), which cannot be validated here without a Docker daemon and
+    would break every build if the binary turned out to be absent. So runtime
+    accessibility is a REVIEW CLASS, exactly like script CONTENT and a
+    `HEALTHCHECK CMD rm -rf`, and it is named as one instead of being papered
+    over by a check that looks like a gate.
     """
-    guarded = set(targets) | {posixpath.dirname(target) for target in targets}
-    for _keyword, argument in instructions:
-        for match in re.finditer(r"chmod\s+((?:-\S+\s+)*)(\S+)\s+(\S+)", argument):
-            mode, operand = match.group(2), match.group(3)
-            if _image_path(operand) not in guarded:
-                continue
-            assert re.fullmatch(r"[0-7]{3,4}", mode), (
-                f"{path}: chmod {mode} {operand} uses a symbolic mode, which "
-                "this guard cannot evaluate. Use a numeric mode, or teach it."
-            )
-            assert int(mode[-1]) & 4, (
-                f"{path}: chmod {mode} {operand} leaves a guarded path with no "
-                "world read bit, so the uid this image drops to cannot read a "
-                "script the build-time guard just declared healthy."
-            )
+    for keyword, argument in instructions:
+        flagged = keyword in ("COPY", "ADD") and re.search(
+            r"--(?:chmod|chown)=", argument)
+        if not flagged and not _MODE_CHANGING.search(argument):
+            continue
+        assert argument in pinned, (
+            f"{path}: `{keyword} {argument[:90]}` changes a mode, owner or ACL "
+            "and is not pinned. The guard above it runs as ROOT and cannot see "
+            "what the uid this image drops to will be able to read or execute, "
+            "so this is refused rather than evaluated -- six ways of evaluating "
+            "it wrongly were found in one review round. Pin the exact command "
+            "in _PINNED_MODE_CHANGES if it is correct."
+        )
 
 
 
@@ -1476,9 +1513,12 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # script unreadable to the process that actually runs it, and a later
     # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
     # whose guard passed and whose documented command still fails. This image
-    # declares neither, so it needs no exception; the three images that DO drop
-    # privilege pay for admitting USER with an asserted mode check
-    # (`_assert_guarded_paths_survive_a_later_user`), not with an assumption.
+    # declares neither, so it needs no exception. The three images that DO drop
+    # privilege must admit USER -- the guard cannot sit below it -- and bound
+    # that admission by refusing every unpinned mode change
+    # (`_assert_no_unpinned_mode_change`). Note BOUND, not paid off: what a
+    # later USER can actually reach is a review class, for the reasons that
+    # helper's docstring records.
     #
     # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
     # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
@@ -1530,16 +1570,36 @@ _CANONICAL_WORKER_RUNS_AFTER_GUARD = (
     '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
 )
 
+# Every mode-changing instruction these three images ship, pinned byte-exact.
+# Nothing else may change a mode, an owner or an ACL; see
+# `_assert_no_unpinned_mode_change` for why this refuses rather than evaluates.
+# canonical-worker ships none at all, so ANY addition there is refused.
+_PINNED_MODE_CHANGES = {
+    "canonical-worker": (),
+    "broker": (
+        "useradd --system --uid 10001 --user-group --home /home/leaf "
+        "--create-home leaf && mkdir -p /data/state /data/drawings && chown -R "
+        "10001:10001 /data /home/leaf",
+    ),
+    "harness": (
+        "npx tsc -p tsconfig.build.json && npm prune --omit=dev && chmod 0555 "
+        "/app/scripts/start-harness.sh",
+        "useradd --system --uid 10002 --user-group --home /home/leaf "
+        "--create-home leaf && mkdir -p /data/tenants /data/grants "
+        "/data/sessions && chown -R 10002:10002 /data /home/leaf",
+    ),
+}
+
 # image -> (the operator-reachable script that motivated its guard,
 #           extra instruction keywords its allowlist must admit,
 #           exact RUN bodies its allowlist must admit)
 #
-# USER is admitted for all three, and unlike the app image that admission is not
-# free: each drops privilege BELOW the guard, so
-# `_assert_guarded_paths_survive_a_later_user` asserts that nothing chmods a
-# guarded path -- or its directory -- to a mode with no world read bit. Without
-# it, `RUN chmod 0700 /app/scripts` under a later `USER 10002` ships an image
-# whose guard passed and whose CMD cannot be read.
+# USER is admitted for all three because the guard CANNOT sit below it: the
+# per-commit ARG contract forbids a RUN there, and an exec-form RUN can never
+# satisfy its consumption rule. That admission is bounded by
+# `_assert_no_unpinned_mode_change` rather than paid off by it -- what a later
+# USER can actually reach is a review class, named as one in that helper's
+# docstring, not something any assertion here proves.
 _GUARDED_IMAGES = {
     "canonical-worker": (
         "/app/scripts/canonical-container-smoke.py",
@@ -1611,22 +1671,46 @@ def test_the_widened_script_parse_refuses_every_form_it_cannot_read():
     _assert_one_survival_guard("probe", [exec_form, ("RUN", "seal $X")],
                                ["/app/scripts/x.py"], _CANNOT_REMOVE, ("seal $X",))
 
-    # A later USER is safe only while the guarded paths stay world readable.
-    _assert_guarded_paths_survive_a_later_user(
-        "probe", [("RUN", "chmod 0555 /app/scripts/x.sh")], ["/app/scripts/x.sh"])
-    with pytest.raises(AssertionError, match="no world read bit"):
-        _assert_guarded_paths_survive_a_later_user(
-            "probe", [("RUN", "chmod 0500 /app/scripts/x.sh")],
-            ["/app/scripts/x.sh"])
-    # ...including a RECURSIVE chmod of the directory, whose flag would
-    # otherwise be read as the mode and skipped.
-    with pytest.raises(AssertionError, match="no world read bit"):
-        _assert_guarded_paths_survive_a_later_user(
-            "probe", [("RUN", "chmod -R 0700 /app/scripts")], ["/app/scripts/x.sh"])
-    with pytest.raises(AssertionError, match="symbolic mode"):
-        _assert_guarded_paths_survive_a_later_user(
-            "probe", [("RUN", "chmod go-r /app/scripts/x.sh")],
-            ["/app/scripts/x.sh"])
+    # MODE CHANGES ARE REFUSED, NOT EVALUATED. Every case below defeated the
+    # evaluating version of this check that shipped in the first round of this
+    # PR -- each was confirmed by running it, and each ships an image whose
+    # guard passed and whose script the runtime uid cannot use. They must all
+    # be refused now, and none of them is refused by reasoning about its mode.
+    for evasion in (
+        "chmod 0744 /app/scripts",                     # dir loses o+x traversal
+        "chmod 0444 /app/scripts/start-harness.sh",    # the CMD loses +x
+        "install -m 0600 src /app/scripts/x.sh",       # not a chmod at all
+        "chmod 0600 '/app/scripts/x.sh'",              # quoted operand
+        "chmod 0600 /app/other /app/scripts/x.sh",     # multi-target
+        "chmod -R 0700 /app",                          # an ancestor, not the path
+        "chown -R 1:1 /app/scripts",                   # owner, not mode
+    ):
+        with pytest.raises(AssertionError, match="not pinned"):
+            _assert_no_unpinned_mode_change("probe", [("RUN", evasion)], ())
+    # ...and the COPY/ADD flag forms, which are not RUNs at all.
+    with pytest.raises(AssertionError, match="not pinned"):
+        _assert_no_unpinned_mode_change(
+            "probe", [("COPY", "--chmod=0600 x /app/scripts/x.sh")], ())
+    with pytest.raises(AssertionError, match="not pinned"):
+        _assert_no_unpinned_mode_change(
+            "probe", [("COPY", "--chown=1:1 x /app/scripts/x.sh")], ())
+    # An exactly-pinned command passes; a one-character edit of it does not.
+    _assert_no_unpinned_mode_change(
+        "probe", [("RUN", "chmod 0555 /app/scripts/x.sh")],
+        ("chmod 0555 /app/scripts/x.sh",))
+    with pytest.raises(AssertionError, match="not pinned"):
+        _assert_no_unpinned_mode_change(
+            "probe", [("RUN", "chmod 0554 /app/scripts/x.sh")],
+            ("chmod 0555 /app/scripts/x.sh",))
+    # `pip install` / `npm install` / `apt-get install` must NOT trip the
+    # `install -m` pattern, or every image would be refused.
+    _assert_no_unpinned_mode_change(
+        "probe",
+        [("RUN", "pip install --no-cache-dir -r /app/server/requirements.txt"),
+         ("RUN", "apt-get install -y --no-install-recommends git"),
+         ("RUN", "npm ci")],
+        (),
+    )
 
     # The one exemption to the destination-above-a-script refusal is the
     # narrowest decidable shape, and each of the four defects that killed the
@@ -1696,6 +1780,30 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
     And no rule about POSITION binds runtime behaviour, so a `HEALTHCHECK CMD
     rm -rf /app/scripts/...` below the guard passes the build and deletes the
     script seconds into container life. Both are review classes, not gates.
+
+    TWO MORE REVIEW CLASSES, named because a review round found them and it
+    would be dishonest to leave a reader thinking they are closed:
+
+      * RUNTIME REACHABILITY as the dropped uid. All three images declare a USER
+        below their guard, the guard runs as root, and no assertion made by root
+        at build time observes what uid 10002 can read or execute.
+        `_assert_no_unpinned_mode_change` BOUNDS this by refusing every unpinned
+        mode change; it does not prove it. That docstring records why evaluating
+        modes was tried, was defeated six ways in one round, and was removed.
+      * A SYMLINKED DESTINATION. Every destination check in this module,
+        including `_copied_scripts`, compares the destination as WRITTEN, while
+        ordinary COPY follows a destination symlink. So
+            RUN ln -s /app/scripts /app/alias
+            COPY harness/package.json /app/alias/start-harness.sh
+        overwrites a guarded script with a non-empty file, and `-f`/`-s` both
+        still pass. Confirmed: that destination is neither equal to, nor an
+        ancestor of, any guarded target, so the equality and `_contains` checks
+        BOTH miss it independently -- it is a property of textual destination
+        comparison, not of the `_writes_only_named_files` exemption, and
+        removing that exemption does not close it. Closing it needs the build
+        filesystem, which is the interpreter this module has twice refused to
+        become. `COPY --link` cannot follow such a symlink, so requiring it is
+        the shape of a real fix if this class ever needs gating.
     """
     for image, (motivating, extra_allowed, allowed_runs) in _GUARDED_IMAGES.items():
         path = f"deploy/Dockerfile.{image}"
@@ -1715,8 +1823,8 @@ def test_every_image_asserts_its_shipped_scripts_at_build_time():
             path, instructions, shipped.values(),
             _CANNOT_REMOVE | extra_allowed, allowed_runs,
         )
-        _assert_guarded_paths_survive_a_later_user(
-            path, instructions, shipped.values())
+        _assert_no_unpinned_mode_change(
+            path, instructions, _PINNED_MODE_CHANGES[image])
 
     # The harness ships a DIRECTORY, so its guarded set is that directory's
     # contents. Re-read independently of the helper: were the directory form
