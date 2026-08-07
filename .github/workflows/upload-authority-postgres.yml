@@ -162,15 +162,21 @@ jobs:
         run: |
           # Did-not-skip assertion in the same shape as the overlay step below,
           # whose comment carries the full reason for the bash string match
-          # over `... | grep -q`. Both halves are load-bearing HERE, because
-          # this suite has two distinct vacuous-green modes:
-          #   * DATABASE_URL unset -> the platform conftest's
-          #     pytest_ignore_collect drops every non-`_static.py` module, so
-          #     pytest exits 5 with "no tests ran" and NEVER prints the word
-          #     "skipped". Only the `if !` catches that one.
-          #   * a per-test skipif -> prints "skipped" at exit 0. Only the
-          #     string match catches that one.
-          # Measured both directions against a live postgres:16; see the PR.
+          # over `... | grep -q`. Both halves are load-bearing HERE, and the
+          # `if !` is the half that does the work today. MEASURED, not assumed:
+          # with DATABASE_URL unset this module does not skip, it FAILS --
+          # "13 failed, 13 passed", each failure a
+          # `RuntimeError: DATABASE_URL is not set` raised from platform/db.py.
+          # A bare `out=$(pytest ...)` would abort the step under `bash -e {0}`
+          # with all 13 tracebacks trapped inside `$out`, so the log would show
+          # a red step and no reason. The `if !` prints them. The string match
+          # then covers the other mode, a future skipif that exits 0.
+          #
+          # Note for anyone extending this: the platform conftest's
+          # pytest_ignore_collect does NOT apply here. pytest consults that hook
+          # when it recurses into a directory, not for a file named explicitly
+          # on the command line, and this step names its module explicitly.
+          # Verified against pytest 9.1.1 with a known-positive control.
           if ! out=$(python -m pytest --import-mode=importlib -q -rs \
               ../platform/tests/test_schema_status_postgres_authority.py); then
             printf '%s\n' "$out"
@@ -191,9 +197,10 @@ jobs:
           # for the sole purpose of asserting it did not skip, so adding a
           # second copy of that assertion here would gate the same command
           # twice and buy nothing. The static proofs are the ones nothing else
-          # covers: pytest_ignore_collect keeps `*_static.py` collectable even
-          # with no database, so a skip there means a test-level gate appeared
-          # and the dependency-free proofs stopped being proofs.
+          # covers, and they are meant to run in every environment: measured,
+          # this module reports "22 passed" with DATABASE_URL unset. So a skip
+          # here means a test-level gate appeared and the dependency-free
+          # proofs quietly stopped being proofs.
           if ! out=$(python -m pytest -q -rs tests/test_overlay_store_static.py); then
             printf '%s\n' "$out"
             exit 1
@@ -391,10 +398,17 @@ jobs:
           # unset, so losing the database would not skip them. Exactly one
           # conditional skip exists across the set -- test_guest_fail_closed.py
           # gates a test on `os.name != "posix"` because fcntl is a Linux
-          # deployment contract -- and it cannot fire on ubuntu-latest. So this
-          # assertion pins the 227 executed tests against a NEW gate appearing,
-          # and against the runner image ceasing to be posix, which would
+          # deployment contract -- and it cannot fire on ubuntu-latest. So what
+          # this assertion buys is a NEW skip gate appearing in any of the seven
+          # modules, and the runner image ceasing to be posix, which would
           # genuinely stop verifying the fcntl contract.
+          #
+          # It asserts that nothing REPORTED a skip. It does not pin how many
+          # tests executed, and it is not trying to: scripts/run-all-gates.py
+          # already carries per-module executed-count floors for six of these
+          # seven modules (57, 36, 14, 59, 41, 9), which is a tighter check than
+          # any aggregate count here could be, and run-all-gates runs on the
+          # same pull request.
           if ! out=$(python -m pytest -q -rs \
               tests/test_guest_uploads.py \
               tests/test_guest_fail_closed.py \
@@ -416,11 +430,14 @@ jobs:
       - name: Run canonical drawing import gate tests
         working-directory: server
         run: |
-          # Same two failure modes as the schema_status step at the top of this
-          # job, because this is the other `platform/tests/` module run from
-          # `server/`: without DATABASE_URL its conftest's
-          # pytest_ignore_collect drops the file entirely (exit 5, the word
-          # "skipped" never printed), which only the `if !` catches.
+          # The other `platform/tests/` module run from `server/`, but its
+          # failure mode is the opposite of the schema_status step's. MEASURED:
+          # with DATABASE_URL unset this reports "17 skipped" -- the `make_org`
+          # fixture in platform/tests/conftest.py calls pytest.skip -- so the
+          # whole gate becomes a green no-op and the STRING MATCH is the half
+          # that catches it. As at that step, pytest_ignore_collect is not
+          # involved: it is not consulted for a file named explicitly on the
+          # command line.
           if ! out=$(python -m pytest --import-mode=importlib -q -rs \
               ../platform/tests/test_drawing_import.py); then
             printf '%s\n' "$out"
