@@ -1,9 +1,11 @@
 name: Dispatch staging deploys
 
 # ---------------------------------------------------------------------------
-# Auto-dispatches the leaf-platform staging deploys (web + app, concurrently)
+# Auto-dispatches the leaf-platform staging deploys (web + app, ONE AT A TIME)
 # when a main-branch "Build platform images" push run succeeds. Removes the
-# hand-dispatch gap between build success and deploy start.
+# hand-dispatch gap between build success and deploy start. This line said
+# "concurrently" until 2026-08-07, left over from before the serial rewrite;
+# it contradicted the serial-dispatch rationale 20 lines below it.
 #
 # The image tag is read from the build run's own staging supply-set manifest
 # artifact (leaf.staging-supply-set.v1, field build_tag), never re-derived,
@@ -39,6 +41,82 @@ name: Dispatch staging deploys
 # A run cancelled before any job started never reached AWS, so eviction is a
 # queueing loss rather than a deploy failure and is the one conclusion this
 # relay retries. Every other non-success fails the relay red.
+#
+# NEED-FIRST ORDERING (2026-08-07). The service loop used to be a hardcoded
+# `for SERVICE in web app`, so web won every race and app lost every race. A
+# relay superseded mid-release always dies before its SECOND service, so under
+# any merge rate faster than one full release (~8 min web plus ~14 min app)
+# app never advanced at all while web advanced every time. Observed: three
+# consecutive relays (d9306c3, 7056e2e, 48204c4) produced web deploys with no
+# app deploy between them, and staging ran a whole release split for over two
+# hours. The stand-down is correct and stays; what was wrong is that the
+# SAME service was always the one abandoned. Ordering by need hands the first
+# slot to whichever service the last successful deploys show further behind,
+# which removes that systematic bias: when the read decides, the service that
+# lost the previous race is the one that advances now.
+#
+# It does NOT guarantee alternation, and it does NOT bound a split to one
+# release. An earlier version of this comment claimed both and sol-critic
+# returned RED for it. The read is BEST EFFORT and every failure mode falls
+# back to the old fixed `web app` (see newest_deploy_title below): an
+# unreadable title, a non-prod tag, equal tags, or an ancestry compare that
+# does not come back "behind". A read that keeps failing, or keeps landing in
+# one of those cases, restores exactly the old starvation shape. Nothing here
+# stops the tip from moving either, so at a high enough merge rate a split can
+# still outlive several relays. The honest claim is narrower: the bias toward
+# one fixed victim is gone whenever the read decides, and the relay still
+# announces every split it leaves, naming the service it left behind.
+#
+# THAT READ MAY ONLY AFFECT ORDER, and here is exactly what that does and does
+# not buy. What it CANNOT do: choose a deploy tag (the tag always comes from
+# the verified supply-set manifest), drop a service from the list, inject a
+# token into the loop, or fail the release when the read itself errors. So it
+# cannot cause a backwards deploy, which is the invariant that matters most.
+#
+# What it CAN do, stated plainly because an earlier version of this comment
+# claimed otherwise and sol-critic returned RED for it: ORDER DECIDES WHO GETS
+# SKIPPED. Only the first service is dispatched unconditionally; the second sits
+# behind another tip re-check and is abandoned if main moved. So a WRONG read
+# can be worse than the fixed order in one concrete schedule: app (~14 min) is
+# put first on bad evidence, main moves at t=10, and web is skipped, where
+# web-first would have landed web at t=8 and dispatched app before the move.
+#
+# That trade is taken deliberately. The fixed order did not avoid the cost, it
+# just always charged it to the same service: web won every race and app lost
+# every race, forever. Occasionally swapping WHICH service lags is strictly
+# better than permanently starving one, and no ordering can stop the tip from
+# moving. The relay still announces the split it leaves, naming the skipped
+# service, so the cost is visible rather than silent.
+#
+# Inferring live
+# state from CI run history is NOT sound, and an earlier cut of this change
+# that used it to pick a DEPLOY TAG was returned RED by sol-critic on PR #506
+# for two reasons: a deploy that flips traffic and then fails or is cancelled
+# leaves the new colour live while its run reads as unsuccessful, so the read
+# can name an older tag as live; and the read/dispatch window is not atomic,
+# so a sibling deploy can move a service forward in between while main has not
+# moved. Both turn a tag DECISION into a silent backwards deploy. Neither can
+# do worse than pick the wrong order here. The task definitions are also
+# digest-pinned and staging app/web are blue/green, so "live" is a function of
+# ALB rule weights: no amount of run-name reading is authoritative about what
+# is serving, and this code must never pretend otherwise.
+#
+# Converging a split with NO new images (a docs-only tip builds none) would
+# need a sound read of live state, which means the relay reading ECS/ALB
+# directly through an OIDC role. That adds id-token: write, breaks the pinned
+# capability wall below, and needs an infra-repo trust change. Deliberately
+# out of scope here: a docs-only tip still skips, so the split waits for the
+# next DEPLOYABLE merge, and even that one only converges it if its own relay
+# is not itself superseded and its own need-first read decides. Need-first
+# ordering makes prompt convergence more likely; it does not make it certain.
+#
+# CLAIM DISCIPLINE, because this file keeps getting this wrong. Rounds 2, 3
+# and 4 of review on PR #506 were all RED for the same reason: a comment
+# promising convergence, alternation, or non-starvation that the code cannot
+# deliver. Every one of those guarantees is conditional on a best-effort read
+# and on the tip holding still, and NEITHER is guaranteed. Before adding any
+# sentence with "converges", "alternates", "cannot starve" or "bounded",
+# check it against the fallbacks at the ordering site and the tip re-check.
 #
 # Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
 # repo) — the same pattern the aws-* service repos use with
@@ -209,9 +287,53 @@ jobs:
                    | sort_by(-.databaseId) | first | .databaseId // empty'
           }
 
+          # Newest SUCCESSFUL deploy run for one service, as its full run name.
+          # Every dispatch of the infra workflow names itself
+          # "Deploy leaf-platform staging <service> (<image_tag|sha|live
+          # baseline>)". Best effort ONLY: this feeds the loop ORDER and
+          # nothing else, so every failure mode below falls back to the old
+          # fixed order rather than failing the release.
+          newest_deploy_title() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 200 --json databaseId,displayTitle,conclusion \
+              | jq -r --arg prefix "Deploy leaf-platform staging $1 (" \
+                  '[.[] | select(.conclusion == "success")
+                        | select(.displayTitle | startswith($prefix))]
+                   | sort_by(-.databaseId) | first | .displayTitle // empty'
+          }
+
+          # "...staging app (prod-abc1234)" -> "prod-abc1234"
+          tag_of_title() {
+            local rest=${1#*\(}
+            printf '%s' "${rest%\)}"
+          }
+
+          # Hand the first slot to whichever service looks further behind, so
+          # the one abandoned by the last superseded relay is the one that
+          # advances now. Only the FIRST service is dispatched
+          # unconditionally, so this decides who gets skipped if main moves;
+          # read the header for why that trade is taken. It cannot change the
+          # tag, drop a service, or fail the release.
+          SERVICES="web app"
+          WEB_TAG=$(tag_of_title "$(newest_deploy_title web || true)")
+          APP_TAG=$(tag_of_title "$(newest_deploy_title app || true)")
+          if [[ "$WEB_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
+            && [[ "$APP_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
+            && [ "$WEB_TAG" != "$APP_TAG" ]; then
+            # compare/<base>...<head> reports the HEAD side, so with web as
+            # base "behind" means APP is behind and app goes first.
+            RELATION=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/compare/${WEB_TAG#prod-}...${APP_TAG#prod-}" \
+              --jq '.status' || true)
+            if [ "$RELATION" = "behind" ]; then
+              SERVICES="app web"
+              echo "::notice::app ($APP_TAG) trails web ($WEB_TAG); deploying app first so the service that lost the last race is the one that advances now. This does not guarantee app lands: if main moves before its dispatch, this relay stands down and web is the service left behind instead."
+            fi
+          fi
+
           DEPLOYED_ANY=false
 
-          for SERVICE in web app; do
+          for SERVICE in $SERVICES; do
             WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
             ATTEMPT=0
 
@@ -229,14 +351,16 @@ jobs:
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
                 if [ "$DEPLOYED_ANY" = "true" ]; then
                   # KNOWN RESIDUAL, stated rather than hidden. Standing down
-                  # here leaves staging on a mixed identity. The newer commit's
-                  # relay converges it whenever that commit builds images, but
-                  # a docs-only commit builds none and its relay skips, so the
-                  # split can survive until the next deployable merge. Standing
-                  # down is still the lesser evil: finishing this release risks
-                  # landing a stale tag over a newer deploy, which is silent
-                  # corruption rather than a visible gap.
-                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this unless that commit builds no images."
+                  # here leaves staging on a mixed identity, and NOTHING here
+                  # guarantees when that ends. The newer commit's relay clears
+                  # it only if that commit builds images AND that relay is not
+                  # itself superseded before it reaches the behind service. A
+                  # docs-only commit builds none and its relay skips outright.
+                  # So the split can survive several relays, not just one.
+                  # Standing down is still the lesser evil: finishing this
+                  # release risks landing a stale tag over a newer deploy,
+                  # which is silent corruption rather than a visible gap.
+                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay clears this only if that commit builds images AND its own relay is not superseded before it reaches $SERVICE; a docs-only commit builds none and skips. This split is not guaranteed to clear on the next merge."
                 else
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
                 fi

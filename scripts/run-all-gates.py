@@ -907,9 +907,14 @@ def build_suites() -> List[Suite]:
         # (a dispatched service is always accounted for, or the relay goes
         # red) is its own named test, so a scoreboard failure says which
         # invariant broke instead of pointing at the mega-test.
+        # 2 -> 3 on 2026-08-07: the relay now orders its two services so the
+        # one a superseded release abandoned goes first, and that one is
+        # EXECUTED — the real dispatch script against a fake gh — so the named
+        # test says which service the relay actually deploys first and onto
+        # which tag, not merely whether its text still reads that way.
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 2),
+              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 3),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
