@@ -580,9 +580,11 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
         the PR that introduced it. BuildKit reported `#31 DONE 0.1s`, building
         tree `27bdb1399ab256d849e1821710fbdee8d7b3448a` as
         `leaf-platform-app:spec-27bdb1399ab256d849e1821710fbdee8d7b3448a-4aaf69f65ecc`,
-        Actions run 31157638863. Git still confirms that tree is the commit
-        which introduced exec form. Git does NOT confirm that BuildKit ran it,
-        and once the Actions log expires nothing here does.
+        Actions run 31157638863. Git still confirms this is the TREE OF the
+        commit which introduced exec form -- they are different objects, so
+        `git rev-parse <commit>^{tree}` is the check, not `git cat-file -t` on
+        the tree. Git does NOT confirm that BuildKit ran it, and once the
+        Actions log expires nothing here does.
 
     Read the log for `DONE`, not for a green job. A later build reported
     `#31 CACHED` at this vertex, which proves only that some earlier build of an
