@@ -372,8 +372,10 @@ jobs:
             # set was unreadable or whose provenance did not match already failed
             # the release closed, so the only candidates reaching this compare
             # carry a VALID, provenance-matched supply set. Among those, the FIRST
-            # whose commit is a strict ANCESTOR of the tip ('ahead') is the newest
-            # main-derived image the tip is built on, and it wins.
+            # whose commit is a strict ANCESTOR of the tip ('ahead') -- or IS the
+            # tip ('identical', a sibling build of the tip's own images; see the
+            # case below) -- is the newest main-derived image the tip describes,
+            # and it wins.
             #
             # A valid candidate that is NOT an ancestor ('behind' or 'diverged')
             # is, by the newest-first order, NEWER than any ancestor still to
@@ -382,8 +384,9 @@ jobs:
             # it). It therefore FAILS THE RELAY CLOSED rather than skipping:
             # skipping it to deploy an older ancestor is exactly the backwards
             # deploy this guard exists to stop (sol-critic RED round 3 on PR
-            # #519). Only 'identical' (the tip commit itself, which is docs-only
-            # and carries no images) keeps scanning.
+            # #519). 'identical' is USED, not skipped: docs-only-ness is decided
+            # per-push, not per-commit, so a same-head sibling build can carry
+            # the tip's own live images (sol-critic RED round 4 on PR #519).
             #
             # A transient compare failure must NOT be treated as a non-ancestor:
             # `|| true` would blank RELATION, skip this candidate, and fall back
@@ -396,20 +399,25 @@ jobs:
               exit 1
             fi
             case "$RELATION" in
-              ahead)
-                # CANDIDATE_SHA is a strict ANCESTOR of the tip (the tip is
-                # built on top of it), so its images are exactly what this tip
+              ahead|identical)
+                # 'ahead': CANDIDATE_SHA is a strict ANCESTOR of the tip (the
+                # tip, docs-only, builds no images of its own, so it is built on
+                # top of this commit) -- its images are exactly what the tip
                 # describes. Newest-first, this is the newest such ancestor.
-                ;;
-              identical)
-                # Same commit as the tip. The tip is docs-only (this IS the
-                # reconcile arm) and built no images of its own, so a run on the
-                # same commit carries nothing deployable and nothing NEWER than
-                # an ancestor -- there is no backwards risk here. Keep scanning.
-                # In practice unreachable: a same-sha run is docs-only too, so it
-                # published a marker not a supply set and was skipped above.
-                echo "::notice::Ignoring the supply set from run $RUN_ID ($CANDIDATE_SHA): its commit is identical to the tip $BUILD_HEAD_SHA, which is docs-only and built no images of its own, so there is nothing newer here to roll back from."
-                continue
+                #
+                # 'identical': CANDIDATE_SHA IS the tip commit. Docs-only-ness is
+                # decided per-PUSH (the build gate diffs github.event.before
+                # against the head), NOT per-commit, so a SIBLING push can reach
+                # this same head SHA from a DIFFERENT base, build real images,
+                # and publish a provenance-matched supply set for the tip itself
+                # -- e.g. main reverts away from a deployed commit and later
+                # returns to it. That candidate's tag is the tip's OWN images
+                # (source_revision == the tip), so it is exactly current, never
+                # older, and is the BEST reconcile target. USE it like an
+                # ancestor. Skipping it to an older ancestor was the round-4
+                # defect (sol-critic RED on PR #519): that sibling build may be
+                # LIVE, so falling back to an older tag rolls staging BACKWARDS.
+                :
                 ;;
               behind|diverged)
                 # A READABLE, provenance-matched supply set whose commit is NOT

@@ -3123,7 +3123,17 @@ def check_docs_noop_filter(text: str) -> None:
         # ONE `gh workflow run` in the deploy step with the same four inputs, no
         # new secret reference, and no new gh call -- the compare read is
         # unchanged, only its non-ancestor outcome moved from skip to exit 1.
-        "d67e511824679788c9a92ed481b39ace2d76e4ad911b3595c8323943f1162c86"
+        # Hash updated 2026-08-07 (j): sol-critic RED round 4 on PR #519. The
+        # 'identical' compare arm no longer `continue`s -- it is merged into the
+        # 'ahead' arm and USED. Docs-only-ness is decided per-PUSH (the build
+        # gate diffs github.event.before against the head), not per-commit, so a
+        # same-head SIBLING build reached from a different base can publish the
+        # tip's OWN live images; skipping it to an older ancestor was a backwards
+        # deploy. Now only 'behind'/'diverged' and unreadable/unexpected compares
+        # fail closed. Control-flow + text change inside the manifest script; no
+        # dispatch change: still exactly ONE `gh workflow run` in the deploy step
+        # with the same four inputs, no new secret reference, and no new gh call.
+        "d1110d4e32e3a3e0e3b9f5446ebe825577f1652ee3b96878d644a2e37645f6fb"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5261,11 +5271,11 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
 
     Runs the extracted manifest script against a fake gh: the docs-only build
     published a marker and no supply set, so the reconcile scans main's
-    successful build runs newest-first and takes the newest tag whose commit IS
-    an ancestor of the tip, setting deploy=true onto it. Then feeds that tag to
-    the real dispatch script and asserts BOTH staging services deploy onto it --
-    the split-closing behaviour end to end. This is the DOES half of the static
-    pins in the invariants test.
+    successful build runs newest-first and takes the newest tag whose commit is
+    an ANCESTOR of the tip (or IS the tip -- a same-head sibling build), setting
+    deploy=true onto it. Then feeds that tag to the real dispatch script and
+    asserts BOTH staging services deploy onto it -- the split-closing behaviour
+    end to end. This is the DOES half of the static pins in the invariants test.
     """
     # Rows newest-first: 100 is the docs-only build itself (skipped), 98 carries
     # the newest tag whose commit IS an ancestor of the tip (must win). No newer
@@ -5287,6 +5297,29 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
         relation="ahead")
     assert rc2 == 0, out2
     assert deployed == [("web", "prod-abc1234"), ("app", "prod-abc1234")], deployed
+
+    # IDENTICAL IS USED, NOT SKIPPED (sol-critic RED round 4 on PR #519). Because
+    # docs-only-ness is decided per-PUSH (the build gate diffs github.event.before
+    # against the head), a SIBLING push can reach the tip's SAME head sha from a
+    # different base, build real images, and publish a provenance-matched supply
+    # set for the tip itself (e.g. main reverts away from a deployed commit then
+    # returns to it). Run 99 is that sibling: head sha == the tip, valid supply
+    # set, compares 'identical'. Its tag is the tip's OWN live images, so it MUST
+    # win over the older ancestor 98 -- skipping it (the old `identical) continue`)
+    # would roll staging BACKWARDS onto prod-abc1234.
+    rc_id, out_id, outputs_id = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docshead 1", "98 ancestor 1"],
+        supply_sets={"99": {"sha": "docshead", "attempt": "1",
+                            "tag": "prod-cafe123"},
+                     "98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"docshead": "identical", "ancestor": "ahead"})
+    assert rc_id == 0, out_id
+    assert outputs_id.get("deploy") == "true", (out_id, outputs_id)
+    assert outputs_id.get("image_tag") == "prod-cafe123", (
+        "a same-head sibling build of the tip's own images must win over the "
+        "older ancestor", out_id, outputs_id)
+    assert outputs_id.get("image_tag") != "prod-abc1234", (out_id, outputs_id)
 
     # NEVER-BACKWARDS (sol-critic RED round 3 on PR #519). A NEWER valid supply
     # set whose commit is NON-ancestral -- 'diverged' (main was rewritten under
