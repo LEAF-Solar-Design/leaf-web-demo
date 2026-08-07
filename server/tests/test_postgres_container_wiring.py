@@ -146,6 +146,35 @@ def _logical_lines(dockerfile: str) -> list[str]:
     return lines
 
 
+_SHELL_FENCE = re.compile(r"```(?:shell|bash|sh)\n(.*?)```", re.DOTALL)
+
+
+def _documented_shell_commands(markdown: str) -> list[str]:
+    """Runnable commands from ```shell fences, `\\`-continuations joined.
+
+    FENCED BLOCKS ONLY, deliberately. The prose around them quotes the WRONG
+    (repository-relative) form on purpose to explain why the right one is
+    absolute, and treating that explanation as a command would make the guard
+    cry wolf about its own documentation.
+    """
+    commands: list[str] = []
+    for block in _SHELL_FENCE.findall(markdown):
+        pending = ""
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            pending = f"{pending} {stripped}".strip() if pending else stripped
+            if pending.endswith("\\"):
+                pending = pending[:-1].rstrip()
+                continue
+            commands.append(pending)
+            pending = ""
+        if pending:
+            commands.append(pending)
+    return commands
+
+
 def _single_stage(dockerfile: str) -> None:
     """Refuse to reason about a multi-stage build instead of guessing wrong.
 
@@ -355,61 +384,73 @@ def test_documented_authority_commands_resolve_in_the_image():
     }
     assert repo_scripts, "no files in scripts/"
 
+    # EVERY PLACE A HUMAN COPIES THE COMMAND FROM, not just the inventory.
+    # The inventory is the machine-readable source, but the cutover operator
+    # follows docs/POSTGRES-CUTOVER.md, so a relative path there is the same
+    # defect with the same reachable caller. Checking only one of the two left
+    # the other free to rot.
+    sources: list[tuple[str, str]] = []
     inventory = json.loads(_read("platform/authority-inventory.json"))
-
-    checked: list[tuple[str, str, str]] = []
     for authority in inventory["authorities"]:
         for phase in ("backfill", "parity"):
             command = authority.get(phase, {}).get("command")
-            if not command:
+            if command:
+                sources.append((f"authority-inventory.json {authority['id']} {phase}",
+                                command))
+    documented = _documented_shell_commands(_read("docs/POSTGRES-CUTOVER.md"))
+    sources.extend(("docs/POSTGRES-CUTOVER.md", command) for command in documented)
+
+    checked: list[tuple[str, str]] = []
+    for origin, command in sources:
+        for token in command.split():
+            name = PurePosixPath(token).name
+            if name not in repo_scripts:
                 continue
-            for token in command.split():
-                name = PurePosixPath(token).name
-                if name not in repo_scripts:
-                    continue
 
-                # A script the inventory documents but the Dockerfile is not
-                # seen to copy is a blocker either way: either it does not ship
-                # and the command cannot run, or the COPY parse missed the form
-                # used and this guard is blind. Do not skip it.
-                target = copies.get(name)
-                assert target is not None, (
-                    f"{authority['id']} {phase} command names {token!r}, but no "
-                    f"COPY of scripts/{name} into the image was found in "
-                    f"deploy/Dockerfile.app. Either the script is not shipped, "
-                    f"or this guard's COPY parse does not understand the form "
-                    f"used. Both are blockers."
-                )
+            # A script that is documented but that the Dockerfile is not seen
+            # to copy is a blocker either way: either it does not ship and the
+            # command cannot run, or the COPY parse missed the form used and
+            # this guard is blind. Do not skip it.
+            target = copies.get(name)
+            assert target is not None, (
+                f"{origin} names {token!r}, but no COPY of scripts/{name} into "
+                f"the image was found in deploy/Dockerfile.app. Either the "
+                f"script is not shipped, or this guard's COPY parse does not "
+                f"understand the form used. Both are blockers."
+            )
 
-                # Primary: parse-free, so no Dockerfile-reading bug can weaken
-                # it. `final_workdir` appears only in the message.
-                assert PurePosixPath(token).is_absolute(), (
-                    f"{authority['id']} {phase} command names {token!r} by a "
-                    f"repository-relative path. The image's effective WORKDIR "
-                    f"is {final_workdir}, so it resolves to "
-                    f"{PurePosixPath(final_workdir) / token} while the script "
-                    f"is at {target}, and the documented command cannot run in "
-                    f"the image. Use the absolute path: it is correct whatever "
-                    f"the WORKDIR turns out to be."
-                )
-                # Secondary: absolute, but is it where the image put it?
-                assert str(PurePosixPath(token)) == target, (
-                    f"{authority['id']} {phase} command names {token!r}, but "
-                    f"deploy/Dockerfile.app copies that script to {target}."
-                )
-                checked.append((authority["id"], phase, token))
+            # Primary: parse-free, so no Dockerfile-reading bug can weaken it.
+            # `final_workdir` appears only in the message.
+            assert PurePosixPath(token).is_absolute(), (
+                f"{origin} names {token!r} by a repository-relative path. The "
+                f"image's effective WORKDIR is {final_workdir}, so it resolves "
+                f"to {PurePosixPath(final_workdir) / token} while the script is "
+                f"at {target}, and the documented command cannot run in the "
+                f"image. Use the absolute path: it is correct whatever the "
+                f"WORKDIR turns out to be."
+            )
+            # Secondary: absolute, but is it where the image put it?
+            assert str(PurePosixPath(token)) == target, (
+                f"{origin} names {token!r}, but deploy/Dockerfile.app copies "
+                f"that script to {target}."
+            )
+            checked.append((origin, token))
 
-    # Anti-vacuity: if the inventory parse ever drifts, this test must go red
-    # rather than silently check nothing. Both reconcilers are documented for
-    # backfill and parity, across three authority entries.
-    assert len(checked) >= 6, f"guard checked too few commands: {checked}"
+    # Anti-vacuity: if either source's parse ever drifts, this test must go red
+    # rather than silently check nothing. Six inventory commands across three
+    # authority entries, plus both worked-example commands in the cutover doc.
+    assert len(checked) >= 8, f"guard checked too few commands: {checked}"
+    assert sum(1 for origin, _ in checked if origin.startswith("docs/")) >= 2, (
+        "the cutover document's worked example was not reached; its shell "
+        f"fences parsed to {documented}"
+    )
     # Every script the image ships must be reached by a documented command.
     # This direction is now the only one keyed on the COPY map, and it is the
     # safe direction: a COPY the parse MISSES cannot hide a command here,
     # because selection above comes from the repository tree instead.
-    assert set(copies).issubset({PurePosixPath(t).name for _, _, t in checked}), (
-        "an image-copied reconciler script is documented by no authority "
-        f"command: copied={sorted(copies)}, exercised={sorted(checked)}"
+    assert set(copies).issubset({PurePosixPath(t).name for _, t in checked}), (
+        "an image-copied reconciler script is documented by no command: "
+        f"copied={sorted(copies)}, exercised={sorted(checked)}"
     )
 
 
