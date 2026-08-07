@@ -441,9 +441,13 @@ def test_documented_authority_commands_resolve_in_the_image():
                 f"understand the form used. Both are blockers."
             )
 
-            # Primary: parse-free, so no Dockerfile-reading bug can weaken it.
-            # `final_workdir` appears only in the message.
-            assert PurePosixPath(token).is_absolute(), (
+            # COMPARE THE RAW STRING, NEVER A NORMALIZED PATH. PurePosixPath
+            # quietly rewrites what the shell would take literally: a trailing
+            # slash and a `/./` segment both vanish, so `/app/scripts/x.py/`
+            # compared equal while the kernel would refuse it with ENOTDIR
+            # (a trailing slash demands a directory). Normalizing here means
+            # judging a string the operator will never run.
+            assert token.startswith("/"), (
                 f"{origin} names {token!r} by a repository-relative path. The "
                 f"image's effective WORKDIR is {final_workdir}, so it resolves "
                 f"to {PurePosixPath(final_workdir) / token} while the script is "
@@ -451,10 +455,12 @@ def test_documented_authority_commands_resolve_in_the_image():
                 f"image. Use the absolute path: it is correct whatever the "
                 f"WORKDIR turns out to be."
             )
-            # Secondary: absolute, but is it where the image put it?
-            assert str(PurePosixPath(token)) == target, (
+            assert token == target, (
                 f"{origin} names {token!r}, but deploy/Dockerfile.app copies "
-                f"that script to {target}."
+                f"that script to {target}. The command must name that path "
+                f"exactly, character for character: a trailing slash, a doubled "
+                f"or dotted segment, or any other spelling the shell takes "
+                f"literally will fail in the image even though it 'looks' right."
             )
             checked.append((origin, token))
 
