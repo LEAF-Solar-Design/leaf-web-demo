@@ -1135,6 +1135,22 @@ def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
         source_after = _sqlite_snapshot(sqlite_path)
         source_stable = authority_digest(source_after) == source_digest
         tables = analysis["tables"]
+        # An EMPTY source against a POPULATED target is the shape a destroyed
+        # source takes, and on its own it reconciles trivially: every target row
+        # is an expected target-only row, nothing is missing, exit 0. That is a
+        # true statement about set inclusion and a worthless one about the
+        # migration -- it proves only that the empty set is a subset.
+        #
+        # It is the exact state a deploy leaves behind wherever the legacy store
+        # is task-local, which is where this command is most likely to be run
+        # first. Reported as its own flag, and it withholds a clean exit unless
+        # the caller passes --allow-empty-source, so a receipt can never be
+        # manufactured out of a source that is simply gone.
+        source_counts = authority_counts(source)
+        target_counts_now = authority_counts(target)
+        empty_source_populated_target = (
+            not any(source_counts.values()) and any(target_counts_now.values())
+        )
         reconciled = source_stable and all(
             entry["source_only_count"] == 0
             and entry["conflicting_count"] == 0
@@ -1146,6 +1162,7 @@ def reconcile(*, sqlite_path: Path, mode: str) -> dict[str, Any]:
             "mode": mode,
             "reconciled": reconciled,
             "source_stable": source_stable,
+            "empty_source_populated_target": empty_source_populated_target,
             "parity": reconciled,
             "exact_equal": target_digest == source_digest,
             "inserted": inserted,
@@ -1184,6 +1201,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="legacy SQLite path; defaults to the app's own SESSIONS_DB resolution",
     )
+    parser.add_argument(
+        "--allow-empty-source",
+        action="store_true",
+        help=(
+            "accept a clean exit when the legacy source holds no rows at all and"
+            " the target holds some. Withheld by default because that is the"
+            " shape a DESTROYED source takes, and it reconciles trivially"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         sqlite_path = args.sqlite if args.sqlite is not None else default_sqlite_path()
@@ -1205,6 +1231,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print("sessions authority parity failed", file=sys.stderr)
+        return 1
+    if receipt["empty_source_populated_target"] and not args.allow_empty_source:
+        print(
+            "sessions authority source holds no rows while the target holds"
+            f" {sum(receipt['target_counts'].values())}. That reconciles"
+            " trivially and proves only that an empty set is a subset; it is NOT"
+            " a cutover receipt. If the source is legitimately empty (for"
+            " example a task-local store that a deploy just replaced), re-run"
+            " with --allow-empty-source and record why.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
