@@ -247,8 +247,6 @@ def _validate_rejection(response: JsonResponse, allowed_statuses: frozenset[int]
 def _validate_wrong_channel_result(
     response: JsonResponse, request_id: int
 ) -> None:
-    if response.status_code in {401, 403}:
-        return
     body = response.body
     result = body.get("result")
     structured = result.get("structuredContent") if isinstance(result, dict) else None

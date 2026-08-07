@@ -444,6 +444,29 @@ def test_probe_rejects_wrong_channel_acceptance(staging):
         )
 
 
+@pytest.mark.parametrize("empty_status", (401, 403))
+def test_probe_rejects_empty_http_wrong_channel_response(staging, empty_status):
+    signer = CapturingSigner()
+    call_count = 0
+
+    def transport(*_args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return rejected_response(401)
+        if call_count == 2:
+            return initialize_response(request_id=11)
+        if call_count == 3:
+            return status_response(signer.calls[0][0], request_id=12)
+        return rejected_response(empty_status)
+
+    with pytest.raises(mcp_staging_probe.ProbeError):
+        mcp_staging_probe.run_probe(
+            authority_signer=signer,
+            transport=transport,
+        )
+
+
 def test_probe_rejects_widened_catalog_or_identity_mismatch(staging):
     overrides = (
         {"allowed_services": ["time", "research"]},
