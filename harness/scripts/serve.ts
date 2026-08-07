@@ -75,7 +75,7 @@ import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js"
 import {
   AuthorStandardServicesRunner,
   LeafStandardServicesHumanApprovalHost,
-  parseStandardServicesEnvironment,
+  standardServicesEnvironmentFromEnv,
   StandardServicesOAuthGrantProvider,
   standardServicesResolverFromEnv,
 } from "../src/ports/impl/leafStandardServicesResolver.js";
@@ -336,7 +336,7 @@ async function main(): Promise<void> {
         dispatchSecret: (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim(),
         host: new LeafStandardServicesHumanApprovalHost({
           brokerEndpoint: (process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim(),
-          environment: parseStandardServicesEnvironment(process.env.LEAF_RUNTIME_ENV),
+          environment: standardServicesEnvironmentFromEnv(process.env),
           approvalStore: tenantBrokerApprovalStoreHandle.store,
         }),
       }
