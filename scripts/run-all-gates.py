@@ -624,13 +624,18 @@ def build_suites() -> List[Suite]:
         # "(executed-count drift: ...)" note, so 34 of these could have vanished
         # and the gate would still have reported green. Raising it with the
         # tests, in the same commit, is what keeps that from happening again.
-        # 46 is safe on every runner because the suite is fully static -- it
+        # 48 is safe on every runner because the suite is fully static -- it
         # reads files and parses AST, and carries no skipif, pytest.skip or
         # importorskip at all, so there is no environment where it executes
         # fewer. That is also why it needs no allowed_skip_reasons.
+        # 46 -> 48 on 2026-08-07 with the two tests that extend the build-time
+        # script-survival guard to Dockerfile.canonical-worker/broker/harness.
+        # They read the repository tree (harness/scripts/) as well as file text,
+        # which does not change the reasoning above: a checkout always has it,
+        # and its absence would fail LOUD rather than skip.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 46),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 48),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.

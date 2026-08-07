@@ -56,6 +56,29 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
   && mkdir -p /data/tenants /data/grants /data/sessions \
   && chown -R 10002:10002 /data /home/leaf
 
+# --- Runtime proof that the shipped scripts survived the build. ---------------
+# Same guard, same reasoning, and the same EXACT spelling as deploy/Dockerfile.app
+# (read the long comment there for why each part is load-bearing; it is not
+# repeated in four files). In short: EXEC FORM so a `SHELL ["/bin/true"]` above
+# it cannot turn the guard into a no-op, and `-s` as well as `-f` because `-f`
+# alone accepts an EMPTY file. This image's CMD *is* one of the guarded files, so
+# a deletion currently surfaces as a container that will not start, and a
+# TRUNCATION as one that starts, exits 0 immediately, and serves nothing.
+#
+# EVERY file of harness/scripts/, not a hand-picked subset, because the COPY is a
+# DIRECTORY copy: whatever is in that directory is what ships, so that is what
+# the guard asserts. The list is derived from the directory rather than curated,
+# which means adding a file there reddens
+# test_every_image_asserts_its_shipped_scripts_at_build_time until this line is
+# updated. That is the intended cost -- it is the same "covered the day it is
+# copied" property the app image gets, applied to a directory.
+#
+# Below the tsc/chmod and useradd RUNs that touch these paths, and ABOVE the
+# per-commit ARG: a RUN below that ARG re-executes on every merge, which
+# scripts/test_build_platform_images_workflow.py forbids outright, and an
+# exec-form RUN can never satisfy its consumption rule (it invokes no shell).
+RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh"]
+
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
 # miss for everything after it — declared at the top it made the apt/npm ci

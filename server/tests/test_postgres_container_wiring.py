@@ -6,6 +6,7 @@ can run the separate migration and cutover stages.
 """
 from pathlib import Path, PurePosixPath
 import ast
+import fnmatch
 import json
 import posixpath
 import re
@@ -566,6 +567,390 @@ def _contains(directory: str, path: str) -> bool:
     return path.startswith(prefix) and path != directory.rstrip("/")
 
 
+# ---------------------------------------------------------------------------- #
+# The SAME survival guard, for the three images `_copied_scripts` cannot read.
+#
+# `_copied_scripts` above is deliberately narrow in ways that all hold for
+# deploy/Dockerfile.app and none of which hold for the other three images. That
+# narrowness is exactly how those images came to ship operator-reachable scripts
+# with no build-time guard at all:
+#
+#   * it folds every stage together and is only ever called behind
+#     `_single_stage`, while deploy/Dockerfile.broker and
+#     deploy/Dockerfile.harness are both TWO-stage builds;
+#   * it selects on a `scripts/` PREFIX, while the broker ships
+#     `harness/scripts/e2b-tool-exec.mjs` -- a scripts path that is not a
+#     scripts prefix, so the prefix test skips it in silence;
+#   * it reads single-FILE sources, while the harness copies the whole
+#     `harness/scripts/` DIRECTORY.
+#
+# So this REUSES the parse rather than repeating it. `_copy_operands` already
+# refuses the JSON form, a variable-built path, a relative destination and a
+# bad arity, and `_image_path`/`_contains` already answer where a destination
+# really lands; all of that is inherited here. What is added is only what those
+# three shapes need: the final stage instead of all stages, a `scripts` path
+# COMPONENT instead of a prefix, and the directory form resolved against the
+# repository tree. Every way the addition can fail to understand a COPY is LOUD
+# -- ADD, a rename, `--from=`, a multi-source copy of a scripts path, a
+# subdirectory, and a dockerignored entry each RAISE rather than quietly
+# shrinking the guarded set, because a guard that silently covers less than it
+# appears to is the failure mode this whole module was rebuilt around.
+# ---------------------------------------------------------------------------- #
+_SCRIPTS_COMPONENT = "scripts"
+
+# The base allowlist of what may follow a survival guard: instructions that
+# cannot remove a file at BUILD time. USER and VOLUME are NOT here, for the
+# reasons spelled out in test_the_image_asserts_its_own_reconcilers_at_build_time.
+_CANNOT_REMOVE = frozenset({
+    "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
+    "MAINTAINER", "SHELL", "STOPSIGNAL", "WORKDIR",
+})
+
+_DOCKERIGNORE_BASENAME = re.compile(r"^\*\*/(?!.*/)(.+)$")
+
+
+def _dockerignore_subset() -> tuple[set[str], set[str]]:
+    """(basename globs, exact repo-relative paths) from the root .dockerignore.
+
+    A deliberate SUBSET of docker's exclusion semantics, used only to fail LOUD
+    and never to decide that something IS shipped. It exists because the
+    directory form below enumerates the repository while the image holds only
+    what the build context delivered: a `harness/scripts/debug.log` is excluded
+    by `**/*.log`, so a guard derived from the directory would name a path that
+    never ships and break every build. Catching it here turns a fail-closed
+    build break into a test failure that says what to do.
+    """
+    basenames: set[str] = set()
+    exact: set[str] = set()
+    for raw in _read(".dockerignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # A negation re-includes a path and which rule wins depends on order.
+        # This subset does not model that, so refuse rather than guess.
+        assert not line.startswith("!"), (
+            ".dockerignore now uses a negation rule, whose effect depends on "
+            "rule order. Teach this subset before relying on it."
+        )
+        match = _DOCKERIGNORE_BASENAME.match(line)
+        if match:
+            basenames.add(match.group(1))
+        else:
+            exact.add(line.rstrip("/"))
+    return basenames, exact
+
+
+def _is_dockerignored(relative: str) -> bool:
+    basenames, exact = _dockerignore_subset()
+    name = PurePosixPath(relative).name
+    if any(fnmatch.fnmatch(name, pattern) for pattern in basenames):
+        return True
+    return relative.rstrip("/") in exact
+
+
+def _shipped_instructions(path: str) -> list[tuple[str, str]]:
+    """The FINAL build stage's instructions -- the only ones that ship.
+
+    Each `FROM` starts a fresh stage and a later stage inherits nothing it does
+    not copy, so an earlier stage's COPY says nothing about the published image.
+    `_single_stage` refuses a multi-stage file rather than reason about this,
+    which is right for deploy/Dockerfile.app and unusable for the two images
+    that ARE multi-stage. Reading the last stage is sound only because the build
+    never selects another one, which
+    `test_the_image_build_never_selects_a_stage_other_than_the_last` pins
+    independently of anything here.
+    """
+    instructions = _instructions(_read(path))
+    starts = [index for index, (keyword, _) in enumerate(instructions)
+              if keyword == "FROM"]
+    assert starts, f"{path} declares no FROM"
+    return instructions[starts[-1]:]
+
+
+_GLOB_METACHARACTERS = re.compile(r"[*?\[]")
+
+
+def _writes_only_named_files(keyword: str, flags: list[str], sources: list[str]) -> bool:
+    """Whether this instruction provably creates ONLY `destination/<basename>`.
+
+    The ONE exception to the refuse-a-destination-above-a-script rule, and it is
+    deliberately the narrowest shape that is decidable WITHOUT re-opening any of
+    the four defects that got the adjudicating version deleted (recorded in
+    `_copied_scripts`). Each of those defects is excluded by construction here
+    rather than by a heuristic:
+
+      * `ADD` auto-extracts a local archive detected by CONTENT, and a suffix
+        rule for that was one of the four. So this accepts COPY only, which
+        NEVER extracts -- no content inspection, no suffix guess.
+      * `--from=` sources a tree that is not this repository, so nothing here
+        could check it. Excluded outright, exactly as `_copied_scripts` does.
+      * A glob's match set is not decidable here (`--exclude=` and .dockerignore
+        both narrow it), and a glob can match a DIRECTORY. Any metacharacter is
+        refused rather than expanded.
+      * A source that is absent, or is a directory, is refused. Absent is the
+        case a glob/ignore rule made "look missing", and it fails CLOSED here:
+        unknown means refuse, never accept.
+
+    What is left is a list of literal, existing, regular files. Docker writes
+    exactly one entry per source into the destination directory, and creates no
+    subdirectory, so such a line cannot reach anything under
+    `destination/scripts/`. That is a statement about docker's file-copy
+    semantics, not an inference about the source tree's contents.
+    """
+    if keyword != "COPY":
+        return False
+    if any(flag.startswith("--from=") for flag in flags):
+        return False
+    for source in sources:
+        if _GLOB_METACHARACTERS.search(source):
+            return False
+        if not (REPO_ROOT / source).is_file():
+            return False
+    return True
+
+
+def _shipped_scripts(path: str) -> dict[str, str]:
+    """repository source path -> absolute in-image path, for the final stage.
+
+    Keyed on the repository SOURCE for the same reason `_copied_scripts` is: a
+    destination-keyed map asks only "does something land at this name", never
+    "is it the right file", so a one-token slip ships one script's content under
+    another's name and passes.
+    """
+    instructions = _shipped_instructions(path)
+    shipped: dict[str, str] = {}
+    destinations: list[tuple[str, str]] = []
+
+    for keyword, argument in instructions:
+        if keyword not in ("COPY", "ADD"):
+            continue
+        flags, sources, destination, is_directory = _copy_operands(keyword, argument)
+        destinations.append((keyword, flags, sources, destination))
+
+        scripted = [
+            source for source in sources
+            if _SCRIPTS_COMPONENT in PurePosixPath(source).parts
+        ]
+        if not scripted:
+            continue
+
+        # ADD can fetch a URL and auto-extracts an archive by its CONTENT, so
+        # what it writes is not decidable from the operands.
+        assert keyword == "COPY", (
+            f"{path}: {keyword} ships {scripted}; ADD may fetch a remote source "
+            "or unpack an archive, so this guard cannot say what it writes. "
+            "Use COPY, or teach this guard."
+        )
+        assert not any(flag.startswith("--from=") for flag in flags), (
+            f"{path}: COPY of {scripted} uses --from=, so it does not come from "
+            "the repository tree; teach this guard before using that form."
+        )
+        assert len(sources) == 1, (
+            f"{path}: COPY ships {scripted} alongside {sources}; with several "
+            "sources each one's in-image path depends on the destination being "
+            "a directory. Split it, or teach this guard."
+        )
+
+        source = sources[0]
+        repo_path = REPO_ROOT / source
+        if repo_path.is_dir():
+            # DIRECTORY form: docker copies the CONTENTS into the destination,
+            # so the repository directory IS the shipped set. Derived rather
+            # than curated, which is what gives a directory copy the same
+            # "covered the day it is copied" property a file copy gets.
+            assert PurePosixPath(source.rstrip("/")).name == _SCRIPTS_COMPONENT, (
+                f"{path}: COPY {source} has a `scripts` path component but is "
+                "not itself a scripts directory; teach this guard."
+            )
+            assert is_directory, (
+                f"{path}: COPY {source} {destination} copies a directory's "
+                "CONTENTS, but the destination is not written as a directory. "
+                "Give it a trailing slash."
+            )
+            entries = sorted(repo_path.iterdir(), key=lambda entry: entry.name)
+            assert entries, f"{path}: COPY {source} ships an empty directory"
+            for entry in entries:
+                relative = f"{source.rstrip('/')}/{entry.name}"
+                # Docker recurses, but the flat guard below would name a
+                # directory as a file and fail every build.
+                assert entry.is_file(), (
+                    f"{path}: {relative} is not a plain file; the directory "
+                    "COPY recurses but this guard only names flat entries."
+                )
+                assert not _is_dockerignored(relative), (
+                    f"{path}: {relative} is excluded by .dockerignore, so the "
+                    "image will not hold it and a guard naming it would fail "
+                    "every build. Remove the file or narrow the ignore rule."
+                )
+                assert relative not in shipped, f"{relative} ships twice"
+                shipped[relative] = posixpath.join(destination, entry.name)
+            continue
+
+        assert repo_path.is_file(), (
+            f"{path}: COPY {source} names no file in the repository"
+        )
+        source_name = PurePosixPath(source).name
+        # A directory DESTINATION for a single file resolves to dest/name, which
+        # is an ordinary correct line, not a rename.
+        landing = (posixpath.join(destination, source_name) if is_directory
+                   else destination)
+        assert PurePosixPath(landing).name == source_name, (
+            f"{path}: COPY ships {source} as {landing}, renaming it. This guard "
+            "identifies a shipped script by its repository name, so a rename "
+            "means the image holds one script's content under another's name. "
+            "Teach this guard before using that form."
+        )
+        assert not _is_dockerignored(source), (
+            f"{path}: {source} is excluded by .dockerignore, so the COPY would "
+            "fail and this guard would name a path the image never holds."
+        )
+        assert source not in shipped, f"{source} is COPYed to more than one target"
+        shipped[source] = landing
+
+    # A COPY need not come FROM a scripts path to land ON one. Checked on
+    # DESTINATIONS, which need no WORKDIR reasoning, and using the same
+    # equal/above pair `_copied_scripts` uses: docker merges a directory copy
+    # recursively and extracts a local archive, so a destination ABOVE a shipped
+    # script reaches it too. Refused rather than adjudicated, for the four
+    # reasons recorded there.
+    targets = set(shipped.values())
+    parents = {posixpath.dirname(target) for target in targets}
+    for keyword, flags, sources, destination in destinations:
+        outsiders = [
+            source for source in sources
+            if _SCRIPTS_COMPONENT not in PurePosixPath(source).parts
+        ]
+        if not outsiders:
+            continue
+
+        # Landing exactly ON a shipped script, or on its directory. Unconditional:
+        # even a copy that writes only the files it names writes them INTO a
+        # destination directory, so `COPY data/blob /app/scripts/` still collides.
+        assert destination not in targets | parents, (
+            f"{path}: {keyword} writes {outsiders} to {destination}, which lands "
+            "on a guarded script path, so the image would ship that content "
+            "under a shipped script's name. Teach this guard before overwriting "
+            "one."
+        )
+
+        # Landing somewhere ABOVE a shipped script, which reaches it too.
+        # `_copied_scripts` refuses this shape outright rather than adjudicate
+        # it, for four reasons recorded there, and deploy/Dockerfile.app never
+        # needed the exception. deploy/Dockerfile.harness does: it copies
+        # `harness/package.json harness/package-lock.json` into /app/, which is
+        # strictly above /app/scripts. That line cannot reach the scripts
+        # directory, and saying so does not require re-opening any of the four
+        # defects -- see `_writes_only_named_files`.
+        if _writes_only_named_files(keyword, flags, sources):
+            continue
+        for target in targets:
+            assert not _contains(destination, target), (
+                f"{path}: {keyword} writes into {destination}, which is ABOVE "
+                f"{target}. Docker merges a directory copy recursively and "
+                f"extracts a local archive, so content under {outsiders} could "
+                "replace a shipped script. This guard deliberately does not try "
+                "to decide whether it actually does. Copy somewhere that is not "
+                "above a shipped script, or teach this guard."
+            )
+
+    # Anti-vacuity for the file as a whole: an image this guard covers that
+    # copies no script means either the script stopped shipping or the parse
+    # stopped seeing it, and both are blockers.
+    assert shipped, f"{path} ships no script this guard can see"
+    return shipped
+
+
+def _survival_guard_argv(targets) -> list[str]:
+    """The one exec-form argv every image's survival guard must be spelled as.
+
+    ONE definition for all four images, so a change to HOW the guard is spelled
+    is a single edit that reddens all of them rather than four edits that drift
+    apart. `-s` as well as `-f`, because `-f` alone accepts an EMPTY file, so a
+    truncation ships a script that exits 0 and emits nothing. Sorted, so the
+    expected string does not depend on the order the COPYs happen to appear in.
+    """
+    command = " && ".join(
+        f"test -f {target} && test -s {target}" for target in sorted(targets)
+    )
+    return ["/bin/sh", "-c", command]
+
+
+def _assert_one_survival_guard(
+    path: str,
+    instructions: list[tuple[str, str]],
+    targets,
+    allowed_after: frozenset,
+    allowed_runs_after: tuple = (),
+) -> int:
+    """Exactly one exec-form guard over `targets`, and nothing unchecked below it.
+
+    EXEC FORM is load-bearing rather than a style choice: shell-form RUN
+    executes through whatever SHELL is in effect, so a `SHELL ["/bin/true"]`
+    placed ABOVE a byte-identical shell-form guard runs it as
+    `/bin/true -c "test -f ..."` -- exit 0, nothing tested, image ships with the
+    scripts deleted. That attack sits ABOVE the guard, where no rule about what
+    FOLLOWS it could ever see it. Exec form names its own interpreter and
+    ignores SHELL, which closes it outright instead of adding a position rule.
+    """
+    expected = _survival_guard_argv(targets)
+    guarded = [
+        index for index, (keyword, argument) in enumerate(instructions)
+        if keyword == "RUN" and _exec_argv(argument) == expected
+    ]
+    assert len(guarded) == 1, (
+        f"{path} must hold exactly one survival guard, in EXEC form, spelled "
+        f"exactly:\n    RUN {json.dumps(expected)}\nfound {len(guarded)}. A "
+        "guard the image ships must assert every script the COPY map ships, "
+        "must name its own interpreter so a SHELL above it cannot neuter it, "
+        "and nothing else may impersonate it."
+    )
+
+    # ALLOWLIST, not a denylist: an instruction this guard does not recognise
+    # fails LOUD rather than being assumed harmless.
+    offending = sorted({
+        keyword for keyword, argument in instructions[guarded[0] + 1:]
+        if keyword.upper() not in allowed_after
+        and not (keyword == "RUN" and argument in allowed_runs_after)
+    })
+    assert not offending, (
+        f"{path} runs {offending} AFTER the survival guard, so those "
+        "instructions ship unchecked. Put them above the guard, or teach this "
+        "allowlist why they cannot remove a file at BUILD time and cannot mask "
+        "or re-permission the path for the runtime process."
+    )
+    return guarded[0]
+
+
+def _assert_guarded_paths_survive_a_later_user(
+    path: str, instructions: list[tuple[str, str]], targets
+) -> None:
+    """A USER below the guard is only safe while the guarded paths stay readable.
+
+    The guard runs as ROOT, so it cannot observe what the runtime uid will see:
+    root reads a 0600 file happily and the image still ships a script the
+    service cannot execute. deploy/Dockerfile.app never faced this -- it
+    declares no USER, which is why USER is off its allowlist -- but the broker,
+    harness and canonical-worker all drop privilege BELOW the guard and so must
+    admit it. This is what pays for that admission: it turns "USER is presumably
+    fine here" into an assertion about the modes these files actually set.
+    """
+    guarded = set(targets) | {posixpath.dirname(target) for target in targets}
+    for _keyword, argument in instructions:
+        for match in re.finditer(r"chmod\s+((?:-\S+\s+)*)(\S+)\s+(\S+)", argument):
+            mode, operand = match.group(2), match.group(3)
+            if _image_path(operand) not in guarded:
+                continue
+            assert re.fullmatch(r"[0-7]{3,4}", mode), (
+                f"{path}: chmod {mode} {operand} uses a symbolic mode, which "
+                "this guard cannot evaluate. Use a numeric mode, or teach it."
+            )
+            assert int(mode[-1]) & 4, (
+                f"{path}: chmod {mode} {operand} leaves a guarded path with no "
+                "world read bit, so the uid this image drops to cannot read a "
+                "script the build-time guard just declared healthy."
+            )
+
+
 
 
 def test_dockerfile_copy_parsing_survives_case_indentation_and_heredocs():
@@ -1038,10 +1423,15 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     escapes the first two; only the allowlist stops it.
 
     SCOPE, so this does not read as more than it is. It covers the app image's
-    reconcilers. deploy/Dockerfile.canonical-worker, deploy/Dockerfile.broker
-    and deploy/Dockerfile.harness ship operator-reachable scripts
-    (canonical-container-smoke.py, e2b-tool-exec.mjs, start-harness.sh) with the
-    same hole and no such guard.
+    reconcilers, and only those. The other three images carry the same guard in
+    the same spelling now, pinned by
+    test_every_image_asserts_its_shipped_scripts_at_build_time -- but on a
+    WEAKER footing, because no daemon has built them; that test says so in its
+    own words and must not inherit this one's build-proof language. The argv and
+    the exactly-one/allowlist rules are shared with it through
+    `_survival_guard_argv` and `_assert_one_survival_guard`, so the spelling
+    cannot drift between the four images. What differs per image is only the
+    COPY map it is derived from and the allowlist it needs, both stated there.
     """
     dockerfile = _app_dockerfile()
     _single_stage(dockerfile)
@@ -1075,37 +1465,20 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # the interpreter closes it outright instead of adding another position
     # rule: exec form ignores SHELL, so nothing above the guard changes what
     # the guard means.
-    command = " && ".join(
-        # `-s` as well as `-f`: `-f` alone accepts an EMPTY file, so a
-        # truncation ships a reconciler that exits 0 and emits no receipt.
-        f"test -f {target} && test -s {target}"
-        for target in sorted(copies.values())
-    )
-    expected = ["/bin/sh", "-c", command]
-
-    instructions = _instructions(dockerfile)
-    guarded = [
-        index for index, (keyword, argument) in enumerate(instructions)
-        if keyword == "RUN" and _exec_argv(argument) == expected
-    ]
-    assert len(guarded) == 1, (
-        "deploy/Dockerfile.app must hold exactly one existence guard, in EXEC "
-        f"form, spelled exactly:\n    RUN {json.dumps(expected)}\n"
-        f"found {len(guarded)}. A guard the image ships must assert every "
-        "script the COPY map ships, must name its own interpreter so a SHELL "
-        "above it cannot neuter it, and nothing else may impersonate it."
-    )
-
-    # ALLOWLIST, not a denylist of RUN/COPY/ADD. An instruction this guard does
-    # not recognise fails LOUD rather than being assumed harmless, which is the
-    # failure mode the deleted static check had.
+    # THE EXACT COMMAND and the exactly-one/allowlist rules live in
+    # `_survival_guard_argv` and `_assert_one_survival_guard`, shared with the
+    # other three images. The reasoning above is the reasoning they encode; it
+    # is stated here because this is where its history is.
     #
-    # USER and VOLUME are deliberately NOT on it, though neither deletes a file.
-    # The guard runs as root at build time, so a later `USER 10001` can leave a
-    # 0600 script unreadable to the process that actually runs it, and a later
+    # deploy/Dockerfile.app takes the BASE allowlist with no additions. USER and
+    # VOLUME are deliberately absent, though neither deletes a file: the guard
+    # runs as root at build time, so a later `USER 10001` can leave a 0600
+    # script unreadable to the process that actually runs it, and a later
     # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
-    # whose guard passed and whose documented command still fails. Adding
-    # either must therefore be a decision someone makes here, not a side effect.
+    # whose guard passed and whose documented command still fails. This image
+    # declares neither, so it needs no exception; the three images that DO drop
+    # privilege pay for admitting USER with an asserted mode check
+    # (`_assert_guarded_paths_survive_a_later_user`), not with an assumption.
     #
     # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
     # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
@@ -1114,17 +1487,250 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # guard passes this test, passes the build, and deletes the script seconds
     # into container life while the container reports healthy. No rule about
     # POSITION can bind runtime behaviour, so that is a review class, not a gate.
-    cannot_remove = {
-        "ARG", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK", "LABEL",
-        "MAINTAINER", "SHELL", "STOPSIGNAL", "WORKDIR",
+    _assert_one_survival_guard(
+        "deploy/Dockerfile.app",
+        _instructions(dockerfile),
+        copies.values(),
+        _CANNOT_REMOVE,
+    )
+
+
+# The two RUNs deploy/Dockerfile.canonical-worker is FORCED to place below its
+# survival guard, pinned byte-exact.
+#
+# Every other image can put its guard last among the filesystem-touching
+# instructions. This one cannot. It declares its per-commit ARGs near the TOP,
+# and scripts/test_build_platform_images_workflow.py requires every RUN below
+# them to CONSUME one through a real shell expansion -- which an exec-form RUN
+# can never do, because it invokes no shell and that checker returns False for
+# the JSON form by construction. So the guard must sit above the ARG, and these
+# two ARG-consuming RUNs necessarily follow it. Verified rather than assumed:
+# moving the guard below the ARG makes `_runs_after_per_commit_arg` report it.
+#
+# Pinning their exact text is what keeps that from being a hole. Both were read:
+# the first attests the copied solver source against the checked-in
+# commit-to-digest map, the second validates two commit shas and writes two
+# revision files. Neither writes under /app/scripts. A THIRD RUN here, or any
+# edit to either of these two, fails rather than shipping unchecked -- the same
+# trade `_PINNED_GIT_INSTALL` makes, and for the same reason: changing what runs
+# after a guard should be a change a reviewer sees.
+_CANONICAL_WORKER_RUNS_AFTER_GUARD = (
+    'PYTHONPATH=/app/server python -c "from pathlib import Path; from '
+    "solver_adapters.autofill import attest_source; attest_source("
+    "Path('/opt/leaf/autofill-solver'), '${AUTOFILL_SOLVER_REVISION}', "
+    "Path('/app/deploy/autofill-solver-sources.json'))\"",
+    'python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
+    "re.fullmatch(r'[0-9a-f]{40}', value) else 'AUTOFILL_SOLVER_REVISION must "
+    "be an exact lowercase 40-character commit')\" \"$AUTOFILL_SOLVER_REVISION\""
+    ' && python -c "import re,sys; value=sys.argv[1]; raise SystemExit(0 if '
+    "re.fullmatch(r'[0-9a-f]{40}', value) else 'LEAF_SOURCE_SHA must be an "
+    "exact lowercase 40-character commit')\" \"$LEAF_SOURCE_SHA\" && printf "
+    "'%s\\n' \"$AUTOFILL_SOLVER_REVISION\" > "
+    "/opt/leaf/autofill-solver/.leaf-source-revision && printf '%s\\n' "
+    '"$LEAF_SOURCE_SHA" > /app/.leaf-source-revision',
+)
+
+# image -> (the operator-reachable script that motivated its guard,
+#           extra instruction keywords its allowlist must admit,
+#           exact RUN bodies its allowlist must admit)
+#
+# USER is admitted for all three, and unlike the app image that admission is not
+# free: each drops privilege BELOW the guard, so
+# `_assert_guarded_paths_survive_a_later_user` asserts that nothing chmods a
+# guarded path -- or its directory -- to a mode with no world read bit. Without
+# it, `RUN chmod 0700 /app/scripts` under a later `USER 10002` ships an image
+# whose guard passed and whose CMD cannot be read.
+_GUARDED_IMAGES = {
+    "canonical-worker": (
+        "/app/scripts/canonical-container-smoke.py",
+        frozenset({"USER"}),
+        _CANONICAL_WORKER_RUNS_AFTER_GUARD,
+    ),
+    "broker": ("/app/harness/scripts/e2b-tool-exec.mjs", frozenset({"USER"}), ()),
+    "harness": ("/app/scripts/start-harness.sh", frozenset({"USER"}), ()),
+}
+
+
+def test_the_widened_script_parse_refuses_every_form_it_cannot_read():
+    """The three images' guards are only as good as this parse, so pin it.
+
+    Each form below is one the narrow `_copied_scripts` drops in SILENCE, which
+    is how three images came to ship unguarded scripts in the first place. A
+    parse that quietly shrinks the guarded set produces a green test over an
+    image that asserts nothing, so every gap here must RAISE.
+    """
+    # Only the FINAL stage ships: an earlier stage's COPY says nothing about the
+    # published image, and crediting a guard for a file that never arrived is
+    # exactly the silent-shrink failure. `_single_stage` refuses a multi-stage
+    # file rather than reason about it, and TWO of the three guarded images
+    # really are multi-stage -- which is the whole reason `_shipped_instructions`
+    # had to exist. Pin that premise, so this does not quietly become a
+    # single-stage problem that `_copied_scripts` could have handled all along.
+    for image in ("broker", "harness"):
+        with pytest.raises(AssertionError, match="stages"):
+            _single_stage(_read(f"deploy/Dockerfile.{image}"))
+    _single_stage(_read("deploy/Dockerfile.canonical-worker"))
+
+    # ...and the last stage is the one read.
+    two_stages = (
+        "FROM node:20-slim AS deps\n"
+        "COPY harness/scripts/ /app/scripts/\n"
+        "FROM python:3.12-slim AS final\n"
+        "COPY server/ /app/server/\n"
+    )
+    assert [k for k, _ in _instructions(two_stages)] == [
+        "FROM", "COPY", "FROM", "COPY"]
+
+    # The guard argv is order-independent and always carries BOTH tests.
+    assert _survival_guard_argv(["/b", "/a"]) == [
+        "/bin/sh", "-c", "test -f /a && test -s /a && test -f /b && test -s /b",
+    ]
+
+    # Exactly one guard, in exec form. A shell-form spelling of the IDENTICAL
+    # command must not satisfy it: a `SHELL ["/bin/true"]` above it would run
+    # the byte-identical guard as `/bin/true -c "test -f ..."`, exit 0, and test
+    # nothing.
+    argv = _survival_guard_argv(["/app/scripts/x.py"])
+    exec_form = ("RUN", json.dumps(argv))
+    _assert_one_survival_guard("probe", [exec_form], ["/app/scripts/x.py"],
+                               _CANNOT_REMOVE)
+    with pytest.raises(AssertionError, match="exactly one survival guard"):
+        _assert_one_survival_guard("probe", [("RUN", argv[2])],
+                                   ["/app/scripts/x.py"], _CANNOT_REMOVE)
+
+    # An instruction the allowlist does not name fails LOUD; a named one passes.
+    with pytest.raises(AssertionError, match=r"runs \['USER'\]"):
+        _assert_one_survival_guard("probe", [exec_form, ("USER", "10001")],
+                                   ["/app/scripts/x.py"], _CANNOT_REMOVE)
+    _assert_one_survival_guard("probe", [exec_form, ("USER", "10001")],
+                               ["/app/scripts/x.py"], _CANNOT_REMOVE | {"USER"})
+    # A RUN below the guard passes ONLY when its exact body is pinned.
+    with pytest.raises(AssertionError, match=r"runs \['RUN'\]"):
+        _assert_one_survival_guard("probe", [exec_form, ("RUN", "rm -rf /app")],
+                                   ["/app/scripts/x.py"], _CANNOT_REMOVE)
+    _assert_one_survival_guard("probe", [exec_form, ("RUN", "seal $X")],
+                               ["/app/scripts/x.py"], _CANNOT_REMOVE, ("seal $X",))
+
+    # A later USER is safe only while the guarded paths stay world readable.
+    _assert_guarded_paths_survive_a_later_user(
+        "probe", [("RUN", "chmod 0555 /app/scripts/x.sh")], ["/app/scripts/x.sh"])
+    with pytest.raises(AssertionError, match="no world read bit"):
+        _assert_guarded_paths_survive_a_later_user(
+            "probe", [("RUN", "chmod 0500 /app/scripts/x.sh")],
+            ["/app/scripts/x.sh"])
+    # ...including a RECURSIVE chmod of the directory, whose flag would
+    # otherwise be read as the mode and skipped.
+    with pytest.raises(AssertionError, match="no world read bit"):
+        _assert_guarded_paths_survive_a_later_user(
+            "probe", [("RUN", "chmod -R 0700 /app/scripts")], ["/app/scripts/x.sh"])
+    with pytest.raises(AssertionError, match="symbolic mode"):
+        _assert_guarded_paths_survive_a_later_user(
+            "probe", [("RUN", "chmod go-r /app/scripts/x.sh")],
+            ["/app/scripts/x.sh"])
+
+    # The one exemption to the destination-above-a-script refusal is the
+    # narrowest decidable shape, and each of the four defects that killed the
+    # earlier adjudicating version must stay excluded by construction.
+    assert _writes_only_named_files(
+        "COPY", [], ["harness/package.json", "harness/package-lock.json"])
+    # ADD extracts a local archive detected by CONTENT.
+    assert not _writes_only_named_files("ADD", [], ["harness/package.json"])
+    # --from= sources a tree that is not this repository.
+    assert not _writes_only_named_files(
+        "COPY", ["--from=build"], ["harness/package.json"])
+    # A directory source recurses.
+    assert not _writes_only_named_files("COPY", [], ["harness/scripts"])
+    # A glob's match set is not decidable here, and can match a directory.
+    assert not _writes_only_named_files("COPY", [], ["harness/*.json"])
+    # An ABSENT source fails closed: unknown means refuse, never accept.
+    assert not _writes_only_named_files("COPY", [], ["harness/no-such-file.json"])
+
+    # The dockerignore subset must recognise this repository's real rules, or
+    # the directory form would demand files the build context never delivers.
+    assert _is_dockerignored("harness/scripts/debug.log")
+    assert _is_dockerignored("harness/scripts/node_modules")
+    assert not _is_dockerignored("harness/scripts/start-harness.sh")
+
+
+def test_every_image_asserts_its_shipped_scripts_at_build_time():
+    """The destruction class, closed for the three images that still had it open.
+
+    deploy/Dockerfile.app has carried this guard since #503. The other three
+    shipped operator-reachable scripts with the identical hole and nothing
+    watching: canonical-container-smoke.py (the worker's containerised smoke),
+    e2b-tool-exec.mjs (the broker's micro-VM helper, named by LEAF_E2B_HELPER),
+    and start-harness.sh (the harness image's literal CMD). An instruction that
+    deleted or truncated any of them left every static check green, because the
+    COPY line is still there to read; the failure surfaced in an operator
+    cutover instead.
+
+    Same answer, same spelling: `test -f && test -s` per shipped script, in EXEC
+    form, above the per-commit ARG. Derived from each Dockerfile's own COPY map
+    rather than a curated list, so a script added later is covered the day it is
+    copied -- and for the harness, whose COPY is a DIRECTORY, that means the day
+    it lands in harness/scripts/.
+
+    WHAT A DAEMON HAS ACTUALLY RUN, for THESE three: NOTHING. No Docker daemon
+    was reachable when they were written -- neither their PASS path nor any FAIL
+    path has been built, in either spelling. This is a WEAKER footing than the
+    app image's guard has, and it must not be described as if it were the same;
+    do not copy that test's build-proof language onto these instructions. What
+    they rest on is Docker's documented rule that SHELL does not affect the exec
+    form, that `test -f` and `test -s` do not change meaning with the
+    interpreter, and that an exec-form RUN whose command exits nonzero fails the
+    build. Those are the same properties the app image's SHELL-form guard was
+    mutation-proven on locally, in a spelling no daemon has executed here.
+    Building these three unmodified, then replaying deletion, truncation and the
+    `SHELL ["/bin/true"]` neutering against each, is what retires this
+    paragraph. Do not delete it on the strength of a green CI job: a CACHED
+    layer proves only that some earlier build of an identical layer succeeded.
+
+    WHAT IS STATICALLY PROVEN: every assertion here was mutation-checked. The
+    exec->shell downgrade, an interpreter swap, dropping `test -s`, deleting the
+    guard, adding an unpinned RUN below it, chmod-ing a guarded path unreadable,
+    and adding a file to harness/scripts/ each turn this test red; moving the
+    guard below the per-commit ARG turns the build gate red.
+
+    NOT covered, the same as the app's: content. `-s` closes the zero-byte case
+    and NOTHING WIDER -- a one-byte overwrite is a valid program that exits 0.
+    And no rule about POSITION binds runtime behaviour, so a `HEALTHCHECK CMD
+    rm -rf /app/scripts/...` below the guard passes the build and deletes the
+    script seconds into container life. Both are review classes, not gates.
+    """
+    for image, (motivating, extra_allowed, allowed_runs) in _GUARDED_IMAGES.items():
+        path = f"deploy/Dockerfile.{image}"
+        shipped = _shipped_scripts(path)
+
+        # ANTI-VACUITY, and the assertion that matters most here: a parse that
+        # silently stopped seeing this image's COPY would yield an empty map, an
+        # empty guard command, and a green test over an image asserting nothing.
+        # Naming the script each guard exists for cannot fail that way.
+        assert motivating in shipped.values(), (
+            f"{path}: {motivating} is the operator-reachable script this guard "
+            f"exists for, and the COPY map does not reach it: {shipped}"
+        )
+
+        instructions = _shipped_instructions(path)
+        _assert_one_survival_guard(
+            path, instructions, shipped.values(),
+            _CANNOT_REMOVE | extra_allowed, allowed_runs,
+        )
+        _assert_guarded_paths_survive_a_later_user(
+            path, instructions, shipped.values())
+
+    # The harness ships a DIRECTORY, so its guarded set is that directory's
+    # contents. Re-read independently of the helper: were the directory form
+    # silently skipped, the map would be empty and this comparison would fail
+    # rather than vacuously pass.
+    harness = _shipped_scripts("deploy/Dockerfile.harness")
+    on_disk = {
+        entry.name for entry in (REPO_ROOT / "harness" / "scripts").iterdir()
+        if entry.is_file()
     }
-    after = [keyword for keyword, _ in instructions[guarded[0] + 1:]]
-    offending = sorted({k for k in after if k.upper() not in cannot_remove})
-    assert not offending, (
-        f"deploy/Dockerfile.app runs {offending} AFTER the existence guard, so "
-        "those instructions ship unchecked. Put them above the guard, or teach "
-        "this allowlist why they cannot remove a file at BUILD time and cannot "
-        "mask or re-permission the path for the runtime process."
+    assert on_disk, "harness/scripts/ is empty"
+    assert {PurePosixPath(target).name for target in harness.values()} == on_disk, (
+        "the harness guard does not cover every file its directory COPY ships: "
+        f"guarded={sorted(harness.values())}, on disk={sorted(on_disk)}"
     )
 
 

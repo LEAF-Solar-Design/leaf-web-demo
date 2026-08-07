@@ -17,6 +17,29 @@ COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke
 COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/
 
+# --- Runtime proof that the shipped scripts survived the build. ---------------
+# Same guard, same reasoning, and the same EXACT spelling as deploy/Dockerfile.app
+# (read the long comment there for why each part is load-bearing; it is not
+# repeated in four files). In short: EXEC FORM so a `SHELL ["/bin/true"]` above
+# it cannot turn the guard into a no-op, and `-s` as well as `-f` because `-f`
+# alone accepts an EMPTY file, so a truncation ships a smoke script that exits 0
+# and proves nothing. Pinned by
+# test_every_image_asserts_its_shipped_scripts_at_build_time.
+#
+# POSITION, which differs from the app's and is the reason this sits here rather
+# than at the end. This file declares its per-commit ARGs near the TOP, and
+# scripts/test_build_platform_images_workflow.py requires every RUN below them to
+# CONSUME one through a real shell expansion. An exec-form RUN never invokes a
+# shell, so it can never consume, so it can never legally sit below the ARG in
+# this file. Above the ARG is therefore the only position available, and it is
+# still below the only instruction that writes /app/scripts.
+#
+# WHAT THAT COSTS, stated rather than glossed: two ARG-consuming RUNs follow this
+# guard, so unlike the app's they are not covered by "nothing may run after the
+# guard". Both are pinned BYTE-EXACT in that test instead, so a third RUN here,
+# or an edit to either of these two, fails rather than shipping unchecked.
+RUN ["/bin/sh", "-c", "test -f /app/scripts/canonical-container-smoke.py && test -s /app/scripts/canonical-container-smoke.py"]
+
 # Declared below every non-consuming instruction, deliberately: LEAF_SOURCE_SHA
 # is a new commit sha on every build, and a changed in-scope ARG is a buildx
 # cache miss for everything after it — declared at the top it made the pip
