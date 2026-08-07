@@ -2759,14 +2759,19 @@ def check_docs_noop_filter(text: str) -> None:
     frozen = hashlib.sha256(
         "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
-    # Hash updated 2026-08-07: the dispatch step now deploys one service at a
-    # time and watches each run to a terminal state, instead of firing both
-    # deploys two seconds apart and exiting. Reviewed for dispatch capability:
-    # still exactly one `gh workflow run` site with the same four inputs, one
-    # added read of THIS repo's tip on the workflow's own read-only token, and
-    # no new secret reference (the count assertion above is unchanged).
+    # Hash updated 2026-08-07 (second edit, same day): the dispatch step now
+    # classifies a mid-release superseder from its own build receipt, fails
+    # RED when it leaves staging split with no converger, and finishes the
+    # release when the superseder is a docs-only no-op that would deploy
+    # nothing. Reviewed for dispatch capability: still exactly ONE
+    # `gh workflow run` site with the same four inputs (the count assertion
+    # above is unchanged), no new secret reference, and the three added calls
+    # are read-only `gh api` GETs against THIS repo — runs, run artifacts,
+    # and one run — each explicitly re-bound to the workflow's own read-only
+    # token with `GH_TOKEN="$HOME_TOKEN"`, matching the existing tip read, so
+    # the infra-repo PAT gains no new command.
     assert frozen == (
-        "39e47e1a24a7770d2d6ca1a28f21a706040eaab2f6e135562d56865e110deb72"
+        "2c886b156fafdcea600f25b0178b319ebf962eaa3e6358f0e033e365ba0c0a6c"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3457,8 +3462,66 @@ def check_staging_relay_convergence(text: str) -> None:
     # than report a plain success.
     assert "STAGING IS SPLIT" in code, (
         "standing down mid-release must announce the split it leaves behind")
-    assert re.search(r'if \[ "\$DEPLOYED_ANY" = "true" \]', code), (
-        "the split warning must be conditioned on a service already being live")
+    assert re.search(r'if \[ "\$DEPLOYED_ANY" != "true" \]', code), (
+        "the split handling must be conditioned on a service already being live")
+
+    # A KNOWINGLY UNCONVERGED SPLIT MUST NOT CONCLUDE SUCCESS.
+    #
+    # Observed 2026-08-07: relay run 31144164225 deployed web, was superseded
+    # mid-release by docs-only 7056e2e8, stood down with an accurate
+    # ::warning:: naming the split, and concluded SUCCESS. A warning on a
+    # green run pages nobody and gates nothing, so staging served
+    # prod-d9306c3 on leaf-platform-web-alt and prod-87294a9 on
+    # leaf-platform-app-alt with no alarm and a clean relay history.
+    #
+    # Red is conditioned on the split being LEFT UNCONVERGED, not on standing
+    # down: being superseded by a commit that does build images is normal and
+    # its own relay converges staging, so that path stays green on purpose.
+    assert code.count("CONVERGER=$(superseder_deploys") == 1, (
+        "a mid-release stand-down must classify whether the superseding "
+        "commit converges staging, from exactly one place")
+    unconverged = re.search(
+        r'else\n\s*echo "::error::STAGING IS SPLIT AND UNCONVERGED:.*?\n\s*exit 1\n',
+        code, re.S)
+    assert unconverged, (
+        "leaving staging split with no known converger must fail the relay "
+        "RED; a ::warning:: on a green run is the reporting hole itself")
+    converged = re.search(
+        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*exit 0\n', code, re.S)
+    assert converged and "STAGING IS SPLIT" in converged.group(1), (
+        "standing down for a superseder that DOES build images may exit 0, "
+        "and must still name the split it leaves for that relay to close")
+
+    # A DOCS-ONLY SUPERSESSION MUST NOT STRAND A PARTIAL RELEASE.
+    #
+    # The old warning named its own escape hatch — "unless that commit builds
+    # no images" — and that is exactly what fired. A docs-only commit is
+    # deploy-neutral alone but not mid-release: it moves the tip, its own
+    # relay skips on the marker, and nothing is left to converge. Because it
+    # dispatches NOTHING, there is no newer deploy for this release's tag to
+    # land over, so finishing is safe and is the only thing that converges.
+    docs_noop_arm = re.search(
+        r'if \[ "\$CONVERGER" = "no" \]; then\n(.*?)\n\s*elif ', code, re.S)
+    assert docs_noop_arm, "the docs-noop superseder needs its own arm"
+    assert not re.search(r"\bexit\b", docs_noop_arm.group(1)), (
+        "a docs-noop superseder converges nothing, so this release must FALL "
+        "THROUGH and finish its remaining services; exiting here strands "
+        "staging split exactly as run 31144164225 did")
+    assert docs_noop_arm.end() < dispatch_at, (
+        "the fall-through must reach the dispatch below it")
+
+    # The classifier reads the superseding build's OWN receipt. Re-deriving
+    # the docs-only verdict from a compare API would be a second copy of a
+    # rule the build computes from the real push diff with rename detection
+    # disabled, and the two would drift.
+    assert "docs-noop-$SUP_SHA-attempt-" in code, (
+        "the superseder must be classified by its docs-noop marker artifact")
+    assert '"completed success") echo yes' in code, (
+        "only a SUCCEEDED superseding build proves a supply set exists to "
+        "converge staging")
+    assert re.search(r"^\s*echo unknown\n\s*\}", code, re.M), (
+        "exhausting the classifier budget must fall to 'unknown', which is "
+        "the RED path; defaulting to 'yes' would restore the silent split")
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
@@ -3487,11 +3550,20 @@ def check_staging_relay_convergence(text: str) -> None:
             f"::error:: on line {i + 1} is not followed by `exit 1`; "
             f"found {following[:1]}")
 
-    # The only clean early exit is standing down for a newer commit.
-    assert code.count("exit 0") == 1, (
-        "the relay may exit 0 early only when a newer commit owns the deploy")
-    assert "standing down" in code[:code.index("exit 0")][-500:], (
-        "the single exit 0 must be the latest-main-only stand-down")
+    # Every clean early exit is a stand-down for a newer commit, and there
+    # are exactly two: nothing was live yet, or the superseder converges.
+    # Counting them pins the shape; requiring each to be a stand-down is what
+    # keeps a future `exit 0` from swallowing a failure.
+    exit_zeros = [i for i, ln in enumerate(code.splitlines())
+                  if ln.strip() == "exit 0"]
+    assert len(exit_zeros) == 2, (
+        "the relay may exit 0 early only for the two stand-downs (nothing "
+        f"live yet, or a converging superseder); found {len(exit_zeros)}")
+    for i in exit_zeros:
+        preceding = "\n".join(code.splitlines()[:i])[-700:]
+        assert "standing down" in preceding.lower(), (
+            f"the exit 0 on line {i + 1} is not a stand-down; every clean "
+            "early exit must say why it is leaving the deploy to someone else")
 
     # Retry covers QUEUE EVICTION ONLY. Zero started jobs proves the run
     # never reached AWS; re-dispatching a run that started and then failed
@@ -3593,6 +3665,40 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original,
                    'landed (run $RUN_ID)."\n                break\n',
                    'landed (run $RUN_ID)."\n'),
+        ),
+        # --- the 2026-08-07 reporting hole and its escape hatch ---
+        (
+            "an unconverged split reported green (run 31144164225 exactly)",
+            mutate(original,
+                   "                  exit 1\n                fi\n              fi\n",
+                   "                  exit 0\n                fi\n              fi\n"),
+        ),
+        (
+            "docs-noop superseder stands down, stranding the partial release",
+            mutate(original,
+                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n',
+                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n'
+                   "                  exit 0\n"),
+        ),
+        (
+            "classifier budget exhaustion defaults to 'converges' instead of red",
+            mutate(original, "            echo unknown\n          }",
+                   "            echo yes\n          }"),
+        ),
+        (
+            "any completed superseding build counted as a converger",
+            mutate(original,
+                   '                  "completed success") echo yes; return 0 ;;\n',
+                   "                  completed*) echo yes; return 0 ;;\n"),
+        ),
+        (
+            "superseder classification skipped, split assumed benign",
+            mutate(original, 'CONVERGER=$(superseder_deploys "$MAIN_SHA")',
+                   "CONVERGER=yes"),
+        ),
+        (
+            "marker check replaced by a re-derived diff that can drift",
+            mutate(original, 'docs-noop-$SUP_SHA-attempt-', "noop-guess-"),
         ),
     ]
     for name, mutant in negatives:

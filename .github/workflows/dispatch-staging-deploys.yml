@@ -40,6 +40,24 @@ name: Dispatch staging deploys
 # queueing loss rather than a deploy failure and is the one conclusion this
 # relay retries. Every other non-success fails the relay red.
 #
+# Superseded mid-release: being overtaken by a newer merge after one service
+# is already live leaves staging split, so the relay asks whether the newer
+# commit will converge it, using that commit's OWN build receipt rather than
+# a re-derived diff. A docs-only push publishes a docs-noop marker and no
+# supply set, and the manifest step above turns that marker into
+# deploy=false, so a marker proves the superseder dispatches NOTHING: no
+# newer deploy exists to land on top of, and nothing else would ever close
+# the split, so this release finishes its remaining services instead of
+# standing down. A superseder whose build SUCCEEDED without a marker
+# produced a supply set, so its own relay converges staging and standing
+# down is both safe and silent-free. Anything else (its build failed, never
+# appeared, or outlived the watch budget) leaves staging split with no known
+# converger and fails this relay RED. Observed 2026-08-07: relay
+# 31144164225 stood down after deploying web, the superseding commit was
+# docs-only, nothing converged, and the run still concluded success, so
+# leaf-platform-web-alt ran prod-d9306c3 while leaf-platform-app-alt ran
+# prod-87294a9 with a ::warning:: on a green run as the only trace.
+#
 # Dispatch auth: TERRAFORM_REPO_TOKEN (PAT, workflow_dispatch on the infra
 # repo) — the same pattern the aws-* service repos use with
 # deploy-service-staging.yml. The deploys themselves run in
@@ -209,6 +227,52 @@ jobs:
                    | sort_by(-.databaseId) | first | .databaseId // empty'
           }
 
+          # Will the commit that superseded this release deploy anything of
+          # its own? Answered from that commit's OWN build receipt, never a
+          # re-derived diff: the build gate decides docs-only from the real
+          # push diff with local git and rename detection disabled, which no
+          # compare-API window can reproduce. Re-deriving it here would be a
+          # second, drifting copy of that rule.
+          #
+          # Echoes exactly one word:
+          #   no      docs-noop marker present, so the superseder builds no
+          #           images and its relay dispatches nothing
+          #   yes     its build concluded success with no marker, so it
+          #           produced a supply set and its own relay converges
+          #   unknown its build failed, never appeared, or outlived the
+          #           budget; nothing is KNOWN to converge staging
+          superseder_deploys() {
+            SUP_SHA="$1"
+            while before_deadline; do
+              SUP_RUN=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SUP_SHA&event=push&per_page=100" \
+                --jq '[.workflow_runs[] | select(.name == "Build platform images")]
+                      | sort_by(-.id) | first | .id // empty' || true)
+              if [ -n "$SUP_RUN" ]; then
+                SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100" \
+                  || true)
+                # The marker is written in `prepare`, so it lands minutes
+                # before any supply set and decides this early.
+                if [ -n "$SUP_ARTIFACTS" ] && printf '%s' "$SUP_ARTIFACTS" \
+                  | jq -e --arg p "docs-noop-$SUP_SHA-attempt-" \
+                      'any(.artifacts[]; .name | startswith($p))' >/dev/null; then
+                  echo no
+                  return 0
+                fi
+                SUP_STATE=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN" \
+                  --jq '"\(.status) \(.conclusion // "")"' || true)
+                case "$SUP_STATE" in
+                  "completed success") echo yes; return 0 ;;
+                  completed*) echo unknown; return 0 ;;
+                esac
+              fi
+              sleep "$POLL_SECONDS"
+            done
+            echo unknown
+          }
+
           DEPLOYED_ANY=false
 
           for SERVICE in web app; do
@@ -227,20 +291,36 @@ jobs:
               MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
                 "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
               if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
-                if [ "$DEPLOYED_ANY" = "true" ]; then
-                  # KNOWN RESIDUAL, stated rather than hidden. Standing down
-                  # here leaves staging on a mixed identity. The newer commit's
-                  # relay converges it whenever that commit builds images, but
-                  # a docs-only commit builds none and its relay skips, so the
-                  # split can survive until the next deployable merge. Standing
-                  # down is still the lesser evil: finishing this release risks
-                  # landing a stale tag over a newer deploy, which is silent
-                  # corruption rather than a visible gap.
-                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. The newer commit's relay converges this unless that commit builds no images."
-                else
+                if [ "$DEPLOYED_ANY" != "true" ]; then
                   echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
+                  exit 0
                 fi
-                exit 0
+                # Something of this release is already live, so standing down
+                # leaves staging on a mixed identity. Whether that is benign
+                # turns entirely on whether the superseder converges it.
+                CONVERGER=$(superseder_deploys "$MAIN_SHA")
+                if [ "$CONVERGER" = "no" ]; then
+                  # The superseder builds NO images, so its relay dispatches
+                  # nothing and there is no newer deploy for $IMAGE_TAG to
+                  # land on top of. The hazard that makes standing down
+                  # correct does not exist here, and standing down would
+                  # strand the split with no converger, so finish the
+                  # release. This does NOT reopen the sol-critic RED from
+                  # PR #497 (relay A's older app landing over relay B's):
+                  # that needs a competing deploy, and a docs-only
+                  # superseder has none. The residual it does not remove is
+                  # the pre-existing one: a third, deployable commit can
+                  # merge while a dispatched run is already being watched.
+                  # The tip re-read at the top of the next attempt catches
+                  # it before any further dispatch.
+                  echo "::warning::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, but $MAIN_SHA published a docs-noop marker: it builds no images and its relay dispatches nothing, so no newer deploy exists and nothing else would converge staging. Finishing $SERVICE on $IMAGE_TAG is what closes the split."
+                elif [ "$CONVERGER" = "yes" ]; then
+                  echo "::warning::STAGING IS SPLIT: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image. Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. That commit's build succeeded with a supply set, so its own relay converges staging."
+                  exit 0
+                else
+                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+                  exit 1
+                fi
               fi
 
               BEFORE=$(latest_any_run_id)
