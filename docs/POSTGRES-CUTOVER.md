@@ -844,8 +844,15 @@ property of the ENVIRONMENT: `LEAF_SESSION_ANNEX_STORE` happens to be unset.
 Be accurate about how much weaker that is, because an earlier draft of this
 paragraph overstated it as "anyone can falsify that by setting a variable, with
 no pull request and no review". Not on this deployment. A task-definition
-override takes a reviewed terraform change or a `configuration_delta`, and the
-allowlist described above does not even carry the annex selector today. That
+override takes a reviewed terraform change or a `configuration_delta`, and **the
+delta rail cannot introduce the hazard at all**: PR #534 admitted exactly
+`LEAF_SESSION_ANNEX_STORE=legacy` and `=postgres`, the two values that never
+compare, and deliberately omitted the three that do. So the comparison hazard on
+the annex tables cannot arrive through the rail this document is about. It would
+take a terraform task-definition change or an image change naming one of the
+three omitted modes. (An earlier draft of this clause said the allowlist "does
+not even carry the annex selector today", which was true when written and was
+retracted above.) That
 draft also wrote the list as "means either", which is not exhaustive:
 `deploy/Dockerfile.app` bakes `LEAF_SESSION_ANNEX_STORE=legacy` into the image,
 so a reviewed application change moves it too, and the effective value is
