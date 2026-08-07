@@ -14,6 +14,8 @@ import json
 import re
 from pathlib import Path
 
+from leaf_platform.db import MIGRATION_GLOB
+
 PLATFORM_DIR = Path(__file__).resolve().parent.parent
 MIGRATION = PLATFORM_DIR / "migrations" / "0028_overlay_tokens.sql"
 STORE = PLATFORM_DIR / "overlay_store.py"
@@ -40,8 +42,15 @@ def test_migration_exists_and_its_number_is_unique():
     0029_session_annex.sql broke it -- while proving nothing about the
     ambiguity it exists to catch. Uniqueness is that property; being last is
     not.
+
+    The glob is the loader's own ``db.MIGRATION_GLOB``, not a hand-written
+    pattern. It used to be ``00*.sql``, which matches 0000-0099 and nothing
+    after; the loader has always matched four digits. So from 0100 on, a
+    duplicate pair would be loaded and applied while this test saw neither
+    file and reported no duplicate. Sharing the loader's pattern is what keeps
+    the test looking at the set it claims to be guarding.
     """
-    names = sorted(p.name for p in (PLATFORM_DIR / "migrations").glob("00*.sql"))
+    names = sorted(p.name for p in (PLATFORM_DIR / "migrations").glob(MIGRATION_GLOB))
     assert MIGRATION.name in names
     numbers = [name.split("_", 1)[0] for name in names]
     duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
