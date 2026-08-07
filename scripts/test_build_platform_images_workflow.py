@@ -3064,8 +3064,76 @@ def check_docs_noop_filter(text: str) -> None:
     # results service, so it needs no addition to the permissions block and the
     # read-only capability wall stands. The infra-repo PAT gains no new command,
     # no new endpoint and no new repo.
+    # Hash updated 2026-08-07 (f): THE DOCS-ONLY RECONCILE (PR #519). The
+    # manifest step's docs-only arm no longer sets deploy=false and exits; it
+    # resolves the last tag built from main (the newest successful main build
+    # supply set whose commit is an ANCESTOR of the tip, scanned newest-first
+    # so the first hit is never-backwards) and sets deploy=true onto it, so the
+    # existing guarded dispatch step converges BOTH staging services. The
+    # manifest was refactored onto a shared fetch_supply_set/supply_set_tag
+    # helper pair used by the ordinary path and the reconcile, so both deploy a
+    # verified supply-set build_tag and neither reads live state (the tag
+    # NEVER comes from a run-name read -- sol-critic RED on PR #506 round 1).
+    # REVIEWED FOR DISPATCH CAPABILITY: the manifest step still holds only the
+    # read-only workflow token (its env is unchanged and asserted above),
+    # carries NO dispatch path (the token tripwire below still passes), and the
+    # ONE `gh workflow run` site stays in the guarded deploy step with the same
+    # four inputs. The reconcile adds only read-only `gh api` GETs on the
+    # workflow's own GH_TOKEN: a workflow-runs list filtered by build workflow
+    # PATH, per-candidate run-artifact listings and zip downloads (already made
+    # by the ordinary path via the same helper), and a compare of each
+    # candidate against the tip. No new secret reference, endpoint class, or
+    # credential; deploy=false is gone and deploy=true now appears twice, both
+    # asserted above.
     assert frozen == (
-        "e377f0ca6bf8d2bc76ccf8433916f6ddd3212a724fa44d15350127f1b27f5f3a"
+        # Hash updated 2026-08-07 (g): sol-critic RED round 2 on PR #519.
+        # The reconcile scan now (1) fails CLOSED when a successful build run
+        # has neither a supply set nor its docs-noop marker (an expired,
+        # deleted, or partial-upload artifact on a DEPLOYABLE run), instead of
+        # skipping past it to an older ancestor and risking a backwards
+        # deploy, and (2) requires each candidate supply set's source_revision
+        # to equal the candidate run's head sha, so an artifact naming an older
+        # revision cannot smuggle an older tag past the ancestor check.
+        # Reviewed for dispatch capability: UNCHANGED -- one added local
+        # jq read of the already-fetched artifacts.json (the marker check),
+        # no new gh call, no new secret, one `gh workflow run` still in the
+        # deploy step.
+        # Hash updated 2026-08-07 (h): sol-critic RED round 2 on PR #519,
+        # findings 1 and 2. (1) The reconcile compare now FAILS CLOSED on an
+        # unreadable ancestry compare instead of `|| true`-skipping to an
+        # older tag. (2) The deploy step no longer finishes its own remaining
+        # service on a moved tip: making docs-only commits reconcile made
+        # them convergers too, so a docs-only superseder (`no`) is now handled
+        # like a deployable one (`yes`) -- both wait for the superseder's
+        # convergence receipt -- and only `unknown` stands down. The dead
+        # NOOP_FINISH_FROM finish-on-older path and its landing check are
+        # gone. #508's fail-red-on-split principle is unchanged (no receipt
+        # within budget is still RED). Reviewed for dispatch capability: one
+        # `gh workflow run` still in the deploy step, no new secret, and the
+        # only added reads are the reconcile's existing gh api GETs.
+        # Hash updated 2026-08-07 (i): sol-critic RED round 3 on PR #519. The
+        # reconcile compare's `behind|identical|diverged` skip branch is split:
+        # a NON-ancestor candidate carrying a valid, provenance-matched supply
+        # set ('behind' or 'diverged') now FAILS CLOSED, because scanned
+        # newest-first it is NEWER than any ancestor the reconcile could fall
+        # back to and may be live, so skipping it to deploy an older ancestor
+        # was a backwards deploy. Only 'identical' (the docs-only tip commit
+        # itself, which carries no images) still continues. Control-flow + text
+        # change inside the manifest script; no dispatch change: still exactly
+        # ONE `gh workflow run` in the deploy step with the same four inputs, no
+        # new secret reference, and no new gh call -- the compare read is
+        # unchanged, only its non-ancestor outcome moved from skip to exit 1.
+        # Hash updated 2026-08-07 (j): sol-critic RED round 4 on PR #519. The
+        # 'identical' compare arm no longer `continue`s -- it is merged into the
+        # 'ahead' arm and USED. Docs-only-ness is decided per-PUSH (the build
+        # gate diffs github.event.before against the head), not per-commit, so a
+        # same-head SIBLING build reached from a different base can publish the
+        # tip's OWN live images; skipping it to an older ancestor was a backwards
+        # deploy. Now only 'behind'/'diverged' and unreadable/unexpected compares
+        # fail closed. Control-flow + text change inside the manifest script; no
+        # dispatch change: still exactly ONE `gh workflow run` in the deploy step
+        # with the same four inputs, no new secret reference, and no new gh call.
+        "d1110d4e32e3a3e0e3b9f5446ebe825577f1652ee3b96878d644a2e37645f6fb"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3082,9 +3150,38 @@ def check_docs_noop_filter(text: str) -> None:
         'NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"'
         in manifest_code
     )
-    assert manifest_code.count('echo "deploy=false"') == 1
-    assert manifest_code.count('echo "deploy=true"') == 1
+    # DOCS-ONLY RECONCILE (PR #519): the docs-only arm no longer skips. It
+    # resolves the last tag built from main and sets deploy=true onto it, so a
+    # docs-only merge converges both staging services instead of stranding a
+    # split until the next deployable merge. deploy=false is therefore GONE,
+    # and deploy=true now appears twice: the ordinary same-build path and the
+    # reconcile path, both routed through the SAME guarded dispatch step.
+    assert manifest_code.count('echo "deploy=false"') == 0, (
+        "the docs-only arm must reconcile, not skip: a deploy=false skip is "
+        "exactly how a staging split outlived a docs-only merge")
+    assert manifest_code.count('echo "deploy=true"') == 2, (
+        "deploy=true is set by the same-build path and the reconcile path")
+    # Still ONE run-artifact listing endpoint, inside the shared
+    # fetch_supply_set helper that both paths call; the reconcile's run scan
+    # lists workflow RUNS, a different endpoint.
     assert manifest_code.count("artifacts?per_page=100") == 1
+    # The reconcile is real, not merely named: it scans successful main build
+    # runs, keeps only a supply set whose commit is an ANCESTOR of the tip
+    # (never-backwards), and fails RED when none is reachable rather than
+    # skipping. test_staging_relay_reconciles_a_docs_only_build EXECUTES it.
+    assert (
+        "reconciling both staging services onto the last tag built from main"
+        in manifest_code), "the docs-only arm must announce the reconcile"
+    assert 'case "$RELATION" in' in manifest_code, (
+        "the reconcile must switch on the EXPLICIT ancestry-compare status: "
+        "the last built tag it takes must have a commit that is an ancestor "
+        "of the tip, so it can never deploy a non-ancestor image")
+    assert "the ancestry compare of candidate run" in manifest_code, (
+        "an unreadable ancestry compare must FAIL CLOSED, never skip to an "
+        "older tag -- that fallback is the backwards deploy sol-critic caught")
+    assert "has nothing to reconcile onto" in manifest_code, (
+        "a docs-only build with no reachable supply set must fail loudly, "
+        "not skip")
     assert "no $NOOP_NAME marker present" in manifest_code, (
         "manifest-and-marker both absent must stay a hard error: a "
         "successful build without a supply set is a partial run")
@@ -3833,77 +3930,91 @@ def check_staging_relay_convergence(text: str) -> None:
     assert len(converger_writes) == 1, (
         "CONVERGER may be assigned exactly once, by the classifier call; "
         f"found {len(converger_writes)} assignments, so one can override it")
-    unconverged = re.search(
-        r'else\n\s*echo "::error::STAGING IS SPLIT AND UNCONVERGED:.*?\n\s*exit 1\n',
-        code, re.S)
-    assert unconverged, (
-        "leaving staging split with no known converger must fail the relay "
-        "RED; a ::warning:: on a green run is the reporting hole itself")
     # THE STAND-DOWN MUST BE EARNED BY THE SUPERSEDER'S RECEIPT.
     #
-    # Until 2026-08-07 this arm exited 0 on the superseder's SUPPLY SET and a
-    # fresh tip read, and the pin here only required it to WARN about the split
-    # it left behind. sol-critic (PR #508) showed that is not enough: the tip
-    # read proves B is the tip at that instant and nothing more, so docs-only C
-    # can push immediately after it, B's own relay then skips on the moved tip,
-    # C's relay dispatches nothing on its marker, and A, B and C are all green
-    # over a live split. A supply set proves B COULD deploy, never that its
-    # relay WILL, and no read taken before A exits can close that.
+    # Until PR #519 there were two mid-release arms: a docs-only superseder
+    # (`no`) FINISHED this relay's own remaining service on its older tag,
+    # because docs-only "dispatched nothing"; a deployable superseder (`yes`)
+    # waited for that superseder's convergence receipt. PR #519 makes docs-only
+    # commits RECONCILE (dispatch both services onto the last built tag), so a
+    # docs-only superseder now dispatches too, and finishing here would race it
+    # and could land this older tag last -- the #497/#508 backwards-deploy race,
+    # reopened (sol-critic RED round 2 on PR #519). So `no` and `yes` collapse
+    # into ONE converge-and-wait arm and only `unknown` is a bare stand-down.
     #
-    # So the exit 0 must now sit INSIDE the receipt wait. Pinned as
-    # containment, not adjacency, so ordinary edits inside the arm stay legal
-    # while moving the exit out of the wait cannot.
-    #
-    # The WHOLE arm, anchored to the `else` at its own indentation. `[ ]*`, not
-    # `\s*`: `\s` matches newlines, so a backreferenced `\s*` group can start
-    # anywhere and turns a non-matching mutant into catastrophic backtracking.
-    converged = re.search(
-        r'^([ ]*)elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\1else\n',
-        code, re.S | re.M)
-    assert converged, "the converging-superseder arm must be extractable"
-    converged_arm = converged.group(2)
-    assert re.search(r"^\s*exit 0\b", converged_arm, re.M), (
-        "the converging-superseder arm must be able to exit 0")
+    # `unknown` (build failed / never appeared / outlived the watch) fails RED.
+    unconverged = re.search(
+        r'if \[ "\$CONVERGER" != "no" \] && \[ "\$CONVERGER" != "yes" \]; then\n'
+        r'.*?echo "::error::STAGING IS SPLIT AND UNCONVERGED:.*?\n\s*exit 1\n',
+        code, re.S)
+    assert unconverged, (
+        "an `unknown` superseder (its build failed, never appeared, or outlived "
+        "the watch) must fail the relay RED; a ::warning:: on a green run is the "
+        "reporting hole itself")
+
+    # THE RELAY MUST NOT FINISH ITS OWN SERVICE ON A MOVED TIP. A docs-only
+    # superseder now reconciles, so there is a competing deploy; the only safe
+    # move is to wait for the superseder's receipt. So the whole moved-tip
+    # handling carries NO dispatch -- the single `gh workflow run` sits after it.
+    classify_at = code.index('CONVERGER=$(superseder_deploys')
+    after_classify = code[classify_at:]
+    moved_tip_block = after_classify[:after_classify.index("BEFORE=$(latest_any_run_id)")]
+    assert "gh workflow run" not in moved_tip_block, (
+        "a relay superseded mid-release must NOT dispatch its own remaining "
+        "service on a moved tip: a docs-only superseder now reconciles, so "
+        "finishing here races it and can land an older tag last")
+
+    # THE CLASSIFICATION IS A POLL, so its input tip is a snapshot. The arm
+    # re-reads the tip AFTER the poll and fails CLOSED if it moved: the
+    # superseder we are about to trust may no longer be the tip, and its own
+    # relay may then stand down and converge nothing.
+    assert re.search(
+        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
+        r'"repos/\$GITHUB_REPOSITORY/branches/main"', moved_tip_block), (
+        "the converge-and-wait arm must re-read the tip AFTER the classification "
+        "poll; acting on the pre-poll snapshot can trust a superseder that is no "
+        "longer the tip")
+    stale_guard = re.search(
+        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi',
+        moved_tip_block, re.S)
+    assert stale_guard, "the re-read needs a guard that fails on a moved tip"
+    assert ("::error::" in stale_guard.group(1)
+            and "exit 1" in stale_guard.group(1)), (
+        "a stale convergence finding must fail RED, not proceed and not exit 0")
+
+    # THE STAND-DOWN EXITS 0 ONLY INSIDE THE RECEIPT WAIT. A supply set (or a
+    # docs-noop marker) proves the superseder COULD converge, never that its
+    # relay DID; only the receipt proves it. The clean exit must sit inside the
+    # wait, and be the ONLY exit 0 in the moved-tip handling.
     receipt_gate = re.search(
         r'^([ ]*)if wait_for_receipt "\$MAIN_SHA" "\$SUP_ATTEMPT_SEEN"; then\n'
         r'(.*?)\n\1fi\b', code, re.S | re.M)
     assert receipt_gate, (
-        "the converging-superseder stand-down must be gated on waiting for "
-        "that superseder's convergence receipt; exiting 0 on its supply set "
-        "alone is the one-hop displacement of the original incident")
-    # The gate lives INSIDE the `yes` arm, not somewhere else that mentions the
-    # same call.
-    assert converged.start() < receipt_gate.start() < converged.end(), (
-        "the receipt wait must gate the converging-superseder arm itself")
+        "the superseded stand-down must be gated on waiting for that "
+        "superseder's convergence receipt; exiting 0 on its supply set or "
+        "marker alone is the one-hop displacement of the original incident")
+    assert receipt_gate.start() > classify_at, (
+        "the receipt wait must live in the mid-release stand-down path")
     assert re.search(r"^\s*exit 0\b", receipt_gate.group(2), re.M), (
-        "the clean exit must sit INSIDE the receipt wait, so a relay that "
-        "never saw the receipt cannot reach it")
-    # And it must be the ONLY exit 0 in that arm: a second one outside the wait
-    # would make the gate decorative.
-    assert len(re.findall(r"^\s*exit 0\b", converged_arm, re.M)) == 1, (
-        "the `yes` arm may exit 0 exactly once, inside its receipt wait; a "
+        "the clean exit must sit INSIDE the receipt wait, so a relay that never "
+        "saw the receipt cannot reach it")
+    assert len(re.findall(r"^\s*exit 0\b", moved_tip_block, re.M)) == 1, (
+        "the superseded arm may exit 0 exactly once, inside its receipt wait; a "
         "second one stands down without the proof the wait exists to get")
-    # And the announcement must say the split CLOSED, on proof. A stand-down
-    # that still merely warns about a split it hopes someone else closes is the
-    # pre-receipt behaviour returning.
+    # The announcement must say the split CLOSED, on proof.
     converged_notice = re.search(
         r'echo "::notice::([^"]*)"', receipt_gate.group(2))
     assert converged_notice and "CONVERGED" in converged_notice.group(1), (
         "the receipt-backed stand-down must announce that staging converged, "
         "naming the proof it stood down on")
-    # A MISSING RECEIPT IS RED. The wait is bounded by the step's own deadline,
-    # so a superseder that was itself superseded (and therefore published
-    # nothing) fails this relay rather than exiting green.
+    # A MISSING RECEIPT IS RED (the wait is bounded by the step's own deadline).
     no_receipt = re.search(
         r'echo "::error::STAGING IS SPLIT AND UNCONVERGED:[^"]*never published '
-        r'a convergence receipt[^"]*"\n[ ]*exit 1\b', converged_arm)
+        r'a convergence receipt[^"]*"\n[ ]*exit 1\b', moved_tip_block)
     assert no_receipt, (
-        "a converging-superseder stand-down whose receipt never arrives must "
-        "fail RED and say the receipt is what was missing")
-    # The attempt the receipt is named for comes from the classifier's own
-    # read. Without it the receipt cannot be named at all, so an unrecorded
-    # attempt is its own explicit error rather than a wait for an artifact
-    # nobody publishes.
+        "a superseded stand-down whose receipt never arrives must fail RED and "
+        "say the receipt is what was missing")
+    # The attempt the receipt is named for comes from the classifier's own read.
     assert 'SUP_ATTEMPT_SEEN=$(cat superseder-attempt' in code, (
         "the receipt must be named from the attempt the classifier actually "
         "read, not from a re-read a rerun could move")
@@ -3912,17 +4023,13 @@ def check_staging_relay_convergence(text: str) -> None:
         r'[ ]*exit 1\b', code), (
         "an unrecorded superseder attempt must fail RED explicitly, not fall "
         "through to a wait for an artifact that can never appear")
-    # The WRITER of that attempt must exist too. Without it the reader above
-    # always sees an empty file, every converging stand-down fails red for the
-    # wrong reason, and the protocol is dead while every other pin still passes.
+    # The WRITER of that attempt must exist too.
     assert re.search(
         r"printf '%s' \"\$SUP_ATTEMPT\" > superseder-attempt", code), (
-        "the classifier must persist the attempt that earned `yes`; it runs in "
-        "a command substitution, so the value dies with that subshell")
-    # `wait_for_receipt` gets the same single-definition rule as the
-    # classifier: bash resolves a function at CALL time, so a later
-    # redefinition returning 0 would stand down on no receipt at all while
-    # every containment pin above still matched.
+        "the classifier must persist the attempt that earned its verdict; it "
+        "runs in a command substitution, so the value dies with that subshell")
+    # `wait_for_receipt` single-definition rule: bash resolves the LAST
+    # definition at call time, so a second one silently wins.
     for fn in ("wait_for_receipt",):
         defs = (code.count(f"{fn}() {{")
                 + len(re.findall(rf"^\s*function\s+{fn}\b", code, re.M)))
@@ -3982,83 +4089,12 @@ def check_staging_relay_convergence(text: str) -> None:
         "build record its classifier already reads. Drifting it publishes a "
         "receipt nobody is waiting for and strands every waiter")
 
-    # A DOCS-ONLY SUPERSESSION MUST NOT STRAND A PARTIAL RELEASE.
-    #
-    # The old warning named its own escape hatch — "unless that commit builds
-    # no images" — and that is exactly what fired. A docs-only commit is
-    # deploy-neutral alone but not mid-release: it moves the tip, its own
-    # relay skips on the marker, and nothing is left to converge. Because it
-    # dispatches NOTHING, there is no newer deploy for this release's tag to
-    # land over, so finishing is safe and is the only thing that converges.
-    docs_noop_arm = re.search(
-        r'if \[ "\$CONVERGER" = "no" \]; then\n(.*?)\n\s*elif ', code, re.S)
-    assert docs_noop_arm, "the docs-noop superseder needs its own arm"
-    arm = docs_noop_arm.group(1)
-    assert docs_noop_arm.end() < dispatch_at, (
-        "the fall-through must reach the dispatch below it")
-
-    # The arm must FALL THROUGH on its success path. Its only exit may be the
-    # stale-classification guard below; an unconditional exit here strands
-    # staging split exactly as run 31144164225 did.
-    arm_exits = [ln.strip() for ln in arm.splitlines()
-                 if re.match(r"^\s*exit\b", ln)]
-    assert arm_exits == ["exit 1"], (
-        "the docs-noop arm may contain exactly one exit, the stale-tip guard; "
-        f"found {arm_exits}")
-    assert not re.match(r"^\s*exit\b", arm.splitlines()[-1]), (
-        "the docs-noop arm must not END in an exit; it has to reach the "
-        "dispatch that converges staging")
-
-    # THE CLASSIFICATION IS A POLL, SO ITS INPUT TIP IS A SNAPSHOT.
-    #
-    # sol@medium found this and it reproduced: between the classifier call and
-    # the dispatch there was no second tip read, so a DEPLOYABLE commit
-    # merging during the poll could deploy a newer tag to both services and
-    # this relay would then dispatch its older tag last. The shared
-    # concurrency group does not prevent that, and an independent lane
-    # refuted the claim that it does against GitHub's own concurrency docs:
-    # FIFO is based on when a run "started waiting on the concurrency group,
-    # not the time each workflow was dispatched", and "ordering is not
-    # guaranteed". An earlier-dispatched run can therefore execute last.
-    # Fail CLOSED on a moved tip rather than re-classify, so the arm cannot
-    # spin on a fast-moving main.
-    assert re.search(
-        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
-        r'"repos/\$GITHUB_REPOSITORY/branches/main"', arm), (
-        "the docs-noop arm must re-read the tip AFTER the classification poll; "
-        "acting on the pre-poll snapshot can land a stale tag over a newer "
-        "deploy")
-    stale_guard = re.search(
-        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', arm, re.S)
-    assert stale_guard, "the re-read needs a guard that acts on a moved tip"
-    assert "::error::" in stale_guard.group(1) and "exit 1" in stale_guard.group(1), (
-        "a stale docs-noop finding must fail RED, not proceed and not exit 0")
-
-    # THE `yes` FINDING IS A POLL RESULT TOO, so it needs the same guard.
-    #
-    # sol-critic reproduced the consequence of leaving it out: A deploys web
-    # and polls deployable B; docs-only C lands during the poll; B completes
-    # with its supply set so A answers `yes` and exits GREEN; B's own relay
-    # then skips because C is the tip, and C's relay skips on its docs-noop
-    # marker. Nothing converges and all three runs are green -- the original
-    # incident displaced by one hop. A supply set proves B COULD deploy, never
-    # that its relay WILL.
-    converger_arm = re.search(
-        r'elif \[ "\$CONVERGER" = "yes" \]; then\n(.*?)\n\s*else\b', code, re.S)
-    assert converger_arm, "the converging-superseder arm must exist"
-    yes_body = converger_arm.group(1)
-    assert re.search(
-        r'TIP_NOW=\$\(GH_TOKEN="\$HOME_TOKEN" gh api \\\n\s*'
-        r'"repos/\$GITHUB_REPOSITORY/branches/main"', yes_body), (
-        "the converging-superseder arm must re-read the tip AFTER its "
-        "classification poll; `yes` about a commit that is no longer the tip "
-        "is a claim about a relay that will itself stand down")
-    yes_stale = re.search(
-        r'if \[ "\$TIP_NOW" != "\$MAIN_SHA" \]; then\n(.*?)\n\s*fi', yes_body, re.S)
-    assert yes_stale, "the converging-superseder re-read needs a guard"
-    assert ("::error::" in yes_stale.group(1)
-            and "exit 1" in yes_stale.group(1)), (
-        "a stale `converges` finding must fail RED, not exit 0")
+    # (The former docs-only `no` arm and deployable `yes` arm collapsed into
+    # the single converge-and-wait stand-down pinned above: PR #519 made
+    # docs-only commits reconcile, so both superseders converge and are
+    # proven by the same receipt, and the tip re-read / stale-guard now lives
+    # in that one arm. The classifier verdicts themselves are unchanged and
+    # are pinned next.)
 
     # The classifier reads the superseding build's OWN receipt. Re-deriving
     # the docs-only verdict from a compare API would be a second copy of a
@@ -4200,27 +4236,10 @@ def check_staging_relay_convergence(text: str) -> None:
         "the supply-set jq filter must be exactly the membership test; a "
         "disjunction such as `any(...) or true` accepts a missing supply set")
 
-    # THE READ-TO-DISPATCH WINDOW IS CLOSED FOR REPORTING.
-    #
-    # Only the docs-noop arm dispatches after main has already moved, and no
-    # read taken BEFORE a dispatch can prove the tip held across it. A third,
-    # deployable commit merging inside that window can deploy newer images
-    # that this older tag then lands on top of. The relay cannot prove staging
-    # is forward, so it must not conclude success.
-    assert re.search(r"^\s*NOOP_FINISH_FROM=\"\$MAIN_SHA\"", code, re.M), (
-        "the docs-noop arm must record the tip it dispatched over")
-    landing_check = re.search(
-        r'if \[ -n "\$NOOP_FINISH_FROM" \]; then\n(.*?)\n\s*fi\n', code, re.S)
-    assert landing_check, (
-        "a landed deploy that was dispatched over a moved tip must re-check "
-        "the tip")
-    assert "TIP_AFTER" in landing_check.group(1), "the landing check needs a fresh tip read"
-    assert ("::error::" in landing_check.group(1)
-            and "exit 1" in landing_check.group(1)), (
-        "a deploy that cannot be proven forward must fail RED, not exit 0")
-    assert code.index("NOOP_FINISH_FROM=\"$MAIN_SHA\"") < code.index(
-        'if [ -n "$NOOP_FINISH_FROM" ]; then'), (
-        "the flag must be set before the landing check reads it")
+    # (The NOOP_FINISH_FROM landing check is gone with the finish-on-moved-tip
+    # path it guarded: since PR #519 this relay never dispatches over a moved
+    # tip -- it waits for the superseder's receipt instead -- so there is no
+    # dispatched-over-a-cleared-tip deploy left to re-check after landing.)
 
     # The loop advances to the next service ONLY from inside the success arm.
     # Pinned as "a break lives in that arm" rather than "break is the next
@@ -4400,17 +4419,10 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         # --- the 2026-08-07 reporting hole and its escape hatch ---
         (
-            "an unconverged split reported green (run 31144164225 exactly)",
+            "an `unknown` superseder no longer fails red, so a split is green",
             mutate(original,
-                   "                  exit 1\n                fi\n              fi\n",
-                   "                  exit 0\n                fi\n              fi\n"),
-        ),
-        (
-            "docs-noop superseder stands down, stranding the partial release",
-            mutate(original,
-                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n',
-                   'Finishing $SERVICE on $IMAGE_TAG is what closes the split."\n'
-                   "                  exit 0\n"),
+                   '                if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then\n',
+                   "                if false; then\n"),
         ),
         (
             "classifier budget exhaustion defaults to 'converges' instead of red",
@@ -4478,25 +4490,8 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
                    "                VERDICT=yes\n"),
         ),
         (
-            "the `yes` finding acted on the pre-poll tip snapshot, so a "
-            "docs-only commit landing during the poll strands the split",
-            mutate(original,
-                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \\\n'
-                   '                    "repos/$GITHUB_REPOSITORY/branches/main" --jq \'.commit.sha\')\n'
-                   '                  if [ "$TIP_NOW" != "$MAIN_SHA" ]; then\n'
-                   '                    echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale.',
-                   '                  if false; then\n'
-                   '                    echo "::error::stale.'),
-        ),
-        (
             "artifact listing trusted without proving it carries a count",
             mutate(original, '(.total_count | type == "number")', "true"),
-        ),
-        (
-            "a deploy dispatched over a moved tip reported green without "
-            "re-checking the tip after it landed",
-            mutate(original, 'NOOP_FINISH_FROM="$MAIN_SHA"',
-                   'NOOP_FINISH_FROM=""'),
         ),
         # --- sol-critic RED on PR #508: the classifier's own read paths ---
         (
@@ -4536,9 +4531,9 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "acting on the pre-poll tip snapshot (sol@medium's interleaving)",
             mutate(original,
-                   '                  TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                   '                TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
 ',
-                   '                  TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
+                   '                TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
 '),
         ),
         (
@@ -4563,10 +4558,10 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original,
                    "it may itself have been superseded and stood down. "
                    "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
-                   'with a successful main build."\n                  exit 1\n',
+                   'with a successful main build."\n                exit 1\n',
                    "it may itself have been superseded and stood down. "
                    "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
-                   'with a successful main build."\n                  exit 0\n'),
+                   'with a successful main build."\n                exit 0\n'),
         ),
         (
             "`wait_for_receipt` REDEFINED later to return 0, so the wait is "
@@ -5139,6 +5134,303 @@ def check_staging_relay_classifier_behaviour(text: str) -> None:
                 f"supply set is the reporting hole itself.")
 
     print(f"staging relay classifier rehearsal ({len(cases)} cases): PASS")
+
+
+_MANIFEST_FAKE_GH = r"""#!/usr/bin/env bash
+# Fake `gh` for the relay MANIFEST reconcile rehearsal. Answers the reads the
+# docs-only reconcile makes, from the scenario in the environment, so the
+# assertion is on the tag the reconcile ACTUALLY resolves, not on its text.
+set -uo pipefail
+args=("$@")
+url="${args[1]:-}"
+case "${args[0]}" in
+  api)
+    case "$url" in
+      *"/actions/runs?branch=main"*)
+        # Newest-first successful main build run scan. Rows are already in
+        # "id sha attempt" shape; the real --jq reduces to the same.
+        printf '%s\n' "$FAKE_ROWS"
+        ;;
+      *"/compare/"*)
+        rest="${url#*/compare/}"
+        base="${rest%%...*}"
+        if printf '%s' "$FAKE_COMPARE_FAILS" | jq -e --arg s "$base" 'index($s) != null' >/dev/null; then
+          echo "fake gh: simulated compare failure for $base" >&2
+          exit 4
+        fi
+        printf '%s\n' "$(printf '%s' "$FAKE_RELATIONS" | jq -r --arg s "$base" '.[$s] // "diverged"')"
+        ;;
+      *"/artifacts/"*"/zip")
+        # The listing call stashed the supply set for this run; materialise it.
+        if [ -f .pending_supply_set.json ]; then
+          cp .pending_supply_set.json staging-supply-set.json
+        fi
+        printf 'zip\n'
+        ;;
+      *"/artifacts?per_page=100")
+        rest="${url#*/actions/runs/}"
+        run_id="${rest%%/*}"
+        rm -f .pending_supply_set.json
+        if [ "$run_id" = "$BUILD_RUN_ID" ]; then
+          printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$BUILD_HEAD_SHA"'-attempt-'"$BUILD_RUN_ATTEMPT"'","id":1,"expired":false}]}'
+        else
+          entry=$(printf '%s' "$FAKE_SUPPLY_SETS" | jq -c --arg id "$run_id" '.[$id] // empty')
+          marker=$(printf '%s' "$FAKE_MARKERS" | jq -c --arg id "$run_id" '.[$id] // empty')
+          if [ -n "$entry" ]; then
+            sha=$(printf '%s' "$entry" | jq -r '.sha')
+            att=$(printf '%s' "$entry" | jq -r '.attempt')
+            tag=$(printf '%s' "$entry" | jq -r '.tag')
+            rev=$(printf '%s' "$entry" | jq -r '.rev // .sha')
+            jq -n --arg rev "$rev" --arg tag "$tag" \
+              '{schema:"leaf.staging-supply-set.v2",source_revision:$rev,build_tag:$tag}' \
+              > .pending_supply_set.json
+            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-'"$sha"'-attempt-'"$att"'","id":'"$run_id"',"expired":false}]}'
+          elif [ -n "$marker" ]; then
+            msha=$(printf '%s' "$marker" | jq -r '.sha')
+            matt=$(printf '%s' "$marker" | jq -r '.attempt')
+            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$msha"'-attempt-'"$matt"'","id":1,"expired":false}]}'
+          else
+            printf '%s\n' '{"total_count":0,"artifacts":[]}'
+          fi
+        fi
+        ;;
+      *) echo "fake gh: unhandled api $url" >&2; exit 9 ;;
+    esac
+    ;;
+  *) echo "fake gh: unhandled ${args[0]}" >&2; exit 9 ;;
+esac
+"""
+
+
+def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
+                             compare_fails=None,
+                             build_run_id="100", build_head_sha="docshead",
+                             build_attempt="1"):
+    """Execute the relay's ACTUAL manifest script (extracted from the parsed
+    YAML) against a fake gh, and return (returncode, combined_output,
+    {output-key: value}) parsed from the step's GITHUB_OUTPUT.
+    """
+    bash = shutil.which("bash")
+    jq = shutil.which("jq")
+    assert bash and jq, "the manifest reconcile rehearsal needs bash and jq on PATH"
+
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"))
+    manifest = next(s for s in relay["jobs"]["dispatch"]["steps"]
+                    if s.get("id") == "manifest")
+
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(_MANIFEST_FAKE_GH, encoding="utf-8", newline="\n")
+        (bindir / "gh").chmod(0o755)
+        # unzip is shimmed: the fake gh writes staging-supply-set.json at the zip
+        # download, so the script's `unzip -o` only has to succeed. This keeps the
+        # rehearsal off any real unzip binary (not guaranteed on the dev host).
+        (bindir / "unzip").write_text(
+            "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        (bindir / "unzip").chmod(0o755)
+
+        out = tmp / "github_output"
+        out.write_text("", encoding="utf-8")
+        script = tmp / "manifest.sh"
+        script.write_text(manifest["run"], encoding="utf-8", newline="\n")
+
+        env = dict(os.environ)
+        env.update(
+            PATH=f"{bindir}{os.pathsep}{env['PATH']}",
+            GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+            INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
+            DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
+            BUILD_RUN_ID=build_run_id,
+            BUILD_HEAD_SHA=build_head_sha,
+            BUILD_RUN_ATTEMPT=build_attempt,
+            GH_TOKEN="fake-token",
+            GITHUB_OUTPUT=str(out),
+            FAKE_ROWS="\n".join(rows),
+            FAKE_SUPPLY_SETS=json.dumps(supply_sets),
+            FAKE_RELATIONS=json.dumps(relations),
+            FAKE_MARKERS=json.dumps(markers or {}),
+            FAKE_COMPARE_FAILS=json.dumps(compare_fails or []),
+        )
+        proc = subprocess.run(
+            [bash, str(script)], env=env, text=True, capture_output=True,
+            cwd=str(tmp))
+        outputs = {}
+        for line in out.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        return proc.returncode, proc.stdout + proc.stderr, outputs
+
+
+def test_staging_relay_reconciles_a_docs_only_build() -> None:
+    """A docs-only merge converges staging instead of stranding a split.
+
+    Runs the extracted manifest script against a fake gh: the docs-only build
+    published a marker and no supply set, so the reconcile scans main's
+    successful build runs newest-first and takes the newest tag whose commit is
+    an ANCESTOR of the tip (or IS the tip -- a same-head sibling build), setting
+    deploy=true onto it. Then feeds that tag to the real dispatch script and
+    asserts BOTH staging services deploy onto it -- the split-closing behaviour
+    end to end. This is the DOES half of the static pins in the invariants test.
+    """
+    # Rows newest-first: 100 is the docs-only build itself (skipped), 98 carries
+    # the newest tag whose commit IS an ancestor of the tip (must win). No newer
+    # non-ancestor sits above it, so the reconcile lands on 98.
+    rows = ["100 docshead 1", "98 ancestor 1"]
+    supply = {"98": {"sha": "ancestor", "attempt": "1", "tag": "prod-abc1234"}}
+    relations = {"ancestor": "ahead"}
+
+    rc, out, outputs = _rehearse_relay_manifest(
+        rows=rows, supply_sets=supply, relations=relations)
+    assert rc == 0, out
+    assert outputs.get("deploy") == "true", (out, outputs)
+    assert outputs.get("image_tag") == "prod-abc1234", (out, outputs)
+
+    # END TO END: hand the resolved tag to the REAL dispatch script; both
+    # services land on it through the single watched dispatch site.
+    rc2, out2, deployed = _rehearse_relay_dispatch(
+        image_tag="prod-abc1234", web_title=None, app_title=None,
+        relation="ahead")
+    assert rc2 == 0, out2
+    assert deployed == [("web", "prod-abc1234"), ("app", "prod-abc1234")], deployed
+
+    # IDENTICAL IS USED, NOT SKIPPED (sol-critic RED round 4 on PR #519). Because
+    # docs-only-ness is decided per-PUSH (the build gate diffs github.event.before
+    # against the head), a SIBLING push can reach the tip's SAME head sha from a
+    # different base, build real images, and publish a provenance-matched supply
+    # set for the tip itself (e.g. main reverts away from a deployed commit then
+    # returns to it). Run 99 is that sibling: head sha == the tip, valid supply
+    # set, compares 'identical'. Its tag is the tip's OWN live images, so it MUST
+    # win over the older ancestor 98 -- skipping it (the old `identical) continue`)
+    # would roll staging BACKWARDS onto prod-abc1234.
+    rc_id, out_id, outputs_id = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docshead 1", "98 ancestor 1"],
+        supply_sets={"99": {"sha": "docshead", "attempt": "1",
+                            "tag": "prod-cafe123"},
+                     "98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"docshead": "identical", "ancestor": "ahead"})
+    assert rc_id == 0, out_id
+    assert outputs_id.get("deploy") == "true", (out_id, outputs_id)
+    assert outputs_id.get("image_tag") == "prod-cafe123", (
+        "a same-head sibling build of the tip's own images must win over the "
+        "older ancestor", out_id, outputs_id)
+    assert outputs_id.get("image_tag") != "prod-abc1234", (out_id, outputs_id)
+
+    # NEVER-BACKWARDS (sol-critic RED round 3 on PR #519). A NEWER valid supply
+    # set whose commit is NON-ancestral -- 'diverged' (main was rewritten under
+    # a deployed commit) or 'behind' (a deployable merge landed after this
+    # docs-only tip) -- MUST fail closed, never skip to the older ancestor. That
+    # skip IS the backwards deploy: run 99's newer tag may be live, so shipping
+    # run 98's older tag rolls both services back. The old code lumped
+    # 'behind'/'diverged' with a clean skip and shipped prod-abc1234.
+    for newer_relation in ("diverged", "behind"):
+        rc_nb, out_nb, outputs_nb = _rehearse_relay_manifest(
+            rows=["100 docshead 1", "99 newer 1", "98 ancestor 1"],
+            supply_sets={"99": {"sha": "newer", "attempt": "1",
+                                "tag": "prod-new9999"},
+                         "98": {"sha": "ancestor", "attempt": "1",
+                                "tag": "prod-abc1234"}},
+            relations={"newer": newer_relation, "ancestor": "ahead"})
+        assert rc_nb != 0, (newer_relation, out_nb)
+        assert "cannot reconcile safely" in out_nb, (newer_relation, out_nb)
+        assert "may be live" in out_nb, (newer_relation, out_nb)
+        assert outputs_nb.get("deploy") != "true", (newer_relation, outputs_nb)
+        assert outputs_nb.get("image_tag") != "prod-abc1234", (
+            "must not fall back to the older ancestor tag",
+            newer_relation, outputs_nb)
+        assert outputs_nb.get("image_tag") != "prod-new9999", (
+            "and must not deploy the unproven newer tag either",
+            newer_relation, outputs_nb)
+
+    # NEGATIVE: a docs-only build whose ONLY candidate is a non-ancestor with a
+    # valid supply set fails RED at the divergence -- it may be live, so the
+    # reconcile refuses rather than skip-and-strand or deploy backwards.
+    rc3, out3, outputs3 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "97 orphan 1"],
+        supply_sets={"97": {"sha": "orphan", "attempt": "1",
+                            "tag": "prod-dead999"}},
+        relations={"orphan": "diverged"})
+    assert rc3 != 0, out3
+    assert "cannot reconcile safely" in out3, out3
+    assert "may be live" in out3, out3
+    assert outputs3.get("deploy") != "true", outputs3
+
+    # And a scan that finds ONLY docs-noop markers above (no ancestor supply
+    # set at all) still fails RED at the END rather than exiting green
+    # undeployed -- skipping was how a split used to survive a docs-only merge.
+    rc3b, out3b, outputs3b = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docsonly99 1"],
+        supply_sets={},
+        relations={},
+        markers={"99": {"sha": "docsonly99", "attempt": "1"}})
+    assert rc3b != 0, out3b
+    assert "has nothing to reconcile onto" in out3b, out3b
+    assert outputs3b.get("deploy") != "true", outputs3b
+
+    # A newer DOCS-ONLY run (marker present, no supply set) between the tip
+    # and the deployable ancestor must be SKIPPED, not mistaken for a
+    # rollback risk -- otherwise the reconcile could never see past the first
+    # docs-only commit.
+    rc4, out4, outputs4 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 docsonly99 1", "98 ancestor 1"],
+        supply_sets={"98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"},
+        markers={"99": {"sha": "docsonly99", "attempt": "1"}})
+    assert rc4 == 0, out4
+    assert outputs4.get("image_tag") == "prod-abc1234", (out4, outputs4)
+
+    # DEFECT 1 (sol-critic RED round 2): a newer DEPLOYABLE run whose supply
+    # set is missing (deleted / partial upload, and NO docs-noop marker) must
+    # FAIL CLOSED, never fall back to the older ancestor -- that fallback is a
+    # backwards deploy. The old `|| continue` skipped it and shipped prod-abc.
+    rc5, out5, outputs5 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 gonerun 1", "98 ancestor 1"],
+        supply_sets={"98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"})
+    assert rc5 != 0, out5
+    assert "cannot reconcile safely" in out5, out5
+    assert "neither a supply set nor a docs-noop marker" in out5, out5
+    assert outputs5.get("deploy") != "true", outputs5
+    assert outputs5.get("image_tag") != "prod-abc1234", (
+        "must not fall back to the older ancestor tag", outputs5)
+
+    # DEFECT 2 (sol-critic RED round 2): a supply set whose internal
+    # source_revision does not equal its run's head sha must FAIL CLOSED -- it
+    # could name an older revision and tag than the run it hangs off.
+    rc6, out6, outputs6 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 run99head 1"],
+        supply_sets={"99": {"sha": "run99head", "attempt": "1",
+                            "tag": "prod-abc1234", "rev": "olderrev"}},
+        relations={"olderrev": "ahead", "run99head": "ahead"})
+    assert rc6 != 0, out6
+    assert "not the run's head" in out6, out6
+    assert outputs6.get("deploy") != "true", outputs6
+
+    # DEFECT 1 (sol-critic RED round 2): a TRANSIENT ancestry-compare failure
+    # on a candidate must FAIL CLOSED, never `|| true`-skip to an older
+    # ancestor (that fallback is the backwards deploy). Newer candidate 99's
+    # compare fails; the reconcile must not fall back to 98's older tag.
+    rc7, out7, outputs7 = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "99 flakerun 1", "98 ancestor 1"],
+        supply_sets={"99": {"sha": "flakerun", "attempt": "1",
+                            "tag": "prod-new9999"},
+                     "98": {"sha": "ancestor", "attempt": "1",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"},
+        compare_fails=["flakerun"])
+    assert rc7 != 0, out7
+    assert "could not be read" in out7, out7
+    assert outputs7.get("deploy") != "true", outputs7
+    assert outputs7.get("image_tag") != "prod-abc1234", (
+        "a failed compare must not fall back to the older ancestor tag",
+        outputs7)
 
 
 def test_build_platform_images_workflow_invariants() -> None:

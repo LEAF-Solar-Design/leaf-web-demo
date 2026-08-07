@@ -932,7 +932,12 @@ def build_suites() -> List[Suite]:
         # which tag, not merely whether its text still reads that way.
         Suite("build-platform-images-workflow",
               "scripts test_build_platform_images_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_build_platform_images_workflow.py"), 3),
+              SCRIPTS_DIR,
+              # 3 -> 4 (PR #519): test_staging_relay_reconciles_a_docs_only_build
+              # executes the extracted manifest script against a fake gh and
+              # asserts the tag a docs-only merge resolves, then feeds it to the
+              # real dispatch script and asserts BOTH services deploy onto it.
+              _py_pytest("test_build_platform_images_workflow.py"), 4),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
