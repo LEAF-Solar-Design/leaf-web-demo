@@ -195,6 +195,17 @@ class ToolCatalogCollisionError(RuntimeError):
     tier that has no documented override relationship with the others."""
 
 
+class ToolCatalogProvenanceError(RuntimeError):
+    """Raised when source provenance cannot be established unambiguously."""
+
+
+TOOL_SOURCE_OPERATOR_OWNED_ENGINE = "operator_owned_engine"
+TOOL_SOURCE_CATALOG_SEED = "catalog_seed"
+TOOL_SOURCE_TENANT_REPO = "tenant_repo"
+TOOL_SOURCE_WRITE_SEED = "write_seed"
+TOOL_SOURCE_AUTHORED = "authored"
+
+
 def _check_global_seed_collisions(tiers: List[Tuple[str, List[Dict[str, Any]]]]) -> None:
     """Fail LOUDLY (raise) on a name collision across the GLOBAL, non-per-tenant,
     non-authored catalog tiers (engine registry, general-catalog seed, write seed).
@@ -301,6 +312,86 @@ def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
         if owner != tenant_id:
             continue
         by_name[t["name"]] = t
+    return list(by_name.values())
+
+
+def _provenance_rows(
+    source: str, tools: Any,
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Validate one tier before it can make an authority claim.
+
+    A duplicate inside one tier has no documented precedence. Reject it instead
+    of letting list order silently decide which same-source row is authoritative.
+    Cross-tier tenant/authored shadows remain valid and are resolved by the
+    existing last-wins catalog order below.
+    """
+    if not isinstance(tools, list):
+        raise ToolCatalogProvenanceError(
+            f"tool source {source!r} is not a list")
+    rows: List[Tuple[Dict[str, Any], str]] = []
+    names = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise ToolCatalogProvenanceError(
+                f"tool source {source!r} contains a non-object row")
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ToolCatalogProvenanceError(
+                f"tool source {source!r} contains a row without a valid name")
+        if name in names:
+            raise ToolCatalogProvenanceError(
+                f"tool source {source!r} contains duplicate name {name!r}")
+        names.add(name)
+        rows.append((tool, source))
+    return rows
+
+
+def effective_tools_with_provenance(
+    tenant_id: str = _DEFAULT_TENANT,
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Return the effective catalog rows paired with their winning source tier.
+
+    This is the authority-safe companion to ``all_tools``. Its tool projection
+    and last-wins order are identical for a valid catalog, but the source label
+    records the row that actually won. Callers deciding whether a tool is an
+    operator-owned engine tool must require
+    ``TOOL_SOURCE_OPERATOR_OWNED_ENGINE``. They must not infer ownership from a
+    digest or definition equality because an override may be an exact copy.
+
+    Tenant repositories also carry published customization catalogs, so their
+    rows are intentionally classified as tenant overrides. Malformed rows and
+    ambiguous same-tier duplicates fail closed.
+    """
+    global_tiers = _global_tool_tiers()
+    if [name for name, _tools in global_tiers] != [
+        "engine_registry", "catalog_seed", "write_seed",
+    ]:
+        raise ToolCatalogProvenanceError(
+            "global tool source order does not match the catalog fold contract")
+    engine_tools = global_tiers[0][1]
+    catalog_tools = global_tiers[1][1]
+    write_tools = global_tiers[2][1]
+
+    authored_tools: List[Dict[str, Any]] = []
+    for tool, _source in _provenance_rows(TOOL_SOURCE_AUTHORED, _AUTHORED):
+        owner = tool.get("tenant_id") or _DEFAULT_TENANT
+        if not isinstance(owner, str) or not owner:
+            raise ToolCatalogProvenanceError(
+                "authored tool contains an invalid tenant_id")
+        if owner == tenant_id:
+            authored_tools.append(tool)
+
+    tiers = [
+        (TOOL_SOURCE_OPERATOR_OWNED_ENGINE, engine_tools),
+        (TOOL_SOURCE_CATALOG_SEED, catalog_tools),
+        (TOOL_SOURCE_TENANT_REPO, load_tenant_repo_tools(tenant_id)),
+        (TOOL_SOURCE_WRITE_SEED, write_tools),
+        (TOOL_SOURCE_AUTHORED, authored_tools),
+    ]
+    by_name: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    for source, tools in tiers:
+        for tool, winning_source in _provenance_rows(source, tools):
+            by_name[tool["name"]] = (tool, winning_source)
     return list(by_name.values())
 
 
