@@ -1,26 +1,35 @@
-"""Wave 4 capstone: production is UNREACHABLE from every operator surface
+"""Wave 4 capstone: production is UNREACHABLE from the operator control plane
 (contract/OPERATOR.md section 7).
 
-Per-action reviews checked this one action at a time; this proves it across the
-WHOLE operator control plane at once, so a future action that quietly reaches
-production fails here. Three conditions of section 7:
+SOUNDNESS NOTE. A keyword denylist ("reject any route/action containing the word
+'production'") is NOT a proof: an aliased action `release_live` or route
+`/api/operator/release/live` would pass it while deploying to production. So this
+gate is an ALLOWLIST/FREEZE: the exact set of operator actions and the exact set
+of operator routes are pinned here. ANY new action or route, however it is
+spelled, changes the set and fails this test until a human adds it to the pin,
+where they must confirm it is not a production path. Combined with the matrix
+SHA-freeze (test_operator_vocab_freeze.py) and the behavioral refusals below,
+that is what makes production unreachable, not the absence of a magic word.
 
-  7.1  No operator surface accepts a production environment/target: the secret
-       broker, the external-write allowlist, the release stager, and all three
-       write runbooks refuse production, fail-closed.
-  7.2  No operator manifest, route, or handler names a production deploy path:
-       the default app mounts no /api/operator route, and with the operator
-       flag ON every mounted route is under /api/operator/ and none names
-       production/promote/deploy.
-  7.3  Production promotion is NOT an action: operator.promote_production is
-       absent from the catalog and listed under not_mounted in the matrix;
-       release preparation stops at the staging-only stage_release_candidate.
-
-No DB is required: every check is structural or a fail-closed refusal path.
+SCOPE. This proves the SERVER operator surface plus the contract:
+  7.1  The credential / destination / deploy surfaces (secret broker, external
+       allowlist, release stager) and the write runbooks refuse a production
+       environment/target, fail-closed; the release-candidate table CHECK
+       forbids production at the schema level.
+  7.2  The mounted operator route surface is EXACTLY the pinned set (all under
+       /api/operator/), and the default app mounts none of it.
+  7.3  The operator action set is EXACTLY the pinned set; production promotion is
+       absent from it and listed under not_mounted in the matrix.
+The disposable-worker environment allowlist (section 7.1's "no production
+credential in a worker") is enforced and frozen on the HARNESS side
+(harness/src/operatorWorker) with its own gate; it is out of scope for this
+server-side Python proof and deliberately not asserted here rather than checked
+vacuously across the language boundary.
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -31,77 +40,117 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 REPO_ROOT = SERVER_DIR.parent
-_NON_PRODUCTION = {"staging", "development"}
-_PROD_WORDS = ("production", "promote", "prod-deploy", "deploy-platform")
 
-# Every operator router that _mount_operator_router() mounts under the flag.
-_OPERATOR_ROUTER_MODULES = [
-    "operator_sessions", "operator_runbooks", "operator_overlay",
-    "operator_secrets", "operator_credential", "operator_external",
-    "operator_release",
-]
+# --- the pinned surface (allowlist) -----------------------------------------
+# Every operator ACTION. Adding one (however spelled) fails until it is listed
+# here AND in the SHA-pinned matrix, forcing a human to confirm it is staging-
+# only. This is the guard an aliased `release_live` cannot slip past.
+_EXPECTED_ACTIONS = frozenset({
+    "operator.read_fleet_state", "operator.read_tenant_state",
+    "operator.read_jobs", "operator.read_sessions", "operator.read_audit",
+    "operator.read_worker_status", "operator.worker_submit_job",
+    "operator.worker_cancel_job", "operator.repo_propose_change",
+    "operator.tenant_agent_pause", "operator.tenant_agent_resume",
+    "operator.tenant_overlay_set", "operator.worker_credential_rotate",
+    "operator.external_write", "operator.stage_release_candidate",
+})
+
+# Every operator ROUTE path. Adding one (however spelled) changes this set and
+# fails, so an aliased /api/operator/release/live cannot be introduced silently.
+_EXPECTED_ROUTES = frozenset({
+    "/api/operator/audit",
+    "/api/operator/external/destinations",
+    "/api/operator/external/execute",
+    "/api/operator/external/propose",
+    "/api/operator/release/execute",
+    "/api/operator/release/propose",
+    "/api/operator/release/{target}/{source_sha}/state",
+    "/api/operator/runbooks/credential/execute",
+    "/api/operator/runbooks/credential/propose",
+    "/api/operator/runbooks/credential/{handle}/state",
+    "/api/operator/runbooks/tenant-agent/{tenant_id}/state",
+    "/api/operator/runbooks/tenant-agent/{verb}/execute",
+    "/api/operator/runbooks/tenant-agent/{verb}/propose",
+    "/api/operator/runbooks/tenant-overlay/execute",
+    "/api/operator/runbooks/tenant-overlay/propose",
+    "/api/operator/runbooks/tenant-overlay/{tenant_id}/state",
+    "/api/operator/secrets",
+    "/api/operator/secrets/{handle}",
+    "/api/operator/sessions",
+    "/api/operator/sessions/{session_id}",
+    "/api/operator/sessions/{session_id}/events",
+    "/api/operator/sessions/{session_id}/messages",
+})
 
 
-# --- 7.3 promotion is not an action -----------------------------------------
-
-def test_promote_production_is_not_a_catalog_action():
-    import operator_policy
-    assert operator_policy.get_action("operator.promote_production") is None
-
-
-def test_matrix_lists_promotion_as_not_mounted_only():
-    matrix = json.loads((REPO_ROOT / "contract" /
-                         "operator_action_matrix.v1.json").read_text(encoding="utf-8"))
-    assert matrix["production_promotion_mounted"] is False
-    assert "operator.promote_production" in matrix["not_mounted"]
-    # A not_mounted action never appears as a real, production-reachable action.
-    assert "operator.promote_production" not in matrix["actions"]
-    assert all(a.get("production_reachable") is False
-               for a in matrix["actions"].values())
+def _operator_router_modules_from_app() -> list[str]:
+    """Derive the mounted operator routers by parsing app.py's
+    _mount_operator_router, so an EIGHTH router added there is scanned here
+    automatically rather than silently escaping a hand-maintained list."""
+    src = (SERVER_DIR / "app.py").read_text(encoding="utf-8")
+    mods = re.findall(r"from routers import (operator_\w+) as", src)
+    assert mods, "could not parse operator router imports from app.py"
+    return mods
 
 
-def test_catalog_declares_no_production_reachable_handler():
+def _mounted_operator_routes():
+    from fastapi import FastAPI
+    app = FastAPI()
+    for mod_name in _operator_router_modules_from_app():
+        mod = __import__(f"routers.{mod_name}", fromlist=["router"])
+        app.include_router(mod.router)
+    return {r.path for r in app.routes if r.path.startswith("/api/")}
+
+
+# --- 7.3 the action set is exactly the pinned set; promotion is not in it ----
+
+def test_catalog_action_set_is_exactly_the_pinned_set():
     import operator_policy
     catalog = operator_policy.load_catalog()
-    for name, entry in catalog["actions"].items():
-        # The parser already refuses production-shaped content except the
-        # staging-only release action; assert none is a promotion.
-        assert "promote_production" not in entry["handler"], name
+    assert set(catalog["actions"]) == _EXPECTED_ACTIONS  # no alias can be added
 
 
-# --- 7.2 no production route named ------------------------------------------
+def test_matrix_action_set_equals_catalog_and_pins_no_promotion():
+    matrix = json.loads((REPO_ROOT / "contract" /
+                         "operator_action_matrix.v1.json").read_text(encoding="utf-8"))
+    actions = matrix["actions"]
+    assert set(actions) == _EXPECTED_ACTIONS  # catalog and matrix agree, frozen
+    assert actions, "matrix actions must be non-empty (guards the all() below)"
+    assert matrix["production_promotion_mounted"] is False
+    assert "operator.promote_production" in matrix["not_mounted"]
+    assert "operator.promote_production" not in actions
+    assert all(a.get("production_reachable") is False for a in actions.values())
+
+
+def test_no_action_handler_is_a_promotion():
+    import operator_policy
+    catalog = operator_policy.load_catalog()
+    handlers = {e["handler"] for e in catalog["actions"].values()}
+    # The handler set is bounded by the pinned action set; assert none promotes.
+    assert not any("promote" in h or "prod" in h for h in handlers)
+
+
+# --- 7.2 the route surface is exactly the pinned set; default app has none ---
 
 def test_default_app_mounts_no_operator_route():
     import app
     assert [r.path for r in app.app.routes if "/api/operator" in r.path] == []
 
 
-def test_flag_on_surface_is_operator_namespaced_and_names_no_production():
-    from fastapi import FastAPI
-    app = FastAPI()
-    for mod_name in _OPERATOR_ROUTER_MODULES:
-        mod = __import__(f"routers.{mod_name}", fromlist=["router"])
-        app.include_router(mod.router)
-    paths = [r.path for r in app.routes if r.path.startswith("/api/")]
-    assert paths, "expected the operator routers to register routes"
-    for p in paths:
-        assert p.startswith("/api/operator/"), p
-        low = p.lower()
-        assert not any(w in low for w in _PROD_WORDS), p
+def test_mounted_operator_routes_are_exactly_the_pinned_set():
+    routes = _mounted_operator_routes()
+    # Exact-set equality is the sound guard: a NEW or ALIASED route (added to a
+    # router, or an eighth router added to app.py) changes this set and fails,
+    # regardless of how it is spelled.
+    assert routes == set(_EXPECTED_ROUTES), {
+        "unexpected": sorted(routes - _EXPECTED_ROUTES),
+        "missing": sorted(set(_EXPECTED_ROUTES) - routes),
+    }
+    # And every pinned route is operator-namespaced (no path escapes the prefix).
+    assert all(p.startswith("/api/operator/") for p in _EXPECTED_ROUTES)
 
 
-def test_operator_router_source_names_no_production_deploy_route():
-    for mod_name in _OPERATOR_ROUTER_MODULES:
-        src = (SERVER_DIR / "routers" / f"{mod_name}.py").read_text(encoding="utf-8")
-        low = src.lower()
-        # "production" may only appear in a REFUSAL context, never as a route
-        # or a deploy target. Assert no route decorator path names production.
-        for line in src.splitlines():
-            if "@router." in line:
-                assert not any(w in line.lower() for w in _PROD_WORDS), (mod_name, line)
-
-
-# --- 7.1 every operator surface refuses production --------------------------
+# --- 7.1 the deploy/credential surfaces refuse production (behavioral) -------
 
 def test_secret_broker_refuses_production():
     import operator_secret_broker as broker
@@ -160,7 +209,6 @@ def test_release_stager_refuses_production_target():
 
 
 def test_write_runbooks_refuse_production_environment_or_target():
-    # Each write runbook's server-owned precondition refuses production.
     import operator_credential_rotate_runbook as cred
     with pytest.raises(cred.RunbookError) as e1:
         cred._broker_verify("github_operator_pr", "production")
@@ -179,8 +227,6 @@ def test_write_runbooks_refuse_production_environment_or_target():
 
 
 def test_release_migration_check_constrains_target_to_non_production():
-    # The candidate table forbids a production row at the schema level, so a
-    # production candidate is unrepresentable even if a bug reached the INSERT.
     sql = (REPO_ROOT / "platform" / "migrations" /
            "0034_operator_release_candidates.sql").read_text(encoding="utf-8")
     assert "CHECK (target IN ('staging', 'development'))" in sql
