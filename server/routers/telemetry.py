@@ -71,22 +71,30 @@ PREAUTH_EVENTS = frozenset({
 # row landed. The token bucket bounds VOLUME, not CONTENT, so the guarantee
 # was only ever true of rows the real client sent.
 #
-# So the anonymous lane validates this event's labels against its own schema:
-# unknown keys are dropped and every value must match its shape. Enumerated
-# labels are closed sets, the digests are decimal, and the class is an
-# allowlist mirroring web/src/telemetry.js's KNOWN_CLASSES. An unlisted class
-# degrades to "Other" rather than being dropped, so the two lists drifting
-# costs a label's precision and never its safety.
+# So this event's labels are validated against a schema, for EVERY caller and
+# not just anonymous ones -- authentication proves identity, not label
+# provenance. Unknown keys are dropped and every value must match its rule.
+# The enumerated labels are CLOSED SETS rather than shapes (a shape accepted
+# "alicesmith/desktop"), and the class list mirrors web/src/telemetry.js's
+# KNOWN_CLASSES. An unlisted class degrades to "Other" rather than being
+# dropped, so the two lists drifting costs a label's precision and never its
+# safety; server/tests/test_client_exception_vocab_freeze.py enforces the
+# mirror.
+#
 # A digest is ALWAYS 16 digits (the client zero-pads it). The door cannot
 # prove a value came from the hash function -- an opaque field holds whatever
 # the caller writes -- but requiring the exact width means the field's
 # capacity is one digest and nothing else. The previous "any decimal" rule
 # accepted "5550142", which is a phone number.
-_HASH_RE = re.compile(r"^[0-9]{16}$")
+# `\Z`, not `$`: Python's `$` ALSO matches before a trailing newline, so
+# sixteen zeros followed by a newline validated as a digest. One newline of
+# capacity is not free text, but a rule that says "exactly 16 digits" should
+# mean exactly that.
+_HASH_RE = re.compile(r"\A[0-9]{16}\Z")
 _CLIENT_EXCEPTION_CLASSES = frozenset({
     "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError",
     "TypeError", "URIError", "AggregateError", "DOMException",
-    "FetchTimeoutError", "UnhandledRejection", "Other",
+    "FetchTimeoutError", "ChunkLoadError", "UnhandledRejection", "Other",
     "AbortError", "ConstraintError", "DataCloneError", "DataError",
     "EncodingError", "HierarchyRequestError", "IndexSizeError",
     "InvalidCharacterError", "InvalidStateError", "NamespaceError",

@@ -53,7 +53,10 @@ def _js_known_classes() -> set[str]:
         line for line in block.group(1).split("\n")
         if not line.strip().startswith("//")
     )
-    return set(re.findall(r"'([A-Za-z]+)'", body))
+    # [A-Za-z0-9]+, not [A-Za-z]+: a class name carrying a digit (a real
+    # possibility -- `ChunkLoad2Error`) was invisible to the parser, so a
+    # JS-only addition passed this test while the runtime lists disagreed.
+    return set(re.findall(r"'([A-Za-z0-9]+)'", body))
 
 
 def test_client_and_server_class_lists_agree_exactly():
@@ -119,9 +122,11 @@ def test_digest_width_is_fixed_on_both_sides():
     requires exactly one digest's width; the client zero-pads to it."""
     src = CLIENT_JS.read_text(encoding="utf-8")
     assert f"const DIGEST_WIDTH = {DIGEST_WIDTH}" in src
-    assert telemetry_router._HASH_RE.pattern == r"^[0-9]{%d}$" % DIGEST_WIDTH
+    assert telemetry_router._HASH_RE.pattern == r"\A[0-9]{%d}\Z" % DIGEST_WIDTH
     assert telemetry_router._HASH_RE.match("0" * DIGEST_WIDTH)
     assert not telemetry_router._HASH_RE.match("5550142")
+    # Python's `$` matches before a trailing newline; `\Z` does not.
+    assert not telemetry_router._HASH_RE.match("0" * DIGEST_WIDTH + "\n")
 
 
 def test_tour_step_is_deliberately_absent():

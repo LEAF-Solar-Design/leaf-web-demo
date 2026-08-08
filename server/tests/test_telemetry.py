@@ -285,8 +285,9 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
     """A JS failure on a page with no principal — a marketing page, the
     sign-in gate, anything before a session exists — is exactly the failure
     nothing else can see: the server answered 200 and the browser died. It
-    lands as event_type `exception` with the client's labels intact and
-    server-stamped anonymous identity."""
+    lands as event_type `exception` with SCHEMA-CONFORMING labels (this is the
+    happy path; the filtering itself is the next test) and server-stamped
+    anonymous identity."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     c = _client()
@@ -296,8 +297,8 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
         "labels": {
             "source": "unhandledrejection",
             "message_class": "TypeError",
-            "message_hash": "2166136261",
-            "stack_hash": "884152034421",
+            "message_hash": "0002166136261234",
+            "stack_hash": "0000884152034421",
             "route": "site",
             "ua_class": "chrome/desktop",
         },
@@ -313,6 +314,9 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
     assert labels["source"] == "unhandledrejection"
     assert labels["message_class"] == "TypeError"
     assert labels["route"] == "site"
+    # Both digests are schema-conforming widths, so both survive.
+    assert labels["message_hash"] == "0002166136261234"
+    assert labels["stack_hash"] == "0000884152034421"
     assert labels["ingest"] == "client"
 
 

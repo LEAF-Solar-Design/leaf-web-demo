@@ -293,11 +293,14 @@ function reasonText(reason) {
   }
   try { if ('message' in reason) return reason.message } catch { /* next */ }
   try {
-    // BUDGETED. `JSON.stringify` walks the whole graph and runs every getter
-    // and `toJSON` it meets, so an application or third-party rejection
-    // carrying a large or proxied object could stall the main thread inside
-    // telemetry. The replacer aborts the walk once it has seen enough to
-    // distinguish one failure from another.
+    // Bounds the NODE COUNT, not the byte count: `JSON.stringify` walks the
+    // whole graph and runs every getter and `toJSON` it meets, and the
+    // replacer aborts that walk once it has seen enough to tell one failure
+    // from another. A single enormous string VALUE still materializes in one
+    // replacer call before `digest` slices it. That residue is self-inflicted
+    // -- only code already running in the page can reject with it, and such
+    // code can stall the main thread far more cheaply -- and nothing
+    // oversized is ever stored, because the digest is fixed width.
     let budget = HASH_INPUT_MAX
     const json = JSON.stringify(reason, (k, v) => {
       budget -= String(k).length + 8
@@ -332,6 +335,11 @@ const KNOWN_CLASSES = new Set([
   'UnhandledRejection', 'Other',
   // This app's own class (web/src/fetchBudget.js); its provenance is ours.
   'FetchTimeoutError',
+  // Bundler-assigned, and this app CODE-SPLITS -- ErrorBoundary itself uses a
+  // dynamic import -- so a tab left open across a deploy throwing
+  // ChunkLoadError is an ordinary, foreseeable failure. Degrading it to
+  // `Other` would lose the one class most worth seeing after a release.
+  'ChunkLoadError',
   // DOMException `name` values the platform assigns.
   'AbortError', 'ConstraintError', 'DataCloneError', 'DataError',
   'EncodingError', 'HierarchyRequestError', 'IndexSizeError',
