@@ -1,30 +1,35 @@
-"""Wave 4 capstone: production is UNREACHABLE from the operator control plane
+"""Wave 4 capstone: the operator control plane does not DECLARE or REQUEST a
+production operation, and its declared surface cannot grow silently
 (contract/OPERATOR.md section 7).
 
-SOUNDNESS NOTE. A keyword denylist ("reject any route/action containing the word
-'production'") is NOT a proof: an aliased action `release_live` or route
-`/api/operator/release/live` would pass it while deploying to production. So this
-gate is an ALLOWLIST/FREEZE: the exact set of operator actions and the exact set
-of operator routes are pinned here. ANY new action or route, however it is
-spelled, changes the set and fails this test until a human adds it to the pin,
-where they must confirm it is not a production path. Combined with the matrix
-SHA-freeze (test_operator_vocab_freeze.py) and the behavioral refusals below,
-that is what makes production unreachable, not the absence of a magic word.
+WHAT A TEST CAN AND CANNOT PROVE HERE. "Production is unreachable" is a claim
+about BEHAVIOR, and no static test can prove that an arbitrary handler body, or
+a deployment-registered callback (a stager/minter/adapter is trusted code), does
+not itself reach production - that is a per-action independent-review guarantee
+and a trust boundary, exactly like the secret broker's minter. What this gate
+DOES prove, soundly and non-vacuously, is the structural frame that makes the
+review meaningful:
 
-SCOPE. This proves the SERVER operator surface plus the contract:
-  7.1  The credential / destination / deploy surfaces (secret broker, external
-       allowlist, release stager) and the write runbooks refuse a production
-       environment/target, fail-closed; the release-candidate table CHECK
-       forbids production at the schema level.
-  7.2  The mounted operator route surface is EXACTLY the pinned set (all under
-       /api/operator/), and the default app mounts none of it.
-  7.3  The operator action set is EXACTLY the pinned set; production promotion is
+  7.1  The operator surfaces that take an environment/target REFUSE production,
+       fail-closed (secret broker, external allowlist, release stager, the write
+       runbooks), and the plane never REQUESTS a production target (the runbooks
+       validate staging-only before calling a registered callback). The
+       release-candidate table CHECK forbids production at the schema level.
+  7.2  The operator ROUTE surface the real mount adds is EXACTLY the pinned set
+       of (method, path) endpoints, discovered from the RUNTIME app (off vs on),
+       so a new/aliased route, a new METHOD on an existing path, an eighth
+       router mounted by ANY import style, or a route escaped to a non-/api
+       prefix all appear in the diff and fail the pin - forcing a human to add
+       it and confirm it is not a production path.
+  7.3  The operator ACTION set is EXACTLY the pinned set; production promotion is
        absent from it and listed under not_mounted in the matrix.
-The disposable-worker environment allowlist (section 7.1's "no production
-credential in a worker") is enforced and frozen on the HARNESS side
-(harness/src/operatorWorker) with its own gate; it is out of scope for this
-server-side Python proof and deliberately not asserted here rather than checked
-vacuously across the language boundary.
+
+EXPLICITLY NOT PROVEN HERE (guaranteed elsewhere): that an EXISTING handler or a
+registered stager/minter/adapter's implementation does not reach production
+(per-action review + trust boundary); and the disposable-worker environment
+allowlist (section 7.1's "no production credential in a worker"), which is
+enforced and frozen on the HARNESS side with its own gate. Those are stated, not
+checked vacuously across the language boundary.
 """
 from __future__ import annotations
 
@@ -45,7 +50,7 @@ REPO_ROOT = SERVER_DIR.parent
 # --- the pinned surface (allowlist) -----------------------------------------
 # Every operator ACTION. Adding one (however spelled) fails until it is listed
 # here AND in the SHA-pinned matrix, forcing a human to confirm it is staging-
-# only. This is the guard an aliased `release_live` cannot slip past.
+# only. An aliased `release_live` cannot slip past this.
 _EXPECTED_ACTIONS = frozenset({
     "operator.read_fleet_state", "operator.read_tenant_state",
     "operator.read_jobs", "operator.read_sessions", "operator.read_audit",
@@ -56,53 +61,60 @@ _EXPECTED_ACTIONS = frozenset({
     "operator.external_write", "operator.stage_release_candidate",
 })
 
-# Every operator ROUTE path. Adding one (however spelled) changes this set and
-# fails, so an aliased /api/operator/release/live cannot be introduced silently.
-_EXPECTED_ROUTES = frozenset({
-    "/api/operator/audit",
-    "/api/operator/external/destinations",
-    "/api/operator/external/execute",
-    "/api/operator/external/propose",
-    "/api/operator/release/execute",
-    "/api/operator/release/propose",
-    "/api/operator/release/{target}/{source_sha}/state",
-    "/api/operator/runbooks/credential/execute",
-    "/api/operator/runbooks/credential/propose",
-    "/api/operator/runbooks/credential/{handle}/state",
-    "/api/operator/runbooks/tenant-agent/{tenant_id}/state",
-    "/api/operator/runbooks/tenant-agent/{verb}/execute",
-    "/api/operator/runbooks/tenant-agent/{verb}/propose",
-    "/api/operator/runbooks/tenant-overlay/execute",
-    "/api/operator/runbooks/tenant-overlay/propose",
-    "/api/operator/runbooks/tenant-overlay/{tenant_id}/state",
-    "/api/operator/secrets",
-    "/api/operator/secrets/{handle}",
-    "/api/operator/sessions",
-    "/api/operator/sessions/{session_id}",
-    "/api/operator/sessions/{session_id}/events",
-    "/api/operator/sessions/{session_id}/messages",
+# Every operator (METHOD, PATH) endpoint. Pinning the METHOD too means a new
+# production-deploying POST on an already-pinned GET path also fails.
+_EXPECTED_ENDPOINTS = frozenset({
+    ("GET", "/api/operator/audit"),
+    ("GET", "/api/operator/external/destinations"),
+    ("GET", "/api/operator/release/{target}/{source_sha}/state"),
+    ("GET", "/api/operator/runbooks/credential/{handle}/state"),
+    ("GET", "/api/operator/runbooks/tenant-agent/{tenant_id}/state"),
+    ("GET", "/api/operator/runbooks/tenant-overlay/{tenant_id}/state"),
+    ("GET", "/api/operator/secrets"),
+    ("GET", "/api/operator/secrets/{handle}"),
+    ("GET", "/api/operator/sessions"),
+    ("GET", "/api/operator/sessions/{session_id}"),
+    ("GET", "/api/operator/sessions/{session_id}/events"),
+    ("POST", "/api/operator/external/execute"),
+    ("POST", "/api/operator/external/propose"),
+    ("POST", "/api/operator/release/execute"),
+    ("POST", "/api/operator/release/propose"),
+    ("POST", "/api/operator/runbooks/credential/execute"),
+    ("POST", "/api/operator/runbooks/credential/propose"),
+    ("POST", "/api/operator/runbooks/tenant-agent/{verb}/execute"),
+    ("POST", "/api/operator/runbooks/tenant-agent/{verb}/propose"),
+    ("POST", "/api/operator/runbooks/tenant-overlay/execute"),
+    ("POST", "/api/operator/runbooks/tenant-overlay/propose"),
+    ("POST", "/api/operator/sessions"),
+    ("POST", "/api/operator/sessions/{session_id}/messages"),
 })
 
 
-def _app_routes(enabled: bool) -> set:
-    """ALL route paths of the REAL app, imported fresh in a subprocess with the
-    operator flag off/on. Inspecting the runtime routes (not app.py's source) is
-    what makes this sound: a router mounted by ANY import style, at ANY path
-    prefix, appears here, so nothing can escape a source-parsing regex or a
-    /api/ filter."""
+def _app_endpoints(enabled: bool) -> set:
+    """ALL (method, path) endpoints of the REAL app, imported fresh in a
+    subprocess with the operator flag off/on. Inspecting the RUNTIME routes (not
+    app.py's source) is what makes this sound: a route mounted by ANY import
+    style, with ANY method, at ANY path prefix, appears here."""
     code = (
-        "import os, json\n"
+        "import json\n"
         "import app\n"
-        "print('ROUTES_JSON=' + json.dumps(sorted(\n"
-        "    getattr(r, 'path', '') for r in app.app.routes)))\n"
+        "eps = []\n"
+        "for r in app.app.routes:\n"
+        "    path = getattr(r, 'path', '')\n"
+        "    methods = getattr(r, 'methods', None) or set()\n"
+        "    for m in (set(methods) - {'HEAD', 'OPTIONS'}):\n"
+        "        eps.append([m, path])\n"
+        "    if not methods:\n"
+        "        eps.append(['MOUNT', path])\n"
+        "print('EPS_JSON=' + json.dumps(eps))\n"
     )
     env = dict(os.environ)
     env["LEAF_OPERATOR_ENABLED"] = "1" if enabled else "0"
     out = subprocess.run([sys.executable, "-c", code], cwd=str(SERVER_DIR),
                          capture_output=True, text=True, env=env, check=True)
     line = next(ln for ln in out.stdout.splitlines()
-                if ln.startswith("ROUTES_JSON="))
-    return set(json.loads(line[len("ROUTES_JSON="):]))
+                if ln.startswith("EPS_JSON="))
+    return {tuple(e) for e in json.loads(line[len("EPS_JSON="):])}
 
 
 # --- 7.3 the action set is exactly the pinned set; promotion is not in it ----
@@ -129,34 +141,31 @@ def test_no_action_handler_is_a_promotion():
     import operator_policy
     catalog = operator_policy.load_catalog()
     handlers = {e["handler"] for e in catalog["actions"].values()}
-    # The handler set is bounded by the pinned action set; assert none promotes.
     assert not any("promote" in h or "prod" in h for h in handlers)
 
 
-# --- 7.2 the route surface is exactly the pinned set; default app has none ---
+# --- 7.2 the route+method surface is exactly the pinned set ------------------
 
 def test_default_app_mounts_no_operator_route():
-    off = _app_routes(enabled=False)
-    # No route ANYWHERE (any prefix) mentions the operator namespace when dark.
-    assert not any("operator" in p for p in off), \
-        sorted(p for p in off if "operator" in p)
+    off = _app_endpoints(enabled=False)
+    # No endpoint ANYWHERE (any prefix/method) mentions the operator namespace
+    # when dark.
+    assert not any("operator" in p for _, p in off), \
+        sorted(p for _, p in off if "operator" in p)
 
 
-def test_flag_on_adds_exactly_the_pinned_operator_routes():
-    off = _app_routes(enabled=False)
-    on = _app_routes(enabled=True)
+def test_flag_on_adds_exactly_the_pinned_operator_endpoints():
+    off = _app_endpoints(enabled=False)
+    on = _app_endpoints(enabled=True)
     added = on - off  # exactly what the real operator mount contributes
-    # Exact-set equality is the sound guard: a new or aliased route, an eighth
-    # router mounted by ANY import style, or a route escaped to a non-/api prefix
-    # all appear in `added` and fail here, regardless of spelling.
-    assert added == set(_EXPECTED_ROUTES), {
-        "unexpected": sorted(added - set(_EXPECTED_ROUTES)),
-        "missing": sorted(set(_EXPECTED_ROUTES) - added),
+    assert added == set(_EXPECTED_ENDPOINTS), {
+        "unexpected": sorted(added - set(_EXPECTED_ENDPOINTS)),
+        "missing": sorted(set(_EXPECTED_ENDPOINTS) - added),
     }
-    # Every route the mount added is operator-namespaced: a route escaped to
+    # Every endpoint the mount added is operator-namespaced: one escaped to
     # /internal/... would be in `added`, absent from the pin, and already fail
-    # above; this second assertion states the invariant directly.
-    assert all(p.startswith("/api/operator/") for p in added)
+    # above; this states the invariant directly.
+    assert all(p.startswith("/api/operator/") for _, p in added)
 
 
 # --- 7.1 the deploy/credential surfaces refuse production (behavioral) -------
