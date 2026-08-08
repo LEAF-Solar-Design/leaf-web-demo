@@ -451,6 +451,20 @@ def test_o4_release_candidate_is_immutable_and_receipted():
     rb = (SERVER_DIR / "operator_stage_release_runbook.py").read_text(encoding="utf-8")
     assert '"staged_taskdef_revision": revs["new_revision"]' in rb
     assert '"reversal": {"rollback_to_taskdef_revision": previous}' in rb
+    # IDENTITY-IMMUTABLE (mutation check): every UPDATE of the candidate table
+    # may write ONLY the receipt fields (status / revisions / timestamps), NEVER
+    # the identity columns source_sha or target. If a future edit adds
+    # `SET source_sha=` or `SET target=` (mutating the immutable identity), the
+    # SET clause below contains it and this fails.
+    import re
+    for m in re.finditer(r"UPDATE\s+operator_release_candidates\s+SET\s+(.*?)\s+WHERE",
+                         rb, re.S | re.I):
+        set_clause = m.group(1)
+        assert "source_sha" not in set_clause, set_clause
+        assert re.search(r"\btarget\s*=", set_clause) is None, set_clause
+    # And the migration declares no trigger/rule that could rewrite identity.
+    sql2 = sql  # already read above
+    assert "CREATE TRIGGER" not in sql2.upper() and "CREATE RULE" not in sql2.upper()
 
 
 # --- O5: production promotion is outside every operator surface --------------
@@ -497,3 +511,32 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
         s = src_path.read_text(encoding="utf-8")
         assert "deploy-platform-web-production" not in s, src_path.name
         assert "approve-vercel-production" not in s, src_path.name
+
+
+# --- O3 (mutation check): no operator handler names a production deploy target
+
+# A handler that CALLED production deploy would have to reference a production
+# deploy target: the production host, the Vercel deploy platform, the canonical
+# production workflow or its approval token, or a cloud-metadata endpoint. None
+# appears in any operator server module today (they use "production" only to
+# REFUSE it), so adding such a call to an existing handler trips this scan.
+_PROD_DEPLOY_CALL_TOKENS = (
+    "api.leafdesign.ai",                 # production surface / host
+    "vercel",                            # the production deploy platform
+    "deploy-platform-web-production",    # the canonical production workflow
+    "approve-vercel-production",         # its independent approval token
+    "169.254.169.254",                   # cloud metadata endpoint
+)
+
+
+def test_o3_no_operator_handler_names_a_production_deploy_target():
+    op_sources = (list(SERVER_DIR.glob("operator_*.py"))
+                  + list((SERVER_DIR / "routers").glob("operator_*.py")))
+    assert op_sources, "expected operator source files to scan"
+    hits = []
+    for src_path in op_sources:
+        low = src_path.read_text(encoding="utf-8").lower()
+        for tok in _PROD_DEPLOY_CALL_TOKENS:
+            if tok.lower() in low:
+                hits.append((src_path.name, tok))
+    assert not hits, hits
