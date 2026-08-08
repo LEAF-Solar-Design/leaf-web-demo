@@ -4,8 +4,8 @@
  * The ErrorBoundary only sees what a component throws during render, so a
  * three.js draw tick, a stray callback, and every unawaited promise used to
  * fail with nothing recorded anywhere. These specs pin the four things that
- * make the capture trustworthy: it fires, it redacts, it stops at the cap,
- * and it stays silent for resource-load noise.
+ * make the capture trustworthy: it fires, NO FREE TEXT LEAVES THE BROWSER, it
+ * stops at the cap, and it stays silent for resource-load noise.
  *
  * Each spec re-imports the module (`vi.resetModules`) because the per-session
  * caps deliberately keep an in-memory floor beside sessionStorage — without a
@@ -84,10 +84,12 @@ describe('global error capture', () => {
     expect(events[0].labels).toMatchObject({
       source: 'window.onerror',
       message_class: 'TypeError',
-      message: 'Cannot read properties of null',
       route: 'app',
     })
     expect(events[0].labels.ua_class).toMatch(/\/(mobile|desktop)$/)
+    // The message travels as a stable hash, never as text.
+    expect(events[0].labels.message).toBeUndefined()
+    expect(events[0].labels.message_hash).toMatch(/^\d+$/)
   })
 
   it('labels the route with the app scene, never the pathname a customer name rides in', async () => {
@@ -118,128 +120,71 @@ describe('global error capture', () => {
       .toEqual(['RangeError', 'UnhandledRejection'])
     expect(events.map((e) => e.labels.source))
       .toEqual(['unhandledrejection', 'unhandledrejection'])
-    expect(events[1].labels.message).toBe('plain string rejection')
+    expect(events[1].labels.message_hash).toMatch(/^\d+$/)
   })
 
-  it('drops whole URIs, emails, and identifier-shaped runs from the message', async () => {
+
+
+
+
+
+
+  it('accepts only a PLATFORM error name, because name is writable', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    const error = new Error(
-      'POST https://api.example.com/invite/AKIAIOSFODNN7EXAMPLE/Alice-Smith/plan.dwg -> 403 '
-      + 'for owner@example.com id eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 case 987654321',
-    )
-    mod.handleErrorEvent({ error })
+    // An identifier-SHAPED check is not enough: `name` is an ordinary
+    // writable property, so `Promise.reject({name: 'AliceSmith'})` is a legal
+    // rejection any visitor can produce and it would have passed one.
+    mod.handleRejectionEvent({ reason: { name: 'AliceSmith', message: 'probe' } })
+    const spaced = new Error('x')
+    spaced.name = 'owner@example.com leaked via the class label'
+    mod.handleErrorEvent({ error: spaced })
+    // A real platform name still comes through.
+    mod.handleErrorEvent({ error: new RangeError('genuine') })
     mod.flushNow()
 
-    const { message } = postedEvents(fetchMock)[0].labels
-    // The whole URI goes, not just its query: the PATH carried the credential
-    // and the customer name.
-    expect(message).not.toContain('api.example.com')
-    expect(message).not.toContain('AKIAIOSFODNN7EXAMPLE')  // 20 chars: under any 24 rule
-    expect(message).not.toContain('Alice-Smith')
-    expect(message).not.toContain('owner@example.com')
-    expect(message).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9')
-    expect(message).not.toContain('987654321')
-    expect(message).toContain('<url>')
-    expect(message).toContain('<email>')
+    const classes = postedEvents(fetchMock).map((e) => e.labels.message_class)
+    expect(classes).toEqual(['UnhandledRejection', 'Other', 'RangeError'])
+    expect(JSON.stringify(classes)).not.toContain('AliceSmith')
+    expect(JSON.stringify(classes)).not.toContain('owner@example.com')
   })
 
-  it('redacts a RELATIVE path with a query, which is what this app actually throws', async () => {
+  it('never lets free text out, whatever the message contains', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    // api.js throws relative, not absolute: `POST /api/drawings/<id>/checkout`.
-    // An absolute-URL-only rule would have let every one of these through.
-    mod.handleErrorEvent({
-      error: new Error('POST /api/drawings/dwg-8823/checkout?invite=abc123xyz -> 409'),
-    })
-    mod.flushNow()
-
-    const { message } = postedEvents(fetchMock)[0].labels
-    expect(message).not.toContain('dwg-8823')
-    expect(message).not.toContain('abc123xyz')
-    expect(message).not.toContain('invite=')
-    // The route SHAPE is the diagnostic value and survives.
-    expect(message).toContain('/api/drawings/<id>/checkout')
-    expect(message).toContain('409')
-  })
-
-  it('redacts a quoted name or typed scrap, but keeps a single-word quote', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    mod.handleErrorEvent({ error: new Error('user "Alice Smith" not found') })
-    mod.handleErrorEvent({ error: new Error("the 'tool name here' is unknown") })
-    // The single-word quote is the detail that makes a message worth having.
-    mod.handleErrorEvent({
-      error: new Error('Cannot read properties of null (reading "geometry")'),
-    })
-    // Regression: the span rule must anchor to an OPENING quote. Unanchored,
-    // the engine pairs the CLOSING quote of one span with the OPENING quote
-    // of the next and this collapses to `Expected "close<q>open"` — message
-    // mangled, neither span redacted.
-    mod.handleErrorEvent({ error: new Error('Expected "close" but found "open"') })
-    mod.flushNow()
-
-    const messages = postedEvents(fetchMock).map((e) => e.labels.message)
-    expect(messages[0]).toBe('user <q> not found')
-    expect(messages[1]).toBe('the <q> is unknown')
-    expect(messages[2]).toBe('Cannot read properties of null (reading "geometry")')
-    expect(messages[3]).toBe('Expected "close" but found "open"')
-  })
-
-  it('redacts a digit-bearing run, so a phone number or a date cannot ride along', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    mod.handleErrorEvent({ error: new Error('contact at 555-0142 ext 9') })
-    mod.handleErrorEvent({ error: new Error('lease 2026-08-07 already expired') })
-    mod.flushNow()
-
-    const messages = postedEvents(fetchMock).map((e) => e.labels.message)
-    expect(messages[0]).toBe('contact at <token> ext 9')
-    // A date is indistinguishable from an id by shape, and the row already
-    // carries a server-stamped timestamp, so losing it costs nothing.
-    expect(messages[1]).toBe('lease <token> already expired')
-  })
-
-  it('leaves ordinary engine messages alone', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // The redactor is worthless if it turns real diagnostics into noise.
-    const intact = [
-      'THREE.WebGLRenderer: context lost',
-      'Unsupported content type application/json; charset=utf-8',
-      'and/or was not handled',
-      'Failed to execute queryAll on Document',
+    // Every case two adversarial reviews found surviving a redactor. None of
+    // them can survive a hash.
+    const hostile = [
+      'Failed to load /app/alice/settings',
+      "Validation failed for customer 'Alice Smith'",
+      'Request to 192.168.1.42 refused',
+      'open failed: C:\Users\Alice\Customer-X\site-plan.dwg',
+      'id deadbeef rejected',
+      'GET https://api.example.com/invite/AKIAIOSFODNN7EXAMPLE -> 403',
+      'contact owner@example.com about 555-0142',
     ]
-    for (const m of intact) mod.handleErrorEvent({ error: new Error(m) })
+    for (const m of hostile) mod.handleErrorEvent({ error: new Error(m) })
     mod.flushNow()
 
-    expect(postedEvents(fetchMock).map((e) => e.labels.message)).toEqual(intact)
+    const serialized = JSON.stringify(postedEvents(fetchMock))
+    for (const needle of [
+      'alice', 'Alice', 'Customer-X', '192.168', 'deadbeef',
+      'AKIAIOSFODNN7EXAMPLE', 'owner@example.com', '555-0142', 'settings',
+    ]) {
+      expect(serialized).not.toContain(needle)
+    }
   })
 
-  it('redacts percent-encoded values, which survive every other rule', async () => {
+  it('hashes the message stably, so distinct failures stay distinguishable', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    mod.handleErrorEvent({ error: new Error('lookup failed owner%40example.com') })
+    mod.handleErrorEvent({ error: new Error('alpha') })
+    mod.handleErrorEvent({ error: new RangeError('beta') })
     mod.flushNow()
 
-    const { message } = postedEvents(fetchMock)[0].labels
-    expect(message).not.toContain('owner%40example.com')
-    expect(message).toContain('<enc>')
-  })
-
-  it('refuses a message_class that is not identifier-shaped', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // `name` is an ordinary writable property, so on a foreign object it is
-    // arbitrary attacker text, not a class.
-    const hostile = new Error('x')
-    hostile.name = 'owner@example.com leaked via the class label'
-    mod.handleErrorEvent({ error: hostile })
-    mod.flushNow()
-
-    const { message_class: cls } = postedEvents(fetchMock)[0].labels
-    expect(cls).toBe('Error')
-    expect(cls).not.toContain('owner@example.com')
+    const [a, b] = postedEvents(fetchMock).map((e) => e.labels.message_hash)
+    expect(a).not.toBe(b)          // different failures do not collide
+    expect(a).toMatch(/^\d+$/)     // and it is an opaque number, not text
   })
 
   it('reduces the stack head to fn@file:line:col and never carries an inline payload', async () => {
@@ -271,16 +216,6 @@ describe('global error capture', () => {
     expect(b).not.toContain('c2VjcmV0LXNvdXJjZQ')
   })
 
-  it('caps the message length so one exception cannot fill a body', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // Long but NOT one unbroken identifier run — that would redact to
-    // `<token>` and prove the cap nothing.
-    mod.handleErrorEvent({ error: new Error('the renderer failed '.repeat(40)) })
-    mod.flushNow()
-
-    expect(postedEvents(fetchMock)[0].labels.message).toHaveLength(200)
-  })
 
   it('stops emitting at the per-session cap so an error loop cannot drain the bucket', async () => {
     const { mod, fetchMock } = await loadTelemetry()
@@ -306,7 +241,7 @@ describe('global error capture', () => {
 
     const events = postedEvents(fetchMock)
     expect(events).toHaveLength(2)
-    expect(events[1].labels.message).toBe('the real crash, seen last')
+    expect(events[1].labels.message_class).toBe('TypeError')
   })
 
   it('keeps the ErrorBoundary budget separate from the global one', async () => {
@@ -371,6 +306,7 @@ describe('global error capture', () => {
 
     const events = postedEvents(fetchMock)
     expect(events).toHaveLength(1)
-    expect(events[0].labels.message).toBe('from a real event')
+    expect(events[0].event_name).toBe('client.exception')
+    expect(events[0].labels.source).toBe('window.onerror')
   })
 })

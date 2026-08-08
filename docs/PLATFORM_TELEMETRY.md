@@ -136,7 +136,7 @@ C-3 (global error capture):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message, stack_head, route, ua_class |
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_head, route, ua_class |
 
 The boundary only sees what a component throws DURING RENDER, so a three.js
 draw tick, a `setTimeout` callback, and every unawaited promise failed with
@@ -145,61 +145,44 @@ in the browser. These handlers close that gap under the SAME event name,
 distinguished by `source` — a second event name would need its own allowlist
 entry, dashboard row, and docs for no added meaning.
 
-### What each label may and may not carry
+### No free text leaves the browser
 
-`message` and `stack_head` are the one place raw-ish text enters the rail
-(every other client label is an enum or a number), so they are the only
-labels with a redaction contract. Client-side, capped at 200 before the
-door's 512:
+Every label is structural. There is no free-text field, and that is a
+correction made under review, not the original design:
 
-- **Whole URIs go**, not just their query strings — `https`, `wss`, `blob`,
-  `data`, `file`, `javascript`. A path carries as much as a query does
-  (`/app/Alice-Smith/invite/7uP9-kL2` is a customer name and an invite code
-  with no `?` in sight) and a `data:` URI can inline an entire source file.
-  Endpoint identity is already recorded, unredacted and classified, by
-  `error.shown` at the transport seams, so nothing is lost.
-- **Relative paths are redacted per segment**, because relative is what this
-  app's own throw sites actually emit (`POST /api/drawings/${id}/checkout ->
-  409`). The route shape survives; the query goes, and any segment carrying a
-  digit becomes `<id>`.
-- Emails become `<email>`; percent-encoded tokens become `<enc>` (that is how
-  an address survives a URL round trip and defeats every other rule); an 8+
-  run containing a digit, or 24+ of any one class, becomes `<token>` (an AWS
-  key id is 20, an invite code 12, `555-0142` is 8 — a 24-only rule missed
-  all three); runs of 6+ digits become `<n>`. Dates go too, which is the right
-  cost: `2026-08-07` is indistinguishable from an id by shape, and the row
-  already carries a server-stamped timestamp.
-- A QUOTED span carrying a space or a digit becomes `<q>` — that is what a
-  name, a file name, or typed input looks like when an error quotes it.
-  Single-word quotes are kept, because `(reading "geometry")` is exactly the
-  detail worth having.
-
-**What still gets through, measured rather than assumed.** A path segment or
-bare word with no digit and under 24 characters survives: `/app/alice/settings`
-would keep `alice`. Two throw sites in `api.js` interpolate an identifier into
-a path — `tenantId` and `drawingId`. `drawingId` carries digits and is
-redacted; `tenantId` may not be, and it survives. That is accepted rather than
-overlooked: `tenant_id` is ALREADY a server-stamped column on every row, so it
-is not new information and cannot be another tenant's. No throw site in
-`web/src` interpolates a person's name into a path. A free-text field cannot
-be proven PII-free, so this contract is best-effort by construction — the
-labels with a GUARANTEE are the structural ones (`route`, `message_class`,
-`stack_head`, `ua_class`), and those are the ones to build on.
-- `stack_head` is the FIRST frame only, reduced to `fn@file:line:col` and
-  BUILT FROM PARTS rather than redacted, so the host, the directory path, the
-  query, and any `data:`/`blob:` payload are dropped by construction instead
-  of by a pattern that has to anticipate them. What survives is the bundle's
-  file name and position, which is the whole diagnostic value.
-- `message_class` is accepted only if it is identifier-shaped. An Error's
-  `name` is an ordinary writable property, so on a foreign object it is
-  arbitrary text, not a class.
+- `message_hash` is a stable 32-bit digest of the exception message. The
+  message itself never leaves the browser. Two independent adversarial
+  reviews of the first attempt each found fresh PII surviving a redactor -- a
+  bare name in a path (`/app/alice/settings`), a quoted name, a Windows path,
+  an IP literal, an all-letter id like `deadbeef` -- and every pattern strong
+  enough to catch them also destroyed the ordinary diagnostics the label
+  existed for. A denylist over free text is an arms race, and losing it once
+  puts customer data in BigQuery permanently. The hash is the convention this
+  codebase already settled on for the same tension: the ErrorBoundary has
+  always emitted `message_class` + `component_stack_hash` and no raw text.
+- `message_class` is accepted only if it is one of the PLATFORM's own error
+  names (the ECMAScript set plus the DOMException names). Checking the SHAPE
+  is not enough: `name` is an ordinary writable property, so
+  `Promise.reject({name: 'AliceSmith'})` is a legal rejection any visitor can
+  produce and an identifier-shaped check passes it. Anything else is `Other`.
+- `stack_head` is the FIRST frame reduced to `fn@file:line:col`, BUILT FROM
+  PARTS rather than redacted, so the host, the directory path, the query, and
+  any `data:`/`blob:` payload are dropped by construction. This is what makes
+  the hash workable: the frame locates the code through a sourcemap, so
+  "which distinct failure, how often, on which surface, at which line" is all
+  still answerable.
 - `route` is the app's own scene name (`site`/`tool`/`sheets`/`app` from
   `site/routeScene.js`), never the pathname. There is no redactor that
-  reliably tells a customer name from a route word, so the label is an enum
-  by construction.
+  reliably tells a customer name from a route word, so the label is an enum by
+  construction.
 - `ua_class` is a browser family plus mobile/desktop, never the raw
   user-agent string. The release marker is the sink's server-stamped
   `app_version`; the client does not send one.
+
+What this costs is reading the message at a glance. That is the right price
+for a guarantee instead of a best effort. If a specific message ever needs to
+be readable, the honest way to add it is a server-side allowlist of known
+engine strings, not a client-side denylist over arbitrary text.
 
 ### Caps
 

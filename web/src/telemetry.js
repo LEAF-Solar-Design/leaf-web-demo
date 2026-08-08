@@ -35,7 +35,6 @@ const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
 // suppress the one record of a real React crash.
 const EXCEPTION_CAP = 10        // global-handler emissions per session
 const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
-const MESSAGE_MAX = 200         // sanitized free text; the door caps at 512
 const STACK_HEAD_MAX = 200
 
 const state = {
@@ -219,81 +218,49 @@ export function trackException(props = {}, capKey = 'exception_boundary') {
 // `source` label — a new event name would need its own allowlist entry, its
 // own dashboard row, and its own docs for no added meaning.
 
-// Free text from an exception is attacker- and user-influenced: a failing
-// request carries ids and codes, a validation message quotes what the user
-// typed. This is the ONE place raw-ish text enters the rail; every other
-// client label is an enum or a number.
-const REDACTIONS = [
-  // WHOLE URIs, not just their query strings. A path carries just as much:
-  // `/app/Alice-Smith/invite/7uP9-kL2` is a customer name and an invite code
-  // in the path alone, and a data:/blob: URI can inline an entire source
-  // file. Endpoint identity is already captured, unredacted and classified,
-  // by `error.shown` at the transport seams, so nothing is lost here.
-  [/\b(?:https?|wss?|blob|data|file|javascript):\S*/gi, '<url>'],
-  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '<email>'],
-  // Percent-encoding is how an address or an id survives a URL round trip,
-  // so it defeats every pattern above unless the whole token goes.
-  [/\S*%[0-9A-Fa-f]{2}\S*/g, '<enc>'],
-  // RELATIVE paths, which is what this app's own throw sites actually emit
-  // (`POST /api/drawings/${drawingId}/checkout -> 409` in api.js). A rule
-  // that only understood absolute URLs would miss every one of them. The
-  // route SHAPE is the diagnostic value and survives; the query goes, and so
-  // does any segment carrying a digit, which is what an id looks like.
-  [/\/[A-Za-z0-9_.~-]*(?:\/[A-Za-z0-9_.~-]*)*(?:[?#]\S*)?/g, redactPath],
-  // Quoted spans carrying a SPACE or a DIGIT: that is what a person's name, a
-  // file name, or a scrap of typed input looks like when an error quotes it
-  // ("Alice Smith", "plan rev 3.dwg"). Single-word quotes are KEPT, because
-  // `Cannot read properties of null (reading "geometry")` is exactly the
-  // detail that makes a message worth having.
-  //
-  // The leading group anchors the match to an OPENING quote. Without it the
-  // engine happily pairs the CLOSING quote of one span with the OPENING quote
-  // of the next, so `Expected "close" but found "open"` collapsed to
-  // `Expected "close<q>open"`: the message mangled and neither span redacted.
-  // A lookbehind would read better and is deliberately not used -- an
-  // unsupported lookbehind literal is a PARSE error, not a runtime one, and
-  // this module is the first import on the page: it must never fail to parse.
-  [/(^|[\s(\[{:,=])(["'`])(?=[^"'`]{0,200}?[\s\d])[^"'`]{1,200}?\2/g, '$1<q>'],
-]
-
-function redactPath(path) {
-  const clean = path.split(/[?#]/)[0]
-  return clean
-    .split('/')
-    .map((seg) => (seg && (/\d/.test(seg) || seg.length >= 24) ? '<id>' : seg))
-    .join('/')
-}
-
-/** Runs that are identifiers rather than words. Done as a replacer instead of
- * a pattern because the test is compositional: an 8+ run containing a DIGIT
- * is an id, a key, a hash, or a phone number, never English (an AWS key id is
- * 20, an invite code 12, `555-0142` is 8); a 24+ run of any single class is a
- * base64 or hex blob. Dates go too, which is a real cost and the right one:
- * `2026-08-07` is indistinguishable from an id by shape alone, and the row
- * already carries a server-stamped timestamp. */
-function redactRuns(s) {
-  return s.replace(/[A-Za-z0-9_-]{8,}/g, (run) => {
-    if (/\d/.test(run)) return '<token>'
-    if (run.length >= 24) return '<token>'
-    return run
-  })
-}
-
-function sanitize(text, max) {
+// NO FREE TEXT LEAVES THE BROWSER. An exception message is attacker- and
+// user-influenced, and two independent adversarial reviews of this file
+// demonstrated that a redactor cannot make it safe: a bare name in a path
+// (`/app/alice/settings`), a Windows path, an IP literal, and an all-letter
+// id (`deadbeef`) each survive every pattern that does not also destroy the
+// ordinary diagnostics the label exists for. A denylist over free text is an
+// arms race, and losing it once puts customer data in BigQuery permanently.
+//
+// So the message travels as a STABLE HASH, which is the convention this
+// codebase already settled on for exactly this tension: ErrorBoundary emits
+// `message_class` + `component_stack_hash` and no raw text. A hash still
+// answers the questions that matter -- which distinct failure, how often,
+// on which surface, at which line -- because it rides alongside `stack_head`
+// (`fn@file:line:col`, which locates the code through a sourcemap) and
+// `route`. What it costs is reading the text at a glance, and that is the
+// right price for a guarantee instead of a best effort.
+function hash32(text) {
   try {
-    // Bound the work before pattern matching, not only after: an exception
-    // message has no size limit, and redaction only ever shrinks text, so
-    // nothing that would survive the final cap is lost by trimming first.
-    let s = String(text ?? '').slice(0, max * 8)
-    for (const [re, sub] of REDACTIONS) s = s.replace(re, sub)
-    s = redactRuns(s)
-    return s.replace(/\d{6,}/g, '<n>').slice(0, max)
-  } catch { return '' }
+    const s = String(text ?? '')
+    let h = 0
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+    return String(h >>> 0)
+  } catch { return '0' }
 }
 
-// An Error's `name` is an ordinary writable property, so on a foreign object
-// it is arbitrary attacker text. Only an identifier shape is accepted.
-const CLASS_RE = /^[A-Za-z][A-Za-z0-9_$]{0,63}$/
+// Provenance, not syntax. `name` is an ordinary writable property, so an
+// identifier-SHAPED check accepts `Promise.reject({name: 'AliceSmith'})` --
+// a legal rejection any visitor can produce. Only the platform's own error
+// names pass; everything else is `Other`, which is still a usable bucket.
+const KNOWN_CLASSES = new Set([
+  'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'TypeError', 'URIError', 'AggregateError', 'DOMException',
+  // DOMException `name` values the platform assigns.
+  'AbortError', 'ConstraintError', 'DataCloneError', 'DataError',
+  'EncodingError', 'HierarchyRequestError', 'IndexSizeError',
+  'InvalidCharacterError', 'InvalidStateError', 'NamespaceError',
+  'NetworkError', 'NotAllowedError', 'NotFoundError', 'NotReadableError',
+  'NotSupportedError', 'OperationError', 'QuotaExceededError',
+  'ReadOnlyError', 'SecurityError', 'SyntaxError', 'TimeoutError',
+  'TransactionInactiveError', 'UnknownError', 'VersionError',
+  'WrongDocumentError',
+])
+
 const FRAME_FN_RE = /^[A-Za-z_$][A-Za-z0-9_$.<>]{0,63}$/
 const FRAME_FILE_RE = /^[A-Za-z0-9_.-]{1,64}$/
 
@@ -301,7 +268,7 @@ function messageClass(err, fallback) {
   // Reading `.name` can itself throw: it may be a getter.
   try {
     const name = err && err.name
-    if (typeof name === 'string' && CLASS_RE.test(name)) return name
+    if (typeof name === 'string' && KNOWN_CLASSES.has(name)) return name
   } catch { /* fall through */ }
   return fallback
 }
@@ -315,8 +282,8 @@ function messageClass(err, fallback) {
 function stackHead(err) {
   try {
     // Anchored: a message line like `Error: request failed at /x` contains
-    // " at " and would otherwise be picked as the frame, duplicating
-    // `message` and losing the real throw site.
+    // " at " and would otherwise be picked as the frame -- putting raw
+    // message text into a label that is supposed to be structural.
     const lines = String((err && err.stack) || '').split('\n').map((l) => l.trim())
     const frame = lines.find((l) => /^at\s/.test(l) || /^[^@\s]*@\S/.test(l)) || ''
     if (!frame) return ''
@@ -364,7 +331,7 @@ function uaClass() {
  * ten slots before a genuinely different crash ever got one. The seen-set is
  * bounded by the cap itself, because past it nothing emits anyway. */
 function emitGlobalException(props) {
-  const sig = `${props.message_class}|${props.message}|${props.stack_head}`
+  const sig = `${props.message_class}|${props.message_hash}|${props.stack_head}`
   if (state.seenExceptions.indexOf(sig) !== -1) return
   if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
   trackException(props, 'exception_global')
@@ -381,8 +348,8 @@ export function handleErrorEvent(ev) {
     if (!err && !(ev && ev.message)) return
     emitGlobalException({
       source: 'window.onerror',
-      message_class: messageClass(err, 'Error'),
-      message: sanitize((err && err.message) || (ev && ev.message), MESSAGE_MAX),
+      message_class: messageClass(err, 'Other'),
+      message_hash: hash32((err && err.message) || (ev && ev.message)),
       stack_head: stackHead(err),
       route: routeLabel(),
       ua_class: uaClass(),
@@ -403,7 +370,7 @@ export function handleRejectionEvent(ev) {
     emitGlobalException({
       source: 'unhandledrejection',
       message_class: messageClass(reason, fallback),
-      message: sanitize(text, MESSAGE_MAX),
+      message_hash: hash32(text),
       stack_head: stackHead(reason),
       route: routeLabel(),
       ua_class: uaClass(),

@@ -296,9 +296,9 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
         "labels": {
             "source": "unhandledrejection",
             "message_class": "TypeError",
-            "message": "Cannot read properties of null",
-            "stack_head": "at renderTick (/assets/index-abc.js:1:200)",
-            "route": "/",
+            "message_hash": "2166136261",
+            "stack_head": "renderTick@index-abc.js:1:200",
+            "route": "site",
             "ua_class": "chrome/desktop",
         },
     }]})
@@ -312,7 +312,7 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
     labels = json.loads(row["labels"])
     assert labels["source"] == "unhandledrejection"
     assert labels["message_class"] == "TypeError"
-    assert labels["route"] == "/"
+    assert labels["route"] == "site"
     assert labels["ingest"] == "client"
 
 
