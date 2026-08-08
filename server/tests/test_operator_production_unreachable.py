@@ -60,11 +60,13 @@ are the same trust boundary that any codebase has for its own trusted code):
   - A trusted deployment-provided callback (a registered minter/rotator/stager/
     adapter) or the isolating worker substrate could reach production in its OWN
     body (e.g. a substrate that claims isolating=true with no real jail).
-  - An EXISTING operator handler/runbook body is the plane's own trusted code;
-    this gate proves it REFUSES production inputs (O3), and pins the declared
-    action/route surface so no NEW handler is added silently, but it cannot prove
-    an existing body never calls production directly, nor that the runbook does
-    not overwrite its own receipt row (O4).
+  - An existing operator handler calling production is NOT a residual: O2/O3 are
+    ENFORCED at runtime by the operator EGRESS BOUNDARY (operator_egress_guard),
+    armed for every handler by require_operator. A handler that invokes a neutral
+    helper, a subprocess (`vercel`/`aws`), or an aliased/env-provided host is
+    DENIED at the socket/subprocess audit chokepoint, which no in-process code
+    can route around. Behavior is proven in test_operator_egress_boundary.py; the
+    receipt-row overwrite is constrained separately (O4 identity immutability).
   - The operator MODEL RUNNER is GREENFIELD: operatorLoop.ts takes the runner by
     injection and NO production Agent SDK runner is wired yet. So the model-half
     obligation is enforced STRUCTURALLY, not by an existing running process: the
@@ -73,12 +75,8 @@ are the same trust boundary that any codebase has for its own trusted code):
     refused), and this gate fails if any operator model module builds env another
     way. What remains UNBOUNDED until the runner ships: an operator SDK runner
     placed OUTSIDE the two scanned locations, or the deployment's own ambient
-    process env. The sound runtime enforcement of "an existing handler cannot
-    CALL production" (O2/O3) is exactly this O1 property plus worker network
-    isolation: with no production deploy credential in the process and no route,
-    a handler that invokes a neutral helper still cannot authenticate or reach a
-    production deploy. (The tenant author agent's env scrub under harness/src/
-    vendor/mushy-author is a DIFFERENT subsystem, not this plane.)
+    process env. (The tenant author agent's env scrub under harness/src/vendor/
+    mushy-author is a DIFFERENT subsystem, not this plane.)
 Each residual is bounded because the plane never REQUESTS a production target
 (O3 refusals), the callbacks and runbooks refuse production, the worker carries
 no deploy credential (allowlist-frozen) and is refused fail-closed on a
@@ -688,16 +686,17 @@ _PROD_DEPLOY_CALL_TOKENS = (
     "update_service",                    # AWS ECS deploy (defense-in-depth)
     "boto3",                             # AWS SDK deploy path (defense-in-depth)
 )
-# NOTE: token-scanning an operator module is defense-in-depth, not a complete
-# proof. An existing handler calling a NEUTRAL helper in a non-operator file that
-# reaches production is the trusted-body residual (docstring): its sound
-# enforcement is O1 (no production deploy credential in the process) + worker
-# network isolation, not this scan.
+# The EGRESS BOUNDARY (operator_egress_guard.py) is the enforcement; it names
+# these routes precisely in order to DENY them, so it is excluded from the scan.
+_EGRESS_GUARD_FILE = "operator_egress_guard.py"
 
 
 def test_o3_no_operator_handler_names_a_production_deploy_target():
+    # Defense-in-depth ONLY (the real enforcement is the egress boundary below):
+    # no operator handler even names a production deploy route today.
     op_sources = (list(SERVER_DIR.glob("operator_*.py"))
                   + list((SERVER_DIR / "routers").glob("operator_*.py")))
+    op_sources = [p for p in op_sources if p.name != _EGRESS_GUARD_FILE]
     assert op_sources, "expected operator source files to scan"
     hits = []
     for src_path in op_sources:
@@ -706,3 +705,39 @@ def test_o3_no_operator_handler_names_a_production_deploy_target():
             if tok.lower() in low:
                 hits.append((src_path.name, tok))
     assert not hits, hits
+
+
+# --- O2/O3 ENFORCED: a generic operator handler CANNOT CALL a production deploy
+#     route. This is the real enforcement the scan above cannot provide (a
+#     handler can call a neutral helper in any file). The egress boundary denies
+#     the call at the socket/subprocess chokepoint, armed for every operator
+#     handler by require_operator. Behavior is proven in
+#     server/tests/test_operator_egress_boundary.py. ------------------------
+_EGRESS_GUARD = SERVER_DIR / "operator_egress_guard.py"
+_EGRESS_TEST = SERVER_DIR / "tests" / "test_operator_egress_boundary.py"
+
+
+def test_o2_o3_generic_handler_cannot_reach_a_production_deploy_route():
+    g = _EGRESS_GUARD.read_text(encoding="utf-8")
+    # Enforced at the process audit-hook chokepoint (catches httpx/boto3/raw
+    # sockets AND the vercel/aws CLIs; audit hooks cannot be uninstalled).
+    assert "sys.addaudithook" in g
+    assert "socket.connect" in g and "socket.getaddrinfo" in g
+    assert "subprocess.Popen" in g            # deploy-CLI spawn denied
+    assert "OperatorEgressDenied" in g
+    # DENY-BY-DEFAULT (an aliased / env-provided / string-composed target is
+    # denied like any other; only loopback + the DB + a declared extra pass).
+    assert "_LOOPBACK" in g and "LEAF_OPERATOR_EGRESS_ALLOW" in g
+    # WIRED into the real request path: require_operator arms it for every
+    # operator handler (not an unused helper).
+    deps = (SERVER_DIR / "operator_deps.py").read_text(encoding="utf-8")
+    assert "from operator_egress_guard import operator_execution" in deps
+    assert "with operator_execution():" in deps
+    assert "yield ctx" in deps
+    # The BEHAVIORAL proof (the exact neutral-helper / ECS / subprocess paths are
+    # denied) exists and is gated.
+    t = _EGRESS_TEST.read_text(encoding="utf-8")
+    assert "test_neutral_ship_helper_to_vercel_is_denied" in t
+    assert "test_existing_handler_ecs_network_path_is_denied" in t
+    assert "test_subprocess_deploy_cli_is_denied" in t
+    assert "test_require_operator_arms_the_egress_boundary" in t
