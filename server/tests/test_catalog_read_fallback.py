@@ -180,6 +180,48 @@ def test_capabilities_requires_exact_engine_and_runtime_live_aps_authority(
     assert projected["aps_live"] is expected
 
 
+def test_capabilities_uses_one_provenance_snapshot_without_all_tools_join(monkeypatch):
+    def split_read_forbidden(_tenant):
+        raise AssertionError("all_tools split read must not run with provenance")
+
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+        "operator_owned_engine",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [(TRUSTED_LIVE_TOOL, "operator_owned_engine")],
+        raising=False,
+    )
+    monkeypatch.setattr(capabilities_router.deps, "all_tools", split_read_forbidden)
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", True)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == TRUSTED_LIVE_TOOL["name"]
+    )
+    assert body["error"] is None
+    assert projected["catalog_digest"] == TRUSTED_LIVE_DIGEST
+    assert projected["aps_live"] is True
+
+
 @pytest.mark.parametrize("missing_name", [
     "effective_tools_with_provenance",
     "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
