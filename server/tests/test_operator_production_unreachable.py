@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -688,6 +689,42 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
         s = src_path.read_text(encoding="utf-8")
         assert "deploy-platform-web-production" not in s, src_path.name
         assert "approve-vercel-production" not in s, src_path.name
+
+
+def test_o5_self_approval_is_behaviorally_rejected():
+    # BEHAVIORAL: EXECUTE the canonical workflow's own separation checks (not a
+    # hand-copy) and prove self-approval FAILS. The two checks are extracted
+    # verbatim from the workflow and run under `set -e`, exactly as the workflow
+    # runs them, so a self-approval (approver == the actor OR the triggering
+    # actor) exits non-zero and an independent approver passes.
+    import shutil
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash unavailable")
+    wf = _PROD_DEPLOY_WF.read_text(encoding="utf-8")
+    # Extract the WHOLE line the workflow runs (not just the bracket), so a
+    # trailing `|| true` / `|| :` tautology defeat is executed too and makes
+    # self-approval wrongly pass -> this test then FAILS, catching the mutation.
+    check_re = re.compile(r'\[ "\$APPROVER" != "\$(?:ACTOR|TRIGGERING_ACTOR)" \]')
+    lines = [ln.strip() for ln in wf.splitlines() if check_re.search(ln)]
+    assert any('!= "$ACTOR" ]' in ln for ln in lines)
+    assert any('!= "$TRIGGERING_ACTOR" ]' in ln for ln in lines)
+    # Run each UNIQUE line once, under set -e, exactly as the workflow does.
+    guard = "set -e\n" + "\n".join(dict.fromkeys(lines)) + "\n"
+
+    def run(approver, actor, triggering):
+        return subprocess.run(
+            [bash, "-c", guard],
+            env={"APPROVER": approver, "ACTOR": actor,
+                 "TRIGGERING_ACTOR": triggering,
+                 "PATH": os.environ.get("PATH", "")},
+            capture_output=True).returncode
+
+    # Self-approval: the approver is the initiator (actor) or the re-run trigger.
+    assert run("alice", "alice", "bob") != 0, "approver == actor must be rejected"
+    assert run("alice", "bob", "alice") != 0, "approver == triggering_actor rejected"
+    # A genuinely independent approver passes both checks.
+    assert run("carol", "alice", "bob") == 0, "an independent approver must pass"
 
 
 # --- O3 (mutation check): no operator handler names a production deploy target
