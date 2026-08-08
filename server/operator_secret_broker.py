@@ -196,10 +196,12 @@ def with_injected(handle: str, environment: str,
     only to guarantee the credential never leaves through the broker itself.
 
     Fail-closed: unknown handle, production scope/environment, no minter, a
-    minter error, or any adapter exception -> SecretBrokerError with a fixed
-    value-free reason (audited as a denial). Every failure raise happens
-    OUTSIDE its except block so no credential-bearing exception is retained in
-    __context__ or __cause__."""
+    minter error, or any ORDINARY adapter exception (Exception) -> SecretBrokerError
+    with a fixed value-free reason (audited as a denial). Every failure raise
+    happens OUTSIDE its except block so no credential-bearing exception is
+    retained in __context__ or __cause__. Control-flow BaseExceptions
+    (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit) are
+    NOT masked: they propagate so cancellation and orderly shutdown stay safe."""
     meta = _load_registry().get(handle)
     if meta is None:
         _audit_inject(subject, handle, None, "deny", "unknown_handle")
@@ -222,7 +224,7 @@ def with_injected(handle: str, environment: str,
     minter_failed = False
     try:
         credential = _MINTER(dict(meta, handle=handle))
-    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
+    except Exception:  # noqa: BLE001 - mask real errors value-free; let control-flow BaseExceptions (CancelledError/KeyboardInterrupt/SystemExit) propagate
         minter_failed = True
     if minter_failed:
         _audit_inject(subject, handle, scope, "deny", "minter_failed")
@@ -230,15 +232,18 @@ def with_injected(handle: str, environment: str,
 
     # Run the adapter for EXACTLY ONE call. The return value is IGNORED, so the
     # broker never surfaces adapter output, which closes every scrub-evasion
-    # vector at the source. Any exception (including a SecretBrokerError the
-    # adapter raises with the credential inside, or a credential-bearing error
-    # thrown while serializing a hostile return type) is treated uniformly as
-    # adapter_failed with no detail; raised outside the except so nothing
-    # chains the original.
+    # vector at the source. Any ORDINARY exception (Exception - including a
+    # SecretBrokerError the adapter raises with the credential inside, or a
+    # credential-bearing error) is treated uniformly as adapter_failed with no
+    # detail; raised outside the except so nothing chains the original. Control-
+    # flow BaseExceptions (asyncio.CancelledError, KeyboardInterrupt, SystemExit,
+    # GeneratorExit) are NOT caught, so cancellation and orderly shutdown
+    # propagate; the trusted adapter is the capability boundary and must not
+    # trade process-lifecycle safety for masking a payload.
     adapter_failed = False
     try:
         use(credential)
-    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
+    except Exception:  # noqa: BLE001 - mask real errors value-free; let control-flow BaseExceptions (CancelledError/KeyboardInterrupt/SystemExit) propagate
         adapter_failed = True
     finally:
         credential = None  # drop the reference in all paths
@@ -283,12 +288,13 @@ def rotate(handle: str, environment: str, *,
         raise SecretBrokerError("no_rotator")
 
     # Perform the external rotation exactly once. The return value is IGNORED
-    # (the new secret must not surface), and EVERY failure is masked as a fixed
-    # value-free error raised outside the except.
+    # (the new secret must not surface), and every ORDINARY failure (Exception)
+    # is masked as a fixed value-free error raised outside the except; control-
+    # flow BaseExceptions (cancellation/shutdown) propagate unchanged.
     rotator_failed = False
     try:
         _ROTATOR(dict(meta, handle=handle))
-    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
+    except Exception:  # noqa: BLE001 - mask real errors value-free; let control-flow BaseExceptions (CancelledError/KeyboardInterrupt/SystemExit) propagate
         rotator_failed = True
     if rotator_failed:
         raise SecretBrokerError("rotator_failed")

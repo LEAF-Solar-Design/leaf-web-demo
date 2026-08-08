@@ -182,16 +182,29 @@ def test_callback_raising_secretbrokererror_with_credential_is_masked():
     assert e.value.__context__ is None
 
 
-def test_base_exception_carrying_the_credential_is_masked():
-    # Even a non-Exception BaseException (e.g. a credential-bearing error
-    # raised while a hostile return type is materialized) must be masked.
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit,
+                                 __import__("asyncio").CancelledError])
+def test_adapter_control_flow_baseexception_propagates(exc):
+    # LIFECYCLE SAFETY: a control-flow BaseException from the adapter (a
+    # cancellation or a shutdown signal) must PROPAGATE, not be masked into a
+    # fixed adapter_failed, so cooperative cancellation and orderly shutdown are
+    # not defeated. Ordinary Exceptions are still masked (below).
     broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
 
-    class Boom(BaseException):
-        pass
+    def use(credential):
+        raise exc()
+
+    with pytest.raises(exc):
+        broker.with_injected("github_operator_pr", "staging", use)
+
+
+def test_adapter_ordinary_exception_is_masked_value_free():
+    # A credential-bearing ORDINARY exception is still masked to a fixed
+    # value-free adapter_failed with no chained context.
+    broker.register_minter(lambda meta: "CANARY-CREDENTIAL")
 
     def use(credential):
-        raise Boom(credential)
+        raise RuntimeError(credential)
 
     with pytest.raises(broker.SecretBrokerError) as e:
         broker.with_injected("github_operator_pr", "staging", use)
@@ -209,19 +222,25 @@ def test_minter_failure_is_a_denial():
     assert e.value.reason == "minter_failed"
 
 
-def test_minter_base_exception_carrying_the_credential_is_masked():
-    # A minter that mints a credential and then raises a non-Exception
-    # BaseException carrying it must NOT leak: the minter catch is
-    # `except BaseException`, and the fixed error is raised outside the except.
-    class MinterBase(BaseException):
-        pass
-
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit,
+                                 __import__("asyncio").CancelledError])
+def test_minter_control_flow_baseexception_propagates(exc):
+    # LIFECYCLE SAFETY: a control-flow BaseException from the minter must
+    # PROPAGATE (cancellation/shutdown), not become minter_failed.
     def bad_minter(meta):
-        raise MinterBase("CANARY-CREDENTIAL-9f31")
+        raise exc()
+    broker.register_minter(bad_minter)
+    with pytest.raises(exc):
+        broker.with_injected("github_operator_pr", "staging", lambda c: None)
 
+
+def test_minter_ordinary_exception_carrying_the_credential_is_masked():
+    # An ordinary credential-bearing minter Exception is masked value-free.
+    def bad_minter(meta):
+        raise RuntimeError("CANARY-CREDENTIAL-9f31")
     broker.register_minter(bad_minter)
     with pytest.raises(broker.SecretBrokerError) as e:
-        broker.with_injected("github_operator_pr", "staging", lambda c: c)
+        broker.with_injected("github_operator_pr", "staging", lambda c: None)
     assert e.value.reason == "minter_failed"
     assert "CANARY" not in str(e.value)
     assert e.value.__cause__ is None
