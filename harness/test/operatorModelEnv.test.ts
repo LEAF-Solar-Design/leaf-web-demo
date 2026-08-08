@@ -8,13 +8,14 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  OPERATOR_MODEL_CREDENTIAL_KEY,
   OPERATOR_MODEL_ENV_ALLOWLIST,
   buildOperatorModelEnv,
   type OperatorModelGrant,
 } from "../src/operatorModel/operatorModelEnv.js";
 
 const GRANT: OperatorModelGrant = {
-  credentialKey: "OPERATOR_MODEL_API_KEY",
+  credentialKey: OPERATOR_MODEL_CREDENTIAL_KEY,
   credentialValue: "sk-operator-model-canary",
 };
 
@@ -44,6 +45,24 @@ describe("operator model child env (O1 model half)", () => {
     expect(serialized).not.toContain("prod-authz-canary");
     expect(serialized).not.toContain("api.leafdesign.ai");
     expect(serialized).not.toContain("unknown-name-canary");
+  });
+
+  it("REFUSES to inject a production deploy token as the model credential", () => {
+    // The one sanctioned injection is the pinned model-auth key. A caller who
+    // hands the builder a deploy credential under the grant — the exact O1
+    // bypass — is refused, so a deploy token cannot reach the model process even
+    // through the injection path.
+    const parent: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    for (const badKey of ["VERCEL_TOKEN", "AWS_SECRET_ACCESS_KEY", "LEAF_LIVE_ACCESS"]) {
+      expect(() =>
+        buildOperatorModelEnv(parent, {
+          credentialKey: badKey,
+          credentialValue: "production-deploy-canary",
+        }),
+      ).toThrow("operator_model_credential_key_not_allowed");
+    }
+    // The pinned key itself is a model-auth key, not a deploy key.
+    expect(/(VERCEL|DEPLOY|LIVE|PROD)/i.test(OPERATOR_MODEL_CREDENTIAL_KEY)).toBe(false);
   });
 
   it("passes ONLY allowlisted OS keys plus the one injected model credential", () => {

@@ -30,13 +30,21 @@ export const OPERATOR_MODEL_ENV_ALLOWLIST = [
   "PATHEXT", "WINDIR", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
 ] as const;
 
+/** The ONE credential key the operator model may authenticate with. Pinning it
+ * (not just injecting whatever the grant names) is what stops a caller from
+ * handing the builder a PRODUCTION DEPLOY token (VERCEL_TOKEN, an AWS deploy
+ * key) as "the model credential": any other key is refused, so a deploy
+ * credential cannot ride into the model process even through the sanctioned
+ * injection path. It is a model-auth key, never a deploy key. */
+export const OPERATOR_MODEL_CREDENTIAL_KEY = "OPERATOR_MODEL_API_KEY";
+
 /** The one credential the operator MODEL legitimately needs to authenticate.
  * It is provided by the deployment (the operator model grant), injected
  * explicitly, and NEVER read from the parent env — so no credential key is ever
- * allowlisted. */
+ * allowlisted. Its key MUST be OPERATOR_MODEL_CREDENTIAL_KEY. */
 export interface OperatorModelGrant {
-  /** Canonical env key the model SDK reads for auth (e.g. the operator model
-   * API key). */
+  /** Canonical env key the model SDK reads for auth. MUST equal
+   * OPERATOR_MODEL_CREDENTIAL_KEY; any other key is refused by the builder. */
   credentialKey: string;
   credentialValue: string;
 }
@@ -51,6 +59,13 @@ export function buildOperatorModelEnv(
   parentEnv: NodeJS.ProcessEnv,
   grant: OperatorModelGrant,
 ): Record<string, string> {
+  // The injected credential MUST be the pinned model-auth key. Refusing any
+  // other key is what prevents a production DEPLOY credential (VERCEL_TOKEN, an
+  // AWS deploy key) from reaching the model process through the sanctioned
+  // injection path — the residual the env allowlist alone cannot bound.
+  if (grant.credentialKey !== OPERATOR_MODEL_CREDENTIAL_KEY) {
+    throw new Error("operator_model_credential_key_not_allowed");
+  }
   const env: Record<string, string> = {};
   for (const key of OPERATOR_MODEL_ENV_ALLOWLIST) {
     const value = parentEnv[key];
@@ -58,8 +73,9 @@ export function buildOperatorModelEnv(
   }
   // Policy-aware marker; carries no secret.
   env.LEAF_OPERATOR_MODEL = "1";
-  // The single trusted injection. Because it comes from the grant and not from
-  // the parent env, the allowlist above holds zero credential keys.
+  // The single trusted injection, under the pinned key only. Because it comes
+  // from the grant and not from the parent env, the allowlist above holds zero
+  // credential keys.
   env[grant.credentialKey] = grant.credentialValue;
   return env;
 }
