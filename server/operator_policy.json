@@ -134,6 +134,7 @@
     "operator.worker_credential_rotate": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 60,
+      "enabled": false,
       "handler": "worker_credential_rotate",
       "args_schema": { "type": "object",
         "properties": { "credential_handle": { "type": "string" } },

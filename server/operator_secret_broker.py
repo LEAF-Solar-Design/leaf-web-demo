@@ -53,6 +53,13 @@ _IDENT_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$")
 # Left None so the broker is dark until a real minter is registered.
 _MINTER: Optional[Callable[[Dict[str, Any]], str]] = None
 
+# Deployment-registered rotator: (handle_meta) -> None. It performs the
+# external rotation (invalidate the currently-active credential for the scope
+# and provision a fresh one in the backing store) as a side effect. It returns
+# nothing the broker surfaces, and the new secret NEVER crosses back. Left None
+# so rotation is dark until a real rotator is registered.
+_ROTATOR: Optional[Callable[[Dict[str, Any]], None]] = None
+
 
 class SecretBrokerError(RuntimeError):
     def __init__(self, reason: str):
@@ -64,6 +71,12 @@ def register_minter(minter: Optional[Callable[[Dict[str, Any]], str]]) -> None:
     """Register (or clear) the deployment credential minter. Out-of-band."""
     global _MINTER
     _MINTER = minter
+
+
+def register_rotator(rotator: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Register (or clear) the deployment credential rotator. Out-of-band."""
+    global _ROTATOR
+    _ROTATOR = rotator
 
 
 def _registry_path() -> Path:
@@ -240,3 +253,45 @@ def with_injected(handle: str, environment: str,
     # already knows which handle it called and can describe(handle) for
     # metadata; the receipt only confirms injection happened.
     return {"injected": True}
+
+
+def rotate(handle: str, environment: str, *,
+           subject: Optional[str] = None) -> Dict[str, Any]:
+    """Rotate the credential behind `handle`: invalidate the currently-active
+    secret for its scope and provision a fresh one in the backing store. The
+    new secret is NEVER returned or logged (same isolation as with_injected).
+
+    This is a DB-FREE side-effect primitive: it holds no transaction and writes
+    no audit, so the caller (the worker_credential_rotate runbook) can invoke it
+    INSIDE its own single transaction and own all auditing. A failure raises a
+    fixed value-free SecretBrokerError so the caller's transaction rolls back
+    (fail-closed): unknown handle, production scope/environment, no rotator, or
+    a rotator error. The raise happens OUTSIDE the except block so no
+    credential-bearing exception is retained in __context__/__cause__.
+
+    Dark by default: no rotator registered => `no_rotator`, so nothing rotates
+    until a deployment registers one out of band.
+    """
+    meta = _load_registry().get(handle)
+    if meta is None:
+        raise SecretBrokerError("unknown_handle")
+    if meta.get("environment") not in _NON_PRODUCTION or environment not in _NON_PRODUCTION:
+        raise SecretBrokerError("production_scope_refused")
+    if meta.get("environment") != environment:
+        raise SecretBrokerError("environment_mismatch")
+    if _ROTATOR is None:
+        raise SecretBrokerError("no_rotator")
+
+    # Perform the external rotation exactly once. The return value is IGNORED
+    # (the new secret must not surface), and EVERY failure is masked as a fixed
+    # value-free error raised outside the except.
+    rotator_failed = False
+    try:
+        _ROTATOR(dict(meta, handle=handle))
+    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
+        rotator_failed = True
+    if rotator_failed:
+        raise SecretBrokerError("rotator_failed")
+
+    # Constant receipt: no rotator- or registry-derived data crosses back.
+    return {"rotated": True}

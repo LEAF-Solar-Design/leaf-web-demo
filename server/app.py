@@ -238,6 +238,7 @@ def _mount_operator_router() -> None:
     from routers import operator_runbooks as operator_runbooks_router
     from routers import operator_overlay as operator_overlay_router
     from routers import operator_secrets as operator_secrets_router
+    from routers import operator_credential as operator_credential_router
 
     app.include_router(operator_sessions_router.router)
     # Lane F reversible runbooks. Write actions are always-confirm and gated by
@@ -248,6 +249,9 @@ def _mount_operator_router() -> None:
     # Secret broker read surface: handle metadata only (never a value); the
     # broker is fail-closed (no minter registered by default).
     app.include_router(operator_secrets_router.router)
+    # Credential-rotation runbook (O4): always-confirm, broker-verified
+    # non-production precondition; rotation is DARK (no rotator registered).
+    app.include_router(operator_credential_router.router)
     print("[leaf-demo] operator control plane mounted (/api/operator/*)")
 
 
