@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 33)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 34)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
