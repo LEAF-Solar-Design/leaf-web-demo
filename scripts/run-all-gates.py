@@ -601,10 +601,25 @@ def build_suites() -> List[Suite]:
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
         # #426 round-2 blocker).
+        # 20 -> 24: the anonymous client.exception row (a JS failure on a page
+        # that has no principal yet) plus the three label-schema tests.
+        # 24 -> 26: the mixed-version pair. A client older than this release
+        # emits a 1-to-10-digit component_stack_hash, and the door has to keep
+        # it while refusing the same width in the digests that are new here.
         Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
-              SERVER, _py_pytest("tests/test_telemetry.py"), 20),
+              SERVER, _py_pytest("tests/test_telemetry.py"), 26),
         Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
               SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
+        # The client.exception label vocabulary is mirrored BY HAND across
+        # web/src/telemetry.js and routers/telemetry.py, and drift there is
+        # silent (a class degrades to "Other" rather than failing). This is
+        # the freeze, in the same spirit as server-auth-vocab-freeze.
+        # 7 -> 9: the freeze's own parser is now proven able to FAIL (it read
+        # single-quoted names only, so a double-quoted class was invisible to
+        # it), and the component_stack_hash compat pair is frozen too.
+        Suite("server-client-exception-vocab-freeze",
+              "server tests/test_client_exception_vocab_freeze.py", "pytest",
+              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 9),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
         # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
         # test_required_platform_rejects_missing_shared_mutation_fence. The floor
@@ -992,8 +1007,36 @@ def build_suites() -> List[Suite]:
         # review found the 14 card tests executing nowhere in CI, so the
         # operator-facing decision surface -- both controls, untrusted text,
         # style sinks -- was unverified on every PR.
+        # 35 -> 72: a FULL re-baseline, not an interim bump. The old floor sat
+        # far below the real count, which is precisely the hazard the header
+        # above describes: the suite could have lost every test of this
+        # feature and still reported green. No environment divergence is
+        # possible here -- all 72 cases are literal and unconditional, with no
+        # skips, no parametrize, and no platform branch, and a collection or
+        # import failure makes vitest FAIL rather than report a lower count,
+        # so the CI-vs-local gap that pins the pytest floors does not apply.
+        # 72 -> 76: cross-path de-duplication (one React crash is one row, and
+        # the guard is proven able to decline) plus the boundary's uncapped
+        # contract.
+        # 76 -> 80: de-duplication that survives a flush. The reviewer's
+        # counterexample (19 queued events, then one crash split across the
+        # batch boundary) plus the three the hold has to keep true -- a held
+        # row still sends when no boundary comes, a late boundary still
+        # retracts, and pagehide carries a held row off a dying tab.
+        # 80 -> 74: DESCOPED (PR #537). Four review rounds of cross-emitter
+        # de-duplication are gone -- the load-bearing assumption (window.onerror
+        # and componentDidCatch see the SAME Error object instance) does not
+        # hold: a probe against the real ErrorBoundary showed DEV React calling
+        # the throwing render function more than once, so the two emitters
+        # routinely see two DIFFERENT instances, and the WeakMap-keyed design's
+        # signature+time-bucket fallback silently merged distinct same-signature
+        # crashes -- data loss, not a fix. The client no longer tries: the
+        # global handler and the boundary each emit independently and the specs
+        # that pinned the removed machinery (exactly-one-row across three
+        # flush/pagehide orderings, dedup_key sharing, same-signature
+        # suppression) are gone with it. Measured on this tree 2026-08-08.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 35),
+              [_npm(), "run", "test:unit"], 74),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

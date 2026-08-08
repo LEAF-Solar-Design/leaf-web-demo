@@ -260,8 +260,9 @@ def test_ingest_caps_events_per_body(monkeypatch):
 
 def test_ingest_anonymous_allowlist_only(monkeypatch):
     """With auth live and no credentials at all, exactly the pre-auth
-    allowlist (the funnel trio + auth.completed, whose failure branch never
-    has a bearer) is accepted; everything else drops silently (still 202)."""
+    allowlist (the funnel trio, auth.completed whose failure branch never has
+    a bearer, and client.exception which fires on pages that have no principal
+    yet) is accepted; everything else drops silently (still 202)."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     c = _client()
@@ -269,13 +270,199 @@ def test_ingest_anonymous_allowlist_only(monkeypatch):
         {"event_name": "gate.choice", "labels": {"choice": "demo"}},
         {"event_name": "tour.started"},
         {"event_name": "auth.completed", "labels": {"ok": "false"}},
+        {"event_name": "client.exception", "event_type": "exception"},
         {"event_name": "prompt.submitted"},   # NOT allowlisted pre-auth
     ]})
     assert resp.status_code == 202
-    assert resp.json()["accepted"] == 3
+    assert resp.json()["accepted"] == 4
     rows = list(telemetry_sink._queue)
     assert all(r["tenant_id"] == "anon" for r in rows)
-    assert {r["event_name"] for r in rows} == {"gate.choice", "tour.started", "auth.completed"}
+    assert {r["event_name"] for r in rows} == {
+        "gate.choice", "tour.started", "auth.completed", "client.exception"}
+
+
+def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
+    """A JS failure on a page with no principal — a marketing page, the
+    sign-in gate, anything before a session exists — is exactly the failure
+    nothing else can see: the server answered 200 and the browser died. It
+    lands as event_type `exception` with SCHEMA-CONFORMING labels (this is the
+    happy path; the filtering itself is the next test) and server-stamped
+    anonymous identity."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "source": "unhandledrejection",
+            "message_class": "TypeError",
+            "message_hash": "0002166136261234",
+            "stack_hash": "0000884152034421",
+            "route": "site",
+            "ua_class": "chrome/desktop",
+        },
+    }]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    (row,) = list(telemetry_sink._queue)
+    assert row["event_name"] == "client.exception"
+    assert row["event_type"] == "exception"
+    assert row["tenant_id"] == "anon"
+    assert row["tenant_kind"] == "anon"
+    labels = json.loads(row["labels"])
+    assert labels["source"] == "unhandledrejection"
+    assert labels["message_class"] == "TypeError"
+    assert labels["route"] == "site"
+    # Both digests are schema-conforming widths, so both survive.
+    assert labels["message_hash"] == "0002166136261234"
+    assert labels["stack_hash"] == "0000884152034421"
+    assert labels["ingest"] == "client"
+
+
+def test_ingest_anonymous_client_exception_labels_are_schema_filtered(monkeypatch):
+    """The event's contract promises STRUCTURAL labels, and the browser half
+    keeps that promise -- but the door is the open internet for this event.
+    An anonymous POST may not smuggle free text into it: unknown keys are
+    dropped, values that do not match their shape are dropped, and a class
+    outside the allowlist degrades to "Other" rather than travelling."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "source": "unhandledrejection",          # allowed enum
+            "message_class": "AliceSmith",           # NOT a platform class
+            "message_hash": "customerSecret",        # not a digest
+            "stack_hash": "0000000000012345",        # a real 16-digit digest
+            "route": "/app/alice/settings",          # not a scene name
+            "ua_class": "alicesmith/desktop",        # shape-valid, NOT a real class
+            "tour_step": "customer_secret",          # no longer in the schema
+            "raw_secret": "sk-live-abcdef",          # invented key
+        },
+    }]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["source"] == "unhandledrejection"
+    assert labels["stack_hash"] == "0000000000012345"
+    # Degraded, dropped, dropped, dropped.
+    assert labels["message_class"] == "Other"
+    assert "message_hash" not in labels          # "customerSecret" is not a digest
+    assert "route" not in labels                 # not a scene name
+    assert "ua_class" not in labels              # not one of the twelve
+    assert "tour_step" not in labels             # not in the schema at all
+    assert "raw_secret" not in labels
+    # Nothing the caller wrote as free text survives anywhere in the row.
+    serialized = json.dumps(labels)
+    assert "AliceSmith" not in serialized
+    assert "customerSecret" not in serialized
+    assert "alice" not in serialized
+    assert "customer_secret" not in serialized
+    assert "sk-live-abcdef" not in serialized
+
+
+def test_ingest_client_exception_schema_binds_authed_callers_too(monkeypatch):
+    """Authentication proves IDENTITY, not label provenance. A bearer holder
+    or a self-mintable guest can POST free text exactly as a stranger can, and
+    this event's contract says its labels are structural -- so the schema
+    binds every caller. The cost, taken deliberately: a new label on THIS
+    event needs a server release."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "message_class": "TypeError",
+            "message_hash": "0000000000001234",
+            "future_label": "owner@example.com",
+        },
+    }]}, headers={"X-Tenant-Id": "acme"})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["message_class"] == "TypeError"
+    assert labels["message_hash"] == "0000000000001234"
+    assert "future_label" not in labels
+    assert "owner@example.com" not in json.dumps(labels)
+
+
+def test_component_stack_hash_accepts_both_client_versions(monkeypatch):
+    """MIXED VERSIONS, which is the whole point of this rule.
+
+    A browser tab opened before this release keeps running the OLD
+    ErrorBoundary, which hashed the component stack with its own 32-bit
+    shift-hash and sent `String(hash >>> 0)` -- 1 to 10 digits. A
+    16-digit-only door accepts that row and silently STRIPS its only stack
+    fingerprint, on exactly the event that reports crashes, for as long as any
+    stale bundle is alive. Both widths are preserved. The widths in between,
+    which no client version ever emitted, are not."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [
+        # The pre-#537 client, still in the wild.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "271828183"}},
+        # This release.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "0000000000012345"}},
+        # Neither: no client emits eleven digits, so nothing is owed to it.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "12345678901"}},
+    ]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 3
+    legacy, current, bogus = (json.loads(r["labels"]) for r in telemetry_sink._queue)
+    assert legacy["component_stack_hash"] == "271828183"
+    assert current["component_stack_hash"] == "0000000000012345"
+    assert "component_stack_hash" not in bogus
+    # The row itself always lands: the label's loss was never visible.
+    assert all(lb["message_class"] == "TypeError" for lb in (legacy, current, bogus))
+
+
+def test_the_new_digests_do_not_get_the_legacy_width(monkeypatch):
+    """The compat window is ONE label wide. `message_hash` and `stack_hash`
+    ship for the first time in this release, so no stale client can emit them
+    and a short decimal in either is a caller inventing one -- `5550142` is a
+    phone number, which is the failure the fixed width exists to stop."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "message_class": "TypeError",
+            "message_hash": "5550142",
+            "stack_hash": "5550142",
+            "component_stack_hash": "5550142",
+        },
+    }]})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert "message_hash" not in labels
+    assert "stack_hash" not in labels
+    assert labels["component_stack_hash"] == "5550142"
+
+
+def test_ingest_other_events_keep_the_generic_additive_contract(monkeypatch):
+    """Only events that DECLARE a schema are filtered. Everything else keeps
+    additive labels, so an ordinary new label still lands with no server
+    release."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "prompt.submitted",
+        "labels": {"input_kind": "typed", "brand_new_label": "kept"},
+    }]}, headers={"X-Tenant-Id": "acme"})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["brand_new_label"] == "kept"
 
 
 def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):

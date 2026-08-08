@@ -70,15 +70,29 @@ export default class ErrorBoundary extends React.Component {
     } catch { /* noop */ }
     // P2 crash rate: message CLASS and a stack hash only, never raw text
     // (the boundary stays dependency-light: dynamic import, never throws).
+    //
+    // The hash comes from telemetry's own `digest`, not a loop copied here.
+    // The ingest door requires a digest to be exactly DIGEST_WIDTH characters
+    // so the field cannot hold a sentence, and a second hash implementation
+    // meant this row's `component_stack_hash` was the wrong width and got
+    // dropped at the door -- a whole label lost, silently, on the one event
+    // that reports crashes. `message_class` is filtered inside
+    // `trackException`, so passing a raw `error.name` here is safe.
+    //
+    // No cross-emitter coordination: this emits independently of the global
+    // handler. React 18's development build ALSO re-throws a render error
+    // through a synthetic DOM event, which reaches telemetry's global handler
+    // too, so one crash can produce two `client.exception` rows in dev --
+    // documented as a known, unsolved gap in telemetry.js (see the comment
+    // above `emitGlobalException`). Production React uses a plain try/catch
+    // and does not re-throw, so this is a dev-build-only cosmetic, not a
+    // production double-count.
     try {
       import('./telemetry.js').then((t) => {
-        let hash = 0
-        const stack = String(info?.componentStack || '')
-        for (let i = 0; i < stack.length; i++) hash = ((hash << 5) - hash + stack.charCodeAt(i)) | 0
         t.trackException({
           message_class: (error && error.name) || 'Error',
-          component_stack_hash: String(hash >>> 0),
-        })
+          component_stack_hash: t.digest(String(info?.componentStack || '')),
+        }, 'exception_boundary')
       }).catch(() => {})
     } catch { /* noop */ }
   }
