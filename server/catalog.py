@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
@@ -68,6 +68,8 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
 def apply_live_aps_runtime_authority(
     tools: List[Dict[str, Any]], *, aps_live_enabled: bool,
     trusted_live_catalog_digests: Set[str],
+    tool_sources: List[Optional[str]],
+    operator_owned_engine_source: Optional[str],
 ) -> List[Dict[str, Any]]:
     """Combine operator-owned tool eligibility with this process's APS gate.
 
@@ -76,12 +78,16 @@ def apply_live_aps_runtime_authority(
     A tenant-effective row qualifies only when its server-issued digest exactly
     matches a live-enabled engine-registry definition.
     """
+    sources_are_complete = len(tool_sources) == len(tools)
     return [
         {
             **tool,
             "_aps_live_runtime_authorized": _APS_LIVE_AUTHORIZED
             if (
                 aps_live_enabled is True
+                and sources_are_complete
+                and operator_owned_engine_source == "operator_owned_engine"
+                and tool_sources[index] == operator_owned_engine_source
                 and tool.get("aps_live") is True
                 and isinstance(tool.get("catalog_digest"), str)
                 and tool.get("tool_manifest_sha256") == tool.get("catalog_digest")
@@ -89,7 +95,7 @@ def apply_live_aps_runtime_authority(
             )
             else None,
         }
-        for tool in tools
+        for index, tool in enumerate(tools)
     ]
 
 
