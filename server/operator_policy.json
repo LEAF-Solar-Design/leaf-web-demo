@@ -8,16 +8,21 @@
     "cost_tokens_per_session_day": 10000000,
     "cost_tokens_per_principal_day": 20000000
   },
+  "spend_limits": {
+    "usd_principal_day_cents": 50000
+  },
   "actions": {
     "operator.read_fleet_state": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_fleet_state",
       "args_schema": { "type": "object", "additionalProperties": false }
     },
     "operator.read_tenant_state": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_tenant_state",
       "args_schema": { "type": "object",
         "properties": { "tenant_id": { "type": "string" } },
@@ -26,6 +31,7 @@
     "operator.read_jobs": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_jobs",
       "args_schema": { "type": "object",
         "properties": { "limit": { "type": "integer", "maximum": 200 } },
@@ -34,12 +40,14 @@
     "operator.read_sessions": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_sessions",
       "args_schema": { "type": "object", "additionalProperties": false }
     },
     "operator.read_audit": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_audit",
       "args_schema": { "type": "object",
         "properties": { "limit": { "type": "integer", "maximum": 500 } },
@@ -48,6 +56,7 @@
     "operator.read_worker_status": {
       "class": "O1", "rung": 1, "policy": "auto",
       "required": "operator", "rate": "low", "timeout_s": 10,
+      "spend": "none",
       "handler": "read_worker_status",
       "args_schema": { "type": "object",
         "properties": { "job_id": { "type": "string" } },
@@ -56,6 +65,7 @@
     "operator.worker_submit_job": {
       "class": "O2", "rung": 2, "policy": "auto",
       "required": "operator", "rate": "medium", "timeout_s": 1800,
+      "spend": "cost_tokens",
       "handler": "worker_submit_job",
       "args_schema": { "type": "object",
         "properties": {
@@ -73,6 +83,7 @@
     "operator.worker_cancel_job": {
       "class": "O2", "rung": 2, "policy": "auto",
       "required": "operator", "rate": "medium", "timeout_s": 30,
+      "spend": "none",
       "handler": "worker_cancel_job",
       "args_schema": { "type": "object",
         "properties": { "job_id": { "type": "string" } },
@@ -81,6 +92,7 @@
     "operator.repo_propose_change": {
       "class": "O3", "rung": 3, "policy": "auto",
       "required": "operator", "rate": "medium", "timeout_s": 1800,
+      "spend": "none",
       "handler": "repo_propose_change",
       "args_schema": { "type": "object",
         "properties": {
@@ -95,6 +107,7 @@
     "operator.tenant_agent_pause": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 30,
+      "spend": "none",
       "handler": "tenant_agent_pause",
       "args_schema": { "type": "object",
         "properties": {
@@ -108,6 +121,7 @@
     "operator.tenant_agent_resume": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 30,
+      "spend": "none",
       "handler": "tenant_agent_resume",
       "args_schema": { "type": "object",
         "properties": {
@@ -121,6 +135,7 @@
     "operator.tenant_overlay_set": {
       "class": "O4", "rung": 4, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 30,
+      "spend": "none",
       "handler": "tenant_overlay_set",
       "args_schema": { "type": "object",
         "properties": {
@@ -135,15 +150,33 @@
       "class": "O4", "rung": 4, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 60,
       "enabled": false,
+      "spend": "none",
       "handler": "worker_credential_rotate",
       "args_schema": { "type": "object",
         "properties": { "credential_handle": { "type": "string" } },
         "required": ["credential_handle"], "additionalProperties": false }
     },
+    "operator.external_write": {
+      "class": "O5", "rung": 5, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 600,
+      "spend": "usd", "max_spend_cents": 10000,
+      "enabled": false,
+      "handler": "external_write",
+      "args_schema": { "type": "object",
+        "properties": {
+          "destination": { "type": "string" },
+          "token_handle": { "type": "string" },
+          "adapter": { "type": "string" },
+          "payload": { "type": "object" }
+        },
+        "required": ["destination", "token_handle", "adapter"],
+        "additionalProperties": false }
+    },
     "operator.stage_release_candidate": {
       "class": "O6", "rung": 6, "policy": "always-confirm",
       "required": "operator", "rate": "high", "timeout_s": 3600,
       "enabled": false,
+      "spend": "usd", "max_spend_cents": 10000,
       "handler": "stage_release_candidate",
       "args_schema": { "type": "object",
         "properties": {

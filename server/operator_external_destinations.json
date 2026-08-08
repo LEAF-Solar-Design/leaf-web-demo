@@ -1,0 +1,9 @@
+{
+  "_note": "Operator external-write destination allowlist (contract/OPERATOR.md section 4.1, operator.external_write). METADATA ONLY: each destination is a LOGICAL name (never a raw URL), a NON-PRODUCTION environment, and the single adapter permitted to service it. No secret and no production host appears here. A destination is inert until its adapter is registered out of band (operator_external_adapters.register_adapter); no adapter ships in v1, so external_write is dark.",
+  "destinations": {
+    "staging_status_webhook": {
+      "environment": "staging",
+      "adapter": "generic_webhook"
+    }
+  }
+}
