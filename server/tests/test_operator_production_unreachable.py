@@ -101,10 +101,17 @@ def _app_endpoints(enabled: bool) -> list:
     code = (
         "import json, asyncio\n"
         "import app\n"
-        # Run the app's startup handlers BEFORE enumerating routes, so a route
-        # added AFTER import in an @app.on_event('startup') callback (via
-        # app.add_api_route) is captured, not missed by an import-time snapshot.
-        "asyncio.run(app.app.router.startup())\n"
+        # Run the app's startup handlers BEFORE enumerating routes (so a route
+        # added in an @app.on_event('startup') callback via app.add_api_route is
+        # captured), THEN drain any tasks startup scheduled with create_task (so
+        # a registration deferred to a later tick is captured too), all on one
+        # persistent loop.
+        "loop = asyncio.new_event_loop()\n"
+        "asyncio.set_event_loop(loop)\n"
+        "loop.run_until_complete(app.app.router.startup())\n"
+        "pending = [t for t in asyncio.all_tasks(loop) if not t.done()]\n"
+        "if pending:\n"
+        "    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))\n"
         "eps = []\n"
         "for r in app.app.routes:\n"
         "    path = getattr(r, 'path', '')\n"
