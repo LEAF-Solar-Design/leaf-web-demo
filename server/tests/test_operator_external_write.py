@@ -182,6 +182,7 @@ def atomic(monkeypatch):
         "phase1_committed": False, "phase1_rolled_back": False,
         "consume": {"raise": None}, "inject": {"raise": None},
         "adapter": "registered",  # "registered" | "dark"
+        "audit_fail_applied": False,  # force the post-write outcome audit to fail
     }
     cur = _Cur(state)
 
@@ -229,9 +230,13 @@ def atomic(monkeypatch):
     monkeypatch.setattr(rb.broker, "with_injected", fake_inject)
     # All audit rows (deny + phase-2 outcome) flow through _audit_row; the
     # phase-1 redemption audit is a raw cur.execute tracked as phase1_audit.
-    monkeypatch.setattr(rb, "_audit_row",
-                        lambda op, decision, reason, aid, extra=None:
-                        state["audit_rows"].append((decision, reason)))
+    # Returns True (stored) unless the test forces the applied outcome to fail.
+    def fake_audit_row(op, decision, reason, aid, extra=None):
+        state["audit_rows"].append((decision, reason))
+        if state["audit_fail_applied"] and reason == "runbook_applied":
+            return False
+        return True
+    monkeypatch.setattr(rb, "_audit_row", fake_audit_row)
     return state
 
 
@@ -271,6 +276,20 @@ def test_execute_write_failure_after_consume_is_not_replayed(atomic):
     assert atomic["phase1_rolled_back"] is False
     assert atomic["wrote"] == 0
     assert ("execute", "write_failed:no_minter") in atomic["audit_rows"]
+
+
+def test_execute_outcome_audit_loss_is_surfaced_not_silent(atomic):
+    # The write succeeded but its outcome audit could not be stored. This must
+    # NOT be swallowed: the runbook raises outcome_audit_unavailable so the loss
+    # is visible. The authority is already spent, so an operator retry is denied
+    # (no duplicate), and the durable phase-1 redemption record still exists.
+    atomic["audit_fail_applied"] = True
+    with pytest.raises(rb.RunbookError) as e:
+        rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
+    assert e.value.reason == "outcome_audit_unavailable"
+    assert atomic["wrote"] == 1                     # the external write happened
+    assert atomic["phase1_committed"] is True       # authority spent (retry denied)
+    assert ("execute", "runbook_applied") in atomic["audit_rows"]  # attempted
 
 
 def test_execute_consume_drift_rolls_back_phase1(atomic):

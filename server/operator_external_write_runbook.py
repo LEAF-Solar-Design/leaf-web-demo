@@ -103,9 +103,13 @@ def propose(op, destination: str, token_handle: str, adapter: str,
 
 
 def _audit_row(op, decision: str, reason: str, authority_id: str,
-               extra: Optional[Dict[str, Any]] = None) -> None:
-    """Write ONE audit row in its OWN transaction. Best-effort: never masks the
-    caller's error, and never writes a token or payload secret."""
+               extra: Optional[Dict[str, Any]] = None) -> bool:
+    """Write ONE audit row in its OWN transaction. Returns True on success,
+    False if the audit store could not be written. Never masks the caller's
+    error, and never writes a token or payload secret. The caller decides
+    whether a failure is best-effort (pre-write denials, where no external
+    effect happened) or must be surfaced (a post-write outcome, which must not
+    be silently lost)."""
     try:
         db = _db()
         with db.connection() as conn, conn.cursor() as cur:
@@ -115,11 +119,14 @@ def _audit_row(op, decision: str, reason: str, authority_id: str,
                 " VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (op.subject, ACTION, decision, reason, authority_id,
                  op.environment, Jsonb(extra or {})))
-    except Exception:  # noqa: BLE001 - audit is best-effort
-        pass
+        return True
+    except Exception:  # noqa: BLE001 - the caller decides what a failure means
+        return False
 
 
 def _audit_deny(op, reason: str, authority_id: str) -> None:
+    # Best-effort: a denial happens BEFORE any external write, so a lost deny
+    # audit strands nothing external (same convention as the other runbooks).
     _audit_row(op, "deny", reason, authority_id)
 
 
@@ -203,13 +210,23 @@ def execute(op, destination: str, token_handle: str, adapter: str,
         broker.with_injected(token_handle, op.environment, _use,
                              subject=op.subject)
     except broker.SecretBrokerError as exc:
+        # The write failed; the RunbookError below loudly signals it, so the
+        # failure audit is best-effort (its loss does not hide an external
+        # effect).
         _audit_row(op, "execute", f"write_failed:{exc.reason}", authority_id,
                    {"destination": destination, "adapter": adapter})
         raise RunbookError(exc.reason) from None
 
-    _audit_row(op, "execute", "runbook_applied", authority_id,
-               {"destination": destination, "adapter": adapter,
-                "reversal": reversal})
+    # The write SUCCEEDED (an external effect happened), so its outcome must be
+    # durably recorded. If the audit store cannot be written, surface it rather
+    # than swallow it: the operator sees `outcome_audit_unavailable` and can
+    # reconcile against the durable phase-1 redemption record. This is safe -
+    # the authority is already spent, so a retry is DENIED (authority_replayed),
+    # never a duplicate write.
+    if not _audit_row(op, "execute", "runbook_applied", authority_id,
+                      {"destination": destination, "adapter": adapter,
+                       "reversal": reversal}):
+        raise RunbookError("outcome_audit_unavailable")
     return {"action": ACTION, "destination": destination, "adapter": adapter,
             "authority_id": authority_id, "environment": self_meta["environment"],
             "reversal": {"adapter_reversal": reversal}}
