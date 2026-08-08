@@ -67,9 +67,23 @@ def stage(source_sha: str, target: str) -> Dict[str, str]:
     if stager_failed:
         raise StageError("stager_failed")
 
-    if (not isinstance(result, dict)
-            or not isinstance(result.get("previous_revision"), str)
-            or not isinstance(result.get("new_revision"), str)):
+    # Validate and extract the result shape DEFENSIVELY. A hostile return value
+    # (e.g. a dict subclass whose .get/__getitem__ raises a SHA-bearing error)
+    # must yield a fixed value-free StageError, never leak it. Any exception
+    # during inspection is masked; the raise happens OUTSIDE the except so
+    # nothing is chained in __context__/__cause__.
+    invalid = False
+    previous = new = None
+    try:
+        if (isinstance(result, dict)
+                and isinstance(result.get("previous_revision"), str)
+                and isinstance(result.get("new_revision"), str)):
+            previous = result["previous_revision"]
+            new = result["new_revision"]
+        else:
+            invalid = True
+    except BaseException:  # noqa: BLE001 - mask ANY inspection failure, value-free
+        invalid = True
+    if invalid:
         raise StageError("stager_result_invalid")
-    return {"previous_revision": result["previous_revision"],
-            "new_revision": result["new_revision"]}
+    return {"previous_revision": previous, "new_revision": new}

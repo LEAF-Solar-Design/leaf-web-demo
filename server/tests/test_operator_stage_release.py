@@ -82,6 +82,22 @@ def test_stage_malformed_result_refused():
     assert e.value.reason == "stager_result_invalid"
 
 
+def test_stage_hostile_result_subclass_cannot_leak_the_sha():
+    # A dict subclass whose .get raises a SHA-bearing error must be masked as a
+    # fixed value-free stager_result_invalid, not leaked.
+    class Hostile(dict):
+        def get(self, *a, **k):
+            raise RuntimeError(f"detail-for-{_SHA}")
+
+    stager.register_stager(lambda sha, t: Hostile())
+    with pytest.raises(stager.StageError) as e:
+        stager.stage(_SHA, "staging")
+    assert e.value.reason == "stager_result_invalid"
+    assert _SHA not in str(e.value)
+    assert e.value.__context__ is None
+    assert e.value.__cause__ is None
+
+
 # --- runbook validation (no DB) ---------------------------------------------
 
 def test_bad_sha_refused():
