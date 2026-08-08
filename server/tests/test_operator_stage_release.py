@@ -98,6 +98,38 @@ def test_stage_hostile_result_subclass_cannot_leak_the_sha():
     assert e.value.__cause__ is None
 
 
+def test_stage_result_get_getitem_divergence_is_rejected():
+    # A dict subclass whose .get returns safe strings but __getitem__ returns a
+    # hostile object (that would raise the SHA when formatted downstream) must
+    # be rejected: only a PLAIN dict with EXACT str values is accepted.
+    class Hostile(dict):
+        def get(self, *a, **k):
+            return "42"  # looks valid
+        def __getitem__(self, k):
+            raise RuntimeError(f"attacker-{_SHA}")
+
+    stager.register_stager(lambda sha, t: Hostile())
+    with pytest.raises(stager.StageError) as e:
+        stager.stage(_SHA, "staging")
+    assert e.value.reason == "stager_result_invalid"
+    assert _SHA not in str(e.value)
+
+
+def test_stage_result_str_subclass_value_is_rejected():
+    # A plain dict whose values are str SUBCLASSES (hostile __format__) is
+    # refused: values must be EXACT str.
+    class Evil(str):
+        def __format__(self, spec):
+            raise RuntimeError(f"fmt-{_SHA}")
+
+    stager.register_stager(lambda sha, t: {"previous_revision": Evil("1"),
+                                           "new_revision": Evil("2")})
+    with pytest.raises(stager.StageError) as e:
+        stager.stage(_SHA, "staging")
+    assert e.value.reason == "stager_result_invalid"
+    assert _SHA not in str(e.value)
+
+
 # --- runbook validation (no DB) ---------------------------------------------
 
 def test_bad_sha_refused():

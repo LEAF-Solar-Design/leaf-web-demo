@@ -68,19 +68,22 @@ def stage(source_sha: str, target: str) -> Dict[str, str]:
         raise StageError("stager_failed")
 
     # Validate and extract the result shape DEFENSIVELY. A hostile return value
-    # (e.g. a dict subclass whose .get/__getitem__ raises a SHA-bearing error)
-    # must yield a fixed value-free StageError, never leak it. Any exception
-    # during inspection is masked; the raise happens OUTSIDE the except so
-    # nothing is chained in __context__/__cause__.
+    # must yield a fixed value-free StageError, never leak. Two rules close the
+    # subclass tricks: require a PLAIN dict (type() is dict), so .get and
+    # __getitem__ are the builtin implementations and cannot diverge or run
+    # attacker code; and require the extracted revisions to be EXACT str (not a
+    # str subclass with a hostile __format__/__str__ that could raise the SHA in
+    # a downstream f-string). The SAME validated objects are returned, so a
+    # value cannot be validated and then swapped. Any inspection failure is
+    # masked; the raise happens OUTSIDE the except so nothing is chained.
     invalid = False
     previous = new = None
     try:
-        if (isinstance(result, dict)
-                and isinstance(result.get("previous_revision"), str)
-                and isinstance(result.get("new_revision"), str)):
-            previous = result["previous_revision"]
-            new = result["new_revision"]
-        else:
+        if type(result) is dict:  # noqa: E721 - exact type, reject subclasses
+            previous = result.get("previous_revision")
+            new = result.get("new_revision")
+        if not (type(previous) is str and type(new) is str  # noqa: E721
+                and 0 < len(previous) <= 64 and 0 < len(new) <= 64):
             invalid = True
     except BaseException:  # noqa: BLE001 - mask ANY inspection failure, value-free
         invalid = True
