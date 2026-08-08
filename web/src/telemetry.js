@@ -16,6 +16,13 @@
 // Dependency-free ON PURPOSE (design rule 7): api.js imports this module for
 // the http()-seam auto-capture, so importing api.js back would be a cycle.
 // The JWT key and API base are read directly (same values api.js uses).
+//
+// ONE exception, added with the global error capture below: site/routeScene.js.
+// It is a pure leaf module with zero imports of its own, so it cannot form a
+// cycle, and it is the app's OWN route vocabulary. Re-deriving a route label
+// here instead would drift the moment a route is added, and a hand-rolled one
+// is exactly how a customer name reaches BigQuery inside a pathname.
+import { sceneForPath } from './site/routeScene.js'
 const DISABLED = import.meta.env?.VITE_TELEMETRY_DISABLED === '1'
 const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const FLUSH_AT = 20
@@ -23,7 +30,11 @@ const FLUSH_MS = 5000
 const BUFFER_MAX = 200          // absolute cap; beyond it the oldest drop
 const ERROR_CAP = 20            // error.shown per session (design cap)
 const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
-const EXCEPTION_CAP = 10        // client.exception per session (flood control)
+// Separate budgets ON PURPOSE: a global error storm (an animation callback
+// throwing every frame) must not be able to spend the boundary's budget and
+// suppress the one record of a real React crash.
+const EXCEPTION_CAP = 10        // global-handler emissions per session
+const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
 const MESSAGE_MAX = 200         // sanitized free text; the door caps at 512
 const STACK_HEAD_MAX = 200
 
@@ -33,6 +44,7 @@ const state = {
   sessionId: null,
   tourStep: null,
   globalsInstalled: false,
+  seenExceptions: [],
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -184,11 +196,15 @@ export function trackStreamDown(reconnectsN) {
 /** Crash capture — the ErrorBoundary AND the global handlers below. Capped
  * per session because a render loop or a retry loop can throw thousands of
  * times per minute, and an uncapped emitter would spend the ingest door's
- * whole token bucket on one broken page. */
-export function trackException(props = {}) {
+ * whole token bucket on one broken page.
+ *
+ * `capKey` selects the budget. The boundary's default keeps its own, so a
+ * storm of global errors can never consume the crash record. */
+export function trackException(props = {}, capKey = 'exception_boundary') {
   try {
-    if (capCount('exception') >= EXCEPTION_CAP) return
-    capIncrement('exception')
+    const limit = capKey === 'exception_global' ? EXCEPTION_CAP : BOUNDARY_CAP
+    if (capCount(capKey) >= limit) return
+    capIncrement(capKey)
     track('client.exception', props, 'exception')
   } catch { /* no-op */ }
 }
@@ -204,46 +220,108 @@ export function trackException(props = {}) {
 // own dashboard row, and its own docs for no added meaning.
 
 // Free text from an exception is attacker- and user-influenced: a failing
-// request URL carries query tokens, a validation message quotes what the user
-// typed. Redact the known shapes, then cap. This is the ONE place raw-ish text
-// enters the rail; every other client label is an enum or a number.
+// request carries ids and codes, a validation message quotes what the user
+// typed. This is the ONE place raw-ish text enters the rail; every other
+// client label is an enum or a number.
 const REDACTIONS = [
-  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '<email>'],   // addresses
-  [/[A-Za-z0-9_-]{24,}/g, '<token>'],           // JWT/bearer/opaque-id blobs
-  [/\d{6,}/g, '<n>'],                           // long digit runs
+  // WHOLE URIs, not just their query strings. A path carries just as much:
+  // `/app/Alice-Smith/invite/7uP9-kL2` is a customer name and an invite code
+  // in the path alone, and a data:/blob: URI can inline an entire source
+  // file. Endpoint identity is already captured, unredacted and classified,
+  // by `error.shown` at the transport seams, so nothing is lost here.
+  [/\b(?:https?|wss?|blob|data|file|javascript):\S*/gi, '<url>'],
+  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '<email>'],
+  // Percent-encoding is how an address or an id survives a URL round trip,
+  // so it defeats every pattern above unless the whole token goes.
+  [/\S*%[0-9A-Fa-f]{2}\S*/g, '<enc>'],
+  // RELATIVE paths, which is what this app's own throw sites actually emit
+  // (`POST /api/drawings/${drawingId}/checkout -> 409` in api.js). A rule
+  // that only understood absolute URLs would miss every one of them. The
+  // route SHAPE is the diagnostic value and survives; the query goes, and so
+  // does any segment carrying a digit, which is what an id looks like.
+  [/\/[A-Za-z0-9_.~-]*(?:\/[A-Za-z0-9_.~-]*)*(?:[?#]\S*)?/g, redactPath],
 ]
+
+function redactPath(path) {
+  const clean = path.split(/[?#]/)[0]
+  return clean
+    .split('/')
+    .map((seg) => (seg && (/\d/.test(seg) || seg.length >= 24) ? '<id>' : seg))
+    .join('/')
+}
+
+/** Runs that are identifiers rather than words. Done as a replacer instead of
+ * a pattern because the test is compositional: 8+ characters mixing letters
+ * AND digits is an id, a key, or a hash, never English (AKIA... is 20, an
+ * invite code is 12); a 24+ run of a single class is a base64 or hex blob. */
+function redactRuns(s) {
+  return s.replace(/[A-Za-z0-9_-]{8,}/g, (run) => {
+    if (/[A-Za-z]/.test(run) && /\d/.test(run)) return '<token>'
+    if (run.length >= 24) return '<token>'
+    return run
+  })
+}
 
 function sanitize(text, max) {
   try {
-    // A URL's query and fragment are where secrets ride; keep the path.
-    let s = String(text ?? '').replace(/(https?:\/\/[^\s?#]*)[?#]\S*/g, '$1')
+    // Bound the work before pattern matching, not only after: an exception
+    // message has no size limit, and redaction only ever shrinks text, so
+    // nothing that would survive the final cap is lost by trimming first.
+    let s = String(text ?? '').slice(0, max * 8)
     for (const [re, sub] of REDACTIONS) s = s.replace(re, sub)
-    return s.slice(0, max)
+    s = redactRuns(s)
+    return s.replace(/\d{6,}/g, '<n>').slice(0, max)
   } catch { return '' }
 }
 
+// An Error's `name` is an ordinary writable property, so on a foreign object
+// it is arbitrary attacker text. Only an identifier shape is accepted.
+const CLASS_RE = /^[A-Za-z][A-Za-z0-9_$]{0,63}$/
+const FRAME_FN_RE = /^[A-Za-z_$][A-Za-z0-9_$.<>]{0,63}$/
+const FRAME_FILE_RE = /^[A-Za-z0-9_.-]{1,64}$/
+
 function messageClass(err, fallback) {
-  // `err.name` is a getter on a foreign object here: it can throw.
+  // Reading `.name` can itself throw: it may be a getter.
   try {
     const name = err && err.name
-    if (typeof name === 'string' && name) return name.slice(0, 64)
+    if (typeof name === 'string' && CLASS_RE.test(name)) return name
   } catch { /* fall through */ }
   return fallback
 }
 
+/** The FIRST frame (the throw site) reduced to `fn@file:line:col`.
+ *
+ * BUILT FROM PARTS rather than redacted: the host, the directory path, the
+ * query, and any data:/blob: payload are dropped by construction, so nothing
+ * depends on a pattern anticipating them. What survives is the bundle's own
+ * file name and position, which is the entire diagnostic value. */
 function stackHead(err) {
   try {
-    // The FIRST frame is the throw site. The rest is call history that
-    // multiplies the payload without adding a distinguishing signal.
-    const lines = String((err && err.stack) || '').split('\n')
-    const frame = lines.find((l) => /\bat\b|@/.test(l)) || ''
-    return sanitize(frame.trim(), STACK_HEAD_MAX)
+    // Anchored: a message line like `Error: request failed at /x` contains
+    // " at " and would otherwise be picked as the frame, duplicating
+    // `message` and losing the real throw site.
+    const lines = String((err && err.stack) || '').split('\n').map((l) => l.trim())
+    const frame = lines.find((l) => /^at\s/.test(l) || /^[^@\s]*@\S/.test(l)) || ''
+    if (!frame) return ''
+    const v8 = frame.match(/^at\s+(?:(\S+)\s+)?\(?(.*?)\)?$/)
+    const spider = v8 ? null : frame.match(/^([^@]*)@(.*)$/)
+    const fnRaw = (v8 ? v8[1] : spider && spider[1]) || ''
+    const locRaw = (v8 ? v8[2] : spider && spider[2]) || ''
+    const fn = fnRaw ? (FRAME_FN_RE.test(fnRaw) ? fnRaw : '<fn>') : '<anon>'
+    if (/^(?:data|blob|javascript):/i.test(locRaw)) return `${fn}@<inline>`
+    const tail = locRaw.split(/[?#]/)[0].split('/').pop() || ''
+    const at = tail.match(/^(.*?)(?::(\d+):(\d+))?$/) || []
+    const file = FRAME_FILE_RE.test(at[1] || '') ? at[1] : '<file>'
+    return `${fn}@${file}${at[2] ? `:${at[2]}:${at[3]}` : ''}`.slice(0, STACK_HEAD_MAX)
   } catch { return '' }
 }
 
 function routeLabel() {
-  // Path only: query and hash carry drawing ids, invite tokens, typed text.
-  try { return String(location?.pathname || '').slice(0, 128) } catch { return '' }
+  // The app's OWN route vocabulary (four static scene names), never the raw
+  // pathname: `/app/Alice-Smith/invite/<code>` is a real shape this product
+  // serves, and there is no redactor that reliably tells a customer name from
+  // a route word. `sceneForPath` collapses every path by construction.
+  try { return sceneForPath(String(location?.pathname || '/')) } catch { return 'unknown' }
 }
 
 function uaClass() {
@@ -260,6 +338,21 @@ function uaClass() {
   } catch { return 'unknown' }
 }
 
+/** Emit one global exception, DE-DUPLICATED by signature.
+ *
+ * A repeat spends nothing. Without this, the cap counts occurrences rather
+ * than distinct failures, and the two loud-and-benign classes this app
+ * invites -- a ResizeObserver loop from the resizable panels, an animation
+ * callback throwing every frame from the three.js viewer -- would spend all
+ * ten slots before a genuinely different crash ever got one. The seen-set is
+ * bounded by the cap itself, because past it nothing emits anyway. */
+function emitGlobalException(props) {
+  const sig = `${props.message_class}|${props.message}|${props.stack_head}`
+  if (state.seenExceptions.indexOf(sig) !== -1) return
+  if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
+  trackException(props, 'exception_global')
+}
+
 /** `error` listener. Exported so a spec can drive it without synthesizing a
  * browser event jsdom does not fully implement. */
 export function handleErrorEvent(ev) {
@@ -269,7 +362,7 @@ export function handleErrorEvent(ev) {
     // plain Event with neither `error` nor `message`. They are not JS
     // exceptions, they arrive in bursts, and they would spend the cap.
     if (!err && !(ev && ev.message)) return
-    trackException({
+    emitGlobalException({
       source: 'window.onerror',
       message_class: messageClass(err, 'Error'),
       message: sanitize((err && err.message) || (ev && ev.message), MESSAGE_MAX),
@@ -290,7 +383,7 @@ export function handleRejectionEvent(ev) {
     const text = reason && typeof reason === 'object' && 'message' in reason
       ? reason.message
       : reason
-    trackException({
+    emitGlobalException({
       source: 'unhandledrejection',
       message_class: messageClass(reason, fallback),
       message: sanitize(text, MESSAGE_MAX),

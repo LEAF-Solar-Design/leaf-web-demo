@@ -62,8 +62,10 @@ bounded queue, drop-oldest, kill switch, never-raise emitters.
   sink overflow, disabled sink included): the client can never observe a
   telemetry failure. Auth rides the platform's existing stack (Auth0
   bearer / guest HMAC / mock tenant); anonymous callers may send exactly
-  `gate.choice | site.demo_viewed | tour.started` behind a per-IP token
-  bucket, recorded as tenant "anon".
+  the pre-auth allowlist (`gate.choice | site.demo_viewed | tour.started |
+  auth.completed | client.exception`, the single list in
+  `routers/telemetry.py`) behind a per-IP token bucket, recorded as tenant
+  "anon".
 
 ## Config (staging first; prod rides the normal deploy train)
 
@@ -134,7 +136,7 @@ C-3 (global error capture):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); cap 10/session, shared with the boundary's emissions | source (window.onerror/unhandledrejection), message_class, message, stack_head, route, ua_class |
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message, stack_head, route, ua_class |
 
 The boundary only sees what a component throws DURING RENDER, so a three.js
 draw tick, a `setTimeout` callback, and every unawaited promise failed with
@@ -143,19 +145,75 @@ in the browser. These handlers close that gap under the SAME event name,
 distinguished by `source` — a second event name would need its own allowlist
 entry, dashboard row, and docs for no added meaning.
 
+### What each label may and may not carry
+
 `message` and `stack_head` are the one place raw-ish text enters the rail
-(every other client label is an enum or a number), so they are redacted then
-capped at 200 client-side, before the door's 512 cap: URL query strings and
-fragments are dropped, email addresses become `<email>`, runs of 24+ token
-characters become `<token>`, runs of 6+ digits become `<n>`. `stack_head` is
-the FIRST frame only, `route` is `location.pathname` with no query or hash,
-and `ua_class` is a browser family plus mobile/desktop, never the raw
-user-agent string. The release marker is the sink's server-stamped
-`app_version`; the client does not send one.
+(every other client label is an enum or a number), so they are the only
+labels with a redaction contract. Client-side, capped at 200 before the
+door's 512:
+
+- **Whole URIs go**, not just their query strings — `https`, `wss`, `blob`,
+  `data`, `file`, `javascript`. A path carries as much as a query does
+  (`/app/Alice-Smith/invite/7uP9-kL2` is a customer name and an invite code
+  with no `?` in sight) and a `data:` URI can inline an entire source file.
+  Endpoint identity is already recorded, unredacted and classified, by
+  `error.shown` at the transport seams, so nothing is lost.
+- **Relative paths are redacted per segment**, because relative is what this
+  app's own throw sites actually emit (`POST /api/drawings/${id}/checkout ->
+  409`). The route shape survives; the query goes, and any segment carrying a
+  digit becomes `<id>`.
+- Emails become `<email>`; percent-encoded tokens become `<enc>` (that is how
+  an address survives a URL round trip and defeats every other rule); a run of
+  8+ characters mixing letters and digits, or 24+ of one class, becomes
+  `<token>` (an AWS key id is 20, an invite code 12 — a 24-only rule missed
+  both); runs of 6+ digits become `<n>`.
+- `stack_head` is the FIRST frame only, reduced to `fn@file:line:col` and
+  BUILT FROM PARTS rather than redacted, so the host, the directory path, the
+  query, and any `data:`/`blob:` payload are dropped by construction instead
+  of by a pattern that has to anticipate them. What survives is the bundle's
+  file name and position, which is the whole diagnostic value.
+- `message_class` is accepted only if it is identifier-shaped. An Error's
+  `name` is an ordinary writable property, so on a foreign object it is
+  arbitrary text, not a class.
+- `route` is the app's own scene name (`site`/`tool`/`sheets`/`app` from
+  `site/routeScene.js`), never the pathname. There is no redactor that
+  reliably tells a customer name from a route word, so the label is an enum
+  by construction.
+- `ua_class` is a browser family plus mobile/desktop, never the raw
+  user-agent string. The release marker is the sink's server-stamped
+  `app_version`; the client does not send one.
+
+### Caps
+
+Two SEPARATE budgets: 10 per session for the global handlers, 5 for the
+ErrorBoundary. Shared, a storm of global errors could spend the budget and
+suppress the one record of a real React crash.
+
+The global budget counts DISTINCT failures — repeats of the same
+class+message+frame spend nothing. Counting occurrences instead would let the
+two loud-and-benign classes this app invites (a ResizeObserver loop from the
+resizable panels, an animation callback throwing every frame from the viewer)
+consume all ten slots before a genuinely different crash got one.
 
 Resource-load failures (a 404 `<img>`, a blocked `<script>`) dispatch an
 event with neither `error` nor `message` and are ignored: they are not JS
-exceptions, they arrive in bursts, and they would spend the session cap.
+exceptions, and they arrive in bursts.
+
+### Two rows per React crash, by design
+
+React 18 re-throws a boundary-caught error to `window`, so one component
+crash now records TWICE: once from `ErrorBoundary` (message class plus
+component-stack hash) and once from the global handler (message plus stack
+head). The pair is deliberate — each half carries what the other cannot — but
+anything COUNTING crashes must filter on `source`, or it double-counts every
+React failure.
+
+### Surfaces still uncovered
+
+- `deploy/presenter-flipbook.html` ships its own inline script and never
+  loads `main.jsx`, so failures there stay invisible.
+- A failure to fetch, parse, or link `main.jsx` itself happens before any
+  module evaluates. Nothing in-band can report it.
 
 C-2 (this change):
 
@@ -184,6 +242,15 @@ exactly the failures nothing else can see. The anonymous exposure it adds is
 the shape `gate.choice` already carries, bounded by the same per-IP token
 bucket (burst 30, 0.5/s), the 50-events-per-body cap, the 512-char label
 cap, and the client's own 10-per-session cap.
+
+That pre-auth lane has a measured denial-of-wallet ceiling, unchanged by
+`client.exception` because the bucket and the label caps are name-agnostic:
+one IP sustains 30 burst + 43,200 refill events/day, and a maximum legal
+event is ~23 KB, so ~1 GB/day of row payload per IP (~$0.05/day streaming
+insert, ~$0.60/GB-month storage). Client-side session caps do not constrain
+an internet caller, and IP rotation multiplies it. Accepted as pre-existing,
+recorded here so the next change to that allowlist starts from the number
+rather than rediscovering it.
 Labels are additive within schema_version 1, so early rows stay queryable.
 Fields named by the design but not yet stamped (e.g. `user_email`,
 `aps_live`, `wrote_version`) arrive additively with later waves.

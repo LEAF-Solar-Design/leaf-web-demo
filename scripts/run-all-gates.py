@@ -994,13 +994,16 @@ def build_suites() -> List[Suite]:
         # review found the 14 card tests executing nowhere in CI, so the
         # operator-facing decision surface -- both controls, untrusted text,
         # style sinks -- was unverified on every PR.
-        # 35 -> 43: an interim bump of exactly what the global-error-capture
-        # spec file added (8), the same convention `platform` used. It is
-        # still BELOW the real executed count (62 locally, 0 skipped), so this
-        # suite keeps reporting executed-count drift; a full re-baseline to a
-        # measured CI count is its own change, not a rider on this one.
+        # 35 -> 69: a FULL re-baseline, not an interim bump. The old floor sat
+        # 19 below the real count, which is precisely the hazard the header
+        # above describes: the suite could have lost every test of this
+        # feature and still reported green. No environment divergence is
+        # possible here -- all 69 cases are literal and unconditional, with no
+        # skips, no parametrize, and no platform branch, and a collection or
+        # import failure makes vitest FAIL rather than report a lower count,
+        # so the CI-vs-local gap that pins the pytest floors does not apply.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 43),
+              [_npm(), "run", "test:unit"], 69),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
