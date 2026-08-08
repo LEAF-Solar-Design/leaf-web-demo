@@ -1018,8 +1018,13 @@ def build_suites() -> List[Suite]:
         # 72 -> 76: cross-path de-duplication (one React crash is one row, and
         # the guard is proven able to decline) plus the boundary's uncapped
         # contract.
+        # 76 -> 80: de-duplication that survives a flush. The reviewer's
+        # counterexample (19 queued events, then one crash split across the
+        # batch boundary) plus the three the hold has to keep true -- a held
+        # row still sends when no boundary comes, a late boundary still
+        # retracts, and pagehide carries a held row off a dying tab.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 76),
+              [_npm(), "run", "test:unit"], 80),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

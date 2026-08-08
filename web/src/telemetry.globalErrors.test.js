@@ -19,6 +19,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 let current = null
 let installed = []
 
+/** telemetry.js's own timings, mirrored rather than imported: they are private
+ * on purpose, and the whole point of the cross-flush spec below is that the
+ * one-row-per-crash guarantee must not depend on the batch threshold's value. */
+const FLUSH_AT = 20             // events per batch
+const FLUSH_MS = 5000           // buffer latency
+const PENDING_MS = 1000         // how long a global row is held for its twin
+
 /** Load a fresh telemetry module with fetch stubbed.
  *
  * Every listener the module registers on import is recorded so afterEach can
@@ -283,13 +290,19 @@ describe('global error capture', () => {
     mod.trackException({ message_class: 'TypeError', component_stack_hash: '42' })
     mod.flushNow()
 
+    // Found by label, not by index: a global row is HELD out of the send
+    // buffer until its dedup window closes, so it rejoins the batch when it is
+    // released rather than where it was recorded. Which rows land is the
+    // contract; where they sit in the array is not, and each carries its own
+    // `client_ts`.
     const events = postedEvents(fetchMock)
     expect(events).toHaveLength(11)
-    expect(events[10].labels).toMatchObject({
+    const boundaryRows = events.filter((e) => e.labels.source === undefined)
+    expect(boundaryRows).toHaveLength(1)
+    expect(boundaryRows[0].labels).toMatchObject({
       message_class: 'TypeError',
       component_stack_hash: '42',
     })
-    expect(events[10].labels.source).toBeUndefined()
   })
 
   it('never caps the ErrorBoundary, so a crash-and-reload loop stays visible', async () => {
@@ -356,11 +369,124 @@ describe('global error capture', () => {
     }, 'exception_boundary', new TypeError('the React crash'))
     mod.flushNow()
 
+    // By label, not by index -- see the note in the cap spec above.
     const events = postedEvents(fetchMock)
     expect(events).toHaveLength(2)
-    expect(events[0].labels.source).toBe('window.onerror')
-    expect(events[0].labels.message_class).toBe('RangeError')
-    expect(events[1].labels.source).toBeUndefined()
+    const globalRows = events.filter((e) => e.labels.source === 'window.onerror')
+    expect(globalRows).toHaveLength(1)
+    expect(globalRows[0].labels.message_class).toBe('RangeError')
+    expect(events.filter((e) => e.labels.source === undefined)).toHaveLength(1)
+  })
+
+  it('de-duplicates ACROSS a flush, because a full batch must not decide the count', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // The counterexample that killed retraction-only de-duplication. Pulling a
+    // row back out of the send buffer works only while it is STILL in the send
+    // buffer: queue 19 events first and the global row is the 20th, the batch
+    // POSTs on the spot, and the boundary arriving one microtask later has
+    // nothing left to retract. One crash landed twice, and whether it did was
+    // decided by how many unrelated events happened to be queued -- so the
+    // guarantee held on a quiet page and broke on a busy one.
+    for (let i = 0; i < FLUSH_AT - 1; i++) mod.track(`filler.${i}`)
+
+    const err = new TypeError('the same crash, split across a flush')
+    mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
+    mod.trackException({
+      message_class: 'TypeError',
+      component_stack_hash: '0000000000000042',
+    }, 'exception_boundary', err)
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    const exceptions = events.filter((e) => e.event_name === 'client.exception')
+    expect(exceptions).toHaveLength(1)
+    expect(exceptions[0].labels.source).toBeUndefined()
+    expect(exceptions[0].labels.component_stack_hash).toBe('0000000000000042')
+    // Nothing else was lost paying for it: all 19 fillers still landed.
+    expect(events).toHaveLength(FLUSH_AT)
+  })
+
+  it('sends a held row when no boundary ever claims it', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // The ordinary case, and the one holding could break: a three.js draw tick
+    // throws and React never hears about it, so no boundary is ever coming.
+    // The hold must DELAY that row, never swallow it.
+    vi.useFakeTimers()
+    try {
+      mod.handleErrorEvent({ error: new Error('a callback nothing renders') })
+      // Held: unreachable from any flush, so a full batch cannot carry it out.
+      for (let i = 0; i < FLUSH_AT; i++) mod.track(`filler.${i}`)
+      expect(postedEvents(fetchMock).filter(
+        (e) => e.event_name === 'client.exception')).toHaveLength(0)
+
+      vi.advanceTimersByTime(PENDING_MS + FLUSH_MS)
+      const exceptions = postedEvents(fetchMock).filter(
+        (e) => e.event_name === 'client.exception')
+      expect(exceptions).toHaveLength(1)
+      expect(exceptions[0].labels.source).toBe('window.onerror')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still retracts for a boundary that arrives after the hold expires', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // Holding covers the window; retraction covers what comes after it. A
+    // boundary behind a slow chunk fetch can miss the hold and still beat the
+    // batch, and that row is retractable exactly as it was before -- so the
+    // fallback stays proven rather than becoming code nothing exercises.
+    vi.useFakeTimers()
+    try {
+      const err = new TypeError('a crash the boundary reports late')
+      mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
+      vi.advanceTimersByTime(PENDING_MS + 1)   // released into the buffer, unsent
+
+      mod.trackException({
+        message_class: 'TypeError',
+        component_stack_hash: '0000000000000013',
+      }, 'exception_boundary', err)
+      mod.flushNow()
+
+      const events = postedEvents(fetchMock)
+      expect(events).toHaveLength(1)
+      expect(events[0].labels.source).toBeUndefined()
+      expect(events[0].labels.component_stack_hash).toBe('0000000000000013')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a held row leave with the pagehide beacon, so a torn-down tab keeps its crash', async () => {
+    const { mod } = await loadTelemetry()
+
+    // The reason the original design refused to defer at all: a record held
+    // for a twin is lost if the page dies first. pagehide is the seam that
+    // makes holding safe, so it has to release before it beacons.
+    const sent = []
+    const hadBeacon = 'sendBeacon' in navigator
+    navigator.sendBeacon = (url, blob) => { sent.push(blob); return true }
+    try {
+      mod.handleErrorEvent({ error: new Error('crash, then the tab closes') })
+      window.dispatchEvent(new Event('pagehide'))
+
+      expect(sent).toHaveLength(1)
+      // FileReader, not Blob.text(): this jsdom's Blob has no text().
+      const body = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsText(sent[0])
+      })
+      const events = JSON.parse(body).events
+      expect(events).toHaveLength(1)
+      expect(events[0].event_name).toBe('client.exception')
+      expect(events[0].labels.source).toBe('window.onerror')
+    } finally {
+      if (!hadBeacon) delete navigator.sendBeacon
+    }
   })
 
   it('leaves a rejection alone, because no boundary ever sees one', async () => {

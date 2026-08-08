@@ -37,7 +37,13 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
-const CROSS_PATH_MS = 10000     // how long a global row stays retractable
+const CROSS_PATH_MS = 10000     // how long a released global row stays retractable
+// How long a global row waits OUTSIDE the send buffer for its boundary twin.
+// It only has to outlast the ErrorBoundary's dynamic import, which is one
+// microtask when the chunk is already in the graph and one fetch when it is
+// not. A second covers both and still lands inside the buffer's own 5 s
+// latency, so nothing is reported later than it would have been anyway.
+const PENDING_MS = 1000
 
 const state = {
   buffer: [],
@@ -47,6 +53,7 @@ const state = {
   globalsInstalled: false,
   seenExceptions: [],
   globalRows: [],
+  pendingGlobals: [],
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -160,37 +167,56 @@ function schedule() {
   } catch { /* no-op */ }
 }
 
+/** Build one event WITHOUT queuing it. Split out for the global exception
+ * path below, which has to own a row for a moment before deciding whether it
+ * is ever sent; every other caller goes through `track`. */
+function buildEvent(name, props, eventType) {
+  if (DISABLED || typeof fetch !== 'function') return undefined
+  return {
+    event_type: eventType,
+    event_name: name,
+    client_ts: Date.now() / 1000,
+    labels: state.tourStep != null && props.tour_step === undefined
+      ? { ...props, tour_step: state.tourStep }
+      : props,
+  }
+}
+
+function enqueue(event) {
+  state.buffer.push(event)
+  if (state.buffer.length > BUFFER_MAX) state.buffer.shift()
+  if (state.buffer.length >= FLUSH_AT) flush()
+  else schedule()
+}
+
 /** Queue one event. `props` values should be primitives; the server
  * stringifies and bounds everything and strips reserved keys.
  *
  * Returns the queued event, or undefined when telemetry is off or the queue
  * threw. The only caller that reads it is the global exception path below,
- * which must be able to identify ITS OWN row later to retract it; identity is
+ * which must be able to identify ITS OWN row later to withdraw it; identity is
  * the only handle that survives a buffer that shifts and splices. */
 export function track(name, props = {}, eventType = 'custom_event') {
   try {
-    if (DISABLED || typeof fetch !== 'function') return undefined
-    const event = {
-      event_type: eventType,
-      event_name: name,
-      client_ts: Date.now() / 1000,
-      labels: state.tourStep != null && props.tour_step === undefined
-        ? { ...props, tour_step: state.tourStep }
-        : props,
-    }
-    state.buffer.push(event)
-    if (state.buffer.length > BUFFER_MAX) state.buffer.shift()
-    if (state.buffer.length >= FLUSH_AT) flush()
-    else schedule()
+    const event = buildEvent(name, props, eventType)
+    if (!event) return undefined
+    enqueue(event)
     return event
   } catch { return undefined /* telemetry never breaks the product */ }
 }
 
 /** Immediate flush for events that must land before an imminent navigation
  * (the post-auth reload): post() uses keepalive fetch WITH identity headers,
- * which survives the unload where the pagehide beacon cannot carry auth. */
+ * which survives the unload where the pagehide beacon cannot carry auth.
+ *
+ * Releases held rows first: a row waiting for a boundary twin that is about
+ * to be navigated away from has run out of window, and the record is worth
+ * more than the de-duplication. */
 export function flushNow() {
-  try { flush() } catch { /* telemetry never breaks the product */ }
+  try {
+    releaseAllPending()
+    flush()
+  } catch { /* telemetry never breaks the product */ }
 }
 
 /** Auto-capture for user-visible errors at the two transport seams
@@ -226,15 +252,24 @@ export function trackStreamDown(reconnectsN) {
  * already hitting several is the one most worth seeing. React bounds this
  * emitter's volume; we do not have to.
  *
- * `error` is the Error the boundary caught. Passing it lets this path retract
- * the global row for the SAME failure, so one React crash is one row. */
-export function trackException(props = {}, capKey = 'exception_boundary', error = undefined) {
+ * `error` is the Error the boundary caught. Passing it lets this path withdraw
+ * the global row for the SAME failure, so one React crash is one row.
+ *
+ * `hold` builds the row and returns it UNQUEUED, for the global path's
+ * pending window below. It stays a parameter of this function rather than a
+ * shortcut around it because the label filter under it is a choke point: a
+ * caller that builds its own row is a caller that can put free text in a
+ * label again. */
+export function trackException(props = {}, capKey = 'exception_boundary', error = undefined, hold = false) {
   try {
     if (capKey === 'exception_global') {
       if (capCount(capKey) >= EXCEPTION_CAP) return undefined
       capIncrement(capKey)
     } else if (error != null) {
-      retractGlobalTwin(crossPathSignature(error))
+      // Held first, buffered second: one failure has at most one global row,
+      // and it lives in exactly one of the two places.
+      const sig = crossPathSignature(error)
+      if (!dropPendingTwin(sig)) retractGlobalTwin(sig)
     }
     // The class is filtered HERE, not at each call site, so every emitter of
     // this event is covered by construction. ErrorBoundary passed
@@ -245,6 +280,7 @@ export function trackException(props = {}, capKey = 'exception_boundary', error 
     const safe = props && props.message_class !== undefined
       ? { ...props, message_class: KNOWN_CLASSES.has(props.message_class) ? props.message_class : 'Other' }
       : props
+    if (hold) return buildEvent('client.exception', safe, 'exception')
     return track('client.exception', safe, 'exception')
   } catch { return undefined /* no-op */ }
 }
@@ -449,12 +485,25 @@ function uaClass() {
 // The BOUNDARY wins the tie. Its row carries `component_stack_hash`, which the
 // global handler cannot know, and it is the older contract.
 //
-// RETRACTION, not deferral: the global handler stays synchronous, because
-// waiting for a boundary that may never come would lose the record whenever
-// the page is torn down first. The one case this cannot cover is a global row
-// already flushed to the wire when the boundary fires, which needs 20 buffered
-// events or the 5 s timer inside a single microtask hop; then two rows land,
-// which is what this did every time before.
+// The global handler stays synchronous -- it observes and records the failure
+// the moment it happens -- but its row is HELD OUT of the send buffer for a
+// short window instead of being queued into it. A held row cannot be flushed,
+// so the boundary can still drop it however many events happen to be queued
+// behind it.
+//
+// This replaces retracting an already-buffered row, which worked only while
+// the row was still buffered: at 19 queued events the global row was the 20th,
+// the batch POSTed on the spot, and the boundary a microtask later had nothing
+// left to pull back. Two rows landed, and whether they did was decided by how
+// busy the page was -- the guarantee held on a quiet page and broke on a busy
+// one. Retraction is KEPT below as the fallback for a boundary that arrives
+// after the hold expires but before the batch goes out.
+//
+// Nothing is traded away for it. The reason the original chose retraction was
+// that deferring an emit loses the record if the page is torn down first, so
+// every exit seam -- the pagehide beacon and the pre-navigation flushNow --
+// releases held rows before it sends, and the hold expires on its own timer
+// for the ordinary case where no boundary is ever coming.
 
 /** The cross-path identity of ONE failure: everything BOTH emitters can derive
  * from the same Error object, and nothing else. `source` is deliberately
@@ -474,6 +523,70 @@ function noteGlobalRow(sig, event) {
     state.globalRows.push({ sig, event, at: now })
     while (state.globalRows.length > EXCEPTION_CAP) state.globalRows.shift()
   } catch { /* no-op */ }
+}
+
+/** Hold one global row OUT of the send buffer for the dedup window.
+ *
+ * A held row is unreachable from `flush`, so no batch threshold and no timer
+ * can put it on the wire while a boundary might still claim it. */
+function holdGlobalRow(sig, event) {
+  try {
+    if (!event) return
+    // No signature is no dedup handle, so holding it could only lose it.
+    if (!sig) { enqueue(event); return }
+    const row = { sig, event, timer: null }
+    state.pendingGlobals.push(row)
+    // Bounded by the global cap on the way in, but held explicitly too: a
+    // pending list that could grow is a leak, and this one holds crash rows.
+    while (state.pendingGlobals.length > EXCEPTION_CAP) releasePendingRow(state.pendingGlobals[0])
+    try {
+      row.timer = setTimeout(() => releasePendingRow(row), PENDING_MS)
+    } catch {
+      // No timer available: send it now rather than hold it forever. The old
+      // behaviour, which is still correct, just weaker.
+      releasePendingRow(row)
+    }
+  } catch { /* no-op */ }
+}
+
+/** The hold is over: the row joins the send buffer and becomes an ordinary
+ * queued event -- retractable while it is still buffered, and nothing more. */
+function releasePendingRow(row) {
+  try {
+    const at = state.pendingGlobals.indexOf(row)
+    if (at === -1) return
+    state.pendingGlobals.splice(at, 1)
+    if (row.timer) { clearTimeout(row.timer); row.timer = null }
+    enqueue(row.event)
+    noteGlobalRow(row.sig, row.event)
+  } catch { /* no-op */ }
+}
+
+/** Every exit seam calls this: a record is worth more than a de-duplication
+ * the page will not be alive to perform. */
+function releaseAllPending() {
+  try {
+    while (state.pendingGlobals.length) releasePendingRow(state.pendingGlobals[0])
+  } catch { /* no-op */ }
+}
+
+/** Drop the held twin of `sig` before it is ever queued. Returns whether one
+ * was actually held -- the caller falls back to buffer retraction when not. */
+function dropPendingTwin(sig) {
+  try {
+    if (!sig) return false
+    for (let i = state.pendingGlobals.length - 1; i >= 0; i--) {
+      const row = state.pendingGlobals[i]
+      if (row.sig !== sig) continue
+      state.pendingGlobals.splice(i, 1)
+      if (row.timer) clearTimeout(row.timer)
+      // Same refund as a retraction: a row nobody ever received must not spend
+      // the budget that exists to bound what the DOOR receives.
+      capDecrement('exception_global')
+      return true
+    }
+    return false
+  } catch { return false }
 }
 
 /** Pull the global twin of `sig` back out of the send buffer. Returns whether
@@ -510,12 +623,12 @@ function emitGlobalException(props, err) {
     props.stack_hash, props.route].join('|')
   if (state.seenExceptions.indexOf(sig) !== -1) return
   if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
-  const event = trackException(props, 'exception_global')
-  // Only `window.onerror` rows are retractable: a rejection never reaches a
-  // React boundary, so recording one could only ever produce a false match.
-  if (event && err != null && props.source === 'window.onerror') {
-    noteGlobalRow(crossPathSignature(err), event)
-  }
+  // Only `window.onerror` rows can have a boundary twin: a rejection never
+  // reaches a React boundary, so holding one could only ever delay a row for a
+  // match that cannot come.
+  const twinnable = err != null && props.source === 'window.onerror'
+  const event = trackException(props, 'exception_global', undefined, twinnable)
+  if (event && twinnable) holdGlobalRow(crossPathSignature(err), event)
 }
 
 /** `error` listener. Exported so a spec can drive it without synthesizing a
@@ -573,7 +686,12 @@ export function installGlobalErrorHandlers() {
 
 function beaconFlush() {
   try {
-    if (DISABLED || !state.buffer.length) return
+    if (DISABLED) return
+    // The tab is going away, so every held row has run out of window. This is
+    // the seam that makes holding safe: a crash recorded a moment before the
+    // page was torn down still leaves with the beacon.
+    releaseAllPending()
+    if (!state.buffer.length) return
     const events = state.buffer.splice(0, FLUSH_AT)
     if (navigator?.sendBeacon) {
       // sendBeacon cannot carry auth headers; the pre-auth allowlist covers

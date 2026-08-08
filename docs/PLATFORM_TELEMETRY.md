@@ -263,8 +263,8 @@ source+class+message+frame+route spend nothing. Counting occurrences instead wou
 two loud-and-benign classes this app invites (a ResizeObserver loop from the
 resizable panels, an animation callback throwing every frame from the viewer)
 consume all ten slots before a genuinely different crash got one. A global row
-that is later retracted (below) refunds its slot: a row nobody ever receives
-must not spend the budget that exists to bound what the door receives.
+that is later dropped or retracted (below) refunds its slot: a row nobody ever
+receives must not spend the budget that exists to bound what the door receives.
 
 Resource-load failures (a 404 `<img>`, a blocked `<script>`) dispatch an
 event with neither `error` nor `message` and are ignored: they are not JS
@@ -288,18 +288,37 @@ first-frame digest, route, deliberately WITHOUT `source`, the one label that
 must differ between them — and the boundary wins, because its row is the only
 one carrying `component_stack_hash`.
 
-The global twin is RETRACTED from the send buffer rather than deferred. The
-global handler has to stay synchronous: deferring its emit to wait for a
-boundary that may never come would lose the record whenever the page is torn
-down first. The one case retraction cannot cover is a global row already
-flushed to the wire when the boundary fires, which needs 20 buffered events or
-the 5 s timer inside a single microtask hop; then two rows land, which is what
-this did every time before. So a consumer counting crashes should still filter
-on `source` — that is what it is for.
+The global handler stays synchronous (it records the failure the moment it
+happens), but its row is HELD OUT of the send buffer for one second rather
+than queued into it. A held row is unreachable from any flush, so the boundary
+can still drop it however many events are queued behind it, and the count no
+longer depends on how busy the page was.
+
+Holding replaced RETRACTING an already-buffered row, which worked only while
+the row was still buffered. Queue 19 events first and the global row is the
+20th: the batch POSTs on the spot and the boundary a microtask later has
+nothing left to pull back, so two rows landed. The guarantee held on a quiet
+page and broke on a busy one. Retraction is kept as the fallback for a
+boundary that arrives after the hold expires but before the batch goes out;
+both paths are measured in `web/src/telemetry.globalErrors.test.js`.
+
+Nothing is traded away for the hold. The reason the original design refused to
+defer at all is that a deferred record is lost if the page is torn down first,
+so every exit seam (the `pagehide` beacon and the pre-navigation `flushNow`)
+releases held rows before it sends, and the hold expires on its own timer
+for the ordinary case where no boundary is ever coming (a three.js draw tick
+throwing where React never looks). One second outlasts the boundary's dynamic
+import and still sits inside the buffer's own 5 s latency, so no row is
+reported later than it would have been anyway.
+
+A consumer counting crashes should still filter on `source` — that is what it
+is for.
 
 This section previously claimed two rows in production and called that
 CONFIRMED. It was confirmed against a development build, which is not the same
-thing — recorded here because the mistake is the interesting part.
+thing — recorded here because the mistake is the interesting part. It then
+claimed retraction closed the gap, which was true only until a batch filled;
+that is recorded here for the same reason.
 
 ### Surfaces still uncovered
 
