@@ -136,7 +136,7 @@ C-3 (global error capture):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_hash, route, ua_class |
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_hash, route, ua_class |
 
 The boundary only sees what a component throws DURING RENDER, so a three.js
 draw tick, a `setTimeout` callback, and every unawaited promise failed with
@@ -258,67 +258,69 @@ LATER production crash on that tab — and the crash a user hits after already
 hitting several is the one most worth seeing. React bounds that emitter's
 volume; we do not have to.
 
-The global budget counts DISTINCT failures — repeats of the same
-source+class+message+frame+route spend nothing. Counting occurrences instead would let the
-two loud-and-benign classes this app invites (a ResizeObserver loop from the
-resizable panels, an animation callback throwing every frame from the viewer)
-consume all ten slots before a genuinely different crash got one. A global row
-that is later dropped or retracted (below) refunds its slot: a row nobody ever
-receives must not spend the budget that exists to bound what the door receives.
+The global budget counts OCCURRENCES, not distinct failures: there is no
+same-signature de-duplication and no slot refund. A loud repeating error
+class — a ResizeObserver loop from the resizable panels, an animation
+callback throwing every frame from the viewer — can consume the whole
+per-session budget before a genuinely different crash gets a slot. That is an
+accepted tradeoff, not an oversight: cross-emitter de-duplication was tried
+and proved unsolvable on the signals the client actually has (see "One row
+per React crash" below), and a same-signature suppression built on those same
+signals carries the identical risk — silently collapsing two genuinely
+distinct failures that happen to share a class, message, and frame into one
+dropped row.
 
 Resource-load failures (a 404 `<img>`, a blocked `<script>`) dispatch an
 event with neither `error` nor `message` and are ignored: they are not JS
 exceptions, and they arrive in bursts.
 
-### One row per React crash
+### One row per React crash, in production; two, in development
 
-A React crash records the boundary row (`component_stack_hash`, no `source`)
-and only that row.
+There is NO client-side de-duplication. The global handler
+(`window.onerror` / `unhandledrejection`) and the ErrorBoundary each call
+`trackException` independently, with no shared key and no coordination
+between them.
 
-It used to record two. React 18's DEVELOPMENT build re-throws a render error
-through a synthetic DOM event so DevTools can observe it, which reaches the
-global handler as well; its production build uses try/catch and need not. So
-the row count was a property of the BUILD, and anything counting crashes
-counted them differently depending on which build it was watching. Measured in
-`web/src/ErrorBoundary.test.jsx`: two rows without de-duplication, one with.
+In PRODUCTION, a React crash records exactly ONE row: the boundary's
+(`component_stack_hash`, no `source`). React's production build catches a
+render error with a plain try/catch, so the error never reaches
+`window.onerror` — there is nothing for the global handler to see.
 
-The two paths are now de-duplicated in `web/src/telemetry.js`. Both derive the
-same signature from the same Error object — message class, message digest,
-first-frame digest, route, deliberately WITHOUT `source`, the one label that
-must differ between them — and the boundary wins, because its row is the only
-one carrying `component_stack_hash`.
+In DEVELOPMENT, the same crash can record TWO rows. React 18's development
+build re-throws a render error through a synthetic DOM event so DevTools can
+observe it, which reaches the global handler as well. Measured in
+`web/src/ErrorBoundary.test.jsx`: a real component, a real render failure,
+both rows land. This is an accepted, documented artifact of dev-serving or
+running tests locally; it does not happen in production and does not affect
+production telemetry.
 
-The global handler stays synchronous (it records the failure the moment it
-happens), but its row is HELD OUT of the send buffer for one second rather
-than queued into it. A held row is unreachable from any flush, so the boundary
-can still drop it however many events are queued behind it, and the count no
-longer depends on how busy the page was.
+WHY THERE IS NO DE-DUPLICATION: three rounds of client-side timing
+(emit-then-retract, then hold-then-release-on-flush-or-pagehide) were tried
+and each made the row count depend on how busy the page was — a batch flush
+or a `pagehide` landing between the two emits committed one row before the
+other could suppress or release it, so the guarantee held on a quiet page and
+broke on a busy one.
 
-Holding replaced RETRACTING an already-buffered row, which worked only while
-the row was still buffered. Queue 19 events first and the global row is the
-20th: the batch POSTs on the spot and the boundary a microtask later has
-nothing left to pull back, so two rows landed. The guarantee held on a quiet
-page and broke on a busy one. Retraction is kept as the fallback for a
-boundary that arrives after the hold expires but before the batch goes out;
-both paths are measured in `web/src/telemetry.globalErrors.test.js`.
+A fourth attempt gave both emitters a shared occurrence key: a digest of the
+failure's signature (message class, message digest, first-frame digest,
+route), memoized on the Error object so two emitters reporting the SAME
+object would agree on it. It depended on an assumption that does not hold —
+that DEV React's re-throw hands `window.onerror` and `componentDidCatch` the
+SAME Error object instance. A probe against the real ErrorBoundary (a real
+component, a real render failure, no mocking) disproved it: DEV React calls
+the throwing render function more than once for one logical crash, so the two
+handlers routinely observe two DIFFERENT Error instances with identical
+message, class, and stack. With no reliable object identity, the key fell
+back to matching on signature alone within a coarse time window, which
+silently merged two genuinely DISTINCT same-signature crashes into one row —
+a worse defect than the duplicate it was built to remove, because it is data
+loss rather than a cosmetic double-count. Both failure modes were measured,
+not assumed: the timing breaks and the object-identity mismatch each have a
+reproducing case in the history of `web/src/telemetry.js`.
 
-Nothing is traded away for the hold. The reason the original design refused to
-defer at all is that a deferred record is lost if the page is torn down first,
-so every exit seam (the `pagehide` beacon and the pre-navigation `flushNow`)
-releases held rows before it sends, and the hold expires on its own timer
-for the ordinary case where no boundary is ever coming (a three.js draw tick
-throwing where React never looks). One second outlasts the boundary's dynamic
-import and still sits inside the buffer's own 5 s latency, so no row is
-reported later than it would have been anyway.
-
-A consumer counting crashes should still filter on `source` — that is what it
-is for.
-
-This section previously claimed two rows in production and called that
-CONFIRMED. It was confirmed against a development build, which is not the same
-thing — recorded here because the mistake is the interesting part. It then
-claimed retraction closed the gap, which was true only until a batch filled;
-that is recorded here for the same reason.
+So the client stopped trying. A consumer counting crashes should filter on
+`source`: its absence is the boundary's row, its presence is the global
+handler's, and in production there is only ever one row to find.
 
 ### Surfaces still uncovered
 
