@@ -76,14 +76,23 @@ _DEPLOY_HOST_EXACT = frozenset({
 })
 _DEPLOY_HOST_PATTERNS = (
     re.compile(r"(^|\.)vercel\.(com|app)$", re.I),
-    re.compile(r"^ecs\.[a-z0-9-]+\.amazonaws\.com$", re.I),          # AWS ECS
-    re.compile(r"^elasticbeanstalk\.[a-z0-9-]+\.amazonaws\.com$", re.I),
+    # AWS ECS / Elastic Beanstalk across FIPS (ecs-fips.*), dual-stack
+    # (ecs.<region>.api.aws), and partitions (.amazonaws.com / .amazonaws.com.cn).
+    re.compile(r"^ecs(-fips)?\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$", re.I),
+    re.compile(r"^ecs(-fips)?\.[a-z0-9-]+\.api\.aws$", re.I),
+    re.compile(r"^elasticbeanstalk(-fips)?\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$", re.I),
 )
 # Deploy CLIs: a spawn of one is a production deploy attempt, denied process-wide
-# (the tenant never spawns these; its toolchain is unrelated).
+# (the tenant never spawns these; its toolchain is unrelated). Matched by
+# basename with the executable extension stripped (_cli_basename), so aws.exe /
+# aws.cmd match "aws". A wrapper (npx/pnpm/...) is inspected one token deeper.
 _DEPLOY_CLIS = frozenset({
-    "vercel", "vercel.cmd", "aws", "aws.cmd", "gcloud", "kubectl",
-    "eb", "flyctl", "netlify", "wrangler",
+    "vercel", "aws", "gcloud", "kubectl", "eb", "flyctl", "netlify", "wrangler",
+    "sam", "cdk", "serverless", "sls", "terraform", "tofu", "pulumi", "helm",
+    "sst", "copilot", "eksctl", "kustomize", "skaffold",
+})
+_WRAPPERS = frozenset({
+    "npx", "pnpm", "yarn", "npm", "pipx", "uvx", "dotnet", "bunx", "bun",
 })
 
 
@@ -144,14 +153,49 @@ def _connect_host(address: object) -> str | None:
     return None  # AF_UNIX / local socket: cannot reach a remote deploy route.
 
 
-def _cli_basename(target: str) -> str:
-    # The audit arg may be a full command string ("vercel promote ...", as
-    # Windows joins argv) or a single executable/path. Take the first
-    # whitespace-delimited token, then its basename.
-    s = (target or "").strip().strip('"')
-    tokens = s.split()
-    first = tokens[0] if tokens else ""
-    return os.path.basename(first.lower())
+_EXE_EXT = (".exe", ".cmd", ".bat", ".ps1")
+
+
+def _basename_noext(tok: str) -> str:
+    b = os.path.basename((tok or "").strip().strip('"').lower())
+    for ext in _EXE_EXT:
+        if b.endswith(ext):
+            return b[: -len(ext)]
+    return b
+
+
+def _spawn_tokens(args: tuple) -> list[str]:
+    # The audit args differ per event: subprocess.Popen is
+    # (executable, argv, cwd, env) where argv is a list (POSIX) or a joined
+    # command string (Windows); os.system is (command,); os.exec is
+    # (path, argv, env). Prefer the argv sequence; fall back to splitting a
+    # command string. Return the argv tokens.
+    argv_list = None
+    cmd_str = None
+    for a in args:
+        if isinstance(a, bytes):
+            a = a.decode(errors="ignore")
+        if isinstance(a, (list, tuple)) and a and argv_list is None:
+            argv_list = [t.decode(errors="ignore") if isinstance(t, bytes) else str(t)
+                         for t in a]
+        elif isinstance(a, str) and a and cmd_str is None:
+            cmd_str = a
+    if argv_list:
+        return argv_list
+    return cmd_str.split() if cmd_str else []
+
+
+def _is_deploy_cli_spawn(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    names = [_basename_noext(t) for t in tokens]
+    if names[0] in _DEPLOY_CLIS:
+        return True
+    # A wrapper (npx cdk deploy, pnpm exec vercel ...) is inspected one or two
+    # tokens deeper. Not the whole argv, to avoid denying a benign argument.
+    if names[0] in _WRAPPERS:
+        return any(n in _DEPLOY_CLIS for n in names[1:3])
+    return False
 
 
 def _audit_hook(event: str, args: tuple) -> None:
@@ -160,26 +204,11 @@ def _audit_hook(event: str, args: tuple) -> None:
     armed = _operator_armed.get()
 
     if event in _SPAWN_EVENTS:
-        # The audit args differ per event (subprocess.Popen is
-        # (executable, argv, cwd, env); os.system is (command,); os.exec is
-        # (path, argv, env)). Collect every candidate executable string: the
-        # executable/path AND the first element of any argv sequence, so a
-        # `Popen(["vercel", ...])` (executable=None) is still seen.
-        candidates: list[str] = []
-
-        def _add(v: object) -> None:
-            if isinstance(v, bytes):
-                candidates.append(v.decode(errors="ignore"))
-            elif isinstance(v, str):
-                candidates.append(v)
-            elif isinstance(v, (list, tuple)) and v:
-                _add(v[0])
-
-        for a in args:
-            _add(a)
-        target = next((c for c in candidates if c), "") or event
-        # Layer 1: a deploy-CLI spawn is denied for the whole process, always.
-        if any(_cli_basename(c) in _DEPLOY_CLIS for c in candidates):
+        tokens = _spawn_tokens(args)
+        target = tokens[0] if tokens else event
+        # Layer 1: a deploy-CLI spawn is denied for the whole process, always
+        # (incl. wrapper forms like `npx cdk deploy`).
+        if _is_deploy_cli_spawn(tokens):
             raise OperatorEgressDenied(target, "deploy-cli-spawn")
         # Layer 2: an operator handler spawns NO process at all.
         if armed:
