@@ -105,7 +105,7 @@ def _app_endpoints(enabled: bool) -> list:
         "for r in app.app.routes:\n"
         "    path = getattr(r, 'path', '')\n"
         "    methods = getattr(r, 'methods', None) or set()\n"
-        "    for m in (set(methods) - {'HEAD', 'OPTIONS'}):\n"
+        "    for m in set(methods):\n"  # capture EVERY method, incl. HEAD/OPTIONS
         "        eps.append([m, path])\n"
         "    if not methods:\n"
         "        eps.append(['MOUNT', path])\n"
