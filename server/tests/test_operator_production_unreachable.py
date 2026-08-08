@@ -39,7 +39,10 @@ is what matters:
       owner, OUTSIDE every operator surface. operator.promote_production is
       absent from the catalog and the pinned action set, listed under
       not_mounted in the matrix, and production_promotion_mounted is false, so no
-      operator action or route performs promotion.
+      operator action or route performs promotion; and the canonical production
+      deploy workflow is MANUAL (workflow_dispatch, on main) gated on an exact
+      confirmation plus an INDEPENDENT approval comment (the separate owner),
+      while no operator module names or triggers it.
 
 The single honest residual, bounded not waived: trusted deployment-provided
 infrastructure (a registered minter/rotator/stager/adapter, or the isolating
@@ -337,11 +340,16 @@ def test_release_migration_check_constrains_target_to_non_production():
 
 _HARNESS_WM = REPO_ROOT / "harness" / "src" / "operatorWorker" / "workerManager.ts"
 _HARNESS_WORKER_TEST = REPO_ROOT / "harness" / "test" / "operatorWorker.test.ts"
-# A key crossing into a job env is a credential/deploy leak if its name contains
-# any of these. The allowlist must contain none of them.
-_BANNED_ENV_SUBSTR = ("AWS", "SECRET", "TOKEN", "DEPLOY", "BROKER", "OPS",
-                      "ANTHROPIC", "APS", "DISPATCH", "KEY", "CRED", "PASSWORD",
-                      "PASSWD", "SESSION", "NEON", "DATABASE_URL")
+# The EXACT set of keys allowed to cross from the manager env into a job. This is
+# an ALLOWLIST-FREEZE, not a credential-name denylist: a denylist misses a
+# credential under an unrecognised name (LEAF_LIVE_AUTH, PROD_AUTHZ), but pinning
+# the whole set means ANY new key, whatever its name, fails until a human adds it
+# here and confirms it is not a credential. Every pinned key is a benign OS path/
+# locale key that holds no secret.
+_EXPECTED_WORKER_ENV_ALLOWLIST = frozenset({
+    "PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP",
+    "PATHEXT", "WINDIR", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+})
 
 
 def _ts_string_array(src: str, name: str) -> list:
@@ -351,15 +359,19 @@ def _ts_string_array(src: str, name: str) -> list:
     return re.findall(r'"([^"]+)"', m.group(1))
 
 
-def test_o1_worker_env_allowlist_carries_no_credential_or_deploy_key():
-    # The disposable-worker env is scrubbed to an explicit allowlist; NO
-    # credential / secret / deploy / broker / cloud key is on it, so a
-    # production deploy credential cannot exist in a worker (contract section 6,
-    # obligation O1 worker half).
-    allow = _ts_string_array(_HARNESS_WM.read_text(encoding="utf-8"), "ENV_ALLOWLIST")
-    assert allow, "expected a non-empty ENV_ALLOWLIST"
-    leaks = [k for k in allow if any(b in k.upper() for b in _BANNED_ENV_SUBSTR)]
-    assert not leaks, leaks
+def test_o1_worker_env_allowlist_is_exactly_the_pinned_known_safe_set():
+    # The disposable-worker env is scrubbed to an explicit allowlist. Pin it
+    # EXACTLY: a production deploy credential cannot cross into a worker under ANY
+    # key name, because adding any key (recognised as a credential or not) fails
+    # this exact-set assertion and forces human review (contract section 6, O1
+    # worker half). This closes the denylist gap where LEAF_LIVE_AUTH / PROD_AUTHZ
+    # would have slipped past a banned-substring check.
+    allow = frozenset(_ts_string_array(
+        _HARNESS_WM.read_text(encoding="utf-8"), "ENV_ALLOWLIST"))
+    assert allow == _EXPECTED_WORKER_ENV_ALLOWLIST, {
+        "unexpected": sorted(allow - _EXPECTED_WORKER_ENV_ALLOWLIST),
+        "missing": sorted(_EXPECTED_WORKER_ENV_ALLOWLIST - allow),
+    }
 
 
 def test_o1_worker_network_always_denies_production_and_metadata():
@@ -441,3 +453,29 @@ def test_o5_production_promotion_needs_the_canonical_owner_not_the_operator():
     assert not any("promote" in a.lower() for a in _EXPECTED_ACTIONS)
     assert not any(("promote" in p.lower() or "production" in p.lower())
                    for _, p in _EXPECTED_ENDPOINTS)
+
+
+_PROD_DEPLOY_WF = REPO_ROOT / ".github" / "workflows" / "deploy-platform-web-production.yml"
+
+
+def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane():
+    # The other half of O5: production promotion goes through the CANONICAL
+    # deploy transaction, which requires a SEPARATE owner and is OUTSIDE every
+    # operator surface. The canonical workflow is MANUAL (not operator-triggered),
+    # pinned to main, and gated on an exact confirmation plus an INDEPENDENT
+    # approval comment in an open issue (the separate owner).
+    wf = _PROD_DEPLOY_WF.read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in wf                       # manual, not operator-triggered
+    assert '[ "$GITHUB_REF" = "refs/heads/main" ]' in wf    # canonical source
+    assert "Validate protected production request and operator" in wf
+    assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # separate independent approval
+    assert "Independent production approval required" in wf
+    # OUTSIDE every operator surface: no operator server module or router names
+    # or triggers the canonical production deploy workflow or its approval token.
+    op_sources = (list(SERVER_DIR.glob("operator_*.py"))
+                  + list((SERVER_DIR / "routers").glob("operator_*.py")))
+    assert op_sources, "expected operator source files to scan"
+    for src_path in op_sources:
+        s = src_path.read_text(encoding="utf-8")
+        assert "deploy-platform-web-production" not in s, src_path.name
+        assert "approve-vercel-production" not in s, src_path.name
