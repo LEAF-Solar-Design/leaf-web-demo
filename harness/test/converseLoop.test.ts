@@ -422,6 +422,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
       wait: true,
       waitTimeoutS: 15,
     });
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
 
     // The gate ran before the execution — in the app policy catalog's vocabulary.
     expect(gate.checks.some((c) => c.action === "run_read_tool" && c.decision === "allow")).toBe(true);
@@ -435,6 +436,34 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(ofType(events, "tool_result")[0]!.data).toMatchObject({ tool: "run_capability", ok: true });
     expect(ofType(events, "turn_usage")[0]!.data).toMatchObject({ cost_tokens: 170 });
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
+  });
+
+  it("omits a malformed read pin instead of coercing it into a drawing version", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        await input.tools.execute("run_capability", {
+          tool: "count-by-layer",
+          params: {},
+          dwg: "rooftop_demo",
+          drawing_version: "3",
+        });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "malformed-pin-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    await sendText(loop, s, "Count layers");
+
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "count-by-layer",
+      wait: true,
+    });
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
   });
 
   it("a local write tool dry run uses the read rung and creates no write proposal", async () => {
@@ -738,6 +767,74 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
 });
 
 describe("ConverseLoop — live-APS split turns (submit_live_solve, R4)", () => {
+  it("forwards the approved drawing head to a live read while keeping write-only generation pins out", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const read = appRun.catalog.find((entry) => entry.name === "count-by-layer")!;
+    appRun.catalog = [{
+      ...read,
+      aps_live: true,
+      tool_manifest_sha256: `sha256:${"5".repeat(64)}`,
+      catalog_commit: "c".repeat(40),
+      effective_catalog_digest: "d".repeat(64),
+    }];
+    appRun.drawingHead = 7;
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    await sendText(loop, s, "RUN:count-by-layer");
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(gate.checks.map((check) => check.action)).toEqual(["submit_live_solve"]);
+
+    const firstEvents = await store.eventsAfter(s.session_id, 0);
+    const cid = String(ofType(firstEvents, "proposed_run")[0]!.data.confirmation_id);
+    const firstTerminalSeq = firstEvents[firstEvents.length - 1]!.seq;
+    gate.grant(cid);
+    const { done } = await loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: s.tenant_id,
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    });
+    await done;
+
+    expect(gate.checks[1]).toMatchObject({
+      action: "submit_live_solve",
+      decision: "allow",
+      args: {
+        tool: "count-by-layer",
+        drawing_version: 7,
+        expected_drawing_head: 7,
+        confirmation_id: cid,
+      },
+    });
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "count-by-layer",
+      dwg: "rooftop_demo",
+      drawingVersion: 7,
+      wait: true,
+      waitTimeoutS: 15,
+    });
+    expect(appRun.submitCalls[0]).not.toHaveProperty("expectedDrawingHead");
+    expect(appRun.submitCalls[0]).not.toHaveProperty("catalogCommit");
+    expect(appRun.submitCalls[0]).not.toHaveProperty("effectiveCatalogDigest");
+    expect(appRun.submitCalls[0]).not.toHaveProperty("toolManifestSha256");
+
+    const resumed = await store.eventsAfter(s.session_id, firstTerminalSeq);
+    const lifecycle = resumed.filter((event) =>
+      event.type === "job_linked" ||
+      event.type === "tool_result" ||
+      event.type === "turn_complete"
+    );
+    expect(lifecycle.map((event) => event.type)).toEqual([
+      "job_linked",
+      "tool_result",
+      "turn_complete",
+    ]);
+    expect(lifecycle[0]!.data).toMatchObject({ tool: "count-by-layer" });
+    expect(lifecycle[1]!.data).toMatchObject({ tool: "run_capability", ok: true });
+    expect(lifecycle[2]!.data).toEqual({ stop_reason: "end_turn" });
+  });
+
   it("run_capability on an aps_live tool consults submit_live_solve — never a run_* rung — and dispatches only after approval", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
