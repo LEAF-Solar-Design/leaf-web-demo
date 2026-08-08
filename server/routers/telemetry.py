@@ -50,7 +50,19 @@ MAX_LABEL_VALUE_LEN = 512
 # exists, plus auth.completed, whose failure branch NEVER has a bearer (that
 # invisible loss is the event's whole point) and whose success branch races a
 # reload the beacon cannot authenticate. Everything else requires a principal.
-PREAUTH_EVENTS = frozenset({"gate.choice", "site.demo_viewed", "tour.started", "auth.completed"})
+#
+# client.exception joins them for the same reason auth.completed did: a JS
+# exception on a marketing or sign-in page happens BEFORE any principal
+# exists, so requiring one drops exactly the failures nobody else can see (the
+# server answers a healthy 200 for a page that is dead in the browser). The
+# exposure is the same shape gate.choice already carries -- an anonymous
+# caller can post these -- and it is bounded by the same per-IP token bucket
+# below (burst 30, 0.5/s), the 50-events-per-body cap, the 512-char label cap,
+# and a client-side per-session cap in web/src/telemetry.js.
+PREAUTH_EVENTS = frozenset({
+    "gate.choice", "site.demo_viewed", "tour.started", "auth.completed",
+    "client.exception",
+})
 
 # Per-IP token bucket for the pre-auth lane (the guest-quota pattern, in
 # miniature): burst 30, refill 30 per minute, in-process only. Telemetry is

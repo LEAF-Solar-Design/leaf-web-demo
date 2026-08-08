@@ -23,12 +23,16 @@ const FLUSH_MS = 5000
 const BUFFER_MAX = 200          // absolute cap; beyond it the oldest drop
 const ERROR_CAP = 20            // error.shown per session (design cap)
 const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
+const EXCEPTION_CAP = 10        // client.exception per session (flood control)
+const MESSAGE_MAX = 200         // sanitized free text; the door caps at 512
+const STACK_HEAD_MAX = 200
 
 const state = {
   buffer: [],
   timer: null,
   sessionId: null,
   tourStep: null,
+  globalsInstalled: false,
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -177,9 +181,139 @@ export function trackStreamDown(reconnectsN) {
   } catch { /* no-op */ }
 }
 
-/** Crash capture (ErrorBoundary). */
+/** Crash capture — the ErrorBoundary AND the global handlers below. Capped
+ * per session because a render loop or a retry loop can throw thousands of
+ * times per minute, and an uncapped emitter would spend the ingest door's
+ * whole token bucket on one broken page. */
 export function trackException(props = {}) {
-  try { track('client.exception', props, 'exception') } catch { /* no-op */ }
+  try {
+    if (capCount('exception') >= EXCEPTION_CAP) return
+    capIncrement('exception')
+    track('client.exception', props, 'exception')
+  } catch { /* no-op */ }
+}
+
+// --- global error capture (outside React) --------------------------------
+// The ErrorBoundary only sees what a component throws DURING RENDER. A
+// three.js draw tick, a setTimeout callback, an event handler, and every
+// unawaited promise fail somewhere React never looks, so those failures were
+// invisible: server EMF showed a healthy 200 while the page was dead.
+//
+// These emit the EXISTING `client.exception` event, distinguished by a
+// `source` label — a new event name would need its own allowlist entry, its
+// own dashboard row, and its own docs for no added meaning.
+
+// Free text from an exception is attacker- and user-influenced: a failing
+// request URL carries query tokens, a validation message quotes what the user
+// typed. Redact the known shapes, then cap. This is the ONE place raw-ish text
+// enters the rail; every other client label is an enum or a number.
+const REDACTIONS = [
+  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '<email>'],   // addresses
+  [/[A-Za-z0-9_-]{24,}/g, '<token>'],           // JWT/bearer/opaque-id blobs
+  [/\d{6,}/g, '<n>'],                           // long digit runs
+]
+
+function sanitize(text, max) {
+  try {
+    // A URL's query and fragment are where secrets ride; keep the path.
+    let s = String(text ?? '').replace(/(https?:\/\/[^\s?#]*)[?#]\S*/g, '$1')
+    for (const [re, sub] of REDACTIONS) s = s.replace(re, sub)
+    return s.slice(0, max)
+  } catch { return '' }
+}
+
+function messageClass(err, fallback) {
+  // `err.name` is a getter on a foreign object here: it can throw.
+  try {
+    const name = err && err.name
+    if (typeof name === 'string' && name) return name.slice(0, 64)
+  } catch { /* fall through */ }
+  return fallback
+}
+
+function stackHead(err) {
+  try {
+    // The FIRST frame is the throw site. The rest is call history that
+    // multiplies the payload without adding a distinguishing signal.
+    const lines = String((err && err.stack) || '').split('\n')
+    const frame = lines.find((l) => /\bat\b|@/.test(l)) || ''
+    return sanitize(frame.trim(), STACK_HEAD_MAX)
+  } catch { return '' }
+}
+
+function routeLabel() {
+  // Path only: query and hash carry drawing ids, invite tokens, typed text.
+  try { return String(location?.pathname || '').slice(0, 128) } catch { return '' }
+}
+
+function uaClass() {
+  // A CLASS, never the raw user-agent string (which is a fingerprint).
+  try {
+    const ua = String(navigator?.userAgent || '')
+    const family = /Edg\//.test(ua) ? 'edge'
+      : /OPR\//.test(ua) ? 'opera'
+        : /Firefox\//.test(ua) ? 'firefox'
+          : /Chrome\//.test(ua) ? 'chrome'
+            : /Safari\//.test(ua) ? 'safari'
+              : 'other'
+    return `${family}/${/Mobi|Android|iPhone|iPad/.test(ua) ? 'mobile' : 'desktop'}`
+  } catch { return 'unknown' }
+}
+
+/** `error` listener. Exported so a spec can drive it without synthesizing a
+ * browser event jsdom does not fully implement. */
+export function handleErrorEvent(ev) {
+  try {
+    const err = ev && ev.error
+    // Resource-load failures (a 404 <img>, a blocked script tag) dispatch a
+    // plain Event with neither `error` nor `message`. They are not JS
+    // exceptions, they arrive in bursts, and they would spend the cap.
+    if (!err && !(ev && ev.message)) return
+    trackException({
+      source: 'window.onerror',
+      message_class: messageClass(err, 'Error'),
+      message: sanitize((err && err.message) || (ev && ev.message), MESSAGE_MAX),
+      stack_head: stackHead(err),
+      route: routeLabel(),
+      ua_class: uaClass(),
+    })
+  } catch { /* telemetry never breaks the product */ }
+}
+
+/** `unhandledrejection` listener. */
+export function handleRejectionEvent(ev) {
+  try {
+    const reason = ev && ev.reason
+    // A rejection value need not be an Error: `Promise.reject('nope')` and
+    // `reject({code: 4})` are both legal and both worth seeing.
+    const fallback = reason instanceof Error ? 'Error' : 'UnhandledRejection'
+    const text = reason && typeof reason === 'object' && 'message' in reason
+      ? reason.message
+      : reason
+    trackException({
+      source: 'unhandledrejection',
+      message_class: messageClass(reason, fallback),
+      message: sanitize(text, MESSAGE_MAX),
+      stack_head: stackHead(reason),
+      route: routeLabel(),
+      ua_class: uaClass(),
+    })
+  } catch { /* telemetry never breaks the product */ }
+}
+
+/** Idempotent; returns whether it installed. Uses addEventListener rather
+ * than `window.onerror = fn` for the reason the pagehide listener does:
+ * assignment clobbers whatever else the page installed, and is itself
+ * clobbered by the next script that assigns. */
+export function installGlobalErrorHandlers() {
+  try {
+    if (DISABLED || state.globalsInstalled) return false
+    if (typeof addEventListener !== 'function') return false
+    addEventListener('error', handleErrorEvent)
+    addEventListener('unhandledrejection', handleRejectionEvent)
+    state.globalsInstalled = true
+    return true
+  } catch { return false }
 }
 
 function beaconFlush() {
@@ -199,5 +333,6 @@ function beaconFlush() {
 try {
   if (!DISABLED && typeof addEventListener === 'function') {
     addEventListener('pagehide', beaconFlush)
+    installGlobalErrorHandlers()
   }
 } catch { /* no-op */ }

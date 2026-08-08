@@ -601,8 +601,10 @@ def build_suites() -> List[Suite]:
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
         # #426 round-2 blocker).
+        # 20 -> 21: the anonymous client.exception row (a JS failure on a page
+        # that has no principal yet) added exactly one test.
         Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
-              SERVER, _py_pytest("tests/test_telemetry.py"), 20),
+              SERVER, _py_pytest("tests/test_telemetry.py"), 21),
         Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
               SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
@@ -992,8 +994,13 @@ def build_suites() -> List[Suite]:
         # review found the 14 card tests executing nowhere in CI, so the
         # operator-facing decision surface -- both controls, untrusted text,
         # style sinks -- was unverified on every PR.
+        # 35 -> 43: an interim bump of exactly what the global-error-capture
+        # spec file added (8), the same convention `platform` used. It is
+        # still BELOW the real executed count (62 locally, 0 skipped), so this
+        # suite keeps reporting executed-count drift; a full re-baseline to a
+        # measured CI count is its own change, not a rider on this one.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 35),
+              [_npm(), "run", "test:unit"], 43),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

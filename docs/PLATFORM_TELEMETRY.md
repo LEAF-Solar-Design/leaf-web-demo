@@ -130,6 +130,33 @@ C-1 (merged #427):
 | `agent.stream_down` | `converse.onStreamDown`; cap 10/session | reconnects_n |
 | `client.exception` | ErrorBoundary | message_class, component_stack_hash |
 
+C-3 (global error capture):
+
+| Event | Choke point | Labels |
+|---|---|---|
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); cap 10/session, shared with the boundary's emissions | source (window.onerror/unhandledrejection), message_class, message, stack_head, route, ua_class |
+
+The boundary only sees what a component throws DURING RENDER, so a three.js
+draw tick, a `setTimeout` callback, and every unawaited promise failed with
+nothing recorded: the server answered a healthy 200 for a page that was dead
+in the browser. These handlers close that gap under the SAME event name,
+distinguished by `source` — a second event name would need its own allowlist
+entry, dashboard row, and docs for no added meaning.
+
+`message` and `stack_head` are the one place raw-ish text enters the rail
+(every other client label is an enum or a number), so they are redacted then
+capped at 200 client-side, before the door's 512 cap: URL query strings and
+fragments are dropped, email addresses become `<email>`, runs of 24+ token
+characters become `<token>`, runs of 6+ digits become `<n>`. `stack_head` is
+the FIRST frame only, `route` is `location.pathname` with no query or hash,
+and `ua_class` is a browser family plus mobile/desktop, never the raw
+user-agent string. The release marker is the sink's server-stamped
+`app_version`; the client does not send one.
+
+Resource-load failures (a 404 `<img>`, a blocked `<script>`) dispatch an
+event with neither `error` nor `message` and are ignored: they are not JS
+exceptions, they arrive in bursts, and they would spend the session cap.
+
 C-2 (this change):
 
 | Event | Choke point | Labels |
@@ -148,9 +175,15 @@ C-2 (this change):
 | `drawing.version_navigated` | undo/redo success, History open, preview click | action (undo/redo/history/preview) |
 
 Only the pre-auth allowlist (`gate.choice`, `site.demo_viewed`,
-`tour.started`, `auth.completed`) is accepted anonymously at the ingest
-door; every other client event identifies like any API call (stub tenant
-off-auth, verified identity on).
+`tour.started`, `auth.completed`, `client.exception`) is accepted
+anonymously at the ingest door; every other client event identifies like any
+API call (stub tenant off-auth, verified identity on). `client.exception` is
+on that list for the reason `auth.completed` is: it fires on marketing and
+sign-in pages where no principal exists yet, so requiring one would drop
+exactly the failures nothing else can see. The anonymous exposure it adds is
+the shape `gate.choice` already carries, bounded by the same per-IP token
+bucket (burst 30, 0.5/s), the 50-events-per-body cap, the 512-char label
+cap, and the client's own 10-per-session cap.
 Labels are additive within schema_version 1, so early rows stay queryable.
 Fields named by the design but not yet stamped (e.g. `user_email`,
 `aps_live`, `wrote_version`) arrive additively with later waves.

@@ -260,8 +260,9 @@ def test_ingest_caps_events_per_body(monkeypatch):
 
 def test_ingest_anonymous_allowlist_only(monkeypatch):
     """With auth live and no credentials at all, exactly the pre-auth
-    allowlist (the funnel trio + auth.completed, whose failure branch never
-    has a bearer) is accepted; everything else drops silently (still 202)."""
+    allowlist (the funnel trio, auth.completed whose failure branch never has
+    a bearer, and client.exception which fires on pages that have no principal
+    yet) is accepted; everything else drops silently (still 202)."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     c = _client()
@@ -269,13 +270,50 @@ def test_ingest_anonymous_allowlist_only(monkeypatch):
         {"event_name": "gate.choice", "labels": {"choice": "demo"}},
         {"event_name": "tour.started"},
         {"event_name": "auth.completed", "labels": {"ok": "false"}},
+        {"event_name": "client.exception", "event_type": "exception"},
         {"event_name": "prompt.submitted"},   # NOT allowlisted pre-auth
     ]})
     assert resp.status_code == 202
-    assert resp.json()["accepted"] == 3
+    assert resp.json()["accepted"] == 4
     rows = list(telemetry_sink._queue)
     assert all(r["tenant_id"] == "anon" for r in rows)
-    assert {r["event_name"] for r in rows} == {"gate.choice", "tour.started", "auth.completed"}
+    assert {r["event_name"] for r in rows} == {
+        "gate.choice", "tour.started", "auth.completed", "client.exception"}
+
+
+def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
+    """A JS failure on a page with no principal — a marketing page, the
+    sign-in gate, anything before a session exists — is exactly the failure
+    nothing else can see: the server answered 200 and the browser died. It
+    lands as event_type `exception` with the client's labels intact and
+    server-stamped anonymous identity."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "source": "unhandledrejection",
+            "message_class": "TypeError",
+            "message": "Cannot read properties of null",
+            "stack_head": "at renderTick (/assets/index-abc.js:1:200)",
+            "route": "/",
+            "ua_class": "chrome/desktop",
+        },
+    }]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    (row,) = list(telemetry_sink._queue)
+    assert row["event_name"] == "client.exception"
+    assert row["event_type"] == "exception"
+    assert row["tenant_id"] == "anon"
+    assert row["tenant_kind"] == "anon"
+    labels = json.loads(row["labels"])
+    assert labels["source"] == "unhandledrejection"
+    assert labels["message_class"] == "TypeError"
+    assert labels["route"] == "/"
+    assert labels["ingest"] == "client"
 
 
 def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):
