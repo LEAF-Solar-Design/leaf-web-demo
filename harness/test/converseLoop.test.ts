@@ -466,6 +466,34 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
   });
 
+  it("omits a numeric drawing version from an ordinary read tool", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        await input.tools.execute("run_capability", {
+          tool: "count-by-layer",
+          params: {},
+          dwg: "rooftop_demo",
+          drawing_version: 3,
+        });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "ordinary-read-pin-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    await sendText(loop, s, "Count layers");
+
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      tool: "count-by-layer",
+      wait: true,
+    });
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
+  });
+
   it("a local write tool dry run uses the read rung and creates no write proposal", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
