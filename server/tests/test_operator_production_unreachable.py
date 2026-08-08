@@ -20,11 +20,16 @@ is what matters:
   O3  No generic handler or executor can CALL production deploy. Behavior-
       grounded: every operator surface that takes an environment/target/
       destination REFUSES production, fail-closed (broker, allowlist, stager,
-      the three write runbooks); and the generic executor (the disposable
-      worker) cannot reach production because its env carries no deploy
-      credential (O1) and production hosts + cloud metadata are ALWAYS denied in
-      the network policy (harness DENIED_NETWORK_ALWAYS, proven by the harness
-      test).
+      the three write runbooks). The generic executor (the disposable worker)
+      cannot reach production for two independent reasons, both proven: its env
+      carries no deploy credential (O1, canary-scrubbed), so it cannot
+      authenticate a production deploy; and broad command execution is FAIL-
+      CLOSED on isolation - the manager REFUSES a non-isolating substrate
+      (`substrate_not_isolating`), and a real isolating substrate (microVM/
+      container) that enforces OS-level network isolation is a documented
+      prerequisite, so production hosts + cloud metadata are denied by the jail,
+      not by advisory strings. The DENIED_NETWORK_ALWAYS list is the policy
+      handed to that jail; the enforcement is the isolation requirement.
   O4  Staging yields an IMMUTABLE, RECEIPTED release candidate. The candidate is
       keyed by (source_sha, target) PRIMARY KEY (one attempt per candidate) and
       CHECK-constrained to non-production; the stage-release runbook returns a
@@ -36,11 +41,13 @@ is what matters:
       not_mounted in the matrix, and production_promotion_mounted is false, so no
       operator action or route performs promotion.
 
-The single honest residual, bounded not waived: a deployment-registered callback
-(minter/rotator/stager/adapter) is trusted server-side code, so this gate cannot
-prove its OWN body never reaches production - the same trust boundary as any
-registered callback. That residual is bounded because the plane never REQUESTS a
-production target (O3 refusals) and the callbacks themselves refuse production.
+The single honest residual, bounded not waived: trusted deployment-provided
+infrastructure (a registered minter/rotator/stager/adapter, or the isolating
+worker substrate) is trusted server-side code, so this gate cannot prove its OWN
+body never reaches production - the same trust boundary throughout. That residual
+is bounded because the plane never REQUESTS a production target (O3 refusals),
+the callbacks refuse production, the worker carries no deploy credential, and a
+non-isolating substrate is refused fail-closed so a real jail is a prerequisite.
 """
 from __future__ import annotations
 
@@ -364,17 +371,33 @@ def test_o1_worker_network_always_denies_production_and_metadata():
     assert "169.254.169.254" in deny     # cloud metadata
 
 
+def test_o3_worker_execution_is_fail_closed_on_isolation():
+    # The REAL enforcement of worker network isolation is NOT the advisory
+    # DENIED_NETWORK_ALWAYS strings: it is that broad command execution requires
+    # an ISOLATING substrate. The manager refuses a non-isolating one, and the
+    # only shipped substrate is explicitly non-isolating (test-only), so an
+    # actual production worker must run on a real jail that enforces the deny.
+    wm = _HARNESS_WM.read_text(encoding="utf-8")
+    assert 'throw new Error("substrate_not_isolating")' in wm      # fail-closed refusal
+    assert "if (!this.substrate.isolating && !this.allowNonIsolated)" in wm
+    assert "readonly isolating = false" in wm                      # LocalProcessSubstrate is not a jail
+    assert "is a prerequisite before" in wm                        # a real jail is required for O2/O3
+
+
 def test_o1_o3_o4_worker_isolation_is_behaviorally_gated_in_the_harness():
-    # The BEHAVIORAL proofs (a planted AWS/secret canary is absent from the built
-    # job env; production hosts denied; artifacts carry sha256 receipts) live in
-    # the harness vitest gate that CI runs. Assert the gate exists and covers
-    # each obligation, so it cannot silently disappear or be weakened.
+    # The BEHAVIORAL proofs live in the harness vitest gate that CI runs. Assert
+    # the gate exists and covers each obligation, so it cannot silently
+    # disappear or be weakened.
     t = _HARNESS_WORKER_TEST.read_text(encoding="utf-8")
     # O1 worker: credential/secret/deploy/cloud keys scrubbed, canaries absent.
     assert "no credential, secret, deploy, or cloud key crosses into a job" in t
     assert "AWS_ACCESS_KEY_ID" in t and "canary-aws" in t
     assert 'expect(JSON.stringify(env)).not.toContain("canary-aws")' in t
-    # O3 executor: always-denied network cannot be re-allowlisted.
+    # O3 executor: fail-closed on isolation (the real network-deny enforcement).
+    assert "submit refuses a non-isolating substrate without the explicit opt-in" in t
+    assert 'rejects.toThrow("substrate_not_isolating")' in t
+    assert "the local substrate is marked non-isolating" in t
+    # O3 executor: always-denied network cannot be re-allowlisted (policy).
     assert "always-denied network hosts cannot be allowlisted back in" in t
     assert "api.leafdesign.ai" in t
     # O4 receipt: worker artifacts carry sha256 receipts.
