@@ -118,6 +118,9 @@ _REQUIRED_COLUMNS = {
     "operator_security_audit": {
         "audit_id", "subject", "action", "decision", "reason",
     },
+    "operator_credential_rotations": {
+        "handle", "revision", "rotated_at", "updated_at",
+    },
 }
 
 # Each selector adds the tables its PostgreSQL implementation reads or writes.
