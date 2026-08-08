@@ -1028,6 +1028,7 @@ export class ConverseLoop {
         }
         const capability = await ctx.capabilityOf(target);
         const drawingVersion =
+          (catalogEntry?.aps_live === true || capability === "drawing.write") &&
           typeof args.drawing_version === "number" &&
           Number.isInteger(args.drawing_version) &&
           args.drawing_version >= 0
