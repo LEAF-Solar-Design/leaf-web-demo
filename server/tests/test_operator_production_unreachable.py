@@ -37,6 +37,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -90,11 +91,13 @@ _EXPECTED_ENDPOINTS = frozenset({
 })
 
 
-def _app_endpoints(enabled: bool) -> set:
+def _app_endpoints(enabled: bool) -> list:
     """ALL (method, path) endpoints of the REAL app, imported fresh in a
-    subprocess with the operator flag off/on. Inspecting the RUNTIME routes (not
-    app.py's source) is what makes this sound: a route mounted by ANY import
-    style, with ANY method, at ANY path prefix, appears here."""
+    subprocess with the operator flag off/on, WITH MULTIPLICITY (a list, not a
+    set). Inspecting the RUNTIME routes (not app.py's source) is what makes this
+    sound: a route mounted by ANY import style, with ANY method, at ANY path
+    prefix appears here; and keeping duplicates is what catches a SHADOWING
+    route that registers a second handler on an already-pinned (method, path)."""
     code = (
         "import json\n"
         "import app\n"
@@ -114,7 +117,7 @@ def _app_endpoints(enabled: bool) -> set:
                          capture_output=True, text=True, env=env, check=True)
     line = next(ln for ln in out.stdout.splitlines()
                 if ln.startswith("EPS_JSON="))
-    return {tuple(e) for e in json.loads(line[len("EPS_JSON="):])}
+    return [tuple(e) for e in json.loads(line[len("EPS_JSON="):])]
 
 
 # --- 7.3 the action set is exactly the pinned set; promotion is not in it ----
@@ -155,17 +158,27 @@ def test_default_app_mounts_no_operator_route():
 
 
 def test_flag_on_adds_exactly_the_pinned_operator_endpoints():
-    off = _app_endpoints(enabled=False)
-    on = _app_endpoints(enabled=True)
-    added = on - off  # exactly what the real operator mount contributes
-    assert added == set(_EXPECTED_ENDPOINTS), {
-        "unexpected": sorted(added - set(_EXPECTED_ENDPOINTS)),
-        "missing": sorted(set(_EXPECTED_ENDPOINTS) - added),
+    # Compare with MULTIPLICITY: the operator mount's contribution as a multiset.
+    added = Counter(_app_endpoints(enabled=True)) - Counter(_app_endpoints(enabled=False))
+
+    # (a) No endpoint the mount added is registered MORE THAN ONCE. A shadowing
+    #     router that registers a second handler on an already-pinned
+    #     (method, path) would be dispatched first by FastAPI; the duplicate is
+    #     invisible to a set but shows here as count > 1.
+    duplicates = {ep: c for ep, c in added.items() if c > 1}
+    assert not duplicates, duplicates
+
+    # (b) Every endpoint the mount added is operator-namespaced (nothing escaped
+    #     to /internal/... or any other prefix).
+    escaped = sorted(ep for ep in added if not ep[1].startswith("/api/operator/"))
+    assert not escaped, escaped
+
+    # (c) The DISTINCT added endpoints equal the pinned set exactly: a new or
+    #     aliased route, or a new method on an existing path, fails here.
+    assert set(added) == set(_EXPECTED_ENDPOINTS), {
+        "unexpected": sorted(set(added) - set(_EXPECTED_ENDPOINTS)),
+        "missing": sorted(set(_EXPECTED_ENDPOINTS) - set(added)),
     }
-    # Every endpoint the mount added is operator-namespaced: one escaped to
-    # /internal/... would be in `added`, absent from the pin, and already fail
-    # above; this states the invariant directly.
-    assert all(p.startswith("/api/operator/") for _, p in added)
 
 
 # --- 7.1 the deploy/credential surfaces refuse production (behavioral) -------
