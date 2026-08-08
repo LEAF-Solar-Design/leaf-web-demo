@@ -8,6 +8,9 @@
     "cost_tokens_per_session_day": 10000000,
     "cost_tokens_per_principal_day": 20000000
   },
+  "spend_limits": {
+    "usd_principal_day_cents": 50000
+  },
   "actions": {
     "operator.read_fleet_state": {
       "class": "O1", "rung": 1, "policy": "auto",
@@ -139,6 +142,22 @@
       "args_schema": { "type": "object",
         "properties": { "credential_handle": { "type": "string" } },
         "required": ["credential_handle"], "additionalProperties": false }
+    },
+    "operator.external_write": {
+      "class": "O5", "rung": 5, "policy": "always-confirm",
+      "required": "operator", "rate": "high", "timeout_s": 600,
+      "spend": "usd", "max_spend_cents": 10000,
+      "enabled": false,
+      "handler": "external_write",
+      "args_schema": { "type": "object",
+        "properties": {
+          "destination": { "type": "string" },
+          "token_handle": { "type": "string" },
+          "adapter": { "type": "string" },
+          "payload": { "type": "object" }
+        },
+        "required": ["destination", "token_handle", "adapter"],
+        "additionalProperties": false }
     },
     "operator.stage_release_candidate": {
       "class": "O6", "rung": 6, "policy": "always-confirm",

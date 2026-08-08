@@ -3,7 +3,7 @@
 Discipline mirrors the tenant parser: unknown fields are load errors, never
 warnings; security booleans refuse coercion; a missing or unreadable file is
 fail-safe deny (empty catalog); overlays may only tighten. policy_revision
-is the SHA-256 of the canonical JSON — it binds into every authority and
+is the SHA-256 of the canonical JSON, and it binds into every authority and
 drift denies redemption.
 """
 from __future__ import annotations
@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 _ALLOWED_TOP = {"_note", "version", "authority_ttl_s",
-                "rate_limits_per_hour", "budgets", "actions"}
+                "rate_limits_per_hour", "budgets", "spend_limits", "actions"}
 _ALLOWED_ACTION = {"class", "rung", "policy", "required", "rate",
-                   "timeout_s", "handler", "args_schema", "enabled"}
+                   "timeout_s", "handler", "args_schema", "enabled",
+                   "spend", "max_spend_cents"}
 _POLICIES = {"auto", "confirm-once", "always-confirm"}
 _CLASSES = {"O1", "O2", "O3", "O4", "O5", "O6"}
+_SPEND_TYPES = {"none", "cost_tokens", "usd"}
 
 
 class OperatorPolicyError(RuntimeError):
@@ -34,7 +36,7 @@ def _policy_path() -> Path:
 
 def load_catalog() -> Optional[Dict[str, Any]]:
     """Parse and validate. None = file absent/unreadable (deny everything).
-    A PRESENT but INVALID file raises — a typo must fail loudly, not grant.
+    A PRESENT but INVALID file raises: a typo must fail loudly, not grant.
     """
     path = _policy_path()
     try:
@@ -71,6 +73,14 @@ def load_catalog() -> Optional[Dict[str, Any]]:
             raise OperatorPolicyError(f"action {name}: handler required")
         if not isinstance(entry.get("args_schema"), dict):
             raise OperatorPolicyError(f"action {name}: args_schema required")
+        if "spend" in entry and entry["spend"] not in _SPEND_TYPES:
+            raise OperatorPolicyError(f"action {name}: bad spend type")
+        if "max_spend_cents" in entry and (
+                not isinstance(entry["max_spend_cents"], int)
+                or isinstance(entry["max_spend_cents"], bool)
+                or entry["max_spend_cents"] < 0):
+            raise OperatorPolicyError(
+                f"action {name}: max_spend_cents must be a non-negative int")
         for route_word in ("production", "deploy-platform"):
             if route_word in json.dumps(entry).lower() and name != \
                     "operator.stage_release_candidate":

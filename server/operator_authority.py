@@ -3,7 +3,7 @@
 Mint: admission (kill switches -> catalog -> args schema -> principal
 revalidation -> rate/budget reservation) + authority insert + security-audit
 row in ONE PostgreSQL transaction. Redeem: a conditional single-row consume
-inside the handler transaction — concurrent redemptions admit exactly one.
+inside the handler transaction; concurrent redemptions admit exactly one.
 Every deny path writes a distinct audit reason. Database or audit
 unavailability denies (the exception propagates to the caller's 503).
 """
@@ -78,6 +78,50 @@ def _reserve_rate(cur, subject: str, action: str, category: str,
     return cur.fetchone() is not None
 
 
+def _reserve_spend(cur, subject: str, action: str, entry: Dict[str, Any],
+                   catalog: Dict[str, Any]) -> Optional[str]:
+    """Reserve this action's bounded spend against a per-principal-day ceiling,
+    in the SAME transaction as the mint (contract/OPERATOR.md section 5:
+    admission includes spend reservation; invariant 6: it commits with the
+    authority insert). Returns None on success, or a distinct deny reason.
+
+    Only USD spend is reserved here. `none` reserves nothing. `cost_tokens` is
+    the live worker lane, metered by the worker/broker rather than this mint
+    path, and is intentionally left unchanged (touching it would regress the
+    enabled O2 action); a NEW unknown spend type fails closed. The reservation
+    is coarse and conservative: the per-action `max_spend_cents` is reserved at
+    mint and NOT refunded if redemption is later denied, exactly as the rate
+    counter is consumed at mint. A missing/zero ceiling or per-action cap denies
+    (fail-closed), so an operator cannot enable a usd action without also
+    configuring its spend limits."""
+    spend_type = entry.get("spend") or "none"
+    if spend_type == "none":
+        return None
+    if spend_type != "usd":
+        return "spend_type_unsupported"
+    amount = int(entry.get("max_spend_cents", 0))
+    ceiling = int(catalog.get("spend_limits", {}).get(
+        "usd_principal_day_cents", 0))
+    if amount <= 0 or ceiling <= 0 or amount > ceiling:
+        return "spend_unconfigured"
+    day_key = datetime.now(timezone.utc).strftime("usd@%Y%m%d")
+    # Adopt the CURRENT ceiling on every reservation (a tightened cap applies at
+    # once) and guard the running total, including the first insert, against it.
+    cur.execute(
+        """
+        INSERT INTO operator_budgets (subject, scope, scope_key, used, ceiling)
+        VALUES (%s, 'spend_principal_day', %s, %s, %s)
+        ON CONFLICT (subject, scope, scope_key) DO UPDATE
+          SET used = operator_budgets.used + EXCLUDED.used,
+              ceiling = EXCLUDED.ceiling,
+              updated_at = now()
+          WHERE operator_budgets.used + EXCLUDED.used <= EXCLUDED.ceiling
+        RETURNING used
+        """,
+        (subject, day_key, amount, ceiling))
+    return None if cur.fetchone() is not None else "spend_exhausted"
+
+
 def mint(subject: str, role_revision: int, profile: str, environment: str,
          session_id: str, turn_id: Optional[str], action: str,
          args: Dict[str, Any],
@@ -118,6 +162,9 @@ def mint(subject: str, role_revision: int, profile: str, environment: str,
         if not _reserve_rate(cur, subject, action, entry.get("rate", "high"),
                              catalog):
             raise deny("rate_exhausted")
+        spend_denial = _reserve_spend(cur, subject, action, entry, catalog)
+        if spend_denial is not None:
+            raise deny(spend_denial)
 
         authority_id = f"opauth-{uuid.uuid4()}"
         ttl = int(catalog.get("authority_ttl_s", 300))
