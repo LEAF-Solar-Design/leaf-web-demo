@@ -1379,6 +1379,63 @@ def _resolve_upload_dwg(name: str, tenant_id: str) -> Path:
     raise ValueError(f"unknown uploaded drawing: {name}")
 
 
+def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
+    """Resolve one live read to a curated or tenant-store DWG.
+
+    An omitted version preserves the curated registry contract. A present
+    version explicitly selects the tenant-owned immutable store, so failure
+    there never falls back to a same-named curated drawing. All store and
+    upload checks complete before the temporary DWG can reach APS.
+    """
+    if req.dwg_version is None:
+        return _resolve_live_dwg(req.dwg), False
+
+    import guest_uploads
+    import store
+
+    backend = write_loop.upload_backend_for_tenant(req.tenant_id)
+    marker = guest_uploads.read_marker(backend, req.tenant_id, req.dwg)
+    if not isinstance(marker, dict):
+        raise ValueError(
+            f"dwg_version selects uploaded drawing {req.dwg!r}, which has no "
+            f"readable upload marker")
+    if marker.get("status") != "ready":
+        raise ValueError(
+            f"uploaded drawing {req.dwg!r} is not ready for a live run")
+    source_ext = str(marker.get("source_ext") or "").lower()
+    if not source_ext:
+        source_ext = Path(str(marker.get("filename") or "")).suffix.lower()
+    if source_ext != ".dwg":
+        raise ValueError(
+            f"live runs need a DWG source; drawing {req.dwg!r} was "
+            f"uploaded as {source_ext or 'an unknown format'}")
+
+    try:
+        store.load_manifest(backend, req.tenant_id, req.dwg)
+        version, version_key = store.resolve_version(
+            backend, req.tenant_id, req.dwg, req.dwg_version)
+        write_loop.read_intake(backend, req.tenant_id, req.dwg, version)
+        stored_source = backend.get(version_key)
+        source, bridged = write_loop._live_execution_source_bytes(stored_source)
+    except KeyError as exc:
+        raise ValueError(
+            f"dwg_version not in tenant store: "
+            f"{req.tenant_id}/{req.dwg}@{req.dwg_version}") from exc
+    if bridged:
+        raise ValueError("uploaded drawing source is not an immutable DWG")
+    if not source:
+        raise ValueError("tenant drawing DWG source is empty")
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".dwg")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(source)
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return Path(tmp_name), True
+
+
 def _live_script_is_nonempty(tool: Dict[str, Any], da: Any) -> bool:
     """True iff da/client.py's REAL `tool_activity_spec(tool)` — the ACTUAL function
     that provisions this tool's live Activity — produces a non-empty (non-whitespace)
@@ -2596,40 +2653,37 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:
-        # Live reads still use the broker-local DWG registry. Validate the name
-        # before credential loading and any APS-capable call.
+        # A version pin selects the tenant-owned upload store. An unpinned read
+        # keeps the curated broker-local registry contract.
         _require_supported_live_completion_mode()
         try:
-            live_dwg = _resolve_live_dwg(req.dwg)
+            live_dwg, live_dwg_is_temporary = _resolve_live_read_dwg(req)
+        except write_loop.ProofStateUnreadable as exc:
+            return (err_envelope(ErrorCode.INTERNAL, str(exc), retryable=True,
+                                 tool=tool.get("name")),
+                    503)
         except ValueError as exc:
             return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
                                  tool=tool.get("name")),
                     DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
-        da = _get_da()
+        try:
+            da = _get_da()
+        except Exception:
+            if live_dwg_is_temporary:
+                live_dwg.unlink(missing_ok=True)
+            raise
         if da is None or not hasattr(da, "run_tool"):
+            if live_dwg_is_temporary:
+                live_dwg.unlink(missing_ok=True)
             degraded = True  # fall back to the pure-python path, flagged
-        elif req.dwg_version is not None:
-            # FAIL CLOSED (review 2026-07-22, HIGH): the live (APS) read path
-            # resolves a single broker-owned DWG file via `_resolve_live_dwg` — it
-            # has NO versioned-store wiring at all, so a `dwg_version` pin was being
-            # silently ignored here (a pinned read against an aps_live=True run
-            # executed the unpinned live DWG regardless of the pin, e.g.
-            # dwg_version=999 still returned 200). A pin must never be silently
-            # dropped: reject before any WorkItem submission rather than execute
-            # against the wrong drawing. Follow-up: wire live reads through the
-            # versioned store's DWG representation (mirrors the write path).
-            return (err_envelope(
-                ErrorCode.BAD_PARAMS,
-                "dwg_version pinning is not yet supported for live (APS_LIVE=1) reads; "
-                "omit dwg_version or run with aps_live=false",
-                retryable=False, tool=tool.get("name")),
-                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
         elif not _live_script_is_nonempty(tool, da):
             # FAIL CLOSED (review 2026-07-22, HIGH, round 2): verified against the
             # REAL da/client.py:tool_activity_spec resolution, never a
             # re-implemented heuristic and never a fabricated live script. See
             # `_live_script_is_nonempty`'s docstring (the shipped-tool `.lsp` path
             # mismatch this guard originally caught was fixed in PR #15).
+            if live_dwg_is_temporary:
+                live_dwg.unlink(missing_ok=True)
             return (err_envelope(
                 ErrorCode.BAD_PARAMS,
                 f"tool {tool.get('name')!r} has no usable live (APS) implementation "
@@ -2690,6 +2744,9 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 return (err_envelope(ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
                                      retryable=True, tool=tool.get("name")),
                         DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+            finally:
+                if live_dwg_is_temporary:
+                    live_dwg.unlink(missing_ok=True)
 
     # 3) mock / pure-python path (APS_LIVE=0, or degraded live fallback):
     #    run_tool_dynamic loads and executes the TOOL FILE the registry entry
