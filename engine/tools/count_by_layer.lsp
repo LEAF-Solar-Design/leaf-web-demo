@@ -6,7 +6,32 @@
 ; The DA Activity runs it via a script:  (load "count_by_layer.lsp")
 ; Pure-python oracle: engine/selfcheck.py -> mock_count_by_layer().
 ; ============================================================================
-(defun leaf-json-str (s) (strcat "\"" s "\""))
+(defun leaf-json-hex-digit (n)
+  (substr "0123456789ABCDEF" (1+ n) 1))
+
+(defun leaf-json-escape (s / i ch code out)
+  (setq i 1 out "")
+  (while (<= i (strlen s))
+    (setq ch (substr s i 1) code (ascii ch))
+    (cond
+      ((= code 34) (setq out (strcat out "\\\"")))
+      ((= code 92) (setq out (strcat out "\\\\")))
+      ((= code 8)  (setq out (strcat out "\\b")))
+      ((= code 9)  (setq out (strcat out "\\t")))
+      ((= code 10) (setq out (strcat out "\\n")))
+      ((= code 12) (setq out (strcat out "\\f")))
+      ((= code 13) (setq out (strcat out "\\r")))
+      ((< code 32)
+       (setq out
+         (strcat out "\\u00"
+           (leaf-json-hex-digit (fix (/ code 16)))
+           (leaf-json-hex-digit (rem code 16)))))
+      (T (setq out (strcat out ch))))
+    (setq i (1+ i)))
+  out)
+
+(defun leaf-json-str (s)
+  (strcat "\"" (leaf-json-escape s) "\""))
 
 (defun c:LEAFTOOL ( / t0 ss nn i ed layn pair lst f entry first res dt)
   (setq t0 (getvar "MILLISECS"))
