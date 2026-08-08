@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
@@ -66,18 +66,27 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
 
 
 def apply_live_aps_runtime_authority(
-    tools: List[Dict[str, Any]], *, aps_live_enabled: bool
+    tools: List[Dict[str, Any]], *, aps_live_enabled: bool,
+    trusted_live_catalog_digests: Set[str],
 ) -> List[Dict[str, Any]]:
-    """Combine static tool eligibility with this process's live APS gate.
+    """Combine operator-owned tool eligibility with this process's APS gate.
 
     The private projection marker is applied after catalog digests are issued,
     so runtime configuration cannot alter source authority or its digest.
+    A tenant-effective row qualifies only when its server-issued digest exactly
+    matches a live-enabled engine-registry definition.
     """
     return [
         {
             **tool,
             "_aps_live_runtime_authorized": _APS_LIVE_AUTHORIZED
-            if aps_live_enabled is True and tool.get("aps_live") is True
+            if (
+                aps_live_enabled is True
+                and tool.get("aps_live") is True
+                and isinstance(tool.get("catalog_digest"), str)
+                and tool.get("tool_manifest_sha256") == tool.get("catalog_digest")
+                and tool["catalog_digest"] in trusted_live_catalog_digests
+            )
             else None,
         }
         for tool in tools

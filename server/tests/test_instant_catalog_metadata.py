@@ -43,9 +43,12 @@ def test_capability_projection_exposes_authoritative_execution_metadata():
 def test_capability_projection_requires_static_and_runtime_aps_live_authority():
     tool = _instant_tool()
     tool["aps_live"] = True
+    view = deps.catalog_tool_view(tool)
 
     authorized = catalog.apply_live_aps_runtime_authority(
-        [tool], aps_live_enabled=True
+        [view],
+        aps_live_enabled=True,
+        trusted_live_catalog_digests={deps.catalog_tool_digest(tool)},
     )
     entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
 
@@ -79,12 +82,17 @@ def test_raw_registry_live_aps_metadata_cannot_authorize_projection():
 def test_capability_projection_fails_closed_without_both_exact_authorities(
     source_value, runtime_value
 ):
+    trusted_tool = _instant_tool()
+    trusted_tool["aps_live"] = True
     tool = _instant_tool()
     if source_value is not None:
         tool["aps_live"] = source_value
+    view = deps.catalog_tool_view(tool)
 
     authorized = catalog.apply_live_aps_runtime_authority(
-        [tool], aps_live_enabled=runtime_value
+        [view],
+        aps_live_enabled=runtime_value,
+        trusted_live_catalog_digests={deps.catalog_tool_digest(trusted_tool)},
     )
     entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
 
