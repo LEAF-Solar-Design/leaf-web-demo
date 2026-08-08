@@ -7,11 +7,18 @@ is what matters:
   O1  No production deployment credential exists in the model process OR any
       disposable worker environment. Model: the operator secret registry and
       catalog declare no production credential, and the broker REFUSES a
-      production scope/environment. Worker: the harness scrubs the job env to an
-      explicit ENV_ALLOWLIST that contains NO credential/secret/deploy/broker/
-      cloud key, PROVEN behaviorally by harness/test/operatorWorker.test.ts
-      (a planted AWS/secret canary is absent from the built job env); this gate
-      pins that allowlist and asserts the behavioral test exists and is gated.
+      production scope/environment; AND the operator MODEL child PROCESS env is
+      built from an explicit allowlist (operatorModel/operatorModelEnv.ts, the
+      twin of the worker's), so a production deploy credential under ANY name -
+      including one the tenant author's name-DENYLIST scrub would miss - never
+      reaches the model process, PROVEN behaviorally by harness/test/
+      operatorModelEnv.test.ts, with the ONLY sanctioned env source pinned to
+      that builder (no vendored scrub, no parent-env pass-through). Worker: the
+      harness scrubs the job env to an explicit ENV_ALLOWLIST that contains NO
+      credential/secret/deploy/broker/cloud key, PROVEN behaviorally by harness/
+      test/operatorWorker.test.ts (a planted AWS/secret canary is absent from the
+      built job env); this gate pins that allowlist and asserts the behavioral
+      test exists and is gated.
   O2  No operator manifest, allowlist, or generic handler names a production
       deploy tool or route. The operator ACTION set and the operator ROUTE
       surface (every route that is operator-authenticated OR operator-pathed,
@@ -433,6 +440,107 @@ def test_o1_o3_o4_worker_isolation_is_behaviorally_gated_in_the_harness():
     # O4 receipt: worker artifacts carry sha256 receipts.
     assert "sha256 receipts" in t
     assert "toMatch(/^[a-f0-9]{64}$/)" in t
+
+
+# --- O1 (model half): the operator MODEL child process carries no production
+#     deploy credential (harness) -------------------------------------------
+#
+# The worker half (above) proves the disposable worker env is allowlist-frozen.
+# The model half closes the symmetric gap: the operator loop's injectable runner
+# (harness/src/agent/operatorLoop.ts) launches an Agent SDK model child, and that
+# child's env must ALSO be allowlist-built — NOT scrubbed by the tenant author's
+# name-DENYLIST (buildScrubbedEnv / scrubSecrets in the vendored mushy-author
+# code), which a production credential under an unrecognised name (LEAF_LIVE_
+# ACCESS, PROD_AUTHZ) would slip past. The non-vendored builder
+# operatorModel/operatorModelEnv.ts mirrors the worker ENV_ALLOWLIST, and the
+# BEHAVIORAL mutation check lives in harness/test/operatorModelEnv.test.ts.
+
+_HARNESS_MODEL_ENV = (REPO_ROOT / "harness" / "src" / "operatorModel" /
+                      "operatorModelEnv.ts")
+_HARNESS_MODEL_ENV_TEST = (REPO_ROOT / "harness" / "test" /
+                           "operatorModelEnv.test.ts")
+_HARNESS_OPERATOR_LOOP = (REPO_ROOT / "harness" / "src" / "agent" /
+                          "operatorLoop.ts")
+# Same benign OS-key set as the worker: an allowlist-freeze, no credential key.
+_EXPECTED_MODEL_ENV_ALLOWLIST = frozenset({
+    "PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP",
+    "PATHEXT", "WINDIR", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+})
+# A key on the model allowlist must be a benign OS/path key. If a future edit
+# adds a credential-shaped key (even while also updating the pin), this trips.
+import re as _re_o1model
+_CRED_NAME_RE = _re_o1model.compile(
+    r"(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|APIKEY|API_KEY|_KEY|AUTH|JWT|"
+    r"ACCESS|LIVE|PROD|DEPLOY)", _re_o1model.I)
+
+
+def _strip_ts_comments(src: str) -> str:
+    # Remove /* ... */ blocks and // line comments so the CODE (not the prose
+    # that documents why the banned constructs are banned) is what gets scanned.
+    # The (?<!:) guard preserves URLs like https:// inside string literals.
+    no_block = _re_o1model.sub(r"/\*.*?\*/", "", src, flags=_re_o1model.S)
+    return _re_o1model.sub(r"(?<!:)//.*", "", no_block)
+
+
+def test_o1_model_env_allowlist_is_exactly_the_pinned_known_safe_set():
+    # The operator MODEL child env is scrubbed to an explicit allowlist. Pin it
+    # EXACTLY: a production deploy credential cannot cross into the model process
+    # under ANY key name, because adding any key fails this exact-set assertion
+    # and forces human review (contract section 6, O1 model half). This is the
+    # symmetric twin of the worker allowlist-freeze; together they close the
+    # denylist gap on BOTH generative surfaces (worker AND model).
+    allow = frozenset(_ts_string_array(
+        _HARNESS_MODEL_ENV.read_text(encoding="utf-8"),
+        "OPERATOR_MODEL_ENV_ALLOWLIST"))
+    assert allow == _EXPECTED_MODEL_ENV_ALLOWLIST, {
+        "unexpected": sorted(allow - _EXPECTED_MODEL_ENV_ALLOWLIST),
+        "missing": sorted(_EXPECTED_MODEL_ENV_ALLOWLIST - allow),
+    }
+    # No allowlisted key is credential-shaped (belt and suspenders: a credential
+    # added to the allowlist fails even if its pin above were also updated).
+    bad = [k for k in allow if _CRED_NAME_RE.search(k)]
+    assert not bad, bad
+
+
+def test_o1_model_env_source_is_the_allowlist_builder_not_the_tenant_scrub():
+    # MUTATION CHECK: the ONLY sanctioned source for the operator model child env
+    # is buildOperatorModelEnv. No operator model-launch module may build that
+    # env from the vendored tenant name-denylist (buildScrubbedEnv / scrubSecrets)
+    # or by passing the parent env through (a `...process.env` spread). If a
+    # future runner is wired that way — the exact production-reaching change under
+    # review — this scan FAILS.
+    model_modules = [_HARNESS_OPERATOR_LOOP] + sorted(
+        (REPO_ROOT / "harness" / "src" / "operatorModel").glob("*.ts"))
+    assert _HARNESS_MODEL_ENV in model_modules, "the builder must be scanned"
+    banned = ("buildScrubbedEnv", "scrubSecrets", "...process.env")
+    hits = []
+    for mod in model_modules:
+        s = _strip_ts_comments(mod.read_text(encoding="utf-8"))
+        for tok in banned:
+            if tok in s:
+                hits.append((mod.name, tok))
+    assert not hits, hits
+    # The builder itself is parameterized (takes the parent env as an argument)
+    # and never reads process.env, so it cannot silently re-widen the source.
+    builder = _strip_ts_comments(_HARNESS_MODEL_ENV.read_text(encoding="utf-8"))
+    assert "process.env" not in builder, "builder must take parentEnv as a param"
+    assert "OPERATOR_MODEL_ENV_ALLOWLIST" in builder
+    # It does not import the vendored scrub.
+    assert "envScrub" not in builder and "mushy-author" not in builder
+
+
+def test_o1_model_env_is_behaviorally_gated_in_the_harness():
+    # The BEHAVIORAL proof (the builder actually strips an unknown-named
+    # credential) lives in the harness vitest gate that CI runs. Assert it exists
+    # and plants the credentials, so it cannot silently disappear or be weakened.
+    t = _HARNESS_MODEL_ENV_TEST.read_text(encoding="utf-8")
+    assert "strips unknown-named production deploy credentials" in t
+    # The planted credentials whose NAMES the tenant denylist would miss.
+    assert "LEAF_LIVE_ACCESS" in t and "PROD_AUTHZ" in t
+    assert 'expect(env).not.toHaveProperty("LEAF_LIVE_ACCESS")' in t
+    assert 'expect(serialized).not.toContain("api.leafdesign.ai")' in t
+    # And it proves ONLY allowlisted keys + the one injected credential survive.
+    assert "ONLY allowlisted OS keys plus the one injected model credential" in t
 
 
 # --- O4: staging yields an IMMUTABLE, RECEIPTED candidate --------------------
