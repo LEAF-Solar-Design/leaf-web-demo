@@ -109,8 +109,16 @@ def _app_endpoints(enabled: bool) -> list:
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
         "loop.run_until_complete(app.app.router.startup())\n"
-        "pending = [t for t in asyncio.all_tasks(loop) if not t.done()]\n"
-        "if pending:\n"
+        # Drain in a LOOP, not once: a task can spawn a descendant while we drain
+        # it, so keep gathering until no task is pending. This captures a bounded
+        # create_task CHAIN of any depth. A truly UNBOUNDED chain would never
+        # settle here (and would never let a real server finish starting either)
+        # - that unbounded dynamic mutation is the acknowledged out-of-scope
+        # residual; the generous cap keeps the test from hanging on it.
+        "for _ in range(100000):\n"
+        "    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]\n"
+        "    if not pending:\n"
+        "        break\n"
         "    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))\n"
         "eps = []\n"
         "for r in app.app.routes:\n"
