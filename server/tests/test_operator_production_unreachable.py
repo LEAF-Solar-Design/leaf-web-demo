@@ -65,12 +65,20 @@ are the same trust boundary that any codebase has for its own trusted code):
     action/route surface so no NEW handler is added silently, but it cannot prove
     an existing body never calls production directly, nor that the runbook does
     not overwrite its own receipt row (O4).
-  - The operator MODEL PROCESS's raw launch env is a deployment property; this
-    gate proves the operator secret registry and broker REFUSE a production scope
-    (no production credential is brokered), but the process's ambient env is set
-    by the deployment, not asserted here. (The tenant author agent's env scrub
-    under harness/src/vendor/mushy-author is a DIFFERENT subsystem, not this
-    plane.)
+  - The operator MODEL RUNNER is GREENFIELD: operatorLoop.ts takes the runner by
+    injection and NO production Agent SDK runner is wired yet. So the model-half
+    obligation is enforced STRUCTURALLY, not by an existing running process: the
+    ONLY non-vendored env builder (operatorModelEnv.ts) is allowlist-based AND
+    pins the one injectable credential to a model-auth key (a deploy token is
+    refused), and this gate fails if any operator model module builds env another
+    way. What remains UNBOUNDED until the runner ships: an operator SDK runner
+    placed OUTSIDE the two scanned locations, or the deployment's own ambient
+    process env. The sound runtime enforcement of "an existing handler cannot
+    CALL production" (O2/O3) is exactly this O1 property plus worker network
+    isolation: with no production deploy credential in the process and no route,
+    a handler that invokes a neutral helper still cannot authenticate or reach a
+    production deploy. (The tenant author agent's env scrub under harness/src/
+    vendor/mushy-author is a DIFFERENT subsystem, not this plane.)
 Each residual is bounded because the plane never REQUESTS a production target
 (O3 refusals), the callbacks and runbooks refuse production, the worker carries
 no deploy credential (allowlist-frozen) and is refused fail-closed on a
@@ -527,6 +535,20 @@ def test_o1_model_env_source_is_the_allowlist_builder_not_the_tenant_scrub():
     assert "OPERATOR_MODEL_ENV_ALLOWLIST" in builder
     # It does not import the vendored scrub.
     assert "envScrub" not in builder and "mushy-author" not in builder
+    # CREDENTIAL PIN: the one injected credential must be the pinned model-auth
+    # key. Without this, a caller could hand the builder a PRODUCTION DEPLOY token
+    # (VERCEL_TOKEN, an AWS deploy key) as "the model credential" and it would
+    # reach the model process through the sanctioned injection path. The builder
+    # refuses any other key.
+    assert ("grant.credentialKey !== OPERATOR_MODEL_CREDENTIAL_KEY" in builder
+            and 'throw new Error("operator_model_credential_key_not_allowed")'
+            in builder), "builder must pin the injected credential key"
+    # The pinned key is a model-auth key, not a deploy key.
+    m = _re_o1model.search(
+        r'OPERATOR_MODEL_CREDENTIAL_KEY\s*=\s*"([^"]+)"', builder)
+    assert m, "OPERATOR_MODEL_CREDENTIAL_KEY must be a pinned string constant"
+    assert not _re_o1model.search(r"(VERCEL|DEPLOY|LIVE|PROD)", m.group(1),
+                                  _re_o1model.I), m.group(1)
 
 
 def test_o1_model_env_is_behaviorally_gated_in_the_harness():
@@ -541,6 +563,9 @@ def test_o1_model_env_is_behaviorally_gated_in_the_harness():
     assert 'expect(serialized).not.toContain("api.leafdesign.ai")' in t
     # And it proves ONLY allowlisted keys + the one injected credential survive.
     assert "ONLY allowlisted OS keys plus the one injected model credential" in t
+    # And it proves the builder REFUSES a production deploy token as the grant.
+    assert "REFUSES to inject a production deploy token as the model credential" in t
+    assert 'toThrow("operator_model_credential_key_not_allowed")' in t
 
 
 # --- O4: staging yields an IMMUTABLE, RECEIPTED candidate --------------------
@@ -563,16 +588,33 @@ def test_o4_release_candidate_is_immutable_and_receipted():
     # may write ONLY the receipt fields (status / revisions / timestamps), NEVER
     # the identity columns source_sha or target. If a future edit adds
     # `SET source_sha=` or `SET target=` (mutating the immutable identity), the
-    # SET clause below contains it and this fails.
+    # SET clause below contains it and this fails. Quotes are stripped first so a
+    # QUOTED identifier (SET "target" =) cannot slip past, and UPDATE ONLY /
+    # a quoted table name are matched.
     import re
-    for m in re.finditer(r"UPDATE\s+operator_release_candidates\s+SET\s+(.*?)\s+WHERE",
-                         rb, re.S | re.I):
+
+    def _dequote(s: str) -> str:
+        return s.replace('"', "").replace("`", "")
+
+    rb_dq = _dequote(rb)
+    updated = False
+    for m in re.finditer(
+            r"UPDATE\s+(?:ONLY\s+)?operator_release_candidates\s+SET\s+(.*?)\s+WHERE",
+            rb_dq, re.S | re.I):
+        updated = True
         set_clause = m.group(1)
-        assert "source_sha" not in set_clause, set_clause
+        assert not re.search(r"\bsource_sha\s*=", set_clause), set_clause
         assert re.search(r"\btarget\s*=", set_clause) is None, set_clause
-    # And the migration declares no trigger/rule that could rewrite identity.
-    sql2 = sql  # already read above
-    assert "CREATE TRIGGER" not in sql2.upper() and "CREATE RULE" not in sql2.upper()
+    assert updated, "expected at least one UPDATE of the candidate table (non-vacuous)"
+    # And NO migration (not just 0034) declares a trigger/rule that could rewrite
+    # the candidate identity: scan EVERY migration, so a later 0035 trigger is
+    # caught too.
+    mig_dir = REPO_ROOT / "platform" / "migrations"
+    for mig in sorted(mig_dir.glob("*.sql")):
+        up = _dequote(mig.read_text(encoding="utf-8")).upper()
+        if "OPERATOR_RELEASE_CANDIDATES" in up:
+            assert "CREATE TRIGGER" not in up, mig.name
+            assert "CREATE RULE" not in up, mig.name
 
 
 # --- O5: production promotion is outside every operator surface --------------
@@ -610,6 +652,15 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
     assert "Validate protected production request and operator" in wf
     assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # separate independent approval
     assert "Independent production approval required" in wf
+    # SEPARATE OWNER, enforced not just present: the approver must differ from
+    # BOTH the actor and the triggering actor (no self-approval), and the request
+    # must FAIL if not. These are bare `set -e` test commands; a mutation that
+    # defeats them with `|| true` / `|| :` is caught here, and a missing exit is
+    # caught by requiring the fail-closed `exit 1`.
+    assert '[ "$APPROVER" != "$ACTOR" ]' in wf
+    assert '[ "$APPROVER" != "$TRIGGERING_ACTOR" ]' in wf
+    assert "|| true" not in wf and "|| :" not in wf   # no tautology defeat
+    assert "exit 1" in wf                             # fail-closed on a bad request
     # OUTSIDE every operator surface: no operator server module or router names
     # or triggers the canonical production deploy workflow or its approval token.
     op_sources = (list(SERVER_DIR.glob("operator_*.py"))
@@ -634,7 +685,14 @@ _PROD_DEPLOY_CALL_TOKENS = (
     "deploy-platform-web-production",    # the canonical production workflow
     "approve-vercel-production",         # its independent approval token
     "169.254.169.254",                   # cloud metadata endpoint
+    "update_service",                    # AWS ECS deploy (defense-in-depth)
+    "boto3",                             # AWS SDK deploy path (defense-in-depth)
 )
+# NOTE: token-scanning an operator module is defense-in-depth, not a complete
+# proof. An existing handler calling a NEUTRAL helper in a non-operator file that
+# reaches production is the trusted-body residual (docstring): its sound
+# enforcement is O1 (no production deploy credential in the process) + worker
+# network isolation, not this scan.
 
 
 def test_o3_no_operator_handler_names_a_production_deploy_target():
