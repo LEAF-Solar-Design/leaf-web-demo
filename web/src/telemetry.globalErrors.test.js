@@ -158,7 +158,7 @@ describe('global error capture', () => {
       'Failed to load /app/alice/settings',
       "Validation failed for customer 'Alice Smith'",
       'Request to 192.168.1.42 refused',
-      'open failed: C:\Users\Alice\Customer-X\site-plan.dwg',
+      'open failed: C:\\Users\\Alice\\Customer-X\\site-plan.dwg',
       'id deadbeef rejected',
       'GET https://api.example.com/invite/AKIAIOSFODNN7EXAMPLE -> 403',
       'contact owner@example.com about 555-0142',
@@ -187,33 +187,61 @@ describe('global error capture', () => {
     expect(a).toMatch(/^\d+$/)     // and it is an opaque number, not text
   })
 
-  it('reduces the stack head to fn@file:line:col and never carries an inline payload', async () => {
+  it('hashes the throw site instead of exporting it, so a crafted stack leaks nothing', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    const real = new Error('render failed')
-    real.stack = [
-      'Error: render failed at /scene/tick',   // a MESSAGE line containing " at "
-      '    at renderTick (https://platform-staging.leafdesign.ai/assets/index-DytZ.js:12:34)',
-      '    at secondFrame (/src/b.js:2:2)',
-    ].join('\n')
-
-    const inline = new Error('inline failed')
-    inline.stack = 'Error\n    at evil (data:text/javascript;base64,c2VjcmV0LXNvdXJjZQ==:1:1)'
-
-    mod.handleErrorEvent({ error: real })
-    mod.handleErrorEvent({ error: inline })
+    // `FRAME_FN_RE`/`FRAME_FILE_RE` once checked SHAPE, not provenance, so
+    // every one of these put its payload straight into a label.
+    const crafted = [
+      'Error\n    at AliceSmith (https://x/assets/index.js:1:2)',
+      'AliceSmith@https://x/assets/customerSecret:3:4',
+      'Error\n    at deadbeef (data:text/javascript;base64,c2VjcmV0:1:1)',
+    ]
+    for (const stack of crafted) {
+      const e = new Error('x')
+      e.stack = stack
+      mod.handleErrorEvent({ error: e })
+    }
     mod.flushNow()
 
-    const [a, b] = postedEvents(fetchMock).map((e) => e.labels.stack_head)
-    // Function + file + position kept; host and directories dropped.
-    expect(a).toBe('renderTick@index-DytZ.js:12:34')
-    expect(a).not.toContain('leafdesign.ai')
-    expect(a).not.toContain('secondFrame')   // FIRST frame only
-    // The message line was not mistaken for a frame.
-    expect(a).not.toContain('/scene/tick')
-    // A data: URI frame can inline a whole source file.
-    expect(b).toBe('evil@<inline>')
-    expect(b).not.toContain('c2VjcmV0LXNvdXJjZQ')
+    const events = postedEvents(fetchMock)
+    const serialized = JSON.stringify(events)
+    for (const needle of ['AliceSmith', 'customerSecret', 'deadbeef', 'c2VjcmV0', 'index.js']) {
+      expect(serialized).not.toContain(needle)
+    }
+    // Still grouped: three distinct throw sites, three distinct digests.
+    const hashes = events.map((e) => e.labels.stack_hash)
+    expect(new Set(hashes).size).toBe(3)
+    for (const h of hashes) expect(h).toMatch(/^\d+$/)
+    expect(events[0].labels.stack_head).toBeUndefined()
+  })
+
+  it('distinguishes two rejections that stringify identically', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // Both are "[object Object]", so hashing the stringification alone merged
+    // them and the dedup then dropped the second.
+    mod.handleRejectionEvent({ reason: { code: 4 } })
+    mod.handleRejectionEvent({ reason: { code: 5 } })
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(2)
+    expect(events[0].labels.message_hash).not.toBe(events[1].labels.message_hash)
+  })
+
+  it('does not collide on the short inputs the 32-bit hash merged', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // "Aa" and "BB" both hashed to 2112 under the previous shift-hash, so the
+    // second distinct failure was silently suppressed by the dedup.
+    mod.handleErrorEvent({ error: new Error('Aa') })
+    mod.handleErrorEvent({ error: new Error('BB') })
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(2)
+    expect(events[0].labels.message_hash).not.toBe(events[1].labels.message_hash)
   })
 
 

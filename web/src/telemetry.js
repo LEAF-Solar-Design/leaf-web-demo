@@ -35,7 +35,7 @@ const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
 // suppress the one record of a real React crash.
 const EXCEPTION_CAP = 10        // global-handler emissions per session
 const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
-const STACK_HEAD_MAX = 200
+const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 
 const state = {
   buffer: [],
@@ -228,19 +228,49 @@ export function trackException(props = {}, capKey = 'exception_boundary') {
 //
 // So the message travels as a STABLE HASH, which is the convention this
 // codebase already settled on for exactly this tension: ErrorBoundary emits
-// `message_class` + `component_stack_hash` and no raw text. A hash still
-// answers the questions that matter -- which distinct failure, how often,
-// on which surface, at which line -- because it rides alongside `stack_head`
-// (`fn@file:line:col`, which locates the code through a sourcemap) and
-// `route`. What it costs is reading the text at a glance, and that is the
-// right price for a guarantee instead of a best effort.
-function hash32(text) {
+// `message_class` + `component_stack_hash` and no raw text. Paired with
+// `stack_hash` and `route`, a digest still answers which distinct failure,
+// how often, on which surface. What it costs is reading the text at a
+// glance, and that is the right price for a guarantee instead of a best
+// effort.
+//
+// A digest of a string that MAY have contained personal data is pseudonymous,
+// not anonymous: anyone with BigQuery access and a candidate list can hash
+// the candidates and compare. That is a real and deliberate limit. It is
+// still strictly better than the text, and BigQuery access is already
+// privileged and already sees the row's stamped tenant.
+function digest(text) {
   try {
-    const s = String(text ?? '')
-    let h = 0
-    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
-    return String(h >>> 0)
+    // cyrb53: two accumulators combined into ~53 bits. The previous 32-bit
+    // shift-hash collided on inputs as short as "Aa"/"BB", which silently
+    // suppressed the second of two distinct failures through the dedup below.
+    //
+    // Input is BOUNDED before hashing. The redactor this replaced happened to
+    // cap its input; deleting it removed that protection, so a server-supplied
+    // multi-megabyte message would hash synchronously on the main thread.
+    const s = String(text ?? '').slice(0, HASH_INPUT_MAX)
+    let h1 = 0xdeadbeef
+    let h2 = 0x41c6ce57
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charCodeAt(i)
+      h1 = Math.imul(h1 ^ ch, 2654435761)
+      h2 = Math.imul(h2 ^ ch, 1597334677)
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+    return String(4294967296 * (2097151 & h2) + (h1 >>> 0))
   } catch { return '0' }
+}
+
+/** A rejection reason need not be an Error. `{code: 4}` and `{code: 5}` both
+ * stringify to "[object Object]", so hashing the stringification alone merges
+ * two distinct failures. Serialize when possible, fall back when not. */
+function reasonText(reason) {
+  try {
+    if (reason && typeof reason === 'object' && 'message' in reason) return reason.message
+    if (reason && typeof reason === 'object') return JSON.stringify(reason)
+    return reason
+  } catch { return String(reason) }
 }
 
 // Provenance, not syntax. `name` is an ordinary writable property, so an
@@ -250,19 +280,18 @@ function hash32(text) {
 const KNOWN_CLASSES = new Set([
   'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError',
   'TypeError', 'URIError', 'AggregateError', 'DOMException',
+  // This app's own class (web/src/fetchBudget.js); its provenance is ours.
+  'FetchTimeoutError',
   // DOMException `name` values the platform assigns.
   'AbortError', 'ConstraintError', 'DataCloneError', 'DataError',
   'EncodingError', 'HierarchyRequestError', 'IndexSizeError',
   'InvalidCharacterError', 'InvalidStateError', 'NamespaceError',
   'NetworkError', 'NotAllowedError', 'NotFoundError', 'NotReadableError',
   'NotSupportedError', 'OperationError', 'QuotaExceededError',
-  'ReadOnlyError', 'SecurityError', 'SyntaxError', 'TimeoutError',
+  'ReadOnlyError', 'SecurityError', 'TimeoutError',
   'TransactionInactiveError', 'UnknownError', 'VersionError',
   'WrongDocumentError',
 ])
-
-const FRAME_FN_RE = /^[A-Za-z_$][A-Za-z0-9_$.<>]{0,63}$/
-const FRAME_FILE_RE = /^[A-Za-z0-9_.-]{1,64}$/
 
 function messageClass(err, fallback) {
   // Reading `.name` can itself throw: it may be a getter.
@@ -273,30 +302,27 @@ function messageClass(err, fallback) {
   return fallback
 }
 
-/** The FIRST frame (the throw site) reduced to `fn@file:line:col`.
+/** A digest of the FIRST frame -- the throw site -- never its text.
  *
- * BUILT FROM PARTS rather than redacted: the host, the directory path, the
- * query, and any data:/blob: payload are dropped by construction, so nothing
- * depends on a pattern anticipating them. What survives is the bundle's own
- * file name and position, which is the entire diagnostic value. */
-function stackHead(err) {
+ * This was `fn@file:line:col`, built from parts, and it was the one label
+ * that still exported caller-controlled text: `FRAME_FN_RE` and
+ * `FRAME_FILE_RE` checked SHAPE, not provenance, so a crafted
+ * `Promise.reject({stack: 'at AliceSmith (index.js:1:2)'})` put `AliceSmith`
+ * straight into a label. That is the same defect the class allowlist fixes,
+ * and keeping it made the docs' "every label is structural" claim FALSE --
+ * worse than an honest best-effort, because consumers build on the claim.
+ *
+ * So the frame is grouped, not read. Paired with `message_hash`, `route` and
+ * a count, it answers which distinct throw site, how often, on which surface.
+ * Binding a hash to a line takes one reproduction, which is exactly how this
+ * codebase's ErrorBoundary has always used `component_stack_hash`. */
+function stackHash(err) {
   try {
-    // Anchored: a message line like `Error: request failed at /x` contains
-    // " at " and would otherwise be picked as the frame -- putting raw
-    // message text into a label that is supposed to be structural.
+    // Only the first frame: the rest is call history, and a deeper frame
+    // changes with the caller rather than with the failure.
     const lines = String((err && err.stack) || '').split('\n').map((l) => l.trim())
     const frame = lines.find((l) => /^at\s/.test(l) || /^[^@\s]*@\S/.test(l)) || ''
-    if (!frame) return ''
-    const v8 = frame.match(/^at\s+(?:(\S+)\s+)?\(?(.*?)\)?$/)
-    const spider = v8 ? null : frame.match(/^([^@]*)@(.*)$/)
-    const fnRaw = (v8 ? v8[1] : spider && spider[1]) || ''
-    const locRaw = (v8 ? v8[2] : spider && spider[2]) || ''
-    const fn = fnRaw ? (FRAME_FN_RE.test(fnRaw) ? fnRaw : '<fn>') : '<anon>'
-    if (/^(?:data|blob|javascript):/i.test(locRaw)) return `${fn}@<inline>`
-    const tail = locRaw.split(/[?#]/)[0].split('/').pop() || ''
-    const at = tail.match(/^(.*?)(?::(\d+):(\d+))?$/) || []
-    const file = FRAME_FILE_RE.test(at[1] || '') ? at[1] : '<file>'
-    return `${fn}@${file}${at[2] ? `:${at[2]}:${at[3]}` : ''}`.slice(0, STACK_HEAD_MAX)
+    return frame ? digest(frame) : ''
   } catch { return '' }
 }
 
@@ -331,7 +357,8 @@ function uaClass() {
  * ten slots before a genuinely different crash ever got one. The seen-set is
  * bounded by the cap itself, because past it nothing emits anyway. */
 function emitGlobalException(props) {
-  const sig = `${props.message_class}|${props.message_hash}|${props.stack_head}`
+  const sig = [props.source, props.message_class, props.message_hash,
+    props.stack_hash, props.route].join('|')
   if (state.seenExceptions.indexOf(sig) !== -1) return
   if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
   trackException(props, 'exception_global')
@@ -349,8 +376,8 @@ export function handleErrorEvent(ev) {
     emitGlobalException({
       source: 'window.onerror',
       message_class: messageClass(err, 'Other'),
-      message_hash: hash32((err && err.message) || (ev && ev.message)),
-      stack_head: stackHead(err),
+      message_hash: digest((err && err.message) || (ev && ev.message)),
+      stack_hash: stackHash(err),
       route: routeLabel(),
       ua_class: uaClass(),
     })
@@ -364,14 +391,11 @@ export function handleRejectionEvent(ev) {
     // A rejection value need not be an Error: `Promise.reject('nope')` and
     // `reject({code: 4})` are both legal and both worth seeing.
     const fallback = reason instanceof Error ? 'Error' : 'UnhandledRejection'
-    const text = reason && typeof reason === 'object' && 'message' in reason
-      ? reason.message
-      : reason
     emitGlobalException({
       source: 'unhandledrejection',
       message_class: messageClass(reason, fallback),
-      message_hash: hash32(text),
-      stack_head: stackHead(reason),
+      message_hash: digest(reasonText(reason)),
+      stack_hash: stackHash(reason),
       route: routeLabel(),
       ua_class: uaClass(),
     })

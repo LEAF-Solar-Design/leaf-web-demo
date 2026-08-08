@@ -136,7 +136,7 @@ C-3 (global error capture):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_head, route, ua_class |
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_hash, route, ua_class |
 
 The boundary only sees what a component throws DURING RENDER, so a three.js
 draw tick, a `setTimeout` callback, and every unawaited promise failed with
@@ -165,12 +165,13 @@ correction made under review, not the original design:
   is not enough: `name` is an ordinary writable property, so
   `Promise.reject({name: 'AliceSmith'})` is a legal rejection any visitor can
   produce and an identifier-shaped check passes it. Anything else is `Other`.
-- `stack_head` is the FIRST frame reduced to `fn@file:line:col`, BUILT FROM
-  PARTS rather than redacted, so the host, the directory path, the query, and
-  any `data:`/`blob:` payload are dropped by construction. This is what makes
-  the hash workable: the frame locates the code through a sourcemap, so
-  "which distinct failure, how often, on which surface, at which line" is all
-  still answerable.
+- `stack_hash` is a digest of the FIRST frame, never its text. It was
+  `fn@file:line:col` built from parts, and that was the one label still
+  exporting caller-controlled text: the frame regexes checked SHAPE, not
+  provenance, so `Promise.reject({stack: 'at AliceSmith (index.js:1:2)'})`
+  put `AliceSmith` into a label. Keeping it would have made the guarantee on
+  this page FALSE, which is worse than an honest best-effort because
+  consumers build on the claim.
 - `route` is the app's own scene name (`site`/`tool`/`sheets`/`app` from
   `site/routeScene.js`), never the pathname. There is no redactor that
   reliably tells a customer name from a route word, so the label is an enum by
@@ -178,6 +179,12 @@ correction made under review, not the original design:
 - `ua_class` is a browser family plus mobile/desktop, never the raw
   user-agent string. The release marker is the sink's server-stamped
   `app_version`; the client does not send one.
+
+A digest of a string that MAY have carried personal data is PSEUDONYMOUS,
+not anonymous: anyone with BigQuery access and a candidate list can hash the
+candidates and compare. That limit is real and deliberate. It is still
+strictly better than shipping the text, and BigQuery access is already
+privileged and already sees the row's server-stamped tenant.
 
 What this costs is reading the message at a glance. That is the right price
 for a guarantee instead of a best effort. If a specific message ever needs to
@@ -191,7 +198,7 @@ ErrorBoundary. Shared, a storm of global errors could spend the budget and
 suppress the one record of a real React crash.
 
 The global budget counts DISTINCT failures — repeats of the same
-class+message+frame spend nothing. Counting occurrences instead would let the
+source+class+message+frame+route spend nothing. Counting occurrences instead would let the
 two loud-and-benign classes this app invites (a ResizeObserver loop from the
 resizable panels, an animation callback throwing every frame from the viewer)
 consume all ten slots before a genuinely different crash got one.

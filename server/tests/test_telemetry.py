@@ -297,7 +297,7 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
             "source": "unhandledrejection",
             "message_class": "TypeError",
             "message_hash": "2166136261",
-            "stack_head": "renderTick@index-abc.js:1:200",
+            "stack_hash": "884152034421",
             "route": "site",
             "ua_class": "chrome/desktop",
         },
