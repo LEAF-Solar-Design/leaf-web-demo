@@ -49,6 +49,8 @@ def test_capability_projection_requires_static_and_runtime_aps_live_authority():
         [view],
         aps_live_enabled=True,
         trusted_live_catalog_digests={deps.catalog_tool_digest(tool)},
+        tool_sources=["operator_owned_engine"],
+        operator_owned_engine_source="operator_owned_engine",
     )
     entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
 
@@ -93,6 +95,8 @@ def test_capability_projection_fails_closed_without_both_exact_authorities(
         [view],
         aps_live_enabled=runtime_value,
         trusted_live_catalog_digests={deps.catalog_tool_digest(trusted_tool)},
+        tool_sources=["operator_owned_engine"],
+        operator_owned_engine_source="operator_owned_engine",
     )
     entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
 

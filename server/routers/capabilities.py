@@ -45,6 +45,28 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
             return denial
     try:
         raw_tools = deps.all_tools(str(tenant))
+        tool_sources = [None] * len(raw_tools)
+        provenance_resolver = getattr(deps, "effective_tools_with_provenance", None)
+        operator_owned_engine_source = getattr(
+            deps, "TOOL_SOURCE_OPERATOR_OWNED_ENGINE", None
+        )
+        if (
+            callable(provenance_resolver)
+            and operator_owned_engine_source == "operator_owned_engine"
+        ):
+            effective_rows = provenance_resolver(str(tenant))
+            provenance_by_definition = {
+                (tool.get("name"), deps.catalog_tool_digest(tool)): source
+                for tool, source in effective_rows
+            }
+            tool_sources = [
+                provenance_by_definition.get(
+                    (tool.get("name"), deps.catalog_tool_digest(tool))
+                )
+                for tool in raw_tools
+            ]
+        # Compatibility with a base that predates provenance keeps raw_tools
+        # as the ordinary catalog, while the None sources disable live APS.
         pin = (
             customization_service.effective_catalog_pin(str(tenant))
             or deps.base_catalog_pin(raw_tools)
@@ -65,6 +87,8 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         tools,
         aps_live_enabled=deps.APS_LIVE,
         trusted_live_catalog_digests=trusted_live_catalog_digests,
+        tool_sources=tool_sources,
+        operator_owned_engine_source=operator_owned_engine_source,
     )
     families = catalog.build_catalog(
         tools,
