@@ -163,6 +163,59 @@ describe('global error capture', () => {
     expect(message).toContain('409')
   })
 
+  it('redacts a quoted name or typed scrap, but keeps a single-word quote', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    mod.handleErrorEvent({ error: new Error('user "Alice Smith" not found') })
+    mod.handleErrorEvent({ error: new Error("the 'tool name here' is unknown") })
+    // The single-word quote is the detail that makes a message worth having.
+    mod.handleErrorEvent({
+      error: new Error('Cannot read properties of null (reading "geometry")'),
+    })
+    // Regression: the span rule must anchor to an OPENING quote. Unanchored,
+    // the engine pairs the CLOSING quote of one span with the OPENING quote
+    // of the next and this collapses to `Expected "close<q>open"` — message
+    // mangled, neither span redacted.
+    mod.handleErrorEvent({ error: new Error('Expected "close" but found "open"') })
+    mod.flushNow()
+
+    const messages = postedEvents(fetchMock).map((e) => e.labels.message)
+    expect(messages[0]).toBe('user <q> not found')
+    expect(messages[1]).toBe('the <q> is unknown')
+    expect(messages[2]).toBe('Cannot read properties of null (reading "geometry")')
+    expect(messages[3]).toBe('Expected "close" but found "open"')
+  })
+
+  it('redacts a digit-bearing run, so a phone number or a date cannot ride along', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    mod.handleErrorEvent({ error: new Error('contact at 555-0142 ext 9') })
+    mod.handleErrorEvent({ error: new Error('lease 2026-08-07 already expired') })
+    mod.flushNow()
+
+    const messages = postedEvents(fetchMock).map((e) => e.labels.message)
+    expect(messages[0]).toBe('contact at <token> ext 9')
+    // A date is indistinguishable from an id by shape, and the row already
+    // carries a server-stamped timestamp, so losing it costs nothing.
+    expect(messages[1]).toBe('lease <token> already expired')
+  })
+
+  it('leaves ordinary engine messages alone', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // The redactor is worthless if it turns real diagnostics into noise.
+    const intact = [
+      'THREE.WebGLRenderer: context lost',
+      'Unsupported content type application/json; charset=utf-8',
+      'and/or was not handled',
+      'Failed to execute queryAll on Document',
+    ]
+    for (const m of intact) mod.handleErrorEvent({ error: new Error(m) })
+    mod.flushNow()
+
+    expect(postedEvents(fetchMock).map((e) => e.labels.message)).toEqual(intact)
+  })
+
   it('redacts percent-encoded values, which survive every other rule', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 

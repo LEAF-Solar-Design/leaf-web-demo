@@ -240,6 +240,20 @@ const REDACTIONS = [
   // route SHAPE is the diagnostic value and survives; the query goes, and so
   // does any segment carrying a digit, which is what an id looks like.
   [/\/[A-Za-z0-9_.~-]*(?:\/[A-Za-z0-9_.~-]*)*(?:[?#]\S*)?/g, redactPath],
+  // Quoted spans carrying a SPACE or a DIGIT: that is what a person's name, a
+  // file name, or a scrap of typed input looks like when an error quotes it
+  // ("Alice Smith", "plan rev 3.dwg"). Single-word quotes are KEPT, because
+  // `Cannot read properties of null (reading "geometry")` is exactly the
+  // detail that makes a message worth having.
+  //
+  // The leading group anchors the match to an OPENING quote. Without it the
+  // engine happily pairs the CLOSING quote of one span with the OPENING quote
+  // of the next, so `Expected "close" but found "open"` collapsed to
+  // `Expected "close<q>open"`: the message mangled and neither span redacted.
+  // A lookbehind would read better and is deliberately not used -- an
+  // unsupported lookbehind literal is a PARSE error, not a runtime one, and
+  // this module is the first import on the page: it must never fail to parse.
+  [/(^|[\s(\[{:,=])(["'`])(?=[^"'`]{0,200}?[\s\d])[^"'`]{1,200}?\2/g, '$1<q>'],
 ]
 
 function redactPath(path) {
@@ -251,12 +265,15 @@ function redactPath(path) {
 }
 
 /** Runs that are identifiers rather than words. Done as a replacer instead of
- * a pattern because the test is compositional: 8+ characters mixing letters
- * AND digits is an id, a key, or a hash, never English (AKIA... is 20, an
- * invite code is 12); a 24+ run of a single class is a base64 or hex blob. */
+ * a pattern because the test is compositional: an 8+ run containing a DIGIT
+ * is an id, a key, a hash, or a phone number, never English (an AWS key id is
+ * 20, an invite code 12, `555-0142` is 8); a 24+ run of any single class is a
+ * base64 or hex blob. Dates go too, which is a real cost and the right one:
+ * `2026-08-07` is indistinguishable from an id by shape alone, and the row
+ * already carries a server-stamped timestamp. */
 function redactRuns(s) {
   return s.replace(/[A-Za-z0-9_-]{8,}/g, (run) => {
-    if (/[A-Za-z]/.test(run) && /\d/.test(run)) return '<token>'
+    if (/\d/.test(run)) return '<token>'
     if (run.length >= 24) return '<token>'
     return run
   })

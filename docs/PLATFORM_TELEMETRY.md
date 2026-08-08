@@ -163,10 +163,28 @@ door's 512:
   409`). The route shape survives; the query goes, and any segment carrying a
   digit becomes `<id>`.
 - Emails become `<email>`; percent-encoded tokens become `<enc>` (that is how
-  an address survives a URL round trip and defeats every other rule); a run of
-  8+ characters mixing letters and digits, or 24+ of one class, becomes
-  `<token>` (an AWS key id is 20, an invite code 12 — a 24-only rule missed
-  both); runs of 6+ digits become `<n>`.
+  an address survives a URL round trip and defeats every other rule); an 8+
+  run containing a digit, or 24+ of any one class, becomes `<token>` (an AWS
+  key id is 20, an invite code 12, `555-0142` is 8 — a 24-only rule missed
+  all three); runs of 6+ digits become `<n>`. Dates go too, which is the right
+  cost: `2026-08-07` is indistinguishable from an id by shape, and the row
+  already carries a server-stamped timestamp.
+- A QUOTED span carrying a space or a digit becomes `<q>` — that is what a
+  name, a file name, or typed input looks like when an error quotes it.
+  Single-word quotes are kept, because `(reading "geometry")` is exactly the
+  detail worth having.
+
+**What still gets through, measured rather than assumed.** A path segment or
+bare word with no digit and under 24 characters survives: `/app/alice/settings`
+would keep `alice`. Two throw sites in `api.js` interpolate an identifier into
+a path — `tenantId` and `drawingId`. `drawingId` carries digits and is
+redacted; `tenantId` may not be, and it survives. That is accepted rather than
+overlooked: `tenant_id` is ALREADY a server-stamped column on every row, so it
+is not new information and cannot be another tenant's. No throw site in
+`web/src` interpolates a person's name into a path. A free-text field cannot
+be proven PII-free, so this contract is best-effort by construction — the
+labels with a GUARANTEE are the structural ones (`route`, `message_class`,
+`stack_head`, `ua_class`), and those are the ones to build on.
 - `stack_head` is the FIRST frame only, reduced to `fn@file:line:col` and
   BUILT FROM PARTS rather than redacted, so the host, the directory path, the
   query, and any `data:`/`blob:` payload are dropped by construction instead
