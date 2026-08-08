@@ -73,8 +73,12 @@ def load_catalog() -> Optional[Dict[str, Any]]:
             raise OperatorPolicyError(f"action {name}: handler required")
         if not isinstance(entry.get("args_schema"), dict):
             raise OperatorPolicyError(f"action {name}: args_schema required")
-        if "spend" in entry and entry["spend"] not in _SPEND_TYPES:
-            raise OperatorPolicyError(f"action {name}: bad spend type")
+        # `spend` is REQUIRED on every action, with no implicit default: an
+        # absent field must not let a usd action mint free by silently reading
+        # as "none". The value must be one of the known types.
+        if entry.get("spend") not in _SPEND_TYPES:
+            raise OperatorPolicyError(f"action {name}: spend required, one of "
+                                      f"{sorted(_SPEND_TYPES)}")
         if "max_spend_cents" in entry and (
                 not isinstance(entry["max_spend_cents"], int)
                 or isinstance(entry["max_spend_cents"], bool)

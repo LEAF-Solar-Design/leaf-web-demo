@@ -8,13 +8,15 @@ Flow (split, always-confirm):
               transaction (operator_authority._reserve_spend).
   execute  -> ONE PostgreSQL transaction that (0b) re-checks the principal on a
               LOCKED row, (1) consumes the one-use authority bound to the exact
-              args (destination + handle + adapter + payload), (2) performs
-              EXACTLY ONE outbound write through the registered adapter, with a
-              short-lived token injected by the secret broker's with_injected
-              (the token is never returned or logged), and (3) writes the
-              security audit. db.connection() commits on clean exit and rolls
-              back on any exception, so authority redemption and the audit are
-              atomic. Invariant 6.
+              args (destination + handle + adapter + payload), (2) writes the
+              applied security audit, and (3) performs EXACTLY ONE outbound
+              write through the registered adapter, with a short-lived token
+              injected by the secret broker's with_injected (the token is never
+              returned or logged). db.connection() commits on clean exit and
+              rolls back on any exception, so authority redemption and the audit
+              are atomic. Invariant 6. The audit is written BEFORE the outbound
+              write so an audit failure cannot leave a duplicated write; the one
+              irreducible window is a commit failure AFTER a successful write.
 
 DARK by construction. No adapter ships in v1 (contract reversal: "per-adapter
 documented reversal, or the adapter does not ship"), so execute fails closed
@@ -153,21 +155,12 @@ def execute(op, destination: str, token_handle: str, adapter: str,
                 raise RunbookError("no_adapter")
             reversal = registered.reversal
 
-            # 3. Perform EXACTLY ONE outbound write with a short-lived token the
-            #    broker injects. with_injected returns a constant and never
-            #    surfaces the token; a broker/adapter failure (incl. dark broker
-            #    -> no_minter) raises SecretBrokerError, mapped to a RunbookError
-            #    so the whole transaction rolls back.
-            def _use(token: str) -> None:
-                registered.write(destination, payload or {}, token)
-            try:
-                broker.with_injected(token_handle, op.environment, _use,
-                                     subject=op.subject)
-            except broker.SecretBrokerError as exc:
-                raise RunbookError(exc.reason) from None
-
-            # 4. Security audit, in the SAME transaction. Records the adapter's
-            #    documented reversal; no token or payload secret is written.
+            # 3. Write the applied audit BEFORE the outbound side effect, in the
+            #    SAME transaction. If the audit (or anything after it) fails, the
+            #    whole tx rolls back and NO outbound write has happened yet, so
+            #    an audit failure can never leave a duplicated external write.
+            #    The audit only persists if the write AND the commit also
+            #    succeed. No token or payload secret is written.
             cur.execute(
                 "INSERT INTO operator_security_audit (subject, action,"
                 " decision, reason, authority_id, environment, extra)"
@@ -176,7 +169,24 @@ def execute(op, destination: str, token_handle: str, adapter: str,
                  Jsonb({"destination": destination, "adapter": adapter,
                         "token_handle": token_handle, "approver": op.subject,
                         "reversal": reversal})))
-            # clean exit: consume + audit commit atomically.
+
+            # 4. Perform EXACTLY ONE outbound write with a short-lived token the
+            #    broker injects. with_injected returns a constant and never
+            #    surfaces the token; a broker/adapter failure (incl. dark broker
+            #    -> no_minter) raises SecretBrokerError, mapped to a RunbookError
+            #    so the whole transaction (consume + audit) rolls back. The one
+            #    irreducible window is a COMMIT failure AFTER a successful write
+            #    (at-least-once, inherent to any external side effect crossing a
+            #    DB commit); a re-execution repeats the write, which the
+            #    adapter's documented reversal covers.
+            def _use(token: str) -> None:
+                registered.write(destination, payload or {}, token)
+            try:
+                broker.with_injected(token_handle, op.environment, _use,
+                                     subject=op.subject)
+            except broker.SecretBrokerError as exc:
+                raise RunbookError(exc.reason) from None
+            # clean exit: consume + audit + write commit atomically.
     except (operator_authority.AuthorityDenied, RunbookError) as exc:
         _audit_deny(op, getattr(exc, "reason", "denied"), authority_id)
         raise

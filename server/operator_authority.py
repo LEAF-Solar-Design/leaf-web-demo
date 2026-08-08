@@ -87,18 +87,23 @@ def _reserve_spend(cur, subject: str, action: str, entry: Dict[str, Any],
 
     Only USD spend is reserved here. `none` reserves nothing. `cost_tokens` is
     the live worker lane, metered by the worker/broker rather than this mint
-    path, and is intentionally left unchanged (touching it would regress the
-    enabled O2 action); a NEW unknown spend type fails closed. The reservation
-    is coarse and conservative: the per-action `max_spend_cents` is reserved at
+    path, so it is allowed WITHOUT a reservation here (denying it would regress
+    the enabled O2 action). The parser requires every action to declare a spend
+    type in {none, cost_tokens, usd}, so there is no unknown type to reach this
+    function. The reservation is coarse and conservative: the per-action
+    `max_spend_cents` is reserved at
     mint and NOT refunded if redemption is later denied, exactly as the rate
     counter is consumed at mint. A missing/zero ceiling or per-action cap denies
     (fail-closed), so an operator cannot enable a usd action without also
     configuring its spend limits."""
     spend_type = entry.get("spend") or "none"
-    if spend_type == "none":
+    if spend_type in ("none", "cost_tokens"):
+        # `none` reserves nothing. `cost_tokens` is the live worker lane, whose
+        # token spend is metered by the worker/broker rather than this mint
+        # path; reserving nothing here is correct and does NOT deny it. The
+        # parser guarantees spend is one of {none, cost_tokens, usd}, so there
+        # is no unknown type to fall through to.
         return None
-    if spend_type != "usd":
-        return "spend_type_unsupported"
     amount = int(entry.get("max_spend_cents", 0))
     ceiling = int(catalog.get("spend_limits", {}).get(
         "usd_principal_day_cents", 0))

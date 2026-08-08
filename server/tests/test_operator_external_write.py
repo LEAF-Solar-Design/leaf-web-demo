@@ -256,8 +256,11 @@ def test_execute_dark_broker_no_minter_rolls_back(atomic):
     with pytest.raises(rb.RunbookError) as e:
         rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
     assert e.value.reason == "no_minter"
-    assert atomic["audited"] is False
+    # The applied-audit statement runs BEFORE the write (P1 ordering), but the
+    # write failure rolls the WHOLE transaction back, so the audit never
+    # persists. The rollback is the proof, not the statement-executed flag.
     assert atomic["committed"] is False and atomic["rolled_back"] is True
+    assert atomic["wrote"] == 0
     assert atomic["deny_audits"] == ["no_minter"]
 
 
@@ -278,6 +281,47 @@ def test_execute_revoked_principal_rolls_back(atomic):
     assert e.value.reason == "principal_drift"
     assert atomic["wrote"] == 0
     assert atomic["committed"] is False and atomic["rolled_back"] is True
+
+
+# --- spend reservation: required + cost_tokens allowed (no DB) --------------
+
+def test_policy_requires_spend_on_every_action(tmp_path, monkeypatch):
+    import operator_policy
+    pol = {"version": 1, "actions": {"operator.x": {
+        "class": "O1", "rung": 1, "policy": "auto", "required": "operator",
+        "rate": "low", "timeout_s": 10, "handler": "x",
+        "args_schema": {"type": "object"}}}}  # no "spend"
+    pf = tmp_path / "p.json"
+    pf.write_text(json.dumps(pol), encoding="utf-8")
+    monkeypatch.setenv("LEAF_OPERATOR_POLICY_FILE", str(pf))
+    with pytest.raises(operator_policy.OperatorPolicyError) as e:
+        operator_policy.load_catalog()
+    assert "spend required" in str(e.value)
+
+
+def test_reserve_spend_allows_none_and_cost_tokens_without_denial():
+    import operator_authority as auth
+
+    class _C:
+        def __init__(self): self.calls = 0
+        def execute(self, *a): self.calls += 1
+        def fetchone(self): return {"used": 1}
+    for spend in ("none", "cost_tokens"):
+        c = _C()
+        # Neither reserves (nor denies): returns None and never touches the DB.
+        assert auth._reserve_spend(c, "s", "a", {"spend": spend}, {}) is None
+        assert c.calls == 0
+
+
+def test_reserve_spend_usd_denies_when_unconfigured():
+    import operator_authority as auth
+
+    class _C:
+        def execute(self, *a): pass
+        def fetchone(self): return None
+    # usd with no ceiling / no cap -> spend_unconfigured (fail-closed).
+    assert auth._reserve_spend(
+        _C(), "s", "a", {"spend": "usd", "max_spend_cents": 100}, {}) == "spend_unconfigured"
 
 
 # --- dark by default + route registration -----------------------------------
