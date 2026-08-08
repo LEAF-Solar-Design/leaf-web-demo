@@ -43,16 +43,6 @@ _QUEUE_MAX = 2000
 _BATCH_MAX = 250
 _FLUSH_INTERVAL_S = 2.0
 
-# A queued row may carry a BigQuery streaming insertId under this key. It is
-# popped off in _flush_batch and passed as `row_ids`, never inserted as a
-# column. BigQuery collapses rows sharing an insertId inside its streaming
-# window, which is how one browser failure stays one row even when its twin
-# events reach two different ECS tasks (routers/telemetry.py explains the
-# topology). Google documents that collapse as BEST EFFORT, so it is one
-# layer of three and never the only one.
-_INSERT_ID_FIELD = "_insert_id"
-_INSERT_ID_MAX = 128
-
 _TABLE_SCHEMA = [
     ("timestamp", "TIMESTAMP", "REQUIRED"),
     ("event_type", "STRING", "REQUIRED"),
@@ -189,18 +179,10 @@ def _ensure_table(day: str) -> None:
 def _flush_batch(rows: List[Dict[str, Any]]) -> None:
     """Insert one batch; on failure drop it with ONE structured stderr line."""
     day = time.strftime("%Y%m%d", time.gmtime())
-    # Popped from EVERY row before the insert, so the transport key can never
-    # reach the table. `None` for a row that asked for no id, which the client
-    # library reads as "no explicit insert id for this row". When nothing in
-    # the batch asked, the call keeps its original shape exactly.
-    row_ids = [r.pop(_INSERT_ID_FIELD, None) for r in rows]
-    if not any(row_ids):
-        row_ids = None
     try:
         _ensure_table(day)
         errors = _get_client().insert_rows_json(
-            _table_id(day), rows, row_ids=row_ids,
-            skip_invalid_rows=True, ignore_unknown_values=True,
+            _table_id(day), rows, skip_invalid_rows=True, ignore_unknown_values=True,
         )
         bad = len(errors) if errors else 0
         with _lock:
@@ -288,7 +270,6 @@ def emit(
     session_id: str,
     user_email: Optional[str] = None,
     labels: Optional[Dict[str, Any]] = None,
-    insert_id: Optional[str] = None,
 ) -> bool:
     """Enqueue one event. Returns whether it was accepted; NEVER raises.
 
@@ -320,12 +301,6 @@ def emit(
             "app_version": _app_version(),
             "labels": _stringify_labels(merged),
         }
-        # Rides the row through the queue and is REMOVED before the insert:
-        # it is a streaming-API argument, not a column. Absent for every
-        # emitter that does not ask for one, which is all of them but the
-        # client.exception path in routers/telemetry.py.
-        if insert_id:
-            row[_INSERT_ID_FIELD] = str(insert_id)[:_INSERT_ID_MAX]
         with _wake:
             if len(_queue) == _QUEUE_MAX:
                 _stats["dropped_overflow"] += 1

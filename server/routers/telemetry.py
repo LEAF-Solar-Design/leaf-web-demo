@@ -145,13 +145,6 @@ _CLIENT_EXCEPTION_SCHEMA: Dict[str, Any] = {
     # BOTH client versions, deliberately and temporarily: see
     # _COMPONENT_STACK_HASH_RE. Every other digest here keeps the strict rule.
     "component_stack_hash": _COMPONENT_STACK_HASH_RE,
-    # The cross-emitter identity of ONE failure (web/src/telemetry.js
-    # `dedupKeyFor`). New in this release, so it keeps the strict 16-digit
-    # rule: no older bundle can emit it, and a variable-width value here would
-    # be both a free-text hole and a merge key, which is the worst pairing on
-    # the schema. A row whose key fails this rule simply loses the label and
-    # is never merged with anything -- the safe direction.
-    "dedup_key": _HASH_RE,
     # `tour_step` is deliberately ABSENT. Closing it needs a mirror of two
     # product-owned step tables that change with ordinary feature work, so it
     # would drift by design; a shape rule would accept "customer_secret". It
@@ -192,93 +185,6 @@ def _schema_filtered(name: str, labels: Dict[str, Any]) -> Dict[str, Any]:
         elif rule.match(val):
             out[key] = val
     return out
-
-# --------------------------------------------------------------------------- #
-# client.exception de-duplication
-# --------------------------------------------------------------------------- #
-# ONE React crash reaches TWO emitters. React 18's development build re-throws
-# a render error through a synthetic DOM event, so the global window handler
-# records it and then the ErrorBoundary records it again. Both rows are real
-# and both describe the same failure; anything counting crashes counted it
-# twice.
-#
-# THE CLIENT NO LONGER TRIES TO SOLVE THIS. Three rounds of browser-side
-# timing de-duplication (emit-then-retract, then hold-pending-then-flush) each
-# failed the same way: a batch flush landing between the two emits committed
-# the first row before the second could suppress it, so the row count became a
-# property of how busy the page was. Instead both emitters now attach the same
-# `dedup_key` -- a digest of the failure's signature plus a coarse time bucket,
-# derived independently from the same Error object -- and de-duplication moved
-# here, where it is a property of the DATA and no ordering can break it.
-#
-# TOPOLOGY ASSUMED, AND WHY IT HOLDS:
-#
-# This door is an ECS service, NOT a singleton. `docs/aws-staging-deploy-
-# receipt.json` records the deployment owner as "ECS CI/CD task-definition
-# revisions; Terraform intentionally ignores task_definition and
-# desired_count", so the instance count is not pinned by IaC and can be raised
-# without a code change. Even at desired_count=1, every rolling deployment
-# runs the outgoing and incoming tasks concurrently behind the same ALB, and
-# nothing in this stack configures session affinity. The two POSTs carrying
-# one crash's twin rows are separate HTTP requests, so they CAN be served by
-# different processes.
-#
-# Therefore a per-process memo would de-duplicate on a quiet single-task day
-# and SILENTLY stop de-duplicating during every deploy and every scale-out --
-# the same class of "works until the environment changes" failure the client
-# design just died of. It is not used here.
-#
-# There is also no shared store to reach for. The telemetry rail deliberately
-# depends on nothing but BigQuery: `telemetry_sink` is a bounded in-memory
-# queue with a guarded SDK import and a never-raise contract, and the platform
-# Postgres is absent from both the broker image and the hermetic CI gate (see
-# the `platform` suite note in scripts/run-all-gates.py). Putting a database
-# round-trip on an anonymous, unauthenticated, loss-tolerant path to save a
-# duplicate row would trade a real availability coupling for a cosmetic one.
-#
-# So de-duplication happens in the two places that need no coordination:
-#
-#   1. WITHIN A REQUEST BODY, here, deterministically. This is the common case
-#      by a wide margin -- both emits normally ride the same 20-event batch --
-#      and it needs no state at all, so it cannot drift between instances.
-#   2. AT THE DURABLE LAYER, by handing BigQuery a stable streaming insertId of
-#      `<session>:<dedup_key>` (see telemetry_sink.emit). BigQuery collapses
-#      repeated insertIds inside its streaming window regardless of which task,
-#      or which retry, sent them. That is documented as BEST EFFORT, which is
-#      exactly why it is not the only layer.
-#   3. AT READ TIME, by the rule in docs/PLATFORM_TELEMETRY.md: every consumer
-#      of client.exception keeps one row per (session_id, dedup_key). That rule
-#      is `_dedup_rank` below, expressed as SQL. It is the authoritative one:
-#      it is a pure function of rows already stored, so it holds no matter how
-#      many instances wrote them or how long apart.
-#
-# A row with no `dedup_key` is never merged with anything.
-
-
-def _dedup_identity(name: str, session_id: str, labels: Dict[str, Any]) -> Optional[tuple]:
-    """The (session, key) two rows must share to be the same failure, or None
-    when this row is not de-duplicable at all."""
-    if name != "client.exception":
-        return None
-    key = labels.get("dedup_key")
-    if not isinstance(key, str) or not key:
-        return None
-    return (session_id, key)
-
-
-def _dedup_rank(labels: Dict[str, Any]) -> int:
-    """Which row SURVIVES when two share an identity. Lower wins.
-
-    The boundary row wins, as it did under every previous design: it carries
-    `component_stack_hash`, which the global handler cannot know, and it is the
-    older contract. It is recognised by the ABSENCE of `source`, which is the
-    one label the two emitters must differ on.
-
-    The read-time rule in docs/PLATFORM_TELEMETRY.md is this function as SQL --
-    `ORDER BY (source IS NOT NULL), timestamp` -- so the layers agree on WHICH
-    row survives, not merely on how many."""
-    return 1 if labels.get("source") else 0
-
 
 # Per-IP token bucket for the pre-auth lane (the guest-quota pattern, in
 # miniature): burst 30, refill 30 per minute, in-process only. Telemetry is
@@ -426,10 +332,6 @@ async def ingest(request: Request,
         session_id = body.get("session_id")
         session_id = str(session_id)[:64] if isinstance(session_id, str) and session_id else "none"
 
-        # Normalize first, emit second. The body is capped at MAX_EVENTS, so
-        # holding the validated rows costs nothing, and it is what lets two
-        # twin rows in ONE body collapse before either is queued.
-        normalized: List[tuple] = []
         for ev in events[:MAX_EVENTS]:
             if not isinstance(ev, dict):
                 continue
@@ -471,53 +373,17 @@ async def ingest(request: Request,
             if user_id:
                 merged["user_id"] = str(user_id)
             merged["ingest"] = "client"
-            normalized.append((str(name), str(etype), merged))
-
-        # Collapse twin rows that arrived together. `_dedup_rank` decides WHICH
-        # survives, so the outcome does not depend on the order the browser
-        # happened to queue them in; arrival order breaks a tie between equal
-        # ranks. A merged-away row still counts as accepted: the door took the
-        # event, it simply resolved to a row that is already there, and the
-        # client must never read a drop into a successful merge.
-        survivors: Dict[tuple, int] = {}
-        keep: List[bool] = []
-        merged_away = 0
-        for idx, (name, _etype, merged) in enumerate(normalized):
-            identity = _dedup_identity(name, session_id, merged)
-            keep.append(True)
-            if identity is None:
-                continue
-            prior = survivors.get(identity)
-            if prior is None:
-                survivors[identity] = idx
-                continue
-            merged_away += 1
-            if _dedup_rank(merged) < _dedup_rank(normalized[prior][2]):
-                keep[prior] = False
-                survivors[identity] = idx
-            else:
-                keep[idx] = False
-
-        for idx, (name, etype, merged) in enumerate(normalized):
-            if not keep[idx]:
-                continue
-            identity = _dedup_identity(name, session_id, merged)
             ok = telemetry_sink.emit(
                 name,
-                event_type=etype,
+                event_type=str(etype),
                 tenant_id=tenant_id,
                 tenant_kind=tenant_kind,
                 session_id=session_id,
                 labels=merged,
-                # The stable streaming id: the SAME string for a twin that
-                # arrives in a later body, on a later retry, or through a
-                # different task. None for everything else, which is every
-                # event's existing behaviour.
-                insert_id=f"{session_id}:{identity[1]}" if identity else None,
             )
             if ok:
                 accepted += 1
-        return {"accepted": accepted + merged_away}
+        return {"accepted": accepted}
     except Exception:  # noqa: BLE001 - the client can never observe a failure
         return {"accepted": accepted}
 

@@ -7,6 +7,17 @@
  * make the capture trustworthy: it fires, NO FREE TEXT LEAVES THE BROWSER, it
  * stops at the cap, and it stays silent for resource-load noise.
  *
+ * There is NO cross-emitter de-duplication (see telemetry.js's comment above
+ * `emitGlobalException`): the global handlers and the ErrorBoundary each emit
+ * `client.exception` independently, with no shared occurrence key and no
+ * same-signature suppression. Four review rounds tried to build one and each
+ * either broke under ordinary batching/pagehide timing or, in the final
+ * attempt, silently merged two genuinely distinct same-signature crashes into
+ * one row -- worse than the duplicate it was meant to remove. These specs do
+ * not assert against a double-emit; where one is possible (a dev-mode React
+ * crash reaching both the global handler and the boundary) it is documented,
+ * not policed.
+ *
  * Each spec re-imports the module (`vi.resetModules`) because the per-session
  * caps deliberately keep an in-memory floor beside sessionStorage — without a
  * fresh instance the cap spec would leak into the ones after it. The jsdom
@@ -19,14 +30,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 let current = null
 let installed = []
 
-/** telemetry.js's own timings, mirrored rather than imported: they are private
- * on purpose, and the whole point of the cross-flush spec below is that the
- * one-row-per-crash guarantee must not depend on the batch threshold's value. */
+/** telemetry.js's own timing, mirrored rather than imported: it is private on
+ * purpose, and the "emits a global row straight away, holding nothing back"
+ * spec below exists to prove nothing is held across it. */
 const FLUSH_AT = 20             // events per batch
-
-/** Every digest this module emits, `dedup_key` included, is exactly 16 digits
- * (the ingest door rejects any other width). */
-const DIGEST = /^\d{16}$/
 
 /** Load a fresh telemetry module with fetch stubbed.
  *
@@ -62,48 +69,6 @@ function postedEvents(fetchMock) {
 
 function exceptionsIn(events) {
   return events.filter((e) => e.event_name === 'client.exception')
-}
-
-/** The events inside one sendBeacon Blob. FileReader, not Blob.text(): this
- * jsdom's Blob has no text(). */
-function readBlobEvents(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(JSON.parse(String(reader.result)).events)
-    reader.onerror = () => reject(reader.error)
-    reader.readAsText(blob)
-  })
-}
-
-/** THE INGEST RULE, mirrored here so these specs can assert what actually
- * reaches BigQuery rather than only what the browser sent.
- *
- * This is `_dedup_identity` + `_dedup_rank` from server/routers/telemetry.py,
- * and the SQL in docs/PLATFORM_TELEMETRY.md, expressed a third time: keep one
- * row per (session, dedup_key), and let the row WITHOUT `source` -- the
- * boundary's, the one carrying component_stack_hash -- win the tie. A row with
- * no key is never merged with anything.
- *
- * Mirrored rather than imported because it lives in Python. The server suite
- * (server/tests/test_client_exception_dedup.py) proves the real door
- * implements it; these specs prove the browser hands it keys it can use. */
-function dedupRows(events, sessionId = 'test-session') {
-  const winners = new Map()
-  const out = []
-  for (const ev of events) {
-    const key = ev.labels && ev.labels.dedup_key
-    if (!key) { out.push(ev); continue }
-    const identity = `${sessionId}|${key}`
-    const prior = winners.get(identity)
-    const rank = ev.labels.source ? 1 : 0
-    if (prior === undefined) {
-      winners.set(identity, out.length)
-      out.push(ev)
-    } else if (rank < (out[prior].labels.source ? 1 : 0)) {
-      out[prior] = ev
-    }
-  }
-  return out
 }
 
 describe('global error capture', () => {
@@ -177,12 +142,6 @@ describe('global error capture', () => {
       .toEqual(['unhandledrejection', 'unhandledrejection'])
     expect(events[1].labels.message_hash).toMatch(/^\d+$/)
   })
-
-
-
-
-
-
 
   it('accepts only a PLATFORM error name, because name is writable', async () => {
     const { mod, fetchMock } = await loadTelemetry()
@@ -274,8 +233,8 @@ describe('global error capture', () => {
   it('distinguishes two rejections that stringify identically', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    // Both are "[object Object]", so hashing the stringification alone merged
-    // them and the dedup then dropped the second.
+    // Both are "[object Object]", so hashing the stringification alone would
+    // make them indistinguishable in the stored labels.
     mod.handleRejectionEvent({ reason: { code: 4 } })
     mod.handleRejectionEvent({ reason: { code: 5 } })
     mod.flushNow()
@@ -289,7 +248,7 @@ describe('global error capture', () => {
     const { mod, fetchMock } = await loadTelemetry()
 
     // "Aa" and "BB" both hashed to 2112 under the previous shift-hash, so the
-    // second distinct failure was silently suppressed by the dedup.
+    // two distinct failures were indistinguishable once hashed.
     mod.handleErrorEvent({ error: new Error('Aa') })
     mod.handleErrorEvent({ error: new Error('BB') })
     mod.flushNow()
@@ -298,7 +257,6 @@ describe('global error capture', () => {
     expect(events).toHaveLength(2)
     expect(events[0].labels.message_hash).not.toBe(events[1].labels.message_hash)
   })
-
 
   it('stops emitting at the per-session cap so an error loop cannot drain the bucket', async () => {
     const { mod, fetchMock } = await loadTelemetry()
@@ -312,21 +270,6 @@ describe('global error capture', () => {
     expect(postedEvents(fetchMock)).toHaveLength(10)
   })
 
-  it('spends nothing on repeats, so a ResizeObserver loop cannot crowd out a real crash', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // The classic pair for an app with a three.js viewer and resizable panels.
-    for (let i = 0; i < 200; i++) {
-      mod.handleErrorEvent({ error: new Error('ResizeObserver loop limit exceeded') })
-    }
-    mod.handleErrorEvent({ error: new TypeError('the real crash, seen last') })
-    mod.flushNow()
-
-    const events = postedEvents(fetchMock)
-    expect(events).toHaveLength(2)
-    expect(events[1].labels.message_class).toBe('TypeError')
-  })
-
   it('caps only the global path, so a storm cannot silence the boundary', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
@@ -338,11 +281,6 @@ describe('global error capture', () => {
     mod.trackException({ message_class: 'TypeError', component_stack_hash: '42' })
     mod.flushNow()
 
-    // Found by label, not by index: a global row is HELD out of the send
-    // buffer until its dedup window closes, so it rejoins the batch when it is
-    // released rather than where it was recorded. Which rows land is the
-    // contract; where they sit in the array is not, and each carries its own
-    // `client_ts`.
     const events = postedEvents(fetchMock)
     expect(events).toHaveLength(11)
     const boundaryRows = events.filter((e) => e.labels.source === undefined)
@@ -375,235 +313,24 @@ describe('global error capture', () => {
     expect(events[11].labels.component_stack_hash).toBe('0000000000000011')
   })
 
-  it('gives one crash the SAME key from both emitters, and the pair collapses to the boundary row', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // ORDERING 1 of 3: the ordinary one. React 18's DEV build re-throws a
-    // render error through a synthetic DOM event, so the global handler sees
-    // the crash first and componentDidCatch sees it second.
-    //
-    // The client no longer decides how many rows there are -- it emits BOTH,
-    // immediately, and they carry the same `dedup_key`. That key is the whole
-    // contract: everything downstream follows from it.
-    const err = new TypeError('the same crash, reached by both paths')
-    mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
-    mod.trackException({
-      message_class: 'TypeError',
-      component_stack_hash: '0000000000000042',
-    }, 'exception_boundary', err)
-    mod.flushNow()
-
-    const exceptions = exceptionsIn(postedEvents(fetchMock))
-    expect(exceptions).toHaveLength(2)
-    expect(exceptions[0].labels.dedup_key).toMatch(DIGEST)
-    expect(exceptions[1].labels.dedup_key).toBe(exceptions[0].labels.dedup_key)
-
-    // And what the ingest door does with that pair: EXACTLY ONE row, and it
-    // is the boundary's, because that is the row carrying component_stack_hash.
-    const rows = dedupRows(exceptions)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].labels.source).toBeUndefined()
-    expect(rows[0].labels.component_stack_hash).toBe('0000000000000042')
-  })
-
-  it('keeps TWO rows for two distinct failures, so de-duplication cannot eat real records', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // Prove the key can DISAGREE. A boundary crash that is not the failure the
-    // global handler saw must keep its own row, or a merge key is just a way
-    // of losing crashes.
-    mod.handleErrorEvent({ error: new RangeError('a genuinely different failure') })
-    mod.trackException({
-      message_class: 'TypeError',
-      component_stack_hash: '0000000000000007',
-    }, 'exception_boundary', new TypeError('the React crash'))
-    mod.flushNow()
-
-    const exceptions = exceptionsIn(postedEvents(fetchMock))
-    expect(exceptions).toHaveLength(2)
-    expect(exceptions[0].labels.dedup_key).not.toBe(exceptions[1].labels.dedup_key)
-
-    const rows = dedupRows(exceptions)
-    expect(rows).toHaveLength(2)
-    const globalRows = rows.filter((e) => e.labels.source === 'window.onerror')
-    expect(globalRows).toHaveLength(1)
-    expect(globalRows[0].labels.message_class).toBe('RangeError')
-    expect(rows.filter((e) => e.labels.source === undefined)).toHaveLength(1)
-  })
-
-  it('survives the 20-event flush boundary, because the key does not depend on the batch', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // ORDERING 2 of 3, and the counterexample that killed BOTH previous
-    // designs. Queue 19 events first and the global row is the 20th: the batch
-    // POSTs on the spot, so a de-duplication that had to reach back into the
-    // send buffer had nothing left to reach for, and one crash landed twice.
-    // Whether it did was decided by how busy the page was.
-    //
-    // A key carries no such dependency. The rows land in two DIFFERENT POST
-    // bodies here -- that is the point -- and still resolve to one row.
-    for (let i = 0; i < FLUSH_AT - 1; i++) mod.track(`filler.${i}`)
-
-    const err = new TypeError('the same crash, split across a flush')
-    mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
-    mod.trackException({
-      message_class: 'TypeError',
-      component_stack_hash: '0000000000000042',
-    }, 'exception_boundary', err)
-    mod.flushNow()
-
-    // The split is REAL, not incidental: assert the two twins were carried by
-    // two separate requests, or this spec would prove nothing the first does.
-    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).events)
-    expect(bodies.length).toBeGreaterThan(1)
-    expect(bodies.filter((b) => exceptionsIn(b).length > 0)).toHaveLength(2)
-
-    const events = postedEvents(fetchMock)
-    const exceptions = exceptionsIn(events)
-    expect(exceptions).toHaveLength(2)
-    expect(exceptions[1].labels.dedup_key).toBe(exceptions[0].labels.dedup_key)
-
-    const rows = dedupRows(exceptions)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].labels.source).toBeUndefined()
-    expect(rows[0].labels.component_stack_hash).toBe('0000000000000042')
-    // Nothing else was lost paying for it: all 19 fillers still landed.
-    expect(events.filter((e) => e.event_name.startsWith('filler.'))).toHaveLength(FLUSH_AT - 1)
-  })
-
-  it('survives a full buffer, a pagehide beacon, and THEN the boundary', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // ORDERING 3 of 3: the sequence the merge gate reproduced to BLOCK round
-    // four -- a nearly full buffer, a global error, a pagehide, and only then
-    // the same Error reaching the boundary. It broke holding for the same
-    // reason a flush broke retraction: pagehide MUST release everything it is
-    // holding or a torn-down tab loses the crash, so the global row was
-    // committed to the wire before the boundary could say anything about it.
-    //
-    // The buffer is filled to FLUSH_AT - 2 so the global row is the 19th and
-    // is still buffered when pagehide fires -- otherwise the 20th event
-    // flushes by fetch and the beacon, which is the transport this ordering
-    // exists to exercise, carries nothing.
-    //
-    // Here the global row leaves with the BEACON and the boundary row leaves
-    // by fetch afterwards. Two transports, two bodies, no shared timing -- and
-    // still one key, so still one row.
-    const beacons = []
-    const hadBeacon = 'sendBeacon' in navigator
-    navigator.sendBeacon = (url, blob) => { beacons.push(blob); return true }
-    try {
-      for (let i = 0; i < FLUSH_AT - 2; i++) mod.track(`filler.${i}`)
-
-      const err = new TypeError('a crash the tab does not outlive')
-      mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
-      window.dispatchEvent(new Event('pagehide'))
-      mod.trackException({
-        message_class: 'TypeError',
-        component_stack_hash: '0000000000000031',
-      }, 'exception_boundary', err)
-      mod.flushNow()
-
-      const beaconed = (await Promise.all(beacons.map(readBlobEvents))).flat()
-      const all = [...postedEvents(fetchMock), ...beaconed]
-      const exceptions = exceptionsIn(all)
-      // Both twins really did leave, by two different transports.
-      expect(exceptions).toHaveLength(2)
-      expect(exceptionsIn(beaconed)).toHaveLength(1)
-      expect(exceptions[1].labels.dedup_key).toBe(exceptions[0].labels.dedup_key)
-
-      const rows = dedupRows(exceptions)
-      expect(rows).toHaveLength(1)
-      expect(rows[0].labels.source).toBeUndefined()
-      expect(rows[0].labels.component_stack_hash).toBe('0000000000000031')
-    } finally {
-      if (!hadBeacon) delete navigator.sendBeacon
-    }
-  })
-
-  it('agrees on the key however far apart the two emitters run', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // The residual race a naive `floor(now / 5s)` would still carry: the
-    // global emit at 4999 ms and the boundary emit at 5001 ms would fall in
-    // two buckets, produce two keys, and land two rows -- rarely, and only on
-    // a slow chunk fetch, which is the worst way for a bug to behave.
-    //
-    // The bucket is fixed by the FIRST emitter to describe an error and read
-    // back by the second, so a boundary arriving a whole bucket later still
-    // agrees. Fake timers make the gap explicit rather than hoping for it.
-    vi.useFakeTimers()
-    try {
-      const err = new TypeError('a crash the boundary reports late')
-      mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
-      vi.advanceTimersByTime(12000)   // several buckets later
-
-      mod.trackException({
-        message_class: 'TypeError',
-        component_stack_hash: '0000000000000013',
-      }, 'exception_boundary', err)
-      mod.flushNow()
-
-      const exceptions = exceptionsIn(postedEvents(fetchMock))
-      expect(exceptions).toHaveLength(2)
-      expect(exceptions[1].labels.dedup_key).toBe(exceptions[0].labels.dedup_key)
-      expect(dedupRows(exceptions)).toHaveLength(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('separates two occurrences of an identical failure once a bucket has passed', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // The other half of the bucket's job. Two DIFFERENT occurrences whose
-    // message, class, throw site and route are all identical are two crashes,
-    // not one, and the rail has to be able to count them. Without the bucket
-    // the signature alone would fold a recurring failure into a single row
-    // forever, and "how often" would become unanswerable.
-    //
-    // Distinct Error objects, so nothing is memoised between them; the clock
-    // is what separates the keys.
-    vi.useFakeTimers()
-    try {
-      const boom = () => { const e = new TypeError('identical text'); e.stack = 'at same (f.js:1:1)'; return e }
-      mod.trackException({ message_class: 'TypeError' }, 'exception_boundary', boom())
-      vi.advanceTimersByTime(10000)
-      mod.trackException({ message_class: 'TypeError' }, 'exception_boundary', boom())
-      mod.flushNow()
-
-      const exceptions = exceptionsIn(postedEvents(fetchMock))
-      expect(exceptions).toHaveLength(2)
-      expect(exceptions[0].labels.dedup_key).not.toBe(exceptions[1].labels.dedup_key)
-      expect(dedupRows(exceptions)).toHaveLength(2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
   it('emits a global row straight away, holding nothing back', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
-    // The ordinary case, and the one the previous design broke to buy its
-    // de-duplication: a three.js draw tick throws and React never hears about
-    // it, so no boundary is ever coming. That row used to sit outside the send
-    // buffer waiting for a twin that did not exist. It is now an ordinary
-    // queued event, so a full batch carries it out like anything else -- no
-    // timer, no window, nothing to lose it in.
+    // No pending list, no hold timer: a three.js draw tick throws and React
+    // never hears about it, so it is an ordinary queued event like any other,
+    // out with the next flush.
     mod.handleErrorEvent({ error: new Error('a callback nothing renders') })
     for (let i = 0; i < FLUSH_AT - 1; i++) mod.track(`filler.${i}`)
 
     const exceptions = exceptionsIn(postedEvents(fetchMock))
     expect(exceptions).toHaveLength(1)
     expect(exceptions[0].labels.source).toBe('window.onerror')
-    expect(exceptions[0].labels.dedup_key).toMatch(DIGEST)
+    expect(exceptions[0].labels.dedup_key).toBeUndefined()
   })
-  it('lets a held row leave with the pagehide beacon, so a torn-down tab keeps its crash', async () => {
+
+  it('lets a global row leave with the pagehide beacon, so a torn-down tab keeps its crash', async () => {
     const { mod } = await loadTelemetry()
 
-    // The reason the original design refused to defer at all: a record held
-    // for a twin is lost if the page dies first. pagehide is the seam that
-    // makes holding safe, so it has to release before it beacons.
     const sent = []
     const hadBeacon = 'sendBeacon' in navigator
     navigator.sendBeacon = (url, blob) => { sent.push(blob); return true }
@@ -626,25 +353,6 @@ describe('global error capture', () => {
     } finally {
       if (!hadBeacon) delete navigator.sendBeacon
     }
-  })
-
-  it('leaves a rejection alone, because no boundary ever sees one', async () => {
-    const { mod, fetchMock } = await loadTelemetry()
-
-    // Only `window.onerror` rows are retractable. A rejection cannot reach a
-    // React boundary, so treating one as retractable could only ever produce
-    // a false match against a crash that merely resembles it.
-    const reason = new TypeError('rejected, never rendered')
-    mod.handleRejectionEvent({ reason })
-    mod.trackException({
-      message_class: 'TypeError',
-      component_stack_hash: '0000000000000009',
-    }, 'exception_boundary', reason)
-    mod.flushNow()
-
-    const events = postedEvents(fetchMock)
-    expect(events).toHaveLength(2)
-    expect(events[0].labels.source).toBe('unhandledrejection')
   })
 
   it('ignores resource-load error events, which carry no exception', async () => {

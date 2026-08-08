@@ -130,13 +130,13 @@ C-1 (merged #427):
 | `run.confirm_shown` | `App.armDecision` (2s same-tool de-dupe over the tour double-arm) | tool, is_write, source (prompt/slash/catalog/tour/agent) |
 | `error.shown` | the two transport seams: `api.http()`, `converse.tagged()`; cap 20/session | http_status, error_code, endpoint_class |
 | `agent.stream_down` | `converse.onStreamDown`; cap 10/session | reconnects_n |
-| `client.exception` | ErrorBoundary; UNCAPPED (React bounds it) | message_class, component_stack_hash, dedup_key |
+| `client.exception` | ErrorBoundary; UNCAPPED (React bounds it) | message_class, component_stack_hash |
 
 C-3 (global error capture):
 
 | Event | Choke point | Labels |
 |---|---|---|
-| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_hash, route, ua_class, dedup_key |
+| `client.exception` | `window` `error` + `unhandledrejection` listeners, installed by importing `telemetry.js` (first import in `main.jsx`); 10 DISTINCT per session | source (window.onerror/unhandledrejection), message_class, message_hash, stack_hash, route, ua_class |
 
 The boundary only sees what a component throws DURING RENDER, so a three.js
 draw tick, a `setTimeout` callback, and every unawaited promise failed with
@@ -242,74 +242,6 @@ in `web/src/telemetry.js` — drift is safe-by-default (an unlisted class
 degrades rather than travelling) but silent, so
 `server/tests/test_client_exception_vocab_freeze.py` enforces it, in the
 same spirit as the auth vocab freeze.
-
-### One failure is one row: `dedup_key` (READ-SIDE CONTRACT)
-
-ONE React crash reaches BOTH emitters. React 18's development build re-throws
-a render error through a synthetic DOM event, so the global `window.onerror`
-handler records it and then the ErrorBoundary records it again. Its production
-build uses try/catch and does not, which made the row count a property of the
-BUILD.
-
-The browser does NOT resolve this. Three rounds of client-side timing
-de-duplication were tried and rejected (emit-then-retract, then
-hold-pending-then-flush-on-exit): a batch flush landing between the two emits
-committed the first row before the second could suppress it, so the row count
-became a property of how busy the page was — correct on a quiet page, wrong on
-a busy one. Both emitters now simply emit, and both attach the same
-`dedup_key`.
-
-`dedup_key` is a 16-digit digest of the failure's signature (message class,
-message digest, throw-site digest, route) plus a coarse 5-second time bucket.
-Two emits of ONE occurrence share it; two occurrences more than a bucket apart
-do not. `component_stack_hash` is deliberately NOT part of it — only the
-boundary can compute that label, so including it would guarantee the two keys
-never matched.
-
-De-duplication happens in three places, none of which coordinate:
-
-1. **Within one request body**, at the ingest door, deterministically. This is
-   the common case: both emits normally ride the same 20-event batch.
-2. **At write time**, as the BigQuery streaming `insertId`
-   `<session_id>:<dedup_key>`. BigQuery collapses repeated insertIds inside its
-   streaming window whichever ECS task or retry sent them. Google documents
-   that as BEST EFFORT, which is why it is not the only layer.
-3. **At read time — THIS IS THE AUTHORITATIVE ONE.** Every consumer of
-   `client.exception` keeps one row per `(session_id, dedup_key)`:
-
-   ```sql
-   -- one row per browser failure; the ErrorBoundary row wins because it is
-   -- the only one carrying component_stack_hash.
-   SELECT * EXCEPT(_dedup_rn) FROM (
-     SELECT t.*, ROW_NUMBER() OVER (
-       PARTITION BY t.session_id, JSON_VALUE(t.labels, '$.dedup_key')
-       ORDER BY (JSON_VALUE(t.labels, '$.source') IS NOT NULL), t.timestamp
-     ) AS _dedup_rn
-     FROM `<project>.leaf_platform_analytics.leaf_platform_events_*` AS t
-     WHERE t.event_name = 'client.exception'
-       AND t.environment = @environment
-       AND JSON_VALUE(t.labels, '$.dedup_key') IS NOT NULL
-   ) WHERE _dedup_rn = 1
-   ```
-
-   Rows with a NULL `dedup_key` are never merged and must be UNIONed back in:
-   a bundle older than this release emits none, and merging on a missing key
-   would collapse unrelated crashes — worse than a duplicate. The ordering
-   clause is `_dedup_rank` in `server/routers/telemetry.py`, so the layers
-   agree on WHICH row survives, not merely on how many.
-
-Why read time is the authority: the ingest door is an ECS service, not a
-singleton. `docs/aws-staging-deploy-receipt.json` records that Terraform
-intentionally ignores `desired_count`, and every rolling deployment runs the
-outgoing and incoming tasks concurrently behind one ALB with no session
-affinity — so the two POSTs carrying one crash's twin rows can be served by
-different processes. A per-process memo would de-duplicate on a quiet day and
-silently stop during every deploy. The read-time rule is a pure function of
-stored rows, so it holds however many processes wrote them.
-
-`server/tests/test_client_exception_dedup.py` asserts EXACTLY ONE row survives
-under all three orderings the merge gate used, and that two distinct failures
-still make two rows.
 
 ### Caps
 

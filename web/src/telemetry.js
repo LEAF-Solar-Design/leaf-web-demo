@@ -37,18 +37,12 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
-// How coarsely a dedup key rounds time. See `dedupKeyFor`: it is the ONLY
-// thing separating two genuinely distinct occurrences whose text, class,
-// throw site and route are all identical.
-const DEDUP_BUCKET_MS = 5000
-
 const state = {
   buffer: [],
   timer: null,
   sessionId: null,
   tourStep: null,
   globalsInstalled: false,
-  seenExceptions: [],
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -232,11 +226,10 @@ export function trackStreamDown(reconnectsN) {
  * already hitting several is the one most worth seeing. React bounds this
  * emitter's volume; we do not have to.
  *
- * `error` is the Error object the emitter is reporting -- the one the
- * boundary caught, or the one the global handler observed. It is READ ONLY to
- * derive `dedup_key`: both emitters seeing one failure derive the SAME key, so
- * the ingest side can collapse them into one row. Nothing about it is sent. */
-export function trackException(props = {}, capKey = 'exception_boundary', error = undefined) {
+ * NO CROSS-EMITTER DE-DUPLICATION. The global handler and the boundary each
+ * emit independently, with no shared key. See the comment above
+ * `emitGlobalException` for why one cannot be derived reliably on the client. */
+export function trackException(props = {}, capKey = 'exception_boundary') {
   try {
     if (capKey === 'exception_global') {
       if (capCount(capKey) >= EXCEPTION_CAP) return undefined
@@ -251,13 +244,7 @@ export function trackException(props = {}, capKey = 'exception_boundary', error 
     const safe = props && props.message_class !== undefined
       ? { ...props, message_class: KNOWN_CLASSES.has(props.message_class) ? props.message_class : 'Other' }
       : props
-    // The key is attached at the same choke point, so an emitter cannot ship a
-    // client.exception without one by forgetting to. An empty key means the
-    // key could not be derived; it is omitted rather than sent, because a
-    // blank shared key would merge unrelated rows -- the one failure mode
-    // worse than a duplicate.
-    const key = dedupKeyFor(error, safe)
-    return track('client.exception', key ? { ...safe, dedup_key: key } : safe, 'exception')
+    return track('client.exception', safe, 'exception')
   } catch { return undefined /* no-op */ }
 }
 
@@ -295,8 +282,9 @@ export function trackException(props = {}, capKey = 'exception_boundary', error 
 export function digest(text) {
   try {
     // cyrb53: two accumulators combined into ~53 bits. The previous 32-bit
-    // shift-hash collided on inputs as short as "Aa"/"BB", which silently
-    // suppressed the second of two distinct failures through the dedup below.
+    // shift-hash collided on inputs as short as "Aa"/"BB", which made two
+    // distinct failures share a hash and become indistinguishable in the
+    // stored labels.
     //
     // Input is BOUNDED before hashing. The redactor this replaced happened to
     // cap its input; deleting it removed that protection, so a server-supplied
@@ -321,7 +309,7 @@ export function digest(text) {
 }
 
 /** A rejection reason need not be an Error, and two different ones must not
- * collapse to one signature or the dedup below silently drops the second.
+ * collapse to one hash, or they become indistinguishable in the stored labels.
  *
  * Four descents, each bounded and none able to throw out of here: the
  * message, a JSON serialization, a per-key value description (BigInt and
@@ -450,121 +438,48 @@ function uaClass() {
   } catch { return 'unknown' }
 }
 
-// --- one React crash is one row --------------------------------------------
-// React 18's DEVELOPMENT build re-throws a render error through a synthetic
-// DOM event so DevTools can observe it, so ONE crash reaches BOTH emitters:
-// the global handler first (synchronously, during render) and the boundary
-// second (behind its dynamic import). Its production build uses try/catch and
-// need not. That made the row count a property of the BUILD, and anything
-// counting crashes counted them differently depending on which one it watched.
+// --- no cross-emitter de-duplication (documented, deliberate) --------------
+// Four review rounds tried to make one browser crash land as exactly one
+// `client.exception` row, by giving the global handler and the ErrorBoundary
+// a shared occurrence key: three rounds of client-side timing (emit-then-
+// retract, then hold-then-release-on-flush-or-pagehide) each made the row
+// count depend on how busy the page was, and a fourth (memoize a key on the
+// Error object itself, WeakMap-keyed) turned out to depend on an assumption
+// that does not hold.
 //
-// THREE ROUNDS OF CLIENT-SIDE TIMING DE-DUPLICATION FAILED HERE, and the
-// fourth attempt is not another one. Retracting an already-buffered row worked
-// only while the row was still buffered: at 19 queued events the global row
-// was the 20th, the batch POSTed on the spot, and the boundary a microtask
-// later had nothing to pull back. Holding the row outside the buffer moved the
-// same problem: pagehide releases every held row before it beacons, so a crash
-// at tab close still queued both. Both designs made the row count a property
-// of HOW BUSY THE PAGE WAS -- the guarantee held on a quiet page and broke on
-// a busy one -- because both asked one emitter to observe the other's timing.
+// THE ASSUMPTION: that DEV React's re-throw of a render error through a
+// synthetic DOM event hands `window.onerror` and `componentDidCatch` the SAME
+// Error object instance. A probe against this exact ErrorBoundary (a real
+// component, a real render failure, no mocking) showed otherwise: DEV React
+// calls the throwing render function more than once for one logical crash,
+// so `window.onerror` and `componentDidCatch` routinely observe two DIFFERENT
+// Error instances with identical message/class/stack. Identity survives only
+// when the render function throws a single reused reference (e.g. a
+// module-scoped Error thrown by value, never reconstructed) -- not how a real
+// crash is written; a plain `throw new Error(...)`, or a native TypeError the
+// engine builds fresh each time the offending expression runs, constructs a
+// NEW object on every invocation. With no reliable identity, the WeakMap
+// fell back to matching on message+class+stack+route within a coarse time
+// window, which silently merged two genuinely DISTINCT same-signature crashes
+// into one row -- a worse defect than the duplicate it existed to remove.
 //
-// So the client no longer de-duplicates at all. It has no pending list, no
-// retraction, no hold timer and no exit-seam release. Each emitter simply
-// emits, immediately, and attaches a STABLE KEY that both derive
-// independently from the same failure. Collapsing rows that share a key is the
-// INGEST side's job (server/routers/telemetry.py), where it is a property of
-// the data rather than of two clocks. Flush thresholds, pagehide, emit order
-// and page load are all now irrelevant to the row count, which is the whole
-// point: there is no ordering left for a race to exploit.
-
-/** The cross-emitter identity of ONE failure: everything BOTH emitters can
- * derive from the same Error object, and nothing either one alone can see.
- *
- * `source` is deliberately absent -- it is the one label that must DIFFER
- * between the two paths for a single crash.
- *
- * `component_stack_hash` is deliberately absent too, and that is worth stating
- * because it is the obvious thing to add: ONLY the boundary can compute it.
- * Putting it in the key would guarantee the two keys never match, which is
- * precisely the de-duplication this exists to perform. It still travels as a
- * LABEL, and the ingest rule prefers the row carrying it. */
-function dedupSignature(err) {
-  let message = ''
-  try { message = (err && err.message) || '' } catch { /* a getter threw */ }
-  return [messageClass(err, 'Other'), digest(message), stackHash(err), routeLabel()].join('|')
-}
-
-// The key each Error object was FIRST given. Not a dedup cache and not state
-// the row count depends on: it is a memo so that two emitters reporting the
-// SAME object cannot disagree about which time bucket it fell in.
+// So there is no client occurrence key, and the two emitters below do not
+// coordinate at all: each simply calls `trackException` when it sees a
+// failure.
 //
-// A WeakMap, not a property on the error: the object belongs to the page, and
-// telemetry does not get to write on it. Entries disappear with the error
-// itself, so nothing here can grow.
-const dedupKeys = typeof WeakMap === 'function' ? new WeakMap() : null
+// PRODUCTION IMPACT IS BOUNDED: React's production build uses a plain
+// try/catch, not the synthetic-event re-throw, so a boundary-caught crash in
+// production never also reaches `window.onerror` -- there is no
+// production-build double-count. The double-emit this leaves unresolved is a
+// DEVELOPMENT-BUILD-ONLY cosmetic (an inflated crash count while dev-serving
+// or running tests locally). Documented follow-up, not solved here: PR #537.
 
-/** The `dedup_key` label: a digest of the failure's signature PLUS a coarse
- * time bucket.
- *
- * The bucket is what keeps this from over-merging. Signature alone would fold
- * every occurrence of one recurring failure -- a nightly `TypeError` from the
- * same line, a thousand times over a session -- into a single row, and then
- * the rail could not answer "how often". Bucketed, two occurrences more than
- * one bucket apart are two rows, and the twin emits of ONE occurrence, which
- * are microseconds apart, are one.
- *
- * A bucket boundary between the two emits would be a residual race -- global
- * at 4999 ms, boundary at 5001 ms, two keys, two rows -- so the bucket is NOT
- * re-read per emitter. The first emitter to describe an error fixes its key,
- * and the second reads that exact value back out of the memo. Whichever fires
- * first, and however long the boundary's dynamic import takes, the two keys
- * are identical by construction rather than by luck.
- *
- * A non-object reason (`Promise.reject('nope')`) cannot key a WeakMap, so it
- * falls back to signature-plus-bucket computed fresh. That costs nothing real:
- * a rejection never reaches a React boundary, so it has no twin to agree with.
- *
- * Returns '' when no key could be derived. The caller omits the label rather
- * than sending a blank one -- rows sharing an empty key would collapse into
- * each other, which is worse than the duplicate this prevents. */
-function dedupKeyFor(err, props) {
-  try {
-    const keyable = err !== null && (typeof err === 'object' || typeof err === 'function')
-    if (dedupKeys && keyable) {
-      const seen = dedupKeys.get(err)
-      if (seen) return seen
-    }
-    // With no error object there is nothing to agree WITH, so the labels the
-    // caller already computed are the best available signature.
-    const signature = err != null ? dedupSignature(err) : [
-      (props && props.message_class) || 'Other',
-      (props && props.message_hash) || '',
-      (props && props.stack_hash) || '',
-      (props && props.route) || routeLabel(),
-    ].join('|')
-    const key = digest(`${signature}|${Math.floor(Date.now() / DEDUP_BUCKET_MS)}`)
-    if (dedupKeys && keyable) dedupKeys.set(err, key)
-    return key
-  } catch { return '' }
-}
-
-/** Emit one global exception, DE-DUPLICATED by signature.
- *
- * A repeat spends nothing. Without this, the cap counts occurrences rather
- * than distinct failures, and the two loud-and-benign classes this app
- * invites -- a ResizeObserver loop from the resizable panels, an animation
- * callback throwing every frame from the three.js viewer -- would spend all
- * ten slots before a genuinely different crash ever got one. The seen-set is
- * bounded by the cap itself, because past it nothing emits anyway. */
-function emitGlobalException(props, err) {
-  const sig = [props.source, props.message_class, props.message_hash,
-    props.stack_hash, props.route].join('|')
-  if (state.seenExceptions.indexOf(sig) !== -1) return
-  if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
-  // The error object is handed straight through so `dedup_key` is derived
-  // from the SAME object the boundary will see. It is read, never sent, and
-  // the row goes out immediately -- there is nothing to wait for.
-  trackException(props, 'exception_global', err)
+/** Emit one global exception. No same-signature suppression either: a storm
+ * of identical errors (a ResizeObserver loop from the resizable panels, a
+ * three.js draw-tick throwing every frame) simply spends the EXCEPTION_CAP
+ * slots like any other occurrence, in exchange for the simplicity above. */
+function emitGlobalException(props) {
+  trackException(props, 'exception_global')
 }
 
 /** `error` listener. Exported so a spec can drive it without synthesizing a
@@ -583,7 +498,7 @@ export function handleErrorEvent(ev) {
       stack_hash: stackHash(err),
       route: routeLabel(),
       ua_class: uaClass(),
-    }, err)
+    })
   } catch { /* telemetry never breaks the product */ }
 }
 
@@ -601,7 +516,7 @@ export function handleRejectionEvent(ev) {
       stack_hash: stackHash(reason),
       route: routeLabel(),
       ua_class: uaClass(),
-    }, reason)
+    })
   } catch { /* telemetry never breaks the product */ }
 }
 

@@ -79,20 +79,20 @@ export default class ErrorBoundary extends React.Component {
     // that reports crashes. `message_class` is filtered inside
     // `trackException`, so passing a raw `error.name` here is safe.
     //
-    // The error itself is passed as the third argument, and only so telemetry
-    // can derive a `dedup_key` from it: React 18's development build ALSO
-    // re-throws it through a synthetic DOM event, which reaches telemetry's
-    // global handler, so one crash produces two rows. Both emitters see the
-    // SAME object, so both derive the SAME key, and the ingest door keeps one
-    // row -- this one, because it is the row carrying `component_stack_hash`.
-    // Neither emitter waits for or observes the other. Nothing about the
-    // error is read here.
+    // No cross-emitter coordination: this emits independently of the global
+    // handler. React 18's development build ALSO re-throws a render error
+    // through a synthetic DOM event, which reaches telemetry's global handler
+    // too, so one crash can produce two `client.exception` rows in dev --
+    // documented as a known, unsolved gap in telemetry.js (see the comment
+    // above `emitGlobalException`). Production React uses a plain try/catch
+    // and does not re-throw, so this is a dev-build-only cosmetic, not a
+    // production double-count.
     try {
       import('./telemetry.js').then((t) => {
         t.trackException({
           message_class: (error && error.name) || 'Error',
           component_stack_hash: t.digest(String(info?.componentStack || '')),
-        }, 'exception_boundary', error)
+        }, 'exception_boundary')
       }).catch(() => {})
     } catch { /* noop */ }
   }
