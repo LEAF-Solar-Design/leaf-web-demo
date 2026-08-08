@@ -390,6 +390,65 @@ def test_ingest_client_exception_schema_binds_authed_callers_too(monkeypatch):
     assert "owner@example.com" not in json.dumps(labels)
 
 
+def test_component_stack_hash_accepts_both_client_versions(monkeypatch):
+    """MIXED VERSIONS, which is the whole point of this rule.
+
+    A browser tab opened before this release keeps running the OLD
+    ErrorBoundary, which hashed the component stack with its own 32-bit
+    shift-hash and sent `String(hash >>> 0)` -- 1 to 10 digits. A
+    16-digit-only door accepts that row and silently STRIPS its only stack
+    fingerprint, on exactly the event that reports crashes, for as long as any
+    stale bundle is alive. Both widths are preserved. The widths in between,
+    which no client version ever emitted, are not."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [
+        # The pre-#537 client, still in the wild.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "271828183"}},
+        # This release.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "0000000000012345"}},
+        # Neither: no client emits eleven digits, so nothing is owed to it.
+        {"event_name": "client.exception", "event_type": "exception",
+         "labels": {"message_class": "TypeError", "component_stack_hash": "12345678901"}},
+    ]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 3
+    legacy, current, bogus = (json.loads(r["labels"]) for r in telemetry_sink._queue)
+    assert legacy["component_stack_hash"] == "271828183"
+    assert current["component_stack_hash"] == "0000000000012345"
+    assert "component_stack_hash" not in bogus
+    # The row itself always lands: the label's loss was never visible.
+    assert all(lb["message_class"] == "TypeError" for lb in (legacy, current, bogus))
+
+
+def test_the_new_digests_do_not_get_the_legacy_width(monkeypatch):
+    """The compat window is ONE label wide. `message_hash` and `stack_hash`
+    ship for the first time in this release, so no stale client can emit them
+    and a short decimal in either is a caller inventing one -- `5550142` is a
+    phone number, which is the failure the fixed width exists to stop."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "message_class": "TypeError",
+            "message_hash": "5550142",
+            "stack_hash": "5550142",
+            "component_stack_hash": "5550142",
+        },
+    }]})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert "message_hash" not in labels
+    assert "stack_hash" not in labels
+    assert labels["component_stack_hash"] == "5550142"
+
+
 def test_ingest_other_events_keep_the_generic_additive_contract(monkeypatch):
     """Only events that DECLARE a schema are filtered. Everything else keeps
     additive labels, so an ordinary new label still lands with no server

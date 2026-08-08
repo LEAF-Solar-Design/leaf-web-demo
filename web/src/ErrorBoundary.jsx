@@ -78,12 +78,19 @@ export default class ErrorBoundary extends React.Component {
     // dropped at the door -- a whole label lost, silently, on the one event
     // that reports crashes. `message_class` is filtered inside
     // `trackException`, so passing a raw `error.name` here is safe.
+    //
+    // The error itself is passed as the third argument, and only for
+    // de-duplication: React 18's development build ALSO re-throws it through a
+    // synthetic DOM event, which reaches telemetry's global handler, so one
+    // crash used to record two rows. Handing the same object over lets that
+    // path retract its own row in favour of this one, which is the row that
+    // carries `component_stack_hash`. Nothing about the error is read here.
     try {
       import('./telemetry.js').then((t) => {
         t.trackException({
           message_class: (error && error.name) || 'Error',
           component_stack_hash: t.digest(String(info?.componentStack || '')),
-        })
+        }, 'exception_boundary', error)
       }).catch(() => {})
     } catch { /* noop */ }
   }

@@ -24,6 +24,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SERVER_DIR.parent
 if str(SERVER_DIR) not in sys.path:
@@ -43,20 +45,65 @@ FROZEN_UA_FAMILIES = {"edge", "opera", "firefox", "chrome", "safari", "other"}
 DIGEST_WIDTH = 16
 
 
+_QUOTES = "'\"`"
+
+
+def _set_literal_names(body: str) -> set[str]:
+    """Every string literal in a JS array body, with a hard requirement that
+    NOTHING ELSE is in there.
+
+    This was `re.findall(r"'([A-Za-z0-9]+)'")`, which is not a parser: it saw
+    single-quoted alphanumerics and was BLIND to everything else. A
+    double-quoted name, a backtick name, a spread of another list, or a
+    computed entry could join the runtime Set while this freeze stayed green
+    -- the one failure a freeze exists to prevent. Both quote styles are legal
+    JS and this repo's lint rules are the only thing discouraging them, which
+    is a style gate, not a data-safety one.
+
+    So the body is SCANNED. Comments and separators are skipped (a
+    commented-out name is not in the Set at runtime), string literals in all
+    three quote styles are collected, and ANYTHING the scanner cannot account
+    for raises rather than being silently ignored -- an escape, a template
+    substitution, an identifier, an unterminated literal.
+    """
+    names: set[str] = set()
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch in " \t\r\n,":
+            i += 1
+        elif body.startswith("//", i):
+            nl = body.find("\n", i)
+            i = n if nl == -1 else nl + 1
+        elif body.startswith("/*", i):
+            end = body.find("*/", i + 2)
+            if end == -1:
+                raise ValueError("unterminated block comment")
+            i = end + 2
+        elif ch in _QUOTES:
+            j, buf = i + 1, []
+            while j < n and body[j] != ch:
+                if body[j] == "\\":
+                    raise ValueError(f"escape at offset {j}: not a bare class name")
+                if ch == "`" and body.startswith("${", j):
+                    raise ValueError(f"template substitution at offset {j}")
+                buf.append(body[j])
+                j += 1
+            if j >= n:
+                raise ValueError(f"unterminated string literal at offset {i}")
+            names.add("".join(buf))
+            i = j + 1
+        else:
+            raise ValueError(f"unparsed content at offset {i}: {body[i:i + 40]!r}")
+    return names
+
+
 def _js_known_classes() -> set[str]:
-    """The literal names in web/src/telemetry.js's KNOWN_CLASSES, comments
-    stripped (a commented-out name is not in the Set at runtime)."""
+    """The literal names in web/src/telemetry.js's KNOWN_CLASSES."""
     src = CLIENT_JS.read_text(encoding="utf-8")
     block = re.search(r"const KNOWN_CLASSES = new Set\(\[(.*?)\n\]\)", src, re.S)
     assert block, "KNOWN_CLASSES not found in web/src/telemetry.js"
-    body = "\n".join(
-        line for line in block.group(1).split("\n")
-        if not line.strip().startswith("//")
-    )
-    # [A-Za-z0-9]+, not [A-Za-z]+: a class name carrying a digit (a real
-    # possibility -- `ChunkLoad2Error`) was invisible to the parser, so a
-    # JS-only addition passed this test while the runtime lists disagreed.
-    return set(re.findall(r"'([A-Za-z0-9]+)'", body))
+    return _set_literal_names(block.group(1))
 
 
 def test_client_and_server_class_lists_agree_exactly():
@@ -127,6 +174,47 @@ def test_digest_width_is_fixed_on_both_sides():
     assert not telemetry_router._HASH_RE.match("5550142")
     # Python's `$` matches before a trailing newline; `\Z` does not.
     assert not telemetry_router._HASH_RE.match("0" * DIGEST_WIDTH + "\n")
+
+
+def test_the_parser_reads_every_quote_style_and_refuses_the_rest():
+    """Prove the checker can fail. The parser this replaced matched
+    single-quoted alphanumerics only, so a double-quoted or backtick class --
+    both legal JS -- could change the runtime vocabulary while every
+    assertion above still passed against a stale reading of the file."""
+    assert _set_literal_names(
+        "'A', \"B\", `C`,\n  // 'D' retired\n  /* 'E' never shipped */\n"
+    ) == {"A", "B", "C"}
+    for hostile in (
+        "'A', ...OTHER_CLASSES",     # a spread
+        "'A', SOME_CONSTANT",        # an identifier
+        "'A', `pre${suffix}`",       # a template substitution
+        "'A', 'B",                   # unterminated
+        "'A', 'B\\u0041'",           # escaped: not a bare name
+        "'A', /* unterminated",
+    ):
+        with pytest.raises(ValueError):
+            _set_literal_names(hostile)
+
+
+def test_component_stack_hash_carries_the_documented_compat_pair():
+    """`component_stack_hash` is the ONE label a client older than this
+    release already emits: the pre-#537 ErrorBoundary sent
+    `String(hash >>> 0)` from its own 32-bit shift-hash, 1 to 10 digits. Its
+    rule therefore accepts BOTH widths for the rollout window and only those
+    two, while the digests that are new in this release keep the strict rule
+    -- no stale client can emit them."""
+    schema = telemetry_router.PREAUTH_LABEL_SCHEMAS["client.exception"]
+    rule = schema["component_stack_hash"]
+    assert rule is telemetry_router._COMPONENT_STACK_HASH_RE
+    assert rule.match("0" * DIGEST_WIDTH)      # this release
+    assert rule.match("4294967295")            # the old 32-bit maximum
+    assert rule.match("0")                     # and its minimum
+    assert not rule.match("1" * 11)            # a width no client ever emitted
+    assert not rule.match("1" * 15)
+    assert not rule.match("abcdefgh")
+    assert not rule.match("0" * DIGEST_WIDTH + "\n")
+    for key in ("message_hash", "stack_hash"):
+        assert schema[key] is telemetry_router._HASH_RE
 
 
 def test_tour_step_is_deliberately_absent():

@@ -30,14 +30,14 @@ const FLUSH_MS = 5000
 const BUFFER_MAX = 200          // absolute cap; beyond it the oldest drop
 const ERROR_CAP = 20            // error.shown per session (design cap)
 const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
-// Separate budgets ON PURPOSE: a global error storm (an animation callback
-// throwing every frame) must not be able to spend the boundary's budget and
-// suppress the one record of a real React crash.
+// The cap belongs to the NEW path only. An animation callback throwing every
+// frame is a storm the browser sustains indefinitely; a React crash is not,
+// because the boundary replaces the tree with a reload card. See trackException.
 const EXCEPTION_CAP = 10        // global-handler emissions per session
-const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
+const CROSS_PATH_MS = 10000     // how long a global row stays retractable
 
 const state = {
   buffer: [],
@@ -46,6 +46,7 @@ const state = {
   tourStep: null,
   globalsInstalled: false,
   seenExceptions: [],
+  globalRows: [],
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -68,7 +69,17 @@ function capCount(key) {
 }
 
 function capIncrement(key) {
-  const next = capCount(key) + 1
+  capSet(key, capCount(key) + 1)
+}
+
+/** Give a slot back. Only the cross-path retraction below uses it: a row that
+ * is pulled out of the buffer before it is ever sent must not spend the budget
+ * that exists to bound what the DOOR receives. */
+function capDecrement(key) {
+  capSet(key, Math.max(0, capCount(key) - 1))
+}
+
+function capSet(key, next) {
   memCaps[key] = next
   try {
     sessionStorage.setItem(`leaf.telemetry.cap.${key}`, String(next))
@@ -150,22 +161,29 @@ function schedule() {
 }
 
 /** Queue one event. `props` values should be primitives; the server
- * stringifies and bounds everything and strips reserved keys. */
+ * stringifies and bounds everything and strips reserved keys.
+ *
+ * Returns the queued event, or undefined when telemetry is off or the queue
+ * threw. The only caller that reads it is the global exception path below,
+ * which must be able to identify ITS OWN row later to retract it; identity is
+ * the only handle that survives a buffer that shifts and splices. */
 export function track(name, props = {}, eventType = 'custom_event') {
   try {
-    if (DISABLED || typeof fetch !== 'function') return
-    state.buffer.push({
+    if (DISABLED || typeof fetch !== 'function') return undefined
+    const event = {
       event_type: eventType,
       event_name: name,
       client_ts: Date.now() / 1000,
       labels: state.tourStep != null && props.tour_step === undefined
         ? { ...props, tour_step: state.tourStep }
         : props,
-    })
+    }
+    state.buffer.push(event)
     if (state.buffer.length > BUFFER_MAX) state.buffer.shift()
     if (state.buffer.length >= FLUSH_AT) flush()
     else schedule()
-  } catch { /* telemetry never breaks the product */ }
+    return event
+  } catch { return undefined /* telemetry never breaks the product */ }
 }
 
 /** Immediate flush for events that must land before an imminent navigation
@@ -194,18 +212,30 @@ export function trackStreamDown(reconnectsN) {
   } catch { /* no-op */ }
 }
 
-/** Crash capture — the ErrorBoundary AND the global handlers below. Capped
- * per session because a render loop or a retry loop can throw thousands of
- * times per minute, and an uncapped emitter would spend the ingest door's
- * whole token bucket on one broken page.
+/** Crash capture — the ErrorBoundary AND the global handlers below.
  *
- * `capKey` selects the budget. The boundary's default keeps its own, so a
- * storm of global errors can never consume the crash record. */
-export function trackException(props = {}, capKey = 'exception_boundary') {
+ * ONLY the global path is capped. A stray callback can throw thousands of
+ * times per minute with nothing to stop it, so an uncapped global emitter
+ * would spend the ingest door's whole token bucket on one broken page.
+ *
+ * The BOUNDARY is uncapped, exactly as it was before global capture existed.
+ * Capping it looked like symmetry and was a regression: the boundary fires
+ * once per crash and the card it renders invites a reload, so five
+ * crash-and-reload cycles in one browser session would have silenced every
+ * later PRODUCTION crash on that tab -- and the crash a user hits after
+ * already hitting several is the one most worth seeing. React bounds this
+ * emitter's volume; we do not have to.
+ *
+ * `error` is the Error the boundary caught. Passing it lets this path retract
+ * the global row for the SAME failure, so one React crash is one row. */
+export function trackException(props = {}, capKey = 'exception_boundary', error = undefined) {
   try {
-    const limit = capKey === 'exception_global' ? EXCEPTION_CAP : BOUNDARY_CAP
-    if (capCount(capKey) >= limit) return
-    capIncrement(capKey)
+    if (capKey === 'exception_global') {
+      if (capCount(capKey) >= EXCEPTION_CAP) return undefined
+      capIncrement(capKey)
+    } else if (error != null) {
+      retractGlobalTwin(crossPathSignature(error))
+    }
     // The class is filtered HERE, not at each call site, so every emitter of
     // this event is covered by construction. ErrorBoundary passed
     // `error.name` verbatim, which meant a component that render-threw an
@@ -215,8 +245,8 @@ export function trackException(props = {}, capKey = 'exception_boundary') {
     const safe = props && props.message_class !== undefined
       ? { ...props, message_class: KNOWN_CLASSES.has(props.message_class) ? props.message_class : 'Other' }
       : props
-    track('client.exception', safe, 'exception')
-  } catch { /* no-op */ }
+    return track('client.exception', safe, 'exception')
+  } catch { return undefined /* no-op */ }
 }
 
 // --- global error capture (outside React) --------------------------------
@@ -408,6 +438,65 @@ function uaClass() {
   } catch { return 'unknown' }
 }
 
+// --- one React crash is one row --------------------------------------------
+// React 18's DEVELOPMENT build re-throws a render error through a synthetic
+// DOM event so DevTools can observe it, so ONE crash reaches BOTH emitters:
+// the global handler first (synchronously, during render) and the boundary
+// second (behind its dynamic import). Its production build uses try/catch and
+// need not. That made the row count a property of the BUILD, and anything
+// counting crashes counted them differently depending on which one it watched.
+//
+// The BOUNDARY wins the tie. Its row carries `component_stack_hash`, which the
+// global handler cannot know, and it is the older contract.
+//
+// RETRACTION, not deferral: the global handler stays synchronous, because
+// waiting for a boundary that may never come would lose the record whenever
+// the page is torn down first. The one case this cannot cover is a global row
+// already flushed to the wire when the boundary fires, which needs 20 buffered
+// events or the 5 s timer inside a single microtask hop; then two rows land,
+// which is what this did every time before.
+
+/** The cross-path identity of ONE failure: everything BOTH emitters can derive
+ * from the same Error object, and nothing else. `source` is deliberately
+ * absent -- it is the one label that must differ between the two paths for a
+ * single crash. */
+function crossPathSignature(err) {
+  let message = ''
+  try { message = (err && err.message) || '' } catch { /* a getter threw */ }
+  return [messageClass(err, 'Other'), digest(message), stackHash(err), routeLabel()].join('|')
+}
+
+function noteGlobalRow(sig, event) {
+  try {
+    if (!sig || !event) return
+    const now = Date.now()
+    state.globalRows = state.globalRows.filter((r) => now - r.at < CROSS_PATH_MS)
+    state.globalRows.push({ sig, event, at: now })
+    while (state.globalRows.length > EXCEPTION_CAP) state.globalRows.shift()
+  } catch { /* no-op */ }
+}
+
+/** Pull the global twin of `sig` back out of the send buffer. Returns whether
+ * a row was actually withdrawn (false once it is already on the wire). */
+function retractGlobalTwin(sig) {
+  try {
+    if (!sig) return false
+    const now = Date.now()
+    for (let i = state.globalRows.length - 1; i >= 0; i--) {
+      const row = state.globalRows[i]
+      if (now - row.at >= CROSS_PATH_MS) { state.globalRows.splice(i, 1); continue }
+      if (row.sig !== sig) continue
+      state.globalRows.splice(i, 1)
+      const at = state.buffer.indexOf(row.event)
+      if (at === -1) return false
+      state.buffer.splice(at, 1)
+      capDecrement('exception_global')
+      return true
+    }
+    return false
+  } catch { return false }
+}
+
 /** Emit one global exception, DE-DUPLICATED by signature.
  *
  * A repeat spends nothing. Without this, the cap counts occurrences rather
@@ -416,12 +505,17 @@ function uaClass() {
  * callback throwing every frame from the three.js viewer -- would spend all
  * ten slots before a genuinely different crash ever got one. The seen-set is
  * bounded by the cap itself, because past it nothing emits anyway. */
-function emitGlobalException(props) {
+function emitGlobalException(props, err) {
   const sig = [props.source, props.message_class, props.message_hash,
     props.stack_hash, props.route].join('|')
   if (state.seenExceptions.indexOf(sig) !== -1) return
   if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
-  trackException(props, 'exception_global')
+  const event = trackException(props, 'exception_global')
+  // Only `window.onerror` rows are retractable: a rejection never reaches a
+  // React boundary, so recording one could only ever produce a false match.
+  if (event && err != null && props.source === 'window.onerror') {
+    noteGlobalRow(crossPathSignature(err), event)
+  }
 }
 
 /** `error` listener. Exported so a spec can drive it without synthesizing a
@@ -440,7 +534,7 @@ export function handleErrorEvent(ev) {
       stack_hash: stackHash(err),
       route: routeLabel(),
       ua_class: uaClass(),
-    })
+    }, err)
   } catch { /* telemetry never breaks the product */ }
 }
 
@@ -458,7 +552,7 @@ export function handleRejectionEvent(ev) {
       stack_hash: stackHash(reason),
       route: routeLabel(),
       ua_class: uaClass(),
-    })
+    }, reason)
   } catch { /* telemetry never breaks the product */ }
 }
 

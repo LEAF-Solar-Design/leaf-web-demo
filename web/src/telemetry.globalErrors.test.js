@@ -272,7 +272,7 @@ describe('global error capture', () => {
     expect(events[1].labels.message_class).toBe('TypeError')
   })
 
-  it('keeps the ErrorBoundary budget separate from the global one', async () => {
+  it('caps only the global path, so a storm cannot silence the boundary', async () => {
     const { mod, fetchMock } = await loadTelemetry()
 
     // A storm of DISTINCT global errors exhausts the global budget...
@@ -290,6 +290,96 @@ describe('global error capture', () => {
       component_stack_hash: '42',
     })
     expect(events[10].labels.source).toBeUndefined()
+  })
+
+  it('never caps the ErrorBoundary, so a crash-and-reload loop stays visible', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // The boundary was briefly given a 5-per-session budget for symmetry with
+    // the global one. It is a regression, not symmetry: the boundary fires
+    // once per crash and the card it renders invites a reload, so five
+    // crash-and-reload cycles in one browser session would silence every LATER
+    // production crash on that tab -- and the crash a user hits after already
+    // hitting several is the one most worth seeing.
+    for (let i = 0; i < 12; i++) {
+      mod.trackException({
+        message_class: 'TypeError',
+        component_stack_hash: String(i).padStart(16, '0'),
+      })
+    }
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(12)
+    expect(events[11].labels.component_stack_hash).toBe('0000000000000011')
+  })
+
+  it('retracts the global twin when the boundary claims the same error', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // React 18's DEV build re-throws a render error through a synthetic DOM
+    // event, so the global handler sees the crash first and componentDidCatch
+    // sees it second. One crash must be one row, and it must be the row that
+    // carries `component_stack_hash`.
+    const err = new TypeError('the same crash, reached by both paths')
+    mod.handleErrorEvent({ error: err, message: 'Uncaught TypeError' })
+    mod.trackException({
+      message_class: 'TypeError',
+      component_stack_hash: '0000000000000042',
+    }, 'exception_boundary', err)
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(1)
+    expect(events[0].labels.source).toBeUndefined()
+    expect(events[0].labels.component_stack_hash).toBe('0000000000000042')
+    // The retracted row spent nothing: the global budget is whole again, so a
+    // dev session full of React crashes cannot exhaust it with rows nobody
+    // ever received.
+    for (let i = 0; i < 10; i++) {
+      mod.handleErrorEvent({ error: new Error(`later distinct failure ${i}`) })
+    }
+    mod.flushNow()
+    expect(postedEvents(fetchMock)).toHaveLength(11)
+  })
+
+  it('retracts only the twin, never an unrelated global row', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // Prove the guard can decline. A boundary crash that is NOT the failure
+    // the global handler saw must leave that row alone, or the dedup would
+    // eat real records instead of duplicates.
+    mod.handleErrorEvent({ error: new RangeError('a genuinely different failure') })
+    mod.trackException({
+      message_class: 'TypeError',
+      component_stack_hash: '0000000000000007',
+    }, 'exception_boundary', new TypeError('the React crash'))
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(2)
+    expect(events[0].labels.source).toBe('window.onerror')
+    expect(events[0].labels.message_class).toBe('RangeError')
+    expect(events[1].labels.source).toBeUndefined()
+  })
+
+  it('leaves a rejection alone, because no boundary ever sees one', async () => {
+    const { mod, fetchMock } = await loadTelemetry()
+
+    // Only `window.onerror` rows are retractable. A rejection cannot reach a
+    // React boundary, so treating one as retractable could only ever produce
+    // a false match against a crash that merely resembles it.
+    const reason = new TypeError('rejected, never rendered')
+    mod.handleRejectionEvent({ reason })
+    mod.trackException({
+      message_class: 'TypeError',
+      component_stack_hash: '0000000000000009',
+    }, 'exception_boundary', reason)
+    mod.flushNow()
+
+    const events = postedEvents(fetchMock)
+    expect(events).toHaveLength(2)
+    expect(events[0].labels.source).toBe('unhandledrejection')
   })
 
   it('ignores resource-load error events, which carry no exception', async () => {

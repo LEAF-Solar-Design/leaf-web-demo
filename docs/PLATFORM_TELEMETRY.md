@@ -130,7 +130,7 @@ C-1 (merged #427):
 | `run.confirm_shown` | `App.armDecision` (2s same-tool de-dupe over the tour double-arm) | tool, is_write, source (prompt/slash/catalog/tour/agent) |
 | `error.shown` | the two transport seams: `api.http()`, `converse.tagged()`; cap 20/session | http_status, error_code, endpoint_class |
 | `agent.stream_down` | `converse.onStreamDown`; cap 10/session | reconnects_n |
-| `client.exception` | ErrorBoundary | message_class, component_stack_hash |
+| `client.exception` | ErrorBoundary; UNCAPPED (React bounds it) | message_class, component_stack_hash |
 
 C-3 (global error capture):
 
@@ -215,6 +215,20 @@ value came from the hash function, but requiring exactly one digest's width
 means the field's capacity is a digest and not a sentence — a variable-width
 decimal accepted `5550142`, which is a phone number.
 
+One label has a compatibility window, and it has an expiry.
+`component_stack_hash` accepts BOTH 16 digits and the 1-to-10-digit decimal
+the pre-#537 ErrorBoundary emitted (`String(hash >>> 0)` from its own 32-bit
+shift-hash). It is the only label a client older than this release already
+sends, and a tab opened before the deploy keeps sending the old width for as
+long as it lives; a 16-digit-only rule accepts those rows and strips their
+ONLY stack fingerprint, on exactly the event that reports crashes, for the
+whole rollout. `message_hash` and `stack_hash` are new here, so no stale
+client can emit them and they keep the strict rule. The legacy branch comes
+out once no pre-#537 bundle can still be running — one browser session's
+lifetime after the release is everywhere is the honest bar — and
+`test_component_stack_hash_accepts_both_client_versions` fails loudly when it
+does, so removing it is a deliberate act rather than a drift.
+
 `tour_step` is deliberately absent from the schema. Closing it would need a
 mirror of two product-owned step tables that change with ordinary feature
 work, so it would drift by design, and a shape rule would accept
@@ -231,37 +245,61 @@ same spirit as the auth vocab freeze.
 
 ### Caps
 
-Two SEPARATE budgets: 10 per session for the global handlers, 5 for the
-ErrorBoundary. Shared, a storm of global errors could spend the budget and
-suppress the one record of a real React crash.
+ONE budget, and it belongs to the NEW path only: 10 per session for the global
+handlers. A stray callback can throw thousands of times a minute with nothing
+to stop it, so an uncapped global emitter would spend the door's whole token
+bucket on one broken page.
+
+The ErrorBoundary stays UNCAPPED, exactly as it was before global capture
+existed. Capping it at 5 looked like symmetry and was a regression: the
+boundary fires once per crash and the card it renders invites a reload, so
+five crash-and-reload cycles in one browser session would have silenced every
+LATER production crash on that tab — and the crash a user hits after already
+hitting several is the one most worth seeing. React bounds that emitter's
+volume; we do not have to.
 
 The global budget counts DISTINCT failures — repeats of the same
 source+class+message+frame+route spend nothing. Counting occurrences instead would let the
 two loud-and-benign classes this app invites (a ResizeObserver loop from the
 resizable panels, an animation callback throwing every frame from the viewer)
-consume all ten slots before a genuinely different crash got one.
+consume all ten slots before a genuinely different crash got one. A global row
+that is later retracted (below) refunds its slot: a row nobody ever receives
+must not spend the budget that exists to bound what the door receives.
 
 Resource-load failures (a 404 `<img>`, a blocked `<script>`) dispatch an
 event with neither `error` nor `message` and are ignored: they are not JS
 exceptions, and they arrive in bursts.
 
-### Two rows per React crash, by design
+### One row per React crash
 
-A React crash ALWAYS records a boundary row (`component_stack_hash`, no
-`source`). It MAY also record a global row (`source: window.onerror`), and
-whether it does is React's business, not ours: React 18's DEVELOPMENT build
-dispatches a synthetic DOM event so DevTools can observe render exceptions,
-which reaches the global handler; its production implementation uses
-try/catch and need not. `web/src/ErrorBoundary.test.jsx` therefore asserts
-the pair BY SHAPE and never by count.
+A React crash records the boundary row (`component_stack_hash`, no `source`)
+and only that row.
 
-This paragraph previously claimed two rows in production and called that
-CONFIRMED. It was confirmed against a development build, which is not the
-same thing — recorded here because the mistake is the interesting part.
+It used to record two. React 18's DEVELOPMENT build re-throws a render error
+through a synthetic DOM event so DevTools can observe it, which reaches the
+global handler as well; its production build uses try/catch and need not. So
+the row count was a property of the BUILD, and anything counting crashes
+counted them differently depending on which build it was watching. Measured in
+`web/src/ErrorBoundary.test.jsx`: two rows without de-duplication, one with.
 
-The consequence for consumers is unchanged and is the reason `source`
-exists: anything COUNTING crashes must filter on it, or it double-counts
-every React failure wherever the second row does appear.
+The two paths are now de-duplicated in `web/src/telemetry.js`. Both derive the
+same signature from the same Error object — message class, message digest,
+first-frame digest, route, deliberately WITHOUT `source`, the one label that
+must differ between them — and the boundary wins, because its row is the only
+one carrying `component_stack_hash`.
+
+The global twin is RETRACTED from the send buffer rather than deferred. The
+global handler has to stay synchronous: deferring its emit to wait for a
+boundary that may never come would lose the record whenever the page is torn
+down first. The one case retraction cannot cover is a global row already
+flushed to the wire when the boundary fires, which needs 20 buffered events or
+the 5 s timer inside a single microtask hop; then two rows land, which is what
+this did every time before. So a consumer counting crashes should still filter
+on `source` — that is what it is for.
+
+This section previously claimed two rows in production and called that
+CONFIRMED. It was confirmed against a development build, which is not the same
+thing — recorded here because the mistake is the interesting part.
 
 ### Surfaces still uncovered
 
@@ -296,7 +334,8 @@ sign-in pages where no principal exists yet, so requiring one would drop
 exactly the failures nothing else can see. The anonymous exposure it adds is
 the shape `gate.choice` already carries, bounded by the same per-IP token
 bucket (burst 30, 0.5/s), the 50-events-per-body cap, the 512-char label
-cap, and the client's own 10-per-session cap.
+cap, and the client's own 10-per-session cap on the global handlers (the
+boundary path is uncapped, and React bounds it instead).
 
 That pre-auth lane has a measured denial-of-wallet ceiling, unchanged by
 `client.exception` because the bucket and the label caps are name-agnostic:

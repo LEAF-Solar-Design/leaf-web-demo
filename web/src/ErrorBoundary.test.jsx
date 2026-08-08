@@ -73,43 +73,34 @@ describe('ErrorBoundary telemetry', () => {
     expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument()
   })
 
-  it('always records the boundary row, and any global row agrees with it', async () => {
+  it('records EXACTLY ONE row for one React crash, and it is the boundary row', async () => {
     const events = await postedAfterCrash({})
 
-    // Asserted BY SHAPE, never by count or index. React 18 DEV dispatches a
-    // synthetic DOM event so DevTools can observe render exceptions, which
-    // makes the global handler fire too; the production implementation uses
-    // try/catch and need not reach `window`. Pinning "exactly two rows" would
-    // pin a dev-build artifact and mislead anyone reading it as a production
-    // guarantee.
-    const boundary = events.filter((e) => e.labels.source === undefined)
-    const global = events.filter((e) => e.labels.source !== undefined)
-
-    expect(boundary).toHaveLength(1)
-    expect(boundary[0]).toMatchObject({
+    // Measured in this jsdom + React 18 DEV setup: without de-duplication
+    // this posted TWO rows, because React's development build re-throws the
+    // render error through a synthetic DOM event and telemetry's global
+    // handler answers it. Its production build uses try/catch and need not,
+    // so the row count was a property of the BUILD and anything counting
+    // crashes counted them differently depending on which one it watched.
+    //
+    // The boundary wins the tie: its row is the only one carrying
+    // `component_stack_hash`. Asserted by COUNT on purpose -- "the pair by
+    // shape" is what let the double-count through.
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
       event_name: 'client.exception',
       event_type: 'exception',
     })
-    expect(boundary[0].labels.message_class).toBe('Error')
-    expect(boundary[0].labels.component_stack_hash).toMatch(/^\d{16}$/)
-
-    // Whether a global row appears is React's business; if one does, it is
-    // the same failure and `source` is what tells the two apart. That filter
-    // is the contract consumers depend on to avoid double-counting.
-    for (const g of global) {
-      expect(g.labels.source).toBe('window.onerror')
-      expect(g.labels.message_class).toBe('Error')
-      expect(g.labels.stack_hash).toMatch(/^\d{16}$/)
-    }
+    expect(events[0].labels.source).toBeUndefined()
+    expect(events[0].labels.message_class).toBe('Error')
+    expect(events[0].labels.component_stack_hash).toMatch(/^\d{16}$/)
   })
 
-  it('refuses a message_class the platform did not assign, on BOTH rows', async () => {
+  it('refuses a message_class the platform did not assign', async () => {
     const events = await postedAfterCrash({ name: 'owner@example.com' })
 
-    expect(events.length).toBeGreaterThan(0)
-    for (const e of events) {
-      expect(e.labels.message_class).toBe('Other')
-    }
+    expect(events).toHaveLength(1)
+    expect(events[0].labels.message_class).toBe('Other')
     expect(JSON.stringify(events)).not.toContain('owner@example.com')
   })
 })

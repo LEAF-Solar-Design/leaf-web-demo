@@ -603,17 +603,23 @@ def build_suites() -> List[Suite]:
         # #426 round-2 blocker).
         # 20 -> 24: the anonymous client.exception row (a JS failure on a page
         # that has no principal yet) plus the three label-schema tests.
+        # 24 -> 26: the mixed-version pair. A client older than this release
+        # emits a 1-to-10-digit component_stack_hash, and the door has to keep
+        # it while refusing the same width in the digests that are new here.
         Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
-              SERVER, _py_pytest("tests/test_telemetry.py"), 24),
+              SERVER, _py_pytest("tests/test_telemetry.py"), 26),
         Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
               SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
         # The client.exception label vocabulary is mirrored BY HAND across
         # web/src/telemetry.js and routers/telemetry.py, and drift there is
         # silent (a class degrades to "Other" rather than failing). This is
         # the freeze, in the same spirit as server-auth-vocab-freeze.
+        # 7 -> 9: the freeze's own parser is now proven able to FAIL (it read
+        # single-quoted names only, so a double-quoted class was invisible to
+        # it), and the component_stack_hash compat pair is frozen too.
         Suite("server-client-exception-vocab-freeze",
               "server tests/test_client_exception_vocab_freeze.py", "pytest",
-              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 7),
+              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 9),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
         # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
         # test_required_platform_rejects_missing_shared_mutation_fence. The floor
@@ -1009,8 +1015,11 @@ def build_suites() -> List[Suite]:
         # skips, no parametrize, and no platform branch, and a collection or
         # import failure makes vitest FAIL rather than report a lower count,
         # so the CI-vs-local gap that pins the pytest floors does not apply.
+        # 72 -> 76: cross-path de-duplication (one React crash is one row, and
+        # the guard is proven able to decline) plus the boundary's uncapped
+        # contract.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 72),
+              [_npm(), "run", "test:unit"], 76),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
