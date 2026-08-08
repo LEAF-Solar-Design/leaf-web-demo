@@ -240,6 +240,7 @@ def _mount_operator_router() -> None:
     from routers import operator_secrets as operator_secrets_router
     from routers import operator_credential as operator_credential_router
     from routers import operator_external as operator_external_router
+    from routers import operator_release as operator_release_router
 
     app.include_router(operator_sessions_router.router)
     # Lane F reversible runbooks. Write actions are always-confirm and gated by
@@ -256,6 +257,9 @@ def _mount_operator_router() -> None:
     # External-write runbook (O5): always-confirm, allowlisted non-production
     # destination + broker-scoped token; DARK (no adapter ships, no minter).
     app.include_router(operator_external_router.router)
+    # Staging release runbook (O6): always-confirm, STAGING ONLY, immutable
+    # candidate per source SHA; DARK (no stager registered). Never reaches prod.
+    app.include_router(operator_release_router.router)
     print("[leaf-demo] operator control plane mounted (/api/operator/*)")
 
 
