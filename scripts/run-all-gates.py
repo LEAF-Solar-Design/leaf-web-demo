@@ -601,10 +601,10 @@ def build_suites() -> List[Suite]:
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
         # #426 round-2 blocker).
-        # 20 -> 21: the anonymous client.exception row (a JS failure on a page
-        # that has no principal yet) added exactly one test.
+        # 20 -> 23: the anonymous client.exception row (a JS failure on a page
+        # that has no principal yet) plus the two label-schema tests.
         Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
-              SERVER, _py_pytest("tests/test_telemetry.py"), 21),
+              SERVER, _py_pytest("tests/test_telemetry.py"), 23),
         Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
               SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
@@ -994,16 +994,16 @@ def build_suites() -> List[Suite]:
         # review found the 14 card tests executing nowhere in CI, so the
         # operator-facing decision surface -- both controls, untrusted text,
         # style sinks -- was unverified on every PR.
-        # 35 -> 69: a FULL re-baseline, not an interim bump. The old floor sat
+        # 35 -> 72: a FULL re-baseline, not an interim bump. The old floor sat
         # far below the real count, which is precisely the hazard the header
         # above describes: the suite could have lost every test of this
         # feature and still reported green. No environment divergence is
-        # possible here -- all 69 cases are literal and unconditional, with no
+        # possible here -- all 72 cases are literal and unconditional, with no
         # skips, no parametrize, and no platform branch, and a collection or
         # import failure makes vitest FAIL rather than report a lower count,
         # so the CI-vs-local gap that pins the pytest floors does not apply.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 69),
+              [_npm(), "run", "test:unit"], 72),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

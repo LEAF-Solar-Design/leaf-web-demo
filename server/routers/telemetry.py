@@ -64,6 +64,71 @@ PREAUTH_EVENTS = frozenset({
     "client.exception",
 })
 
+# `client.exception` promises STRUCTURAL labels (docs/PLATFORM_TELEMETRY.md),
+# and the browser half keeps that promise. The door did not: an anonymous
+# caller could POST the event with `message_class: "AliceSmith"`, a
+# `message_hash` of "customerSecret", or an invented `raw_secret` key, and the
+# row landed. The token bucket bounds VOLUME, not CONTENT, so the guarantee
+# was only ever true of rows the real client sent.
+#
+# So the anonymous lane validates this event's labels against its own schema:
+# unknown keys are dropped and every value must match its shape. Enumerated
+# labels are closed sets, the digests are decimal, and the class is an
+# allowlist mirroring web/src/telemetry.js's KNOWN_CLASSES. An unlisted class
+# degrades to "Other" rather than being dropped, so the two lists drifting
+# costs a label's precision and never its safety.
+_HASH_RE = re.compile(r"^[0-9]{0,20}$")
+_CLIENT_EXCEPTION_CLASSES = frozenset({
+    "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError",
+    "TypeError", "URIError", "AggregateError", "DOMException",
+    "FetchTimeoutError", "UnhandledRejection", "Other",
+    "AbortError", "ConstraintError", "DataCloneError", "DataError",
+    "EncodingError", "HierarchyRequestError", "IndexSizeError",
+    "InvalidCharacterError", "InvalidStateError", "NamespaceError",
+    "NetworkError", "NotAllowedError", "NotFoundError", "NotReadableError",
+    "NotSupportedError", "OperationError", "QuotaExceededError",
+    "ReadOnlyError", "SecurityError", "TimeoutError",
+    "TransactionInactiveError", "UnknownError", "VersionError",
+    "WrongDocumentError",
+})
+_CLIENT_EXCEPTION_SCHEMA: Dict[str, Any] = {
+    "source": frozenset({"window.onerror", "unhandledrejection"}),
+    "route": frozenset({"site", "tool", "sheets", "app", "unknown"}),
+    "message_class": _CLIENT_EXCEPTION_CLASSES,
+    "message_hash": _HASH_RE,
+    "stack_hash": _HASH_RE,
+    "ua_class": re.compile(r"^[a-z]+/(mobile|desktop)$"),
+    "component_stack_hash": _HASH_RE,
+    "tour_step": re.compile(r"^[a-z0-9_-]{1,64}$"),
+}
+PREAUTH_LABEL_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "client.exception": _CLIENT_EXCEPTION_SCHEMA,
+}
+
+
+def _schema_filtered(name: str, labels: Dict[str, Any]) -> Dict[str, Any]:
+    """Anonymous labels for an event that declares a schema. Unknown keys are
+    dropped; a value that does not match its shape is dropped, EXCEPT a
+    message_class outside the allowlist, which degrades to "Other" so the row
+    keeps its meaning. Events with no schema are unchanged (the pre-existing
+    generic behaviour for the rest of the allowlist)."""
+    schema = PREAUTH_LABEL_SCHEMAS.get(name)
+    if schema is None:
+        return labels
+    out: Dict[str, Any] = {}
+    for key, rule in schema.items():
+        val = labels.get(key)
+        if not isinstance(val, str):
+            continue
+        if isinstance(rule, frozenset):
+            if val in rule:
+                out[key] = val
+            elif key == "message_class":
+                out[key] = "Other"
+        elif rule.match(val):
+            out[key] = val
+    return out
+
 # Per-IP token bucket for the pre-auth lane (the guest-quota pattern, in
 # miniature): burst 30, refill 30 per minute, in-process only. Telemetry is
 # loss-tolerant; a bucket miss silently drops.
@@ -222,6 +287,12 @@ async def ingest(request: Request,
             if principal is None and name not in PREAUTH_EVENTS:
                 continue
             labels = ev.get("labels") if isinstance(ev.get("labels"), dict) else {}
+            # Anonymous callers are the open internet. Where the event
+            # declares a label schema, hold them to it BEFORE the generic
+            # bounding below, so an event promising structural labels cannot
+            # be polluted by a direct POST.
+            if principal is None:
+                labels = _schema_filtered(name, labels)
             # Reserved keys are server-stamped envelope/identity fields: a
             # client may not smuggle them (or oversize junk) in as labels.
             merged: Dict[str, Any] = {}

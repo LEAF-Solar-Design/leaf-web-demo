@@ -109,7 +109,7 @@ Wave B (server emits, one per verified choke point):
 |---|---|---|
 | `job.terminal` | server, `jobs.complete_callback` (both store modes) | job_id, status, tool, duration_ms (pg mode), error_code, attempts, execution_path |
 | `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, tools_called_n, usd_est, tokens_in, tokens_out; model / grant_kind / degraded ONLY when the usage wire supplies them (optional fields the sink drops when absent) |
-| client ingest door | `POST /api/telemetry` | pre-auth trio + any valid authed event; reserved envelope/identity keys are stripped from client labels |
+| client ingest door | `POST /api/telemetry` | the five pre-auth events + any valid authed event; reserved envelope/identity keys are stripped from client labels, and an anonymous `client.exception` is additionally held to its label schema |
 
 ## Events live in v1 (wave C: the client tracker)
 
@@ -150,7 +150,7 @@ entry, dashboard row, and docs for no added meaning.
 Every label is structural. There is no free-text field, and that is a
 correction made under review, not the original design:
 
-- `message_hash` is a stable 32-bit digest of the exception message. The
+- `message_hash` is a stable ~53-bit digest (cyrb53) of the exception message. The
   message itself never leaves the browser. Two independent adversarial
   reviews of the first attempt each found fresh PII surviving a redactor -- a
   bare name in a path (`/app/alice/settings`), a quoted name, a Windows path,
@@ -191,6 +191,21 @@ for a guarantee instead of a best effort. If a specific message ever needs to
 be readable, the honest way to add it is a server-side allowlist of known
 engine strings, not a client-side denylist over arbitrary text.
 
+### The anonymous lane is held to a schema
+
+The guarantees above are properties of the BROWSER half. The ingest door is
+the open internet for a pre-auth event, and it applied only generic bounding,
+so an anonymous POST could put `message_class: "AliceSmith"` or an invented
+`raw_secret` key into a `client.exception` row -- true of the whole pre-auth
+allowlist before this change, but this event is the one whose contract claims
+structural labels. So `routers/telemetry.py` validates anonymous
+`client.exception` labels against `PREAUTH_LABEL_SCHEMAS`: unknown keys are
+dropped, each value must match its shape, and a class outside the allowlist
+degrades to `Other` rather than travelling. The class list mirrors
+`KNOWN_CLASSES` in `web/src/telemetry.js`; the two drifting costs a label's
+precision, never its safety. Authenticated callers keep the generic additive
+contract, so a new label still lands without a server release.
+
 ### Caps
 
 Two SEPARATE budgets: 10 per session for the global handlers, 5 for the
@@ -210,11 +225,14 @@ exceptions, and they arrive in bursts.
 ### Two rows per React crash, by design
 
 React 18 re-throws a boundary-caught error to `window`, so one component
-crash now records TWICE: once from `ErrorBoundary` (message class plus
-component-stack hash) and once from the global handler (message plus stack
-head). The pair is deliberate — each half carries what the other cannot — but
-anything COUNTING crashes must filter on `source`, or it double-counts every
-React failure.
+crash records TWICE. CONFIRMED by observation, not inferred:
+`web/src/ErrorBoundary.test.jsx` drives a real render failure and asserts the
+exact pair — one row from the global handler (`source: window.onerror`,
+`message_hash`, `stack_hash`, `route`) and one from `ErrorBoundary`
+(`component_stack_hash`, no `source`). The pair is deliberate, since each
+half carries what the other cannot, but anything COUNTING crashes must filter
+on `source` or it double-counts every React failure. That spec exists so this
+contract cannot break silently.
 
 ### Surfaces still uncovered
 

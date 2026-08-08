@@ -36,6 +36,7 @@ const STREAM_DOWN_CAP = 10      // agent.stream_down per session (design cap)
 const EXCEPTION_CAP = 10        // global-handler emissions per session
 const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
+const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 
 const state = {
   buffer: [],
@@ -204,7 +205,16 @@ export function trackException(props = {}, capKey = 'exception_boundary') {
     const limit = capKey === 'exception_global' ? EXCEPTION_CAP : BOUNDARY_CAP
     if (capCount(capKey) >= limit) return
     capIncrement(capKey)
-    track('client.exception', props, 'exception')
+    // The class is filtered HERE, not at each call site, so every emitter of
+    // this event is covered by construction. ErrorBoundary passed
+    // `error.name` verbatim, which meant a component that render-threw an
+    // error named `owner@example.com` put that text in a label -- under the
+    // same event whose contract promises structural labels. One choke point
+    // is also the only way a future caller cannot reintroduce it.
+    const safe = props && props.message_class !== undefined
+      ? { ...props, message_class: KNOWN_CLASSES.has(props.message_class) ? props.message_class : 'Other' }
+      : props
+    track('client.exception', safe, 'exception')
   } catch { /* no-op */ }
 }
 
@@ -262,15 +272,30 @@ function digest(text) {
   } catch { return '0' }
 }
 
-/** A rejection reason need not be an Error. `{code: 4}` and `{code: 5}` both
- * stringify to "[object Object]", so hashing the stringification alone merges
- * two distinct failures. Serialize when possible, fall back when not. */
+/** A rejection reason need not be an Error, and two different ones must not
+ * collapse to one signature or the dedup below silently drops the second.
+ *
+ * Four descents, each bounded and none able to throw out of here: the
+ * message, a JSON serialization, a per-key value description (BigInt and
+ * Symbol values make `JSON.stringify` throw or omit, so `{code: 1n}` and
+ * `{code: 2n}` both reached "[object Object]"), and a constant. `String()` is
+ * never the last resort, because a hostile `Symbol.toPrimitive` makes IT
+ * throw too, which lost the whole record rather than degrading it. */
 function reasonText(reason) {
+  if (reason === null || typeof reason !== 'object') {
+    try { return String(reason) } catch { return '[unserializable]' }
+  }
+  try { if ('message' in reason) return reason.message } catch { /* next */ }
   try {
-    if (reason && typeof reason === 'object' && 'message' in reason) return reason.message
-    if (reason && typeof reason === 'object') return JSON.stringify(reason)
-    return reason
-  } catch { return String(reason) }
+    const json = JSON.stringify(reason)
+    if (typeof json === 'string') return json
+  } catch { /* next */ }
+  try {
+    return Object.keys(reason).slice(0, KEY_SAMPLE_MAX).sort().map((k) => {
+      try { return `${k}:${String(reason[k])}` } catch { return `${k}:?` }
+    }).join(',')
+  } catch { /* next */ }
+  return '[unserializable]'
 }
 
 // Provenance, not syntax. `name` is an ordinary writable property, so an
@@ -280,6 +305,10 @@ function reasonText(reason) {
 const KNOWN_CLASSES = new Set([
   'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError',
   'TypeError', 'URIError', 'AggregateError', 'DOMException',
+  // Values THIS module assigns when the platform supplies none. They must be
+  // listed, or the choke-point filter in trackException degrades the very
+  // fallbacks the handlers just computed.
+  'UnhandledRejection', 'Other',
   // This app's own class (web/src/fetchBudget.js); its provenance is ours.
   'FetchTimeoutError',
   // DOMException `name` values the platform assigns.
@@ -318,11 +347,13 @@ function messageClass(err, fallback) {
  * codebase's ErrorBoundary has always used `component_stack_hash`. */
 function stackHash(err) {
   try {
-    // Only the first frame: the rest is call history, and a deeper frame
-    // changes with the caller rather than with the failure.
-    const lines = String((err && err.stack) || '').split('\n').map((l) => l.trim())
-    const frame = lines.find((l) => /^at\s/.test(l) || /^[^@\s]*@\S/.test(l)) || ''
-    return frame ? digest(frame) : ''
+    // Bounded BEFORE any parsing: the first frame is always within the first
+    // few lines, so a multi-megabyte stack costs nothing extra. Splitting and
+    // mapping the whole stack to find one line was both the redundant work
+    // and the unbounded one.
+    const stack = String((err && err.stack) || '').slice(0, HASH_INPUT_MAX)
+    const frame = /^[ \t]*(at .+|[^@\s]*@\S+)$/m.exec(stack)
+    return frame ? digest(frame[1].trim()) : ''
   } catch { return '' }
 }
 

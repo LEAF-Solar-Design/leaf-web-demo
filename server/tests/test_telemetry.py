@@ -316,6 +316,65 @@ def test_ingest_anonymous_client_exception_lands_with_its_labels(monkeypatch):
     assert labels["ingest"] == "client"
 
 
+def test_ingest_anonymous_client_exception_labels_are_schema_filtered(monkeypatch):
+    """The event's contract promises STRUCTURAL labels, and the browser half
+    keeps that promise -- but the door is the open internet for this event.
+    An anonymous POST may not smuggle free text into it: unknown keys are
+    dropped, values that do not match their shape are dropped, and a class
+    outside the allowlist degrades to "Other" rather than travelling."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {
+            "source": "unhandledrejection",          # allowed enum
+            "message_class": "AliceSmith",           # NOT a platform class
+            "message_hash": "customerSecret",        # not a digest
+            "stack_hash": "12345",                   # a digest
+            "route": "/app/alice/settings",          # not a scene name
+            "ua_class": "chrome/desktop",            # allowed shape
+            "raw_secret": "sk-live-abcdef",          # invented key
+        },
+    }]})
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["source"] == "unhandledrejection"
+    assert labels["stack_hash"] == "12345"
+    assert labels["ua_class"] == "chrome/desktop"
+    # Degraded, dropped, dropped, dropped.
+    assert labels["message_class"] == "Other"
+    assert "message_hash" not in labels
+    assert "route" not in labels
+    assert "raw_secret" not in labels
+    # Nothing the caller wrote as free text survives anywhere in the row.
+    serialized = json.dumps(labels)
+    assert "AliceSmith" not in serialized
+    assert "customerSecret" not in serialized
+    assert "alice" not in serialized
+    assert "sk-live-abcdef" not in serialized
+
+
+def test_ingest_authed_labels_are_not_schema_filtered(monkeypatch):
+    """The schema guards the ANONYMOUS lane only. A verified principal keeps
+    the generic additive-labels contract, so a new label does not need a
+    server release to start landing."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "client.exception",
+        "event_type": "exception",
+        "labels": {"message_class": "TypeError", "future_label": "kept"},
+    }]}, headers={"X-Tenant-Id": "acme"})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["future_label"] == "kept"
+    assert labels["message_class"] == "TypeError"
+
+
 def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):
     _enable_fake_sink(monkeypatch)
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
