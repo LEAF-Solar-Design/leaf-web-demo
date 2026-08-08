@@ -134,15 +134,28 @@ def _operator_surface(enabled: bool) -> list:
         "        stack.extend(getattr(d, 'dependencies', None) or [])\n"
         "    return False\n"
         "eps = []\n"
-        "for r in app.app.routes:\n"
-        "    path = getattr(r, 'path', '')\n"
-        "    if not (path.startswith('/api/operator/') or _uses_ro(r)):\n"
-        "        continue\n"
-        "    methods = getattr(r, 'methods', None) or set()\n"
-        "    for m in set(methods):\n"  # capture EVERY method, incl. HEAD/OPTIONS
-        "        eps.append([m, path])\n"
-        "    if not methods:\n"
-        "        eps.append(['MOUNT', path])\n"
+        # RECURSE into sub-application Mounts: a Mount at /api/operator nests a
+        # whole sub-app whose child routes are NOT in app.routes flatly, so a
+        # production route mounted there would escape a non-recursive walk. Walk
+        # child routes with the mount path as prefix.
+        "def _walk(routes, prefix):\n"
+        "    for r in routes:\n"
+        "        rpath = prefix + getattr(r, 'path', '')\n"
+        "        try:\n"
+        "            subs = getattr(r, 'routes', None)\n"
+        "        except Exception:\n"
+        "            subs = None\n"
+        "        if subs:\n"          # a Mount / sub-application
+        "            _walk(subs, rpath)\n"
+        "            continue\n"
+        "        if not (rpath.startswith('/api/operator/') or _uses_ro(r)):\n"
+        "            continue\n"
+        "        methods = getattr(r, 'methods', None) or set()\n"
+        "        for m in set(methods):\n"  # capture EVERY method, incl. HEAD/OPTIONS
+        "            eps.append([m, rpath])\n"
+        "        if not methods:\n"
+        "            eps.append(['MOUNT', rpath])\n"
+        "_walk(app.app.routes, '')\n"
         "print('EPS_JSON=' + json.dumps(eps))\n"
     )
     env = dict(os.environ)
