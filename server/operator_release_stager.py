@@ -62,7 +62,7 @@ def stage(source_sha: str, target: str) -> Dict[str, str]:
     stager_failed = False
     try:
         result = _STAGER(source_sha, target)
-    except BaseException:  # noqa: BLE001 - mask EVERY failure, value-free
+    except Exception:  # noqa: BLE001 - mask real errors value-free; let control-flow BaseExceptions (CancelledError/KeyboardInterrupt/SystemExit) propagate
         stager_failed = True
     if stager_failed:
         raise StageError("stager_failed")
@@ -74,8 +74,9 @@ def stage(source_sha: str, target: str) -> Dict[str, str]:
     # attacker code; and require the extracted revisions to be EXACT str (not a
     # str subclass with a hostile __format__/__str__ that could raise the SHA in
     # a downstream f-string). The SAME validated objects are returned, so a
-    # value cannot be validated and then swapped. Any inspection failure is
-    # masked; the raise happens OUTSIDE the except so nothing is chained.
+    # value cannot be validated and then swapped. Any ordinary inspection
+    # failure (Exception) is masked; the raise happens OUTSIDE the except so
+    # nothing is chained. Control-flow BaseExceptions propagate unchanged.
     invalid = False
     previous = new = None
     try:
@@ -85,7 +86,7 @@ def stage(source_sha: str, target: str) -> Dict[str, str]:
         if not (type(previous) is str and type(new) is str  # noqa: E721
                 and 0 < len(previous) <= 64 and 0 < len(new) <= 64):
             invalid = True
-    except BaseException:  # noqa: BLE001 - mask ANY inspection failure, value-free
+    except Exception:  # noqa: BLE001 - mask inspection errors value-free; let control-flow BaseExceptions propagate
         invalid = True
     if invalid:
         raise StageError("stager_result_invalid")

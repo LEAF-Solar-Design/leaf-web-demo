@@ -89,18 +89,16 @@ def test_rotate_rotator_failure_is_masked_no_leak():
     assert e.value.__context__ is None
 
 
-def test_rotate_rotator_base_exception_is_masked():
-    class Boom(BaseException):
-        pass
-
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit,
+                                 __import__("asyncio").CancelledError])
+def test_rotate_rotator_control_flow_baseexception_propagates(exc):
+    # LIFECYCLE SAFETY: a control-flow BaseException from the rotator must
+    # PROPAGATE (cancellation/shutdown), not become rotator_failed.
     def boom(meta):
-        raise Boom("NEW-SECRET-xyz")
+        raise exc()
     broker.register_rotator(boom)
-    with pytest.raises(broker.SecretBrokerError) as e:
+    with pytest.raises(exc):
         broker.rotate(_HANDLE, "staging")
-    assert e.value.reason == "rotator_failed"
-    assert "NEW-SECRET" not in str(e.value)
-    assert e.value.__context__ is None
 
 
 # --- runbook handle validation + broker-verify (no DB) ----------------------

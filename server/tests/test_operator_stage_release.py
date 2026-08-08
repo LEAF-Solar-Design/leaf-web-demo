@@ -75,6 +75,19 @@ def test_stage_stager_exception_is_masked():
     assert e.value.__context__ is None
 
 
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit,
+                                 __import__("asyncio").CancelledError])
+def test_stage_stager_control_flow_baseexception_propagates(exc):
+    # LIFECYCLE SAFETY: a control-flow BaseException from the stager (a
+    # cancellation or shutdown signal) must PROPAGATE, not be masked into a
+    # fixed stager_failed, so cancellation-safe termination is not defeated.
+    def boom(sha, t):
+        raise exc()
+    stager.register_stager(boom)
+    with pytest.raises(exc):
+        stager.stage(_SHA, "staging")
+
+
 def test_stage_malformed_result_refused():
     stager.register_stager(lambda sha, t: {"previous_revision": 7, "new_revision": "8"})
     with pytest.raises(stager.StageError) as e:
