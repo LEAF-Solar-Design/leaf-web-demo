@@ -109,7 +109,7 @@ Wave B (server emits, one per verified choke point):
 |---|---|---|
 | `job.terminal` | server, `jobs.complete_callback` (both store modes) | job_id, status, tool, duration_ms (pg mode), error_code, attempts, execution_path |
 | `agent.turn_completed` | server, `turn_runner._finalize_terminal` | turn_id, stop_reason, tools_called_n, usd_est, tokens_in, tokens_out; model / grant_kind / degraded ONLY when the usage wire supplies them (optional fields the sink drops when absent) |
-| client ingest door | `POST /api/telemetry` | the five pre-auth events + any valid authed event; reserved envelope/identity keys are stripped from client labels, and an anonymous `client.exception` is additionally held to its label schema |
+| client ingest door | `POST /api/telemetry` | the five pre-auth events + any valid authed event; reserved envelope/identity keys are stripped from client labels, and `client.exception` is additionally held to its label schema for EVERY caller |
 
 ## Events live in v1 (wave C: the client tracker)
 
@@ -191,20 +191,43 @@ for a guarantee instead of a best effort. If a specific message ever needs to
 be readable, the honest way to add it is a server-side allowlist of known
 engine strings, not a client-side denylist over arbitrary text.
 
-### The anonymous lane is held to a schema
+### The door holds EVERY caller to the schema
 
-The guarantees above are properties of the BROWSER half. The ingest door is
-the open internet for a pre-auth event, and it applied only generic bounding,
-so an anonymous POST could put `message_class: "AliceSmith"` or an invented
-`raw_secret` key into a `client.exception` row -- true of the whole pre-auth
-allowlist before this change, but this event is the one whose contract claims
-structural labels. So `routers/telemetry.py` validates anonymous
-`client.exception` labels against `PREAUTH_LABEL_SCHEMAS`: unknown keys are
-dropped, each value must match its shape, and a class outside the allowlist
-degrades to `Other` rather than travelling. The class list mirrors
-`KNOWN_CLASSES` in `web/src/telemetry.js`; the two drifting costs a label's
-precision, never its safety. Authenticated callers keep the generic additive
-contract, so a new label still lands without a server release.
+The guarantees above are properties of the BROWSER half. The door is where
+the data actually lands, and it applied only generic bounding, so a direct
+POST could put `message_class: "AliceSmith"` or an invented `raw_secret` key
+into a `client.exception` row. That was true of the whole pre-auth allowlist
+already, but this is the event whose contract claims structural labels, so
+the claim was only ever true of rows the real client sent.
+
+`routers/telemetry.py` now validates `client.exception` labels against
+`PREAUTH_LABEL_SCHEMAS` for EVERY caller, not only anonymous ones.
+Authentication proves identity, not label provenance: a bearer holder or a
+self-mintable guest can POST free text exactly as a stranger can. Unknown
+keys are dropped, every value must match its rule, and a class outside the
+allowlist degrades to `Other` rather than travelling.
+
+The enumerated labels are CLOSED SETS, not shapes. A shape rule is what
+accepted `alicesmith/desktop` as a `ua_class`, which is the same
+shape-not-provenance failure as an identifier-shaped class. Digests are
+FIXED WIDTH (16 characters) for the same reason: the door cannot prove a
+value came from the hash function, but requiring exactly one digest's width
+means the field's capacity is a digest and not a sentence — a variable-width
+decimal accepted `5550142`, which is a phone number.
+
+`tour_step` is deliberately absent from the schema. Closing it would need a
+mirror of two product-owned step tables that change with ordinary feature
+work, so it would drift by design, and a shape rule would accept
+`customer_secret`. It is marginal on a row that already carries `route` and
+both digests.
+
+Two costs, taken deliberately. A new label on THIS event needs a server
+release, unlike every other event, which keeps the generic additive
+contract. And the class list is a hand-maintained mirror of `KNOWN_CLASSES`
+in `web/src/telemetry.js` — drift is safe-by-default (an unlisted class
+degrades rather than travelling) but silent, so
+`server/tests/test_client_exception_vocab_freeze.py` enforces it, in the
+same spirit as the auth vocab freeze.
 
 ### Caps
 
@@ -224,15 +247,21 @@ exceptions, and they arrive in bursts.
 
 ### Two rows per React crash, by design
 
-React 18 re-throws a boundary-caught error to `window`, so one component
-crash records TWICE. CONFIRMED by observation, not inferred:
-`web/src/ErrorBoundary.test.jsx` drives a real render failure and asserts the
-exact pair — one row from the global handler (`source: window.onerror`,
-`message_hash`, `stack_hash`, `route`) and one from `ErrorBoundary`
-(`component_stack_hash`, no `source`). The pair is deliberate, since each
-half carries what the other cannot, but anything COUNTING crashes must filter
-on `source` or it double-counts every React failure. That spec exists so this
-contract cannot break silently.
+A React crash ALWAYS records a boundary row (`component_stack_hash`, no
+`source`). It MAY also record a global row (`source: window.onerror`), and
+whether it does is React's business, not ours: React 18's DEVELOPMENT build
+dispatches a synthetic DOM event so DevTools can observe render exceptions,
+which reaches the global handler; its production implementation uses
+try/catch and need not. `web/src/ErrorBoundary.test.jsx` therefore asserts
+the pair BY SHAPE and never by count.
+
+This paragraph previously claimed two rows in production and called that
+CONFIRMED. It was confirmed against a development build, which is not the
+same thing — recorded here because the mistake is the interesting part.
+
+The consequence for consumers is unchanged and is the reason `source`
+exists: anything COUNTING crashes must filter on it, or it double-counts
+every React failure wherever the second row does appear.
 
 ### Surfaces still uncovered
 

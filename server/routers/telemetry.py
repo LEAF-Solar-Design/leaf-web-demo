@@ -5,7 +5,7 @@ Design of record: docs/PLATFORM_TELEMETRY.md. Decisions that live here:
   - AUTH IS OPTIONAL at the route level, resolved manually (the uploads.py
     idiom): an authenticated principal (Auth0 bearer, guest HMAC, mock
     tenant) gets its events accepted with SERVER-STAMPED identity; an
-    anonymous caller may send exactly the pre-auth allowlist trio behind a
+    anonymous caller may send exactly the pre-auth allowlist behind a
     per-IP token bucket. Identity fields in the payload are IGNORED and
     overwritten from the verified principal (the telemetry-proxy
     verified-identity lesson).
@@ -77,7 +77,12 @@ PREAUTH_EVENTS = frozenset({
 # allowlist mirroring web/src/telemetry.js's KNOWN_CLASSES. An unlisted class
 # degrades to "Other" rather than being dropped, so the two lists drifting
 # costs a label's precision and never its safety.
-_HASH_RE = re.compile(r"^[0-9]{0,20}$")
+# A digest is ALWAYS 16 digits (the client zero-pads it). The door cannot
+# prove a value came from the hash function -- an opaque field holds whatever
+# the caller writes -- but requiring the exact width means the field's
+# capacity is one digest and nothing else. The previous "any decimal" rule
+# accepted "5550142", which is a phone number.
+_HASH_RE = re.compile(r"^[0-9]{16}$")
 _CLIENT_EXCEPTION_CLASSES = frozenset({
     "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError",
     "TypeError", "URIError", "AggregateError", "DOMException",
@@ -97,9 +102,20 @@ _CLIENT_EXCEPTION_SCHEMA: Dict[str, Any] = {
     "message_class": _CLIENT_EXCEPTION_CLASSES,
     "message_hash": _HASH_RE,
     "stack_hash": _HASH_RE,
-    "ua_class": re.compile(r"^[a-z]+/(mobile|desktop)$"),
+    # CLOSED SET, not a shape. `^[a-z]+/(mobile|desktop)$` accepted
+    # "alicesmith/desktop": the same shape-not-provenance failure as an
+    # identifier-shaped class. These twelve are every value uaClass() emits.
+    "ua_class": frozenset({
+        f"{family}/{form}"
+        for family in ("edge", "opera", "firefox", "chrome", "safari", "other")
+        for form in ("mobile", "desktop")
+    }) | {"unknown"},
     "component_stack_hash": _HASH_RE,
-    "tour_step": re.compile(r"^[a-z0-9_-]{1,64}$"),
+    # `tour_step` is deliberately ABSENT. Closing it needs a mirror of two
+    # product-owned step tables that change with ordinary feature work, so it
+    # would drift by design; a shape rule would accept "customer_secret". It
+    # is marginal on an exception row, which already carries route and both
+    # digests, so it is dropped rather than guessed at.
 }
 PREAUTH_LABEL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "client.exception": _CLIENT_EXCEPTION_SCHEMA,
@@ -107,11 +123,18 @@ PREAUTH_LABEL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 
 def _schema_filtered(name: str, labels: Dict[str, Any]) -> Dict[str, Any]:
-    """Anonymous labels for an event that declares a schema. Unknown keys are
-    dropped; a value that does not match its shape is dropped, EXCEPT a
+    """Client labels for an event that declares a schema. Unknown keys are
+    dropped; a value that does not match its rule is dropped, EXCEPT a
     message_class outside the allowlist, which degrades to "Other" so the row
-    keeps its meaning. Events with no schema are unchanged (the pre-existing
-    generic behaviour for the rest of the allowlist)."""
+    keeps its meaning. Events with no schema are unchanged (the generic
+    additive behaviour every other event keeps).
+
+    Applied to EVERY caller, not only anonymous ones. Authentication proves
+    identity, not label provenance: a bearer holder or a self-mintable guest
+    can POST `message_hash: "customerSecret"` exactly as a stranger can, and
+    this event's contract says its labels are structural. The cost is that a
+    new label on THIS event needs a server release -- the right trade for the
+    one event whose whole point is that its labels cannot carry free text."""
     schema = PREAUTH_LABEL_SCHEMAS.get(name)
     if schema is None:
         return labels
@@ -287,12 +310,10 @@ async def ingest(request: Request,
             if principal is None and name not in PREAUTH_EVENTS:
                 continue
             labels = ev.get("labels") if isinstance(ev.get("labels"), dict) else {}
-            # Anonymous callers are the open internet. Where the event
-            # declares a label schema, hold them to it BEFORE the generic
-            # bounding below, so an event promising structural labels cannot
-            # be polluted by a direct POST.
-            if principal is None:
-                labels = _schema_filtered(name, labels)
+            # Where the event declares a label schema, hold EVERY caller to
+            # it before the generic bounding below, so an event promising
+            # structural labels cannot be polluted by any direct POST.
+            labels = _schema_filtered(name, labels)
             # Reserved keys are server-stamped envelope/identity fields: a
             # client may not smuggle them (or oversize junk) in as labels.
             merged: Dict[str, Any] = {}

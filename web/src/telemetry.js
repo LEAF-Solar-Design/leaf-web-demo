@@ -37,6 +37,7 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const BOUNDARY_CAP = 5          // ErrorBoundary crashes per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
+const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
 
 const state = {
   buffer: [],
@@ -249,7 +250,7 @@ export function trackException(props = {}, capKey = 'exception_boundary') {
 // the candidates and compare. That is a real and deliberate limit. It is
 // still strictly better than the text, and BigQuery access is already
 // privileged and already sees the row's stamped tenant.
-function digest(text) {
+export function digest(text) {
   try {
     // cyrb53: two accumulators combined into ~53 bits. The previous 32-bit
     // shift-hash collided on inputs as short as "Aa"/"BB", which silently
@@ -268,8 +269,13 @@ function digest(text) {
     }
     h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
     h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
-    return String(4294967296 * (2097151 & h2) + (h1 >>> 0))
-  } catch { return '0' }
+    // FIXED WIDTH, always 16 digits. The door cannot prove a digest's
+    // provenance -- an opaque field holds whatever the caller puts in it --
+    // but it CAN require the exact width of one, so the field's capacity is a
+    // digest and nothing else. A variable-width decimal accepted `5550142`,
+    // which is a phone number, not a hash.
+    return String(4294967296 * (2097151 & h2) + (h1 >>> 0)).padStart(DIGEST_WIDTH, '0')
+  } catch { return ''.padStart(DIGEST_WIDTH, '0') }
 }
 
 /** A rejection reason need not be an Error, and two different ones must not
@@ -287,13 +293,28 @@ function reasonText(reason) {
   }
   try { if ('message' in reason) return reason.message } catch { /* next */ }
   try {
-    const json = JSON.stringify(reason)
+    // BUDGETED. `JSON.stringify` walks the whole graph and runs every getter
+    // and `toJSON` it meets, so an application or third-party rejection
+    // carrying a large or proxied object could stall the main thread inside
+    // telemetry. The replacer aborts the walk once it has seen enough to
+    // distinguish one failure from another.
+    let budget = HASH_INPUT_MAX
+    const json = JSON.stringify(reason, (k, v) => {
+      budget -= String(k).length + 8
+      if (budget < 0) throw new RangeError('bounded')
+      return v
+    })
     if (typeof json === 'string') return json
   } catch { /* next */ }
   try {
-    return Object.keys(reason).slice(0, KEY_SAMPLE_MAX).sort().map((k) => {
-      try { return `${k}:${String(reason[k])}` } catch { return `${k}:?` }
-    }).join(',')
+    // `Object.keys` materializes EVERY key (and runs a proxy's ownKeys trap)
+    // before any slice could bound it; for-in with a break never does.
+    const parts = []
+    for (const k in reason) {
+      if (parts.length >= KEY_SAMPLE_MAX) break
+      try { parts.push(`${k}:${String(reason[k])}`) } catch { parts.push(`${k}:?`) }
+    }
+    return parts.sort().join(',')
   } catch { /* next */ }
   return '[unserializable]'
 }
@@ -454,7 +475,7 @@ function beaconFlush() {
     const events = state.buffer.splice(0, FLUSH_AT)
     if (navigator?.sendBeacon) {
       // sendBeacon cannot carry auth headers; the pre-auth allowlist covers
-      // anonymous trio events, and identified events flushed here may drop —
+      // the anonymous allowlist, and identified events flushed here may drop —
       // acceptable by the loss-tolerance contract at tab close.
       navigator.sendBeacon(
         endpoint(), new Blob([payload(events)], { type: 'application/json' }))

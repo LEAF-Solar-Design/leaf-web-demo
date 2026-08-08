@@ -332,9 +332,10 @@ def test_ingest_anonymous_client_exception_labels_are_schema_filtered(monkeypatc
             "source": "unhandledrejection",          # allowed enum
             "message_class": "AliceSmith",           # NOT a platform class
             "message_hash": "customerSecret",        # not a digest
-            "stack_hash": "12345",                   # a digest
+            "stack_hash": "0000000000012345",        # a real 16-digit digest
             "route": "/app/alice/settings",          # not a scene name
-            "ua_class": "chrome/desktop",            # allowed shape
+            "ua_class": "alicesmith/desktop",        # shape-valid, NOT a real class
+            "tour_step": "customer_secret",          # no longer in the schema
             "raw_secret": "sk-live-abcdef",          # invented key
         },
     }]})
@@ -342,37 +343,63 @@ def test_ingest_anonymous_client_exception_labels_are_schema_filtered(monkeypatc
     assert resp.json()["accepted"] == 1
     labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
     assert labels["source"] == "unhandledrejection"
-    assert labels["stack_hash"] == "12345"
-    assert labels["ua_class"] == "chrome/desktop"
+    assert labels["stack_hash"] == "0000000000012345"
     # Degraded, dropped, dropped, dropped.
     assert labels["message_class"] == "Other"
-    assert "message_hash" not in labels
-    assert "route" not in labels
+    assert "message_hash" not in labels          # "customerSecret" is not a digest
+    assert "route" not in labels                 # not a scene name
+    assert "ua_class" not in labels              # not one of the twelve
+    assert "tour_step" not in labels             # not in the schema at all
     assert "raw_secret" not in labels
     # Nothing the caller wrote as free text survives anywhere in the row.
     serialized = json.dumps(labels)
     assert "AliceSmith" not in serialized
     assert "customerSecret" not in serialized
     assert "alice" not in serialized
+    assert "customer_secret" not in serialized
     assert "sk-live-abcdef" not in serialized
 
 
-def test_ingest_authed_labels_are_not_schema_filtered(monkeypatch):
-    """The schema guards the ANONYMOUS lane only. A verified principal keeps
-    the generic additive-labels contract, so a new label does not need a
-    server release to start landing."""
+def test_ingest_client_exception_schema_binds_authed_callers_too(monkeypatch):
+    """Authentication proves IDENTITY, not label provenance. A bearer holder
+    or a self-mintable guest can POST free text exactly as a stranger can, and
+    this event's contract says its labels are structural -- so the schema
+    binds every caller. The cost, taken deliberately: a new label on THIS
+    event needs a server release."""
     _enable_fake_sink(monkeypatch)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     c = _client()
     resp = _post(c, {"events": [{
         "event_name": "client.exception",
         "event_type": "exception",
-        "labels": {"message_class": "TypeError", "future_label": "kept"},
+        "labels": {
+            "message_class": "TypeError",
+            "message_hash": "0000000000001234",
+            "future_label": "owner@example.com",
+        },
     }]}, headers={"X-Tenant-Id": "acme"})
     assert resp.status_code == 202
     labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
-    assert labels["future_label"] == "kept"
     assert labels["message_class"] == "TypeError"
+    assert labels["message_hash"] == "0000000000001234"
+    assert "future_label" not in labels
+    assert "owner@example.com" not in json.dumps(labels)
+
+
+def test_ingest_other_events_keep_the_generic_additive_contract(monkeypatch):
+    """Only events that DECLARE a schema are filtered. Everything else keeps
+    additive labels, so an ordinary new label still lands with no server
+    release."""
+    _enable_fake_sink(monkeypatch)
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    c = _client()
+    resp = _post(c, {"events": [{
+        "event_name": "prompt.submitted",
+        "labels": {"input_kind": "typed", "brand_new_label": "kept"},
+    }]}, headers={"X-Tenant-Id": "acme"})
+    assert resp.status_code == 202
+    labels = json.loads(list(telemetry_sink._queue)[0]["labels"])
+    assert labels["brand_new_label"] == "kept"
 
 
 def test_ingest_anonymous_bucket_exhaustion_drops_silently(monkeypatch):

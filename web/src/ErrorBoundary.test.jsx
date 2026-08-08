@@ -21,6 +21,7 @@ function Boom({ name }) {
 }
 
 let consoleError
+let installed = []
 
 beforeEach(() => {
   try { sessionStorage.clear() } catch { /* jsdom always has it */ }
@@ -30,6 +31,10 @@ beforeEach(() => {
 
 afterEach(() => {
   consoleError?.mockRestore()
+  // Each re-import installs listeners on the SHARED jsdom window; without
+  // this they accumulate and answer later specs' events.
+  for (const [type, fn, opts] of installed) window.removeEventListener(type, fn, opts)
+  installed = []
   delete globalThis.fetch
 })
 
@@ -38,7 +43,19 @@ async function postedAfterCrash(childProps) {
   const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 202 }))
   globalThis.fetch = fetchMock
   vi.resetModules()
-  const telemetry = await import('./telemetry.js')
+
+  installed = []
+  const realAdd = window.addEventListener.bind(window)
+  window.addEventListener = (type, fn, opts) => {
+    installed.push([type, fn, opts])
+    return realAdd(type, fn, opts)
+  }
+  let telemetry
+  try {
+    telemetry = await import('./telemetry.js')
+  } finally {
+    window.addEventListener = realAdd
+  }
 
   render(<ErrorBoundary><Boom {...childProps} /></ErrorBoundary>)
   // The boundary imports telemetry.js dynamically so it can survive whatever
@@ -56,27 +73,34 @@ describe('ErrorBoundary telemetry', () => {
     expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument()
   })
 
-  it('records ONE React crash as exactly two rows, told apart by `source`', async () => {
+  it('always records the boundary row, and any global row agrees with it', async () => {
     const events = await postedAfterCrash({})
 
-    // React re-throws a boundary-caught error to `window`, so the global
-    // handler sees it too. The pair is deliberate -- each half carries what
-    // the other cannot -- but anything COUNTING crashes must filter on
-    // `source` or it double-counts every React failure. This spec is what
-    // stops that contract being broken silently.
-    expect(events).toHaveLength(2)
-    for (const e of events) {
-      expect(e).toMatchObject({ event_name: 'client.exception', event_type: 'exception' })
-      expect(e.labels.message_class).toBe('Error')
+    // Asserted BY SHAPE, never by count or index. React 18 DEV dispatches a
+    // synthetic DOM event so DevTools can observe render exceptions, which
+    // makes the global handler fire too; the production implementation uses
+    // try/catch and need not reach `window`. Pinning "exactly two rows" would
+    // pin a dev-build artifact and mislead anyone reading it as a production
+    // guarantee.
+    const boundary = events.filter((e) => e.labels.source === undefined)
+    const global = events.filter((e) => e.labels.source !== undefined)
+
+    expect(boundary).toHaveLength(1)
+    expect(boundary[0]).toMatchObject({
+      event_name: 'client.exception',
+      event_type: 'exception',
+    })
+    expect(boundary[0].labels.message_class).toBe('Error')
+    expect(boundary[0].labels.component_stack_hash).toMatch(/^\d{16}$/)
+
+    // Whether a global row appears is React's business; if one does, it is
+    // the same failure and `source` is what tells the two apart. That filter
+    // is the contract consumers depend on to avoid double-counting.
+    for (const g of global) {
+      expect(g.labels.source).toBe('window.onerror')
+      expect(g.labels.message_class).toBe('Error')
+      expect(g.labels.stack_hash).toMatch(/^\d{16}$/)
     }
-
-    const [globalRow, boundaryRow] = events
-    expect(globalRow.labels.source).toBe('window.onerror')
-    expect(globalRow.labels.stack_hash).toMatch(/^\d+$/)
-    expect(globalRow.labels.route).toBe('site')
-
-    expect(boundaryRow.labels.source).toBeUndefined()
-    expect(boundaryRow.labels.component_stack_hash).toMatch(/^\d+$/)
   })
 
   it('refuses a message_class the platform did not assign, on BOTH rows', async () => {

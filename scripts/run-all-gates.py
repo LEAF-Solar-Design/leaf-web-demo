@@ -601,12 +601,19 @@ def build_suites() -> List[Suite]:
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
         # #426 round-2 blocker).
-        # 20 -> 23: the anonymous client.exception row (a JS failure on a page
-        # that has no principal yet) plus the two label-schema tests.
+        # 20 -> 24: the anonymous client.exception row (a JS failure on a page
+        # that has no principal yet) plus the three label-schema tests.
         Suite("server-telemetry", "server tests/test_telemetry.py", "pytest",
-              SERVER, _py_pytest("tests/test_telemetry.py"), 23),
+              SERVER, _py_pytest("tests/test_telemetry.py"), 24),
         Suite("server-telemetry-emits", "server tests/test_telemetry_emits.py", "pytest",
               SERVER, _py_pytest("tests/test_telemetry_emits.py"), 10),
+        # The client.exception label vocabulary is mirrored BY HAND across
+        # web/src/telemetry.js and routers/telemetry.py, and drift there is
+        # silent (a class degrades to "Other" rather than failing). This is
+        # the freeze, in the same spirit as server-auth-vocab-freeze.
+        Suite("server-client-exception-vocab-freeze",
+              "server tests/test_client_exception_vocab_freeze.py", "pytest",
+              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 7),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
         # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
         # test_required_platform_rejects_missing_shared_mutation_fence. The floor
