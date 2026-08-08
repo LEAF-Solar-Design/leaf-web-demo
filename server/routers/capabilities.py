@@ -56,8 +56,15 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         view = deps.catalog_tool_view(tool)
         view.update(pin)
         tools.append(view)
+    trusted_live_catalog_digests = {
+        deps.catalog_tool_digest(tool)
+        for tool in deps.load_engine_registry_tools()
+        if tool.get("aps_live") is True
+    }
     tools = catalog.apply_live_aps_runtime_authority(
-        tools, aps_live_enabled=deps.APS_LIVE
+        tools,
+        aps_live_enabled=deps.APS_LIVE,
+        trusted_live_catalog_digests=trusted_live_catalog_digests,
     )
     families = catalog.build_catalog(
         tools,

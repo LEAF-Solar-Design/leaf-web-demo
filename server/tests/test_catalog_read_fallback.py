@@ -29,6 +29,8 @@ TENANT_TOOL = {
     "name": "unpublished-tenant-tool",
     "entry": "tools/unpublished-tenant-tool/tool.py",
 }
+TRUSTED_LIVE_TOOL = {**BASE_TOOL, "aps_live": True}
+TRUSTED_LIVE_DIGEST = deps.catalog_tool_digest(TRUSTED_LIVE_TOOL)
 
 
 def _raise(error: CustomizationServiceError):
@@ -100,13 +102,40 @@ def test_capabilities_uses_only_safe_base_for_tenant_without_pin(
 
 
 @pytest.mark.parametrize(
-    ("runtime_enabled", "expected"), [(False, False), (True, True)]
+    ("effective_tool", "runtime_enabled", "expected"),
+    [
+        (TRUSTED_LIVE_TOOL, True, True),
+        (TRUSTED_LIVE_TOOL, False, False),
+        (
+            {**BASE_TOOL, "description": "tenant override", "aps_live": True},
+            True,
+            False,
+        ),
+        ({**BASE_TOOL, "description": "same-name inherited override"}, True, False),
+        ({**BASE_TOOL, "name": "arbitrary-live-tool", "aps_live": True}, True, False),
+        (
+            {
+                **BASE_TOOL,
+                "description": "forged digest override",
+                "aps_live": True,
+                "catalog_digest": TRUSTED_LIVE_DIGEST,
+            },
+            True,
+            False,
+        ),
+    ],
 )
-def test_capabilities_combines_tool_and_runtime_live_aps_authority(
-    monkeypatch, runtime_enabled, expected
+def test_capabilities_requires_exact_engine_and_runtime_live_aps_authority(
+    monkeypatch, effective_tool, runtime_enabled, expected
 ):
-    tool = {**BASE_TOOL, "aps_live": True}
-    monkeypatch.setattr(capabilities_router.deps, "all_tools", lambda _tenant: [tool])
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps, "all_tools", lambda _tenant: [effective_tool]
+    )
     monkeypatch.setattr(
         customization_service, "effective_catalog_pin", lambda _tenant: None
     )
@@ -120,7 +149,7 @@ def test_capabilities_combines_tool_and_runtime_live_aps_authority(
         capability
         for family in body["families"]
         for capability in family["capabilities"]
-        if capability["name"] == tool["name"]
+        if capability["name"] == effective_tool["name"]
     )
     assert projected["aps_live"] is expected
 
