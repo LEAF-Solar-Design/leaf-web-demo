@@ -99,8 +99,12 @@ def _app_endpoints(enabled: bool) -> list:
     prefix appears here; and keeping duplicates is what catches a SHADOWING
     route that registers a second handler on an already-pinned (method, path)."""
     code = (
-        "import json\n"
+        "import json, asyncio\n"
         "import app\n"
+        # Run the app's startup handlers BEFORE enumerating routes, so a route
+        # added AFTER import in an @app.on_event('startup') callback (via
+        # app.add_api_route) is captured, not missed by an import-time snapshot.
+        "asyncio.run(app.app.router.startup())\n"
         "eps = []\n"
         "for r in app.app.routes:\n"
         "    path = getattr(r, 'path', '')\n"
@@ -113,6 +117,10 @@ def _app_endpoints(enabled: bool) -> list:
     )
     env = dict(os.environ)
     env["LEAF_OPERATOR_ENABLED"] = "1" if enabled else "0"
+    # Keep the customization startup a no-op (default OFF) so running startup
+    # has no side effects; the route enumeration is all we need.
+    env["LEAF_CUSTOMIZATION_R5_MODE"] = "off"
+    env["LEAF_CUSTOMIZATION_R6_MODE"] = "off"
     out = subprocess.run([sys.executable, "-c", code], cwd=str(SERVER_DIR),
                          capture_output=True, text=True, env=env, check=True)
     line = next(ln for ln in out.stdout.splitlines()
