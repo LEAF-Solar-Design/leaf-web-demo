@@ -62,11 +62,20 @@ are the same trust boundary that any codebase has for its own trusted code):
     body (e.g. a substrate that claims isolating=true with no real jail).
   - An existing operator handler calling production is NOT a residual: O2/O3 are
     ENFORCED at runtime by the operator EGRESS BOUNDARY (operator_egress_guard),
-    armed for every handler by require_operator. A handler that invokes a neutral
-    helper, a subprocess (`vercel`/`aws`), or an aliased/env-provided host is
-    DENIED at the socket/subprocess audit chokepoint, which no in-process code
-    can route around. Behavior is proven in test_operator_egress_boundary.py; the
-    receipt-row overwrite is constrained separately (O4 identity immutability).
+    in two layers. Layer 1 denies the KNOWN production deploy control plane (the
+    production surface, the Vercel deploy API, AWS ECS, cloud metadata) and the
+    deploy CLIs for the WHOLE process UNCONDITIONALLY, so a neutral helper run
+    through a fresh contextvars.Context(), a raw thread, or an executor - the
+    escape a context-only guard would miss - is still denied. Layer 2 adds
+    operator-context deny-by-default (loopback + DB only), closing an aliased/
+    env-provided target on the innocent same-context path. Behavior, including
+    the escape regression, is proven in test_operator_egress_boundary.py.
+    IRREDUCIBLE in-process residual, bounded and named: a handler that
+    DELIBERATELY escapes its context AND targets a host that is neither a known
+    deploy route nor caught while armed (a pre-arranged alias), and any egress a
+    spawned CHILD process makes, are outside an in-process hook; the complete
+    boundary is the deployment's NETWORK EGRESS POLICY, for which this guard is
+    defense-in-depth. The receipt-row overwrite is constrained separately (O4).
   - The operator MODEL RUNNER is GREENFIELD: operatorLoop.ts takes the runner by
     injection and NO production Agent SDK runner is wired yet. So the model-half
     obligation is enforced STRUCTURALLY, not by an existing running process: the
@@ -782,8 +791,15 @@ def test_o2_o3_generic_handler_cannot_reach_a_production_deploy_route():
     assert "socket.connect" in g and "socket.getaddrinfo" in g
     assert "subprocess.Popen" in g            # deploy-CLI spawn denied
     assert "OperatorEgressDenied" in g
-    # DENY-BY-DEFAULT (an aliased / env-provided / string-composed target is
-    # denied like any other; only loopback + the DB + a declared extra pass).
+    # LAYER 1 - UNCONDITIONAL (no context to escape via a fresh context / raw
+    # thread / executor): the known production deploy control plane + deploy CLIs
+    # are denied for the whole process, always.
+    assert "_DEPLOY_HOST_EXACT" in g and "_is_deploy_control_plane" in g
+    assert "_DEPLOY_CLIS" in g
+    for endpoint in ("api.leafdesign.ai", "vercel", "ecs", "169.254.169.254"):
+        assert endpoint in g, endpoint
+    # LAYER 2 - operator-context DENY-BY-DEFAULT (an aliased / env-provided target
+    # on the innocent same-context path; only loopback + DB + a declared extra).
     assert "_LOOPBACK" in g and "LEAF_OPERATOR_EGRESS_ALLOW" in g
     # WIRED into the real request path: require_operator arms it for every
     # operator handler (not an unused helper).
@@ -791,10 +807,12 @@ def test_o2_o3_generic_handler_cannot_reach_a_production_deploy_route():
     assert "from operator_egress_guard import operator_execution" in deps
     assert "with operator_execution():" in deps
     assert "yield ctx" in deps
-    # The BEHAVIORAL proof (the exact neutral-helper / ECS / subprocess paths are
-    # denied) exists and is gated.
+    # The BEHAVIORAL proof exists and is gated, INCLUDING the regression test for
+    # the context/thread/executor escape (a real deploy route stays denied even
+    # from a fresh context - Layer 1 has none to escape).
     t = _EGRESS_TEST.read_text(encoding="utf-8")
     assert "test_neutral_ship_helper_to_vercel_is_denied" in t
-    assert "test_existing_handler_ecs_network_path_is_denied" in t
-    assert "test_subprocess_deploy_cli_is_denied" in t
+    assert "test_deploy_control_plane_denied_without_arming" in t
+    assert "test_deploy_route_denied_across_context_escapes" in t
+    assert "test_deploy_cli_spawn_denied_unconditionally" in t
     assert "test_require_operator_arms_the_egress_boundary" in t
