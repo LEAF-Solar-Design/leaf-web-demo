@@ -29,7 +29,8 @@ vacuously across the language boundary.
 from __future__ import annotations
 
 import json
-import re
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -83,23 +84,25 @@ _EXPECTED_ROUTES = frozenset({
 })
 
 
-def _operator_router_modules_from_app() -> list[str]:
-    """Derive the mounted operator routers by parsing app.py's
-    _mount_operator_router, so an EIGHTH router added there is scanned here
-    automatically rather than silently escaping a hand-maintained list."""
-    src = (SERVER_DIR / "app.py").read_text(encoding="utf-8")
-    mods = re.findall(r"from routers import (operator_\w+) as", src)
-    assert mods, "could not parse operator router imports from app.py"
-    return mods
-
-
-def _mounted_operator_routes():
-    from fastapi import FastAPI
-    app = FastAPI()
-    for mod_name in _operator_router_modules_from_app():
-        mod = __import__(f"routers.{mod_name}", fromlist=["router"])
-        app.include_router(mod.router)
-    return {r.path for r in app.routes if r.path.startswith("/api/")}
+def _app_routes(enabled: bool) -> set:
+    """ALL route paths of the REAL app, imported fresh in a subprocess with the
+    operator flag off/on. Inspecting the runtime routes (not app.py's source) is
+    what makes this sound: a router mounted by ANY import style, at ANY path
+    prefix, appears here, so nothing can escape a source-parsing regex or a
+    /api/ filter."""
+    code = (
+        "import os, json\n"
+        "import app\n"
+        "print('ROUTES_JSON=' + json.dumps(sorted(\n"
+        "    getattr(r, 'path', '') for r in app.app.routes)))\n"
+    )
+    env = dict(os.environ)
+    env["LEAF_OPERATOR_ENABLED"] = "1" if enabled else "0"
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(SERVER_DIR),
+                         capture_output=True, text=True, env=env, check=True)
+    line = next(ln for ln in out.stdout.splitlines()
+                if ln.startswith("ROUTES_JSON="))
+    return set(json.loads(line[len("ROUTES_JSON="):]))
 
 
 # --- 7.3 the action set is exactly the pinned set; promotion is not in it ----
@@ -133,21 +136,27 @@ def test_no_action_handler_is_a_promotion():
 # --- 7.2 the route surface is exactly the pinned set; default app has none ---
 
 def test_default_app_mounts_no_operator_route():
-    import app
-    assert [r.path for r in app.app.routes if "/api/operator" in r.path] == []
+    off = _app_routes(enabled=False)
+    # No route ANYWHERE (any prefix) mentions the operator namespace when dark.
+    assert not any("operator" in p for p in off), \
+        sorted(p for p in off if "operator" in p)
 
 
-def test_mounted_operator_routes_are_exactly_the_pinned_set():
-    routes = _mounted_operator_routes()
-    # Exact-set equality is the sound guard: a NEW or ALIASED route (added to a
-    # router, or an eighth router added to app.py) changes this set and fails,
-    # regardless of how it is spelled.
-    assert routes == set(_EXPECTED_ROUTES), {
-        "unexpected": sorted(routes - _EXPECTED_ROUTES),
-        "missing": sorted(set(_EXPECTED_ROUTES) - routes),
+def test_flag_on_adds_exactly_the_pinned_operator_routes():
+    off = _app_routes(enabled=False)
+    on = _app_routes(enabled=True)
+    added = on - off  # exactly what the real operator mount contributes
+    # Exact-set equality is the sound guard: a new or aliased route, an eighth
+    # router mounted by ANY import style, or a route escaped to a non-/api prefix
+    # all appear in `added` and fail here, regardless of spelling.
+    assert added == set(_EXPECTED_ROUTES), {
+        "unexpected": sorted(added - set(_EXPECTED_ROUTES)),
+        "missing": sorted(set(_EXPECTED_ROUTES) - added),
     }
-    # And every pinned route is operator-namespaced (no path escapes the prefix).
-    assert all(p.startswith("/api/operator/") for p in _EXPECTED_ROUTES)
+    # Every route the mount added is operator-namespaced: a route escaped to
+    # /internal/... would be in `added`, absent from the pin, and already fail
+    # above; this second assertion states the invariant directly.
+    assert all(p.startswith("/api/operator/") for p in added)
 
 
 # --- 7.1 the deploy/credential surfaces refuse production (behavioral) -------
