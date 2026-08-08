@@ -91,38 +91,53 @@ _EXPECTED_ENDPOINTS = frozenset({
 })
 
 
-def _app_endpoints(enabled: bool) -> list:
-    """ALL (method, path) endpoints of the REAL app, imported fresh in a
-    subprocess with the operator flag off/on, WITH MULTIPLICITY (a list, not a
-    set). Inspecting the RUNTIME routes (not app.py's source) is what makes this
-    sound: a route mounted by ANY import style, with ANY method, at ANY path
-    prefix appears here; and keeping duplicates is what catches a SHADOWING
-    route that registers a second handler on an already-pinned (method, path)."""
+def _operator_surface(enabled: bool) -> list:
+    """The OPERATOR-SURFACE (method, path) endpoints of the REAL app, imported
+    fresh in a subprocess with the operator flag off/on, WITH MULTIPLICITY.
+
+    A route is on the operator surface if it is operator-PATHED
+    (/api/operator/...) OR requires operator authentication (require_operator in
+    its dependency tree). The auth arm is what makes this sound against an
+    operator-authenticated production route mounted UNCONDITIONALLY and OUTSIDE
+    the flag gate at any path (e.g. POST /api/deploy-production): it is captured
+    regardless of path or mount, so it fails the flag-off "surface is empty"
+    assertion. Runtime inspection (after startup + a full task drain), not
+    source parsing, catches ANY import/mount style, method, or timing; keeping
+    multiplicity catches a SHADOWING duplicate registration."""
     code = (
         "import json, asyncio\n"
         "import app\n"
-        # Run the app's startup handlers BEFORE enumerating routes (so a route
-        # added in an @app.on_event('startup') callback via app.add_api_route is
-        # captured), THEN drain any tasks startup scheduled with create_task (so
-        # a registration deferred to a later tick is captured too), all on one
-        # persistent loop.
+        "from operator_deps import require_operator as _ro\n"
+        # Run the app's startup handlers BEFORE enumerating (so a route added in
+        # an @app.on_event('startup') callback via app.add_api_route is
+        # captured), then DRAIN the tasks startup scheduled, in a LOOP so a
+        # create_task chain that spawns descendants while draining also settles.
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
         "loop.run_until_complete(app.app.router.startup())\n"
-        # Drain in a LOOP, not once: a task can spawn a descendant while we drain
-        # it, so keep gathering until no task is pending. This captures a bounded
-        # create_task CHAIN of any depth. A truly UNBOUNDED chain would never
-        # settle here (and would never let a real server finish starting either)
-        # - that unbounded dynamic mutation is the acknowledged out-of-scope
-        # residual; the generous cap keeps the test from hanging on it.
-        "for _ in range(100000):\n"
+        # The cap bounds the drain so a pathological chain cannot hang the test;
+        # a chain deeper than the cap is effectively an unbounded dynamic
+        # mutation (it would also stall a real server's startup), the
+        # acknowledged out-of-scope residual.
+        "for _ in range(1000000):\n"
         "    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]\n"
         "    if not pending:\n"
         "        break\n"
         "    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))\n"
+        "def _uses_ro(route):\n"
+        "    dep = getattr(route, 'dependant', None)\n"
+        "    stack = [dep] if dep is not None else []\n"
+        "    while stack:\n"
+        "        d = stack.pop()\n"
+        "        if getattr(d, 'call', None) is _ro:\n"
+        "            return True\n"
+        "        stack.extend(getattr(d, 'dependencies', None) or [])\n"
+        "    return False\n"
         "eps = []\n"
         "for r in app.app.routes:\n"
         "    path = getattr(r, 'path', '')\n"
+        "    if not (path.startswith('/api/operator/') or _uses_ro(r)):\n"
+        "        continue\n"
         "    methods = getattr(r, 'methods', None) or set()\n"
         "    for m in set(methods):\n"  # capture EVERY method, incl. HEAD/OPTIONS
         "        eps.append([m, path])\n"
@@ -172,36 +187,32 @@ def test_no_action_handler_is_a_promotion():
 
 # --- 7.2 the route+method surface is exactly the pinned set ------------------
 
-def test_default_app_mounts_no_operator_route():
-    off = _app_endpoints(enabled=False)
-    # No endpoint ANYWHERE (any prefix/method) mentions the operator namespace
-    # when dark.
-    assert not any("operator" in p for _, p in off), \
-        sorted(p for _, p in off if "operator" in p)
+def test_default_app_exposes_no_operator_surface():
+    # DARK by default: the flag-off app has NO operator-surface endpoint at all
+    # (no operator path AND no operator-authenticated route). An operator-authed
+    # production route mounted unconditionally would appear here and fail.
+    off = _operator_surface(enabled=False)
+    assert off == [], sorted(off)
 
 
-def test_flag_on_adds_exactly_the_pinned_operator_endpoints():
-    # Compare with MULTIPLICITY: the operator mount's contribution as a multiset.
-    added = Counter(_app_endpoints(enabled=True)) - Counter(_app_endpoints(enabled=False))
+def test_flag_on_operator_surface_is_exactly_the_pinned_set():
+    surface = Counter(_operator_surface(enabled=True))
 
-    # (a) No endpoint the mount added is registered MORE THAN ONCE. A shadowing
+    # (a) No operator-surface endpoint is registered MORE THAN ONCE. A shadowing
     #     router that registers a second handler on an already-pinned
-    #     (method, path) would be dispatched first by FastAPI; the duplicate is
-    #     invisible to a set but shows here as count > 1.
-    duplicates = {ep: c for ep, c in added.items() if c > 1}
+    #     (method, path) is invisible to a set but shows here as count > 1.
+    duplicates = {ep: c for ep, c in surface.items() if c > 1}
     assert not duplicates, duplicates
 
-    # (b) Every endpoint the mount added is operator-namespaced (nothing escaped
-    #     to /internal/... or any other prefix).
-    escaped = sorted(ep for ep in added if not ep[1].startswith("/api/operator/"))
-    assert not escaped, escaped
-
-    # (c) The DISTINCT added endpoints equal the pinned set exactly: a new or
-    #     aliased route, or a new method on an existing path, fails here.
-    assert set(added) == set(_EXPECTED_ENDPOINTS), {
-        "unexpected": sorted(set(added) - set(_EXPECTED_ENDPOINTS)),
-        "missing": sorted(set(_EXPECTED_ENDPOINTS) - set(added)),
+    # (b) The DISTINCT operator-surface endpoints equal the pinned set exactly:
+    #     a new/aliased route, a new method on an existing path, or an
+    #     operator-authed route at any other path all fail here.
+    assert set(surface) == set(_EXPECTED_ENDPOINTS), {
+        "unexpected": sorted(set(surface) - set(_EXPECTED_ENDPOINTS)),
+        "missing": sorted(set(_EXPECTED_ENDPOINTS) - set(surface)),
     }
+    # (c) And every pinned endpoint is operator-namespaced.
+    assert all(p.startswith("/api/operator/") for _, p in _EXPECTED_ENDPOINTS)
 
 
 # --- 7.1 the deploy/credential surfaces refuse production (behavioral) -------
