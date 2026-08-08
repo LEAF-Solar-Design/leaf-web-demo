@@ -604,15 +604,35 @@ def test_o4_release_candidate_is_immutable_and_receipted():
         assert not re.search(r"\bsource_sha\s*=", set_clause), set_clause
         assert re.search(r"\btarget\s*=", set_clause) is None, set_clause
     assert updated, "expected at least one UPDATE of the candidate table (non-vacuous)"
-    # And NO migration (not just 0034) declares a trigger/rule that could rewrite
-    # the candidate identity: scan EVERY migration, so a later 0035 trigger is
-    # caught too.
+    # DB-ENFORCED immutability: identity is protected at the schema level, not by
+    # code discipline. A migration defines a BEFORE UPDATE trigger that REJECTS a
+    # change to source_sha/target. Any trigger/rule on the table must be
+    # PROTECTIVE (READs the identity columns and RAISEs), never REWRITING (an
+    # assignment `NEW.source_sha :=` / `NEW.target :=` would mutate the reviewed
+    # identity). Scan EVERY migration.
     mig_dir = REPO_ROOT / "platform" / "migrations"
+    protective_trigger_found = False
     for mig in sorted(mig_dir.glob("*.sql")):
-        up = _dequote(mig.read_text(encoding="utf-8")).upper()
-        if "OPERATOR_RELEASE_CANDIDATES" in up:
-            assert "CREATE TRIGGER" not in up, mig.name
-            assert "CREATE RULE" not in up, mig.name
+        text = mig.read_text(encoding="utf-8")
+        up = _dequote(text).upper()
+        if "OPERATOR_RELEASE_CANDIDATES" not in up:
+            continue
+        # A CREATE RULE is never used here (a rule can silently rewrite/suppress).
+        assert "CREATE RULE" not in up, mig.name
+        if "CREATE TRIGGER" in up:
+            # A protective trigger never ASSIGNS the identity columns.
+            assert not re.search(r"NEW\.source_sha\s*:?=", text), mig.name
+            assert not re.search(r"NEW\.target\s*:?=", text), mig.name
+            # ...and it RAISEs on an identity change (the protection).
+            assert "RAISE EXCEPTION" in up and "IS DISTINCT FROM" in up, mig.name
+            protective_trigger_found = True
+    assert protective_trigger_found, (
+        "expected a migration with a protective identity-immutability trigger")
+    # The BEHAVIORAL proof against the FULLY MIGRATED schema (an attempted UPDATE
+    # of source_sha/target is rejected by the DB) is the needs_pg test
+    # test_pg_candidate_identity_is_db_immutable in test_operator_stage_release.py.
+    st = (SERVER_DIR / "tests" / "test_operator_stage_release.py").read_text(encoding="utf-8")
+    assert "def test_pg_candidate_identity_is_db_immutable" in st
 
 
 # --- O5: production promotion is outside every operator surface --------------
