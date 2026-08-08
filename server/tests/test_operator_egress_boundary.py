@@ -33,6 +33,10 @@ def _resolve(host, port=443):
 @pytest.mark.parametrize("host", [
     "api.vercel.com", "myapp.vercel.app", "api.leafdesign.ai",
     "ecs.us-east-1.amazonaws.com", "169.254.169.254",
+    # FIPS, dual-stack, and partition ECS endpoints an executor AWS SDK call
+    # could otherwise reach (round-4 review completeness gap).
+    "ecs-fips.us-east-1.amazonaws.com", "ecs.us-east-1.api.aws",
+    "ecs.cn-north-1.amazonaws.com.cn",
 ])
 def test_deploy_control_plane_denied_without_arming(host):
     assert not guard.is_armed()
@@ -80,6 +84,8 @@ def test_deploy_route_denied_across_context_escapes():
 @pytest.mark.parametrize("argv", [
     ["vercel", "promote", "https://x.vercel.app"],
     ["aws", "ecs", "update-service", "--cluster", "production"],
+    ["cdk", "deploy"], ["terraform", "apply"], ["pulumi", "up"],
+    ["npx", "cdk", "deploy"],                       # wrapper form
 ])
 def test_deploy_cli_spawn_denied_unconditionally(argv):
     # Denied WITHOUT arming (Layer 1) and inside a fresh context (no escape).
@@ -88,6 +94,15 @@ def test_deploy_cli_spawn_denied_unconditionally(argv):
         subprocess.Popen(argv)
     with pytest.raises(OperatorEgressDenied):
         contextvars.Context().run(lambda: subprocess.Popen(argv))
+
+
+def test_benign_subprocess_not_denied_by_layer1_outside_context():
+    # A non-deploy spawn is NOT denied process-wide (only in operator context).
+    # `echo aws` must not trip on the argument "aws".
+    assert not guard.is_armed()
+    import operator_egress_guard as g
+    assert not g._is_deploy_cli_spawn(["echo", "aws"])
+    assert not g._is_deploy_cli_spawn(["sh", "-c", "true"])
 
 
 # === Layer 2: operator context denies an aliased / non-deploy target ==========
