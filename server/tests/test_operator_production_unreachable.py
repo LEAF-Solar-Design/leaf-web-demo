@@ -30,11 +30,15 @@ is what matters:
       prerequisite, so production hosts + cloud metadata are denied by the jail,
       not by advisory strings. The DENIED_NETWORK_ALWAYS list is the policy
       handed to that jail; the enforcement is the isolation requirement.
-  O4  Staging yields an IMMUTABLE, RECEIPTED release candidate. The candidate is
-      keyed by (source_sha, target) PRIMARY KEY (one attempt per candidate) and
-      CHECK-constrained to non-production; the stage-release runbook returns a
-      receipt (the staged task-def revision and the rollback target); worker
-      artifacts carry sha256 receipts (harness test).
+  O4  Staging yields an IDENTITY-IMMUTABLE, RECEIPTED release candidate. The
+      candidate is keyed by (source_sha, target) PRIMARY KEY, so it is claimed at
+      most once (a second stage of the same candidate is a no-op conflict, never
+      an overwrite) and CHECK-constrained to non-production; the row then records
+      the RECEIPT (status + the staged task-def revision + the rollback target),
+      which the stage-release runbook returns; worker artifacts carry sha256
+      receipts (harness test). "Immutable" is identity-immutability (no re-stage),
+      not a write-once row: the runbook records the outcome into the row, which is
+      the receipt, and mutating that record is the trusted-handler residual below.
   O5  Production promotion needs the canonical deploy transaction and a SEPARATE
       owner, OUTSIDE every operator surface. operator.promote_production is
       absent from the catalog and the pinned action set, listed under
@@ -44,13 +48,27 @@ is what matters:
       confirmation plus an INDEPENDENT approval comment (the separate owner),
       while no operator module names or triggers it.
 
-The single honest residual, bounded not waived: trusted deployment-provided
-infrastructure (a registered minter/rotator/stager/adapter, or the isolating
-worker substrate) is trusted server-side code, so this gate cannot prove its OWN
-body never reaches production - the same trust boundary throughout. That residual
-is bounded because the plane never REQUESTS a production target (O3 refusals),
-the callbacks refuse production, the worker carries no deploy credential, and a
-non-isolating substrate is refused fail-closed so a real jail is a prerequisite.
+The honest residuals, bounded not waived (no static test can close these; they
+are the same trust boundary that any codebase has for its own trusted code):
+  - A trusted deployment-provided callback (a registered minter/rotator/stager/
+    adapter) or the isolating worker substrate could reach production in its OWN
+    body (e.g. a substrate that claims isolating=true with no real jail).
+  - An EXISTING operator handler/runbook body is the plane's own trusted code;
+    this gate proves it REFUSES production inputs (O3), and pins the declared
+    action/route surface so no NEW handler is added silently, but it cannot prove
+    an existing body never calls production directly, nor that the runbook does
+    not overwrite its own receipt row (O4).
+  - The operator MODEL PROCESS's raw launch env is a deployment property; this
+    gate proves the operator secret registry and broker REFUSE a production scope
+    (no production credential is brokered), but the process's ambient env is set
+    by the deployment, not asserted here. (The tenant author agent's env scrub
+    under harness/src/vendor/mushy-author is a DIFFERENT subsystem, not this
+    plane.)
+Each residual is bounded because the plane never REQUESTS a production target
+(O3 refusals), the callbacks and runbooks refuse production, the worker carries
+no deploy credential (allowlist-frozen) and is refused fail-closed on a
+non-isolating substrate, and production promotion is the canonical workflow with
+a separate owner, off every operator surface (O5).
 """
 from __future__ import annotations
 
