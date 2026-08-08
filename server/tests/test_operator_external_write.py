@@ -138,8 +138,8 @@ class _Cur:
         s = " ".join(sql.split())
         if "operator_principals" in s and "FOR UPDATE" in s:
             self._last = self.state["principal"]
-        elif "INSERT INTO operator_security_audit" in s and "'execute'" in s:
-            self.state["audited"] = True
+        elif "INSERT INTO operator_security_audit" in s and "authority_consumed" in s:
+            self.state["phase1_audit"] = True    # the redemption audit ran
             self._last = None
         else:
             self._last = None
@@ -165,10 +165,12 @@ class _Conn:
         return self
 
     def __exit__(self, exc_type, *a):
+        # Phase 1's connection: clean exit commits the consume; an exception
+        # rolls it back (authority stays granted).
         if exc_type is None:
-            self.state["committed"] = True
+            self.state["phase1_committed"] = True
         else:
-            self.state["rolled_back"] = True
+            self.state["phase1_rolled_back"] = True
         return False
 
 
@@ -176,8 +178,8 @@ class _Conn:
 def atomic(monkeypatch):
     state = {
         "principal": {"status": "active", "role_revision": _Op.role_revision},
-        "audited": False, "deny_audits": [], "wrote": 0,
-        "committed": False, "rolled_back": False,
+        "phase1_audit": False, "audit_rows": [], "wrote": 0, "conn_opened": 0,
+        "phase1_committed": False, "phase1_rolled_back": False,
         "consume": {"raise": None}, "inject": {"raise": None},
         "adapter": "registered",  # "registered" | "dark"
     }
@@ -193,6 +195,7 @@ def atomic(monkeypatch):
 
     class _DB:
         def connection(self):
+            state["conn_opened"] += 1
             return _Conn(state)
 
     monkeypatch.setattr(rb, "_db", lambda: _DB())
@@ -224,54 +227,59 @@ def atomic(monkeypatch):
         use("SHORT-LIVED-TOKEN")  # exercises the adapter write
         return {"injected": True}
     monkeypatch.setattr(rb.broker, "with_injected", fake_inject)
-    monkeypatch.setattr(rb, "_audit_deny",
-                        lambda op, reason, aid: state["deny_audits"].append(reason))
+    # All audit rows (deny + phase-2 outcome) flow through _audit_row; the
+    # phase-1 redemption audit is a raw cur.execute tracked as phase1_audit.
+    monkeypatch.setattr(rb, "_audit_row",
+                        lambda op, decision, reason, aid, extra=None:
+                        state["audit_rows"].append((decision, reason)))
     return state
 
 
 def test_execute_atomic_happy_path(atomic):
     out = rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x",
                      payload={"msg": "hi"})
-    assert atomic["committed"] is True and atomic["rolled_back"] is False
-    assert atomic["wrote"] == 1                 # exactly one outbound write
-    assert atomic["audited"] is True
+    # Phase 1 committed the redemption + its audit; phase 2 wrote exactly once.
+    assert atomic["phase1_committed"] is True and atomic["phase1_rolled_back"] is False
+    assert atomic["phase1_audit"] is True
+    assert atomic["wrote"] == 1
+    assert ("execute", "runbook_applied") in atomic["audit_rows"]
     assert atomic["consume_args"]["destination"] == _DEST
     assert out["reversal"]["adapter_reversal"] == "delete the webhook post"
 
 
-def test_execute_dark_no_adapter_rolls_back(atomic):
+def test_execute_dark_no_adapter_preserves_authority(atomic):
+    # No adapter is caught BEFORE phase 1, so the authority is never consumed
+    # (no connection opened) and can be retried once an adapter is registered.
     atomic["adapter"] = "dark"
     with pytest.raises(rb.RunbookError) as e:
         rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
     assert e.value.reason == "no_adapter"
+    assert atomic["conn_opened"] == 0        # authority untouched
     assert atomic["wrote"] == 0
-    sqls = " | ".join(s for s, _ in atomic["cur"].executed)
-    assert "INSERT INTO operator_security_audit" not in sqls or "'execute'" not in sqls
-    assert atomic["committed"] is False and atomic["rolled_back"] is True
-    assert atomic["deny_audits"] == ["no_adapter"]
+    assert ("deny", "no_adapter") in atomic["audit_rows"]
 
 
-def test_execute_dark_broker_no_minter_rolls_back(atomic):
+def test_execute_write_failure_after_consume_is_not_replayed(atomic):
+    # no_minter happens in phase 2, AFTER phase 1 committed the consume. The
+    # authority is already SPENT (at-most-once): the failed write is NOT a
+    # rolled-back replay, so it cannot duplicate. A write_failed audit is kept.
     atomic["inject"]["raise"] = broker.SecretBrokerError("no_minter")
     with pytest.raises(rb.RunbookError) as e:
         rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
     assert e.value.reason == "no_minter"
-    # The applied-audit statement runs BEFORE the write (P1 ordering), but the
-    # write failure rolls the WHOLE transaction back, so the audit never
-    # persists. The rollback is the proof, not the statement-executed flag.
-    assert atomic["committed"] is False and atomic["rolled_back"] is True
+    assert atomic["phase1_committed"] is True      # authority spent, not rolled back
+    assert atomic["phase1_rolled_back"] is False
     assert atomic["wrote"] == 0
-    assert atomic["deny_audits"] == ["no_minter"]
+    assert ("execute", "write_failed:no_minter") in atomic["audit_rows"]
 
 
-def test_execute_consume_drift_rolls_back(atomic):
+def test_execute_consume_drift_rolls_back_phase1(atomic):
     atomic["consume"]["raise"] = rb.operator_authority.AuthorityDenied("args_mismatch")
     with pytest.raises(rb.operator_authority.AuthorityDenied):
         rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
-    assert atomic["wrote"] == 0            # never reached the adapter
-    assert atomic["audited"] is False
-    assert atomic["committed"] is False and atomic["rolled_back"] is True
-    assert atomic["deny_audits"] == ["args_mismatch"]
+    assert atomic["wrote"] == 0            # never reached phase 2
+    assert atomic["phase1_committed"] is False and atomic["phase1_rolled_back"] is True
+    assert ("deny", "args_mismatch") in atomic["audit_rows"]
 
 
 def test_execute_revoked_principal_rolls_back(atomic):
@@ -280,7 +288,7 @@ def test_execute_revoked_principal_rolls_back(atomic):
         rb.execute(_Op(), _DEST, _HANDLE, _ADAPTER, "opauth-x")
     assert e.value.reason == "principal_drift"
     assert atomic["wrote"] == 0
-    assert atomic["committed"] is False and atomic["rolled_back"] is True
+    assert atomic["phase1_rolled_back"] is True
 
 
 # --- spend reservation: required + cost_tokens allowed (no DB) --------------
