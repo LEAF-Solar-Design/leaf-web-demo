@@ -121,6 +121,10 @@ _REQUIRED_COLUMNS = {
     "operator_credential_rotations": {
         "handle", "revision", "rotated_at", "updated_at",
     },
+    "operator_release_candidates": {
+        "source_sha", "target", "status", "previous_taskdef_revision",
+        "staged_taskdef_revision",
+    },
 }
 
 # Each selector adds the tables its PostgreSQL implementation reads or writes.
