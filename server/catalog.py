@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
 DEFAULT_FAMILY = "custom"
+_APS_LIVE_AUTHORIZED = object()
 
 
 def _load_config() -> Dict[str, Any]:
@@ -64,6 +65,25 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
     return DEFAULT_FAMILY
 
 
+def apply_live_aps_runtime_authority(
+    tools: List[Dict[str, Any]], *, aps_live_enabled: bool
+) -> List[Dict[str, Any]]:
+    """Combine static tool eligibility with this process's live APS gate.
+
+    The private projection marker is applied after catalog digests are issued,
+    so runtime configuration cannot alter source authority or its digest.
+    """
+    return [
+        {
+            **tool,
+            "_aps_live_runtime_authorized": _APS_LIVE_AUTHORIZED
+            if aps_live_enabled is True and tool.get("aps_live") is True
+            else None,
+        }
+        for tool in tools
+    ]
+
+
 def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
     effective_digest = tool.get("effective_catalog_digest")
     if (tool.get("execution_class") == "instant" and isinstance(effective_digest, str)
@@ -89,6 +109,9 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "limits": tool.get("limits"),
         "artifact_digest": tool.get("artifact_digest"),
         "batch_fallback": bool(tool.get("batch_fallback", False)),
+        # Only the route's combined static and runtime authority marker may
+        # advertise live APS. Raw registry metadata alone always fails closed.
+        "aps_live": tool.get("_aps_live_runtime_authorized") is _APS_LIVE_AUTHORIZED,
     }
 
 

@@ -99,6 +99,32 @@ def test_capabilities_uses_only_safe_base_for_tenant_without_pin(
     assert body["error"] is None
 
 
+@pytest.mark.parametrize(
+    ("runtime_enabled", "expected"), [(False, False), (True, True)]
+)
+def test_capabilities_combines_tool_and_runtime_live_aps_authority(
+    monkeypatch, runtime_enabled, expected
+):
+    tool = {**BASE_TOOL, "aps_live": True}
+    monkeypatch.setattr(capabilities_router.deps, "all_tools", lambda _tenant: [tool])
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", runtime_enabled)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == tool["name"]
+    )
+    assert projected["aps_live"] is expected
+
+
 def test_flat_tools_uses_only_safe_base_for_tenant_without_pin(
     monkeypatch, tmp_path
 ):

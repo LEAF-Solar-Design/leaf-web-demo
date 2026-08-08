@@ -56,6 +56,9 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         view = deps.catalog_tool_view(tool)
         view.update(pin)
         tools.append(view)
+    tools = catalog.apply_live_aps_runtime_authority(
+        tools, aps_live_enabled=deps.APS_LIVE
+    )
     families = catalog.build_catalog(
         tools,
         include_internal=include_internal,
