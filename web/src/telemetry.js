@@ -37,13 +37,10 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
-const CROSS_PATH_MS = 10000     // how long a released global row stays retractable
-// How long a global row waits OUTSIDE the send buffer for its boundary twin.
-// It only has to outlast the ErrorBoundary's dynamic import, which is one
-// microtask when the chunk is already in the graph and one fetch when it is
-// not. A second covers both and still lands inside the buffer's own 5 s
-// latency, so nothing is reported later than it would have been anyway.
-const PENDING_MS = 1000
+// How coarsely a dedup key rounds time. See `dedupKeyFor`: it is the ONLY
+// thing separating two genuinely distinct occurrences whose text, class,
+// throw site and route are all identical.
+const DEDUP_BUCKET_MS = 5000
 
 const state = {
   buffer: [],
@@ -52,8 +49,6 @@ const state = {
   tourStep: null,
   globalsInstalled: false,
   seenExceptions: [],
-  globalRows: [],
-  pendingGlobals: [],
 }
 
 /** Wave C-2: while the guided tour is active, every organic event carries a
@@ -77,13 +72,6 @@ function capCount(key) {
 
 function capIncrement(key) {
   capSet(key, capCount(key) + 1)
-}
-
-/** Give a slot back. Only the cross-path retraction below uses it: a row that
- * is pulled out of the buffer before it is ever sent must not spend the budget
- * that exists to bound what the DOOR receives. */
-function capDecrement(key) {
-  capSet(key, Math.max(0, capCount(key) - 1))
 }
 
 function capSet(key, next) {
@@ -167,9 +155,8 @@ function schedule() {
   } catch { /* no-op */ }
 }
 
-/** Build one event WITHOUT queuing it. Split out for the global exception
- * path below, which has to own a row for a moment before deciding whether it
- * is ever sent; every other caller goes through `track`. */
+/** Build one event WITHOUT queuing it. Kept split from `track` because the
+ * DISABLED / no-fetch decision belongs in exactly one place. */
 function buildEvent(name, props, eventType) {
   if (DISABLED || typeof fetch !== 'function') return undefined
   return {
@@ -193,9 +180,7 @@ function enqueue(event) {
  * stringifies and bounds everything and strips reserved keys.
  *
  * Returns the queued event, or undefined when telemetry is off or the queue
- * threw. The only caller that reads it is the global exception path below,
- * which must be able to identify ITS OWN row later to withdraw it; identity is
- * the only handle that survives a buffer that shifts and splices. */
+ * threw. */
 export function track(name, props = {}, eventType = 'custom_event') {
   try {
     const event = buildEvent(name, props, eventType)
@@ -207,14 +192,9 @@ export function track(name, props = {}, eventType = 'custom_event') {
 
 /** Immediate flush for events that must land before an imminent navigation
  * (the post-auth reload): post() uses keepalive fetch WITH identity headers,
- * which survives the unload where the pagehide beacon cannot carry auth.
- *
- * Releases held rows first: a row waiting for a boundary twin that is about
- * to be navigated away from has run out of window, and the record is worth
- * more than the de-duplication. */
+ * which survives the unload where the pagehide beacon cannot carry auth. */
 export function flushNow() {
   try {
-    releaseAllPending()
     flush()
   } catch { /* telemetry never breaks the product */ }
 }
@@ -252,24 +232,15 @@ export function trackStreamDown(reconnectsN) {
  * already hitting several is the one most worth seeing. React bounds this
  * emitter's volume; we do not have to.
  *
- * `error` is the Error the boundary caught. Passing it lets this path withdraw
- * the global row for the SAME failure, so one React crash is one row.
- *
- * `hold` builds the row and returns it UNQUEUED, for the global path's
- * pending window below. It stays a parameter of this function rather than a
- * shortcut around it because the label filter under it is a choke point: a
- * caller that builds its own row is a caller that can put free text in a
- * label again. */
-export function trackException(props = {}, capKey = 'exception_boundary', error = undefined, hold = false) {
+ * `error` is the Error object the emitter is reporting -- the one the
+ * boundary caught, or the one the global handler observed. It is READ ONLY to
+ * derive `dedup_key`: both emitters seeing one failure derive the SAME key, so
+ * the ingest side can collapse them into one row. Nothing about it is sent. */
+export function trackException(props = {}, capKey = 'exception_boundary', error = undefined) {
   try {
     if (capKey === 'exception_global') {
       if (capCount(capKey) >= EXCEPTION_CAP) return undefined
       capIncrement(capKey)
-    } else if (error != null) {
-      // Held first, buffered second: one failure has at most one global row,
-      // and it lives in exactly one of the two places.
-      const sig = crossPathSignature(error)
-      if (!dropPendingTwin(sig)) retractGlobalTwin(sig)
     }
     // The class is filtered HERE, not at each call site, so every emitter of
     // this event is covered by construction. ErrorBoundary passed
@@ -280,8 +251,13 @@ export function trackException(props = {}, capKey = 'exception_boundary', error 
     const safe = props && props.message_class !== undefined
       ? { ...props, message_class: KNOWN_CLASSES.has(props.message_class) ? props.message_class : 'Other' }
       : props
-    if (hold) return buildEvent('client.exception', safe, 'exception')
-    return track('client.exception', safe, 'exception')
+    // The key is attached at the same choke point, so an emitter cannot ship a
+    // client.exception without one by forgetting to. An empty key means the
+    // key could not be derived; it is omitted rather than sent, because a
+    // blank shared key would merge unrelated rows -- the one failure mode
+    // worse than a duplicate.
+    const key = dedupKeyFor(error, safe)
+    return track('client.exception', key ? { ...safe, dedup_key: key } : safe, 'exception')
   } catch { return undefined /* no-op */ }
 }
 
@@ -482,132 +458,94 @@ function uaClass() {
 // need not. That made the row count a property of the BUILD, and anything
 // counting crashes counted them differently depending on which one it watched.
 //
-// The BOUNDARY wins the tie. Its row carries `component_stack_hash`, which the
-// global handler cannot know, and it is the older contract.
+// THREE ROUNDS OF CLIENT-SIDE TIMING DE-DUPLICATION FAILED HERE, and the
+// fourth attempt is not another one. Retracting an already-buffered row worked
+// only while the row was still buffered: at 19 queued events the global row
+// was the 20th, the batch POSTed on the spot, and the boundary a microtask
+// later had nothing to pull back. Holding the row outside the buffer moved the
+// same problem: pagehide releases every held row before it beacons, so a crash
+// at tab close still queued both. Both designs made the row count a property
+// of HOW BUSY THE PAGE WAS -- the guarantee held on a quiet page and broke on
+// a busy one -- because both asked one emitter to observe the other's timing.
 //
-// The global handler stays synchronous -- it observes and records the failure
-// the moment it happens -- but its row is HELD OUT of the send buffer for a
-// short window instead of being queued into it. A held row cannot be flushed,
-// so the boundary can still drop it however many events happen to be queued
-// behind it.
-//
-// This replaces retracting an already-buffered row, which worked only while
-// the row was still buffered: at 19 queued events the global row was the 20th,
-// the batch POSTed on the spot, and the boundary a microtask later had nothing
-// left to pull back. Two rows landed, and whether they did was decided by how
-// busy the page was -- the guarantee held on a quiet page and broke on a busy
-// one. Retraction is KEPT below as the fallback for a boundary that arrives
-// after the hold expires but before the batch goes out.
-//
-// Nothing is traded away for it. The reason the original chose retraction was
-// that deferring an emit loses the record if the page is torn down first, so
-// every exit seam -- the pagehide beacon and the pre-navigation flushNow --
-// releases held rows before it sends, and the hold expires on its own timer
-// for the ordinary case where no boundary is ever coming.
+// So the client no longer de-duplicates at all. It has no pending list, no
+// retraction, no hold timer and no exit-seam release. Each emitter simply
+// emits, immediately, and attaches a STABLE KEY that both derive
+// independently from the same failure. Collapsing rows that share a key is the
+// INGEST side's job (server/routers/telemetry.py), where it is a property of
+// the data rather than of two clocks. Flush thresholds, pagehide, emit order
+// and page load are all now irrelevant to the row count, which is the whole
+// point: there is no ordering left for a race to exploit.
 
-/** The cross-path identity of ONE failure: everything BOTH emitters can derive
- * from the same Error object, and nothing else. `source` is deliberately
- * absent -- it is the one label that must differ between the two paths for a
- * single crash. */
-function crossPathSignature(err) {
+/** The cross-emitter identity of ONE failure: everything BOTH emitters can
+ * derive from the same Error object, and nothing either one alone can see.
+ *
+ * `source` is deliberately absent -- it is the one label that must DIFFER
+ * between the two paths for a single crash.
+ *
+ * `component_stack_hash` is deliberately absent too, and that is worth stating
+ * because it is the obvious thing to add: ONLY the boundary can compute it.
+ * Putting it in the key would guarantee the two keys never match, which is
+ * precisely the de-duplication this exists to perform. It still travels as a
+ * LABEL, and the ingest rule prefers the row carrying it. */
+function dedupSignature(err) {
   let message = ''
   try { message = (err && err.message) || '' } catch { /* a getter threw */ }
   return [messageClass(err, 'Other'), digest(message), stackHash(err), routeLabel()].join('|')
 }
 
-function noteGlobalRow(sig, event) {
-  try {
-    if (!sig || !event) return
-    const now = Date.now()
-    state.globalRows = state.globalRows.filter((r) => now - r.at < CROSS_PATH_MS)
-    state.globalRows.push({ sig, event, at: now })
-    while (state.globalRows.length > EXCEPTION_CAP) state.globalRows.shift()
-  } catch { /* no-op */ }
-}
+// The key each Error object was FIRST given. Not a dedup cache and not state
+// the row count depends on: it is a memo so that two emitters reporting the
+// SAME object cannot disagree about which time bucket it fell in.
+//
+// A WeakMap, not a property on the error: the object belongs to the page, and
+// telemetry does not get to write on it. Entries disappear with the error
+// itself, so nothing here can grow.
+const dedupKeys = typeof WeakMap === 'function' ? new WeakMap() : null
 
-/** Hold one global row OUT of the send buffer for the dedup window.
+/** The `dedup_key` label: a digest of the failure's signature PLUS a coarse
+ * time bucket.
  *
- * A held row is unreachable from `flush`, so no batch threshold and no timer
- * can put it on the wire while a boundary might still claim it. */
-function holdGlobalRow(sig, event) {
+ * The bucket is what keeps this from over-merging. Signature alone would fold
+ * every occurrence of one recurring failure -- a nightly `TypeError` from the
+ * same line, a thousand times over a session -- into a single row, and then
+ * the rail could not answer "how often". Bucketed, two occurrences more than
+ * one bucket apart are two rows, and the twin emits of ONE occurrence, which
+ * are microseconds apart, are one.
+ *
+ * A bucket boundary between the two emits would be a residual race -- global
+ * at 4999 ms, boundary at 5001 ms, two keys, two rows -- so the bucket is NOT
+ * re-read per emitter. The first emitter to describe an error fixes its key,
+ * and the second reads that exact value back out of the memo. Whichever fires
+ * first, and however long the boundary's dynamic import takes, the two keys
+ * are identical by construction rather than by luck.
+ *
+ * A non-object reason (`Promise.reject('nope')`) cannot key a WeakMap, so it
+ * falls back to signature-plus-bucket computed fresh. That costs nothing real:
+ * a rejection never reaches a React boundary, so it has no twin to agree with.
+ *
+ * Returns '' when no key could be derived. The caller omits the label rather
+ * than sending a blank one -- rows sharing an empty key would collapse into
+ * each other, which is worse than the duplicate this prevents. */
+function dedupKeyFor(err, props) {
   try {
-    if (!event) return
-    // No signature is no dedup handle, so holding it could only lose it.
-    if (!sig) { enqueue(event); return }
-    const row = { sig, event, timer: null }
-    state.pendingGlobals.push(row)
-    // Bounded by the global cap on the way in, but held explicitly too: a
-    // pending list that could grow is a leak, and this one holds crash rows.
-    while (state.pendingGlobals.length > EXCEPTION_CAP) releasePendingRow(state.pendingGlobals[0])
-    try {
-      row.timer = setTimeout(() => releasePendingRow(row), PENDING_MS)
-    } catch {
-      // No timer available: send it now rather than hold it forever. The old
-      // behaviour, which is still correct, just weaker.
-      releasePendingRow(row)
+    const keyable = err !== null && (typeof err === 'object' || typeof err === 'function')
+    if (dedupKeys && keyable) {
+      const seen = dedupKeys.get(err)
+      if (seen) return seen
     }
-  } catch { /* no-op */ }
-}
-
-/** The hold is over: the row joins the send buffer and becomes an ordinary
- * queued event -- retractable while it is still buffered, and nothing more. */
-function releasePendingRow(row) {
-  try {
-    const at = state.pendingGlobals.indexOf(row)
-    if (at === -1) return
-    state.pendingGlobals.splice(at, 1)
-    if (row.timer) { clearTimeout(row.timer); row.timer = null }
-    enqueue(row.event)
-    noteGlobalRow(row.sig, row.event)
-  } catch { /* no-op */ }
-}
-
-/** Every exit seam calls this: a record is worth more than a de-duplication
- * the page will not be alive to perform. */
-function releaseAllPending() {
-  try {
-    while (state.pendingGlobals.length) releasePendingRow(state.pendingGlobals[0])
-  } catch { /* no-op */ }
-}
-
-/** Drop the held twin of `sig` before it is ever queued. Returns whether one
- * was actually held -- the caller falls back to buffer retraction when not. */
-function dropPendingTwin(sig) {
-  try {
-    if (!sig) return false
-    for (let i = state.pendingGlobals.length - 1; i >= 0; i--) {
-      const row = state.pendingGlobals[i]
-      if (row.sig !== sig) continue
-      state.pendingGlobals.splice(i, 1)
-      if (row.timer) clearTimeout(row.timer)
-      // Same refund as a retraction: a row nobody ever received must not spend
-      // the budget that exists to bound what the DOOR receives.
-      capDecrement('exception_global')
-      return true
-    }
-    return false
-  } catch { return false }
-}
-
-/** Pull the global twin of `sig` back out of the send buffer. Returns whether
- * a row was actually withdrawn (false once it is already on the wire). */
-function retractGlobalTwin(sig) {
-  try {
-    if (!sig) return false
-    const now = Date.now()
-    for (let i = state.globalRows.length - 1; i >= 0; i--) {
-      const row = state.globalRows[i]
-      if (now - row.at >= CROSS_PATH_MS) { state.globalRows.splice(i, 1); continue }
-      if (row.sig !== sig) continue
-      state.globalRows.splice(i, 1)
-      const at = state.buffer.indexOf(row.event)
-      if (at === -1) return false
-      state.buffer.splice(at, 1)
-      capDecrement('exception_global')
-      return true
-    }
-    return false
-  } catch { return false }
+    // With no error object there is nothing to agree WITH, so the labels the
+    // caller already computed are the best available signature.
+    const signature = err != null ? dedupSignature(err) : [
+      (props && props.message_class) || 'Other',
+      (props && props.message_hash) || '',
+      (props && props.stack_hash) || '',
+      (props && props.route) || routeLabel(),
+    ].join('|')
+    const key = digest(`${signature}|${Math.floor(Date.now() / DEDUP_BUCKET_MS)}`)
+    if (dedupKeys && keyable) dedupKeys.set(err, key)
+    return key
+  } catch { return '' }
 }
 
 /** Emit one global exception, DE-DUPLICATED by signature.
@@ -623,12 +561,10 @@ function emitGlobalException(props, err) {
     props.stack_hash, props.route].join('|')
   if (state.seenExceptions.indexOf(sig) !== -1) return
   if (state.seenExceptions.length < EXCEPTION_CAP) state.seenExceptions.push(sig)
-  // Only `window.onerror` rows can have a boundary twin: a rejection never
-  // reaches a React boundary, so holding one could only ever delay a row for a
-  // match that cannot come.
-  const twinnable = err != null && props.source === 'window.onerror'
-  const event = trackException(props, 'exception_global', undefined, twinnable)
-  if (event && twinnable) holdGlobalRow(crossPathSignature(err), event)
+  // The error object is handed straight through so `dedup_key` is derived
+  // from the SAME object the boundary will see. It is read, never sent, and
+  // the row goes out immediately -- there is nothing to wait for.
+  trackException(props, 'exception_global', err)
 }
 
 /** `error` listener. Exported so a spec can drive it without synthesizing a
@@ -687,10 +623,9 @@ export function installGlobalErrorHandlers() {
 function beaconFlush() {
   try {
     if (DISABLED) return
-    // The tab is going away, so every held row has run out of window. This is
-    // the seam that makes holding safe: a crash recorded a moment before the
-    // page was torn down still leaves with the beacon.
-    releaseAllPending()
+    // Nothing is held back any more, so this seam has nothing to release: a
+    // crash recorded a moment before the page was torn down is already in the
+    // buffer and leaves with the beacon like any other event.
     if (!state.buffer.length) return
     const events = state.buffer.splice(0, FLUSH_AT)
     if (navigator?.sendBeacon) {

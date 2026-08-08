@@ -617,9 +617,27 @@ def build_suites() -> List[Suite]:
         # 7 -> 9: the freeze's own parser is now proven able to FAIL (it read
         # single-quoted names only, so a double-quoted class was invisible to
         # it), and the component_stack_hash compat pair is frozen too.
+        # 9 -> 11: `dedup_key` is frozen on BOTH sides, and the removed
+        # client-side timing machinery is pinned ABSENT. Drift in that label is
+        # invisible twice -- the door schema-filters an unknown label away and
+        # stores every row, so one crash quietly becomes two and no gate goes
+        # red -- which is exactly what a freeze is for.
         Suite("server-client-exception-vocab-freeze",
               "server tests/test_client_exception_vocab_freeze.py", "pytest",
-              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 9),
+              SERVER, _py_pytest("tests/test_client_exception_vocab_freeze.py"), 11),
+        # One browser failure is ONE client.exception row. Three merge-gate
+        # rounds of BROWSER-side timing de-duplication failed here, so the
+        # de-duplication moved to a stable key resolved at ingest; this suite
+        # is the proof, and it asserts EXACTLY ONE surviving row under each of
+        # the three orderings that killed the previous designs (one body, the
+        # 20-event flush split, and the pagehide-then-boundary split) plus the
+        # negative case that two distinct failures stay two rows.
+        # Floor 12 is the measured executed count on this tree 2026-08-08; the
+        # file is fully static (FastAPI TestClient + the in-memory sink, no
+        # DATABASE_URL, no SDK, no skipif), so it executes 12 on every runner.
+        Suite("server-client-exception-dedup",
+              "server tests/test_client_exception_dedup.py", "pytest",
+              SERVER, _py_pytest("tests/test_client_exception_dedup.py"), 12),
         # Floor 13, re-measured 2026-07-27. The 12 was measured when this suite
         # was registered (bd4606c, 2026-07-24), a day before 5495b81 added
         # test_required_platform_rejects_missing_shared_mutation_fence. The floor
@@ -1023,8 +1041,15 @@ def build_suites() -> List[Suite]:
         # batch boundary) plus the three the hold has to keep true -- a held
         # row still sends when no boundary comes, a late boundary still
         # retracts, and pagehide carries a held row off a dying tab.
+        # 80 -> 82: browser-side timing de-duplication is GONE (it failed three
+        # merge-gate rounds) and the specs that pinned it were replaced by
+        # specs that pin the stable key instead: the two emitters agree on a
+        # key across all three orderings, distinct failures still get distinct
+        # keys, a bucket separates two occurrences of an identical failure, and
+        # the real React crash in ErrorBoundary.test.jsx now asserts BOTH rows
+        # leave the browser and the documented ingest rule keeps one.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 80),
+              [_npm(), "run", "test:unit"], 82),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

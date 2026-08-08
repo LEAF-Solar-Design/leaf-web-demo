@@ -223,3 +223,45 @@ def test_tour_step_is_deliberately_absent():
     `customer_secret`. Recorded so a future reader does not read the gap as an
     oversight and 'fix' it with a regex."""
     assert "tour_step" not in telemetry_router.PREAUTH_LABEL_SCHEMAS["client.exception"]
+
+
+def test_dedup_key_is_strict_on_the_door_and_actually_emitted_by_the_client():
+    """The de-duplication label is the one place drift is INVISIBLE TWICE.
+
+    If the client stops emitting `dedup_key`, or renames it, the door does not
+    fail -- it schema-filters the unknown label away and stores every row, so
+    one browser crash quietly becomes two rows again and every crash-rate
+    number moves without anything going red. And if the door's rule were ever
+    loosened to a variable width, the label would become both a free-text hole
+    and a merge key, which is the worst pairing on this schema: an anonymous
+    caller could collapse rows that are not theirs.
+
+    So both halves are frozen here: the door keeps the STRICT digest rule (not
+    the dated component_stack_hash compatibility pair), and the client file
+    still derives and attaches the label."""
+    schema = telemetry_router.PREAUTH_LABEL_SCHEMAS["client.exception"]
+    assert schema["dedup_key"] is telemetry_router._HASH_RE
+    assert schema["dedup_key"] is not telemetry_router._COMPONENT_STACK_HASH_RE
+    assert not schema["dedup_key"].match("5550142")
+
+    src = CLIENT_JS.read_text(encoding="utf-8")
+    assert "function dedupKeyFor(" in src, "the client no longer derives a key"
+    assert "dedup_key: key" in src, "the client no longer attaches the label"
+    # The coarse time bucket is what stops the key folding every occurrence of
+    # one recurring failure into a single row forever.
+    assert "const DEDUP_BUCKET_MS =" in src
+
+
+def test_the_client_no_longer_carries_timing_dedup_machinery():
+    """Three merge-gate rounds died on browser-side timing de-duplication:
+    emit-then-retract, then hold-pending-then-flush-on-exit. Both made the row
+    count depend on whether a batch flush landed between the two emits.
+
+    Re-introducing either would look like a local improvement ("just hold it a
+    moment longer") and would fail exactly the same way, so the absence is
+    pinned rather than left to memory. The replacement is the stable key
+    above, resolved at ingest."""
+    src = CLIENT_JS.read_text(encoding="utf-8")
+    for gone in ("pendingGlobals", "retractGlobalTwin", "dropPendingTwin",
+                 "holdGlobalRow", "releaseAllPending", "PENDING_MS"):
+        assert gone not in src, f"client-side timing dedup is back: {gone}"

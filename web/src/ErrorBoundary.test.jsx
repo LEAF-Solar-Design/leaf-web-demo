@@ -66,6 +66,27 @@ async function postedAfterCrash(childProps) {
   return fetchMock.mock.calls.flatMap(([, init]) => JSON.parse(init.body).events)
 }
 
+/** THE INGEST RULE, mirrored from server/routers/telemetry.py
+ * (`_dedup_identity` + `_dedup_rank`): one row per (session, dedup_key), and
+ * the row WITHOUT `source` -- the boundary's -- wins the tie. The client emits
+ * both twins on purpose; this is what the door then stores. */
+function dedupRows(events) {
+  const winners = new Map()
+  const out = []
+  for (const ev of events) {
+    const key = ev.labels && ev.labels.dedup_key
+    if (!key) { out.push(ev); continue }
+    const prior = winners.get(key)
+    if (prior === undefined) {
+      winners.set(key, out.length)
+      out.push(ev)
+    } else if (!ev.labels.source && out[prior].labels.source) {
+      out[prior] = ev
+    }
+  }
+  return out
+}
+
 describe('ErrorBoundary telemetry', () => {
   it('renders the calm card instead of a white screen', async () => {
     await postedAfterCrash({})
@@ -76,31 +97,48 @@ describe('ErrorBoundary telemetry', () => {
   it('records EXACTLY ONE row for one React crash, and it is the boundary row', async () => {
     const events = await postedAfterCrash({})
 
-    // Measured in this jsdom + React 18 DEV setup: without de-duplication
-    // this posted TWO rows, because React's development build re-throws the
-    // render error through a synthetic DOM event and telemetry's global
-    // handler answers it. Its production build uses try/catch and need not,
-    // so the row count was a property of the BUILD and anything counting
-    // crashes counted them differently depending on which one it watched.
+    // The strongest form of this claim available anywhere in the suite: a REAL
+    // component, a REAL render failure, both emitters reached the way React
+    // actually reaches them. React 18's development build re-throws the render
+    // error through a synthetic DOM event, so telemetry's global handler
+    // answers it AND the boundary answers it. Its production build uses
+    // try/catch and does not, so the browser's row count is a property of the
+    // BUILD -- which is exactly why the browser is no longer allowed to decide
+    // the row count.
     //
-    // The boundary wins the tie: its row is the only one carrying
-    // `component_stack_hash`. Asserted by COUNT on purpose -- "the pair by
-    // shape" is what let the double-count through.
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({
+    // So: the client emits BOTH, and they agree on a key.
+    expect(events).toHaveLength(2)
+    expect(events.map((e) => e.event_name)).toEqual(
+      ['client.exception', 'client.exception'])
+    expect(events[0].labels.dedup_key).toMatch(/^\d{16}$/)
+    expect(events[1].labels.dedup_key).toBe(events[0].labels.dedup_key)
+
+    // And the door stores ONE. The boundary wins the tie: its row is the only
+    // one carrying `component_stack_hash`. Asserted by COUNT on purpose --
+    // "the pair by shape" is what let the double-count through.
+    const rows = dedupRows(events)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
       event_name: 'client.exception',
       event_type: 'exception',
     })
-    expect(events[0].labels.source).toBeUndefined()
-    expect(events[0].labels.message_class).toBe('Error')
-    expect(events[0].labels.component_stack_hash).toMatch(/^\d{16}$/)
+    expect(rows[0].labels.source).toBeUndefined()
+    expect(rows[0].labels.message_class).toBe('Error')
+    expect(rows[0].labels.component_stack_hash).toMatch(/^\d{16}$/)
   })
 
   it('refuses a message_class the platform did not assign', async () => {
     const events = await postedAfterCrash({ name: 'owner@example.com' })
 
-    expect(events).toHaveLength(1)
-    expect(events[0].labels.message_class).toBe('Other')
+    // BOTH emitters must refuse it, not just the one that survives the merge:
+    // the door schema-filters every row it receives, but a row carrying free
+    // text has already left the browser by then.
+    expect(events).toHaveLength(2)
+    for (const ev of events) expect(ev.labels.message_class).toBe('Other')
     expect(JSON.stringify(events)).not.toContain('owner@example.com')
+
+    const rows = dedupRows(events)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].labels.message_class).toBe('Other')
   })
 })
