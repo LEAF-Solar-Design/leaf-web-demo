@@ -273,6 +273,56 @@ def shared_tools() -> List[Dict[str, Any]]:
     return list(by_name.values())
 
 
+def _ordered_effective_tool_tiers(
+    tiers_by_source: Dict[str, List[Dict[str, Any]]],
+) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """Apply the one precedence specification shared by every effective fold."""
+    return [
+        (source, tiers_by_source[source])
+        for source in EFFECTIVE_TOOL_SOURCE_PRECEDENCE
+    ]
+
+
+def _fold_effective_tool_tiers(
+    tiers: List[Tuple[str, List[Dict[str, Any]]]],
+    tenant_id: str,
+    *,
+    strict_provenance: bool = False,
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Fold effective rows once, retaining the winning tier for projection."""
+    if tuple(source for source, _tools in tiers) != EFFECTIVE_TOOL_SOURCE_PRECEDENCE:
+        raise ToolCatalogProvenanceError(
+            "tool source order does not match the catalog fold contract")
+    by_name: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    for source, tools in tiers:
+        for tool in tools:
+            if source == TOOL_SOURCE_AUTHORED:
+                owner = tool.get("tenant_id") or _DEFAULT_TENANT
+                if strict_provenance and (
+                    not isinstance(owner, str) or not owner
+                ):
+                    raise ToolCatalogProvenanceError(
+                        "authored tool contains an invalid tenant_id")
+                if owner != tenant_id:
+                    continue
+            by_name[tool["name"]] = (tool, source)
+    return list(by_name.values())
+
+
+def _compatibility_effective_tool_tiers(
+    tenant_id: str,
+) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """Build tiers through the existing forgiving loaders used by all_tools."""
+    global_tiers = _global_tool_tiers()
+    return _ordered_effective_tool_tiers({
+        TOOL_SOURCE_OPERATOR_OWNED_ENGINE: global_tiers[0][1],
+        TOOL_SOURCE_CATALOG_SEED: global_tiers[1][1],
+        TOOL_SOURCE_TENANT_REPO: load_tenant_repo_tools(tenant_id),
+        TOOL_SOURCE_WRITE_SEED: global_tiers[2][1],
+        TOOL_SOURCE_AUTHORED: _AUTHORED,
+    })
+
+
 def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
     """Registry tools + general-catalog seed + THIS TENANT's repo tools + write seed +
     authored tools, de-duped by name. PRECEDENCE (last wins): engine registry <
@@ -293,33 +343,9 @@ def all_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, Any]]:
     catalog seed / write seed) — see ``_check_global_seed_collisions``. Tenant-repo and
     authored_tools.json are excluded from that check: they are the DOCUMENTED override
     tiers and a same-name collision there is the intended shadowing behaviour, not a bug."""
-    global_tiers = _global_tool_tiers()
-    engine_tools = global_tiers[0][1]
-    catalog_tools = global_tiers[1][1]
-    write_tools = global_tiers[2][1]
-
-    by_name: Dict[str, Dict[str, Any]] = {}
-    for t in engine_tools:
-        by_name[t["name"]] = t
-    for t in catalog_tools:  # tracked general-catalog seed (non-write)
-        by_name[t["name"]] = t
-    for t in load_tenant_repo_tools(tenant_id):  # the REQUESTING tenant's OWN registry
-        by_name[t["name"]] = t
-    for t in write_tools:  # tracked drawing.write seed (M2)
-        by_name[t["name"]] = t
-    for t in _AUTHORED:  # in-memory authored list (also persisted)
-        # TENANT ISOLATION: _AUTHORED is process-global and folded LAST, so an
-        # unscoped entry would win a name collision against the requesting
-        # tenant's own registry tools above — one tenant could shadow another
-        # tenant's tool by authoring a same-named one. Only fold entries this
-        # tenant authored. Entries written before tools carried an owner (no
-        # "tenant_id") default to the demo tenant, so an existing store keeps
-        # working for the lane that created it without leaking across tenants.
-        owner = t.get("tenant_id") or _DEFAULT_TENANT
-        if owner != tenant_id:
-            continue
-        by_name[t["name"]] = t
-    return list(by_name.values())
+    folded = _fold_effective_tool_tiers(
+        _compatibility_effective_tool_tiers(tenant_id), tenant_id)
+    return [tool for tool, _source in folded]
 
 
 def _provenance_rows(
@@ -373,7 +399,10 @@ def _strict_store_tools(
     if not isinstance(data, dict) or not isinstance(data.get("tools"), list):
         raise ToolCatalogProvenanceError(
             f"tool source {source!r} does not contain a tools list")
-    return data["tools"]
+    tools = data["tools"]
+    if source == TOOL_SOURCE_OPERATOR_OWNED_ENGINE and not tools:
+        return list(missing or [])
+    return tools
 
 
 def _strict_provenance_tiers(
@@ -402,10 +431,7 @@ def _strict_provenance_tiers(
         TOOL_SOURCE_WRITE_SEED: write_tools,
         TOOL_SOURCE_AUTHORED: _AUTHORED,
     }
-    return [
-        (source, tiers_by_source[source])
-        for source in EFFECTIVE_TOOL_SOURCE_PRECEDENCE
-    ]
+    return _ordered_effective_tool_tiers(tiers_by_source)
 
 
 def effective_tools_with_provenance(
@@ -425,38 +451,23 @@ def effective_tools_with_provenance(
     ambiguous same-tier duplicates fail closed.
     """
     raw_tiers = _strict_provenance_tiers(tenant_id)
-    if tuple(source for source, _tools in raw_tiers) != EFFECTIVE_TOOL_SOURCE_PRECEDENCE:
-        raise ToolCatalogProvenanceError(
-            "tool source order does not match the catalog fold contract")
     validated_tiers = {
-        source: _provenance_rows(source, tools)
+        source: [tool for tool, _label in _provenance_rows(source, tools)]
         for source, tools in raw_tiers
     }
     _check_global_seed_collisions([
-        (source, [tool for tool, _source in validated_tiers[source]])
+        (source, validated_tiers[source])
         for source in (
             TOOL_SOURCE_OPERATOR_OWNED_ENGINE,
             TOOL_SOURCE_CATALOG_SEED,
             TOOL_SOURCE_WRITE_SEED,
         )
     ])
-    authored_tools: List[Dict[str, Any]] = []
-    for tool, _source in validated_tiers[TOOL_SOURCE_AUTHORED]:
-        owner = tool.get("tenant_id") or _DEFAULT_TENANT
-        if not isinstance(owner, str) or not owner:
-            raise ToolCatalogProvenanceError(
-                "authored tool contains an invalid tenant_id")
-        if owner == tenant_id:
-            authored_tools.append(tool)
-
-    validated_tiers[TOOL_SOURCE_AUTHORED] = [
-        (tool, TOOL_SOURCE_AUTHORED) for tool in authored_tools
-    ]
-    by_name: Dict[str, Tuple[Dict[str, Any], str]] = {}
-    for source in EFFECTIVE_TOOL_SOURCE_PRECEDENCE:
-        for tool, winning_source in validated_tiers[source]:
-            by_name[tool["name"]] = (tool, winning_source)
-    return list(by_name.values())
+    return _fold_effective_tool_tiers(
+        _ordered_effective_tool_tiers(validated_tiers),
+        tenant_id,
+        strict_provenance=True,
+    )
 
 
 def find_tool(name: str, tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str, Any]]:

@@ -63,6 +63,19 @@ def test_plain_engine_row_is_operator_owned_and_preserves_all_tools(stores):
     assert [tool for tool, _source in rows] == deps.all_tools("tenant-a")
 
 
+def test_empty_engine_registry_uses_operator_owned_default_fallback(stores):
+    stores(engine=[])
+
+    rows = deps.effective_tools_with_provenance("tenant-a")
+
+    assert [tool for tool, _source in rows] == deps.all_tools("tenant-a")
+    assert [tool for tool, _source in rows] == list(deps.fb.DEFAULT_TOOLS)
+    assert all(
+        source == deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
+        for _tool_row, source in rows
+    )
+
+
 def test_exact_copy_tenant_override_is_not_operator_owned_engine(stores):
     engine_tool = _tool("count-by-layer")
     tenant_copy = copy.deepcopy(engine_tool)
@@ -151,6 +164,32 @@ def test_full_precedence_matches_all_tools_and_reports_each_winner(stores):
         "write-authored": deps.TOOL_SOURCE_AUTHORED,
         "write-only": deps.TOOL_SOURCE_WRITE_SEED,
     }
+
+
+def test_both_apis_obey_the_same_mutated_fold_order(stores, monkeypatch):
+    shared_name = "tenant-write-order-probe"
+    tenant_tool = _tool(shared_name, "tenant")
+    write_tool = _tool(shared_name, "write")
+    stores(
+        engine=[_tool("engine-only")],
+        tenant=[tenant_tool],
+        write=[write_tool],
+    )
+    reordered = list(deps.EFFECTIVE_TOOL_SOURCE_PRECEDENCE)
+    tenant_index = reordered.index(deps.TOOL_SOURCE_TENANT_REPO)
+    write_index = reordered.index(deps.TOOL_SOURCE_WRITE_SEED)
+    reordered[tenant_index], reordered[write_index] = (
+        reordered[write_index], reordered[tenant_index]
+    )
+    monkeypatch.setattr(deps, "EFFECTIVE_TOOL_SOURCE_PRECEDENCE", tuple(reordered))
+
+    projected = deps.all_tools("tenant-a")
+    provenance = deps.effective_tools_with_provenance("tenant-a")
+
+    assert [tool for tool, _source in provenance] == projected
+    tool, source = _by_name(provenance)[shared_name]
+    assert tool["marker"] == "tenant"
+    assert source == deps.TOOL_SOURCE_TENANT_REPO
 
 
 @pytest.mark.parametrize("malformed_source", ["tenant", "catalog", "write"])
