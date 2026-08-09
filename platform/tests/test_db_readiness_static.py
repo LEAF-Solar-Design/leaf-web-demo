@@ -62,9 +62,27 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (32, "operator_control_plane"),
                 (33, "operator_credential_rotations"),
                 (34, "operator_release_candidates"),
+                (37, "session_request_journal"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
+
+
+def test_request_journal_migration_unconditionally_declares_runtime_schema():
+    migration = (
+        db._PKG_DIR / "migrations" / "0037_session_request_journal.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS app_session_requests" in migration
+    assert {
+        "idx_app_session_requests_one_executing",
+        "idx_app_session_requests_one_queued",
+        "idx_app_session_requests_recovery",
+        "idx_app_session_requests_scope",
+    } <= {
+        line.split("IF NOT EXISTS ", 1)[1].split()[0]
+        for line in migration.splitlines()
+        if "INDEX IF NOT EXISTS idx_" in line
+    }
 
 
 def test_customization_authority_migration_follows_tenant_mcp_journal():
