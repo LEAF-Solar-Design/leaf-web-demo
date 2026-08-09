@@ -8,6 +8,7 @@ Python reimplementation executes the shipped LISP.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LSP_PATH = REPO_ROOT / "engine" / "tools" / "count_by_layer.lsp"
+LIVE_REGISTRY_PATH = REPO_ROOT / "da" / "registry_live.json"
 
 CASES = [
     "plain layer",
@@ -36,6 +38,16 @@ CASES = [
 
 def _source() -> str:
     return LSP_PATH.read_text(encoding="utf-8")
+
+
+def _load_da_client():
+    spec = importlib.util.spec_from_file_location(
+        "da_client_count_by_layer_json_test", REPO_ROOT / "da" / "client.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _reference_json_string(value: str) -> str:
@@ -106,6 +118,21 @@ def test_count_command_remains_read_only_and_keeps_result_schema():
         r'\"cost\":null,\"error\":null}',
     ):
         assert schema_fragment in _source()
+
+
+def test_live_inline_script_and_activity_spec_match_canonical_source():
+    tools = json.loads(LIVE_REGISTRY_PATH.read_text(encoding="utf-8"))["tools"]
+    tool = next(item for item in tools if item["name"] == "count-by-layer")
+    canonical = _source()
+
+    assert tool["engine_script"] == canonical
+    assert '(leaf-json-escape s)' in tool["engine_script"]
+    assert '(open "result.json" "w" "utf8")' in tool["engine_script"]
+
+    activity_script = _load_da_client().tool_activity_spec(tool)["settings"][
+        "script"
+    ]["value"]
+    assert activity_script == canonical
 
 
 def _autocad_runtime() -> tuple[Path, Path] | None:
