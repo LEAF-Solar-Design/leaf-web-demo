@@ -29,6 +29,8 @@ CASES = [
     "form\ffeed",
     "back\bspace",
     "control-\x01-layer",
+    "München roof",
+    "屋根 layer",
 ]
 
 
@@ -95,6 +97,8 @@ def test_count_command_remains_read_only_and_keeps_result_schema():
     for mutator in mutators:
         assert mutator not in source
 
+    assert '(open "result.json" "w" "utf8")' in source
+
     for schema_fragment in (
         r'{\"ok\":true,\"tool\":\"count-by-layer\",\"version\":\"1.0.0\",',
         r'\"result\":{\"counts\":{',
@@ -143,6 +147,8 @@ def _lisp_literal(value: str) -> str:
             pieces.append(r"\\")
         elif code < 0x20:
             pieces.append(f'" (chr {code}) "')
+        elif code > 0x7F:
+            pieces.append(f'" (chr {code}) "')
         else:
             pieces.append(char)
     return '"' + "".join(pieces) + '"'
@@ -163,7 +169,7 @@ def test_real_autolisp_serializer_round_trips_representative_names(tmp_path):
     )
     harness = serializer_source + f"""
 (setq leaf-test-values (list {encoded_cases}))
-(setq leaf-test-file (open \"{output.as_posix()}\" \"w\"))
+(setq leaf-test-file (open \"{output.as_posix()}\" \"w\" \"utf8\"))
 (write-line (strcat \"[\" (car leaf-test-values)
   (apply 'strcat
     (mapcar '(lambda (value) (strcat \",\" value)) (cdr leaf-test-values)))
@@ -187,4 +193,6 @@ def test_real_autolisp_serializer_round_trips_representative_names(tmp_path):
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert output.is_file(), completed.stdout + completed.stderr
-    assert json.loads(output.read_text(encoding="utf-8")) == CASES
+    decoded = output.read_bytes().decode("utf-8", errors="strict")
+    assert not decoded.startswith("\ufeff")
+    assert json.loads(decoded) == CASES

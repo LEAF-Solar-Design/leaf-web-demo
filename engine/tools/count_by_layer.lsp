@@ -53,7 +53,7 @@
     (setq res (strcat res (if first "" ",") (leaf-json-str (car p)) ":" (itoa (cdr p))))
     (setq first nil))
   (setq dt (- (getvar "MILLISECS") t0))
-  (setq f (open "result.json" "w"))
+  (setq f (open "result.json" "w" "utf8"))
   (write-line
     (strcat
       "{\"ok\":true,\"tool\":\"count-by-layer\",\"version\":\"1.0.0\","
