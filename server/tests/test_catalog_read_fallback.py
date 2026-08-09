@@ -29,6 +29,8 @@ TENANT_TOOL = {
     "name": "unpublished-tenant-tool",
     "entry": "tools/unpublished-tenant-tool/tool.py",
 }
+TRUSTED_LIVE_TOOL = {**BASE_TOOL, "aps_live": True}
+TRUSTED_LIVE_DIGEST = deps.catalog_tool_digest(TRUSTED_LIVE_TOOL)
 
 
 def _raise(error: CustomizationServiceError):
@@ -97,6 +99,174 @@ def test_capabilities_uses_only_safe_base_for_tenant_without_pin(
     assert names == {BASE_TOOL["name"]}
     assert TENANT_TOOL["name"] not in names
     assert body["error"] is None
+
+
+@pytest.mark.parametrize(
+    ("effective_tool", "source", "runtime_enabled", "expected"),
+    [
+        (TRUSTED_LIVE_TOOL, "operator_owned_engine", True, True),
+        (TRUSTED_LIVE_TOOL, "operator_owned_engine", False, False),
+        (TRUSTED_LIVE_TOOL, "tenant_repo", True, False),
+        (TRUSTED_LIVE_TOOL, "authored", True, False),
+        (
+            {**BASE_TOOL, "description": "tenant override", "aps_live": True},
+            "tenant_repo",
+            True,
+            False,
+        ),
+        (
+            {**BASE_TOOL, "description": "same-name inherited override"},
+            "tenant_repo",
+            True,
+            False,
+        ),
+        (
+            {**BASE_TOOL, "name": "arbitrary-live-tool", "aps_live": True},
+            "tenant_repo",
+            True,
+            False,
+        ),
+        (
+            {
+                **BASE_TOOL,
+                "description": "forged digest override",
+                "aps_live": True,
+                "catalog_digest": TRUSTED_LIVE_DIGEST,
+            },
+            "tenant_repo",
+            True,
+            False,
+        ),
+    ],
+)
+def test_capabilities_requires_exact_engine_and_runtime_live_aps_authority(
+    monkeypatch, effective_tool, source, runtime_enabled, expected
+):
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+        "operator_owned_engine",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [(effective_tool, source)],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps, "all_tools", lambda _tenant: [effective_tool]
+    )
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", runtime_enabled)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == effective_tool["name"]
+    )
+    assert projected["aps_live"] is expected
+
+
+def test_capabilities_uses_one_provenance_snapshot_without_all_tools_join(monkeypatch):
+    def split_read_forbidden(_tenant):
+        raise AssertionError("all_tools split read must not run with provenance")
+
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+        "operator_owned_engine",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [(TRUSTED_LIVE_TOOL, "operator_owned_engine")],
+        raising=False,
+    )
+    monkeypatch.setattr(capabilities_router.deps, "all_tools", split_read_forbidden)
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", True)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == TRUSTED_LIVE_TOOL["name"]
+    )
+    assert body["error"] is None
+    assert projected["catalog_digest"] == TRUSTED_LIVE_DIGEST
+    assert projected["aps_live"] is True
+
+
+@pytest.mark.parametrize("missing_name", [
+    "effective_tools_with_provenance",
+    "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+])
+def test_capabilities_without_provenance_seam_keeps_catalog_but_disables_live_aps(
+    monkeypatch, missing_name
+):
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+        "operator_owned_engine",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [(TRUSTED_LIVE_TOOL, "operator_owned_engine")],
+        raising=False,
+    )
+    monkeypatch.delattr(capabilities_router.deps, missing_name)
+    monkeypatch.setattr(
+        capabilities_router.deps, "all_tools", lambda _tenant: [TRUSTED_LIVE_TOOL]
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", True)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == TRUSTED_LIVE_TOOL["name"]
+    )
+    assert body["error"] is None
+    assert projected["aps_live"] is False
 
 
 def test_flat_tools_uses_only_safe_base_for_tenant_without_pin(

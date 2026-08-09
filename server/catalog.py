@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
 DEFAULT_FAMILY = "custom"
+_APS_LIVE_AUTHORIZED = object()
 
 
 def _load_config() -> Dict[str, Any]:
@@ -64,6 +65,40 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
     return DEFAULT_FAMILY
 
 
+def apply_live_aps_runtime_authority(
+    tools: List[Dict[str, Any]], *, aps_live_enabled: bool,
+    trusted_live_catalog_digests: Set[str],
+    tool_sources: List[Optional[str]],
+    operator_owned_engine_source: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Combine operator-owned tool eligibility with this process's APS gate.
+
+    The private projection marker is applied after catalog digests are issued,
+    so runtime configuration cannot alter source authority or its digest.
+    A tenant-effective row qualifies only when its server-issued digest exactly
+    matches a live-enabled engine-registry definition.
+    """
+    sources_are_complete = len(tool_sources) == len(tools)
+    return [
+        {
+            **tool,
+            "_aps_live_runtime_authorized": _APS_LIVE_AUTHORIZED
+            if (
+                aps_live_enabled is True
+                and sources_are_complete
+                and operator_owned_engine_source == "operator_owned_engine"
+                and tool_sources[index] == operator_owned_engine_source
+                and tool.get("aps_live") is True
+                and isinstance(tool.get("catalog_digest"), str)
+                and tool.get("tool_manifest_sha256") == tool.get("catalog_digest")
+                and tool["catalog_digest"] in trusted_live_catalog_digests
+            )
+            else None,
+        }
+        for index, tool in enumerate(tools)
+    ]
+
+
 def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
     effective_digest = tool.get("effective_catalog_digest")
     if (tool.get("execution_class") == "instant" and isinstance(effective_digest, str)
@@ -89,6 +124,9 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         "limits": tool.get("limits"),
         "artifact_digest": tool.get("artifact_digest"),
         "batch_fallback": bool(tool.get("batch_fallback", False)),
+        # Only the route's combined static and runtime authority marker may
+        # advertise live APS. Raw registry metadata alone always fails closed.
+        "aps_live": tool.get("_aps_live_runtime_authorized") is _APS_LIVE_AUTHORIZED,
     }
 
 

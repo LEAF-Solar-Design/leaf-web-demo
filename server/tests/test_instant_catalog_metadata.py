@@ -2,6 +2,8 @@ import copy
 import hashlib
 from pathlib import Path
 
+import pytest
+
 import catalog
 import deps
 
@@ -36,6 +38,69 @@ def test_capability_projection_exposes_authoritative_execution_metadata():
     assert entry["limits"]["wall_ms"] == 100
     assert entry["artifact_digest"] == "sha256:" + ("a" * 64)
     assert entry["batch_fallback"] is True
+
+
+def test_capability_projection_requires_static_and_runtime_aps_live_authority():
+    tool = _instant_tool()
+    tool["aps_live"] = True
+    view = deps.catalog_tool_view(tool)
+
+    authorized = catalog.apply_live_aps_runtime_authority(
+        [view],
+        aps_live_enabled=True,
+        trusted_live_catalog_digests={deps.catalog_tool_digest(tool)},
+        tool_sources=["operator_owned_engine"],
+        operator_owned_engine_source="operator_owned_engine",
+    )
+    entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
+
+    assert entry["aps_live"] is True
+
+
+def test_raw_registry_live_aps_metadata_cannot_authorize_projection():
+    tool = _instant_tool()
+    tool["aps_live"] = True
+
+    entry = catalog.build_catalog([tool])[0]["capabilities"][0]
+
+    assert entry["aps_live"] is False
+
+
+@pytest.mark.parametrize(
+    ("source_value", "runtime_value"),
+    [
+        (True, False),
+        (True, None),
+        (True, "true"),
+        (True, 1),
+        (False, True),
+        (None, True),
+        ("true", True),
+        (1, True),
+        ([], True),
+        ({}, True),
+    ],
+)
+def test_capability_projection_fails_closed_without_both_exact_authorities(
+    source_value, runtime_value
+):
+    trusted_tool = _instant_tool()
+    trusted_tool["aps_live"] = True
+    tool = _instant_tool()
+    if source_value is not None:
+        tool["aps_live"] = source_value
+    view = deps.catalog_tool_view(tool)
+
+    authorized = catalog.apply_live_aps_runtime_authority(
+        [view],
+        aps_live_enabled=runtime_value,
+        trusted_live_catalog_digests={deps.catalog_tool_digest(trusted_tool)},
+        tool_sources=["operator_owned_engine"],
+        operator_owned_engine_source="operator_owned_engine",
+    )
+    entry = catalog.build_catalog(authorized)[0]["capabilities"][0]
+
+    assert entry["aps_live"] is False
 
 
 def test_legacy_tool_defaults_to_batch_without_an_implicit_fallback():
