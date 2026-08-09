@@ -1027,7 +1027,13 @@ export class ConverseLoop {
           }
         }
         const capability = await ctx.capabilityOf(target);
-        const drawingVersion = Number(args.drawing_version);
+        const drawingVersion =
+          (catalogEntry?.aps_live === true || capability === "drawing.write") &&
+          typeof args.drawing_version === "number" &&
+          Number.isInteger(args.drawing_version) &&
+          args.drawing_version >= 0
+            ? args.drawing_version
+            : undefined;
         const expectedDrawingHead = Number(args.expected_drawing_head);
         const catalogCommit = args.catalog_commit;
         const effectiveCatalogDigest = args.effective_catalog_digest;
@@ -1041,7 +1047,7 @@ export class ConverseLoop {
           params,
           dwg,
           catalogDigest,
-          ...(capability === "drawing.write" && Number.isInteger(drawingVersion)
+          ...(drawingVersion !== undefined
             ? { drawingVersion }
             : {}),
           ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
