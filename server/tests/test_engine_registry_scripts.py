@@ -56,6 +56,23 @@ def _live_activity_tools():
     ]
 
 
+def test_count_by_layer_is_the_only_explicit_live_aps_catalog_tool():
+    live_eligible = [
+        tool for tool in _registry_tools() if tool.get("aps_live") is True
+    ]
+    assert [tool.get("name") for tool in live_eligible] == ["count-by-layer"]
+    assert live_eligible[0]["capabilities"] == ["drawing.read"]
+    assert live_eligible[0]["script"] == "engine/tools/count_by_layer.lsp"
+
+
+def test_live_aps_catalog_authority_requires_an_exact_boolean():
+    count_by_layer = next(
+        tool for tool in _registry_tools() if tool.get("name") == "count-by-layer"
+    )
+    assert count_by_layer.get("aps_live") is True
+    assert type(count_by_layer["aps_live"]) is bool
+
+
 def test_offline_only_registry_scope_is_exact_and_immutable():
     offline = [tool for tool in _registry_tools() if tool.get("offline_only")]
     assert offline == [{

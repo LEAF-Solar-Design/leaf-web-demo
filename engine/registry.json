@@ -30,6 +30,7 @@
       "kind": "script",
       "engine_op": "count_by_layer",
       "script": "engine/tools/count_by_layer.lsp",
+      "aps_live": true,
       "params": { "type": "object", "properties": {}, "required": [] },
       "returns": {
         "type": "object",
