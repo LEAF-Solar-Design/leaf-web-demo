@@ -188,6 +188,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await page.getByRole('tab', { name: 'Operator' }).click()
 
   const command = page.getByRole('textbox', { name: 'Command bar' })
+  await command.fill(REQUEST)
   await expect(command).toHaveValue(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 

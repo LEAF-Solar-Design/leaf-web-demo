@@ -768,7 +768,8 @@ export default function ToolCast({
     }
     setSelectedCatalogTool(tool)
     const runScope = ++catalogRunScopeRef.current
-    const runDrawingId = confirmed.execution.context.drawingId
+    const runDrawingId = confirmed.execution.context.drawingArtifactId
+      || confirmed.execution.context.drawingId
     setBusy(true)
     setError(null)
     setPhase('running')
@@ -797,6 +798,7 @@ export default function ToolCast({
       catalogRunScopeRef.current !== runScope ||
       activeDrawingIdRef.current !== runDrawingId
     ) return
+    if (!PUBLIC_DEMO) await workspace.rehydrate()
     if (envelope?.ok) setPhase(envelope.result?.new_version ? 'complete' : 'tool-complete')
     else if (envelope) {
       setPhase('failed')
@@ -807,7 +809,6 @@ export default function ToolCast({
     }
     setBusy(false)
     catalog.actions.dismissRoute()
-    if (!PUBLIC_DEMO && workspace.openProjectId) workspace.rehydrate()
     if (!PUBLIC_DEMO) checkout.actions.refresh()
   }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, drawing.shown, jobRunning, previewLocked, runTrackedJob, workspace, writeLocked])
 
@@ -950,7 +951,7 @@ export default function ToolCast({
       setPhase('failed')
       setError('The panel run did not produce a readable drawing version.')
     }
-    if (workspace.openProjectId) workspace.rehydrate()
+    await workspace.rehydrate()
     checkout.actions.refresh()
   }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, workspace])
 
