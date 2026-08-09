@@ -24,12 +24,14 @@ def stores(monkeypatch, tmp_path):
     engine_store = tmp_path / "engine.json"
     catalog_store = tmp_path / "catalog.json"
     write_store = tmp_path / "write.json"
+    authored_store = tmp_path / "authored.json"
     tenant_root = tmp_path / "tenant-a"
     tenant_root.mkdir()
 
     monkeypatch.setattr(deps, "ENGINE_REGISTRY", engine_store)
     monkeypatch.setattr(deps, "CATALOG_TOOLS_STORE", catalog_store)
     monkeypatch.setattr(deps, "WRITE_TOOLS_STORE", write_store)
+    monkeypatch.setattr(deps, "AUTHORED_STORE", authored_store)
     monkeypatch.setattr(deps, "tenant_repo_dir", lambda _tenant: tenant_root)
     monkeypatch.setattr(deps, "_AUTHORED", [])
 
@@ -39,6 +41,7 @@ def stores(monkeypatch, tmp_path):
             (catalog_store, catalog),
             (tenant_root / "registry.json", tenant),
             (write_store, write),
+            (authored_store, authored),
         ):
             path.write_text(json.dumps({"tools": list(tools)}), encoding="utf-8")
         monkeypatch.setattr(deps, "_AUTHORED", list(authored))
@@ -100,6 +103,53 @@ def test_exact_copy_authored_override_is_not_operator_owned_engine(stores):
 
     assert {key: value for key, value in tool.items() if key != "tenant_id"} == engine_tool
     assert source == deps.TOOL_SOURCE_AUTHORED
+
+
+def test_absent_authored_tenant_id_keeps_legacy_demo_owner(stores):
+    engine_tool = _tool("count-by-layer")
+    authored_override = _tool("count-by-layer", "authored")
+    stores(engine=[engine_tool], authored=[authored_override])
+
+    tool, source = _by_name(
+        deps.effective_tools_with_provenance(deps._DEFAULT_TENANT)
+    )[engine_tool["name"]]
+
+    assert tool["marker"] == "authored"
+    assert source == deps.TOOL_SOURCE_AUTHORED
+
+
+@pytest.mark.parametrize("invalid_tenant_id", [None, "", " ", False, 0, [], {}])
+def test_present_invalid_authored_tenant_id_fails_closed(
+    stores, invalid_tenant_id,
+):
+    engine_tool = _tool("count-by-layer")
+    authored_override = {
+        **_tool("count-by-layer", "authored"),
+        "tenant_id": invalid_tenant_id,
+    }
+    stores(engine=[engine_tool], authored=[authored_override])
+
+    with pytest.raises(
+        deps.ToolCatalogProvenanceError,
+        match="authored tool contains an invalid tenant_id",
+    ):
+        deps.effective_tools_with_provenance(deps._DEFAULT_TENANT)
+
+
+@pytest.mark.parametrize("malformed", ["{not-json", '{"tools": {}}'])
+def test_real_malformed_authored_store_cannot_restore_engine_authority(
+    stores, malformed, monkeypatch,
+):
+    engine_tool = _tool("count-by-layer")
+    stores(engine=[engine_tool])
+    deps.AUTHORED_STORE.write_text(malformed, encoding="utf-8")
+    # Match startup's forgiving compatibility loader: malformed authored JSON
+    # collapses to an empty in-memory list for existing all_tools consumers.
+    monkeypatch.setattr(deps, "_AUTHORED", [])
+
+    assert deps.all_tools(deps._DEFAULT_TENANT) == [engine_tool]
+    with pytest.raises(deps.ToolCatalogProvenanceError):
+        deps.effective_tools_with_provenance(deps._DEFAULT_TENANT)
 
 
 def test_modified_override_reports_the_actual_winning_tier(stores):

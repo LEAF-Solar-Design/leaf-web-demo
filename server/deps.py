@@ -297,9 +297,13 @@ def _fold_effective_tool_tiers(
     for source, tools in tiers:
         for tool in tools:
             if source == TOOL_SOURCE_AUTHORED:
-                owner = tool.get("tenant_id") or _DEFAULT_TENANT
+                owner = (
+                    tool["tenant_id"]
+                    if "tenant_id" in tool
+                    else _DEFAULT_TENANT
+                )
                 if strict_provenance and (
-                    not isinstance(owner, str) or not owner
+                    not isinstance(owner, str) or not owner.strip()
                 ):
                     raise ToolCatalogProvenanceError(
                         "authored tool contains an invalid tenant_id")
@@ -424,12 +428,17 @@ def _strict_provenance_tiers(
     )
     write_tools = _strict_store_tools(
         WRITE_TOOLS_STORE, TOOL_SOURCE_WRITE_SEED)
+    authored_tools = _strict_store_tools(
+        AUTHORED_STORE,
+        TOOL_SOURCE_AUTHORED,
+        missing=_AUTHORED,
+    )
     tiers_by_source = {
         TOOL_SOURCE_OPERATOR_OWNED_ENGINE: engine_tools,
         TOOL_SOURCE_CATALOG_SEED: catalog_tools,
         TOOL_SOURCE_TENANT_REPO: tenant_tools,
         TOOL_SOURCE_WRITE_SEED: write_tools,
-        TOOL_SOURCE_AUTHORED: _AUTHORED,
+        TOOL_SOURCE_AUTHORED: authored_tools,
     }
     return _ordered_effective_tool_tiers(tiers_by_source)
 
