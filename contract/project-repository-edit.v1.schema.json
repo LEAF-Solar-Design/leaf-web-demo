@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contracts/project-repository-edit.v1.schema.json",
+  "title": "Leaf project repository edit v1",
+  "type": "object",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "state": {
+      "enum": [
+        "created",
+        "staging",
+        "staged",
+        "awaiting_confirmation",
+        "publishing",
+        "published",
+        "rejected",
+        "conflicted",
+        "failed",
+        "superseded",
+        "rolled_back"
+      ]
+    },
+    "repositoryAuthority": {
+      "type": "object",
+      "required": [
+        "tenant_id",
+        "organization_id",
+        "project_id",
+        "repo_key"
+      ],
+      "properties": {
+        "tenant_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "repo_key": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    "normalizedPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.[Gg][Ii][Tt](?:/|$))(?!.*(?:^|/)\\.\\.?($|/))(?!.*//)(?!.*\\/$)[^\\u0000\\\\]+$"
+    },
+    "stagedReceipt": {
+      "type": "object",
+      "required": [
+        "contract",
+        "edit_id",
+        "state",
+        "operation",
+        "source_edit_id",
+        "actor_binding_id",
+        "tenant_id",
+        "organization_id",
+        "project_id",
+        "repo_key",
+        "base_commit",
+        "staged_head_commit",
+        "changed_paths",
+        "diff_digest",
+        "instruction_digest",
+        "idempotency_key"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.project-repository-edit.v1"
+        },
+        "edit_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "const": "staged"
+        },
+        "operation": {
+          "enum": [
+            "edit",
+            "rollback"
+          ]
+        },
+        "source_edit_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor_binding_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "repo_key": {
+          "$ref": "#/$defs/uuid"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "staged_head_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "changed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/normalizedPath"
+          }
+        },
+        "diff_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "instruction_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/idempotencyKey"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "edit"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_edit_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "rollback"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_edit_id": {
+                "$ref": "#/$defs/uuid"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "confirmationReceipt": {
+      "type": "object",
+      "required": [
+        "contract",
+        "confirmation_id",
+        "receipt_digest",
+        "approver_binding_id",
+        "tenant_id",
+        "organization_id",
+        "project_id",
+        "repo_key",
+        "edit_id",
+        "issued_at",
+        "expires_at"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.project-repository-edit-confirmation.v1"
+        },
+        "confirmation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "receipt_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "approver_binding_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "repo_key": {
+          "$ref": "#/$defs/uuid"
+        },
+        "edit_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "publishRequest": {
+      "type": "object",
+      "required": [
+        "receipt",
+        "receipt_digest",
+        "confirmation_id",
+        "expected_main_sha",
+        "idempotency_key"
+      ],
+      "properties": {
+        "receipt": {
+          "$ref": "#/$defs/stagedReceipt"
+        },
+        "receipt_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "confirmation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expected_main_sha": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/idempotencyKey"
+        }
+      },
+      "additionalProperties": false
+    },
+    "auditReceipt": {
+      "type": "object",
+      "required": [
+        "contract",
+        "event_id",
+        "timestamp",
+        "edit_id",
+        "source_edit_id",
+        "actor_binding_id",
+        "approver_binding_id",
+        "tenant_id",
+        "organization_id",
+        "project_id",
+        "repo_key",
+        "prior_state",
+        "next_state",
+        "base_commit",
+        "staged_head_commit",
+        "changed_paths_digest",
+        "receipt_digest",
+        "idempotency_key",
+        "result",
+        "reason_code"
+      ],
+      "properties": {
+        "contract": {
+          "const": "leaf.project-repository-edit.audit.v1"
+        },
+        "event_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "edit_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_edit_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor_binding_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "approver_binding_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "repo_key": {
+          "$ref": "#/$defs/uuid"
+        },
+        "prior_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_state": {
+          "$ref": "#/$defs/state"
+        },
+        "base_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/gitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "staged_head_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/gitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changed_paths_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/idempotencyKey"
+        },
+        "result": {
+          "enum": [
+            "ok",
+            "denied",
+            "failed"
+          ]
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/stagedReceipt"
+    },
+    {
+      "$ref": "#/$defs/confirmationReceipt"
+    },
+    {
+      "$ref": "#/$defs/publishRequest"
+    },
+    {
+      "$ref": "#/$defs/auditReceipt"
+    }
+  ]
+}
