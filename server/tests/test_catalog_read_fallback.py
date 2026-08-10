@@ -83,8 +83,17 @@ def test_capabilities_uses_only_safe_base_for_tenant_without_pin(
     monkeypatch, tmp_path
 ):
     tenant = _fresh_enabled_tenant(monkeypatch, tmp_path)
+    # capabilities() prefers the provenance seam (deps.effective_tools_with_
+    # provenance) over deps.all_tools/shared_tools when both are present on
+    # deps (tiered-fold catalog, mainline #545). Mock at that seam so the
+    # router-level assertion below (only the safe base surfaces, the
+    # unpublished tenant tool never leaks in) exercises the code path
+    # capabilities() actually takes.
     monkeypatch.setattr(
-        capabilities_router.deps, "shared_tools", lambda: [BASE_TOOL]
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [(BASE_TOOL, deps.TOOL_SOURCE_CATALOG_SEED)],
+        raising=False,
     )
 
     body = capabilities_router.capabilities(
@@ -377,6 +386,17 @@ def test_catalog_routes_preserve_customization_error_status_without_detail(
         },
     )
     monkeypatch.setattr(capabilities_router.deps, "all_tools", _raise(error))
+    # capabilities() reads deps.effective_tools_with_provenance first when it
+    # is present (tiered-fold catalog, mainline #545); tools_router.tools()
+    # has no such branch and only ever calls deps.all_tools. Mock both seams
+    # so the SAME customization-service failure surfaces as the SAME
+    # normalized error envelope regardless of which route is under test.
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        _raise(error),
+        raising=False,
+    )
 
     response = route(tenant="pinned-tenant", **kwargs)
 
