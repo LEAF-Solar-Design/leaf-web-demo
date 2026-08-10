@@ -277,7 +277,9 @@ def test_migration_sequence_is_collision_free_and_manifest_ordered():
     names = [path.name for path in migrations]
     assert "0035_session_request_journal.sql" in names
     assert len({name[:4] for name in names}) == len(names), "migration prefixes must be unique"
-    assert names.index("0035_session_request_journal.sql") == len(names) - 1
+    # Fixed position, not "last": unique sorted 4-digit prefixes put 0035 at
+    # index 34 permanently, so later migrations don't decay this assertion.
+    assert names.index("0035_session_request_journal.sql") == 34
     sql = (REPO_ROOT / "platform" / "migrations" /
            "0035_session_request_journal.sql").read_text(encoding="utf-8")
     assert "idx_app_session_requests_one_executing" in sql

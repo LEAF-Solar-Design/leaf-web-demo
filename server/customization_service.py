@@ -924,8 +924,11 @@ class CustomizationService:
         except Exception as exc:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
+            # Class-qualified: _harness_stage is also exercised unbound
+            # (self=None), a convention test_customization_refusal_observability
+            # pins, so no attribute lookup may go through self.
             reason = (
-                self._harness_job_failure_reason(response)
+                CustomizationService._harness_job_failure_reason(response)
                 if response is not None else None
             )
             if reason is not None:
