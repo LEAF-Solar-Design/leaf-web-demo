@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   stage_heartbeat_at INTEGER,
   stage_next_attempt_at INTEGER NOT NULL DEFAULT 0,
   stage_error_code TEXT,
+  stage_error_message TEXT,
   stage_error_retryable INTEGER NOT NULL DEFAULT 0 CHECK (stage_error_retryable IN (0, 1)),
   stage_phase TEXT NOT NULL DEFAULT 'queued',
   stage_started_at TEXT,
@@ -297,6 +298,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             "stage_heartbeat_at": "INTEGER",
             "stage_next_attempt_at": "INTEGER NOT NULL DEFAULT 0",
             "stage_error_code": "TEXT",
+            "stage_error_message": "TEXT",
             "stage_error_retryable": "INTEGER NOT NULL DEFAULT 0",
             "stage_phase": "TEXT NOT NULL DEFAULT 'queued'",
             "stage_started_at": "TEXT",
@@ -503,7 +505,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "UPDATE customization_change_sets SET stage_lease_owner = ?, "
                 "stage_lease_expires_at = ?, stage_heartbeat_at = ?, "
                 "stage_attempt = stage_attempt + 1, stage_phase = 'authoring', "
-                "stage_error_code = NULL, stage_error_retryable = ?, "
+                "stage_error_code = NULL, stage_error_message = NULL, "
+                "stage_error_retryable = ?, "
                 "stage_started_at = COALESCE(stage_started_at, "
                 "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
@@ -573,9 +576,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
 
     def fail_stage_claim(
         self, *, tenant_id: str, change_set_id: str, owner: str,
-        reason_code: str, retryable: bool,
+        reason_code: str, retryable: bool, reason_message: str | None = None,
     ) -> ChangeSet | None:
         reason_code = require_bounded(reason_code, "reason_code", 200)
+        if reason_message is not None:
+            reason_message = require_bounded(reason_message, "reason_message", 500)
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
             if row.state is not ChangeState.STAGING or row.stage_lease_owner != owner:
@@ -588,10 +593,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
             conn.execute(
                 "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
                 "stage_lease_expires_at = NULL, stage_error_code = ?, "
+                "stage_error_message = ?, "
                 "stage_error_retryable = ?, stage_phase = 'failed', "
                 "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE tenant_id = ? AND change_set_id = ?",
-                (reason_code, bool(retryable), tenant_id, change_set_id),
+                (reason_code, reason_message, bool(retryable),
+                 tenant_id, change_set_id),
             )
             return self._find_change_set(conn, tenant_id, change_set_id)
 
@@ -1306,6 +1313,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             stage_heartbeat_at=row["stage_heartbeat_at"],
             stage_next_attempt_at=row["stage_next_attempt_at"],
             stage_error_code=row["stage_error_code"],
+            stage_error_message=row["stage_error_message"],
             stage_error_retryable=bool(row["stage_error_retryable"]),
             stage_phase=row["stage_phase"],
             stage_started_at=row["stage_started_at"],

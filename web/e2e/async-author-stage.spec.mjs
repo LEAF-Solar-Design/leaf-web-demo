@@ -305,14 +305,19 @@ test('a bounded failed poll clears recovery state without staging a tool', async
     const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
     if (url.pathname === '/api/author/stage' && request.method() === 'POST') submissions += 1
     if (url.pathname === '/api/author/stages/failed-change-0001') {
+      // Real producer shape (customization_service.stage_status_change):
+      // reason_code + retryable always, message when a reason was captured.
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         headers,
         body: JSON.stringify({
+          contract: 'leaf.customization-stage-job.v1',
           status: 'failed',
+          phase: 'failed',
           change_set_id: 'failed-change-0001',
-          error: { error_code: 'AUTHOR_FAILED', message: 'Generated source did not pass validation.', retryable: true },
+          error: { reason_code: 'customization_author_job_failed', retryable: true, message: 'Generated source did not pass validation.' },
+          retry_after_ms: 250,
         }),
       })
       return
@@ -330,6 +335,85 @@ test('a bounded failed poll clears recovery state without staging a tool', async
   await expect(page.getByText(/Generated source did not pass validation/)).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.authored')).toHaveCount(0)
   expect(submissions).toBe(0)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
+})
+
+test('a harness job failure surfaces the server reason instead of eternal pending', async ({ page }) => {
+  const proofState = makeCatProofState()
+  let polls = 0
+  await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
+    if (url.pathname === '/api/author/stage' && request.method() === 'POST') {
+      await route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        headers,
+        body: JSON.stringify({
+          contract: 'leaf.customization-stage-job.v1',
+          change_set_id: 'dead-authoring-0001',
+          status: 'queued',
+          poll_url: '/api/author/stages/dead-authoring-0001',
+          retry_after_ms: 250,
+        }),
+      })
+      return
+    }
+    if (url.pathname === '/api/author/stages/dead-authoring-0001' && request.method() === 'GET') {
+      polls += 1
+      // First poll: the job runs. Then the harness authoring job dies and the
+      // worker records the terminal failure with the harness's reason string.
+      const body = polls > 1
+        ? {
+            contract: 'leaf.customization-stage-job.v1',
+            change_set_id: 'dead-authoring-0001',
+            status: 'failed',
+            phase: 'failed',
+            error: {
+              reason_code: 'customization_author_job_failed',
+              retryable: true,
+              message: 'Agent SDK auth failure: oauth_org_not_allowed',
+            },
+            retry_after_ms: 250,
+          }
+        : {
+            contract: 'leaf.customization-stage-job.v1',
+            change_set_id: 'dead-authoring-0001',
+            status: 'running',
+            phase: 'authoring',
+            retry_after_ms: 250,
+          }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers,
+        body: JSON.stringify(body),
+      })
+      return
+    }
+    const result = catProofResponse({ method: request.method(), path: url.pathname }, proofState)
+    await route.fulfill({
+      status: result.status,
+      contentType: result.body == null ? undefined : 'application/json',
+      body: result.body == null ? '' : JSON.stringify(result.body),
+      headers,
+    })
+  })
+
+  await page.goto('/try?proof=1')
+  await page.getByRole('tab', { name: 'Author' }).click()
+  await page.getByLabel('What should the tool do?').fill('count panels near the ridge line')
+  await page.getByRole('button', { name: 'Generate tool' }).click()
+  // The terminal failure reaches the operator as a red failure carrying the
+  // server's reason string — not silence, not an eternal authoring spinner,
+  // and not the calm "temporarily unavailable" gate.
+  await expect(page.getByText(/Agent SDK auth failure: oauth_org_not_allowed/)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText(/author the tool/)).toBeVisible()
+  await expect(page.getByText(/Authoring service is temporarily unavailable/)).toHaveCount(0)
+  await expect(page.getByText(/Authoring with the agent/)).toHaveCount(0)
+  await expect(page.locator('.authored')).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
 })
 

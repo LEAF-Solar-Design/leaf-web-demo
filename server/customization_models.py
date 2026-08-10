@@ -81,6 +81,7 @@ class ChangeSet:
     stage_heartbeat_at: Optional[int] = None
     stage_next_attempt_at: int = 0
     stage_error_code: Optional[str] = None
+    stage_error_message: Optional[str] = None
     stage_error_retryable: bool = False
     stage_phase: str = "queued"
     stage_started_at: Optional[str] = None

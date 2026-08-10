@@ -872,6 +872,12 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"POSIX advisory locking only",)),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
+        # Async stage queue: reservation/lease/worker semantics AND the terminal
+        # failure-visibility guards (a harness-answered job failure must FAIL the
+        # change set on attempt 1 with the harness's reason readable from stage
+        # status). Was never registered, so none of it ran in CI.
+        Suite("server-customization-async-stage", "server customization async stage", "pytest",
+              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 47),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
@@ -1098,6 +1104,12 @@ def build_suites() -> List[Suite]:
         Suite("web-author-quota-gate",
               "web daily authoring 429 renders a calm QuotaGate", "script", WEB,
               [_npm(), "run", "proof:author-quota-gate"], None),
+        # Async authoring lifecycle: resume-one-exact-revision, pointer scoping,
+        # poll-URL guards, and failure visibility (a failed stage renders the
+        # server's error.message instead of an eternal authoring spinner).
+        Suite("web-async-author-stage",
+              "web async authoring stage lifecycle + failure visibility", "script", WEB,
+              [_npm(), "run", "proof:async-author-stage"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #

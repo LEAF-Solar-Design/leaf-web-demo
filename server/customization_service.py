@@ -806,6 +806,11 @@ class CustomizationService:
             result["error"] = {
                 "reason_code": change.stage_error_code or "customization_stage_failed",
                 "retryable": bool(change.stage_error_retryable),
+                # The terminal reason a tenant can act on ("Agent SDK auth
+                # failure: ..."), persisted from the harness's own error body.
+                # Additive: absent when no reason was captured.
+                **({"message": change.stage_error_message}
+                   if change.stage_error_message else {}),
             }
         return result
 
@@ -848,6 +853,77 @@ class CustomizationService:
             raise CustomizationServiceError("invalid_staged_catalog", 502)
         return dict(tool)
 
+    # The only harness failure messages that may cross the boundary VERBATIM.
+    # The harness's catch-all 500 serializes raw exception messages (only its
+    # stderr copy is token-redacted), so an arbitrary message can carry a
+    # credential fragment, internal URL, or path — length and printable-char
+    # filtering are not secret redaction (sol-critic, PR #553). These full-match
+    # patterns pin the deliberate, authored Agent SDK terminal failures
+    # (agentSdkRunner.ts); anything else surfaces as reason_code only, and the
+    # full text stays in the harness's own log for operators.
+    _SAFE_HARNESS_REASONS = (
+        re.compile(
+            r"Agent SDK auth failure: "
+            r"(?:authentication_failed|oauth_org_not_allowed|billing_error)"
+        ),
+        re.compile(
+            r"Agent SDK rate limited"
+            r"(?: \(retry after ~?\d+s\)| \(retry horizon unknown\))?"
+        ),
+        re.compile(
+            r"Agent SDK spend cap exceeded "
+            r"\(turns=\d+ > \d+ or cost-tokens=\d+ > \d+\)"
+        ),
+    )
+
+    @classmethod
+    def _harness_job_failure(cls, response: Any) -> tuple[bool, str | None]:
+        """Classify an error response: (harness answered, tenant-safe reason).
+
+        DETECTION and SURFACING are deliberately separate (sol-critic round 2,
+        PR #553). A parseable JSON error body carrying a string message means
+        the harness was reachable and ANSWERED: the authoring job itself
+        failed, terminally — regardless of whether its message is safe to
+        show. That is distinct from a transport failure, where nothing about
+        the job is known and retrying is honest.
+
+        The reason is non-None only when it may cross the tenant boundary:
+        either the body's shape marks a deliberate harness refusal
+        (grant_required / llm_quota_exhausted), or the message full-matches a
+        pinned safe pattern. An answered failure with an unpinned message is
+        (True, None): terminal, surfaced as reason_code only.
+        """
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001 - unparseable body: not a harness answer
+            return False, None
+        if not isinstance(body, dict):
+            return False, None
+        error = body.get("error")
+        message = None
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            message = error["message"]
+        elif isinstance(body.get("message"), str):
+            # The harness quota refusal carries its message at the top level.
+            message = body["message"]
+        if not isinstance(message, str) or not message:
+            return False, None
+        cleaned = " ".join(
+            "".join(ch if ch.isprintable() else " " for ch in message).split()
+        )[:300]
+        if not cleaned:
+            return True, None
+        # Shape-marked deliberate refusals: the §16 legacy lane already
+        # forwards the grant message verbatim, and the quota message is a
+        # fixed authored constant.
+        if body.get("grant_required") is True:
+            return True, cleaned
+        if body.get("errorCode") == "llm_quota_exhausted":
+            return True, cleaned
+        if any(p.fullmatch(cleaned) for p in cls._SAFE_HARNESS_REASONS):
+            return True, cleaned
+        return True, None
+
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
             tenant_id,
@@ -884,7 +960,29 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            # Class-qualified: _harness_stage is also exercised unbound
+            # (self=None), a convention test_customization_refusal_observability
+            # pins, so no attribute lookup may go through self.
+            answered, reason = (
+                CustomizationService._harness_job_failure(response)
+                if response is not None else (False, None)
+            )
+            if answered:
+                # The harness answered with its own failure reason: the
+                # authoring JOB failed terminally. Filing it as "unavailable"
+                # would defer and re-run authoring for minutes while the
+                # workspace shows nothing, so this raises a distinct code the
+                # worker fails immediately, carrying the harness's reason for
+                # stage status to surface.
+                error = CustomizationServiceError(
+                    "customization_author_job_failed", 502,
+                    f"harness_stage_job_failed: {url}/author/stage "
+                    f"status={status}",
+                )
+                error.harness_reason = reason
+                raise error from exc
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
                 f"harness_stage_failed: {url}/author/stage status={status} "

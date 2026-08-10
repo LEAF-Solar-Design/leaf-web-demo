@@ -679,6 +679,230 @@ def test_ambiguous_transport_failure_waits_past_harness_lease(store):
     assert store.claim_stage(owner="worker-b", lease_seconds=1) is None
 
 
+class _AnsweredWithError(Exception):
+    """Transport-layer stand-in: the harness answered an HTTP error."""
+
+    def __init__(self, response):
+        super().__init__("harness answered with an error status")
+        self.response = response
+
+
+class _HarnessErrorResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self._body = body
+
+    def raise_for_status(self):
+        raise _AnsweredWithError(self)
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _authorized_stage_change(store, monkeypatch, *, key="job-failure"):
+    change, created = store.reserve_stage(
+        tenant_id="tenant-a",
+        idempotency_key=key,
+        base_commit=BASE,
+        desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject=ALICE,
+        request_description=DESCRIPTION,
+        request_fingerprint=FINGERPRINT,
+        authority_session_id="session-a",
+        authority_turn_id="turn-a",
+    )
+    assert created
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_args: ALICE)
+    monkeypatch.setattr(
+        customization_service, "_harness_config",
+        lambda: ("http://harness.invalid", "secret"),
+    )
+    return change
+
+
+def test_harness_answered_job_failure_is_terminal_and_carries_reason(
+    store, monkeypatch
+):
+    """The incident class: the harness ran the job and reported WHY it died."""
+    change = _authorized_stage_change(store, monkeypatch)
+    response = _HarnessErrorResponse(500, {
+        "error": {"message": "Agent SDK auth failure: oauth_org_not_allowed"},
+    })
+    monkeypatch.setattr(
+        "requests.post", lambda *_args, **_kwargs: response
+    )
+    with pytest.raises(CustomizationServiceError) as caught:
+        CustomizationService(store)._harness_stage(
+            "tenant-a", DESCRIPTION, change
+        )
+    assert caught.value.code == "customization_author_job_failed"
+    assert caught.value.status_code == 502
+    assert caught.value.harness_reason == (
+        "Agent SDK auth failure: oauth_org_not_allowed"
+    )
+
+
+def test_harness_transport_failure_without_reason_stays_unavailable(
+    store, monkeypatch
+):
+    change = _authorized_stage_change(store, monkeypatch, key="transport-failure")
+    response = _HarnessErrorResponse(502, ValueError("not json"))
+    monkeypatch.setattr(
+        "requests.post", lambda *_args, **_kwargs: response
+    )
+    with pytest.raises(CustomizationServiceError) as caught:
+        CustomizationService(store)._harness_stage(
+            "tenant-a", DESCRIPTION, change
+        )
+    assert caught.value.code == "customization_harness_unavailable"
+    assert not hasattr(caught.value, "harness_reason")
+
+
+@pytest.mark.parametrize("body,expected", [
+    # Pinned Agent SDK terminal failures: answered, and surfaced verbatim
+    # (the incident class).
+    ({"error": {"message": "Agent SDK auth failure: oauth_org_not_allowed"}},
+     (True, "Agent SDK auth failure: oauth_org_not_allowed")),
+    ({"error": {"message": "Agent SDK auth failure: billing_error"}},
+     (True, "Agent SDK auth failure: billing_error")),
+    ({"error": {"message": "Agent SDK rate limited (retry after ~42s)"}},
+     (True, "Agent SDK rate limited (retry after ~42s)")),
+    ({"error": {"message": "Agent SDK rate limited (retry horizon unknown)"}},
+     (True, "Agent SDK rate limited (retry horizon unknown)")),
+    ({"error": {"message":
+      "Agent SDK spend cap exceeded (turns=9 > 8 or cost-tokens=100 > 50)"}},
+     (True, "Agent SDK spend cap exceeded (turns=9 > 8 or cost-tokens=100 > 50)")),
+    # Shape-marked deliberate refusals: answered, surfaced verbatim.
+    ({"grant_required": True,
+      "error": {"message": "tenant t has no eligible Claude grant.",
+                "code": "grant_required"}},
+     (True, "tenant t has no eligible Claude grant.")),
+    ({"errorCode": "llm_quota_exhausted",
+      "message": "all authorized Claude mounts are temporarily unavailable"},
+     (True, "all authorized Claude mounts are temporarily unavailable")),
+    # An answered failure with an unpinned message is still TERMINAL — but
+    # its message stays reason_code-only: an arbitrary catch-all message can
+    # carry a credential fragment, internal URL, or path (sol-critic, PR #553).
+    ({"error": {"message": "ENOENT /srv/tenants/t/.git x-oauth-basic@internal"}},
+     (True, None)),
+    ({"error": {"message": "Agent SDK auth failure: something_else"}},
+     (True, None)),
+    ({"error": {"message": "Agent SDK auth failure: oauth_org_not_allowed "
+                           "plus trailing junk"}}, (True, None)),
+    ({"error": {"message": "line one\nline\ttwo"}}, (True, None)),
+    ({"error": {"message": "x" * 400}}, (True, None)),
+    ({"error": {"message": "   "}}, (True, None)),
+    # No usable string message at all: not recognizably a harness answer, so
+    # the transport lane (defer/retry) keeps ownership.
+    ({"error": {"message": 7}}, (False, None)),
+    ({"error": "not a dict"}, (False, None)),
+    (["not", "a", "dict"], (False, None)),
+    (ValueError("unparseable body"), (False, None)),
+])
+def test_harness_job_failure_classification(body, expected):
+    response = _HarnessErrorResponse(500, body)
+    assert CustomizationService._harness_job_failure(response) == expected
+
+
+def test_multiline_grant_message_is_collapsed_before_surfacing():
+    """Sanitization still applies to shape-marked messages."""
+    response = _HarnessErrorResponse(401, {
+        "grant_required": True,
+        "error": {"message": "no linked\nClaude grant", "code": "grant_required"},
+    })
+    assert CustomizationService._harness_job_failure(response) == (
+        True, "no linked Claude grant"
+    )
+
+
+def test_unallowlisted_answered_failure_is_still_terminal_without_a_message(
+    store, monkeypatch
+):
+    """Detection is separate from surfacing (sol-critic round 2): an answered
+    catch-all failure whose message is not pinned safe must STILL fail on
+    attempt 1 as customization_author_job_failed — with no verbatim reason."""
+    change = _authorized_stage_change(store, monkeypatch, key="unsafe-reason")
+    response = _HarnessErrorResponse(500, {
+        "error": {"message": "ENOENT /srv/tenants/t/.git x-oauth-basic@internal"},
+    })
+    monkeypatch.setattr("requests.post", lambda *_args, **_kwargs: response)
+    with pytest.raises(CustomizationServiceError) as caught:
+        CustomizationService(store)._harness_stage(
+            "tenant-a", DESCRIPTION, change
+        )
+    assert caught.value.code == "customization_author_job_failed"
+    assert caught.value.harness_reason is None
+
+
+def test_author_job_failure_fails_first_attempt_and_status_carries_reason(
+    store,
+):
+    """One failed dispatch = terminal FAILED with the harness reason readable
+    from stage status — no 3x135s retry window hiding the truth."""
+    change = queued(store)
+    service = CustomizationService(store)
+    error = CustomizationServiceError("customization_author_job_failed", 502)
+    error.harness_reason = "Agent SDK auth failure: oauth_org_not_allowed"
+    service.dispatch_stage = lambda _change: (_ for _ in ()).throw(error)
+    assert customization_stage_worker.run_once(
+        "worker-a", service=service, lease_seconds=1
+    )
+    durable = store.get_change_set(
+        tenant_id="tenant-a", change_set_id=change.change_set_id
+    )
+    assert durable.state is ChangeState.FAILED
+    assert durable.stage_attempt == 1
+    assert durable.stage_error_code == "customization_author_job_failed"
+    assert durable.stage_error_message == (
+        "Agent SDK auth failure: oauth_org_not_allowed"
+    )
+    status = service.stage_status(
+        tenant="tenant-a", change_set_id=change.change_set_id
+    )
+    assert status["status"] == "failed"
+    assert status["phase"] == "failed"
+    assert status["error"] == {
+        "reason_code": "customization_author_job_failed",
+        "retryable": True,
+        "message": "Agent SDK auth failure: oauth_org_not_allowed",
+    }
+
+
+def test_transport_exhaustion_fails_without_inventing_a_message(
+    store, monkeypatch
+):
+    """The unreachable-harness lane keeps its defer/retry shape, and its
+    terminal status stays additive: no message key when none was captured."""
+    change = queued(store)
+    service = CustomizationService(store)
+    service.dispatch_stage = lambda _change: (_ for _ in ()).throw(
+        CustomizationServiceError("customization_harness_unavailable", 503)
+    )
+    clock = [1000.0]
+    monkeypatch.setattr(customization_store.time, "time", lambda: clock[0])
+    for _attempt in range(3):
+        assert customization_stage_worker.run_once(
+            "worker-a", service=service, lease_seconds=1
+        )
+        clock[0] += customization_stage_worker.DEFAULT_RETRY_SECONDS + 1
+    durable = store.get_change_set(
+        tenant_id="tenant-a", change_set_id=change.change_set_id
+    )
+    assert durable.state is ChangeState.FAILED
+    assert durable.stage_error_code == "customization_harness_unavailable"
+    assert durable.stage_error_message is None
+    status = service.stage_status(
+        tenant="tenant-a", change_set_id=change.change_set_id
+    )
+    assert status["error"] == {
+        "reason_code": "customization_harness_unavailable",
+        "retryable": True,
+    }
+
+
 def test_worker_does_not_reconcile_success_after_guard_loss(store, monkeypatch):
     change = queued(store)
     service = CustomizationService(store)
