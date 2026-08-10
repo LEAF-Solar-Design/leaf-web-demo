@@ -21,13 +21,51 @@ WORKDIR /app
 # runner's VPC has no port-80 egress, which only surfaces when a base-image
 # bump busts the apt layer cache (two identical failures on 2026-08-04:
 # "Unable to connect to deb.debian.org:http").
+#
+# --- dwg2dxf (GNU libredwg): the APS-free guest DWG read lane. ----------------
+# server/dwg_convert.py runs it as a sandboxed SUBPROCESS converting an
+# uploaded .dwg to ASCII DXF for the dxf_intake parser (guest_uploads engine
+# `local`; CONTRACT-ADDENDUM §19).
+#   * Built from source because Debian trixie ships NO libredwg package
+#     (verified against this exact base image 2026-08-10: `apt-cache policy/
+#     search libredwg*` empty beside a known-positive control).
+#   * Provenance: the canonical GNU release tarball, version + sha256 pinned
+#     below; GPG signatures live beside it at the same URL.
+#   * LICENSE (GPL-3.0+): consumed strictly across a process boundary —
+#     subprocess only, never linked or bound into the Python process (the
+#     load-bearing note lives in server/dwg_convert.py). The binary ships only
+#     inside this server image and is never distributed to end users.
+#   * --disable-werror: GCC 14 (trixie) promotes -Walloc-size findings in
+#     0.13.3's encode.c to errors; upstream ships this switch for exactly that.
+#   * --disable-shared --disable-bindings: one static binary, no bindings.
+#   * The toolchain is purged in the SAME layer; `dwg2dxf --version` at the
+#     end is the build-time proof the binary landed and runs.
+# NOTE: the `apt-get install ... git` prefix below is pinned verbatim by
+# server/tests/test_postgres_container_wiring.py (_PINNED_GIT_INSTALL).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     -exec sed -i \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
  && apt-get update \
- && apt-get install -y --no-install-recommends git \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends git curl ca-certificates \
+      xz-utils gcc make libc6-dev \
+ && curl -fsSL https://ftp.gnu.org/gnu/libredwg/libredwg-0.13.3.tar.xz \
+      -o /tmp/libredwg.tar.xz \
+ && echo "83f1f6e78a744777a481ff4520e4cef3f8ac4b2c1c25671077ca12fe81e8816e  /tmp/libredwg.tar.xz" \
+      | sha256sum -c - \
+ && tar -xJf /tmp/libredwg.tar.xz -C /tmp \
+ && cd /tmp/libredwg-0.13.3 \
+ && ./configure --disable-shared --disable-bindings --disable-werror \
+      > /tmp/libredwg-configure.log 2>&1 \
+ && make -j"$(nproc)" > /tmp/libredwg-make.log 2>&1 \
+ && install -s -m755 programs/dwg2dxf /usr/local/bin/dwg2dxf \
+ && cd / \
+ && rm -rf /tmp/libredwg-0.13.3 /tmp/libredwg.tar.xz \
+      /tmp/libredwg-configure.log /tmp/libredwg-make.log \
+ && apt-get purge -y curl xz-utils gcc make libc6-dev \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && dwg2dxf --version
 
 # --- Python deps: server + platform + da (the three the app imports). ---------
 # psycopg[binary] ships its own libpq wheel, so no apt libpq-dev is needed.

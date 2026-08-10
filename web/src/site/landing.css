@@ -331,6 +331,11 @@
 .tc-result-details { display: flex; justify-content: flex-end; padding: 0 12px 12px; }
 .drawing-upload { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 10px; border-top: 1px solid #27272a; }
 .drawing-upload input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.drawing-upload-engine { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; }
+.drawing-upload-engine-label { font-size: 11px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.04em; }
+.drawing-upload-engine-opt { opacity: 0.65; }
+.drawing-upload-engine-opt.selected { opacity: 1; outline: 1px solid #22c55e; }
+.drawing-upload-engine-opt[disabled] { opacity: 0.35; }
 .drawing-upload-note { font-size: 11px; color: #71717a; }
 .drawing-upload-error { flex: 1 1 100%; font-size: 11px; color: #e24947; }
 .drawing-upload-ready { font-size: 11px; color: #22c55e; }

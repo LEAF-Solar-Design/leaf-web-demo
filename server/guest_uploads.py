@@ -25,9 +25,17 @@ DEFAULT, in both modes — the DWG extract Activity binds HostDwg to a fixed
 With LEAF_GUEST_DXF_EXTRACT=aps AND APS_LIVE=1, a .dxf instead goes through the
 credential-holding broker to the DXF-correct Activity (HostDwg localName
 `input.dxf`), a real full-fidelity APS extract that costs a paid run like DWG.
-A .dwg goes through the broker (POST /broker/extract {upload: true}) at
-APS_LIVE=1, and fails honestly (APS_UNAVAILABLE) at APS_LIVE=0 because no local
-DWG reader exists.
+A .dwg extracts through one of TWO engines, chosen per upload (the `engine`
+form field the /try toggle sends) with LEAF_GUEST_DWG_EXTRACT as the server
+default (see dwg_extract_mode):
+  * `local` — server/dwg_convert.py runs GNU libredwg's dwg2dxf as a sandboxed
+    subprocess (GPL-3 note there: subprocess only, never linked) converting
+    THEIR staged bytes to ASCII DXF, which then feeds the SAME dxf_intake
+    parser the .dxf path uses. Free, APS-free, honest — a conversion failure
+    lands in the marker as a structured rejection, never partial intake.
+  * `aps` — the broker (POST /broker/extract {upload: true}) at APS_LIVE=1,
+    failing honestly (APS_UNAVAILABLE) at APS_LIVE=0, byte-identical to the
+    pre-engine behavior.
 """
 from __future__ import annotations
 
@@ -112,6 +120,35 @@ def _dxf_extract_mode() -> str:
     return "aps" if mode == "aps" else "local"
 
 
+def dwg_extract_mode() -> str:
+    """The server-DEFAULT engine for live DWG uploads: `local` (dwg2dxf
+    conversion feeding the dxf_intake parser — free, APS-free) or `aps` (the
+    paid broker Activity). A per-upload `engine` form field (the /try toggle)
+    overrides this for that upload; the chosen engine is recorded in the
+    upload marker so poll-triggered re-extractions replay the same choice.
+
+    LEAF_GUEST_DWG_EXTRACT unset (or any unrecognized value) resolves as
+    `auto`: local when the converter binary is present, aps otherwise — which
+    preserves the pre-engine behavior on deployments without the binary, and
+    means a typo can never silently change which engine (and whose bill) a
+    guest upload lands on."""
+    mode = os.environ.get("LEAF_GUEST_DWG_EXTRACT", "auto").strip().lower()
+    if mode in {"local", "aps"}:
+        return mode
+    import dwg_convert  # lazy: keep module import graph flat
+    return "local" if dwg_convert.available() else "aps"
+
+
+def _resolved_dwg_engine(marker: Dict[str, Any]) -> str:
+    """The engine THIS extraction attempt runs: the marker's upload-time
+    choice when it is a recognized value, else the server default resolved
+    now. A marker written before the engine field existed carries none and so
+    keeps following the deployment default — exactly what it did when it was
+    uploaded."""
+    engine = marker.get("extract_engine")
+    return engine if engine in ("local", "aps") else dwg_extract_mode()
+
+
 def purge_interval_s() -> float:
     try:
         return float(os.environ.get("LEAF_GUEST_PURGE_INTERVAL_S", "300"))
@@ -145,6 +182,7 @@ def policy_view() -> Dict[str, Any]:
     frontend renders ALL retention/size copy from THIS — zero copy drift by
     construction."""
     import deps  # lazy: avoid import cycle at module load
+    import dwg_convert  # lazy: same reason
     return {
         "enabled": enabled(),
         "retention_hours": retention_hours(),
@@ -152,6 +190,13 @@ def policy_view() -> Dict[str, Any]:
         "accepted": list(ACCEPTED_EXTENSIONS),
         "extract_live": bool(deps.APS_LIVE),
         "dxf_local_ok": True,
+        # DWG engine toggle (operator mandate 2026-08-10): the /try upload
+        # panel renders its APS-cloud-vs-Local control from THESE fields, so
+        # the toggle the user sees and the routing the server enforces cannot
+        # drift apart.
+        "dwg_engines": ["local", "aps"],
+        "dwg_engine_default": dwg_extract_mode(),
+        "dwg_local_ok": dwg_convert.available(),
     }
 
 
@@ -178,14 +223,25 @@ def new_account_upload_drawing_id() -> str:
     return str(uuid.uuid4())
 
 
-def derived_upload_drawing_id(tenant_id: str, data: bytes) -> str:
+def derived_upload_drawing_id(tenant_id: str, data: bytes,
+                              engine: Optional[str] = None) -> str:
     """Content-derived id for GUEST uploads (same ``u-<10 hex>`` shape as the
-    random mint): sha256(tenant : content). This is the upload idempotency
-    key — a guest re-posting the SAME bytes lands on the SAME drawing, so an
-    aborted upload whose receipt the client never saw is recovered by
-    re-uploading instead of duplicated (FE review round 3, MAJOR)."""
+    random mint): sha256(tenant [: engine] : content). This is the upload
+    idempotency key — a guest re-posting the SAME bytes lands on the SAME
+    drawing, so an aborted upload whose receipt the client never saw is
+    recovered by re-uploading instead of duplicated (FE review round 3,
+    MAJOR).
+
+    The RESOLVED DWG engine is folded into the digest when one applies
+    (sol-critic #552 round-1 RED): the two engines produce different intake
+    fidelity, so the same bytes on a DIFFERENT engine must be a DIFFERENT
+    drawing — a dedupe hit must never silently override the visible toggle.
+    Same bytes + same engine still recover the same receipt; .dxf uploads
+    (engine None) keep the original digest."""
+    scope = f":{engine}" if engine else ""
     digest = hashlib.sha256(
-        tenant_id.encode("utf-8") + b":" + hashlib.sha256(data).digest()).hexdigest()
+        (tenant_id + scope).encode("utf-8") + b":"
+        + hashlib.sha256(data).digest()).hexdigest()
     return "u-" + digest[:10]
 
 
@@ -839,7 +895,8 @@ def _finalize_pg_ready_attempt(
 
 
 def new_marker(*, filename: str, data: bytes, tenant_kind: str,
-               source_ext: str = "") -> Dict[str, Any]:
+               source_ext: str = "",
+               extract_engine: Optional[str] = None) -> Dict[str, Any]:
     now = _now()
     expires = (_iso(now + timedelta(hours=retention_hours()))
                if tenant_kind == "guest" else None)
@@ -852,6 +909,11 @@ def new_marker(*, filename: str, data: bytes, tenant_kind: str,
         # new attempt's state.
         "attempt": secrets.token_hex(8),
         "source_ext": source_ext,  # write_loop's live-write guard reads this
+        # DWG engine RESOLVED AT UPLOAD TIME (route: request field or
+        # dwg_extract_mode default) and carried here so every worker of this
+        # attempt — including poll-triggered re-extractions — replays the
+        # exact engine the uploader saw. None for .dxf.
+        "extract_engine": extract_engine,
         "filename": str(filename),
         "bytes": len(data),
         "content_sha256": hashlib.sha256(data).hexdigest(),
@@ -1268,6 +1330,30 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             import dxf_intake
             intake = dxf_intake.parse_dxf_file(source_path,
                                                source_name=marker.get("filename") or drawing_id)
+        elif _resolved_dwg_engine(marker) == "local":
+            # APS-FREE DWG READ: dwg2dxf (sandboxed subprocess; GPL-3 note in
+            # dwg_convert.py — subprocess only, never linked) converts THEIR
+            # staged bytes to ASCII DXF, and the SAME dxf_intake parser the
+            # .dxf path uses reads the result. Zero new intake code; the
+            # honesty rule is inherited from the parser. Every conversion
+            # failure is a structured rejection landing in the marker below —
+            # never a crash, never partial intake, and NEVER a silent
+            # fallback to the paid APS path.
+            import dwg_convert
+            import dxf_intake
+            try:
+                with dwg_convert.converted_dxf(source_path) as dxf_path:
+                    intake = dxf_intake.parse_dxf_file(
+                        dxf_path,
+                        source_name=marker.get("filename") or drawing_id)
+            except dwg_convert.ConvertError as exc:
+                raise _ExtractError(exc.error_code, exc.message,
+                                    exc.retryable) from exc
+            except dxf_intake.DxfParseError as exc:
+                raise _ExtractError(
+                    "BAD_PARAMS",
+                    f"the converted DXF could not be parsed: {exc}",
+                    False) from exc
         elif deps.APS_LIVE:
             intake = _extract_via_broker(
                 tenant_id, drawing_id, str(marker.get("attempt") or ""))

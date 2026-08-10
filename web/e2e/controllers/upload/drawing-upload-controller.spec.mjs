@@ -95,6 +95,31 @@ test('a failure arriving on the final allowed poll surfaces the server message, 
   expect(controller.getSnapshot().error).not.toContain('still running')
 })
 
+test('engine seeds from the policy default and rides every upload', async () => {
+  const engines = []
+  const controller = createDrawingUploadController({
+    pollMs: 0,
+    services: {
+      policy: async () => ({
+        enabled: true, accepted: ['.dwg'], max_bytes: 1024,
+        dwg_engines: ['local', 'aps'], dwg_engine_default: 'local', dwg_local_ok: true,
+      }),
+      upload: async (uploaded, engine) => { engines.push(engine); return { drawing_id: 'd1', status: 'extracting' } },
+      wait: async () => {},
+      status: async () => ({ status: 'ready' }),
+      intake: async () => ({}),
+    },
+  })
+  await controller.loadPolicy()
+  expect(controller.getSnapshot().engine).toBe('local')
+  await controller.upload({ name: 'roof.dwg', size: 10 })
+  controller.setEngine('aps')
+  controller.setEngine('garbage') // unrecognized values never land
+  expect(controller.getSnapshot().engine).toBe('aps')
+  await controller.upload({ name: 'roof.dwg', size: 10 })
+  expect(engines).toEqual(['local', 'aps'])
+})
+
 test('cancel prevents a late upload receipt from loading or seating intake', async () => {
   let release
   let intakeCalls = 0

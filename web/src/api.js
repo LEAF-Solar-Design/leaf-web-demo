@@ -825,9 +825,12 @@ export async function getGuestUploadPolicy() {
   return http('/api/site/guest-upload-policy', undefined, STARTUP_FETCH_TIMEOUT_MS)
 }
 
-export async function uploadDrawing(file, guestSession = null) {
+export async function uploadDrawing(file, guestSession = null, engine = null) {
   const form = new FormData()
   form.append('file', file)
+  // DWG extraction engine ('local' | 'aps') — the /try toggle's choice. The
+  // server validates it and applies it to .dwg only.
+  if (engine) form.append('engine', engine)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
   const uploadGuestSession = guestSession || storedGuestSession()
   if (uploadGuestSession) headers['X-Guest-Session'] = uploadGuestSession

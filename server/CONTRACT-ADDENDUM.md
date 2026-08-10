@@ -1336,15 +1336,19 @@ are built against their defaults; both are env-tunable without a code change.
   parsed locally by default — CPU on the service, not an APS charge — but a
   paid APS run too when `LEAF_GUEST_DXF_EXTRACT=aps`, see the Extraction note
   below).
-  GUEST uploads are idempotent by content: the drawing id derives from
-  (tenant, sha256(bytes)), so re-posting the same bytes as the same guest
+  GUEST uploads are idempotent by content AND engine: the drawing id derives
+  from (tenant, resolved-DWG-engine, sha256(bytes)) — engine omitted for
+  .dxf — so re-posting the same bytes as the same guest ON THE SAME ENGINE
   returns the SAME drawing's receipt (its CURRENT `status`, original
   retention window, fresh session token) and consumes no quota — an aborted
   upload whose 202 the client never saw is recovered by re-uploading, never
-  duplicated. A terminally `failed` attempt is the exception: its retry
-  reuses the derived id, replaces the failure, and counts quota (it
-  extracts again). Account uploads mint random ids (two intentional copies
-  of one file stay two drawings).
+  duplicated. The same bytes on the OTHER engine are a DIFFERENT drawing
+  with their own real extraction and quota count: the two engines produce
+  different intake fidelity, so a dedupe hit must never silently override
+  the visible toggle (sol-critic #552). A terminally `failed` attempt is
+  the exception: its retry reuses the derived id, replaces the failure, and
+  counts quota (it extracts again). Account uploads mint random ids (two
+  intentional copies of one file stay two drawings).
 * `GET /api/drawings/{id}/upload-status` — the upload marker's honest state
   (`extracting|ready|failed` + §10 error; stale `extracting` past
   `LEAF_UPLOAD_EXTRACT_TIMEOUT_S` is PERSISTED as failed/TIMEOUT).
@@ -1371,12 +1375,38 @@ staged upload files, drops empty tenant dirs, and appends one
 with NO retention promise (and none is shown).
 
 **Extraction** (`guest_uploads.run_extraction`, background thread + durable
-marker — deliberately NOT the tool-shaped jobs spine): `.dwg` at APS_LIVE=1
-goes through `POST /broker/extract {upload: true}`; the broker's
-`_resolve_upload_dwg` applies the IDENTICAL strictness as the library resolver
-(bare name, no symlink, parent must BE `data/uploads/`) and the two namespaces
-never cross-resolve. At APS_LIVE=0 a .dwg fails honestly (APS_UNAVAILABLE: no
-local DWG reader exists).
+marker — deliberately NOT the tool-shaped jobs spine): `.dwg` extraction has
+two ENGINES, chosen per upload by the `engine` multipart field (the /try
+panel's visible APS-cloud-vs-Local toggle sends it; values `local` | `aps`,
+anything else is a 400) with `LEAF_GUEST_DWG_EXTRACT` as the server default
+(`local` | `aps`; unset or unrecognized = `auto`: local when the converter is
+present, aps otherwise). The resolved engine is recorded in the upload marker
+(`extract_engine`) so poll-triggered re-extractions replay the uploader's
+exact choice:
+
+- `local` — `server/dwg_convert.py` runs GNU libredwg's `dwg2dxf` as a
+  sandboxed subprocess (fixed argv, no shell, scratch dir always deleted,
+  `LEAF_DWG_CONVERT_TIMEOUT_S` wall clock, `LEAF_DWG_CONVERT_MAX_OUTPUT_BYTES`
+  output cap; binary from `LEAF_DWG2DXF_BIN` or PATH, shipped in the app
+  image — provenance + GPL-3 subprocess-boundary note in
+  `deploy/Dockerfile.app` and `dwg_convert.py`) converting the staged bytes to
+  ASCII DXF for the SAME `dxf_intake` parser the .dxf path uses. Free,
+  APS-free, honest: a malformed/hostile DWG lands a structured failed marker
+  (BAD_PARAMS/TIMEOUT/INTERNAL, never a crash, never partial intake) and
+  there is NO silent fallback to the paid engine in either direction. An
+  upload explicitly requesting `local` where no converter exists is refused
+  up front (503, before the quota charge). The v1 version blob still holds
+  the RAW DWG bytes exactly like the aps engine (a later live write signs
+  and sends them as HostDwg); only the intake cache comes from conversion.
+- `aps` — byte-identical to the pre-engine behavior: at APS_LIVE=1 through
+  `POST /broker/extract {upload: true}`; the broker's `_resolve_upload_dwg`
+  applies the IDENTICAL strictness as the library resolver (bare name, no
+  symlink, parent must BE `data/uploads/`) and the two namespaces never
+  cross-resolve. At APS_LIVE=0 it fails honestly (APS_UNAVAILABLE).
+
+The policy payload advertises the toggle (`dwg_engines`, `dwg_engine_default`,
+`dwg_local_ok`) so the control the /try panel renders and the routing the
+server enforces cannot drift apart.
 
 `.dxf` extraction has two paths, chosen by `LEAF_GUEST_DXF_EXTRACT`:
 
@@ -1406,7 +1436,11 @@ any token defect falls through to the ordinary 401.
 not-rooftop test), `tests/test_guest_fail_closed.py` (7),
 `tests/test_guest_purge.py` (6 — short-override deletion proof),
 `tests/test_guest_session_auth.py` (12 — incl. the json↔hardcoded policy
-mirror), `tests/test_broker_upload_resolver.py` (19).
+mirror), `tests/test_broker_upload_resolver.py` (19),
+`tests/test_dwg_local_extract.py` (the local DWG engine: sandboxed conversion,
+fail-closed rejections, engine routing + policy advertisement; its
+real-dwg2dxf test runs wherever the binary exists and skips allowlisted
+elsewhere).
 
 **Review round 2 hardening** (sol-critic round-1 findings, all addressed):
 the offline `/api/session` route and offline `/broker/run` now resolve a

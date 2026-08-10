@@ -28,10 +28,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 import deps
+import dwg_convert
 import entitlements
 import guest_uploads
 import write_loop
@@ -174,13 +175,15 @@ def _emit_upload_event(resp: Any, ident: Dict[str, Any]) -> None:
 def upload_drawing(
     request: Request,
     file: UploadFile = File(...),
+    engine: Optional[str] = Form(default=None),
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
     ident: Dict[str, Any] = {}
     resp = _upload_drawing_gated(
-        request, file, x_tenant_id, authorization, x_guest_session, ident)
+        request, file, x_tenant_id, authorization, x_guest_session, ident,
+        engine=engine)
     _emit_upload_event(resp, ident)
     return resp
 
@@ -192,6 +195,7 @@ def _upload_drawing_gated(
     authorization: Optional[str],
     x_guest_session: Optional[str],
     ident: Optional[Dict[str, Any]] = None,
+    engine: Optional[str] = None,
 ) -> Any:
     if not write_loop.upload_import_mutations_enabled():
         return error_response(
@@ -235,6 +239,7 @@ def _upload_drawing_gated(
             authorization,
             x_guest_session,
             ident,
+            engine=engine,
         )
 
 
@@ -245,6 +250,7 @@ def _upload_drawing(
     authorization: Optional[str],
     x_guest_session: Optional[str],
     ident: Optional[Dict[str, Any]] = None,
+    engine: Optional[str] = None,
 ) -> Any:
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
@@ -292,6 +298,29 @@ def _upload_drawing(
         return error_response(ErrorCode.BAD_PARAMS, reason, retryable=False,
                               status_code=400)
 
+    # DWG ENGINE — resolved AT UPLOAD TIME so the marker records exactly what
+    # the uploader chose (the /try toggle's `engine` field), or the server
+    # default when the field is absent. Validated for every upload; applied
+    # only to .dwg (the .dxf path keeps LEAF_GUEST_DXF_EXTRACT semantics).
+    raw_engine = (engine or "").strip().lower()
+    if raw_engine and raw_engine not in ("local", "aps"):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "engine must be 'local' or 'aps'", retryable=False,
+            status_code=400)
+    engine_choice: Optional[str] = None
+    if ext == ".dwg":
+        engine_choice = raw_engine or guest_uploads.dwg_extract_mode()
+        if engine_choice == "local" and not dwg_convert.available():
+            # BEFORE the quota charge, deliberately: an upload that is doomed
+            # by deployment configuration must not consume a guest slot.
+            # Never a silent fallback to the paid APS engine.
+            return error_response(
+                ErrorCode.INTERNAL,
+                "local DWG conversion is not available on this deployment; "
+                "choose the APS engine or upload a DXF",
+                retryable=False, status_code=503)
+
     backend = write_loop.upload_backend_for_tenant(str(tenant))
     import store  # importable via write_loop's sys.path setup
 
@@ -307,7 +336,12 @@ def _upload_drawing(
     drawing_id = None
     dedupe_marker = None
     if tenant_kind == "guest":
-        derived = guest_uploads.derived_upload_drawing_id(str(tenant), data)
+        # The RESOLVED engine scopes the derived id for .dwg (None for .dxf):
+        # same bytes + same engine recover the same receipt; same bytes on the
+        # OTHER engine are a different drawing with their own real extraction,
+        # so a dedupe hit can never silently override the visible toggle.
+        derived = guest_uploads.derived_upload_drawing_id(
+            str(tenant), data, engine_choice)
         # ONE critical section for check → quota charge → marker + staged
         # bytes: two concurrent identical uploads cannot both pass the dedupe
         # check — the loser blocks on the lock, then dedupes onto the
@@ -388,7 +422,8 @@ def _upload_drawing(
                     drawing_id = derived
                     marker = guest_uploads.new_marker(
                         filename=file.filename or f"upload{ext}",
-                        data=data, tenant_kind=tenant_kind, source_ext=ext)
+                        data=data, tenant_kind=tenant_kind, source_ext=ext,
+                        extract_engine=engine_choice)
                     try:
                         guest_uploads.write_marker(
                             backend, str(tenant), drawing_id, marker)
@@ -439,7 +474,8 @@ def _upload_drawing(
         # Same effect order and same purge-exclusion lock as the guest path.
         marker = guest_uploads.new_marker(filename=file.filename or f"upload{ext}",
                                           data=data, tenant_kind=tenant_kind,
-                                          source_ext=ext)
+                                          source_ext=ext,
+                                          extract_engine=engine_choice)
         staged = guest_uploads.staged_path(str(tenant), drawing_id, ext)
         with guest_uploads.drawing_lock(str(tenant), drawing_id):
             guest_uploads.write_marker(backend, str(tenant), drawing_id, marker)
