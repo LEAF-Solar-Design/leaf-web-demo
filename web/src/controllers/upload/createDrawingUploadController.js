@@ -59,6 +59,9 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
         if (run !== sequence) return null
         status = await services.status(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
       }
+      if (status.status === 'failed') {
+        throw new Error(status.error?.message || status.error || 'Drawing extraction failed.')
+      }
       if (status.status !== 'ready') {
         throw new Error('Extraction is still running on the server. It has not failed, so reopen the drawing in a few minutes.')
       }
