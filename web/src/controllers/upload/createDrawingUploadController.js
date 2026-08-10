@@ -4,7 +4,11 @@ function message(error) {
   return String(error?.message || error || 'Drawing upload failed.')
 }
 
-export function createDrawingUploadController({ services, onReady, pollMs = 500, maxPolls = 120 } = {}) {
+// pollMs * maxPolls is the client's patience for a server-side extraction that
+// legitimately runs for minutes (the WorkItem ceiling is 600s, the server's own
+// budget 900s). 500ms * 1800 = 900s: giving up sooner reports a failure the
+// server never declared — the 60s default did exactly that on 2026-08-10.
+export function createDrawingUploadController({ services, onReady, pollMs = 500, maxPolls = 1800 } = {}) {
   if (!services) throw new TypeError('createDrawingUploadController requires services')
   let state = { policy: null, policyLoading: false, busy: false, phase: 'idle', error: null, receipt: null }
   let snapshot = state
@@ -55,7 +59,9 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
         if (run !== sequence) return null
         status = await services.status(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
       }
-      if (status.status !== 'ready') throw new Error('Drawing extraction did not finish in time.')
+      if (status.status !== 'ready') {
+        throw new Error('Extraction is still running on the server. It has not failed, so reopen the drawing in a few minutes.')
+      }
       publish({ phase: 'loading' })
       const view = await services.intake(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
       if (run !== sequence) return null
