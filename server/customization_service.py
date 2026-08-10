@@ -806,6 +806,11 @@ class CustomizationService:
             result["error"] = {
                 "reason_code": change.stage_error_code or "customization_stage_failed",
                 "retryable": bool(change.stage_error_retryable),
+                # The terminal reason a tenant can act on ("Agent SDK auth
+                # failure: ..."), persisted from the harness's own error body.
+                # Additive: absent when no reason was captured.
+                **({"message": change.stage_error_message}
+                   if change.stage_error_message else {}),
             }
         return result
 
@@ -848,6 +853,39 @@ class CustomizationService:
             raise CustomizationServiceError("invalid_staged_catalog", 502)
         return dict(tool)
 
+    @staticmethod
+    def _harness_job_failure_reason(response: Any) -> str | None:
+        """Extract the harness's own failure reason from an error response.
+
+        A parseable JSON error body means the harness was reachable and
+        ANSWERED: the authoring job itself failed (the incident class is the
+        Agent SDK dying with an auth failure seconds after dispatch). That is
+        distinct from a transport failure, where nothing about the job is
+        known. Returns a bounded printable string, or None when the response
+        carries no usable reason.
+        """
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001 - any unparseable body means no reason
+            return None
+        if not isinstance(body, dict):
+            return None
+        error = body.get("error")
+        message = None
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            message = error["message"]
+        elif isinstance(body.get("message"), str):
+            # The harness quota refusal carries its message at the top level.
+            message = body["message"]
+        if not message:
+            return None
+        cleaned = " ".join(
+            "".join(ch if ch.isprintable() else " " for ch in message).split()
+        )
+        if not cleaned:
+            return None
+        return cleaned[:300]
+
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
             tenant_id,
@@ -884,7 +922,26 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            reason = (
+                self._harness_job_failure_reason(response)
+                if response is not None else None
+            )
+            if reason is not None:
+                # The harness answered with its own failure reason: the
+                # authoring JOB failed terminally. Filing it as "unavailable"
+                # would defer and re-run authoring for minutes while the
+                # workspace shows nothing, so this raises a distinct code the
+                # worker fails immediately, carrying the harness's reason for
+                # stage status to surface.
+                error = CustomizationServiceError(
+                    "customization_author_job_failed", 502,
+                    f"harness_stage_job_failed: {url}/author/stage "
+                    f"status={status}",
+                )
+                error.harness_reason = reason
+                raise error from exc
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
                 f"harness_stage_failed: {url}/author/stage status={status} "

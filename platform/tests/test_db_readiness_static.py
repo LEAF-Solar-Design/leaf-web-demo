@@ -63,6 +63,7 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (33, "operator_credential_rotations"),
                 (34, "operator_release_candidates"),
                 (35, "session_request_journal"),
+                (36, "customization_stage_error_message"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)

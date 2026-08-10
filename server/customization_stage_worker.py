@@ -1,6 +1,7 @@
 """Durable worker for queued customization stage requests."""
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import threading
@@ -9,6 +10,9 @@ from typing import Any
 
 from customization_models import ChangeState
 from customization_service import CustomizationService, CustomizationServiceError
+
+
+_LOG = logging.getLogger(__name__)
 
 
 DEFAULT_LEASE_SECONDS = 30.0
@@ -95,6 +99,12 @@ def run_once(
             return True
         if exc.code == "customization_harness_unavailable":
             if change.stage_attempt >= 3:
+                _LOG.warning(
+                    "customization_stage_failed: tenant=%s change_set=%s "
+                    "code=%s attempts=%s",
+                    change.tenant_id, change.change_set_id, exc.code,
+                    change.stage_attempt,
+                )
                 service.store.fail_stage_claim(
                     tenant_id=change.tenant_id,
                     change_set_id=change.change_set_id,
@@ -111,12 +121,23 @@ def run_once(
                     delay_seconds=DEFAULT_RETRY_SECONDS,
                 )
         else:
+            # Any other refusal is terminal for this change set NOW — most
+            # importantly a harness-reported authoring-job failure, whose
+            # reason string rides along so stage status can answer WHY.
+            reason_message = getattr(exc, "harness_reason", None)
+            _LOG.warning(
+                "customization_stage_failed: tenant=%s change_set=%s code=%s "
+                "reason=%s",
+                change.tenant_id, change.change_set_id, exc.code,
+                reason_message or "-",
+            )
             service.store.fail_stage_claim(
                 tenant_id=change.tenant_id,
                 change_set_id=change.change_set_id,
                 owner=owner,
                 reason_code=exc.code,
                 retryable=exc.status_code >= 500,
+                reason_message=reason_message,
             )
         return True
     except Exception:
