@@ -2,11 +2,13 @@
  * REAL server-catalog-to-harness regression (PR #541's follow-up requirement
  * for #542): proves that when the trusted operator-owned engine winner
  * carries live APS and runtime APS is enabled, the REAL server catalog
- * (server/catalog.py + server/routers/capabilities.py, computed by a real
- * Python subprocess — see test/fixtures/live-aps-catalog-fixture.py) drives
- * the REAL harness (HttpAppRunClient, never FakeAppRunClient/FAKE_CATALOG)
- * to select `submit_live_solve` for `count-by-layer` inside the REAL
- * ConverseLoop run_capability gate-consult logic (converseLoop.ts).
+ * (server/deps.py's effective_tools_with_provenance — the PRODUCTION seam,
+ * never monkeypatched — + server/catalog.py + server/routers/capabilities.py,
+ * computed by a real Python subprocess over real stores on disk — see
+ * test/fixtures/live-aps-catalog-fixture.py) drives the REAL harness
+ * (HttpAppRunClient, never FakeAppRunClient/FAKE_CATALOG) to select
+ * `submit_live_solve` for `count-by-layer` inside the REAL ConverseLoop
+ * run_capability gate-consult logic (converseLoop.ts).
  *
  * Every prior converseLoop.test.ts coverage of this rung used a hand-typed
  * fake catalog entry (FAKE_CATALOG's "solve-live") that never touched the

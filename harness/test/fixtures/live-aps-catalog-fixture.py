@@ -1,20 +1,27 @@
 """Real server-catalog fixture for the harness cross-language live-APS regression.
 
 Computes the ACTUAL /api/capabilities response body (server/routers/capabilities.py
-+ server/catalog.py, both UNMOCKED) for one scenario of the live-APS "trusted
-operator-owned engine winner" authority chain.
++ server/catalog.py + server/deps.py, ALL UNMOCKED) for one scenario of the
+live-APS "trusted operator-owned engine winner" authority chain.
 
-The provenance seam it exercises (``deps.effective_tools_with_provenance`` /
-``deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE``) has NO production implementation
-anywhere in this repository (confirmed by a repo-wide search, 2026-08-09): it
-is a documented ``getattr(deps, ..., None)``-guarded optional hook (see
-server/routers/capabilities.py), so in the deployed server today
-``operator_owned_engine_source`` always resolves to ``None`` and live APS can
-never turn on. This fixture populates the seam the same way
-server/tests/test_catalog_read_fallback.py already does (monkeypatch AT that
-boundary), then lets the real router and real catalog module compute the
-projection from there — nothing inside catalog.py's selection algebra or
-capabilities.py's routing is mocked.
+THE SEAM IS REAL HERE. Earlier drafts of this fixture replaced
+``deps.effective_tools_with_provenance`` / ``deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE``
+with per-scenario lambdas because the seam had no production implementation yet.
+It does now (server/deps.py, PR #545): every scenario below runs the REAL strict
+provenance fold over REAL stores on disk. The only overrides this fixture makes
+are STORE WIRING, the same sanctioned pattern
+server/tests/test_catalog_tool_source_provenance.py uses:
+
+  * environment knobs read by the real code at their real read points
+    (``APS_LIVE`` before import, ``LEAF_TENANTS_DIR`` for the tenant fold,
+    ``LEAF_CUSTOMIZATION_DB`` pointed at a nonexistent file so the
+    customization authority is naturally absent), and
+  * store LOCATIONS (``deps.ENGINE_REGISTRY`` / ``deps.AUTHORED_STORE`` paths)
+    for scenarios that need a variant registry file or hermetic isolation from
+    a developer's local authored store.
+
+No function or constant of the provenance seam, the catalog algebra, or the
+router is ever replaced.
 
 Printed as one JSON line so harness/test/serverCatalogLiveAps.test.ts can feed
 it, byte-for-byte, into the REAL HttpAppRunClient + real ConverseLoop
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import platform as _stdlib_platform
 import sys
 import sysconfig
@@ -43,88 +51,113 @@ if not callable(getattr(_stdlib_platform, "system", None)):
     _stdlib_platform = importlib.util.module_from_spec(platform_spec)
     platform_spec.loader.exec_module(_stdlib_platform)
     sys.modules["platform"] = _stdlib_platform
-for p in (str(ROOT), str(SERVER_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-import deps  # noqa: E402
-import customization_service  # noqa: E402
-from routers import capabilities as capabilities_router  # noqa: E402
 
 
-# The real engine/registry.json definition for count-by-layer, plus the
-# aps_live marker a trusted engine winner would carry.
-ENGINE_TOOL = {
-    "name": "count-by-layer",
-    "version": "1.0.0",
-    "description": "Counts every model-space entity per layer.",
-    "kind": "script",
-    "engine_op": "count_by_layer",
-    "script": "engine/tools/count_by_layer.lsp",
-    "params": {"type": "object", "properties": {}, "required": []},
-    "returns": {
-        "type": "object",
-        "properties": {"counts": {"type": "object", "additionalProperties": {"type": "integer"}}},
-    },
-    "capabilities": ["drawing.read"],
-    "provenance": {"author": "agent", "created": "2026-07-17T00:00:00Z"},
-    "aps_live": True,
-}
+def _scenario_environment(scenario: str, scratch: Path) -> None:
+    """Set the real environment knobs BEFORE the server modules import.
+
+    ``deps.APS_LIVE`` is read from the environment at import time in
+    production; setting it here is the production path, not a patch.
+    """
+    os.environ["APS_LIVE"] = "0" if scenario == "runtime_off" else "1"
+    # The customization authority is naturally absent: a nonexistent sqlite
+    # path with rollout OFF makes effective_catalog_pin() return None through
+    # its real branches (see customization_service.effective_catalog_pin).
+    os.environ["LEAF_CUSTOMIZATION_DB"] = str(scratch / "absent-customization.sqlite3")
+    for rollout_knob in (
+        "LEAF_CUSTOMIZATION_STORE",
+        "LEAF_CUSTOMIZATION_R5_MODE",
+        "LEAF_CUSTOMIZATION_R6_MODE",
+    ):
+        os.environ.pop(rollout_knob, None)
+    # Tenant fold: OFF unless the scenario needs a tenant-repo shadow.
+    os.environ.pop("LEAF_TENANT_REPO", None)
+    if scenario == "shadow":
+        os.environ["LEAF_TENANTS_DIR"] = str(scratch / "tenants")
+    else:
+        os.environ.pop("LEAF_TENANTS_DIR", None)
 
 
-def _wire(effective_row, source, aps_live_enabled, engine_registry_tools):
-    deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE = "operator_owned_engine"
-    deps.effective_tools_with_provenance = lambda _tenant: [(effective_row, source)]
-    deps.load_engine_registry_tools = lambda: engine_registry_tools
-    deps.all_tools = lambda _tenant: [effective_row]
-    deps.APS_LIVE = aps_live_enabled
-    customization_service.effective_catalog_pin = lambda _tenant: None
+def _real_registry_tool(registry: dict, name: str) -> dict:
+    for tool in registry["tools"]:
+        if tool.get("name") == name:
+            return tool
+    raise SystemExit(f"engine/registry.json no longer defines {name!r}")
 
 
 def run(scenario: str) -> dict:
-    if scenario == "engine_winner_live":
-        # The real regression: a trusted operator-owned engine winner, digest
-        # intact, with runtime APS enabled.
-        _wire(ENGINE_TOOL, "operator_owned_engine", True, [ENGINE_TOOL])
+    scratch = Path(tempfile.mkdtemp(prefix="live-aps-fixture-"))
+    _scenario_environment(scenario, scratch)
 
-    elif scenario == "runtime_off":
-        # Fail-closed (1): identical winner, runtime APS disabled.
-        _wire(ENGINE_TOOL, "operator_owned_engine", False, [ENGINE_TOOL])
+    for p in (str(ROOT), str(SERVER_DIR)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    import deps  # noqa: E402
+    from routers import capabilities as capabilities_router  # noqa: E402
+
+    # Hermetic isolation from a developer's local gitignored authored store:
+    # point the store PATH at an empty file (never replace a loader).
+    empty_authored = scratch / "authored.json"
+    empty_authored.write_text(json.dumps({"tools": []}), encoding="utf-8")
+    deps.AUTHORED_STORE = empty_authored
+    deps._AUTHORED[:] = []
+
+    real_registry = json.loads(deps.ENGINE_REGISTRY.read_text(encoding="utf-8"))
+
+    if scenario in ("engine_winner_live", "runtime_off"):
+        # The real regression (and its runtime-off fail-closed twin): the
+        # SHIPPED engine/registry.json, whose count-by-layer row carries the
+        # aps_live marker PR #541 authorized. Nothing else is wired.
+        pass
 
     elif scenario == "malformed_registry":
-        # Fail-closed (2): point ENGINE_REGISTRY at malformed JSON so the REAL
-        # deps.load_engine_registry_tools() (left unpatched) takes its actual
-        # except-and-fallback branch to tools_fallback.DEFAULT_TOOLS, whose
-        # count-by-layer carries no aps_live marker at all -> no trusted
-        # digest -> fails closed even though the effective row still claims
-        # operator_owned_engine + aps_live True.
-        bad = Path(tempfile.mkstemp(suffix=".json")[1])
+        # Fail-closed (2): point ENGINE_REGISTRY at malformed JSON. The REAL
+        # strict provenance fold raises ToolCatalogProvenanceError, the router
+        # degrades loudly to the forgiving read, and the forgiving loader's
+        # real fallback (tools_fallback.DEFAULT_TOOLS) carries no aps_live
+        # marker -> no trusted digest -> live APS fails closed while the
+        # catalog itself stays available.
+        bad = scratch / "malformed-registry.json"
         bad.write_text("{not valid json", encoding="utf-8")
         deps.ENGINE_REGISTRY = bad
-        deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE = "operator_owned_engine"
-        deps.effective_tools_with_provenance = lambda _tenant: [(ENGINE_TOOL, "operator_owned_engine")]
-        deps.all_tools = lambda _tenant: [ENGINE_TOOL]
-        deps.APS_LIVE = True
-        customization_service.effective_catalog_pin = lambda _tenant: None
 
     elif scenario == "shadow":
-        # Fail-closed (3): a tenant/authored tool shadows the engine tool's
-        # NAME (and even claims aps_live True) but its provenance source is
-        # tenant_repo, not operator_owned_engine -- engine ownership must not
-        # be spoofable by a same-named row from another tier.
-        shadow_row = {**ENGINE_TOOL, "description": "tenant-authored row shadowing the engine tool name"}
-        _wire(shadow_row, "tenant_repo", True, [ENGINE_TOOL])
+        # Fail-closed (3): a tenant-repo row shadows the engine tool's NAME
+        # (and even claims aps_live True), written into a REAL tenant repo the
+        # REAL fold resolves via LEAF_TENANTS_DIR. The strict fold classifies
+        # the winner as tenant_repo, never operator_owned_engine -- engine
+        # ownership is decided by which tier the winning row came from, not by
+        # anything the row claims about itself.
+        shadow_row = {
+            **_real_registry_tool(real_registry, "count-by-layer"),
+            "description": "tenant-authored row shadowing the engine tool name",
+            "aps_live": True,
+        }
+        tenant_repo = scratch / "tenants" / "tenant-a"
+        tenant_repo.mkdir(parents=True)
+        (tenant_repo / "registry.json").write_text(
+            json.dumps({"tools": [shadow_row]}), encoding="utf-8"
+        )
 
     elif scenario == "non_boolean_marker":
-        # Fail-closed (4): the winning row's aps_live marker is a non-boolean
-        # truthy value ("true", not True) -- must be rejected, not coerced.
-        forged_row = {**ENGINE_TOOL, "aps_live": "true"}
-        _wire(forged_row, "operator_owned_engine", True, [ENGINE_TOOL])
+        # Fail-closed (4): the engine registry itself carries a non-boolean
+        # truthy marker ("true", not True). The row still WINS as
+        # operator_owned_engine through the real fold, but the runtime
+        # authority requires ``is True`` and the trusted-digest set only
+        # admits ``aps_live is True`` rows -- must be rejected, not coerced.
+        forged = json.loads(json.dumps(real_registry))
+        _real_registry_tool(forged, "count-by-layer")["aps_live"] = "true"
+        forged_path = scratch / "forged-registry.json"
+        forged_path.write_text(json.dumps(forged), encoding="utf-8")
+        deps.ENGINE_REGISTRY = forged_path
 
     else:
         raise SystemExit(f"unknown scenario {scenario!r}")
 
-    return capabilities_router.capabilities(x_internal_role=None, x_ops_secret=None, tenant="tenant-a")
+    return capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
 
 
 if __name__ == "__main__":
