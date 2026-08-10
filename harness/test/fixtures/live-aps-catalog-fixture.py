@@ -22,13 +22,27 @@ run_capability selection logic (never the fake app-run client / fake catalog).
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import platform as _stdlib_platform
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SERVER_DIR = ROOT / "server"
+# A repository-root current directory can resolve Leaf's top-level ``platform``
+# package before Python's standard-library module. Load the stdlib file by
+# path and bind its canonical name before FastAPI or Pydantic imports it.
+if not callable(getattr(_stdlib_platform, "system", None)):
+    platform_path = Path(sysconfig.get_path("stdlib")) / "platform.py"
+    platform_spec = importlib.util.spec_from_file_location("_leaf_stdlib_platform", platform_path)
+    if platform_spec is None or platform_spec.loader is None:
+        raise RuntimeError(f"cannot load standard-library platform module from {platform_path}")
+    _stdlib_platform = importlib.util.module_from_spec(platform_spec)
+    platform_spec.loader.exec_module(_stdlib_platform)
+    sys.modules["platform"] = _stdlib_platform
 for p in (str(ROOT), str(SERVER_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
