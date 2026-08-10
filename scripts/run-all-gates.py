@@ -395,6 +395,13 @@ def build_suites() -> List[Suite]:
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 57),
+        # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
+        # The one real-binary test runs wherever dwg2dxf is installed (the app
+        # container ships it; see deploy/Dockerfile.app) and skips with this
+        # exact allowlisted reason everywhere else.
+        Suite("server-dwg-local-extract", "server tests/test_dwg_local_extract.py", "pytest",
+              SERVER, _py_pytest("tests/test_dwg_local_extract.py"), 15,
+              allowed_skip_reasons=(r"dwg2dxf binary not installed on this host",)),
         # The cross-process fence probe uses POSIX fcntl and therefore skips on
         # Windows operator boxes. Linux CI executes it. Keep the Windows run
         # honest with the exact measured floor for every portable test and an

@@ -6,7 +6,7 @@ function message(error) {
 
 export function createDrawingUploadController({ services, onReady, pollMs = 500, maxPolls = 120 } = {}) {
   if (!services) throw new TypeError('createDrawingUploadController requires services')
-  let state = { policy: null, policyLoading: false, busy: false, phase: 'idle', error: null, receipt: null }
+  let state = { policy: null, policyLoading: false, busy: false, phase: 'idle', error: null, receipt: null, engine: null }
   let snapshot = state
   let sequence = 0
   let disposed = false
@@ -23,7 +23,13 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     publish({ policyLoading: true, error: null })
     try {
       const policy = await services.policy()
-      if (run === sequence) publish({ policy: { ...DEFAULT_POLICY, ...policy }, policyLoading: false })
+      if (run === sequence) {
+        const merged = { ...DEFAULT_POLICY, ...policy }
+        // Seed the DWG engine toggle from the server default once; a choice
+        // the user already made survives policy refreshes.
+        const engine = state.engine || merged.dwg_engine_default || null
+        publish({ policy: merged, policyLoading: false, engine })
+      }
       return policy
     } catch (error) {
       if (run === sequence) publish({ policy: DEFAULT_POLICY, policyLoading: false, error: message(error) })
@@ -45,7 +51,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     const run = ++sequence
     publish({ busy: true, phase: 'uploading', error: null, receipt: null })
     try {
-      const receipt = await services.upload(file)
+      const receipt = await services.upload(file, state.engine)
       if (run !== sequence) return null
       publish({ receipt, phase: receipt.status === 'ready' ? 'loading' : 'extracting' })
       let status = receipt
@@ -75,6 +81,9 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     dispose() { disposed = true; sequence += 1 },
     loadPolicy,
     upload,
+    setEngine(engine) {
+      if (engine === 'local' || engine === 'aps') publish({ engine })
+    },
     cancel() { sequence += 1; publish({ busy: false, phase: 'idle', error: null }) },
   }
 }

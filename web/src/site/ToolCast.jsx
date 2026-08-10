@@ -1302,6 +1302,8 @@ export default function ToolCast({
               busy={drawingUpload.busy}
               phase={drawingUpload.phase}
               error={drawingUpload.error}
+              engine={drawingUpload.engine}
+              onEngineChange={drawingUpload.actions.setEngine}
               onUpload={drawingUpload.actions.upload}
               onCancel={drawingUpload.actions.cancel}
             />

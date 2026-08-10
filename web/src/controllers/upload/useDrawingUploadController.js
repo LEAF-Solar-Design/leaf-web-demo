@@ -4,7 +4,7 @@ import createDrawingUploadController from './createDrawingUploadController.js'
 
 const services = {
   policy: getGuestUploadPolicy,
-  upload: uploadDrawing,
+  upload: (file, engine) => uploadDrawing(file, null, engine),
   status: getDrawingUploadStatus,
   intake: getUploadedDrawingIntake,
   wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -25,7 +25,7 @@ export default function useDrawingUploadController({ onReady } = {}) {
     return () => controller.dispose()
   }, [controller])
   const actions = useMemo(
-    () => ({ upload: controller.upload, cancel: controller.cancel, refreshPolicy: controller.loadPolicy }),
+    () => ({ upload: controller.upload, cancel: controller.cancel, refreshPolicy: controller.loadPolicy, setEngine: controller.setEngine }),
     [controller],
   )
   return { ...state, actions }
