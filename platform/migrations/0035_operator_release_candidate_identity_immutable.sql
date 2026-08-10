@@ -6,7 +6,12 @@
 -- reviewed identity is immutable regardless of application-code discipline,
 -- dynamic SQL, a quoted identifier, or a future handler. The trigger only READS
 -- the identity columns and RAISEs; it never assigns them (it is protective, not
--- a rewriting rule). Expand-only: no contract-phase statement.
+-- a rewriting rule). Effectively expand-only: the sole DROP below is the
+-- idempotent recreate of this migration's OWN trigger, never a reader-visible
+-- removal. The expand-contract gate's catch-all DROP scan still requires a
+-- marker; it anchors to 0034, which created operator_release_candidates, the
+-- table this trigger protects.
+-- expand-contract: contract-of=0034
 
 CREATE OR REPLACE FUNCTION operator_release_candidate_identity_immutable()
 RETURNS TRIGGER AS $$
