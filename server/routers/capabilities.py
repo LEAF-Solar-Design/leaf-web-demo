@@ -48,16 +48,31 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         operator_owned_engine_source = getattr(
             deps, "TOOL_SOURCE_OPERATOR_OWNED_ENGINE", None
         )
+        effective_rows = None
         if (
             callable(provenance_resolver)
             and operator_owned_engine_source == "operator_owned_engine"
         ):
-            effective_rows = provenance_resolver(str(tenant))
+            try:
+                effective_rows = provenance_resolver(str(tenant))
+            except (deps.ToolCatalogProvenanceError,
+                    deps.ToolCatalogCollisionError) as exc:
+                # Provenance could not be established, so live APS FAILS CLOSED
+                # (None sources below) while the catalog itself stays available
+                # through the same forgiving read this route has always served.
+                print(
+                    f"[leaf-catalog] tool provenance unavailable "
+                    f"({type(exc).__name__}: {exc}); live APS fails closed to "
+                    f"batch for this response",
+                    file=sys.stderr, flush=True,
+                )
+        if effective_rows is not None:
             raw_tools = [tool for tool, _source in effective_rows]
             tool_sources = [source for _tool, source in effective_rows]
         else:
-            # Compatibility with a base that predates provenance reads the
-            # ordinary catalog once, while None sources disable live APS.
+            # Compatibility with a base that predates provenance, and the
+            # fail-closed degrade above, both read the ordinary catalog once;
+            # None sources disable live APS.
             raw_tools = deps.all_tools(str(tenant))
             tool_sources = [None] * len(raw_tools)
         pin = (

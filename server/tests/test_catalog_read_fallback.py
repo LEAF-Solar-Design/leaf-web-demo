@@ -278,6 +278,59 @@ def test_capabilities_without_provenance_seam_keeps_catalog_but_disables_live_ap
     assert projected["aps_live"] is False
 
 
+@pytest.mark.parametrize("provenance_error", [
+    deps.ToolCatalogProvenanceError("tool source 'authored' contains a non-object row"),
+    deps.ToolCatalogCollisionError("tool name collision across GLOBAL catalog tiers"),
+])
+def test_capabilities_degrades_to_batch_only_when_provenance_fails(
+    monkeypatch, capsys, provenance_error
+):
+    """A provenance failure must not take the catalog down: the route serves the
+    forgiving read (today's production catalog) with live APS failed closed."""
+    def raise_provenance(_tenant):
+        raise provenance_error
+
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "TOOL_SOURCE_OPERATOR_OWNED_ENGINE",
+        "operator_owned_engine",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        raise_provenance,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps, "all_tools", lambda _tenant: [TRUSTED_LIVE_TOOL]
+    )
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "load_engine_registry_tools",
+        lambda: [TRUSTED_LIVE_TOOL],
+    )
+    monkeypatch.setattr(
+        customization_service, "effective_catalog_pin", lambda _tenant: None
+    )
+    monkeypatch.setattr(capabilities_router.deps, "APS_LIVE", True)
+
+    body = capabilities_router.capabilities(
+        x_internal_role=None, x_ops_secret=None, tenant="tenant-a"
+    )
+
+    projected = next(
+        capability
+        for family in body["families"]
+        for capability in family["capabilities"]
+        if capability["name"] == TRUSTED_LIVE_TOOL["name"]
+    )
+    assert body["error"] is None
+    assert projected["aps_live"] is False
+    # Loud, never silent: the degrade names the failure on stderr.
+    assert "tool provenance unavailable" in capsys.readouterr().err
+
+
 def test_flat_tools_uses_only_safe_base_for_tenant_without_pin(
     monkeypatch, tmp_path
 ):

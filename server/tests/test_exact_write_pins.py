@@ -36,6 +36,18 @@ def test_capability_projection_carries_server_issued_generation_pins(monkeypatch
     monkeypatch.setattr(
         capabilities_router.deps, "all_tools", lambda _tenant: [WRITE_TOOL]
     )
+    # capabilities() prefers the provenance seam over deps.all_tools when both
+    # are present on deps (tiered-fold catalog, mainline #545). Mock at that
+    # seam so the pin assertions exercise the code path the route actually
+    # takes; a non-engine source keeps live APS out of scope here.
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [
+            (WRITE_TOOL, capabilities_router.deps.TOOL_SOURCE_CATALOG_SEED)
+        ],
+        raising=False,
+    )
     monkeypatch.setattr(
         capabilities_router.customization_service,
         "effective_catalog_pin",
@@ -64,6 +76,15 @@ def test_capability_projection_carries_server_issued_generation_pins(monkeypatch
 def test_capability_projection_issues_base_generation_for_fresh_tenant(monkeypatch):
     monkeypatch.setattr(
         capabilities_router.deps, "all_tools", lambda _tenant: [WRITE_TOOL]
+    )
+    # Same seam preference as above: the route reads provenance first.
+    monkeypatch.setattr(
+        capabilities_router.deps,
+        "effective_tools_with_provenance",
+        lambda _tenant: [
+            (WRITE_TOOL, capabilities_router.deps.TOOL_SOURCE_CATALOG_SEED)
+        ],
+        raising=False,
     )
     monkeypatch.setattr(
         capabilities_router.customization_service,
