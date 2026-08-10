@@ -35,7 +35,8 @@
       "0031",
       "0032",
       "0033",
-      "0034"
+      "0034",
+      "0035"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -277,7 +278,8 @@
       "postgres_tables": [
         "app_sessions",
         "app_session_events",
-        "app_approvals"
+        "app_approvals",
+        "app_session_requests"
       ],
       "legacy_source": [
         "SESSIONS_DB SQLite sessions, session_events, and approvals tables"

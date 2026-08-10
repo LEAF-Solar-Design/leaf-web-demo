@@ -76,6 +76,7 @@ import broker_client
 import emf_metrics
 import entitlements
 import instant_execution
+import request_journal
 import session_policy
 import session_store
 import standard_service_contract
@@ -291,6 +292,13 @@ def _drop_canceller(turn_id: str) -> None:
 # on a stable outcome: started, rejected (transcript closed), or dropped.
 _queued_lock = threading.Lock()
 _queued: Dict[str, Dict[str, Any]] = {}
+
+# Startup recovery may find a queued successor still fenced by a crashed
+# process's unexpired lease. One daemon timer re-runs recovery at the earliest
+# such lease edge. The database remains the authority, so duplicate app
+# processes or timer races cannot claim the same row twice.
+_durable_recovery_lock = threading.Lock()
+_durable_recovery_timer: Optional[threading.Timer] = None
 
 # The kicker's TurnBusy-retry bound. Each retry requires a DISTINCT foreign
 # turn to have acquired AND terminalized the session's CAS inside the window
@@ -601,7 +609,11 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                queued_id: Optional[str] = None,
                entitlement_tier: Optional[str] = None,
                entitlement_roles: Optional[tuple] = None,
-               entitlement_elevated: Optional[bool] = None) -> str:
+               entitlement_elevated: Optional[bool] = None,
+               request_id: Optional[str] = None,
+               turn_id: Optional[str] = None,
+               journal_claimed: bool = False,
+               journal_recoverable: Optional[Dict[str, Any]] = None) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -636,10 +648,20 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
-    turn_id = str(uuid.uuid4())
+    turn_id = turn_id or str(uuid.uuid4())
     max_s = turn_max_s()
+    if request_id is not None and request_journal.enabled() and not journal_claimed:
+        if not request_journal.begin_request(
+            request_id, turn_id, lease_seconds=max_s,
+        ):
+            raise TurnBusy(f"request {request_id!r} is already active")
     if not session_store.try_begin_turn(session_id, turn_id, max_s, tier=tier,
                                         subject=subject):
+        if request_id is not None and request_journal.enabled():
+            request_journal.release_execution(
+                request_id, turn_id, requeue=journal_claimed,
+                recoverable=journal_recoverable,
+            )
         raise TurnBusy(f"session {session_id!r} already has an active turn")
 
     # The durable transcript source: whatever drove this turn (a fresh user
@@ -924,7 +946,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     _spawn_relay(tenant_id, session_id, turn_id, resp, max_s,
                  tier=tier, entitlement_tier=entitlement_tier,
                  entitlement_roles=entitlement_roles,
-                 entitlement_elevated=entitlement_elevated)
+                 entitlement_elevated=entitlement_elevated,
+                 request_id=request_id)
     return turn_id
 
 
@@ -1034,6 +1057,15 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
         except Exception:  # noqa: BLE001  best-effort; releasing the CAS is what matters
             pass
         session_store.end_turn(session_id, turn_id)
+        if request_journal.enabled():
+            try:
+                request_journal.finish_turn(
+                    session_id, turn_id, state="completed", response_status=200,
+                    response={"turn_id": turn_id, "status": "completed",
+                              "stop_reason": "interrupted"},
+                )
+            except Exception:  # noqa: BLE001
+                pass
     # This path has no relay, so no _finalize_terminal will run for the turn —
     # BOTH follow-ups run here or a parked policy decision / queued prompt
     # waits forever (review rounds 3 and 9).
@@ -1049,6 +1081,15 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
 def queued_prompt(session_id: str) -> Optional[Dict[str, Any]]:
     """The session's pending prompt (a copy), or None. Read-only, for tests
     and status surfaces."""
+    if request_journal.enabled():
+        row = request_journal.queued_for_session(session_id)
+        if row is None:
+            return None
+        payload = dict(row.get("recoverable_json") or {})
+        payload["queued_id"] = row["request_id"]
+        payload["created_at"] = row["created_at"]
+        payload.pop("subject", None)
+        return payload
     with _queued_lock:
         payload = _queued.get(session_id)
         if not payload:
@@ -1060,7 +1101,8 @@ def queued_prompt(session_id: str) -> Optional[Dict[str, Any]]:
 
 def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
                      classifier_hint: Optional[Dict[str, Any]] = None,
-                     model: Optional[str] = None) -> tuple:
+                     model: Optional[str] = None,
+                     request_id: Optional[str] = None) -> tuple:
     """Queue ONE text prompt to start when the active turn ends.
 
     Returns ("queued", queued_id) or ("full", None). Only plain text turns are
@@ -1086,6 +1128,51 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     entitlement_tier = entitlements.resolve_tier(tenant_id)
     entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     tenant_id = str(tenant_id)
+    if request_journal.enabled():
+        if request_id is None:
+            raise TurnRejected(
+                500, ErrorCode.INTERNAL,
+                "durable queue request identity is unavailable",
+            )
+        recoverable = {
+            "text": text,
+            "classifier_hint": classifier_hint,
+            "model": model,
+            "tier": tier,
+            "subject": subject,
+            "entitlement_tier": entitlement_tier,
+            "entitlement_roles": list(entitlement_roles),
+            "entitlement_elevated": entitlement_elevated is True,
+        }
+        try:
+            queued = request_journal.queue_request(request_id, recoverable)
+        except request_journal.CredentialMaterial as exc:
+            raise TurnRejected(
+                400, ErrorCode.BAD_PARAMS,
+                "queue payload contains credential material",
+            ) from exc
+        if not queued:
+            return ("full", None)
+        try:
+            session_store.append_event(
+                session_id, None, "turn_queued",
+                {"queued_id": request_id, "text": text},
+            )
+        except Exception as exc:  # noqa: BLE001
+            request_journal.fail_queued(
+                request_id,
+                response_status=404,
+                response={"status": "failed", "error": {
+                    "error_code": ErrorCode.SESSION_NOT_FOUND,
+                    "message": f"unknown session_id {session_id!r}",
+                }},
+            )
+            raise TurnRejected(
+                404, ErrorCode.SESSION_NOT_FOUND,
+                f"unknown session_id {session_id!r}",
+            ) from exc
+        _kick_queued(session_id)
+        return ("queued", request_id)
     queued_id = str(uuid.uuid4())
     payload = {
         "queued_id": queued_id,
@@ -1145,6 +1232,150 @@ def drain_session_followups(tenant_id: Any, session_id: str) -> None:
     _kick_queued(session_id)
 
 
+def _kick_durable_queued(session_id: Optional[str] = None) -> int:
+    """Claim and start durable queue rows without ever replaying execution.
+
+    A claimed row already owns its journal execution fence. The existing
+    session CAS remains the final one-active-turn guard. Losing that CAS puts
+    the exact row back in ``queued``; every other start failure terminalizes it.
+    """
+    attempts = 0
+    processed = 0
+    while attempts < _KICK_MAX_ATTEMPTS:
+        attempts += 1
+        row = request_journal.claim_next_queued(
+            lease_seconds=turn_max_s(), session_id=session_id,
+        )
+        if row is None:
+            return processed
+        payload = row.get("recoverable_json") or {}
+        request_id = row["request_id"]
+        turn_id = row["turn_id"]
+        try:
+            allowed = entitlements.entitlements_for(
+                payload["entitlement_tier"],
+                tuple(payload.get("entitlement_roles") or ()),
+                payload.get("entitlement_elevated") is True,
+            ).get("converse", False)
+        except Exception:  # noqa: BLE001
+            allowed = False
+        if not allowed:
+            processed += 1
+            request_journal.finish_request(
+                request_id, turn_id, state="failed", response_status=403,
+                response={"request_id": request_id, "status": "failed",
+                          "error": {"error_code": "ENTITLEMENT_REQUIRED",
+                                    "message": "converse entitlement is unavailable"}},
+            )
+            try:
+                session_store.append_event(
+                    row["session_id"], None, "turn_queue_dropped",
+                    {"queued_id": request_id, "reason": "entitlement_denied"},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        try:
+            start_turn(
+                row["tenant_id"], row["session_id"],
+                text=payload["text"],
+                classifier_hint=payload.get("classifier_hint"),
+                model=payload.get("model"),
+                tier=payload.get("tier"),
+                subject=payload.get("subject"),
+                queued_id=request_id,
+                entitlement_tier=payload.get("entitlement_tier"),
+                entitlement_roles=tuple(payload.get("entitlement_roles") or ()),
+                entitlement_elevated=payload.get("entitlement_elevated") is True,
+                request_id=request_id,
+                turn_id=turn_id,
+                journal_claimed=True,
+                journal_recoverable=payload,
+            )
+            processed += 1
+            if session_id is not None:
+                return processed
+            continue
+        except TurnBusy:
+            # start_turn already returned the claim to queued after losing CAS.
+            return processed
+        except TurnRejected as exc:
+            processed += 1
+            request_journal.finish_request(
+                request_id, turn_id, state="failed",
+                response_status=exc.status_code,
+                response={"request_id": request_id, "status": "failed",
+                          "error": {"error_code": exc.error_code,
+                                    "message": exc.message}},
+            )
+            if exc.turn_id is not None:
+                try:
+                    session_store.append_event(
+                        row["session_id"], exc.turn_id, "error",
+                        {"error": {"error_code": exc.error_code,
+                                   "message": exc.message},
+                         "stop_reason": "error"},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            continue
+        except Exception as exc:  # noqa: BLE001
+            processed += 1
+            request_journal.finish_request(
+                request_id, turn_id, state="failed", response_status=503,
+                response={"request_id": request_id, "status": "failed",
+                          "error": {"error_code": ErrorCode.INTERNAL,
+                                    "message": "queued request could not start"}},
+            )
+            print(
+                f"[leaf-agent] durable queue start crashed ({type(exc).__name__})",
+                file=sys.stderr, flush=True,
+            )
+            continue
+    return processed
+
+
+def _run_scheduled_durable_recovery() -> None:
+    global _durable_recovery_timer
+    with _durable_recovery_lock:
+        _durable_recovery_timer = None
+    try:
+        recover_queued_turns()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[leaf-agent] durable queue recovery failed: {type(exc).__name__}",
+            file=sys.stderr, flush=True,
+        )
+
+
+def _schedule_durable_recovery(delay: float) -> None:
+    global _durable_recovery_timer
+    with _durable_recovery_lock:
+        current = _durable_recovery_timer
+        if current is not None and current.is_alive():
+            return
+        timer = threading.Timer(max(0.05, delay), _run_scheduled_durable_recovery)
+        timer.daemon = True
+        _durable_recovery_timer = timer
+        timer.start()
+
+
+def recover_queued_turns() -> None:
+    """Startup recovery: settle ambiguous execution, then resume queued work."""
+    if not request_journal.enabled():
+        return
+    request_journal.settle_abandoned()
+    recovered = 0
+    while recovered < 100:
+        count = _kick_durable_queued()
+        recovered += count
+        if count == 0:
+            break
+    delay = request_journal.next_queued_recovery_delay()
+    if delay is not None:
+        _schedule_durable_recovery(delay)
+
+
 def _kick_queued(session_id: str) -> None:
     """Start the session's queued prompt, if any. Runs at every terminal site
     (relay finalization, orphan cancel) and at enqueue time when the session
@@ -1168,6 +1399,9 @@ def _kick_queued(session_id: str) -> None:
     inside our window, which the free-session re-check catches by retrying)
     · CRASH (slot emptied, loud stderr).
     """
+    if request_journal.enabled():
+        _kick_durable_queued(session_id)
+        return
     attempts = 0
     while attempts < _KICK_MAX_ATTEMPTS:
         attempts += 1
@@ -1624,7 +1858,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  tier: Optional[str] = None,
                  entitlement_tier: Optional[str] = None,
                  entitlement_roles: tuple = (),
-                 entitlement_elevated: bool = False) -> None:
+                 entitlement_elevated: bool = False,
+                 request_id: Optional[str] = None) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -1716,6 +1951,31 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             session_store.end_turn(session_id, turn_id)
         except Exception:  # noqa: BLE001
             pass
+        if request_id is not None and request_journal.enabled():
+            journal_state = (
+                "failed"
+                if event_type == "error" or "error" in terminal_data
+                or stop_reason == "error"
+                else "completed"
+            )
+            journal_status = 200 if journal_state == "completed" else 503
+            try:
+                request_journal.finish_request(
+                    request_id, turn_id, state=journal_state,
+                    response_status=journal_status,
+                    response={
+                        "request_id": request_id,
+                        "turn_id": turn_id,
+                        "status": journal_state,
+                        "stop_reason": stop_reason,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[leaf-agent] request journal terminal write failed: "
+                    f"{type(exc).__name__}",
+                    file=sys.stderr, flush=True,
+                )
         # P2 product event: one enqueue of the record the ledger already
         # holds (identity-attached chat engagement/cost/stop-reason mix).
         # Deliberately AFTER end_turn so a slow first sink self-check can
@@ -1890,7 +2150,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
             # fault, and must read identically to the watchdog's own terminal
             # event — otherwise which one the caller sees is a coin flip.
             # Decided INSIDE the one-shot lock (see `resolve`), never before it.
-            _end_once(resolve=lambda: _drain_terminal(deadline, exc))
+            _end_once(resolve=lambda exc=exc: _drain_terminal(deadline, exc))
         finally:
             # A stream that simply ENDED without a terminal event gets the same
             # treatment: past the deadline it is expiry and must read like the

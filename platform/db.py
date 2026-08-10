@@ -163,6 +163,12 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "params_json", "capability", "rationale", "kind", "payload_json",
             "decided", "approved", "decided_by", "created_at", "expires_at", "consumed",
         },
+        "app_session_requests": {
+            "request_id", "tenant_id", "drawing_id", "session_id",
+            "principal_key", "payload_digest", "recoverable_json", "state",
+            "turn_id", "lease_owner", "lease_expires_at", "response_status",
+            "response_json", "created_at", "updated_at", "terminal_at",
+        },
     },
     # Separate from "sessions" on purpose: LEAF_SESSION_ANNEX_STORE selects
     # these independently, so a sessions-only deployment must not be required to
@@ -386,6 +392,36 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "FOREIGN KEY (session_id) REFERENCES app_sessions(session_id) ON DELETE CASCADE"),
         "app_approvals_pkey": _catalog_contract(
             "app_approvals", "PRIMARY KEY (confirmation_id)"),
+        "app_session_requests_pkey": _catalog_contract(
+            "app_session_requests", "PRIMARY KEY (request_id)"),
+        "app_session_requests_session_id_fkey": _catalog_contract(
+            "app_session_requests", "FOREIGN KEY (session_id)",
+            "REFERENCES app_sessions(session_id)", "ON DELETE CASCADE"),
+        "app_session_requests_payload_digest_check": _catalog_contract(
+            "app_session_requests", "CHECK",
+            "payload_digest ~ '^[0-9a-f]{64}$'"),
+        "app_session_requests_state_check": _catalog_contract(
+            "app_session_requests",
+            "CHECK (state = ANY (ARRAY['admitted', 'queued', 'executing', "
+            "'completed', 'failed', 'abandoned']))"),
+        "app_session_requests_response_status_check": _catalog_contract(
+            "app_session_requests",
+            "CHECK (response_status IS NULL OR "
+            "(response_status >= 100 AND response_status <= 599))"),
+        "app_session_requests_queued_payload_present_check": _catalog_contract(
+            "app_session_requests", "CHECK", "state <> 'queued'",
+            "recoverable_json IS NOT NULL"),
+        "app_session_requests_nonqueued_payload_absent_check": _catalog_contract(
+            "app_session_requests", "CHECK", "state = 'queued'",
+            "recoverable_json IS NULL"),
+        "app_session_requests_executing_lease_shape_check": _catalog_contract(
+            "app_session_requests", "CHECK", "state <> 'executing'",
+            "turn_id IS NOT NULL", "lease_owner IS NOT NULL",
+            "lease_expires_at IS NOT NULL"),
+        "app_session_requests_terminal_result_shape_check": _catalog_contract(
+            "app_session_requests", "CHECK", "completed", "failed",
+            "abandoned", "terminal_at IS NOT NULL",
+            "response_status IS NOT NULL", "response_json IS NOT NULL"),
     },
     "session_annex": {
         "app_session_checkpoints_pkey": _catalog_contract(
@@ -679,6 +715,17 @@ _AUTHORITY_REQUIRED_INDEXES = {
             "app_session_events", "(session_id, seq DESC)"),
         "idx_app_approvals_session": _catalog_contract(
             "app_approvals", "(session_id, created_at DESC)"),
+        "idx_app_session_requests_one_executing": _catalog_contract(
+            "app_session_requests", "CREATE UNIQUE INDEX", "(session_id)",
+            "WHERE", "state = 'executing'"),
+        "idx_app_session_requests_one_queued": _catalog_contract(
+            "app_session_requests", "CREATE UNIQUE INDEX", "(session_id)",
+            "WHERE", "state = 'queued'"),
+        "idx_app_session_requests_recovery": _catalog_contract(
+            "app_session_requests", "(state, lease_expires_at, created_at)"),
+        "idx_app_session_requests_scope": _catalog_contract(
+            "app_session_requests",
+            "(tenant_id, drawing_id, session_id, created_at DESC)"),
     },
     "session_annex": {
         "idx_app_session_checkpoints_scope": _catalog_contract(

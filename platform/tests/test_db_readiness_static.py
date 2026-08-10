@@ -62,9 +62,59 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
                 (32, "operator_control_plane"),
                 (33, "operator_credential_rotations"),
                 (34, "operator_release_candidates"),
+                (35, "session_request_journal"),
             ]
         ]
     assert all(len(item["sha256"]) == 64 for item in manifest)
+
+
+def test_request_journal_migration_unconditionally_declares_runtime_schema():
+    migration = (
+        db._PKG_DIR / "migrations" / "0035_session_request_journal.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS app_session_requests" in migration
+    expected_indexes = {
+        "idx_app_session_requests_one_executing",
+        "idx_app_session_requests_one_queued",
+        "idx_app_session_requests_recovery",
+        "idx_app_session_requests_scope",
+    }
+    assert expected_indexes == {
+        line.split("IF NOT EXISTS ", 1)[1].split()[0]
+        for line in migration.splitlines()
+        if "INDEX IF NOT EXISTS idx_" in line
+    }
+    expected_constraints = {
+        "app_session_requests_session_id_fkey",
+        "app_session_requests_payload_digest_check",
+        "app_session_requests_state_check",
+        "app_session_requests_response_status_check",
+        "app_session_requests_queued_payload_present_check",
+        "app_session_requests_nonqueued_payload_absent_check",
+        "app_session_requests_executing_lease_shape_check",
+        "app_session_requests_terminal_result_shape_check",
+    }
+    assert expected_constraints == {
+        line.strip().split()[1]
+        for line in migration.splitlines()
+        if line.strip().startswith("CONSTRAINT app_session_requests_")
+    }
+    assert db._AUTHORITY_REQUIRED_COLUMNS["sessions"][
+        "app_session_requests"
+    ] == {
+        "request_id", "tenant_id", "drawing_id", "session_id",
+        "principal_key", "payload_digest", "recoverable_json", "state",
+        "turn_id", "lease_owner", "lease_expires_at", "response_status",
+        "response_json", "created_at", "updated_at", "terminal_at",
+    }
+    assert expected_constraints | {"app_session_requests_pkey"} <= {
+        name for name in db._AUTHORITY_REQUIRED_CONSTRAINTS["sessions"]
+        if name.startswith("app_session_requests_")
+    }
+    assert expected_indexes == {
+        name for name in db._AUTHORITY_REQUIRED_INDEXES["sessions"]
+        if name.startswith("idx_app_session_requests_")
+    }
 
 
 def test_customization_authority_migration_follows_tenant_mcp_journal():

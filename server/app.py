@@ -92,6 +92,16 @@ _customization_worker_thread: threading.Thread | None = None
 
 
 @app.on_event("startup")
+def recover_session_request_journal() -> None:
+    """Settle ambiguous execution and resume durable P5a queue rows."""
+    import request_journal
+    import turn_runner
+
+    request_journal.validate_startup()
+    turn_runner.recover_queued_turns()
+
+
+@app.on_event("startup")
 def initialize_customization_store() -> None:
     """SQLite coordination is intentionally a single-process deployment."""
     if (

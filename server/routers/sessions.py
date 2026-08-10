@@ -106,6 +106,7 @@ import deps
 import emf_metrics
 import entitlements
 import instant_execution
+import request_journal
 import session_policy
 import session_store
 import turn_runner
@@ -246,6 +247,14 @@ class CreateSessionRequest(BaseModel):
 
 
 class MessageRequest(BaseModel):
+    # P5a idempotency identity. In PostgreSQL sessions mode, eligible plain-text
+    # messages receive a server UUID when absent and may supply that UUID on an
+    # ambiguous retry. Confirmations, images, and credential-bearing turns keep
+    # their existing consume-once/direct behavior and cannot opt into this key.
+    # Any at the wire boundary is intentional. Legacy stores historically
+    # ignored unknown request_id shapes; PostgreSQL mode validates the exact
+    # canonical UUID before admission without changing that legacy contract.
+    request_id: Any = None
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
     # Inline image attachments are bounded before the entitlement and approval
@@ -601,6 +610,29 @@ def _busy_response(session_id: str, approval_lost: bool = False) -> JSONResponse
     return JSONResponse(status_code=409, content=body)
 
 
+def _journal_response(row: Dict[str, Any], tenant) -> JSONResponse:
+    state = row["state"]
+    status_code = row.get("response_status") if state in {
+        "completed", "failed", "abandoned",
+    } else 202
+    body = dict(row.get("response_json") or {})
+    body.setdefault("request_id", row["request_id"])
+    body.setdefault("turn_id", row.get("turn_id"))
+    body.setdefault("status", "started" if state == "executing" else state)
+    body["active_requests"] = request_journal.active_counts(
+        row["tenant_id"], row["drawing_id"],
+    )
+    return JSONResponse(
+        status_code=int(status_code or 202),
+        content=deps.tenant_echo(with_envelope_fields(body), tenant),
+    )
+
+
+def _response_content(response: JSONResponse) -> Dict[str, Any]:
+    body = json.loads(response.body.decode("utf-8"))
+    return body if isinstance(body, dict) else {"status": "failed"}
+
+
 # --------------------------------------------------------------------------- #
 # POST /api/sessions
 # --------------------------------------------------------------------------- #
@@ -654,7 +686,8 @@ async def post_message_route(session_id: str, request: Request,
 def post_message(session_id: str, req: MessageRequest, request: Request,
                  tenant=Depends(deps.require_active_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
-    if _require_owned_session(session_id, tenant) is None:
+    session = _require_owned_session(session_id, tenant)
+    if session is None:
         return _session_not_found(session_id)
 
     # 2. Validate images before entitlement evaluation or approval consumption.
@@ -760,6 +793,74 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                               "ENTITLEMENT_REQUIRED")
         return entitlements.entitlement_denied_response("converse", tier)
 
+    # P5a admission is deliberately narrow: plain-text messages only. Those
+    # are the requests that may enter the queue and can be safely recovered
+    # without persisting a credential, image bytes, or approval material.
+    journal_request_id: Optional[str] = None
+    journal_enabled = request_journal.enabled()
+    journal_eligible = (
+        journal_enabled
+        and has_text
+        and not has_confirm
+        and not has_images
+        and validated_grant is None
+    )
+    if journal_enabled and req.request_id is not None and not journal_eligible:
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "request_id is supported only for plain-text messages",
+            retryable=False, status_code=400,
+        )
+    if journal_eligible:
+        try:
+            journal_request_id = request_journal.canonical_request_id(req.request_id)
+        except ValueError as exc:
+            return error_response(
+                ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400,
+            )
+        if req.queue is True:
+            queue_probe = {
+                "text": req.text,
+                "classifier_hint": req.classifier_hint,
+                "model": req.model,
+                "tier": getattr(tenant, "tier", None),
+                "subject": getattr(tenant, "subject", None),
+                "entitlement_tier": tier,
+                "entitlement_roles": list(roles),
+                "entitlement_elevated": elevated is True,
+            }
+            try:
+                request_journal.validate_recoverable_payload(queue_probe)
+            except request_journal.CredentialMaterial:
+                return error_response(
+                    ErrorCode.BAD_PARAMS,
+                    "queue payload contains credential material",
+                    retryable=False, status_code=400,
+                )
+        digest = request_journal.payload_digest({
+            "text": req.text,
+            "classifier_hint": req.classifier_hint,
+            "model": req.model,
+            "queue": req.queue is True,
+        })
+        try:
+            journal_row, inserted = request_journal.admit_request(
+                request_id=journal_request_id,
+                tenant_id=str(tenant),
+                drawing_id=str(session["drawing_id"]),
+                session_id=session_id,
+                principal_key=str(getattr(tenant, "subject", None) or ""),
+                digest=digest,
+            )
+        except request_journal.RequestConflict:
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "request_id is already bound to another message",
+                retryable=False, status_code=409,
+            )
+        if not inserted and journal_row["state"] != "admitted":
+            return _journal_response(journal_row, tenant)
+
     # 4. confirm path: atomically verify-and-consume the durable approval row
     # (merge-gate finding #1 — see module docstring's APPROVAL CONSUME note)
     # and build the frozen ConverseTurnInput.confirm shape ourselves, using
@@ -854,6 +955,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
             model=req.model, credential_grant=validated_grant, images=images,
+            request_id=journal_request_id,
         )
     except turn_runner.TurnBusy:
         # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of
@@ -864,18 +966,18 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             try:
                 q_status, queued_id = turn_runner.try_enqueue_turn(
                     tenant, session_id, text=req.text,
-                    classifier_hint=req.classifier_hint, model=req.model)
+                    classifier_hint=req.classifier_hint, model=req.model,
+                    request_id=journal_request_id)
             except turn_runner.TurnRejected as exc:
                 return _turn_rejected_response(exc, tenant=tenant, session_id=session_id)
             if q_status == "queued":
-                return JSONResponse(
-                    status_code=202,
-                    content=deps.tenant_echo(
-                        with_envelope_fields(
-                            {"status": "queued", "queued_id": queued_id}),
-                        tenant,
-                    ),
-                )
+                if journal_request_id is not None:
+                    row = request_journal.get_request(journal_request_id)
+                    if row is not None:
+                        return _journal_response(row, tenant)
+                return JSONResponse(status_code=202, content=deps.tenant_echo(
+                    with_envelope_fields(
+                        {"status": "queued", "queued_id": queued_id}), tenant))
             # q_status == "full": one prompt is already parked — fall through
             # to the byte-identical busy 409 ("a second is refused").
         # The approval (if any) was consumed at step 4 but NOTHING redeemed it:
@@ -887,7 +989,17 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             approval_lost = not _give_back_unredeemed_approval(
                 confirmation_id, session_id, str(tenant))
         _emit_agent_wall_kind(tenant, session_id, "busy", 409, "turn_in_progress")
-        return _busy_response(session_id, approval_lost=approval_lost)
+        response = _busy_response(session_id, approval_lost=approval_lost)
+        if journal_request_id is not None:
+            current = request_journal.get_request(journal_request_id)
+            if current is not None and current["state"] != "admitted":
+                return _journal_response(current, tenant)
+            request_journal.fail_admitted(
+                journal_request_id,
+                response_status=response.status_code,
+                response=_response_content(response),
+            )
+        return response
     except turn_runner.TurnRejected as exc:
         # Same rule, second site: give the approval back on every rejection
         # the engine can PROVE happened before the harness saw the turn
@@ -930,15 +1042,30 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 print(f"[leaf-agent] transcript closure FAILED for turn "
                       f"{exc.turn_id!r} on session {session_id!r}; the turn "
                       f"dangles until repair", file=sys.stderr, flush=True)
-        return _turn_rejected_response(exc, approval_lost=approval_lost,
-                                       tenant=tenant, session_id=session_id)
+        response = _turn_rejected_response(
+            exc, approval_lost=approval_lost, tenant=tenant, session_id=session_id,
+        )
+        if journal_request_id is not None:
+            if exc.turn_id is not None:
+                request_journal.finish_request(
+                    journal_request_id, exc.turn_id, state="failed",
+                    response_status=response.status_code,
+                    response=_response_content(response),
+                )
+            else:
+                request_journal.fail_admitted(
+                    journal_request_id,
+                    response_status=response.status_code,
+                    response=_response_content(response),
+                )
+        return response
 
-    return JSONResponse(
-        status_code=202,
-        content=deps.tenant_echo(
-            with_envelope_fields({"turn_id": turn_id, "status": "started"}), tenant
-        ),
-    )
+    if journal_request_id is not None:
+        row = request_journal.get_request(journal_request_id)
+        if row is not None:
+            return _journal_response(row, tenant)
+    return JSONResponse(status_code=202, content=deps.tenant_echo(
+        with_envelope_fields({"turn_id": turn_id, "status": "started"}), tenant))
 
 
 # --------------------------------------------------------------------------- #
