@@ -877,24 +877,28 @@ class CustomizationService:
     )
 
     @classmethod
-    def _harness_job_failure_reason(cls, response: Any) -> str | None:
-        """Extract the harness's own failure reason from an error response.
+    def _harness_job_failure(cls, response: Any) -> tuple[bool, str | None]:
+        """Classify an error response: (harness answered, tenant-safe reason).
 
-        A parseable JSON error body means the harness was reachable and
-        ANSWERED: the authoring job itself failed (the incident class is the
-        Agent SDK dying with an auth failure seconds after dispatch). That is
-        distinct from a transport failure, where nothing about the job is
-        known. Returns a tenant-safe reason string, or None when the response
-        carries none: either the body's shape marks a deliberate harness
-        refusal (grant_required / llm_quota_exhausted), or the message
-        full-matches a pinned safe pattern.
+        DETECTION and SURFACING are deliberately separate (sol-critic round 2,
+        PR #553). A parseable JSON error body carrying a string message means
+        the harness was reachable and ANSWERED: the authoring job itself
+        failed, terminally — regardless of whether its message is safe to
+        show. That is distinct from a transport failure, where nothing about
+        the job is known and retrying is honest.
+
+        The reason is non-None only when it may cross the tenant boundary:
+        either the body's shape marks a deliberate harness refusal
+        (grant_required / llm_quota_exhausted), or the message full-matches a
+        pinned safe pattern. An answered failure with an unpinned message is
+        (True, None): terminal, surfaced as reason_code only.
         """
         try:
             body = response.json()
-        except Exception:  # noqa: BLE001 - any unparseable body means no reason
-            return None
+        except Exception:  # noqa: BLE001 - unparseable body: not a harness answer
+            return False, None
         if not isinstance(body, dict):
-            return None
+            return False, None
         error = body.get("error")
         message = None
         if isinstance(error, dict) and isinstance(error.get("message"), str):
@@ -902,23 +906,23 @@ class CustomizationService:
         elif isinstance(body.get("message"), str):
             # The harness quota refusal carries its message at the top level.
             message = body["message"]
-        if not message:
-            return None
+        if not isinstance(message, str) or not message:
+            return False, None
         cleaned = " ".join(
             "".join(ch if ch.isprintable() else " " for ch in message).split()
         )[:300]
         if not cleaned:
-            return None
+            return True, None
         # Shape-marked deliberate refusals: the §16 legacy lane already
         # forwards the grant message verbatim, and the quota message is a
         # fixed authored constant.
         if body.get("grant_required") is True:
-            return cleaned
+            return True, cleaned
         if body.get("errorCode") == "llm_quota_exhausted":
-            return cleaned
+            return True, cleaned
         if any(p.fullmatch(cleaned) for p in cls._SAFE_HARNESS_REASONS):
-            return cleaned
-        return None
+            return True, cleaned
+        return True, None
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
@@ -961,11 +965,11 @@ class CustomizationService:
             # Class-qualified: _harness_stage is also exercised unbound
             # (self=None), a convention test_customization_refusal_observability
             # pins, so no attribute lookup may go through self.
-            reason = (
-                CustomizationService._harness_job_failure_reason(response)
-                if response is not None else None
+            answered, reason = (
+                CustomizationService._harness_job_failure(response)
+                if response is not None else (False, None)
             )
-            if reason is not None:
+            if answered:
                 # The harness answered with its own failure reason: the
                 # authoring JOB failed terminally. Filing it as "unavailable"
                 # would defer and re-run authoring for minutes while the
