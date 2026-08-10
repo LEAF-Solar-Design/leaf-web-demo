@@ -101,11 +101,12 @@ def client(monkeypatch, tmp_path):
     return TestClient(app_module.app)
 
 
-def _upload(client, data=MALFORMED_DWG, name="site.dwg", engine=None):
+def _upload(client, data=MALFORMED_DWG, name="site.dwg", engine=None,
+            headers=None):
     form = {"engine": engine} if engine else None
     return client.post("/api/drawings/upload",
                        files={"file": (name, io.BytesIO(data))},
-                       data=form)
+                       data=form, headers=headers or {})
 
 
 def _status(client, receipt):
@@ -305,6 +306,39 @@ def test_dwg_default_engine_used_when_field_absent(client, monkeypatch, tmp_path
     marker = guest_uploads.read_marker(
         write_loop.upload_backend_for_tenant(tenant), tenant, did)
     assert marker["extract_engine"] == "local"
+
+
+def test_same_bytes_other_engine_is_a_new_drawing_not_a_dedupe_hit(
+        client, monkeypatch, tmp_path):
+    """sol-critic #552 round-1 RED: a content-dedupe hit must never silently
+    override the visible toggle. Same bytes + same engine recover the same
+    receipt; same bytes on the OTHER engine are a DIFFERENT drawing whose own
+    engine really runs."""
+    monkeypatch.setenv("LEAF_DWG2DXF_BIN", str(_stub_converter(tmp_path)))
+    first = _upload(client, engine="local").json()
+    tenant = first["tenant_id"]
+    assert _status(client, first)["status"] == "ready"
+
+    # Same bytes + same engine: the SAME drawing (idempotent recovery intact).
+    again = _upload(client, engine="local",
+                    headers={"X-Tenant-Id": tenant}).json()
+    assert again["drawing_id"] == first["drawing_id"]
+
+    # Same bytes + APS engine: a NEW drawing that really runs the APS branch
+    # (honest APS_UNAVAILABLE at APS_LIVE=0) while the local drawing stays
+    # ready and untouched.
+    other = _upload(client, engine="aps",
+                    headers={"X-Tenant-Id": tenant}).json()
+    assert other["drawing_id"] != first["drawing_id"]
+    aps_view = _status(client, other)
+    assert aps_view["status"] == "failed"
+    assert aps_view["error"]["error_code"] == "APS_UNAVAILABLE"
+    assert _status(client, first)["status"] == "ready"
+
+    marker = guest_uploads.read_marker(
+        write_loop.upload_backend_for_tenant(tenant), tenant,
+        other["drawing_id"])
+    assert marker["extract_engine"] == "aps"
 
 
 def test_engine_field_garbage_is_400(client):

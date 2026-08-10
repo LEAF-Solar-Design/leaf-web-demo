@@ -1336,15 +1336,19 @@ are built against their defaults; both are env-tunable without a code change.
   parsed locally by default — CPU on the service, not an APS charge — but a
   paid APS run too when `LEAF_GUEST_DXF_EXTRACT=aps`, see the Extraction note
   below).
-  GUEST uploads are idempotent by content: the drawing id derives from
-  (tenant, sha256(bytes)), so re-posting the same bytes as the same guest
+  GUEST uploads are idempotent by content AND engine: the drawing id derives
+  from (tenant, resolved-DWG-engine, sha256(bytes)) — engine omitted for
+  .dxf — so re-posting the same bytes as the same guest ON THE SAME ENGINE
   returns the SAME drawing's receipt (its CURRENT `status`, original
   retention window, fresh session token) and consumes no quota — an aborted
   upload whose 202 the client never saw is recovered by re-uploading, never
-  duplicated. A terminally `failed` attempt is the exception: its retry
-  reuses the derived id, replaces the failure, and counts quota (it
-  extracts again). Account uploads mint random ids (two intentional copies
-  of one file stay two drawings).
+  duplicated. The same bytes on the OTHER engine are a DIFFERENT drawing
+  with their own real extraction and quota count: the two engines produce
+  different intake fidelity, so a dedupe hit must never silently override
+  the visible toggle (sol-critic #552). A terminally `failed` attempt is
+  the exception: its retry reuses the derived id, replaces the failure, and
+  counts quota (it extracts again). Account uploads mint random ids (two
+  intentional copies of one file stay two drawings).
 * `GET /api/drawings/{id}/upload-status` — the upload marker's honest state
   (`extracting|ready|failed` + §10 error; stale `extracting` past
   `LEAF_UPLOAD_EXTRACT_TIMEOUT_S` is PERSISTED as failed/TIMEOUT).

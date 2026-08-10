@@ -223,14 +223,25 @@ def new_account_upload_drawing_id() -> str:
     return str(uuid.uuid4())
 
 
-def derived_upload_drawing_id(tenant_id: str, data: bytes) -> str:
+def derived_upload_drawing_id(tenant_id: str, data: bytes,
+                              engine: Optional[str] = None) -> str:
     """Content-derived id for GUEST uploads (same ``u-<10 hex>`` shape as the
-    random mint): sha256(tenant : content). This is the upload idempotency
-    key — a guest re-posting the SAME bytes lands on the SAME drawing, so an
-    aborted upload whose receipt the client never saw is recovered by
-    re-uploading instead of duplicated (FE review round 3, MAJOR)."""
+    random mint): sha256(tenant [: engine] : content). This is the upload
+    idempotency key — a guest re-posting the SAME bytes lands on the SAME
+    drawing, so an aborted upload whose receipt the client never saw is
+    recovered by re-uploading instead of duplicated (FE review round 3,
+    MAJOR).
+
+    The RESOLVED DWG engine is folded into the digest when one applies
+    (sol-critic #552 round-1 RED): the two engines produce different intake
+    fidelity, so the same bytes on a DIFFERENT engine must be a DIFFERENT
+    drawing — a dedupe hit must never silently override the visible toggle.
+    Same bytes + same engine still recover the same receipt; .dxf uploads
+    (engine None) keep the original digest."""
+    scope = f":{engine}" if engine else ""
     digest = hashlib.sha256(
-        tenant_id.encode("utf-8") + b":" + hashlib.sha256(data).digest()).hexdigest()
+        (tenant_id + scope).encode("utf-8") + b":"
+        + hashlib.sha256(data).digest()).hexdigest()
     return "u-" + digest[:10]
 
 

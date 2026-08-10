@@ -336,7 +336,12 @@ def _upload_drawing(
     drawing_id = None
     dedupe_marker = None
     if tenant_kind == "guest":
-        derived = guest_uploads.derived_upload_drawing_id(str(tenant), data)
+        # The RESOLVED engine scopes the derived id for .dwg (None for .dxf):
+        # same bytes + same engine recover the same receipt; same bytes on the
+        # OTHER engine are a different drawing with their own real extraction,
+        # so a dedupe hit can never silently override the visible toggle.
+        derived = guest_uploads.derived_upload_drawing_id(
+            str(tenant), data, engine_choice)
         # ONE critical section for check → quota charge → marker + staged
         # bytes: two concurrent identical uploads cannot both pass the dedupe
         # check — the loser blocks on the lock, then dedupes onto the
