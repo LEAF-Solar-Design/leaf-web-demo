@@ -553,6 +553,21 @@ def _redact(obj):
 # --------------------------------------------------------------------------- #
 # WorkItem submit + poll (low level)
 # --------------------------------------------------------------------------- #
+def workitem_processing_limit_s() -> int:
+    """Explicit WorkItem processing ceiling (`limitProcessingTimeSec`).
+
+    Without this field APS applies its 100s engine default, which kills any
+    real-sized drawing mid-extract (a 26MB intake died at exactly 100s with
+    status=failedLimitProcessingTime, 2026-08-10). The clamp ceiling is 900:
+    the value must never exceed `_poll_workitem`'s 900s budget, or the submit
+    abandons a WorkItem APS still finishes and bills."""
+    try:
+        value = int(os.environ.get("APS_WORKITEM_PROCESSING_LIMIT_S", "600"))
+    except ValueError:
+        value = 600
+    return max(60, min(value, 900))
+
+
 def submit_workitem(activity_id: str, arguments: dict,
                     dry_run: bool = False, poll: bool = True,
                     tenant_id: str | None = None,
@@ -578,7 +593,8 @@ def submit_workitem(activity_id: str, arguments: dict,
     from here. The callback is best-effort: it must never turn a successful paid
     submit into a failed run, so any exception it raises is swallowed.
     """
-    body = {"activityId": activity_id, "arguments": arguments}
+    body = {"activityId": activity_id, "arguments": arguments,
+            "limitProcessingTimeSec": workitem_processing_limit_s()}
     if dry_run:
         return {"_dry_run": True, "endpoint": f"POST {DA}/workitems",
                 "body": _redact(body)}

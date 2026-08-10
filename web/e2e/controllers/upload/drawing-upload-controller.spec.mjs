@@ -41,6 +41,60 @@ test('invalid type and oversize files never call upload', async () => {
   expect(calls).toBe(0)
 })
 
+test('exhausted polling reports still-running, not a failure the server never declared', async () => {
+  const controller = createDrawingUploadController({
+    pollMs: 0,
+    maxPolls: 2,
+    services: {
+      policy: async () => ({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 }),
+      upload: async () => ({ drawing_id: 'drawing-slow', status: 'extracting' }),
+      wait: async () => {},
+      status: async () => ({ status: 'extracting' }),
+      intake: async () => ({}),
+    },
+  })
+  await controller.loadPolicy()
+  const result = await controller.upload(file)
+  expect(result).toBeNull()
+  expect(controller.getSnapshot().phase).toBe('failed')
+  expect(controller.getSnapshot().error).toContain('still running')
+  expect(controller.getSnapshot().error).not.toContain('did not finish')
+})
+
+test('a server-declared failure surfaces the server message verbatim', async () => {
+  const controller = createDrawingUploadController({
+    pollMs: 0,
+    services: {
+      policy: async () => ({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 }),
+      upload: async () => ({ drawing_id: 'drawing-big', status: 'extracting' }),
+      wait: async () => {},
+      status: async () => ({ status: 'failed', error: { message: 'WorkItem hit the processing time limit' } }),
+      intake: async () => ({}),
+    },
+  })
+  await controller.loadPolicy()
+  await controller.upload(file)
+  expect(controller.getSnapshot().error).toContain('processing time limit')
+})
+
+test('a failure arriving on the final allowed poll surfaces the server message, not still-running', async () => {
+  const controller = createDrawingUploadController({
+    pollMs: 0,
+    maxPolls: 1,
+    services: {
+      policy: async () => ({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 }),
+      upload: async () => ({ drawing_id: 'drawing-last-poll', status: 'extracting' }),
+      wait: async () => {},
+      status: async () => ({ status: 'failed', error: { message: 'SERVER VERBATIM: processing time limit' } }),
+      intake: async () => ({}),
+    },
+  })
+  await controller.loadPolicy()
+  await controller.upload(file)
+  expect(controller.getSnapshot().error).toContain('SERVER VERBATIM')
+  expect(controller.getSnapshot().error).not.toContain('still running')
+})
+
 test('cancel prevents a late upload receipt from loading or seating intake', async () => {
   let release
   let intakeCalls = 0
