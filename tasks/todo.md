@@ -1,3 +1,38 @@
+# P5a durable request and queued-turn journal
+
+Source contract: unified Leaf Platform reconciliation plan v1.59, P5a,
+SHA-256 `28A7FD7D6DFDB65277E44FCFB218D89A9CBBB190EA19B6D68ED6CE9AE3007F42`.
+
+Migration allocation: `0035_session_request_journal.sql`. Current main ends
+at 0034; PR #536 and P7 will rebase and take later free numbers after P5a.
+
+- [x] Admit each eligible message request into PostgreSQL before the active-turn CAS.
+- [x] Bind an immutable request identity to tenant, drawing, session, principal, and payload digest.
+- [x] Permit at most one executing turn and one queued turn per session while allowing independent sessions to proceed.
+- [x] Recover queued turns after process replacement through a lease-bound atomic claim.
+- [x] Close expired executing requests as abandoned instead of executing them again.
+- [x] Replay the stored terminal HTTP result for an exact idempotent retry and reject request-id substitution.
+- [x] Derive queued, executing, and total active counts from journal rows.
+- [x] Keep credentials, image bytes, tokens, and approval secrets out of the journal.
+- [x] Preserve the existing SQLite and non-PostgreSQL behavior until the paired P4a selector cutover.
+- [x] Prove the migration, tenant/drawing isolation, fencing, crash recovery, replay, and counts with executable tests.
+- [x] Store no recoverable text, classifier, model, subject, or entitlement snapshot for admitted, direct, or executing requests.
+- [x] Write recoverable payload only in the admitted-to-queued transaction, after recursive credential-shape refusal.
+- [x] Reject nested Authorization or Bearer values, JWT-shaped values, and credential-key values before storage, queueing, logging, or echo.
+- [x] Keep ordinary queueable prose and non-secret classifier data recoverable.
+- [x] Ignore `request_id` when the request journal is disabled so the legacy response and dispatch path stay unchanged.
+- [x] Keep stored terminal result fields stable on replay while projecting current `active_requests` counts live.
+- [x] Re-arm startup recovery until a still-live crashed lease expires, then start its queued successor exactly once.
+- [x] Require the full request-journal column, constraint, and index catalog before PostgreSQL sessions readiness.
+- [x] If a newer queued request takes the only queue slot while a claimed request loses the session CAS, preserve the older request as admitted for exact retry instead of terminalizing it.
+
+Risks:
+
+- A recovered executing request may already have caused an external effect, so it must become abandoned and must never be dispatched again.
+- A queued request may be reclaimed only once, with its immutable identity and payload intact.
+- The journal cannot weaken approval consume-once or persist per-turn credentials.
+- Live active-count projection may change between terminal replays; stored terminal fields may not.
+
 # Staging failed-test repair
 
 - [x] Wave 0: capture the current gate baseline and add failing regression checks.
