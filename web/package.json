@@ -14,6 +14,7 @@
     "proof:local": "playwright test --config playwright.local.config.mjs",
     "proof:version-restore": "playwright test e2e/local/version-restore.spec.mjs --config playwright.config.mjs",
     "proof:author-quota-gate": "playwright test e2e/author-quota-gate.spec.mjs --config playwright.config.mjs",
+    "proof:async-author-stage": "playwright test e2e/async-author-stage.spec.mjs --config playwright.config.mjs",
     "proof:local:managed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_unified_local_proof.ps1",
     "proof:guest": "playwright test --config playwright.guest.config.mjs",
     "proof:guest:managed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_unified_local_proof.ps1 -Mode guest",
