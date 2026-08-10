@@ -22,6 +22,7 @@ Migration allocation: `0037_session_request_journal.sql`. Open PR #536 owns
 - [x] Keep ordinary queueable prose and non-secret classifier data recoverable.
 - [x] Ignore `request_id` when the request journal is disabled so the legacy response and dispatch path stay unchanged.
 - [x] Keep stored terminal result fields stable on replay while projecting current `active_requests` counts live.
+- [ ] Re-arm startup recovery until a still-live crashed lease expires, then start its queued successor exactly once.
 
 Risks:
 

@@ -293,6 +293,13 @@ def _drop_canceller(turn_id: str) -> None:
 _queued_lock = threading.Lock()
 _queued: Dict[str, Dict[str, Any]] = {}
 
+# Startup recovery may find a queued successor still fenced by a crashed
+# process's unexpired lease. One daemon timer re-runs recovery at the earliest
+# such lease edge. The database remains the authority, so duplicate app
+# processes or timer races cannot claim the same row twice.
+_durable_recovery_lock = threading.Lock()
+_durable_recovery_timer: Optional[threading.Timer] = None
+
 # The kicker's TurnBusy-retry bound. Each retry requires a DISTINCT foreign
 # turn to have acquired AND terminalized the session's CAS inside the window
 # between one pop-check and one start attempt, with that turn's own terminal
@@ -1328,6 +1335,31 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
     return processed
 
 
+def _run_scheduled_durable_recovery() -> None:
+    global _durable_recovery_timer
+    with _durable_recovery_lock:
+        _durable_recovery_timer = None
+    try:
+        recover_queued_turns()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[leaf-agent] durable queue recovery failed: {type(exc).__name__}",
+            file=sys.stderr, flush=True,
+        )
+
+
+def _schedule_durable_recovery(delay: float) -> None:
+    global _durable_recovery_timer
+    with _durable_recovery_lock:
+        current = _durable_recovery_timer
+        if current is not None and current.is_alive():
+            return
+        timer = threading.Timer(max(0.05, delay), _run_scheduled_durable_recovery)
+        timer.daemon = True
+        _durable_recovery_timer = timer
+        timer.start()
+
+
 def recover_queued_turns() -> None:
     """Startup recovery: settle ambiguous execution, then resume queued work."""
     if not request_journal.enabled():
@@ -1339,6 +1371,9 @@ def recover_queued_turns() -> None:
         recovered += count
         if count == 0:
             break
+    delay = request_journal.next_queued_recovery_delay()
+    if delay is not None:
+        _schedule_durable_recovery(delay)
 
 
 def _kick_queued(session_id: str) -> None:

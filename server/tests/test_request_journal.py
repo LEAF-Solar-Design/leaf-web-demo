@@ -161,6 +161,14 @@ class FakeDb:
             candidates = [row for row in self.rows.values() if row["state"] == "queued"]
             if session_id is not None:
                 candidates = [row for row in candidates if row["session_id"] == session_id]
+            candidates = [
+                row for row in candidates
+                if not any(
+                    active["session_id"] == row["session_id"]
+                    and active["state"] == "executing"
+                    for active in self.rows.values()
+                )
+            ]
             candidates.sort(key=lambda row: (row["created_at"], row["request_id"]))
             if not candidates:
                 return _Result([])
@@ -176,6 +184,20 @@ class FakeDb:
             row = next((row for row in self.rows.values()
                         if row["session_id"] == params[0] and row["state"] == "queued"), None)
             return _Result([dict(row)] if row else [])
+        if normalized.startswith(
+            "SELECT MIN(active.lease_expires_at) AS lease_expires_at"
+        ):
+            expiries = [
+                active["lease_expires_at"]
+                for queued in self.rows.values()
+                if queued["state"] == "queued"
+                for active in self.rows.values()
+                if active["session_id"] == queued["session_id"]
+                and active["state"] == "executing"
+            ]
+            return _Result([{
+                "lease_expires_at": min(expiries) if expiries else None,
+            }])
         if normalized.startswith("UPDATE app_session_requests SET state=%s"):
             state, status, response, terminal, updated, request_id, turn_id = params
             row = self.rows.get(request_id)
@@ -325,6 +347,58 @@ def test_replacement_settles_execution_that_expires_after_startup(journal, monke
         "queued": 0, "executing": 0, "active": 0,
     }
     assert request_journal.claim_next_queued(lease_seconds=30) is None
+
+
+def test_startup_recovery_rearms_until_live_lease_expires(journal, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(request_journal.time, "time", lambda: clock[0])
+    executing, *_ = _admit(journal, text="already running")
+    queued, *_ = _admit(journal, text="recover me")
+    assert request_journal.begin_request(executing, "turn-1", lease_seconds=600)
+    assert request_journal.queue_request(queued, _recoverable("recover me"))
+
+    timers = []
+
+    class FakeTimer:
+        def __init__(self, delay, target):
+            self.delay = delay
+            self.target = target
+            self.daemon = False
+            timers.append(self)
+
+        def is_alive(self):
+            return True
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(turn_runner.threading, "Timer", FakeTimer)
+    monkeypatch.setattr(turn_runner, "_durable_recovery_timer", None)
+    monkeypatch.setattr(
+        turn_runner.entitlements, "entitlements_for",
+        lambda *_a, **_kw: {"converse": True},
+    )
+    starts = []
+    monkeypatch.setattr(
+        turn_runner, "start_turn",
+        lambda *args, **kwargs: starts.append((args, kwargs)) or kwargs["turn_id"],
+    )
+
+    # A replacement process must not abandon a lease that is still live, but
+    # it must arm one later recovery pass for the queued successor.
+    turn_runner.recover_queued_turns()
+    assert starts == []
+    assert len(timers) == 1
+    assert timers[0].delay == pytest.approx(600.0)
+
+    clock[0] = 701.0
+    timers[0].target()
+    assert journal.rows[executing]["state"] == "abandoned"
+    assert len(starts) == 1
+    assert starts[0][1]["request_id"] == queued
+    assert starts[0][1]["journal_claimed"] is True
+    assert starts[0][1]["text"] == "recover me"
+    assert journal.rows[queued]["recoverable_json"] is None
 
 
 def test_active_counts_are_tenant_and_drawing_scoped(journal):

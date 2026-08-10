@@ -400,6 +400,26 @@ def queued_for_session(session_id: str) -> Optional[Dict[str, Any]]:
         return _row(cur.fetchone())
 
 
+def next_queued_recovery_delay() -> Optional[float]:
+    """Seconds until the earliest live execution stops blocking queued work."""
+    db = platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT MIN(active.lease_expires_at) AS lease_expires_at"
+            " FROM app_session_requests AS queued"
+            " JOIN app_session_requests AS active"
+            " ON active.session_id=queued.session_id"
+            " WHERE queued.state='queued' AND active.state='executing'"
+        )
+        row = cur.fetchone()
+    lease_expires_at = row.get("lease_expires_at") if row else None
+    if lease_expires_at is None:
+        return None
+    # Settlement uses a strict less-than comparison. A small positive floor
+    # ensures the follow-up pass runs after, not exactly on, the lease edge.
+    return max(0.05, float(lease_expires_at) - time.time())
+
+
 def finish_request(
     request_id: str, turn_id: str, *, state: str,
     response_status: int, response: Dict[str, Any],
