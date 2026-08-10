@@ -356,6 +356,22 @@ def build_suites() -> List[Suite]:
         # import shadow, both found by a real chat turn, neither by CI.
         # Floors are the executed counts measured on this tree 2026-08-04 with
         # no DATABASE_URL; every one of these files is dependency-free.
+        # Live-APS catalog authority (2026-08-10): none of these four files was
+        # registered, so the seam that gates real-USD APS routing (deps
+        # provenance fold, router consumer, aps_live projection, generation
+        # pins) ran nowhere in CI -- the same silent-gap failure mode the
+        # comment above records. Floors are collected counts on this tree;
+        # all four files are dependency-free (monkeypatch + tmp stores only).
+        Suite("server-exact-write-pins", "server tests/test_exact_write_pins.py", "pytest",
+              SERVER, _py_pytest("tests/test_exact_write_pins.py"), 11),
+        Suite("server-catalog-read-fallback", "server tests/test_catalog_read_fallback.py",
+              "pytest", SERVER, _py_pytest("tests/test_catalog_read_fallback.py"), 21),
+        Suite("server-instant-catalog-metadata",
+              "server tests/test_instant_catalog_metadata.py", "pytest", SERVER,
+              _py_pytest("tests/test_instant_catalog_metadata.py"), 16),
+        Suite("server-catalog-source-provenance",
+              "server tests/test_catalog_tool_source_provenance.py", "pytest", SERVER,
+              _py_pytest("tests/test_catalog_tool_source_provenance.py"), 24),
         Suite("server-overlay-propose", "server tests/test_overlay_propose.py", "pytest",
               SERVER, _py_pytest("tests/test_overlay_propose.py"), 13),
         Suite("server-overlay-decision", "server tests/test_overlay_decision.py", "pytest",
