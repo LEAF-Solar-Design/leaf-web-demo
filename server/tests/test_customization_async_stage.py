@@ -762,13 +762,35 @@ def test_harness_transport_failure_without_reason_stays_unavailable(
 
 
 @pytest.mark.parametrize("body,expected", [
+    # Pinned Agent SDK terminal failures surface verbatim (the incident class).
     ({"error": {"message": "Agent SDK auth failure: oauth_org_not_allowed"}},
      "Agent SDK auth failure: oauth_org_not_allowed"),
-    # The harness quota refusal carries its message at the top level.
-    ({"errorCode": "llm_quota_exhausted", "message": "grant pool exhausted"},
-     "grant pool exhausted"),
-    ({"error": {"message": "line one\nline\ttwo"}}, "line one line two"),
-    ({"error": {"message": "x" * 400}}, "x" * 300),
+    ({"error": {"message": "Agent SDK auth failure: billing_error"}},
+     "Agent SDK auth failure: billing_error"),
+    ({"error": {"message": "Agent SDK rate limited (retry after ~42s)"}},
+     "Agent SDK rate limited (retry after ~42s)"),
+    ({"error": {"message": "Agent SDK rate limited (retry horizon unknown)"}},
+     "Agent SDK rate limited (retry horizon unknown)"),
+    ({"error": {"message":
+      "Agent SDK spend cap exceeded (turns=9 > 8 or cost-tokens=100 > 50)"}},
+     "Agent SDK spend cap exceeded (turns=9 > 8 or cost-tokens=100 > 50)"),
+    # Shape-marked deliberate refusals surface verbatim.
+    ({"grant_required": True,
+      "error": {"message": "tenant t has no eligible Claude grant.",
+                "code": "grant_required"}},
+     "tenant t has no eligible Claude grant."),
+    ({"errorCode": "llm_quota_exhausted",
+      "message": "all authorized Claude mounts are temporarily unavailable"},
+     "all authorized Claude mounts are temporarily unavailable"),
+    # Anything else stays reason_code-only: an arbitrary catch-all message can
+    # carry a credential fragment, internal URL, or path (sol-critic, PR #553).
+    ({"error": {"message": "ENOENT /srv/tenants/t/.git x-oauth-basic@internal"}},
+     None),
+    ({"error": {"message": "Agent SDK auth failure: something_else"}}, None),
+    ({"error": {"message": "Agent SDK auth failure: oauth_org_not_allowed "
+                           "plus trailing junk"}}, None),
+    ({"error": {"message": "line one\nline\ttwo"}}, None),
+    ({"error": {"message": "x" * 400}}, None),
     ({"error": {"message": "   "}}, None),
     ({"error": {"message": 7}}, None),
     ({"error": "not a dict"}, None),
@@ -778,6 +800,17 @@ def test_harness_transport_failure_without_reason_stays_unavailable(
 def test_harness_job_failure_reason_extraction(body, expected):
     response = _HarnessErrorResponse(500, body)
     assert CustomizationService._harness_job_failure_reason(response) == expected
+
+
+def test_multiline_grant_message_is_collapsed_before_surfacing():
+    """Sanitization still applies to shape-marked messages."""
+    response = _HarnessErrorResponse(401, {
+        "grant_required": True,
+        "error": {"message": "no linked\nClaude grant", "code": "grant_required"},
+    })
+    assert CustomizationService._harness_job_failure_reason(response) == (
+        "no linked Claude grant"
+    )
 
 
 def test_author_job_failure_fails_first_attempt_and_status_carries_reason(

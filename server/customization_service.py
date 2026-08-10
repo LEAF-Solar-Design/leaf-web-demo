@@ -853,16 +853,41 @@ class CustomizationService:
             raise CustomizationServiceError("invalid_staged_catalog", 502)
         return dict(tool)
 
-    @staticmethod
-    def _harness_job_failure_reason(response: Any) -> str | None:
+    # The only harness failure messages that may cross the boundary VERBATIM.
+    # The harness's catch-all 500 serializes raw exception messages (only its
+    # stderr copy is token-redacted), so an arbitrary message can carry a
+    # credential fragment, internal URL, or path — length and printable-char
+    # filtering are not secret redaction (sol-critic, PR #553). These full-match
+    # patterns pin the deliberate, authored Agent SDK terminal failures
+    # (agentSdkRunner.ts); anything else surfaces as reason_code only, and the
+    # full text stays in the harness's own log for operators.
+    _SAFE_HARNESS_REASONS = (
+        re.compile(
+            r"Agent SDK auth failure: "
+            r"(?:authentication_failed|oauth_org_not_allowed|billing_error)"
+        ),
+        re.compile(
+            r"Agent SDK rate limited"
+            r"(?: \(retry after ~?\d+s\)| \(retry horizon unknown\))?"
+        ),
+        re.compile(
+            r"Agent SDK spend cap exceeded "
+            r"\(turns=\d+ > \d+ or cost-tokens=\d+ > \d+\)"
+        ),
+    )
+
+    @classmethod
+    def _harness_job_failure_reason(cls, response: Any) -> str | None:
         """Extract the harness's own failure reason from an error response.
 
         A parseable JSON error body means the harness was reachable and
         ANSWERED: the authoring job itself failed (the incident class is the
         Agent SDK dying with an auth failure seconds after dispatch). That is
         distinct from a transport failure, where nothing about the job is
-        known. Returns a bounded printable string, or None when the response
-        carries no usable reason.
+        known. Returns a tenant-safe reason string, or None when the response
+        carries none: either the body's shape marks a deliberate harness
+        refusal (grant_required / llm_quota_exhausted), or the message
+        full-matches a pinned safe pattern.
         """
         try:
             body = response.json()
@@ -881,10 +906,19 @@ class CustomizationService:
             return None
         cleaned = " ".join(
             "".join(ch if ch.isprintable() else " " for ch in message).split()
-        )
+        )[:300]
         if not cleaned:
             return None
-        return cleaned[:300]
+        # Shape-marked deliberate refusals: the §16 legacy lane already
+        # forwards the grant message verbatim, and the quota message is a
+        # fixed authored constant.
+        if body.get("grant_required") is True:
+            return cleaned
+        if body.get("errorCode") == "llm_quota_exhausted":
+            return cleaned
+        if any(p.fullmatch(cleaned) for p in cls._SAFE_HARNESS_REASONS):
+            return cleaned
+        return None
 
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
