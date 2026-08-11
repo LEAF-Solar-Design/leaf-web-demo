@@ -3168,9 +3168,15 @@ def check_docs_noop_filter(text: str) -> None:
         # Hash updated for the dormant digest-aware v3 producer/consumer
         # handshake. The guarded step still has one workflow dispatch site;
         # v1/v2 retain their exact legacy inputs, while v3 can run only when
-        # the hardcoded source flag is deliberately enabled with the
-        # reviewed Terraform consumer marker present.
-        "b5a7e1dc3991fbd162bd9b3b6aa67311243414db5f57cf2a3544bda7e27f21d5"
+            # the hardcoded source flag is deliberately enabled with the
+            # reviewed Terraform consumer marker present.
+            # Hash updated for the bounded private-repository dispatch
+            # envelope. The same single workflow-dispatch site now sends one
+            # exact schema-checked base64 evidence object instead of nineteen
+            # independent fields, keeping the target workflow below GitHub's
+            # input limit. No secret, endpoint, dispatch site, or service was
+            # added.
+            "8fb70f9347a107b1e1289180724dfb950a4b70d23bcc7fc9ff7cd5fb823baad8"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5581,25 +5587,22 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert 'CURRENT_TF_BLOB" = "$TF_CONSUMER_BLOB' in code
     for field in (
         "digest_aware_reconcile=true",
-        "expected_image_digest=$SERVICE_DIGEST",
-        "component_producer_source_revision=$PRODUCER_SOURCE",
-        "component_producer_source_tree=$PRODUCER_TREE",
-        "surface_fingerprint=$SURFACE_FINGERPRINT",
-        "recipe_fingerprint=$RECIPE_FINGERPRINT",
-        "producer_workflow_path=$PRODUCER_WORKFLOW",
-        "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB",
-        "producer_run_id=$PRODUCER_RUN_ID",
-        "producer_run_attempt=$PRODUCER_RUN_ATTEMPT",
-        "provenance_subject=$PROVENANCE_SUBJECT",
-        "provenance_digest=$PROVENANCE_DIGEST",
-        "release_source_revision=$BUILD_HEAD_SHA",
-        "release_source_tree=$RELEASE_SOURCE_TREE",
-        "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID",
-        "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME",
-        "supply_set_sha256=$SUPPLY_SHA256",
         "convergence_id=$CONVERGENCE_ID",
+        "digest_aware_evidence_b64=$DIGEST_EVIDENCE_B64",
+        "leaf.digest-aware-dispatch.v1",
+        "candidate_image_digest:$candidate_image_digest",
+        "component_producer_source_revision:$component_producer_source_revision",
+        "producer_workflow_blob:$producer_workflow_blob",
+        "provenance_digest:$provenance_digest",
+        "release_source_revision:$release_source_revision",
+        "supply_set_artifact_id:$supply_set_artifact_id",
+        "supply_set_json_b64:$supply_set_json_b64",
+        "build_run_attempt:$build_run_attempt",
+        "terraform_workflow_blob:$terraform_workflow_blob",
     ):
         assert field in code
+    assert '${#DIGEST_EVIDENCE_B64}" -le 50000' in code
+    assert '-f "expected_image_digest=' not in code
     assert 'OUTCOME=$(jq -er \'.outcome\'' in code
     assert 'if [ "$OUTCOME" = "deployed" ]' in code
     assert "DEPLOYED_ANY=true" in code
