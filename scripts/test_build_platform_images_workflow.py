@@ -3172,11 +3172,16 @@ def check_docs_noop_filter(text: str) -> None:
             # reviewed Terraform consumer marker present.
             # Hash updated for the bounded private-repository dispatch
             # envelope. The same single workflow-dispatch site now sends one
-            # exact schema-checked base64 evidence object instead of nineteen
-            # independent fields, keeping the target workflow below GitHub's
-            # input limit. No secret, endpoint, dispatch site, or service was
-            # added.
-            "8fb70f9347a107b1e1289180724dfb950a4b70d23bcc7fc9ff7cd5fb823baad8"
+                # exact schema-checked base64 evidence object instead of nineteen
+                # independent fields, keeping the target workflow below GitHub's
+                # input limit. No secret, endpoint, dispatch site, or service was
+                # added.
+                # Hash updated for receipt-integrity closure. A successful v3
+                # run is now accepted only after the exact artifact file set,
+                # canonical detailed-receipt hash, and outcome-specific receipt
+                # semantics pass the first-party manifest verifier. This adds
+                # no dispatch site, credential, endpoint, service, or AWS call.
+                "eec2a75695731e4afb6a8d27f031094e665553cdfb29508ca365810c68920138"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5603,6 +5608,9 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
         assert field in code
     assert '${#DIGEST_EVIDENCE_B64}" -le 50000' in code
     assert '-f "expected_image_digest=' not in code
+    assert "platform_release_manifest.py verify-surface-result" in code
+    assert '--directory "surface-result-$SERVICE"' in code
+    assert 'cp "$RESULT_FILE" "surface-results/$SERVICE.json"' not in code
     assert 'OUTCOME=$(jq -er \'.outcome\'' in code
     assert 'if [ "$OUTCOME" = "deployed" ]' in code
     assert "DEPLOYED_ANY=true" in code

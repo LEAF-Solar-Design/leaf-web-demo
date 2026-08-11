@@ -997,35 +997,18 @@ jobs:
                   gh api "repos/$INFRA_REPO/actions/artifacts/$RESULT_ID/zip" \
                     > "surface-result-$SERVICE.zip"
                   unzip -q "surface-result-$SERVICE.zip" -d "surface-result-$SERVICE"
-                  RESULT_FILE="surface-result-$SERVICE/surface-result.json"
-                  jq -e --arg release "$BUILD_HEAD_SHA" \
-                    --arg service "$SERVICE" \
-                    --arg convergence "$CONVERGENCE_ID" \
-                    --arg digest "$SERVICE_DIGEST" \
-                    --arg tf_blob "$TF_CONSUMER_BLOB" '
-                    (keys | sort) == [
-                      "aws_mutation_count", "candidate_image_digest",
-                      "convergence_id", "outcome", "release_source_revision",
-                      "schema", "service", "surface_receipt_sha256",
-                      "terminal_image_digest", "terraform_workflow_blob"
-                    ]
-                    and .schema == "leaf.staging-surface-result.v1"
-                    and .release_source_revision == $release
-                    and .service == $service
-                    and .convergence_id == $convergence
-                    and .candidate_image_digest == $digest
-                    and .terminal_image_digest == $digest
-                    and .terraform_workflow_blob == $tf_blob
-                    and (.surface_receipt_sha256 | test("^[0-9a-f]{64}$"))
-                    and (
-                      (.outcome == "skipped" and .aws_mutation_count == 0)
-                      or (.outcome == "deployed" and (.aws_mutation_count | type == "number") and .aws_mutation_count > 0)
-                    )
-                  ' "$RESULT_FILE" >/dev/null || {
+                  RESULT_FILE="surface-results/$SERVICE.json"
+                  python scripts/platform_release_manifest.py verify-surface-result \
+                    --directory "surface-result-$SERVICE" \
+                    --service "$SERVICE" \
+                    --convergence-id "$CONVERGENCE_ID" \
+                    --release-source-revision "$BUILD_HEAD_SHA" \
+                    --candidate-digest "$SERVICE_DIGEST" \
+                    --terraform-workflow-blob "$TF_CONSUMER_BLOB" \
+                    --output "$RESULT_FILE" || {
                     echo "::error::V3 run $RUN_ID returned an invalid or mismatched surface result."
                     exit 1
                   }
-                  cp "$RESULT_FILE" "surface-results/$SERVICE.json"
                   OUTCOME=$(jq -er '.outcome' "$RESULT_FILE")
                   if [ "$OUTCOME" = "deployed" ]; then
                     DEPLOYED_ANY=true
