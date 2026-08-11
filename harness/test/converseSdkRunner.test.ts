@@ -236,6 +236,15 @@ function doneOf(events: ConverseRunnerEvent[]) {
   return done;
 }
 
+const PUBLIC_ERROR_MESSAGE = /^[A-Za-z0-9][A-Za-z0-9 _,:;()'\-]{0,239}$/;
+const SENSITIVE_ERROR_TEXT =
+  /(?:bearer\s|(?:^|[^A-Za-z])(token|secret|password|credential)(?:[^A-Za-z]|$)|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b|sha256:[0-9a-f]{64}|\b[A-Za-z0-9_-]{32,}\b)/i;
+
+function expectPublicError(done: ReturnType<typeof doneOf>): void {
+  expect(done.error?.message).toMatch(PUBLIC_ERROR_MESSAGE);
+  expect(done.error?.message).not.toMatch(SENSITIVE_ERROR_TEXT);
+}
+
 function runnerWith(
   mock: ReturnType<typeof makeMockSdk>,
   opts: Partial<ConverseSdkRunnerOptions> = {},
@@ -313,7 +322,7 @@ describe("ConverseSdkRunner — a throw never carries the grant out", () => {
     const serialized = JSON.stringify(events) + String(events);
 
     expect(serialized).not.toContain(GRANT);
-    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).toContain("Agent service failed");
   });
 
   it("strips the grant from a throw that ESCAPES runInner (the public wrapper)", async () => {
@@ -487,7 +496,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
       makeInput({ resumeSdkSessionId: "prior-session" }),
     );
     expect(unrelated.queries).toHaveLength(1);
-    expect(doneOf(unrelatedEvents).error?.message).toBe("network failed");
+    expect(doneOf(unrelatedEvents).error?.message).toBe("Agent service failed");
 
     const afterOutput = makeMockSdk([
       [streamDelta("partial"), new Error("No conversation found with session ID: stale-id")],
@@ -646,13 +655,41 @@ describe("ConverseSdkRunner — events", () => {
     const done = doneOf(await collect(runnerWith(mock), makeInput()));
     expect(done.stopReason).toBe("cap_hit");
     expect(done.error?.error_code).toBe("cap_hit");
+    expectPublicError(done);
   });
 
   it("maps a terminal auth failure to stop_reason error (not retryable)", async () => {
     const mock = makeMockSdk([assistant("authentication_failed")]);
     const done = doneOf(await collect(runnerWith(mock), makeInput()));
     expect(done.stopReason).toBe("error");
-    expect(done.error).toMatchObject({ error_code: "authentication_failed", retryable: false });
+    expect(done.error).toEqual({
+      error_code: "authentication_failed",
+      message: "Agent service terminal failure",
+      retryable: false,
+    });
+    expectPublicError(done);
+  });
+
+  it("publishes a stable public error instead of SDK stream diagnostics", async () => {
+    const diagnostic = "request failed at https://private.example/token=do-not-persist";
+    const done = doneOf(await collect(runnerWith(makeMockSdk([new Error(diagnostic)])), makeInput()));
+    expect(done.error).toEqual({
+      error_code: "internal",
+      message: "Agent service failed",
+      retryable: false,
+    });
+    expect(JSON.stringify(done)).not.toContain(diagnostic);
+    expectPublicError(done);
+  });
+
+  it("publishes a stable public error when the SDK ends without a result", async () => {
+    const done = doneOf(await collect(runnerWith(makeMockSdk([])), makeInput()));
+    expect(done.error).toEqual({
+      error_code: "internal",
+      message: "Agent service ended without a success result",
+      retryable: false,
+    });
+    expectPublicError(done);
   });
 });
 
@@ -668,6 +705,7 @@ describe("ConverseSdkRunner — wall-clock timeout", () => {
     const done = doneOf(events);
     expect(done.stopReason).toBe("timeout");
     expect(done.error).toMatchObject({ error_code: "timeout", retryable: true });
+    expectPublicError(done);
   });
 });
 
@@ -690,6 +728,9 @@ describe("ConverseSdkRunner — rate-limit classification", () => {
     const done = doneOf(await collect(runnerWith(mock), makeInput()));
     expect(done.stopReason).toBe("llm_rate_limited");
     expect(done.error).toMatchObject({ error_code: "llm_rate_limited", retryable: true });
+    expect(done.error?.message).toBe("Agent service rate limited");
+    expect(done.error?.retry_after_s).toBeGreaterThan(0);
+    expectPublicError(done);
   });
 
   it("rate_limit with NO horizon information => llm_rate_limited (transient default)", async () => {
