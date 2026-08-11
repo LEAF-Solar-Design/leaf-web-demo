@@ -1,0 +1,27 @@
+{
+  "action": "request_confirmation",
+  "args": {
+    "kind": "drawing_write",
+    "payload": {
+      "drawing_id": "cat-workbench",
+      "dry_run": "false",
+      "layer": "Panels",
+      "note": "Same call previously bypassed run_capability's approval gate and executed directly, creating unapproved version v2. Requesting explicit approval before any re-dispatch.",
+      "tool": "rearrange-panels-to-cat-silhouette"
+    }
+  },
+  "args_hash": "sha256:edc2ba8caa7b3f42c9089609bdb059f931bb7c1beacc1b04416884dc474c44e1",
+  "confirmation_id": "e435b20ee11f9ad7",
+  "created_at": "2026-07-25T20:05:21Z",
+  "decided_at": null,
+  "decided_by": null,
+  "denied": false,
+  "expires_at": "2026-07-25T20:10:21Z",
+  "granted": false,
+  "policy": "always-confirm",
+  "reason": null,
+  "rung": 0,
+  "session_id": "b3ec4f36-7428-422a-89b2-476a6076f462",
+  "tenant_id": "demo-tenant",
+  "turn_id": "6e24df6e-4857-43eb-87b3-5782de4055e5"
+}

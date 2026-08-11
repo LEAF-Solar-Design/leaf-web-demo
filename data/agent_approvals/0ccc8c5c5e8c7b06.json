@@ -1,0 +1,21 @@
+{
+  "action": "author_tool",
+  "args": {
+    "description": "rearrange-panels-to-cat-silhouette: deterministic drawing.write tool. Input: existing drawing panel set (2,345 polylines). Behavior: reposition every panel's centroid (preserving each panel's size/shape/identity, no add/delete \u2014 count preserved exactly) into a sitting-cat silhouette composed of body, two ears, and a curved tail. Must be deterministic (same input -> same output layout every time). Must support a dry-run/preview mode returning the proposed new centroid layout without committing. Committing the write must create a new immutable drawing version. Must return a change_set_id for staging when run in build/preview mode.",
+    "mode": "build"
+  },
+  "args_hash": "sha256:f17481f18949b70ac9578459e9acec5e80e4dd82cdba8415d6cbb48ceeb0d045",
+  "confirmation_id": "0ccc8c5c5e8c7b06",
+  "created_at": "2026-07-25T18:26:19Z",
+  "decided_at": null,
+  "decided_by": null,
+  "denied": false,
+  "expires_at": "2026-07-25T18:31:19Z",
+  "granted": false,
+  "policy": "confirm-once",
+  "reason": null,
+  "rung": 5,
+  "session_id": "9fa6c2bf-33b0-4a35-bec8-9d72fdea2402",
+  "tenant_id": "demo-tenant",
+  "turn_id": "6193db93-aa7b-4e5a-b508-57f9ff08a1c7"
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "tenant_id": "demo-tenant",
+    "drawing_id": "demo",
+    "sdk_session_id": "d7a144e9-9df0-4526-b73b-3e7c55d25e9d",
+    "status": "idle",
+    "summary": null,
+    "created_at": "2026-07-25T18:06:37.385Z",
+    "updated_at": "2026-07-25T18:10:46.668Z"
+  }
+]

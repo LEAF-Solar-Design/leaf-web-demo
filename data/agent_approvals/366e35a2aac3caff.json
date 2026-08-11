@@ -1,0 +1,33 @@
+{
+  "action": "run_write_tool",
+  "args": {
+    "catalog_commit": "a92631668dd57c6c7a8a619bff4d9c591510ea3d",
+    "catalog_digest": "sha256:4164d614b50e7391c6cd87a374e915ac40a97d053a26ac7214ebfa6d32b8db4f",
+    "drawing_version": 1,
+    "dwg": "cat-workbench",
+    "effective_catalog_digest": "4595444eaa2ff9f67e559258e1638bccb55da96b452d17b4e6eecd2497ef190f",
+    "expected_drawing_head": 1,
+    "params": {
+      "drawing_id": "cat-workbench",
+      "dry_run": true,
+      "layer": "Panels"
+    },
+    "tool": "rearrange-panels-to-cat-silhouette",
+    "tool_manifest_sha256": "sha256:4164d614b50e7391c6cd87a374e915ac40a97d053a26ac7214ebfa6d32b8db4f"
+  },
+  "args_hash": "sha256:1bf636d49bf7e3bfd496e77709a2fe43c62b2fec263c4440141def5a27767b50",
+  "confirmation_id": "366e35a2aac3caff",
+  "consumed_at": "2026-07-25T19:45:21Z",
+  "created_at": "2026-07-25T19:43:57Z",
+  "decided_at": "2026-07-25T19:45:07Z",
+  "decided_by": "demo-tenant",
+  "denied": false,
+  "expires_at": "2026-07-25T19:48:57Z",
+  "granted": true,
+  "policy": "confirm-once",
+  "reason": "approved",
+  "rung": 3,
+  "session_id": "b3ec4f36-7428-422a-89b2-476a6076f462",
+  "tenant_id": "demo-tenant",
+  "turn_id": "139a23b3-6792-4d5b-95f1-d6d86c536ee5"
+}

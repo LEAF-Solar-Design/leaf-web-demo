@@ -1,0 +1,22 @@
+{
+  "action": "author_tool",
+  "args": {
+    "description": "Deterministic drawing-write tool: rearranges every existing panel entity (closed polylines on the Panels layer, or as specified) into positions forming a recognizable sitting-cat silhouette. Must preserve each panel (same handle/identity, size, shape \u2014 only reposition/rotate, no create/delete/resize). Must support a dry_run parameter that computes and returns the proposed new layout (e.g. panel handle -> new position/rotation, plus a summary/preview) WITHOUT mutating the drawing. When dry_run is false and the write is approved, it applies the rearrangement and commits a new immutable drawing version (does not overwrite prior versions). Deterministic: given the same input panel set, always produces the same silhouette mapping (e.g. panels sorted by handle/current position assigned in fixed order to fixed target silhouette anchor points scaled/centered to the current panel bounding extents). Capability: drawing.write.",
+    "mode": "build"
+  },
+  "args_hash": "sha256:bff46dbf97375b9c4493cc379867d15c3634d67f0b822da417def03fc98f2aaa",
+  "confirmation_id": "2ac56ef1170ae3a9",
+  "consumed_at": "2026-07-25T18:31:26Z",
+  "created_at": "2026-07-25T18:30:36Z",
+  "decided_at": "2026-07-25T18:31:09Z",
+  "decided_by": "demo-tenant",
+  "denied": false,
+  "expires_at": "2026-07-25T18:35:36Z",
+  "granted": true,
+  "policy": "confirm-once",
+  "reason": "approved",
+  "rung": 5,
+  "session_id": "b3ec4f36-7428-422a-89b2-476a6076f462",
+  "tenant_id": "demo-tenant",
+  "turn_id": "d085738b-5c35-45e7-9b90-c909612b351c"
+}

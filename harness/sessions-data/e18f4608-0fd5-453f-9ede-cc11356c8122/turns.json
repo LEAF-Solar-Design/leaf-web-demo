@@ -1,0 +1,38 @@
+[
+  {
+    "turn_id": "e40fe5dd-4f4e-4547-b17a-485dd3d95ce3",
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "seq_start": 1,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-25T18:06:37.389Z",
+    "ended_at": "2026-07-25T18:07:03.283Z"
+  },
+  {
+    "turn_id": "c3457df2-0960-4789-a4c3-8e4c84cd34e6",
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "seq_start": 26,
+    "status": "complete",
+    "stop_reason": "awaiting_approval",
+    "started_at": "2026-07-25T18:07:28.306Z",
+    "ended_at": "2026-07-25T18:07:48.613Z"
+  },
+  {
+    "turn_id": "01790187-8d6a-4b21-abb9-9c1cb2b7a212",
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "seq_start": 39,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-25T18:08:05.049Z",
+    "ended_at": "2026-07-25T18:08:34.940Z"
+  },
+  {
+    "turn_id": "83d305db-965e-4c96-83d0-50a63653fed1",
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "seq_start": 58,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-25T18:10:22.825Z",
+    "ended_at": "2026-07-25T18:10:46.665Z"
+  }
+]

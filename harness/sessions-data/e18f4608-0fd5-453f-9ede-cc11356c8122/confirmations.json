@@ -1,0 +1,15 @@
+[
+  {
+    "confirmation_id": "f604bcc478772ae4",
+    "session_id": "e18f4608-0fd5-453f-9ede-cc11356c8122",
+    "turn_id": "c3457df2-0960-4789-a4c3-8e4c84cd34e6",
+    "action": "author_tool",
+    "args_json": "{\"description\":\"Deterministic drawing-write tool \\\"rearrange-panels-to-cat-silhouette\\\": takes all existing closed-polyline panel entities on the Panels layer (default layer param \\\"Panels\\\"), preserves every panel (same count, same individual polyline geometry/size — only position/rotation may change, no panels added or deleted), and repositions them so their centroids collectively trace a recognizable sitting-cat silhouette (rounded body mass, two triangular ears, a curved tail) sized to fit within the current drawing extents. Must be deterministic (same input drawing -> same output layout, no randomness). Produces a new immutable drawing version on write. Read-only preview/dry-run should be supported so the proposal can be shown for approval before any write is committed.\",\"mode\":\"build\"}",
+    "kind": "author_tool",
+    "status": "approved",
+    "created_at": "2026-07-25T18:07:43.560Z",
+    "expires_at": "2026-07-25T18:12:43.560Z",
+    "decided_at": "2026-07-25T18:08:05.054Z",
+    "decided_by": "demo-tenant"
+  }
+]
