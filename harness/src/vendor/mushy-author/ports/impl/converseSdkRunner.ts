@@ -559,7 +559,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       stopReason = "timeout";
       error = {
         error_code: "timeout",
-        message: `turn exceeded the ${this.turnTimeoutS}s wall-clock budget and was aborted`,
+        message: "Agent turn timed out",
         retryable: true,
       };
     } else if (terminalError === "rate_limit") {
@@ -573,9 +573,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       stopReason = classifyRateLimit(retryAfterS);
       error = {
         error_code: stopReason,
-        message:
-          `Anthropic rate limited` +
-          (retryAfterS !== null ? ` (retry after ~${Math.round(retryAfterS)}s)` : " (horizon unknown)"),
+        message: "Agent service rate limited",
         retryable: true,
         ...(retryAfterS !== null ? { retry_after_s: retryAfterS } : {}),
       };
@@ -583,12 +581,12 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       stopReason = "error";
       error = {
         error_code: terminalError,
-        message: `Agent SDK terminal failure: ${terminalError}`,
+        message: "Agent service terminal failure",
         retryable: false,
       };
     } else if (streamFault) {
       stopReason = "error";
-      error = { error_code: "internal", message: streamFault, retryable: false };
+      error = { error_code: "internal", message: "Agent service failed", retryable: false };
     } else if (result && result.subtype === "success") {
       stopReason = "end_turn";
     } else if (result && result.subtype === "error_max_turns") {
@@ -602,7 +600,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       stopReason = "error";
       error = {
         error_code: "internal",
-        message: `SDK session ended without a success result (subtype=${String(result?.subtype ?? "none")})`,
+        message: "Agent service ended without a success result",
         retryable: false,
       };
     }
