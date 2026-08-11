@@ -9,6 +9,7 @@ creation must carry a stable reason_code.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 
 import broker
 import broker_client
+import catalog
 import deps
 import guest_uploads
 import jobs
@@ -153,6 +155,132 @@ def _tool():
     assert tool["aps_live"] is True
     assert broker.validate_params(tool, {}) == []
     return tool
+
+
+def _live_runtime_authorized(tool, source):
+    view = deps.catalog_tool_view(tool)
+    return catalog.live_aps_runtime_authorized(
+        view,
+        aps_live_enabled=True,
+        trusted_live_catalog_digests={
+            deps.catalog_tool_digest(row)
+            for row in deps.load_engine_registry_tools()
+            if row.get("aps_live") is True
+        },
+        tool_source=source,
+        operator_owned_engine_source=deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE,
+    )
+
+
+def test_effective_canonical_row_is_the_only_live_aps_authority(monkeypatch):
+    monkeypatch.setattr(deps, "tenant_repo_dir", lambda _tenant: None)
+    rows = deps.effective_tools_with_provenance(TENANT)
+    tool, source = next(
+        (row, row_source) for row, row_source in rows
+        if row.get("name") == "count-by-layer"
+    )
+
+    assert source == deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
+    assert _live_runtime_authorized(tool, source) is True
+    spec = importlib.util.spec_from_file_location(
+        "p6_live_aps_da_client", Path(__file__).parents[2] / "da" / "client.py"
+    )
+    assert spec is not None and spec.loader is not None
+    da = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(da)
+    assert broker._live_script_is_nonempty(tool, da) is True
+
+
+def test_same_name_tenant_python_row_cannot_enter_live_aps(
+    monkeypatch, tmp_path,
+):
+    tenant_root = tmp_path / "effective-tenant"
+    tenant_root.mkdir()
+    (tenant_root / "registry.json").write_text(json.dumps({"tools": [{
+        "name": "count-by-layer",
+        "version": "tenant-shadow",
+        "kind": "script",
+        "engine_op": "count_by_layer",
+        "entry": "tools/count-by-layer/tool.py",
+        "aps_live": True,
+        "capabilities": ["drawing.read"],
+        "params": {"type": "object", "properties": {}},
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(deps, "tenant_repo_dir", lambda _tenant: tenant_root)
+
+    rows = deps.effective_tools_with_provenance(TENANT)
+    tool, source = next(
+        (row, row_source) for row, row_source in rows
+        if row.get("name") == "count-by-layer"
+    )
+
+    assert source == deps.TOOL_SOURCE_TENANT_REPO
+    assert tool["entry"] == "tools/count-by-layer/tool.py"
+    assert _live_runtime_authorized(tool, source) is False
+    assert "script" not in tool and "engine_script" not in tool
+
+
+@pytest.mark.parametrize(
+    ("effective_source", "expected_live"),
+    [
+        (deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE, True),
+        (deps.TOOL_SOURCE_TENANT_REPO, False),
+    ],
+)
+def test_run_route_derives_live_aps_from_effective_row_authority(
+    monkeypatch, effective_source, expected_live,
+):
+    from routers import jobs as jobs_router
+
+    canonical = next(
+        row for row in deps.load_engine_registry_tools()
+        if row.get("name") == "count-by-layer"
+    )
+    effective = canonical if expected_live else {
+        "name": "count-by-layer",
+        "version": "tenant-shadow",
+        "kind": "script",
+        "engine_op": "count_by_layer",
+        "entry": "tools/count-by-layer/tool.py",
+        "aps_live": True,
+        "capabilities": ["drawing.read"],
+        "params": {"type": "object", "properties": {}},
+    }
+    monkeypatch.setattr(jobs_router.deps, "APS_LIVE", True)
+    monkeypatch.setattr(
+        jobs_router.deps, "find_tool", lambda *_args: effective
+    )
+    monkeypatch.setattr(
+        jobs_router.deps,
+        "effective_tools_with_provenance",
+        lambda *_args: [(effective, effective_source)],
+    )
+    captured = {}
+
+    def fake_submit_job(*_args, aps_live=None, **_kwargs):
+        captured["aps_live"] = aps_live
+        return "effective-authority-job"
+
+    monkeypatch.setattr(jobs_router.jobs, "submit_job", fake_submit_job)
+    req = jobs_router.RunRequest(
+        tool="count-by-layer",
+        params={},
+        dwg=DRAWING,
+        catalog_digest=jobs_router.deps.catalog_tool_digest(effective),
+    )
+
+    response = jobs_router.run(
+        req,
+        wait=0,
+        tenant_id=TENANT,
+        x_org_id=None,
+        x_project_id=None,
+        idempotency_key=None,
+        authorization=None,
+    )
+
+    assert response.status_code == 202
+    assert captured == {"aps_live": expected_live}
 
 
 def _request(tool=None, *, event_key=f"{JOB}:broker-run"):
