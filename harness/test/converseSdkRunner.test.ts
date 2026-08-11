@@ -829,4 +829,29 @@ describe("ConverseSdkRunner — mounted MCP surface", () => {
       expect(query.options.settingSources).toEqual([]);
     }
   });
+
+  it("degrades an optional resolver setup failure without exposing its diagnostic", async () => {
+    const secret = "resolver-secret-123456789012";
+    const mock = makeMockSdk([resultSuccess()]);
+    const input = makeInput({
+      standardServicesContext: {
+        tenant_id: "tenant-a",
+        session_id: "session-a",
+        subscription_mount_id: "mount-a",
+        authority_session_id: "authority-session-a",
+        authority_turn_id: "turn-a",
+      },
+    });
+    const events = await collect(runnerWith(mock, {
+      standardServicesResolver: {
+        resolve: async () => { throw new Error(`resolver failed ${secret}`); },
+      },
+    }), input);
+
+    expect(doneOf(events).stopReason).toBe("end_turn");
+    expect(mock.queries).toHaveLength(1);
+    expect(Object.keys((mock.queries[0]!.options.mcpServers ?? {}) as Record<string, unknown>))
+      .toEqual(["spine"]);
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
 });

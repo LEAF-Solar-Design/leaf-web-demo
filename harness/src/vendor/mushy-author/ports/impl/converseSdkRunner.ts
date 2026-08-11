@@ -318,7 +318,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
           profile: "spine",
         });
       } catch {
-        throw new Error("standard_services_resolver_setup_failed");
+        // The spine profile declares every standard service optional and its
+        // missing-service behavior is degrade. Keep the private spine server
+        // available when the attachment path is unavailable or malformed.
+        services = undefined;
       }
     }
     const composition = composeRunnerCapabilities({
