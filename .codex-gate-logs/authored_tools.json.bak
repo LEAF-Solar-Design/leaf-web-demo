@@ -1,0 +1,101 @@
+{
+  "tools": [
+    {
+      "name": "count-panels",
+      "version": "1.0.0",
+      "description": "count panels on layer Panels",
+      "kind": "script",
+      "engine_op": "count_by_layer",
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "string",
+            "default": "Panels"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-28T04:24:34.491400+00:00",
+        "static_scan": []
+      },
+      "default_params": {
+        "layer": "Panels"
+      },
+      "entry": "authored/40f9e71e83d39b2f68c8a5fe07af1ba9/count-panels.py",
+      "tenant_id": "demo-tenant"
+    },
+    {
+      "name": "measure-panels",
+      "version": "1.0.0",
+      "description": "measure area on layer Panels",
+      "kind": "script",
+      "engine_op": "measure_area_by_layer",
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "string",
+            "default": "Panels"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-28T04:24:34.846753+00:00",
+        "static_scan": []
+      },
+      "default_params": {
+        "layer": "Panels"
+      },
+      "entry": "authored/40f9e71e83d39b2f68c8a5fe07af1ba9/measure-panels.py",
+      "tenant_id": "demo-tenant"
+    },
+    {
+      "name": "list-all-layer-names-in-the-drawing",
+      "version": "1.0.0",
+      "description": "list all layer names in the drawing",
+      "kind": "script",
+      "engine_op": "list_layers",
+      "params": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "description": "optional: only layers starting with this prefix"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-28T04:24:52.356744+00:00",
+        "static_scan": []
+      },
+      "default_params": {},
+      "entry": "authored/40f9e71e83d39b2f68c8a5fe07af1ba9/list-all-layer-names-in-the-drawing.py",
+      "tenant_id": "demo-tenant"
+    }
+  ]
+}
