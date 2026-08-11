@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +101,99 @@ async function setupFenced() {
 }
 
 describe("customizationLifecycle", () => {
+  it("stages one exact registry-row removal without moving main or reordering retained rows", async () => {
+    const { bare, loop } = await setup();
+    const seed = await new FakeTenantRepoProvider(FIXTURE).checkout(TENANT);
+    const registry = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"])) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    const retained: Record<string, unknown> = {
+      name: "retained-tool", note: "escaped \\\"value\\\"", ...registry.tools[0],
+    };
+    retained.name = "retained-tool";
+    const retainedRaw = `{"note":"escaped \\\"value\\\"",  "name":"retained-tool", "capabilities" : ${JSON.stringify(retained.capabilities)}, "description":${JSON.stringify(retained.description)}, "engine_op":${JSON.stringify(retained.engine_op)}, "params":${JSON.stringify(retained.params)}, "returns":${JSON.stringify(retained.returns)}}`;
+    const irregular = `{"note":"decoy \\\"tools\\\": [1]", "nested":{"tools":[]}, "tools":[\n  ${JSON.stringify(registry.tools[0])},\n\t${retainedRaw}\n]}\n`;
+    writeFileSync(join(seed.dir, "registry.json"), irregular);
+    git(seed.dir, ["add", "registry.json"]);
+    git(seed.dir, ["-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai", "commit", "-m", "seed retained row"]);
+    git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const raw = execFileSync("git", ["show", `${base}:registry.json`], { cwd: bare.dir });
+    const digest = createHash("sha256").update(raw).digest("hex");
+
+    const staged = await loop.stageRemoval(TENANT, {
+      ...request(CHANGE_A, base), toolName: "count-by-layer",
+      expectedCatalogDigest: digest,
+    });
+    const result = JSON.parse(git(bare.dir, ["show", `${staged.receipt.staged_commit}:registry.json`])) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    expect(result.tools).toEqual([JSON.parse(retainedRaw)]);
+    const stagedRaw = execFileSync(
+      "git", ["show", `${staged.receipt.staged_commit}:registry.json`],
+      { cwd: bare.dir, encoding: "utf8" },
+    );
+    expect(stagedRaw).toContain(retainedRaw);
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+  });
+
+  it("refuses stale digest and absent removal targets without advancing main", async () => {
+    const { bare, loop } = await setup();
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    await expect(loop.stageRemoval(TENANT, {
+      ...request(CHANGE_A, base), toolName: "count-by-layer",
+      expectedCatalogDigest: "0".repeat(64),
+    })).rejects.toThrow("effective catalog digest changed");
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+
+    const raw = execFileSync("git", ["show", `${base}:registry.json`], { cwd: bare.dir });
+    const digest = createHash("sha256").update(raw).digest("hex");
+    await expect(loop.stageRemoval(TENANT, {
+      ...request(CHANGE_B, base), toolName: "missing-tool",
+      expectedCatalogDigest: digest,
+    })).rejects.toThrow("removal target cardinality is not one");
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+  });
+
+  it("refuses a duplicate removal target", async () => {
+    const { bare, loop } = await setup();
+    const seed = await new FakeTenantRepoProvider(FIXTURE).checkout(TENANT);
+    const registry = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"])) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    registry.tools.push({ ...registry.tools[0] });
+    writeFileSync(join(seed.dir, "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
+    git(seed.dir, ["add", "registry.json"]);
+    git(seed.dir, ["-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai", "commit", "-m", "seed duplicate row"]);
+    git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const raw = execFileSync("git", ["show", `${base}:registry.json`], { cwd: bare.dir });
+    const digest = createHash("sha256").update(raw).digest("hex");
+
+    await expect(loop.stageRemoval(TENANT, {
+      ...request(CHANGE_A, base), toolName: "count-by-layer",
+      expectedCatalogDigest: digest,
+    })).rejects.toThrow("removal target cardinality is not one");
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+  });
+
+  it("rejects duplicate root tools keys as a malformed registry", async () => {
+    const { bare, loop } = await setup();
+    const seed = await new FakeTenantRepoProvider(FIXTURE).checkout(TENANT);
+    const row = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"])).tools[0];
+    const malformed = `{"tools":[${JSON.stringify(row)}],"tools":[${JSON.stringify(row)}]}\n`;
+    writeFileSync(join(seed.dir, "registry.json"), malformed);
+    git(seed.dir, ["add", "registry.json"]);
+    git(seed.dir, ["-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai", "commit", "-m", "seed duplicate root key"]);
+    git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
+    const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+    const raw = execFileSync("git", ["show", `${base}:registry.json`], { cwd: bare.dir });
+    const digest = createHash("sha256").update(raw).digest("hex");
+    await expect(loop.stageRemoval(TENANT, {
+      ...request(CHANGE_A, base), toolName: "count-by-layer",
+      expectedCatalogDigest: digest,
+    })).rejects.toThrow("tenant registry is malformed");
+  });
   it("revises exactly the explicitly bound authored tool without adding a catalog entry", async () => {
     const tenantRepo = new FakeTenantRepoProvider(FIXTURE);
     const coordination = new TestCustomizationCoordination();

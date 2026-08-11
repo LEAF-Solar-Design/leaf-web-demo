@@ -797,6 +797,26 @@ export function createHarness(ports: HarnessPorts, opts?: {
         return send(res, 200, await loop.ensureRepository(tenant));
       }
 
+      if (method === "POST" && path === "/author/remove") {
+        if (!authoredExecutionEnabled()) {
+          return send(res, 403, {
+            error: { message: "tenant-authored execution is disabled" },
+          });
+        }
+        const body = await readJsonBody(req);
+        const tenant = tenantForRequest(req, body);
+        const out = await loop.stageRemoval(tenant, {
+          toolName: requiredText(body, "toolName"),
+          expectedCatalogDigest: requiredText(body, "expectedCatalogDigest"),
+          changeSetId: requiredText(body, "changeSetId"),
+          expectedBaseSha: requiredText(body, "expectedBaseSha"),
+          platformRelease: requiredText(body, "platformRelease"),
+          workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
+          idempotencyKey: requiredText(body, "idempotencyKey"),
+        });
+        return send(res, 200, out);
+      }
+
       if (method === "POST" && path === "/author/publish") {
         if (!authoredExecutionEnabled()) {
           return send(res, 403, {
