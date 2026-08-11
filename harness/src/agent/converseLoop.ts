@@ -14,7 +14,6 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { redactTokens } from "../redact.js";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { SPINE_TOOL_NAMES } from "../ports/index.js";
 import type {
@@ -500,10 +499,12 @@ export class ConverseLoop {
         await emit("error", {
           error: {
             error_code: "internal",
-            // Redacted: this message is APPENDED TO THE TRANSCRIPT and streamed
-            // to the client, so an arbitrary throw carrying a BYO grant value
-            // would be persisted and published. sol-critic PR #117, blocker 2.
-            message: redactTokens((e as Error).message),
+            // This message is APPENDED TO THE TRANSCRIPT and streamed to the
+            // client. A thrown exception is private diagnostic material, even
+            // after token-shaped values are redacted: paths, URLs, identifiers,
+            // and provider text can still escape. Keep the public contract
+            // stable and leave the exception out of every durable event.
+            message: "Agent conversation failed",
             retryable: false,
           },
           degraded_mode: false,
