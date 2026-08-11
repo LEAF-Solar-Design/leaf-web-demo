@@ -21,9 +21,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 import checkout_capability
+import catalog
 import deps
 import entitlements
 import jobs
@@ -379,10 +380,26 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # cross-tenant. The tenant_id then threads jobs -> broker -> tool_loader so entry
     # resolution + execution read the same tenant's repo.
     tool = deps.find_tool(req.tool, str(tenant_id))
+    tool_source = None
+    try:
+        effective_rows = deps.effective_tools_with_provenance(str(tenant_id))
+    except (deps.ToolCatalogProvenanceError, deps.ToolCatalogCollisionError):
+        # Keep the ordinary catalog available, but fail closed to non-live
+        # execution when the winning row's authority cannot be established.
+        pass
+    else:
+        match = next(
+            ((row, source) for row, source in effective_rows
+             if row.get("name") == req.tool),
+            None,
+        )
+        if match is not None and tool == match[0]:
+            tool_source = match[1]
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
-    current_catalog_digest = deps.catalog_tool_digest(tool)
+    tool_view = deps.catalog_tool_view(tool)
+    current_catalog_digest = tool_view["catalog_digest"]
     if not isinstance(req.catalog_digest, str) or not hmac.compare_digest(
             req.catalog_digest, current_catalog_digest):
         return error_response(
@@ -421,6 +438,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     checkout_holder, checkout_fence = _checkout_identity(
         tenant_id, target_drawing_id, x_checkout_capability)
 
+    aps_live_authorized = False
     try:
         platform_context = jobs.platform_link.resolve_submission_context(
             x_org_id, x_project_id, authorization)
@@ -517,8 +535,23 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                         return error_response(
                             ErrorCode.FORBIDDEN, str(exc), retryable=False,
                             status_code=403)
+            trusted_live_catalog_digests = {
+                deps.catalog_tool_digest(row)
+                for row in deps.load_engine_registry_tools()
+                if row.get("aps_live") is True
+            }
+            aps_live_authorized = catalog.live_aps_runtime_authorized(
+                tool_view,
+                aps_live_enabled=deps.APS_LIVE,
+                trusted_live_catalog_digests=trusted_live_catalog_digests,
+                tool_source=tool_source,
+                operator_owned_engine_source=(
+                    deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
+                ),
+            )
             job_id = jobs.submit_job(
-                tenant_id, tool, params, req.dwg, aps_live=deps.APS_LIVE,
+                tenant_id, tool, params, req.dwg,
+                aps_live=aps_live_authorized,
                 org_id=resolved_org, project_id=resolved_project,
                 dwg_version=req.dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
@@ -570,7 +603,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # populations with two different contracts do not share one gauge.
     _emit_submit_latency(
         (time.perf_counter() - submit_t0) * 1000.0,
-        deps.APS_LIVE, str(tenant_id), tool.get("name") or req.tool, job_id,
+        aps_live_authorized, str(tenant_id), tool.get("name") or req.tool, job_id,
     )
     return JSONResponse(status_code=202, content=body)
 

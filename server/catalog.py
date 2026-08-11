@@ -18,6 +18,30 @@ DEFAULT_FAMILY = "custom"
 _APS_LIVE_AUTHORIZED = object()
 
 
+def live_aps_runtime_authorized(
+    tool: Dict[str, Any], *, aps_live_enabled: bool,
+    trusted_live_catalog_digests: Set[str],
+    tool_source: Optional[str],
+    operator_owned_engine_source: Optional[str],
+) -> bool:
+    """Return whether this exact effective row may enter the live APS lane.
+
+    A same-name tenant or authored row is a distinct execution authority even
+    when it copies the engine row's public fields. Only the winning
+    operator-owned engine row, with its server-issued trusted digest, may use
+    the live Activity path.
+    """
+    return (
+        aps_live_enabled is True
+        and operator_owned_engine_source == "operator_owned_engine"
+        and tool_source == operator_owned_engine_source
+        and tool.get("aps_live") is True
+        and isinstance(tool.get("catalog_digest"), str)
+        and tool.get("tool_manifest_sha256") == tool.get("catalog_digest")
+        and tool["catalog_digest"] in trusted_live_catalog_digests
+    )
+
+
 def _load_config() -> Dict[str, Any]:
     return json.loads(FAMILIES_FILE.read_text(encoding="utf-8"))
 
@@ -84,14 +108,14 @@ def apply_live_aps_runtime_authority(
             **tool,
             "_aps_live_runtime_authorized": _APS_LIVE_AUTHORIZED
             if (
-                aps_live_enabled is True
-                and sources_are_complete
-                and operator_owned_engine_source == "operator_owned_engine"
-                and tool_sources[index] == operator_owned_engine_source
-                and tool.get("aps_live") is True
-                and isinstance(tool.get("catalog_digest"), str)
-                and tool.get("tool_manifest_sha256") == tool.get("catalog_digest")
-                and tool["catalog_digest"] in trusted_live_catalog_digests
+                sources_are_complete
+                and live_aps_runtime_authorized(
+                    tool,
+                    aps_live_enabled=aps_live_enabled,
+                    trusted_live_catalog_digests=trusted_live_catalog_digests,
+                    tool_source=tool_sources[index],
+                    operator_owned_engine_source=operator_owned_engine_source,
+                )
             )
             else None,
         }
