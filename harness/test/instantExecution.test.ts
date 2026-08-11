@@ -80,6 +80,7 @@ describe("instant run_capability", () => {
     expect(appRun.submitCalls[0]).toMatchObject({
       authoritySessionId: "app-session-instant",
       authorityTurnId: "app-turn-instant",
+      drawingVersion: 3,
     });
     const events = await store.eventsAfter(session.session_id, 0);
     expect(events.find((event) => event.type === "job_linked")?.data).toMatchObject({ route: "batch_fallback", reason: "instant_transport_failure" });
@@ -93,6 +94,7 @@ describe("instant run_capability", () => {
     expect(missingAssignment.appRun.submitCalls[0]).toMatchObject({
       authoritySessionId: "app-session-instant",
       authorityTurnId: "app-turn-instant",
+      drawingVersion: 3,
     });
 
     const disabledExecutor = setup({ batch_fallback: true }, false);
@@ -102,6 +104,7 @@ describe("instant run_capability", () => {
     expect(disabledExecutor.appRun.submitCalls[0]).toMatchObject({
       authoritySessionId: "app-session-instant",
       authorityTurnId: "app-turn-instant",
+      drawingVersion: 3,
     });
   });
 });

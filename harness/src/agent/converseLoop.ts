@@ -628,6 +628,14 @@ export class ConverseLoop {
                 : "run_read_tool";
           const dwg = String(args.dwg ?? session.drawing_id);
           if (
+            entry?.aps_live === true &&
+            typeof args.dwg === "string" &&
+            args.dwg.length > 0 &&
+            args.dwg !== session.drawing_id
+          ) {
+            throw new Error("live capability drawing must match the current session drawing");
+          }
+          if (
             action !== "run_read_tool" &&
             entry?.capabilities.includes("drawing.write") &&
             params.drawing_id == null
@@ -635,6 +643,17 @@ export class ConverseLoop {
             params = { ...params, drawing_id: dwg };
           }
           let drawingPins: Record<string, unknown> = {};
+          if (
+            entry?.capabilities.includes("drawing.read") ||
+            entry?.capabilities.includes("drawing.write")
+          ) {
+            const versions = await appRun.getDrawingState(tenantId, dwg, "versions");
+            const head = Number(versions.head);
+            if (!Number.isInteger(head) || head < 0) {
+              throw new Error("run_capability requires a current drawing head");
+            }
+            drawingPins = { drawing_version: head };
+          }
           if (action !== "run_read_tool") {
             if (
               typeof entry?.tool_manifest_sha256 !== "string" ||
@@ -643,14 +662,9 @@ export class ConverseLoop {
             ) {
               throw new Error("write approval requires an effective catalog generation");
             }
-            const versions = await appRun.getDrawingState(tenantId, dwg, "versions");
-            const head = Number(versions.head);
-            if (!Number.isInteger(head) || head < 0) {
-              throw new Error("run_capability requires a current drawing head");
-            }
             drawingPins = {
-              drawing_version: head,
-              expected_drawing_head: head,
+              ...drawingPins,
+              expected_drawing_head: drawingPins.drawing_version,
               catalog_commit: entry.catalog_commit,
               effective_catalog_digest: entry.effective_catalog_digest,
               tool_manifest_sha256: entry.tool_manifest_sha256,
@@ -974,10 +988,19 @@ export class ConverseLoop {
         if (typeof catalogDigest !== "string" || !catalogDigest) {
           return err("run_capability requires a current server-issued catalog digest");
         }
+        const capability = await ctx.capabilityOf(target);
+        const drawingVersion =
+          (capability === "drawing.read" || capability === "drawing.write") &&
+          typeof args.drawing_version === "number" &&
+          Number.isInteger(args.drawing_version) &&
+          args.drawing_version >= 0
+            ? args.drawing_version
+            : undefined;
         if (catalogEntry?.execution_class === "instant") {
           const batchFallback = async (reason: string): Promise<SpineToolResult> => {
             const fallback = await appRun.submitRun({
               tenantId, tool: target, params, dwg, catalogDigest,
+              ...(drawingVersion !== undefined ? { drawingVersion } : {}),
               authoritySessionId: ctx.authoritySessionId,
               authorityTurnId: ctx.authorityTurnId,
               wait: true, waitTimeoutS: this.readWaitS,
@@ -1027,14 +1050,6 @@ export class ConverseLoop {
             return batchFallback("instant_transport_failure");
           }
         }
-        const capability = await ctx.capabilityOf(target);
-        const drawingVersion =
-          (catalogEntry?.aps_live === true || capability === "drawing.write") &&
-          typeof args.drawing_version === "number" &&
-          Number.isInteger(args.drawing_version) &&
-          args.drawing_version >= 0
-            ? args.drawing_version
-            : undefined;
         const expectedDrawingHead = Number(args.expected_drawing_head);
         const catalogCommit = args.catalog_commit;
         const effectiveCatalogDigest = args.effective_catalog_digest;
