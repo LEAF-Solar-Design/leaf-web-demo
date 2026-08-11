@@ -8,11 +8,16 @@ import sys
 import pytest
 
 from platform_release_manifest import (
+    BUILD_WORKFLOW_PATH,
     ContractError,
     SERVICES,
     build_manifest,
+    build_surface_fingerprint,
+    build_surface_predicate,
     build_speculative_manifest,
+    build_v3_manifest,
     validate_manifest,
+    validate_surface_predicate,
     validate_speculative_manifest,
     verify_artifact,
     verify_staging_receipt,
@@ -126,6 +131,61 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     _git(repo, "add", "source.txt")
     _git(repo, "commit", "-m", "release")
     return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _surface_repository(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "surface-repo"
+    (repo / "deploy").mkdir(parents=True)
+    (repo / "web").mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Release Test")
+    _git(repo, "config", "user.email", "release-test@example.invalid")
+    (repo / ".dockerignore").write_text(".git\n", encoding="utf-8")
+    (repo / "deploy" / "Dockerfile.web").write_text(
+        "FROM node:22-slim AS build\n"
+        "ARG VITE_MOCK=0\n"
+        "ARG LEAF_SOURCE_SHA=unknown\n"
+        "COPY web/ /web/\n"
+        "FROM nginx:alpine AS web\n"
+        "COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf\n"
+        "COPY --from=build /web/dist /usr/share/nginx/html\n",
+        encoding="utf-8",
+    )
+    (repo / "deploy" / "nginx.conf").write_text("server {}\n", encoding="utf-8")
+    (repo / "web" / "index.html").write_text("leaf\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "surface")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _v3_entry(name: str) -> dict:
+    entry = {
+        "repository": f"leaf-platform-{name}",
+        "image_digest": DIGESTS[name],
+        "immutable_lookup_tag": "surface-v1-" + format(SERVICES.index(name) + 10, "064x"),
+        "producer_source_revision": "a" * 40,
+        "producer_source_tree": "e" * 40,
+        "surface_fingerprint": format(SERVICES.index(name) + 20, "064x"),
+        "recipe_fingerprint": format(SERVICES.index(name) + 30, "064x"),
+        "producer_workflow_path": BUILD_WORKFLOW_PATH,
+        "producer_workflow_blob": "f" * 40,
+        "producer_run_id": 31415926535,
+        "producer_run_attempt": 1,
+        "provenance_subject": (
+            "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+            f"leaf-platform-{name}"
+        ),
+        "provenance_digest": "sha256:" + format(SERVICES.index(name) + 40, "064x"),
+        "build_disposition": "reused",
+    }
+    if name == "canonical-worker":
+        entry["solver_provenance"] = {
+            "solver_source_revision": SOLVER_REVISION,
+            "solver_source_sha256": SOLVER_HASH,
+        }
+    if name == "web":
+        entry["artifact_sha256"] = WEB_HASH
+    return entry
 
 
 def test_cli_generates_exact_five_service_manifest_with_composite_provenance(
@@ -600,3 +660,219 @@ def test_verify_speculative_cli_round_trip(tmp_path: Path):
     )
     assert mismatched.returncode != 0
     assert not (tmp_path / "rejected.json").exists()
+
+
+def test_v3_manifest_preserves_mixed_component_producer_identity():
+    services = {name: _v3_entry(name) for name in SERVICES}
+    manifest = build_v3_manifest(
+        "a" * 40,
+        "b" * 40,
+        "31415926535",
+        "2",
+        services,
+    )
+
+    validate_manifest(manifest)
+
+    assert manifest["schema"] == "leaf.staging-supply-set.v3"
+    assert manifest["release_source_revision"] == "a" * 40
+    assert manifest["services"]["web"]["build_disposition"] == "reused"
+    assert manifest["services"]["canonical-worker"]["solver_provenance"] == {
+        "solver_source_revision": SOLVER_REVISION,
+        "solver_source_sha256": SOLVER_HASH,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["services"].pop("harness"),
+        lambda value: value["services"]["app"].update(extra="field"),
+        lambda value: value["services"]["web"].update(
+            immutable_lookup_tag="prod-latest"
+        ),
+        lambda value: value["services"]["broker"].update(
+            provenance_subject=(
+                "807034087062.dkr.ecr.us-east-1.amazonaws.com/leaf-platform-app"
+            )
+        ),
+        lambda value: value["services"]["app"].update(
+            producer_workflow_path=".github/workflows/spoof.yml"
+        ),
+        lambda value: value["services"]["app"].update(
+            build_disposition="restamped"
+        ),
+    ],
+)
+def test_v3_manifest_rejects_partial_mutable_or_restamped_evidence(mutate):
+    manifest = build_v3_manifest(
+        "a" * 40,
+        "b" * 40,
+        "31415926535",
+        "2",
+        {name: _v3_entry(name) for name in SERVICES},
+    )
+    mutate(manifest)
+
+    with pytest.raises(ContractError):
+        validate_manifest(manifest)
+
+
+def test_surface_fingerprint_is_deterministic_and_excludes_release_sha(
+    tmp_path: Path,
+):
+    repo, revision = _surface_repository(tmp_path)
+    bases = {
+        "nginx:alpine": "sha256:" + "1" * 64,
+        "node:22-slim": "sha256:" + "2" * 64,
+    }
+
+    first = build_surface_fingerprint(
+        repo,
+        revision,
+        "web",
+        bases,
+        {},
+        buildkit_version="v0.24.0",
+        platform="linux/amd64",
+    )
+    second = build_surface_fingerprint(
+        repo,
+        revision,
+        "web",
+        bases,
+        {},
+        buildkit_version="v0.24.0",
+        platform="linux/amd64",
+    )
+
+    assert first == second
+    assert first["migration_fingerprint"] == "not_app"
+    assert first["recipe"]["build_args"] == {"VITE_MOCK": "0"}
+    assert "LEAF_SOURCE_SHA" not in first["recipe"]["build_args"]
+    with pytest.raises(ContractError):
+        build_surface_fingerprint(
+            repo,
+            revision,
+            "web",
+            bases,
+            {"LEAF_SOURCE_SHA": "a" * 40},
+            buildkit_version="v0.24.0",
+            platform="linux/amd64",
+        )
+
+
+def test_surface_fingerprint_rejects_uncovered_copy_and_mutable_base(
+    tmp_path: Path,
+):
+    repo, _revision = _surface_repository(tmp_path)
+    dockerfile = repo / "deploy" / "Dockerfile.web"
+    dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8") + "COPY surprise.txt /tmp/\n",
+        encoding="utf-8",
+    )
+    (repo / "surprise.txt").write_text("not declared\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "uncovered")
+    revision = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(ContractError, match="not fingerprinted"):
+        build_surface_fingerprint(
+            repo,
+            revision,
+            "web",
+            {
+                "nginx:alpine": "sha256:" + "1" * 64,
+                "node:22-slim": "sha256:" + "2" * 64,
+            },
+            {},
+            buildkit_version="v0.24.0",
+            platform="linux/amd64",
+        )
+
+
+def test_every_current_dockerfile_surface_is_fully_classified():
+    repo = Path(__file__).resolve().parents[1]
+    revision = _git(repo, "rev-parse", "HEAD")
+    digest = "sha256:" + "1" * 64
+    bases = {
+        "app": {"python:3.12-slim": digest},
+        "broker": {"node:20-slim": digest, "python:3.12-slim": digest},
+        "canonical-worker": {"python:3.12-slim": digest},
+        "harness": {"node:22-bookworm": digest, "node:22-slim": digest},
+        "web": {"nginx:alpine": digest, "node:22-slim": digest},
+    }
+
+    fingerprints = {}
+    for service in SERVICES:
+        keyword = {}
+        build_args = {}
+        if service == "canonical-worker":
+            build_args["AUTOFILL_SOLVER_REVISION"] = SOLVER_REVISION
+            keyword = {
+                "solver_revision": SOLVER_REVISION,
+                "solver_source_sha256": SOLVER_HASH,
+            }
+        fingerprints[service] = build_surface_fingerprint(
+            repo,
+            revision,
+            service,
+            bases[service],
+            build_args,
+            buildkit_version="v0.24.0",
+            platform="linux/amd64",
+            **keyword,
+        )
+
+    assert set(fingerprints) == set(SERVICES)
+    assert fingerprints["web"]["recipe"]["build_args"]["VITE_API_BASE"] == ""
+    assert fingerprints["app"]["migration_fingerprint"] != "not_app"
+
+
+def test_surface_predicate_binds_exact_producer_and_special_web_hash(
+    tmp_path: Path,
+):
+    repo, revision = _surface_repository(tmp_path)
+    fingerprint = build_surface_fingerprint(
+        repo,
+        revision,
+        "web",
+        {
+            "nginx:alpine": "sha256:" + "1" * 64,
+            "node:22-slim": "sha256:" + "2" * 64,
+        },
+        {},
+        buildkit_version="v0.24.0",
+        platform="linux/amd64",
+    )
+
+    predicate = build_surface_predicate(
+        fingerprint,
+        repository="leaf-platform-web",
+        image_digest=DIGESTS["web"],
+        source_tree="e" * 40,
+        workflow_blob="f" * 40,
+        run_id="31415926535",
+        run_attempt="2",
+        artifact_sha256=WEB_HASH,
+    )
+
+    assert predicate["producer_source_revision"] == revision
+    assert predicate["producer_workflow_path"] == BUILD_WORKFLOW_PATH
+    assert predicate["artifact_sha256"] == WEB_HASH
+    validate_surface_predicate(predicate)
+    malformed = dict(predicate)
+    malformed["extra"] = "untrusted"
+    with pytest.raises(ContractError):
+        validate_surface_predicate(malformed)
+    with pytest.raises(ContractError):
+        build_surface_predicate(
+            fingerprint,
+            repository="leaf-platform-app",
+            image_digest=DIGESTS["web"],
+            source_tree="e" * 40,
+            workflow_blob="f" * 40,
+            run_id="31415926535",
+            run_attempt="2",
+            artifact_sha256=WEB_HASH,
+        )

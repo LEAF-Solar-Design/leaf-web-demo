@@ -276,6 +276,23 @@ def _mount_operator_router() -> None:
 _mount_operator_router()
 
 
+# One-time identity provisioning rail. Its dedicated flag is intentionally
+# independent of LEAF_OPERATOR_ENABLED, so enabling this route does not expose
+# the wider operator control plane and enabling that plane does not expose this
+# mutation.
+def _mount_operator_identity_binding_router() -> None:
+    if os.environ.get(
+            "LEAF_OPERATOR_IDENTITY_BINDING_ENABLED", "").strip() != "1":
+        return
+    from routers import operator_identity_bindings
+
+    app.include_router(operator_identity_bindings.router)
+    print("[leaf-demo] operator identity binding rail mounted")
+
+
+_mount_operator_identity_binding_router()
+
+
 def _drawing_mutation_fence_state() -> str:
     """Report the live shared-fence state without changing liveness."""
     configured = os.environ.get(
