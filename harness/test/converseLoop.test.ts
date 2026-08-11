@@ -178,6 +178,36 @@ describe("ConverseLoop — sessions", () => {
 
     expect((await store.getSession(session.session_id))!.sdk_session_id).toBeNull();
   });
+
+  it("keeps a thrown runner exception out of the durable public error", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run() {
+        throw new Error(
+          "mysql://operator:secret@db.internal/leaf?session=018f5f5d-7b1c-7000-8000-000000000001",
+        );
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    await sendText(loop, session, "hello");
+
+    const events = await store.eventsAfter(session.session_id, 0);
+    const error = ofType(events, "error")[0]!;
+    expect(error.data).toEqual({
+      error: {
+        error_code: "internal",
+        message: "Agent conversation failed",
+        retryable: false,
+      },
+      degraded_mode: false,
+    });
+    expect(JSON.stringify(events)).not.toContain("mysql://");
+    expect(JSON.stringify(events)).not.toContain("018f5f5d");
+  });
 });
 
 describe("ConverseLoop — turn lock", () => {
