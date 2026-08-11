@@ -19,10 +19,6 @@ from platform_link import platform_db
 from scripts import reconcile_customization_authority as authority_reconcile
 
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("PG_CUSTOMIZATION_TEST_URL"),
-    reason="PG_CUSTOMIZATION_TEST_URL is not configured",
-)
 BASE = "a" * 40
 STAGED = "b" * 40
 DIGEST = "c" * 64
@@ -93,8 +89,77 @@ def _postgres_snapshot(database):
         return authority_reconcile._postgres_snapshot(connection)
 
 
+def _authority_subset(source: dict[str, list[dict]], first: dict) -> dict:
+    declared = authority_reconcile.TABLE_COLUMNS
+    if set(source) != set(declared):
+        raise RuntimeError("customization authority fixture has an invalid table set")
+
+    subset: dict[str, list[dict]] = {}
+    for table, columns in declared.items():
+        if "tenant_id" in columns:
+            key = "tenant_id"
+        elif "snapshot_id" in columns:
+            key = "snapshot_id"
+        else:
+            raise RuntimeError(
+                f"customization authority fixture has no partition key for {table}"
+            )
+        subset[table] = [row for row in source[table] if row[key] == first[key]]
+    return subset
+
+
+def test_authority_subset_follows_declared_inventory(monkeypatch):
+    declared = {
+        "tenant_rows": ("row_id", "tenant_id"),
+        "snapshot_rows": ("row_id", "snapshot_id"),
+        "new_reconciled_rows": ("row_id", "tenant_id"),
+    }
+    source = {
+        "tenant_rows": [
+            {"row_id": "a", "tenant_id": "tenant-a"},
+            {"row_id": "b", "tenant_id": "tenant-b"},
+        ],
+        "snapshot_rows": [
+            {"row_id": "a", "snapshot_id": "snapshot-a"},
+            {"row_id": "b", "snapshot_id": "snapshot-b"},
+        ],
+        "new_reconciled_rows": [
+            {"row_id": "a", "tenant_id": "tenant-a"},
+            {"row_id": "b", "tenant_id": "tenant-b"},
+        ],
+    }
+    monkeypatch.setattr(authority_reconcile, "TABLE_COLUMNS", declared)
+
+    assert _authority_subset(
+        source, {"tenant_id": "tenant-a", "snapshot_id": "snapshot-a"}
+    ) == {
+        "tenant_rows": [{"row_id": "a", "tenant_id": "tenant-a"}],
+        "snapshot_rows": [{"row_id": "a", "snapshot_id": "snapshot-a"}],
+        "new_reconciled_rows": [{"row_id": "a", "tenant_id": "tenant-a"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("declared", "source"),
+    (
+        ({"declared": ("row_id", "tenant_id")}, {}),
+        ({}, {"unknown": []}),
+        ({"unsupported": ("row_id",)}, {"unsupported": []}),
+    ),
+)
+def test_authority_subset_refuses_inventory_drift(monkeypatch, declared, source):
+    monkeypatch.setattr(authority_reconcile, "TABLE_COLUMNS", declared)
+
+    with pytest.raises(RuntimeError, match="invalid table set|no partition key"):
+        _authority_subset(
+            source, {"tenant_id": "tenant-a", "snapshot_id": "snapshot-a"}
+        )
+
+
 @pytest.fixture(scope="module")
 def authority_backfill_gate(tmp_path_factory):
+    if not os.environ.get("PG_CUSTOMIZATION_TEST_URL"):
+        pytest.skip("PG_CUSTOMIZATION_TEST_URL is not configured")
     os.environ["DATABASE_URL"] = os.environ["PG_CUSTOMIZATION_TEST_URL"]
     database = platform_db()
     database.reset_pool()
@@ -108,40 +173,16 @@ def authority_backfill_gate(tmp_path_factory):
     try:
         sqlite_path = Path(sqlite_store.database_path)
         source = authority_reconcile._sqlite_snapshot(sqlite_path)
-        subset = {
-            "customization_change_sets": [
-                row for row in source["customization_change_sets"]
-                if row["tenant_id"] == first["tenant_id"]
-            ],
-            "customization_confirmations": [
-                row for row in source["customization_confirmations"]
-                if row["tenant_id"] == first["tenant_id"]
-            ],
-            "customization_publication_requests": [
-                row for row in source["customization_publication_requests"]
-                if row["tenant_id"] == first["tenant_id"]
-            ],
-            "effective_catalogs": [
-                row for row in source["effective_catalogs"]
-                if row["tenant_id"] == first["tenant_id"]
-            ],
-            "customization_audit_events": [
-                row for row in source["customization_audit_events"]
-                if row["tenant_id"] == first["tenant_id"]
-            ],
-            "customization_deployment_snapshots": [
-                row for row in source["customization_deployment_snapshots"]
-                if row["snapshot_id"] == first["snapshot_id"]
-            ],
-            "customization_deployment_audit": [
-                row for row in source["customization_deployment_audit"]
-                if row["snapshot_id"] == first["snapshot_id"]
-            ],
-        }
-        assert all(subset[table] for table in authority_reconcile.TABLE_COLUMNS)
+        subset = _authority_subset(source, first)
+        assert all(
+            subset[table]
+            for table in authority_reconcile.TABLE_COLUMNS
+            if source[table]
+        )
         assert all(
             len(subset[table]) < len(source[table])
             for table in authority_reconcile.TABLE_COLUMNS
+            if source[table]
         )
         assert not any(
             authority_reconcile.authority_counts(_postgres_snapshot(database)).values()
