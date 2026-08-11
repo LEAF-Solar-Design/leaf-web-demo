@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
 
 SERVER_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = SERVER_DIR.parent
@@ -185,7 +186,7 @@ def _settle_expired_executions(
 ) -> int:
     """Atomically close expired execution leases in one trusted scope."""
     clauses = ["state='executing'", "lease_expires_at < %s"]
-    params: list[Any] = [_abandoned_response(), now, now, now]
+    params: list[Any] = [Jsonb(_abandoned_response()), now, now, now]
     if request_id is not None:
         clauses.append("request_id=%s")
         params.append(request_id)
@@ -328,7 +329,7 @@ def queue_request(request_id: str, recoverable: Dict[str, Any]) -> bool:
                 "   WHERE queued.session_id=candidate.session_id"
                 "   AND queued.state='queued'"
                 " ) RETURNING request_id",
-                (safe_recoverable, now, request_id),
+                (Jsonb(safe_recoverable), now, request_id),
             ).fetchone()
     except UniqueViolation:
         return False
@@ -354,7 +355,13 @@ def release_execution(
                 " lease_owner=NULL, lease_expires_at=NULL, updated_at=%s"
                 " WHERE request_id=%s AND state='executing' AND turn_id=%s"
                 " RETURNING request_id",
-                (state, safe_recoverable, now, request_id, turn_id),
+                (
+                    state,
+                    Jsonb(safe_recoverable) if safe_recoverable is not None else None,
+                    now,
+                    request_id,
+                    turn_id,
+                ),
             ).fetchone()
     except UniqueViolation:
         if not requeue:
@@ -450,7 +457,10 @@ def finish_request(
             " recoverable_json=NULL, lease_owner=NULL, lease_expires_at=NULL"
             " WHERE request_id=%s AND state='executing' AND turn_id=%s"
             " RETURNING request_id",
-            (state, response_status, safe_response, now, now, request_id, turn_id),
+            (
+                state, response_status, Jsonb(safe_response), now, now,
+                request_id, turn_id,
+            ),
         ).fetchone()
     return row is not None
 
@@ -474,7 +484,10 @@ def finish_turn(
             " recoverable_json=NULL, lease_owner=NULL, lease_expires_at=NULL"
             " WHERE session_id=%s AND state='executing' AND turn_id=%s"
             " RETURNING request_id",
-            (state, response_status, safe_response, now, now, session_id, turn_id),
+            (
+                state, response_status, Jsonb(safe_response), now, now,
+                session_id, turn_id,
+            ),
         ).fetchone()
     return row is not None
 
@@ -492,7 +505,7 @@ def fail_admitted(
             "UPDATE app_session_requests SET state='failed', response_status=%s,"
             " response_json=%s, terminal_at=%s, updated_at=%s, recoverable_json=NULL"
             " WHERE request_id=%s AND state='admitted' RETURNING request_id",
-            (response_status, safe_response, now, now, request_id),
+            (response_status, Jsonb(safe_response), now, now, request_id),
         ).fetchone()
     return row is not None
 
@@ -510,7 +523,7 @@ def fail_queued(
             "UPDATE app_session_requests SET state='failed', response_status=%s,"
             " response_json=%s, terminal_at=%s, updated_at=%s, recoverable_json=NULL"
             " WHERE request_id=%s AND state='queued' RETURNING request_id",
-            (response_status, safe_response, now, now, request_id),
+            (response_status, Jsonb(safe_response), now, now, request_id),
         ).fetchone()
     return row is not None
 
@@ -550,7 +563,7 @@ def settle_abandoned(*, admitted_after_seconds: float = 30.0) -> int:
             " WHERE (state='executing' AND lease_expires_at < %s)"
             " OR (state='admitted' AND created_at < %s)"
             " RETURNING request_id, session_id, turn_id",
-            (response, now, now, now, cutoff),
+            (Jsonb(response), now, now, now, cutoff),
         ).fetchall()
         for row in rows:
             if row.get("turn_id") is not None:

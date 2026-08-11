@@ -92,6 +92,7 @@ class FakeDb:
             "UPDATE app_session_requests SET state='abandoned', response_status=503"
         ) and "WHERE state='executing' AND lease_expires_at <" in normalized:
             response, terminal, updated, now, *scope = params
+            response = response.obj
             request_id = None
             tenant_id = None
             drawing_id = None
@@ -135,6 +136,7 @@ class FakeDb:
             return _Result([{"request_id": request_id}])
         if normalized.startswith("UPDATE app_session_requests AS candidate SET state='queued'"):
             recoverable, updated, request_id = params
+            recoverable = recoverable.obj
             row = self.rows.get(request_id)
             if row is None or row["state"] != "admitted" or any(
                 other["session_id"] == row["session_id"]
@@ -149,6 +151,7 @@ class FakeDb:
         if normalized.startswith("UPDATE app_session_requests SET state=%s") \
                 and "response_status" not in normalized:
             state, recoverable, updated, request_id, turn_id = params
+            recoverable = recoverable.obj if recoverable is not None else None
             row = self.rows.get(request_id)
             if row is None or row["state"] != "executing" or row["turn_id"] != turn_id:
                 return _Result([])
@@ -207,6 +210,7 @@ class FakeDb:
             }])
         if normalized.startswith("UPDATE app_session_requests SET state=%s"):
             state, status, response, terminal, updated, request_id, turn_id = params
+            response = response.obj
             row = self.rows.get(request_id)
             if row is None or row["state"] != "executing" or row["turn_id"] != turn_id:
                 return _Result([])
@@ -226,6 +230,7 @@ class FakeDb:
                             for state, count in counts.items()])
         if normalized.startswith("UPDATE app_session_requests SET state='abandoned'"):
             _response, terminal, updated, now, cutoff = params
+            _response = _response.obj
             changed = []
             for row in self.rows.values():
                 stale = row["state"] == "executing" and row["lease_expires_at"] < now
@@ -436,6 +441,66 @@ def test_startup_recovery_rearms_until_live_lease_expires(journal, monkeypatch):
     assert starts[0][1]["journal_claimed"] is True
     assert starts[0][1]["text"] == "recover me"
     assert journal.rows[queued]["recoverable_json"] is None
+
+
+def test_every_request_journal_json_write_uses_psycopg_jsonb():
+    class CaptureDb:
+        def __init__(self):
+            self.calls = []
+
+        @contextmanager
+        def transaction(self):
+            yield self
+
+        def execute(self, sql, params=()):
+            self.calls.append((" ".join(sql.split()), params))
+            return _Result([])
+
+    db = CaptureDb()
+    original_platform_db = request_journal.platform_db
+    request_journal.platform_db = lambda: db
+    try:
+        response = {"status": "failed", "error": {"error_code": "INTERNAL"}}
+        recoverable = _recoverable()
+        request_journal._settle_expired_executions(db, now=100.0)
+        request_journal.queue_request("request-id", recoverable)
+        request_journal.release_execution(
+            "request-id", "turn-id", requeue=True, recoverable=recoverable,
+        )
+        request_journal.release_execution(
+            "request-id", "turn-id", requeue=False,
+        )
+        request_journal.finish_request(
+            "request-id", "turn-id", state="failed",
+            response_status=500, response=response,
+        )
+        request_journal.finish_turn(
+            "session-id", "turn-id", state="failed",
+            response_status=500, response=response,
+        )
+        request_journal.fail_admitted(
+            "request-id", response_status=500, response=response,
+        )
+        request_journal.fail_queued(
+            "request-id", response_status=500, response=response,
+        )
+        request_journal.settle_abandoned()
+    finally:
+        request_journal.platform_db = original_platform_db
+
+    json_values = []
+    for sql, params in db.calls:
+        if "response_json=%s" in sql:
+            json_values.append(params[2] if "SET state=%s" in sql else params[1]
+                               if "SET state='failed'" in sql else params[0])
+        if "recoverable_json=%s" in sql:
+            value = params[1] if "SET state=%s" in sql else params[0]
+            if value is not None:
+                json_values.append(value)
+
+    assert len(json_values) == 8
+    assert all(isinstance(value, request_journal.Jsonb) for value in json_values)
+    assert all(type(value.obj) is dict for value in json_values)
 
 
 def test_active_counts_are_tenant_and_drawing_scoped(journal):
