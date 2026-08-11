@@ -70,6 +70,12 @@ def _live_request(tenant="tenant-owner", drawing="u-owned", version=1):
     )
 
 
+def _assert_live_read_reason(reason_code, match, operation):
+    with pytest.raises(broker.LiveReadResolutionError, match=match) as caught:
+        operation()
+    assert caught.value.reason_code == reason_code
+
+
 def test_live_versioned_read_materializes_tenant_owned_dwg(tmp_path, monkeypatch):
     backend, source = _live_upload_backend(tmp_path)
     monkeypatch.setattr(
@@ -89,8 +95,12 @@ def test_live_versioned_read_is_tenant_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(
         write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
 
-    with pytest.raises(ValueError, match="no readable upload marker"):
-        broker._resolve_live_read_dwg(_live_request(tenant="tenant-intruder"))
+    _assert_live_read_reason(
+        "uploaded_marker_unreadable",
+        "no readable upload marker",
+        lambda: broker._resolve_live_read_dwg(
+            _live_request(tenant="tenant-intruder")),
+    )
 
 
 def test_live_versioned_read_never_falls_back_to_curated_name(tmp_path, monkeypatch):
@@ -98,9 +108,12 @@ def test_live_versioned_read_never_falls_back_to_curated_name(tmp_path, monkeypa
     monkeypatch.setattr(
         write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
 
-    with pytest.raises(ValueError, match="no readable upload marker"):
-        broker._resolve_live_read_dwg(
-            _live_request(drawing="rooftop_demo", version=1))
+    _assert_live_read_reason(
+        "uploaded_marker_unreadable",
+        "no readable upload marker",
+        lambda: broker._resolve_live_read_dwg(
+            _live_request(drawing="rooftop_demo", version=1)),
+    )
 
 
 @pytest.mark.parametrize("marker_bytes", [None, b"{not-json", b"[]"])
@@ -113,8 +126,11 @@ def test_live_versioned_read_requires_readable_upload_marker(
     monkeypatch.setattr(
         write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
 
-    with pytest.raises(ValueError, match="no readable upload marker"):
-        broker._resolve_live_read_dwg(_live_request())
+    _assert_live_read_reason(
+        "uploaded_marker_unreadable",
+        "no readable upload marker",
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
 
 
 def test_live_versioned_read_requires_ready_dwg_upload(tmp_path, monkeypatch):
@@ -126,8 +142,11 @@ def test_live_versioned_read_requires_ready_dwg_upload(tmp_path, monkeypatch):
         json.dumps({"status": "extracting", "source_ext": ".dwg"}).encode(),
     )
 
-    with pytest.raises(ValueError, match="not ready"):
-        broker._resolve_live_read_dwg(_live_request())
+    _assert_live_read_reason(
+        "uploaded_marker_not_ready",
+        "not ready",
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
 
 
 def test_live_versioned_read_rejects_non_dwg_upload(tmp_path, monkeypatch):
@@ -139,8 +158,123 @@ def test_live_versioned_read_rejects_non_dwg_upload(tmp_path, monkeypatch):
         json.dumps({"status": "ready", "source_ext": ".dxf"}).encode(),
     )
 
-    with pytest.raises(ValueError, match="need a DWG source"):
-        broker._resolve_live_read_dwg(_live_request())
+    _assert_live_read_reason(
+        "uploaded_source_not_dwg",
+        "need a DWG source",
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
+
+
+def test_live_versioned_read_classifies_missing_version(tmp_path, monkeypatch):
+    backend, _source = _live_upload_backend(tmp_path)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(
+        store,
+        "resolve_version",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("version 2 is not available")),
+    )
+
+    _assert_live_read_reason(
+        "uploaded_version_unavailable",
+        "version 2 is not available",
+        lambda: broker._resolve_live_read_dwg(_live_request(version=2)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "failure", "reason_code"),
+    [
+        (store, "load_manifest", "uploaded_manifest_unavailable"),
+        (write_loop, "read_intake", "uploaded_intake_unavailable"),
+    ],
+)
+def test_live_versioned_read_classifies_missing_prerequisite(
+        tmp_path, monkeypatch, target, failure, reason_code):
+    backend, _source = _live_upload_backend(tmp_path)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(
+        target,
+        failure,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            KeyError("missing prerequisite")),
+    )
+
+    _assert_live_read_reason(
+        reason_code,
+        "dwg_version not in tenant store",
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
+
+
+def test_live_versioned_read_classifies_missing_source(tmp_path, monkeypatch):
+    backend, _source = _live_upload_backend(tmp_path)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(write_loop, "read_intake", lambda *_args: ({}, {}))
+    real_get = backend.get
+
+    def missing_source(key):
+        if key.endswith("00000001.dwg"):
+            raise KeyError(key)
+        return real_get(key)
+
+    monkeypatch.setattr(backend, "get", missing_source)
+
+    _assert_live_read_reason(
+        "uploaded_source_unavailable",
+        "dwg_version not in tenant store",
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("bridged", "source", "reason_code", "match"),
+    [
+        (True, b"AC1032", "uploaded_source_not_immutable", "not an immutable DWG"),
+        (False, b"", "uploaded_source_empty", "DWG source is empty"),
+    ],
+)
+def test_live_versioned_read_classifies_unusable_source(
+        tmp_path, monkeypatch, bridged, source, reason_code, match):
+    backend, _source = _live_upload_backend(tmp_path)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(
+        write_loop,
+        "_live_execution_source_bytes",
+        lambda _stored: (source, bridged),
+    )
+
+    _assert_live_read_reason(
+        reason_code,
+        match,
+        lambda: broker._resolve_live_read_dwg(_live_request()),
+    )
+
+
+def test_live_run_exposes_machine_reason_for_uploaded_dwg_failure(
+        tmp_path, monkeypatch):
+    backend, _source = _live_upload_backend(tmp_path)
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: backend)
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda _tenant, _tool: None)
+    backend.put(
+        write_loop.upload_marker_key("tenant-owner", "u-owned"),
+        json.dumps({"status": "extracting", "source_ext": ".dwg"}).encode(),
+    )
+
+    response = broker.broker_run(_live_request())
+    body = json.loads(response.body)
+
+    assert response.status_code == 400
+    assert body["error"]["error_code"] == "BAD_PARAMS"
+    assert body["error"]["reason_code"] == "uploaded_marker_not_ready"
+    assert body["error"]["retryable"] is False
 
 
 def test_live_run_submits_exact_versioned_bytes_and_cleans_temp(
