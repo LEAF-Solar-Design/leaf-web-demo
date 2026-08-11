@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any, Sequence
 
@@ -20,9 +21,12 @@ SCHEMA = "leaf.staging-supply-set.v1"
 # verifier) accept BOTH schemas, because a rerun of a pre-v2 build run
 # regenerates its artifact from the old workflow and must keep dispatching.
 SCHEMA_V2 = "leaf.staging-supply-set.v2"
-ACCEPTED_SCHEMAS = (SCHEMA, SCHEMA_V2)
+SCHEMA_V3 = "leaf.staging-supply-set.v3"
+ACCEPTED_SCHEMAS = (SCHEMA, SCHEMA_V2, SCHEMA_V3)
 SPECULATIVE_SCHEMA = "leaf.speculative-supply-set.v1"
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
+SURFACE_PREDICATE_TYPE = "https://leafdesign.ai/attestations/platform-surface/v1"
+BUILD_WORKFLOW_PATH = ".github/workflows/build-platform-images.yml"
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
 REPOSITORIES = {name: f"leaf-platform-{name}" for name in SERVICES}
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -39,6 +43,59 @@ _RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
 _RUN_ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _RECEIPT_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{5,49}$")
 _PR_NUMBER = re.compile(r"^[1-9][0-9]{0,9}$")
+_LOOKUP_TAG = re.compile(
+    r"^(?:prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}|surface-v1-[0-9a-f]{64})$"
+)
+_ECR_SUBJECT = re.compile(
+    r"^807034087062\.dkr\.ecr\.us-east-1\.amazonaws\.com/"
+    r"leaf-platform-(?:app|broker|canonical-worker|harness|web)$"
+)
+
+
+SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
+    "app": (
+        ".dockerignore",
+        "deploy/Dockerfile.app",
+        "server",
+        "da",
+        "engine",
+        "platform",
+        "contract",
+        "data",
+        "scripts/reconcile_customization_authority.py",
+        "scripts/reconcile_sessions_authority.py",
+    ),
+    "broker": (
+        ".dockerignore",
+        "deploy/Dockerfile.broker",
+        "server",
+        "da",
+        "engine",
+        "platform",
+        "contract",
+        "data",
+        "harness/scripts/e2b-tool-exec.mjs",
+    ),
+    "canonical-worker": (
+        ".dockerignore",
+        "deploy/Dockerfile.canonical-worker",
+        "server",
+        "platform",
+        "scripts/canonical-container-smoke.py",
+        "deploy/autofill-solver-sources.json",
+    ),
+    "harness": (
+        ".dockerignore",
+        "deploy/Dockerfile.harness",
+        "harness",
+    ),
+    "web": (
+        ".dockerignore",
+        "deploy/Dockerfile.web",
+        "deploy/nginx.conf",
+        "web",
+    ),
+}
 
 
 class ContractError(ValueError):
@@ -67,6 +124,205 @@ def load_json(path: Path) -> dict[str, Any]:
 def _exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
     if set(value) != expected:
         raise ContractError(f"{label} has unsupported or missing fields")
+
+
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git(repo_root: Path, *arguments: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ContractError("cannot resolve the exact git surface") from exc
+    return result.stdout.strip()
+
+
+def _pairs(values: Sequence[str], label: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for value in values:
+        name, separator, item = value.partition("=")
+        if not separator or not name or not item or name in pairs:
+            raise ContractError(f"each {label} must be one unique name=value pair")
+        pairs[name] = item
+    return pairs
+
+
+def _surface_blobs(repo_root: Path, revision: str, service: str) -> dict[str, str]:
+    if service not in SURFACE_INPUTS:
+        raise ContractError("surface service is not canonical")
+    if not _SHA.fullmatch(revision):
+        raise ContractError("surface revision must be a full lowercase commit SHA")
+    resolved = _git(repo_root, "rev-parse", revision)
+    if resolved != revision:
+        raise ContractError("surface revision did not resolve exactly")
+    blobs: dict[str, str] = {}
+    for source in SURFACE_INPUTS[service]:
+        listing = _git(repo_root, "ls-tree", "-r", revision, "--", source)
+        if not listing:
+            raise ContractError(f"surface input is absent from git: {source}")
+        for line in listing.splitlines():
+            metadata, separator, path = line.partition("\t")
+            parts = metadata.split()
+            if not separator or len(parts) != 3 or parts[1] != "blob":
+                raise ContractError("surface git listing is malformed")
+            mode, _kind, blob = parts
+            if mode == "160000" or not _SHA.fullmatch(blob) or path in blobs:
+                raise ContractError("surface contains an unsupported or duplicate input")
+            blobs[path] = blob
+    return dict(sorted(blobs.items()))
+
+
+def _dockerfile_contract(
+    repo_root: Path, revision: str, service: str
+) -> tuple[dict[str, str], set[str]]:
+    dockerfile = _git(repo_root, "show", f"{revision}:deploy/Dockerfile.{service}")
+    logical: list[str] = []
+    pending = ""
+    for raw in dockerfile.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        pending = f"{pending} {line}".strip()
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        logical.append(pending)
+        pending = ""
+    if pending:
+        raise ContractError("Dockerfile ends with an incomplete instruction")
+
+    declared = SURFACE_INPUTS[service]
+    aliases: set[str] = set()
+    external_images: set[str] = set()
+    args: dict[str, str] = {}
+    for instruction in logical:
+        upper = instruction.upper()
+        if upper.startswith("FROM "):
+            tokens = shlex.split(instruction)
+            if len(tokens) < 2:
+                raise ContractError("Dockerfile FROM instruction is malformed")
+            external_images.add(tokens[1])
+            if len(tokens) >= 4 and tokens[-2].upper() == "AS":
+                aliases.add(tokens[-1])
+        elif upper.startswith("ARG "):
+            token = instruction[4:].strip()
+            name, separator, default = token.partition("=")
+            if not name or any(character.isspace() for character in name):
+                raise ContractError("Dockerfile ARG instruction is malformed")
+            if name != "LEAF_SOURCE_SHA":
+                args[name] = default if separator else ""
+        elif upper.startswith(("COPY ", "ADD ")):
+            tokens = shlex.split(instruction)
+            flags = [token for token in tokens[1:] if token.startswith("--")]
+            from_flags = [token for token in flags if token.startswith("--from=")]
+            if from_flags:
+                if len(from_flags) != 1:
+                    raise ContractError("Dockerfile copy source is ambiguous")
+                source = from_flags[0].split("=", 1)[1]
+                if source not in aliases and source != "autofill_solver":
+                    external_images.add(source)
+                continue
+            values = [token for token in tokens[1:] if not token.startswith("--")]
+            if len(values) < 2:
+                raise ContractError("Dockerfile local copy is malformed")
+            for source in values[:-1]:
+                normalized = source.rstrip("/")
+                covered = any(
+                    normalized == root.rstrip("/")
+                    or normalized.startswith(root.rstrip("/") + "/")
+                    for root in declared
+                )
+                if not covered:
+                    raise ContractError(
+                        f"Dockerfile local input is not fingerprinted: {source}"
+                    )
+    return args, external_images
+
+
+def build_surface_fingerprint(
+    repo_root: Path,
+    revision: str,
+    service: str,
+    base_images: dict[str, str],
+    build_args: dict[str, str],
+    *,
+    buildkit_version: str,
+    platform: str,
+    solver_revision: str | None = None,
+    solver_source_sha256: str | None = None,
+) -> dict[str, Any]:
+    if not buildkit_version or not platform:
+        raise ContractError("builder version and platform are required")
+    docker_args, external_images = _dockerfile_contract(
+        repo_root, revision, service
+    )
+    if set(base_images) != external_images or any(
+        not _DIGEST.fullmatch(value) for value in base_images.values()
+    ):
+        raise ContractError("every resolved base image must be an immutable digest")
+    if "LEAF_SOURCE_SHA" in build_args:
+        raise ContractError("release coordinator SHA is not a surface build argument")
+    effective_args = dict(docker_args)
+    for name, value in build_args.items():
+        if name not in docker_args:
+            raise ContractError(f"undeclared surface build argument: {name}")
+        effective_args[name] = value
+    if service == "canonical-worker":
+        if not solver_revision or not _SHA.fullmatch(solver_revision):
+            raise ContractError("canonical-worker solver revision is invalid")
+        if not solver_source_sha256 or not _SOURCE_HASH.fullmatch(
+            solver_source_sha256
+        ):
+            raise ContractError("canonical-worker solver source hash is invalid")
+    elif solver_revision is not None or solver_source_sha256 is not None:
+        raise ContractError("solver provenance applies only to canonical-worker")
+    blobs = _surface_blobs(repo_root, revision, service)
+    recipe: dict[str, Any] = {
+        "build_args": dict(sorted(effective_args.items())),
+        "buildkit_version": buildkit_version,
+        "dockerfile_blob": blobs[f"deploy/Dockerfile.{service}"],
+        "platform": platform,
+        "resolved_base_images": dict(sorted(base_images.items())),
+    }
+    if service == "canonical-worker":
+        recipe["solver"] = {
+            "source_revision": solver_revision,
+            "source_sha256": solver_source_sha256,
+        }
+    recipe_fingerprint = _canonical_sha256(recipe)
+    surface = {
+        "blobs": blobs,
+        "recipe_fingerprint": recipe_fingerprint,
+        "service": service,
+    }
+    migration_paths = {
+        path: blob
+        for path, blob in blobs.items()
+        if path == "platform/db.py"
+        or path.startswith("platform/migrations/")
+        or path.startswith("platform/migration")
+    }
+    return {
+        "schema": "leaf.platform-surface-fingerprint.v1",
+        "service": service,
+        "source_revision": revision,
+        "surface_fingerprint": _canonical_sha256(surface),
+        "recipe_fingerprint": recipe_fingerprint,
+        "migration_fingerprint": (
+            _canonical_sha256(migration_paths) if service == "app" else "not_app"
+        ),
+        "inputs": blobs,
+        "recipe": recipe,
+    }
 
 
 def build_manifest(
@@ -127,10 +383,305 @@ def build_manifest(
     return manifest
 
 
+_V3_SERVICE_FIELDS = {
+    "repository",
+    "image_digest",
+    "immutable_lookup_tag",
+    "producer_source_revision",
+    "producer_source_tree",
+    "surface_fingerprint",
+    "recipe_fingerprint",
+    "producer_workflow_path",
+    "producer_workflow_blob",
+    "producer_run_id",
+    "producer_run_attempt",
+    "provenance_subject",
+    "provenance_digest",
+    "build_disposition",
+}
+
+
+def build_v3_manifest(
+    release_source_revision: str,
+    release_source_tree: str,
+    build_run_id: str,
+    build_run_attempt: str,
+    services: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    manifest = {
+        "schema": SCHEMA_V3,
+        "release_source_revision": release_source_revision,
+        "release_source_tree": release_source_tree,
+        "build_run_id": int(build_run_id) if _RUN_ID.fullmatch(build_run_id) else 0,
+        "build_run_attempt": (
+            int(build_run_attempt) if _RUN_ATTEMPT.fullmatch(build_run_attempt) else 0
+        ),
+        "services": services,
+    }
+    validate_v3_manifest(manifest)
+    return manifest
+
+
+def validate_v3_manifest(manifest: dict[str, Any]) -> None:
+    _exact_keys(
+        manifest,
+        {
+            "schema",
+            "release_source_revision",
+            "release_source_tree",
+            "build_run_id",
+            "build_run_attempt",
+            "services",
+        },
+        "v3 manifest",
+    )
+    if manifest["schema"] != SCHEMA_V3:
+        raise ContractError("unsupported v3 release manifest schema")
+    release_source = manifest["release_source_revision"]
+    release_tree = manifest["release_source_tree"]
+    if not isinstance(release_source, str) or not _SHA.fullmatch(release_source):
+        raise ContractError("v3 release source revision is invalid")
+    if not isinstance(release_tree, str) or not _TREE.fullmatch(release_tree):
+        raise ContractError("v3 release source tree is invalid")
+    if (
+        not isinstance(manifest["build_run_id"], int)
+        or not _RUN_ID.fullmatch(str(manifest["build_run_id"]))
+        or not isinstance(manifest["build_run_attempt"], int)
+        or not _RUN_ATTEMPT.fullmatch(str(manifest["build_run_attempt"]))
+    ):
+        raise ContractError("v3 build run identity is invalid")
+    services = manifest["services"]
+    if not isinstance(services, dict) or set(services) != set(SERVICES):
+        raise ContractError("v3 manifest must contain exactly five services")
+    for name in SERVICES:
+        service = services[name]
+        if not isinstance(service, dict):
+            raise ContractError(f"{name} v3 entry must be an object")
+        fields = set(_V3_SERVICE_FIELDS)
+        if name == "canonical-worker":
+            fields.add("solver_provenance")
+        if name == "web":
+            fields.add("artifact_sha256")
+        _exact_keys(service, fields, f"{name} v3 entry")
+        if service["repository"] != REPOSITORIES[name]:
+            raise ContractError(f"{name} v3 repository is not canonical")
+        if not isinstance(service["image_digest"], str) or not _DIGEST.fullmatch(
+            service["image_digest"]
+        ):
+            raise ContractError(f"{name} v3 digest is not immutable")
+        if not isinstance(service["immutable_lookup_tag"], str) or not (
+            _LOOKUP_TAG.fullmatch(service["immutable_lookup_tag"])
+        ):
+            raise ContractError(f"{name} v3 lookup tag is invalid")
+        for field in ("producer_source_revision", "producer_source_tree", "producer_workflow_blob"):
+            value = service[field]
+            if not isinstance(value, str) or not _SHA.fullmatch(value):
+                raise ContractError(f"{name} v3 {field} is invalid")
+        if service["producer_workflow_path"] != BUILD_WORKFLOW_PATH:
+            raise ContractError(f"{name} v3 producer workflow is not canonical")
+        for field in ("surface_fingerprint", "recipe_fingerprint"):
+            value = service[field]
+            if not isinstance(value, str) or not _SOURCE_HASH.fullmatch(value):
+                raise ContractError(f"{name} v3 {field} is invalid")
+        if (
+            not isinstance(service["producer_run_id"], int)
+            or not _RUN_ID.fullmatch(str(service["producer_run_id"]))
+            or not isinstance(service["producer_run_attempt"], int)
+            or not _RUN_ATTEMPT.fullmatch(str(service["producer_run_attempt"]))
+        ):
+            raise ContractError(f"{name} v3 producer run is invalid")
+        expected_subject = (
+            "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+            f"{REPOSITORIES[name]}"
+        )
+        if service["provenance_subject"] != expected_subject or not (
+            _ECR_SUBJECT.fullmatch(service["provenance_subject"])
+        ):
+            raise ContractError(f"{name} v3 provenance subject is invalid")
+        if not isinstance(service["provenance_digest"], str) or not (
+            _DIGEST.fullmatch(service["provenance_digest"])
+        ):
+            raise ContractError(f"{name} v3 provenance digest is invalid")
+        if service["build_disposition"] not in {"built", "reused"}:
+            raise ContractError(f"{name} v3 build disposition is invalid")
+        if name == "web" and (
+            not isinstance(service["artifact_sha256"], str)
+            or not _SOURCE_HASH.fullmatch(service["artifact_sha256"])
+        ):
+            raise ContractError("web v3 artifact hash is invalid")
+    worker = services["canonical-worker"]["solver_provenance"]
+    if not isinstance(worker, dict):
+        raise ContractError("canonical-worker v3 solver provenance is invalid")
+    _exact_keys(
+        worker,
+        {"solver_source_revision", "solver_source_sha256"},
+        "canonical-worker v3 solver provenance",
+    )
+    if not isinstance(worker["solver_source_revision"], str) or not _SHA.fullmatch(
+        worker["solver_source_revision"]
+    ):
+        raise ContractError("canonical-worker v3 solver revision is invalid")
+    if not isinstance(worker["solver_source_sha256"], str) or not (
+        _SOURCE_HASH.fullmatch(worker["solver_source_sha256"])
+    ):
+        raise ContractError("canonical-worker v3 solver source hash is invalid")
+
+
+def build_surface_predicate(
+    fingerprint: dict[str, Any],
+    *,
+    repository: str,
+    image_digest: str,
+    source_tree: str,
+    workflow_blob: str,
+    run_id: str,
+    run_attempt: str,
+    artifact_sha256: str | None = None,
+) -> dict[str, Any]:
+    service = fingerprint.get("service")
+    if service not in SERVICES or repository != REPOSITORIES[service]:
+        raise ContractError("surface predicate repository is not canonical")
+    for key in ("surface_fingerprint", "recipe_fingerprint"):
+        if not isinstance(fingerprint.get(key), str) or not _SOURCE_HASH.fullmatch(
+            fingerprint[key]
+        ):
+            raise ContractError("surface predicate fingerprint is invalid")
+    source = fingerprint.get("source_revision")
+    if not isinstance(source, str) or not _SHA.fullmatch(source):
+        raise ContractError("surface predicate source revision is invalid")
+    if not _DIGEST.fullmatch(image_digest):
+        raise ContractError("surface predicate image digest is invalid")
+    if not _TREE.fullmatch(source_tree) or not _SHA.fullmatch(workflow_blob):
+        raise ContractError("surface predicate tree or workflow blob is invalid")
+    if not _RUN_ID.fullmatch(run_id) or not _RUN_ATTEMPT.fullmatch(run_attempt):
+        raise ContractError("surface predicate run identity is invalid")
+    predicate: dict[str, Any] = {
+        "schema": "leaf.platform-surface-provenance.v1",
+        "service": service,
+        "repository": repository,
+        "image_digest": image_digest,
+        "producer_source_revision": source,
+        "producer_source_tree": source_tree,
+        "surface_fingerprint": fingerprint["surface_fingerprint"],
+        "recipe_fingerprint": fingerprint["recipe_fingerprint"],
+        "migration_fingerprint": fingerprint["migration_fingerprint"],
+        "producer_workflow_path": BUILD_WORKFLOW_PATH,
+        "producer_workflow_blob": workflow_blob,
+        "producer_run_id": int(run_id),
+        "producer_run_attempt": int(run_attempt),
+    }
+    if service == "canonical-worker":
+        predicate["solver_provenance"] = {
+            "solver_source_revision": fingerprint["recipe"]["solver"][
+                "source_revision"
+            ],
+            "solver_source_sha256": fingerprint["recipe"]["solver"][
+                "source_sha256"
+            ],
+        }
+    if service == "web":
+        if not artifact_sha256 or not _SOURCE_HASH.fullmatch(artifact_sha256):
+            raise ContractError("web surface predicate artifact hash is invalid")
+        predicate["artifact_sha256"] = artifact_sha256
+    elif artifact_sha256 is not None:
+        raise ContractError("artifact hash applies only to the web surface")
+    validate_surface_predicate(predicate)
+    return predicate
+
+
+_SURFACE_PREDICATE_FIELDS = {
+    "schema",
+    "service",
+    "repository",
+    "image_digest",
+    "producer_source_revision",
+    "producer_source_tree",
+    "surface_fingerprint",
+    "recipe_fingerprint",
+    "migration_fingerprint",
+    "producer_workflow_path",
+    "producer_workflow_blob",
+    "producer_run_id",
+    "producer_run_attempt",
+}
+
+
+def validate_surface_predicate(predicate: dict[str, Any]) -> None:
+    service = predicate.get("service")
+    if service not in SERVICES:
+        raise ContractError("surface predicate service is not canonical")
+    fields = set(_SURFACE_PREDICATE_FIELDS)
+    if service == "canonical-worker":
+        fields.add("solver_provenance")
+    if service == "web":
+        fields.add("artifact_sha256")
+    _exact_keys(predicate, fields, "surface predicate")
+    if predicate["schema"] != "leaf.platform-surface-provenance.v1":
+        raise ContractError("surface predicate schema is invalid")
+    if predicate["repository"] != REPOSITORIES[service]:
+        raise ContractError("surface predicate repository is not canonical")
+    if not isinstance(predicate["image_digest"], str) or not _DIGEST.fullmatch(
+        predicate["image_digest"]
+    ):
+        raise ContractError("surface predicate digest is invalid")
+    for field in (
+        "producer_source_revision",
+        "producer_source_tree",
+        "producer_workflow_blob",
+    ):
+        value = predicate[field]
+        if not isinstance(value, str) or not _SHA.fullmatch(value):
+            raise ContractError(f"surface predicate {field} is invalid")
+    for field in ("surface_fingerprint", "recipe_fingerprint"):
+        value = predicate[field]
+        if not isinstance(value, str) or not _SOURCE_HASH.fullmatch(value):
+            raise ContractError(f"surface predicate {field} is invalid")
+    migration = predicate["migration_fingerprint"]
+    if service == "app":
+        if not isinstance(migration, str) or not _SOURCE_HASH.fullmatch(migration):
+            raise ContractError("app surface migration fingerprint is invalid")
+    elif migration != "not_app":
+        raise ContractError("non-app surface migration fingerprint is invalid")
+    if predicate["producer_workflow_path"] != BUILD_WORKFLOW_PATH:
+        raise ContractError("surface predicate workflow is not canonical")
+    if (
+        not isinstance(predicate["producer_run_id"], int)
+        or not _RUN_ID.fullmatch(str(predicate["producer_run_id"]))
+        or not isinstance(predicate["producer_run_attempt"], int)
+        or not _RUN_ATTEMPT.fullmatch(str(predicate["producer_run_attempt"]))
+    ):
+        raise ContractError("surface predicate run identity is invalid")
+    if service == "canonical-worker":
+        solver = predicate["solver_provenance"]
+        if not isinstance(solver, dict):
+            raise ContractError("surface predicate solver provenance is invalid")
+        _exact_keys(
+            solver,
+            {"solver_source_revision", "solver_source_sha256"},
+            "surface predicate solver provenance",
+        )
+        if not isinstance(solver["solver_source_revision"], str) or not (
+            _SHA.fullmatch(solver["solver_source_revision"])
+        ):
+            raise ContractError("surface predicate solver revision is invalid")
+        if not isinstance(solver["solver_source_sha256"], str) or not (
+            _SOURCE_HASH.fullmatch(solver["solver_source_sha256"])
+        ):
+            raise ContractError("surface predicate solver source hash is invalid")
+    if service == "web" and (
+        not isinstance(predicate["artifact_sha256"], str)
+        or not _SOURCE_HASH.fullmatch(predicate["artifact_sha256"])
+    ):
+        raise ContractError("surface predicate web artifact hash is invalid")
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     schema = manifest.get("schema")
     if schema not in ACCEPTED_SCHEMAS:
         raise ContractError("unsupported release manifest schema")
+    if schema == SCHEMA_V3:
+        validate_v3_manifest(manifest)
+        return
     top_level = {"schema", "source_revision", "build_tag", "services"}
     if schema == SCHEMA_V2:
         top_level |= {"source_tree", "speculative"}
@@ -558,6 +1109,18 @@ def _images(values: Sequence[str]) -> dict[str, str]:
     return images
 
 
+def _service_entries(values: Sequence[str]) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator or name in entries or name not in SERVICES:
+            raise ContractError(
+                "each --service-entry must be one unique canonical service=path pair"
+            )
+        entries[name] = load_json(Path(path))
+    return entries
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -615,12 +1178,77 @@ def main(argv: Sequence[str] | None = None) -> int:
     verify_artifact_command.add_argument("--output", type=Path, required=True)
     web_digest = commands.add_parser("digest-web-dist")
     web_digest.add_argument("--root", type=Path, required=True)
+    fingerprint = commands.add_parser("surface-fingerprint")
+    fingerprint.add_argument("--repo-root", type=Path, required=True)
+    fingerprint.add_argument("--source-revision", required=True)
+    fingerprint.add_argument("--service", choices=SERVICES, required=True)
+    fingerprint.add_argument("--base-image", action="append", default=[])
+    fingerprint.add_argument("--build-arg", action="append", default=[])
+    fingerprint.add_argument("--buildkit-version", required=True)
+    fingerprint.add_argument("--platform", required=True)
+    fingerprint.add_argument("--solver-revision")
+    fingerprint.add_argument("--solver-source-sha256")
+    fingerprint.add_argument("--output", type=Path, required=True)
+    predicate = commands.add_parser("surface-predicate")
+    predicate.add_argument("--fingerprint", type=Path, required=True)
+    predicate.add_argument("--repository", required=True)
+    predicate.add_argument("--image-digest", required=True)
+    predicate.add_argument("--source-tree", required=True)
+    predicate.add_argument("--workflow-blob", required=True)
+    predicate.add_argument("--run-id", required=True)
+    predicate.add_argument("--run-attempt", required=True)
+    predicate.add_argument("--artifact-sha256")
+    predicate.add_argument("--output", type=Path, required=True)
+    verify_predicate = commands.add_parser("verify-surface-predicate")
+    verify_predicate.add_argument("--predicate", type=Path, required=True)
+    verify_predicate.add_argument("--output", type=Path, required=True)
+    generate_v3 = commands.add_parser("generate-v3")
+    generate_v3.add_argument("--release-source-revision", required=True)
+    generate_v3.add_argument("--release-source-tree", required=True)
+    generate_v3.add_argument("--build-run-id", required=True)
+    generate_v3.add_argument("--build-run-attempt", required=True)
+    generate_v3.add_argument("--service-entry", action="append", default=[])
+    generate_v3.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "digest-web-dist":
             print(web_dist_digest(args.root))
             return 0
-        if args.command == "verify-workflow-run":
+        if args.command == "surface-fingerprint":
+            value = build_surface_fingerprint(
+                args.repo_root,
+                args.source_revision,
+                args.service,
+                _pairs(args.base_image, "--base-image"),
+                _pairs(args.build_arg, "--build-arg"),
+                buildkit_version=args.buildkit_version,
+                platform=args.platform,
+                solver_revision=args.solver_revision,
+                solver_source_sha256=args.solver_source_sha256,
+            )
+        elif args.command == "surface-predicate":
+            value = build_surface_predicate(
+                load_json(args.fingerprint),
+                repository=args.repository,
+                image_digest=args.image_digest,
+                source_tree=args.source_tree,
+                workflow_blob=args.workflow_blob,
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                artifact_sha256=args.artifact_sha256,
+            )
+        elif args.command == "verify-surface-predicate":
+            value = load_json(args.predicate)
+            validate_surface_predicate(value)
+        elif args.command == "generate-v3":
+            value = build_v3_manifest(
+                args.release_source_revision,
+                args.release_source_tree,
+                args.build_run_id,
+                args.build_run_attempt,
+                _service_entries(args.service_entry),
+            )
+        elif args.command == "verify-workflow-run":
             value = verify_workflow_run(
                 load_json(args.run),
                 load_json(args.workflow),
