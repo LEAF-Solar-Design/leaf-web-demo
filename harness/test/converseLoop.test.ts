@@ -25,6 +25,7 @@ import type {
   GateCheckResult,
   SessionRecord,
   SpineConverseRunner,
+  SpineToolResult,
   StoredEvent,
 } from "../src/ports/index.js";
 
@@ -429,6 +430,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
 
   it("run_capability on a READ tool dispatches inline via the wait path", async () => {
     const { loop, appRun, gate, store } = makeLoop();
+    appRun.drawingHead = 1;
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     const turn = await loop.handleMessage({
       sessionId: s.session_id,
@@ -449,10 +451,10 @@ describe("ConverseLoop — read auto-dispatch", () => {
       tool: "count-by-layer",
       params: {},
       dwg: "rooftop_demo",
+      drawingVersion: 1,
       wait: true,
       waitTimeoutS: 15,
     });
-    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
 
     // The gate ran before the execution — in the app policy catalog's vocabulary.
     expect(gate.checks.some((c) => c.action === "run_read_tool" && c.decision === "allow")).toBe(true);
@@ -468,7 +470,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
   });
 
-  it("omits a malformed read pin instead of coercing it into a drawing version", async () => {
+  it("replaces a malformed model read pin with the current drawing head", async () => {
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();
     const store = new FakeSessionStore();
@@ -484,6 +486,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
       },
     };
     const loop = new ConverseLoop({ runner, appRun, gate, store });
+    appRun.drawingHead = 3;
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
 
     await sendText(loop, s, "Count layers");
@@ -491,12 +494,12 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls).toHaveLength(1);
     expect(appRun.submitCalls[0]).toMatchObject({
       tool: "count-by-layer",
+      drawingVersion: 3,
       wait: true,
     });
-    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
   });
 
-  it("omits a numeric drawing version from an ordinary read tool", async () => {
+  it("uses the current drawing head instead of a model-supplied read pin", async () => {
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();
     const store = new FakeSessionStore();
@@ -512,6 +515,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
       },
     };
     const loop = new ConverseLoop({ runner, appRun, gate, store });
+    appRun.drawingHead = 4;
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
 
     await sendText(loop, s, "Count layers");
@@ -519,9 +523,9 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls).toHaveLength(1);
     expect(appRun.submitCalls[0]).toMatchObject({
       tool: "count-by-layer",
+      drawingVersion: 4,
       wait: true,
     });
-    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
   });
 
   it("a local write tool dry run uses the read rung and creates no write proposal", async () => {
@@ -825,6 +829,44 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
 });
 
 describe("ConverseLoop — live-APS split turns (submit_live_solve, R4)", () => {
+  it("refuses a model-selected live drawing that differs from the session drawing", async () => {
+    const appRun = new FakeAppRunClient();
+    const read = appRun.catalog.find((entry) => entry.name === "count-by-layer")!;
+    appRun.catalog = [{
+      ...read,
+      aps_live: true,
+      tool_manifest_sha256: `sha256:${"5".repeat(64)}`,
+      catalog_commit: "c".repeat(40),
+      effective_catalog_digest: "d".repeat(64),
+    }];
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const results: SpineToolResult[] = [];
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        results.push(await input.tools.execute("run_capability", {
+          tool: "count-by-layer",
+          params: {},
+          dwg: "another-drawing",
+        }));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "live-drawing-mismatch" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "uploaded-drawing");
+
+    await sendText(loop, session, "Count layers in this upload");
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      isError: true,
+      content: "tool error: live capability drawing must match the current session drawing",
+    });
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(gate.checks).toHaveLength(0);
+    expect(ofType(await store.eventsAfter(session.session_id, 0), "job_linked")).toHaveLength(0);
+  });
+
   it("forwards the approved drawing head to a live read while keeping write-only generation pins out", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const read = appRun.catalog.find((entry) => entry.name === "count-by-layer")!;
@@ -954,6 +996,7 @@ describe("ConverseLoop — gate action vocabulary (app policy catalog)", () => {
       params: {},
       dwg: "rooftop_demo",
       catalog_digest: `sha256:${"1".repeat(64)}`,
+      drawing_version: 3,
     });
   });
 });
