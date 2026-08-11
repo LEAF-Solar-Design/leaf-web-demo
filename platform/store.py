@@ -72,6 +72,14 @@ class DrawingImportForbidden(ValueError):
 class DrawingImportConflict(ValueError):
     """An idempotency key or immutable source version conflicts."""
 
+
+class IdentityBindingPairConflict(ValueError):
+    """The requested pair conflicts with durable tenant or identity state."""
+
+
+class IdentityBindingPairPrincipalDrift(ValueError):
+    """The verified operator principal changed before the transaction locked it."""
+
 # --------------------------------------------------------------------------- #
 # writes
 # --------------------------------------------------------------------------- #
@@ -254,6 +262,156 @@ def create_identity_binding(org_id: uuid.UUID, external_authority: str, external
     if existing.platform_tenant_id != org_id:
         raise ValueError("verified external subject is already bound to another platform tenant")
     return existing
+
+
+def bind_identity_pair(
+    bindings: List[Dict[str, Any]], *, operator_subject: str,
+    operator_role_revision: int, environment: str, idempotency_key: str,
+) -> Dict[str, Any]:
+    """Atomically bind exactly two verified Auth0 subjects as read-only users.
+
+    The operator route validates the request shape. This store repeats every
+    security-sensitive invariant inside one SERIALIZABLE transaction, locks
+    tenants and subjects in stable order, preserves exact active rows, and
+    writes only hashed target identity data to the audit record.
+    """
+    if len(bindings) != 2:
+        raise ValueError("exactly two identity bindings are required")
+    if not operator_subject or not environment or not idempotency_key:
+        raise ValueError("operator, environment, and idempotency key are required")
+
+    normalized = []
+    for item in bindings:
+        tenant_id = uuid.UUID(str(item["tenant_id"]))
+        subject = str(item["subject"])
+        if item.get("role") != "read_only":
+            raise ValueError("identity binding role must be read_only")
+        if not subject.startswith("auth0|") or len(subject) > 255:
+            raise ValueError("a canonical Auth0 subject is required")
+        normalized.append({"tenant_id": tenant_id, "subject": subject})
+    if len({row["tenant_id"] for row in normalized}) != 2:
+        raise ValueError("identity binding tenants must be distinct")
+    if len({row["subject"] for row in normalized}) != 2:
+        raise ValueError("identity binding subjects must be distinct")
+    normalized.sort(key=lambda row: str(row["tenant_id"]))
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, role_revision, status, environment "
+                "FROM operator_principals WHERE subject = %(subject)s FOR UPDATE",
+                {"subject": operator_subject},
+            )
+            principal = cur.fetchone()
+            if (principal is None or principal["status"] != "active"
+                    or principal["role"] != "operator"
+                    or int(principal["role_revision"]) != int(operator_role_revision)
+                    or principal["environment"] != environment):
+                raise IdentityBindingPairPrincipalDrift("operator principal drift")
+
+            tenant_ids = [row["tenant_id"] for row in normalized]
+            cur.execute(
+                "SELECT org_id, status FROM orgs "
+                "WHERE org_id = ANY(%(tenant_ids)s) ORDER BY org_id FOR UPDATE",
+                {"tenant_ids": tenant_ids},
+            )
+            tenants = cur.fetchall()
+            if (len(tenants) != 2
+                    or any(row["status"] != "active" for row in tenants)):
+                raise IdentityBindingPairConflict("tenant pair is unavailable")
+
+            # Cover absent binding rows. Sorted transaction-scoped advisory
+            # locks make identical and conflicting pair requests deterministic.
+            for subject in sorted(row["subject"] for row in normalized):
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%(subject)s, 0))",
+                    {"subject": subject},
+                )
+
+            subjects = [row["subject"] for row in normalized]
+            cur.execute(
+                "SELECT binding_id, external_subject, platform_tenant_id, "
+                "platform_user_id, role FROM identity_bindings "
+                "WHERE external_authority = 'auth0' "
+                "AND external_subject = ANY(%(subjects)s) AND status = 'active' "
+                "ORDER BY external_subject FOR UPDATE",
+                {"subjects": subjects},
+            )
+            existing = {row["external_subject"]: row for row in cur.fetchall()}
+
+            results = []
+            for requested in normalized:
+                row = existing.get(requested["subject"])
+                if row is not None:
+                    if (row["platform_tenant_id"] != requested["tenant_id"]
+                            or row["role"] != "read_only"):
+                        raise IdentityBindingPairConflict(
+                            "identity binding conflicts with durable state")
+                    results.append({
+                        "tenant_id": requested["tenant_id"],
+                        "binding_id": row["binding_id"],
+                        "role": "read_only",
+                        "state": "preserved",
+                    })
+                    continue
+
+                binding_id = new_uuid()
+                platform_user_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"leaf:auth0:{requested['subject']}")
+                cur.execute(
+                    "INSERT INTO identity_bindings "
+                    "(binding_id, external_authority, external_subject, "
+                    "platform_tenant_id, platform_user_id, role) VALUES "
+                    "(%(binding_id)s, 'auth0', %(subject)s, %(tenant_id)s, "
+                    "%(user_id)s, 'read_only')",
+                    {"binding_id": binding_id, "subject": requested["subject"],
+                     "tenant_id": requested["tenant_id"],
+                     "user_id": platform_user_id},
+                )
+                results.append({
+                    "tenant_id": requested["tenant_id"],
+                    "binding_id": binding_id,
+                    "role": "read_only",
+                    "state": "created",
+                })
+
+            target_hashes = sorted(
+                hashlib.sha256(row["subject"].encode("utf-8")).hexdigest()
+                for row in normalized
+            )
+            tenant_hashes = sorted(
+                hashlib.sha256(str(row["tenant_id"]).encode("utf-8")).hexdigest()
+                for row in normalized
+            )
+            audit_payload = {
+                "idempotency_key_sha256": hashlib.sha256(
+                    idempotency_key.encode("utf-8")).hexdigest(),
+                "subject_sha256": target_hashes,
+                "tenant_sha256": tenant_hashes,
+            }
+            args_hash = hashlib.sha256(
+                json.dumps(audit_payload, sort_keys=True, separators=(",", ":"))
+                .encode("utf-8")
+            ).hexdigest()
+            cur.execute(
+                "INSERT INTO operator_security_audit "
+                "(subject, action, decision, reason, args_hash, environment, extra) "
+                "VALUES (%(operator_subject)s, 'operator.identity_bind_pair', "
+                "'execute', %(reason)s, %(args_hash)s, %(environment)s, %(extra)s)",
+                {"operator_subject": operator_subject,
+                 "reason": ("pair_created" if any(
+                     row["state"] == "created" for row in results)
+                     else "pair_replayed"),
+                 "args_hash": args_hash, "environment": environment,
+                 "extra": Jsonb(audit_payload)},
+            )
+            return {"bindings": results}
+
+    try:
+        return run_transaction(operation, isolation="serializable")
+    except UniqueViolation as exc:
+        raise IdentityBindingPairConflict(
+            "identity binding conflicts with durable state") from exc
 
 
 def _lookup_active_identity_binding(external_authority: str, external_subject: str) -> Optional[IdentityBinding]:
