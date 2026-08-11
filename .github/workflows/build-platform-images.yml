@@ -119,10 +119,21 @@ on:
         description: "Required with speculative: the open PR whose head is source_sha."
         type: string
         required: false
+      force_rebuild_all:
+        description: "Build and attest all five surfaces even when signed fingerprints are reusable."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   pull-requests: read
+
+# Dormant until the reviewed Terraform consumer lands. This is a source
+# constant, not a repository variable, so no mutable setting can make a v3
+# supply set live before the shared-lock consumer exists.
+env:
+  DIGEST_AWARE_CONVERGENCE_ENABLED: "false"
+  SURFACE_PREDICATE_TYPE: https://leafdesign.ai/attestations/platform-surface/v1
 
 concurrency:
   # Serial main builds make the previous push's cache the normal input. GitHub
@@ -862,6 +873,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      attestations: write
 
     strategy:
       fail-fast: false
@@ -919,6 +931,199 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve one signed reusable surface
+        id: surface
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
+          SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
+          FORCE_REBUILD_ALL: ${{ inputs.force_rebuild_all }}
+        run: |
+          set -euo pipefail
+          echo "reuse=false" >> "$GITHUB_OUTPUT"
+          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]; then
+            echo "::notice::Digest-aware producer is source-ready but dormant until the reviewed Terraform consumer lands."
+            exit 0
+          fi
+          if [ "${FORCE_REBUILD_ALL:-false}" = "true" ]; then
+            echo "::notice::The requested security refresh forces a fresh build and attestation for every surface."
+            exit 0
+          fi
+
+          case "${{ matrix.image }}" in
+            app) bases=(python:3.12-slim) ;;
+            broker) bases=(node:20-slim python:3.12-slim) ;;
+            canonical-worker) bases=(python:3.12-slim) ;;
+            harness) bases=(node:22-bookworm node:22-slim) ;;
+            web) bases=(nginx:alpine node:22-slim) ;;
+            *) echo "::error::Unknown platform surface."; exit 1 ;;
+          esac
+          base_args=()
+          for base in "${bases[@]}"; do
+            digest="$(docker buildx imagetools inspect "$base" \
+              --format '{{json .Manifest}}' | jq -er '.digest')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Base image $base did not resolve to one immutable digest."
+              exit 1
+            }
+            base_args+=(--base-image "$base=$digest")
+          done
+          build_args=()
+          solver_args=()
+          if [ "${{ matrix.image }}" = "canonical-worker" ]; then
+            build_args+=(--build-arg "AUTOFILL_SOLVER_REVISION=$SOLVER_REVISION")
+            solver_args+=(--solver-revision "$SOLVER_REVISION")
+            solver_args+=(--solver-source-sha256 "$SOLVER_SOURCE_SHA256")
+          fi
+          buildkit_version="$(docker buildx version | head -n 1)"
+          python scripts/platform_release_manifest.py surface-fingerprint \
+            --repo-root . \
+            --source-revision "$SOURCE_SHA" \
+            --service "${{ matrix.image }}" \
+            "${base_args[@]}" \
+            "${build_args[@]}" \
+            --buildkit-version "$buildkit_version" \
+            --platform linux/amd64 \
+            "${solver_args[@]}" \
+            --output "$RUNNER_TEMP/surface-fingerprint.json"
+          fingerprint="$(jq -er '.surface_fingerprint' "$RUNNER_TEMP/surface-fingerprint.json")"
+          recipe="$(jq -er '.recipe_fingerprint' "$RUNNER_TEMP/surface-fingerprint.json")"
+          lookup_tag="surface-v1-$fingerprint"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+          echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
+          echo "lookup_tag=$lookup_tag" >> "$GITHUB_OUTPUT"
+
+          if ! response="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$lookup_tag" \
+              --output json)"; then
+            echo "::notice::$IMAGE_NAME reuse discovery is unavailable; building this surface."
+            exit 0
+          fi
+          count="$(jq '[.images[]?] | length' <<<"$response")"
+          if [ "$count" = "0" ]; then
+            echo "::notice::$IMAGE_NAME has no signed reusable surface for $fingerprint."
+            exit 0
+          fi
+          [ "$count" = "1" ] || {
+            echo "::error::$IMAGE_NAME:$lookup_tag did not resolve uniquely."
+            exit 1
+          }
+          digest="$(jq -er '.images[0].imageId.imageDigest' <<<"$response")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Reusable surface returned a malformed image digest."
+            exit 1
+          }
+          subject="$ECR_REGISTRY/$IMAGE_NAME"
+          if ! gh attestation verify "oci://$subject@$digest" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$SURFACE_PREDICATE_TYPE" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build-platform-images.yml" \
+              --source-ref refs/heads/main \
+              --format json > "$RUNNER_TEMP/surface-attestation.json"; then
+            echo "::notice::$IMAGE_NAME has no verifiable signed surface proof; building this surface."
+            exit 0
+          fi
+          if ! jq --arg service "${{ matrix.image }}" \
+              --arg repository "$IMAGE_NAME" \
+              --arg digest "$digest" \
+              --arg fingerprint "$fingerprint" \
+              --arg recipe "$recipe" '
+            [.[] | .verificationResult.statement.predicate
+             | select(.schema == "leaf.platform-surface-provenance.v1")
+             | select(.service == $service)
+             | select(.repository == $repository)
+             | select(.image_digest == $digest)
+             | select(.surface_fingerprint == $fingerprint)
+             | select(.recipe_fingerprint == $recipe)]
+            | if length == 1 then .[0] else error("no unique exact surface predicate") end
+          ' "$RUNNER_TEMP/surface-attestation.json" > "$RUNNER_TEMP/surface-predicate.json"; then
+            echo "::notice::$IMAGE_NAME signed proof does not bind this exact surface; building it."
+            exit 0
+          fi
+          if ! python scripts/platform_release_manifest.py verify-surface-predicate \
+              --predicate "$RUNNER_TEMP/surface-predicate.json" \
+              --output "$RUNNER_TEMP/verified-surface-predicate.json"; then
+            echo "::notice::$IMAGE_NAME signed proof has malformed or extra evidence; building it."
+            exit 0
+          fi
+          mv "$RUNNER_TEMP/verified-surface-predicate.json" "$RUNNER_TEMP/surface-predicate.json"
+          if ! producer="$(jq -er '.producer_source_revision' "$RUNNER_TEMP/surface-predicate.json")"; then
+            echo "::notice::$IMAGE_NAME signed proof has no exact producer source; building it."
+            exit 0
+          fi
+          [[ "$producer" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::notice::$IMAGE_NAME signed producer source is malformed; building it."
+            exit 0
+          }
+          if ! relation="$(gh api \
+              "repos/$GITHUB_REPOSITORY/compare/$producer...$SOURCE_SHA" \
+              --jq '.status')"; then
+            echo "::notice::$IMAGE_NAME signed producer ancestry is unavailable; building it."
+            exit 0
+          fi
+          if [ "$relation" != "ahead" ] && [ "$relation" != "identical" ]; then
+            echo "::notice::$IMAGE_NAME signed producer is not an ancestor of this protected main release; building it."
+            exit 0
+          fi
+          if ! git cat-file -e "$producer^{commit}" 2>/dev/null; then
+            if ! git fetch --no-tags --depth=1 origin "$producer"; then
+              echo "::notice::$IMAGE_NAME signed producer object is unavailable; building it."
+              exit 0
+            fi
+          fi
+          producer_tree="$(jq -er '.producer_source_tree' "$RUNNER_TEMP/surface-predicate.json")"
+          workflow_blob="$(jq -er '.producer_workflow_blob' "$RUNNER_TEMP/surface-predicate.json")"
+          exact_tree="$(git rev-parse "$producer^{tree}")"
+          exact_workflow_blob="$(git rev-parse "$producer:.github/workflows/build-platform-images.yml")"
+          if [ "$producer_tree" != "$exact_tree" ] || [ "$workflow_blob" != "$exact_workflow_blob" ]; then
+            echo "::notice::$IMAGE_NAME signed producer tree or workflow blob is stale; building it."
+            exit 0
+          fi
+          if ! witness="$(aws ecr batch-get-image \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=sha-$producer" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text)"; then
+            echo "::notice::$IMAGE_NAME baked-source witness is unavailable; building this surface."
+            exit 0
+          fi
+          [ "$witness" = "$digest" ] || {
+            echo "::error::Reusable surface baked-source witness does not resolve to its attested digest."
+            exit 1
+          }
+          producer_run_id="$(jq -er '.producer_run_id' "$RUNNER_TEMP/surface-predicate.json")"
+          producer_run_attempt="$(jq -er '.producer_run_attempt' "$RUNNER_TEMP/surface-predicate.json")"
+          if [ "${{ matrix.image }}" = "web" ]; then
+            expected_web_hash="$(jq -er '.artifact_sha256' "$RUNNER_TEMP/surface-predicate.json")"
+            rm -rf "$RUNNER_TEMP/reused-web-dist"
+            if ! gh run download "$producer_run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "web-dist-$producer-attempt-$producer_run_attempt" \
+                --dir "$RUNNER_TEMP/reused-web-dist"; then
+              echo "::notice::The signed web artifact is unavailable; building web."
+              exit 0
+            fi
+            actual_web_hash="$(python scripts/platform_release_manifest.py \
+              digest-web-dist --root "$RUNNER_TEMP/reused-web-dist")"
+            [ "$actual_web_hash" = "$expected_web_hash" ] || {
+              echo "::error::Reusable web artifact does not match its signed hash."
+              exit 1
+            }
+          fi
+          predicate_hash="$(jq -cS . "$RUNNER_TEMP/surface-predicate.json" | sha256sum | awk '{print $1}')"
+          echo "reuse=true" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "producer=$producer" >> "$GITHUB_OUTPUT"
+          echo "producer_tree=$producer_tree" >> "$GITHUB_OUTPUT"
+          echo "workflow_blob=$workflow_blob" >> "$GITHUB_OUTPUT"
+          echo "producer_run_id=$producer_run_id" >> "$GITHUB_OUTPUT"
+          echo "producer_run_attempt=$producer_run_attempt" >> "$GITHUB_OUTPUT"
+          echo "provenance_digest=sha256:$predicate_hash" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$(jq -er '.artifact_sha256 // "not_web"' "$RUNNER_TEMP/surface-predicate.json")" >> "$GITHUB_OUTPUT"
+          echo "::notice::$IMAGE_NAME will reuse signed digest $digest from protected-main producer $producer."
+
       # A cancelled five-way matrix can leave a complete immutable output for
       # some images and no output for others. Resume only at that image
       # boundary. The finite BatchGetImage probe preserves the release role's
@@ -929,6 +1134,7 @@ jobs:
       # than asking Buildx to collide with an immutable tag.
       - name: Inspect exact full-build outputs
         id: resume
+        if: steps.surface.outputs.reuse != 'true'
         env:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
@@ -1008,7 +1214,7 @@ jobs:
           echo "skip=true" >> "$GITHUB_OUTPUT"
 
       - name: Require the read-only canonical solver deploy key
-        if: matrix.image == 'canonical-worker' && steps.resume.outputs.skip != 'true'
+        if: matrix.image == 'canonical-worker' && steps.surface.outputs.reuse != 'true' && steps.resume.outputs.skip != 'true'
         env:
           AUTOFILL_SOLVER_DEPLOY_KEY: ${{ secrets.AUTOFILL_SOLVER_DEPLOY_KEY }}
         run: |
@@ -1019,7 +1225,7 @@ jobs:
           }
 
       - name: Check out the exact canonical solver source
-        if: matrix.image == 'canonical-worker' && steps.resume.outputs.skip != 'true'
+        if: matrix.image == 'canonical-worker' && steps.surface.outputs.reuse != 'true' && steps.resume.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: LEAF-Solar-Design/autofill-solver
@@ -1030,7 +1236,7 @@ jobs:
 
       - name: Select immutable cache references
         id: cache
-        if: steps.resume.outputs.skip != 'true'
+        if: steps.surface.outputs.reuse != 'true' && steps.resume.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
@@ -1126,7 +1332,8 @@ jobs:
           echo "to=$cache_to" >> "$GITHUB_OUTPUT"
 
       - name: Build and push ${{ matrix.image }}
-        if: steps.resume.outputs.skip != 'true'
+        id: build-image
+        if: steps.surface.outputs.reuse != 'true' && steps.resume.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -1150,8 +1357,138 @@ jobs:
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('{0}/{1}:sha-{2}-solver-{3}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha, needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, needs.prepare.outputs.source_sha) || '' }}
+            ${{ env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && format('{0}/{1}:surface-v1-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, steps.surface.outputs.fingerprint) || '' }}
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
+
+      - name: Set up Node for the signed web artifact
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Hash the signed web deployment artifact
+        id: surface-web
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
+        working-directory: web
+        env:
+          VITE_API_BASE: ""
+          VITE_MOCK: "0"
+          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
+          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
+          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
+            "$LEAF_SOURCE_SHA" > dist/health.json
+          artifact_sha256="$(python ../scripts/platform_release_manifest.py \
+            digest-web-dist --root dist)"
+          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve the exact v3 web deployment artifact
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web'
+        uses: actions/upload-artifact@v4
+        with:
+          name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.surface.outputs.reuse == 'true' && format('{0}/reused-web-dist', runner.temp) || 'web/dist' }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create exact surface provenance predicate
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && steps.surface.outputs.reuse != 'true'
+        env:
+          IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          WEB_ARTIFACT_SHA256: ${{ steps.surface-web.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Buildx did not return one immutable component digest."
+            exit 1
+          }
+          artifact_args=()
+          if [ "${{ matrix.image }}" = "web" ]; then
+            artifact_args+=(--artifact-sha256 "$WEB_ARTIFACT_SHA256")
+          fi
+          python scripts/platform_release_manifest.py surface-predicate \
+            --fingerprint "$RUNNER_TEMP/surface-fingerprint.json" \
+            --repository "$IMAGE_NAME" \
+            --image-digest "$IMAGE_DIGEST" \
+            --source-tree "$(git rev-parse 'HEAD^{tree}')" \
+            --workflow-blob "$(git rev-parse 'HEAD:.github/workflows/build-platform-images.yml')" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            "${artifact_args[@]}" \
+            --output "$RUNNER_TEMP/surface-predicate.json"
+
+      - name: Sign exact surface provenance
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && steps.surface.outputs.reuse != 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build-image.outputs.digest }}
+          predicate-type: ${{ env.SURFACE_PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/surface-predicate.json
+          push-to-registry: true
+
+      - name: Materialize one exact v3 service entry
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
+        env:
+          BUILT_DIGEST: ${{ steps.build-image.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.surface.outputs.digest }}
+          REUSED: ${{ steps.surface.outputs.reuse }}
+          LOOKUP_TAG: ${{ steps.surface.outputs.lookup_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$REUSED" = "true" ]; then
+            digest="$REUSED_DIGEST"
+            disposition=reused
+          else
+            digest="$BUILT_DIGEST"
+            disposition=built
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::The v3 surface result has no immutable image digest."
+            exit 1
+          }
+          predicate_hash="$(jq -cS . "$RUNNER_TEMP/surface-predicate.json" | sha256sum | awk '{print $1}')"
+          jq --arg disposition "$disposition" \
+             --arg lookup_tag "$LOOKUP_TAG" \
+             --arg subject "$ECR_REGISTRY/$IMAGE_NAME" \
+             --arg provenance_digest "sha256:$predicate_hash" '
+            {
+              repository,
+              image_digest,
+              immutable_lookup_tag: $lookup_tag,
+              producer_source_revision,
+              producer_source_tree,
+              surface_fingerprint,
+              recipe_fingerprint,
+              producer_workflow_path,
+              producer_workflow_blob,
+              producer_run_id,
+              producer_run_attempt,
+              provenance_subject: $subject,
+              provenance_digest: $provenance_digest,
+              build_disposition: $disposition
+            }
+            + (if .service == "canonical-worker" then {solver_provenance} else {} end)
+            + (if .service == "web" then {artifact_sha256} else {} end)
+          ' "$RUNNER_TEMP/surface-predicate.json" > "$RUNNER_TEMP/service-entry.json"
+
+      - name: Upload exact v3 service entry
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/service-entry.json
+          if-no-files-found: error
+          retention-days: 30
 
   verify:
     # The FULL-BUILD path's fan-in: the matrix succeeded, and the five
@@ -1189,7 +1526,22 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
+      - name: Download exact v3 service entries
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: surface-result-*-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/surface-results
+
+      - name: Download exact v3 web deployment artifact
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: web/dist
+
       - uses: actions/setup-node@v4
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED != 'true'
         with:
           node-version: 22
           cache: npm
@@ -1197,6 +1549,7 @@ jobs:
 
       - name: Build and hash the exact web deployment artifact
         id: web-artifact
+        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED != 'true'
         working-directory: web
         env:
           VITE_API_BASE: ""
@@ -1230,6 +1583,57 @@ jobs:
           ADOPTED_SPEC_RUN_ID: ${{ needs.adopt.outputs.spec_run_id }}
         run: |
           set -euo pipefail
+          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" = "true" ]; then
+            declare -A entries
+            for image in app broker canonical-worker harness web; do
+              mapfile -t matches < <(find "$RUNNER_TEMP/surface-results" -type f \
+                -path "*/surface-result-$image-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}/service-entry.json" \
+                -print)
+              if [ "${#matches[@]}" != "1" ]; then
+                echo "::error::Expected one exact v3 service entry for $image, found ${#matches[@]}."
+                exit 1
+              fi
+              entries["$image"]="${matches[0]}"
+              digest="$(jq -er '.image_digest' "${matches[0]}")"
+              repository="$(jq -er '.repository' "${matches[0]}")"
+              [ "$repository" = "leaf-platform-$image" ] || {
+                echo "::error::V3 service entry for $image names $repository."
+                exit 1
+              }
+              count="$(aws ecr batch-get-image \
+                --repository-name "$repository" \
+                --image-ids "imageDigest=$digest" \
+                --query 'length(images)' \
+                --output text)"
+              [ "$count" = "1" ] || {
+                echo "::error::V3 service entry for $image is absent from ECR."
+                exit 1
+              }
+            done
+            python scripts/platform_release_manifest.py generate-v3 \
+              --release-source-revision "${{ needs.prepare.outputs.source_sha }}" \
+              --release-source-tree "$(git rev-parse 'HEAD^{tree}')" \
+              --build-run-id "$GITHUB_RUN_ID" \
+              --build-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --service-entry "app=${entries[app]}" \
+              --service-entry "broker=${entries[broker]}" \
+              --service-entry "canonical-worker=${entries[canonical-worker]}" \
+              --service-entry "harness=${entries[harness]}" \
+              --service-entry "web=${entries[web]}" \
+              --output "$RUNNER_TEMP/staging-supply-set.json"
+            {
+              echo "## Digest-aware five-service staging supply set verified"
+              echo ""
+              echo "Release source: \`${{ needs.prepare.outputs.source_sha }}\`"
+              for image in app broker canonical-worker harness web; do
+                disposition="$(jq -er '.build_disposition' "${entries[$image]}")"
+                digest="$(jq -er '.image_digest' "${entries[$image]}")"
+                producer="$(jq -er '.producer_source_revision' "${entries[$image]}")"
+                echo "- \`leaf-platform-$image@$digest\`: $disposition from \`$producer\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
             echo "::error::Refusing to verify an unapproved immutable tag: $TAG"
             exit 1
@@ -1709,6 +2113,9 @@ jobs:
             if [ -n "${2:-}" ]; then echo "::notice::adopt: $2"; fi
             exit 0
           }
+          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" = "true" ]; then
+            finish false "digest-aware convergence uses per-surface signed reuse; speculative whole-set adoption is disabled"
+          fi
           tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || finish false "checkout has no tree"
           [[ "$PROVEN_TREE" == "$tree" ]] || finish false "gate verdict binds tree ${PROVEN_TREE:-<none>}, not $tree"
