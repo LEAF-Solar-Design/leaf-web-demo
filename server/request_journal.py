@@ -391,7 +391,7 @@ def claim_next_queued(
             " AS claimed_recoverable_json FROM app_session_requests AS queued"
             " JOIN app_sessions AS session ON session.session_id=queued.session_id"
             " WHERE queued.state='queued' AND session.active_turn_id IS NULL"
-            " AND (%s IS NULL OR queued.session_id=%s) AND NOT EXISTS ("
+            " AND (CAST(%s AS TEXT) IS NULL OR queued.session_id=%s) AND NOT EXISTS ("
             "   SELECT 1 FROM app_session_requests AS active"
             "   WHERE active.session_id=queued.session_id AND active.state='executing'"
             " ) ORDER BY queued.created_at, queued.request_id"

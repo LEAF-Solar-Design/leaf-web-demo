@@ -370,6 +370,20 @@ def test_queue_payload_is_written_only_by_transition_and_cleared_on_claim(journa
     ) is False
 
 
+def test_unscoped_queue_claim_types_the_nullable_postgres_parameter(journal):
+    request_id, *_ = _admit(journal)
+    assert request_journal.queue_request(request_id, _recoverable()) is True
+
+    claimed = request_journal.claim_next_queued(lease_seconds=30)
+
+    assert claimed["request_id"] == request_id
+    claim_sql = next(
+        sql for sql, _params in reversed(journal.sql)
+        if sql.startswith("WITH next_request AS")
+    )
+    assert "CAST(%s AS TEXT) IS NULL OR queued.session_id=%s" in claim_sql
+
+
 def test_replacement_settles_execution_that_expires_after_startup(journal, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(request_journal.time, "time", lambda: clock[0])
