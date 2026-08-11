@@ -1,0 +1,1 @@
+{"session_id":"ba1f7b67-c590-4b99-a00f-f562a3c091ac","turn_id":"1a705017-582c-47f6-bd78-9154f5383df2","usage":{"turns":3,"input_tokens":6,"output_tokens":1196,"cache_creation_tokens":4513,"cache_read_tokens":7073,"cost_tokens":5715,"total_cost_usd":0.0484879,"models":["claude-sonnet-5","claude-haiku-4-5-20251001"]},"ts":"2026-07-20T17:16:43.600Z"}

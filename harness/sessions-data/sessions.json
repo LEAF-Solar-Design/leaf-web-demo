@@ -1,0 +1,22 @@
+[
+  {
+    "session_id": "ba1f7b67-c590-4b99-a00f-f562a3c091ac",
+    "tenant_id": "demo-tenant",
+    "drawing_id": "rooftop_demo",
+    "sdk_session_id": "6f6df759-90b4-4daf-89ae-a8e25a9cc47a",
+    "status": "idle",
+    "summary": null,
+    "created_at": "2026-07-20T17:16:19.930Z",
+    "updated_at": "2026-07-20T17:16:43.613Z"
+  },
+  {
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "tenant_id": "demo-tenant",
+    "drawing_id": "demo",
+    "sdk_session_id": "02e4d4d9-692e-489d-8a3b-b0af8ce8c3c8",
+    "status": "idle",
+    "summary": null,
+    "created_at": "2026-07-20T17:41:45.039Z",
+    "updated_at": "2026-07-20T17:49:48.257Z"
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "action": "run_write_tool",
+  "args": {
+    "params": {
+      "layer": "Panels"
+    },
+    "tool": "delete-marked-panel"
+  },
+  "args_hash": "sha256:592091511a6d24bc75f20a3f3128385e1c51d1c62bcc7c38c227f6085658dffa",
+  "confirmation_id": "4270177a3deb4e95",
+  "created_at": "2026-07-20T17:41:54Z",
+  "decided_at": "2026-07-20T17:44:06Z",
+  "decided_by": "demo-tenant",
+  "denied": false,
+  "expires_at": "2026-07-20T17:46:54Z",
+  "granted": true,
+  "policy": "confirm-once",
+  "reason": "approved",
+  "rung": 3,
+  "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+  "tenant_id": "demo-tenant",
+  "turn_id": "168c651c-6b89-4ea8-9511-436505b8d7a2"
+}

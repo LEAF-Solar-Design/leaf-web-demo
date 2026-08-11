@@ -1,0 +1,65 @@
+[
+  {
+    "turn_id": "168c651c-6b89-4ea8-9511-436505b8d7a2",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 1,
+    "status": "complete",
+    "stop_reason": "awaiting_approval",
+    "started_at": "2026-07-20T17:41:45.093Z",
+    "ended_at": "2026-07-20T17:41:58.085Z"
+  },
+  {
+    "turn_id": "000b9bc9-de4a-44b4-92f5-35d65a258d52",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 10,
+    "status": "complete",
+    "stop_reason": "awaiting_approval",
+    "started_at": "2026-07-20T17:42:18.838Z",
+    "ended_at": "2026-07-20T17:42:36.049Z"
+  },
+  {
+    "turn_id": "ff25f0c2-1f27-412e-b0b5-6e008abddb47",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 30,
+    "status": "complete",
+    "stop_reason": "awaiting_approval",
+    "started_at": "2026-07-20T17:44:02.034Z",
+    "ended_at": "2026-07-20T17:44:21.699Z"
+  },
+  {
+    "turn_id": "8e6ac846-2e7b-40bc-9291-8762a879f923",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 39,
+    "status": "complete",
+    "stop_reason": "awaiting_approval",
+    "started_at": "2026-07-20T17:44:38.018Z",
+    "ended_at": "2026-07-20T17:44:49.717Z"
+  },
+  {
+    "turn_id": "5631fe06-91dc-461a-bc78-21e9893a51a9",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 50,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-20T17:44:50.281Z",
+    "ended_at": "2026-07-20T17:45:05.021Z"
+  },
+  {
+    "turn_id": "a935c4ec-4380-4c44-a605-484220b9337f",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 69,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-20T17:46:14.930Z",
+    "ended_at": "2026-07-20T17:46:30.883Z"
+  },
+  {
+    "turn_id": "ba315e60-e503-4861-accb-670bd592555c",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "seq_start": 83,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-20T17:49:39.178Z",
+    "ended_at": "2026-07-20T17:49:48.256Z"
+  }
+]

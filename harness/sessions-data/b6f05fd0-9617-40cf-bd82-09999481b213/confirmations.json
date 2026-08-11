@@ -1,0 +1,41 @@
+[
+  {
+    "confirmation_id": "4270177a3deb4e95",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "turn_id": "000b9bc9-de4a-44b4-92f5-35d65a258d52",
+    "action": "run_capability",
+    "args_json": "{\"tool\":\"delete-marked-panel\",\"params\":{\"layer\":\"Panels\"},\"confirmation_id\":\"4270177a3deb4e95\"}",
+    "kind": "run_capability",
+    "status": "pending",
+    "created_at": "2026-07-20T17:42:26.779Z",
+    "expires_at": "2026-07-20T17:47:26.779Z",
+    "decided_at": null,
+    "decided_by": null
+  },
+  {
+    "confirmation_id": "89d50ccafb8afbce",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "turn_id": "ff25f0c2-1f27-412e-b0b5-6e008abddb47",
+    "action": "run_capability",
+    "args_json": "{\"tool\":\"delete-marked-panel\",\"params\":{\"layer\":\"Panels\"}}",
+    "kind": "run_capability",
+    "status": "pending",
+    "created_at": "2026-07-20T17:44:17.447Z",
+    "expires_at": "2026-07-20T17:49:17.447Z",
+    "decided_at": null,
+    "decided_by": null
+  },
+  {
+    "confirmation_id": "ccb7a4bfea14adc4",
+    "session_id": "b6f05fd0-9617-40cf-bd82-09999481b213",
+    "turn_id": "8e6ac846-2e7b-40bc-9291-8762a879f923",
+    "action": "run_capability",
+    "args_json": "{\"tool\":\"delete-marked-panel\",\"params\":{\"layer\":\"Panels\"}}",
+    "kind": "run_capability",
+    "status": "approved",
+    "created_at": "2026-07-20T17:44:47.014Z",
+    "expires_at": "2026-07-20T17:49:47.014Z",
+    "decided_at": "2026-07-20T17:44:50.285Z",
+    "decided_by": "demo-tenant"
+  }
+]

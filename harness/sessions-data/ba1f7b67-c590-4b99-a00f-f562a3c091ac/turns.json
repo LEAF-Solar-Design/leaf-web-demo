@@ -1,0 +1,11 @@
+[
+  {
+    "turn_id": "1a705017-582c-47f6-bd78-9154f5383df2",
+    "session_id": "ba1f7b67-c590-4b99-a00f-f562a3c091ac",
+    "seq_start": 1,
+    "status": "complete",
+    "stop_reason": "end_turn",
+    "started_at": "2026-07-20T17:16:19.960Z",
+    "ended_at": "2026-07-20T17:16:43.608Z"
+  }
+]
