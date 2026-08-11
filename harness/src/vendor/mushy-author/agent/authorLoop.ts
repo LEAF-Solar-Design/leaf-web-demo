@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
@@ -56,6 +56,104 @@ export interface StageCustomizationRequest {
 
 export interface StageCustomizationResponse extends Partial<AuthorResponse> {
   receipt: StagedCustomizationReceipt;
+}
+
+export interface StageRemovalRequest extends StageCustomizationRequest {
+  toolName: string;
+  expectedCatalogDigest: string;
+}
+
+function removeExactToolRow(raw: string, toolName: string): string {
+  const toolsValues: number[] = [];
+  let depth = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === '"') {
+      const start = index;
+      let escaped = false;
+      do {
+        index += 1;
+        const current = raw[index];
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === '"') break;
+      } while (index < raw.length);
+      if (index >= raw.length) throw new AuthorLoopError("tenant registry is malformed", 422);
+      if (depth === 1) {
+        let after = index + 1;
+        while (/\s/.test(raw[after] ?? "")) after += 1;
+        if (raw[after] === ":") {
+          let name: unknown;
+          try { name = JSON.parse(raw.slice(start, index + 1)); }
+          catch { throw new AuthorLoopError("tenant registry is malformed", 422); }
+          if (name === "tools") {
+            after += 1;
+            while (/\s/.test(raw[after] ?? "")) after += 1;
+            toolsValues.push(after);
+          }
+        }
+      }
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") depth -= 1;
+    if (depth < 0) throw new AuthorLoopError("tenant registry is malformed", 422);
+  }
+  if (depth !== 0 || toolsValues.length !== 1) {
+    throw new AuthorLoopError("tenant registry is malformed", 422);
+  }
+  let cursor = toolsValues[0];
+  if (raw[cursor] !== "[") throw new AuthorLoopError("tenant registry is malformed", 422);
+  const open = cursor;
+  cursor += 1;
+  const spans: Array<{ start: number; end: number; value: unknown }> = [];
+  while (cursor < raw.length) {
+    while (/\s/.test(raw[cursor] ?? "")) cursor += 1;
+    if (raw[cursor] === "]") break;
+    const start = cursor;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    while (cursor < raw.length) {
+      const char = raw[cursor];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === "{" || char === "[") depth += 1;
+      else if (char === "}" || char === "]") {
+        if (depth === 0) break;
+        depth -= 1;
+      } else if (char === "," && depth === 0) break;
+      cursor += 1;
+    }
+    let end = cursor;
+    while (end > start && /\s/.test(raw[end - 1] ?? "")) end -= 1;
+    let value: unknown;
+    try { value = JSON.parse(raw.slice(start, end)); }
+    catch { throw new AuthorLoopError("tenant registry is malformed", 422); }
+    spans.push({ start, end, value });
+    while (/\s/.test(raw[cursor] ?? "")) cursor += 1;
+    if (raw[cursor] === ",") cursor += 1;
+    else if (raw[cursor] !== "]") throw new AuthorLoopError("tenant registry is malformed", 422);
+  }
+  if (raw[cursor] !== "]" || open >= cursor) {
+    throw new AuthorLoopError("tenant registry is malformed", 422);
+  }
+  const matches = spans
+    .map((span, index) => ({ span, index }))
+    .filter(({ span }) => typeof span.value === "object" && span.value !== null
+      && (span.value as { name?: unknown }).name === toolName);
+  if (matches.length !== 1) {
+    throw new AuthorLoopError("removal target cardinality is not one", 409);
+  }
+  const { index, span } = matches[0];
+  let removeStart = span.start;
+  let removeEnd = span.end;
+  if (spans.length > 1 && index < spans.length - 1) removeEnd = spans[index + 1].start;
+  else if (spans.length > 1) removeStart = spans[index - 1].end;
+  return raw.slice(0, removeStart) + raw.slice(removeEnd);
 }
 
 export class AuthorLoopError extends Error {
@@ -606,6 +704,69 @@ export class AuthorLoop {
           receipt,
           ...(run.telemetry ? { telemetry: run.telemetry } : {}),
         };
+      } finally {
+        await runFenced(() => changes.cleanupWorktree(change));
+      }
+    });
+  }
+
+  /** Stage removal of one exact tenant registry row on a private change ref. */
+  async stageRemoval(
+    tenantId: string,
+    request: StageRemovalRequest,
+  ): Promise<StageCustomizationResponse> {
+    return this.withTenantRepoLease(tenantId, async (runFenced) => {
+      const { bare, coordination } = this.lifecyclePorts();
+      const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
+      const observedMainSha = await runFenced(() => changes.readRef("refs/heads/main"));
+      if (observedMainSha !== request.expectedBaseSha) {
+        throw new AuthorLoopError("removal base no longer matches main", 409);
+      }
+      const change = await runFenced(() =>
+        changes.createOrResume(request.changeSetId, request.expectedBaseSha));
+      try {
+        if (change.stagedSha === null) {
+          const registryPath = join(change.dir, REGISTRY_FILE);
+          const raw = readFileSync(registryPath);
+          const observedDigest = createHash("sha256").update(raw).digest("hex");
+          if (observedDigest !== request.expectedCatalogDigest) {
+            throw new AuthorLoopError("effective catalog digest changed", 409);
+          }
+          const registry = JSON.parse(raw.toString("utf8")) as { tools?: unknown };
+          if (!Array.isArray(registry.tools)) {
+            throw new AuthorLoopError("tenant registry is malformed", 422);
+          }
+          const matches = registry.tools.filter((row) =>
+            typeof row === "object" && row !== null
+            && (row as { name?: unknown }).name === request.toolName);
+          if (matches.length !== 1) {
+            throw new AuthorLoopError("removal target cardinality is not one", 409);
+          }
+          writeFileSync(
+            registryPath, removeExactToolRow(raw.toString("utf8"), request.toolName), "utf8",
+          );
+          await runFenced(() => changes.stageCommit(
+            change, `remove tenant tool: ${request.toolName}`));
+        }
+        const stagedCommit = change.stagedSha;
+        if (!stagedCommit) throw new AuthorLoopError("removal did not stage", 500);
+        const catalogDigest = await runFenced(() => createHash("sha256")
+          .update(readFileSync(join(change.dir, REGISTRY_FILE))).digest("hex"));
+        const receipt = Object.freeze({
+          contract: "leaf.customization.v1" as const,
+          tenant_id: tenantId,
+          change_set_id: request.changeSetId,
+          state: "staged" as const,
+          base_commit: request.expectedBaseSha,
+          staged_commit: stagedCommit,
+          catalog_digest: catalogDigest,
+          platform_release: request.platformRelease,
+          workspace_contract_digest: request.workspaceContractDigest,
+          idempotency_key: request.idempotencyKey,
+        });
+        await coordination.recordStaged(receipt);
+        return { receipt };
       } finally {
         await runFenced(() => changes.cleanupWorktree(change));
       }

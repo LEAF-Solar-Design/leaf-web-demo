@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS customization_publication_requests (
   FOREIGN KEY (confirmation_id) REFERENCES customization_confirmations(confirmation_id)
 );
 
+CREATE TABLE IF NOT EXISTS customization_removal_requests (
+  tenant_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL,
+  target_tool_name TEXT NOT NULL,
+  expected_catalog_digest TEXT NOT NULL,
+  predecessor_change_set_id TEXT NOT NULL,
+  predecessor_catalog_commit TEXT NOT NULL,
+  predecessor_catalog_digest TEXT NOT NULL,
+  predecessor_platform_release TEXT NOT NULL,
+  predecessor_workspace_contract_digest TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (tenant_id, change_set_id),
+  FOREIGN KEY (change_set_id) REFERENCES customization_change_sets(change_set_id)
+);
+
 CREATE TABLE IF NOT EXISTS customization_deployment_snapshots (
   snapshot_id TEXT PRIMARY KEY,
   payload_json TEXT NOT NULL,
@@ -684,6 +699,29 @@ class SQLiteCustomizationStore(CustomizationRepository):
         """Publish a ``publishing`` row and its catalog pointer in one transaction."""
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
+            removal = conn.execute(
+                "SELECT * FROM customization_removal_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            if removal is not None:
+                current = self._effective_catalog(conn, tenant_id)
+                expected = (
+                    removal["predecessor_change_set_id"],
+                    removal["predecessor_catalog_commit"],
+                    removal["predecessor_catalog_digest"],
+                    removal["predecessor_platform_release"],
+                    removal["predecessor_workspace_contract_digest"],
+                )
+                observed = (
+                    current.change_set_id, current.catalog_commit,
+                    current.catalog_digest, current.effective_platform_release,
+                    current.workspace_contract_digest,
+                )
+                if observed != expected:
+                    raise ChangeSetConflictError(
+                        "effective catalog changed before removal activation"
+                    )
             published = self._transition_row(
                 conn, row, ChangeState.PUBLISHED, expected_version, idempotency_key,
                 approver_subject=approver_subject,
@@ -711,6 +749,94 @@ class SQLiteCustomizationStore(CustomizationRepository):
         self.initialize()
         with self._connection() as conn:
             return self._effective_catalog(conn, tenant_id)
+
+    def bind_removal_request(
+        self, *, tenant_id: str, change_set_id: str, target_tool_name: str,
+        expected_catalog_digest: str,
+    ) -> dict[str, str]:
+        """Bind one exact removal to the current pointer before it can stage."""
+        target_tool_name = require_bounded(target_tool_name, "target_tool_name", 64)
+        expected_catalog_digest = require_sha(
+            expected_catalog_digest, 64, "expected_catalog_digest"
+        )
+        with self._transaction() as conn:
+            change = self._find_change_set(conn, tenant_id, change_set_id)
+            current = self._effective_catalog(conn, tenant_id)
+            if not hmac.compare_digest(current.catalog_digest, expected_catalog_digest):
+                raise ChangeSetConflictError("effective catalog digest changed")
+            if change.base_commit != current.catalog_commit:
+                raise ChangeSetConflictError("removal base is not the effective catalog")
+            values = {
+                "tenant_id": tenant_id,
+                "change_set_id": change_set_id,
+                "target_tool_name": target_tool_name,
+                "expected_catalog_digest": expected_catalog_digest,
+                "predecessor_change_set_id": current.change_set_id,
+                "predecessor_catalog_commit": current.catalog_commit,
+                "predecessor_catalog_digest": current.catalog_digest,
+                "predecessor_platform_release": current.effective_platform_release,
+                "predecessor_workspace_contract_digest": current.workspace_contract_digest,
+            }
+            existing = conn.execute(
+                "SELECT * FROM customization_removal_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            if existing is not None:
+                if any(existing[key] != value for key, value in values.items()):
+                    raise IdempotencyReplayError("removal request binding changed")
+                return values
+            conn.execute(
+                "INSERT INTO customization_removal_requests "
+                "(tenant_id, change_set_id, target_tool_name, expected_catalog_digest, "
+                "predecessor_change_set_id, predecessor_catalog_commit, "
+                "predecessor_catalog_digest, predecessor_platform_release, "
+                "predecessor_workspace_contract_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(values.values()),
+            )
+            return values
+
+    def get_removal_request(
+        self, *, tenant_id: str, change_set_id: str
+    ) -> dict[str, str] | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_removal_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def verify_removal_predecessor(
+        self, *, tenant_id: str, change_set_id: str
+    ) -> None:
+        """Fail before external publish when the bound predecessor moved."""
+        with self._transaction() as conn:
+            removal = conn.execute(
+                "SELECT * FROM customization_removal_requests "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            if removal is None:
+                return
+            current = self._effective_catalog(conn, tenant_id)
+            expected = (
+                removal["predecessor_change_set_id"],
+                removal["predecessor_catalog_commit"],
+                removal["predecessor_catalog_digest"],
+                removal["predecessor_platform_release"],
+                removal["predecessor_workspace_contract_digest"],
+            )
+            observed = (
+                current.change_set_id, current.catalog_commit,
+                current.catalog_digest, current.effective_platform_release,
+                current.workspace_contract_digest,
+            )
+            if observed != expected:
+                raise ChangeSetConflictError(
+                    "effective catalog changed before removal activation"
+                )
 
     # The confirmation rows are deliberately owned by this same SQLite file as
     # state and audit. ``consume`` is a durable compare-and-set, not an

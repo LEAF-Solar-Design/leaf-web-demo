@@ -74,6 +74,13 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "audit_id", "snapshot_id", "action", "result", "idempotency_key",
         "created_at",
     ),
+    "customization_removal_requests": (
+        "tenant_id", "change_set_id", "target_tool_name",
+        "expected_catalog_digest", "predecessor_change_set_id",
+        "predecessor_catalog_commit", "predecessor_catalog_digest",
+        "predecessor_platform_release",
+        "predecessor_workspace_contract_digest", "created_at",
+    ),
 }
 _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "customization_change_sets": ("change_set_id",),
@@ -83,6 +90,7 @@ _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "customization_audit_events": ("event_id",),
     "customization_deployment_snapshots": ("snapshot_id",),
     "customization_deployment_audit": ("audit_id",),
+    "customization_removal_requests": ("tenant_id", "change_set_id"),
 }
 _WRITE_FENCE = 0x4C45414643555354
 
