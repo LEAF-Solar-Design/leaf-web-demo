@@ -569,7 +569,7 @@ class CustomizationService:
                 idempotency_key=f"stage:{idempotency_key}", expected_state=ChangeState.CREATED,
             )
         if change.state is ChangeState.STAGED:
-            self._verify_stage_policy(change)
+            self._verify_bound_stage_policy(change)
             return self._receipt(change)
         if change.state is not ChangeState.STAGING:
             raise CustomizationServiceError("stage_not_available")
@@ -685,6 +685,130 @@ class CustomizationService:
             )
         return self.stage_status_change(change)
 
+    def stage_removal(
+        self, *, tenant: Any, tool_name: str,
+        expected_catalog_digest: str, idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Stage deletion of one exact tenant row without widening catalog edits."""
+        tenant_id = _tenant_id(tenant)
+        if not enabled(6, tenant_id):
+            raise CustomizationServiceError("customization_publish_disabled", 404)
+        if (
+            not isinstance(tool_name, str)
+            or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", tool_name)
+            or len(tool_name) > 64
+            or not isinstance(expected_catalog_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_catalog_digest)
+        ):
+            raise CustomizationServiceError("invalid_removal_request", 422)
+        binding = _binding(tenant)
+        if binding.role not in {"owner", "editor"}:
+            raise CustomizationServiceError("tenant_role_denied", 403)
+        current = self.store.get_effective_catalog(tenant_id=tenant_id)
+        if not hmac.compare_digest(current.catalog_digest, expected_catalog_digest):
+            raise CustomizationServiceError("effective_catalog_digest_mismatch", 409)
+        try:
+            change = self.store.get_change_set_by_idempotency(
+                tenant_id=tenant_id, idempotency_key=idempotency_key
+            )
+        except ChangeSetNotFoundError:
+            change = self.store.create_change_set(
+                tenant_id=tenant_id, idempotency_key=idempotency_key,
+                base_commit=current.catalog_commit,
+                desired_platform_release=current.effective_platform_release,
+                workspace_contract_digest=current.workspace_contract_digest,
+                author_subject=binding.subject or "", change_set_id=str(uuid4()),
+                change_kind="revise", target_tool_name=tool_name,
+            )
+        self.store.bind_removal_request(
+            tenant_id=tenant_id, change_set_id=change.change_set_id,
+            target_tool_name=tool_name,
+            expected_catalog_digest=expected_catalog_digest,
+        )
+        if change.state is ChangeState.CREATED:
+            change = self.store.transition(
+                tenant_id=tenant_id, change_set_id=change.change_set_id,
+                next_state=ChangeState.STAGING, expected_version=change.version,
+                idempotency_key=f"remove:{idempotency_key}",
+                expected_state=ChangeState.CREATED,
+            )
+        if change.state is ChangeState.STAGED:
+            self._verify_bound_stage_policy(change)
+            removal = self.store.get_removal_request(
+                tenant_id=tenant_id, change_set_id=change.change_set_id
+            )
+            return self._receipt(
+                change,
+                predecessor_change_set_id=removal["predecessor_change_set_id"],
+                predecessor_catalog_commit=removal["predecessor_catalog_commit"],
+                predecessor_catalog_digest=removal["predecessor_catalog_digest"],
+            )
+        if change.state is not ChangeState.STAGING:
+            raise CustomizationServiceError("stage_not_available")
+        body = self._harness_remove(change, expected_catalog_digest)
+        receipt = self._validate_receipt(body.get("receipt", {}), change)
+        proposed = replace(
+            change, staged_commit=receipt["staged_commit"],
+            catalog_digest=receipt["catalog_digest"],
+        )
+        self._verify_bound_stage_policy(proposed, body)
+        durable = self.store.get_change_set(
+            tenant_id=tenant_id, change_set_id=change.change_set_id
+        )
+        if durable.state is ChangeState.STAGING:
+            durable = self.store.record_staged(
+                tenant_id=tenant_id, change_set_id=durable.change_set_id,
+                expected_version=durable.version,
+                idempotency_key=f"removed:{idempotency_key}",
+                staged_commit=receipt["staged_commit"],
+                catalog_digest=receipt["catalog_digest"],
+                platform_release=receipt["platform_release"],
+                workspace_contract_digest=receipt["workspace_contract_digest"],
+            )
+        self._verify_bound_stage_policy(durable)
+        removal = self.store.get_removal_request(
+            tenant_id=tenant_id, change_set_id=durable.change_set_id
+        )
+        return self._receipt(
+            durable,
+            predecessor_change_set_id=removal["predecessor_change_set_id"],
+            predecessor_catalog_commit=removal["predecessor_catalog_commit"],
+            predecessor_catalog_digest=removal["predecessor_catalog_digest"],
+        )
+
+    def _harness_remove(
+        self, change: ChangeSet, expected_catalog_digest: str
+    ) -> Mapping[str, Any]:
+        url, secret = _harness_config()
+        if not url:
+            raise CustomizationServiceError("customization_harness_unavailable", 503)
+        try:
+            import requests
+            response = requests.post(
+                f"{url}/author/remove", timeout=_harness_stage_timeout_s(),
+                headers={"X-Harness-Secret": secret},
+                json={
+                    "tenant_id": change.tenant_id,
+                    "toolName": change.target_tool_name,
+                    "expectedCatalogDigest": expected_catalog_digest,
+                    "changeSetId": change.change_set_id,
+                    "expectedBaseSha": change.base_commit,
+                    "platformRelease": change.desired_platform_release,
+                    "workspaceContractDigest": change.workspace_contract_digest,
+                    "idempotencyKey": change.idempotency_key,
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        except Exception as exc:
+            raise CustomizationServiceError(
+                "customization_harness_unavailable", 503,
+                f"harness_remove_failed: status={getattr(getattr(exc, 'response', None), 'status_code', None)}",
+            ) from exc
+        if not isinstance(body, Mapping):
+            raise CustomizationServiceError("invalid_staged_receipt", 502)
+        return body
+
     def execute_stage(self, change: ChangeSet) -> dict[str, Any]:
         if change.state is not ChangeState.STAGING or not change.request_description:
             raise CustomizationServiceError("stage_not_available")
@@ -742,13 +866,13 @@ class CustomizationService:
             # durable receipt. Revalidate any proposed tool against the
             # committed catalog before returning it to the browser.
             if body.get("tool") is None:
-                self._verify_stage_policy(durable)
+                self._verify_bound_stage_policy(durable)
                 return self._receipt(durable)
-            self._verify_stage_policy(durable, body)
+            self._verify_bound_stage_policy(durable, body)
             return self._receipt(
                 durable, tool=body.get("tool"), preview=body.get("preview")
             )
-        self._verify_stage_policy(proposed, body)
+        self._verify_bound_stage_policy(proposed, body)
         change = durable
         if change.state is ChangeState.STAGING:
             change = self.store.record_staged(
@@ -761,7 +885,7 @@ class CustomizationService:
             )
         elif change.state is not ChangeState.STAGED:
             raise CustomizationServiceError("stage_not_available")
-        self._verify_stage_policy(change, body)
+        self._verify_bound_stage_policy(change, body)
         return self._receipt(change, tool=body.get("tool"), preview=body.get("preview"))
 
     def stage_status(self, *, tenant: Any, change_set_id: str) -> dict[str, Any]:
@@ -1011,9 +1135,23 @@ class CustomizationService:
             except ValueError: raise CustomizationServiceError("invalid_staged_receipt", 502)
         return dict(body)
 
+    def _verify_bound_stage_policy(
+        self, change: ChangeSet, body: Mapping[str, Any] | None = None
+    ) -> None:
+        removal = self.store.get_removal_request(
+            tenant_id=change.tenant_id, change_set_id=change.change_set_id
+        )
+        if removal is None:
+            self._verify_stage_policy(change, body)
+        else:
+            self._verify_stage_policy(
+                change, body, removal_target=removal["target_tool_name"]
+            )
+
     @staticmethod
     def _verify_stage_policy(
-        change: ChangeSet, body: Mapping[str, Any] | None = None
+        change: ChangeSet, body: Mapping[str, Any] | None = None,
+        *, removal_target: str | None = None,
     ) -> None:
         """Validate every changed path and the trusted derived registry update."""
         bare = _bare_repo(change.tenant_id)
@@ -1076,6 +1214,22 @@ class CustomizationService:
             name for name, item in base_by_name.items()
             if name in staged_by_name and staged_by_name[name] != item
         ]
+        if removal_target is not None:
+            if change.target_tool_name != removal_target:
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            if set(changed) != {"registry.json"}:
+                raise CustomizationServiceError("invalid_staged_paths", 422)
+            if (
+                added or modified or removed != [removal_target]
+                or [item for item in base_tools if item.get("name") != removal_target]
+                != tools
+            ):
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            if sum(item.get("name") == removal_target for item in base_tools) != 1:
+                raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+            if body is not None and set(body) - {"receipt"}:
+                raise CustomizationServiceError("invalid_staged_tool", 422)
+            return
         if change.change_kind == "create":
             if modified:
                 raise CustomizationServiceError("existing_catalog_entry_changed", 403)
@@ -1449,6 +1603,9 @@ class CustomizationService:
             approver_subject=confirmation.approver_subject,
             idempotency_key=idempotency_key,
         )
+        self.store.verify_removal_predecessor(
+            tenant_id=tenant_id, change_set_id=change.change_set_id
+        )
         published_commit = self._harness_publish(change)
         if published_commit != request.staged_commit:
             raise CustomizationServiceError("published_commit_mismatch", 502)
@@ -1506,7 +1663,7 @@ class CustomizationService:
             staged_commit=validated["staged_commit"],
             catalog_digest=validated["catalog_digest"],
         )
-        self._verify_stage_policy(proposed)
+        self._verify_bound_stage_policy(proposed)
         if change.state is ChangeState.STAGING:
             change = self.store.record_staged(
                 tenant_id=tenant_id,

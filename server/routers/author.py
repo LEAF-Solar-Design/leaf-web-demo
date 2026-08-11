@@ -102,6 +102,15 @@ class RollbackRequest(BaseModel):
         extra = "forbid"
 
 
+class RemovalRequest(BaseModel):
+    tool_name: str = Field(..., min_length=1, max_length=64)
+    expected_catalog_digest: str = Field(..., min_length=64, max_length=64)
+    idempotency_key: str = Field(..., min_length=1, max_length=200)
+
+    class Config:
+        extra = "forbid"
+
+
 class InternalConfirmRequest(BaseModel):
     change_set_id: str
 
@@ -872,6 +881,31 @@ def confirmation_lookup(
     except Exception as exc:
         return _customization_error(
             CustomizationServiceError("customization_publish_failed", 503), cause=exc
+        )
+
+
+@router.post("/api/author/removals")
+def remove_tool(
+    req: RemovalRequest, tenant=Depends(deps.require_tenant)
+) -> Dict[str, Any]:
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
+    try:
+        return CustomizationService.configured().stage_removal(
+            tenant=tenant, tool_name=req.tool_name,
+            expected_catalog_digest=req.expected_catalog_digest,
+            idempotency_key=req.idempotency_key,
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
         )
 
 

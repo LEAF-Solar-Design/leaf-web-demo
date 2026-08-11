@@ -149,6 +149,111 @@ def test_publish_flips_pointer_and_appends_audit_in_one_transaction(store):
     assert "prompt" not in payload
 
 
+def test_removal_binding_refuses_stale_digest_and_pointer_drift(store):
+    predecessor = advance_to_publishing(store, create(store))
+    before = store.publish(
+        tenant_id="tenant-a", change_set_id=predecessor.change_set_id,
+        expected_version=predecessor.version, idempotency_key="publish-before",
+    )
+    removal = store.create_change_set(
+        tenant_id="tenant-a", idempotency_key="remove-one",
+        base_commit=before.catalog_commit,
+        desired_platform_release=before.effective_platform_release,
+        workspace_contract_digest=before.workspace_contract_digest,
+        author_subject="auth0|author", change_kind="revise",
+        target_tool_name="count-by-layer",
+    )
+    with pytest.raises(ChangeSetConflictError, match="digest changed"):
+        store.bind_removal_request(
+            tenant_id="tenant-a", change_set_id=removal.change_set_id,
+            target_tool_name="count-by-layer", expected_catalog_digest="0" * 64,
+        )
+    store.bind_removal_request(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        target_tool_name="count-by-layer",
+        expected_catalog_digest=before.catalog_digest,
+    )
+    successor = advance_to_publishing(
+        store, create(store, key="intervening"), "intervening-"
+    )
+    store.publish(
+        tenant_id="tenant-a", change_set_id=successor.change_set_id,
+        expected_version=successor.version, idempotency_key="publish-intervening",
+    )
+    with pytest.raises(ChangeSetConflictError, match="changed before removal"):
+        store.verify_removal_predecessor(
+            tenant_id="tenant-a", change_set_id=removal.change_set_id
+        )
+    assert store.get_effective_catalog(tenant_id="tenant-a").change_set_id == successor.change_set_id
+
+
+def test_removal_publish_can_restore_exact_predecessor(store):
+    predecessor = advance_to_publishing(store, create(store))
+    before = store.publish(
+        tenant_id="tenant-a", change_set_id=predecessor.change_set_id,
+        expected_version=predecessor.version, idempotency_key="publish-before",
+    )
+    removal = store.create_change_set(
+        tenant_id="tenant-a", idempotency_key="remove-one",
+        base_commit=before.catalog_commit,
+        desired_platform_release=before.effective_platform_release,
+        workspace_contract_digest=before.workspace_contract_digest,
+        author_subject="auth0|author", change_kind="revise",
+        target_tool_name="count-by-layer",
+    )
+    store.bind_removal_request(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        target_tool_name="count-by-layer",
+        expected_catalog_digest=before.catalog_digest,
+    )
+    staging = store.transition(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=removal.version,
+        idempotency_key="remove-staging",
+    )
+    staged = store.record_staged(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        expected_version=staging.version, idempotency_key="remove-staged",
+        staged_commit="e" * 40, catalog_digest="f" * 64,
+        platform_release=before.effective_platform_release,
+        workspace_contract_digest=before.workspace_contract_digest,
+    )
+    awaiting = store.transition(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        next_state=ChangeState.AWAITING_APPROVAL, expected_version=staged.version,
+        idempotency_key="remove-awaiting",
+    )
+    approved = store.transition(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        next_state=ChangeState.APPROVED, expected_version=awaiting.version,
+        idempotency_key="remove-approved", approver_subject="auth0|approver",
+    )
+    publishing = store.transition(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        next_state=ChangeState.PUBLISHING, expected_version=approved.version,
+        idempotency_key="remove-publishing",
+    )
+    after = store.publish(
+        tenant_id="tenant-a", change_set_id=removal.change_set_id,
+        expected_version=publishing.version, idempotency_key="remove-published",
+    )
+    assert after.change_set_id == removal.change_set_id
+    restored = store.restore_effective_catalog(
+        tenant_id="tenant-a", target_change_set_id=predecessor.change_set_id,
+        prior_change_set_id=removal.change_set_id,
+        idempotency_key="restore-predecessor",
+    )
+    assert (
+        restored.change_set_id, restored.catalog_commit,
+        restored.catalog_digest, restored.effective_platform_release,
+        restored.workspace_contract_digest,
+    ) == (
+        before.change_set_id, before.catalog_commit,
+        before.catalog_digest, before.effective_platform_release,
+        before.workspace_contract_digest,
+    )
+
+
 def test_tenant_isolation_and_effective_pointer(store):
     a = advance_to_publishing(store, create(store, "tenant-a", "a-create"), "a-")
     b = advance_to_publishing(store, create(store, "tenant-b", "b-create"), "b-")
