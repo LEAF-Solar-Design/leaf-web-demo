@@ -1387,6 +1387,23 @@ class LiveReadResolutionError(ValueError):
         self.reason_code = reason_code
 
 
+def _classified_bad_params(
+    reason_code: str,
+    message: str,
+    *,
+    tool: Optional[str] = None,
+) -> tuple[Dict[str, Any], int]:
+    """Build one non-retryable BAD_PARAMS envelope with a stable public reason."""
+    env = err_envelope(
+        ErrorCode.BAD_PARAMS,
+        message,
+        retryable=False,
+        tool=tool,
+    )
+    env["error"]["reason_code"] = reason_code
+    return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
+
+
 def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
     """Resolve one live read to a curated or tenant-store DWG.
 
@@ -2335,14 +2352,12 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
     try:
         if postgres_mode and not req.ledger_event_key:
             entry["status"] = ErrorCode.BAD_PARAMS
-            env = err_envelope(
-                ErrorCode.BAD_PARAMS,
+            env, status = _classified_bad_params(
+                "broker_event_key_required",
                 "ledger_event_key is required when LEAF_BROKER_STORE=postgres",
-                retryable=False,
                 tool=tool.get("name"),
             )
-            return JSONResponse(
-                status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS], content=env)
+            return JSONResponse(status_code=status, content=env)
         if postgres_mode:
             usage = _get_usage()
             tier = _tenant_tier(req.tenant_id)
@@ -2369,16 +2384,12 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
                 )
             if decision in {"collision", "mismatch"}:
                 admission = None
-                env = err_envelope(
-                    ErrorCode.BAD_PARAMS,
+                env, status = _classified_bad_params(
+                    "broker_event_key_invalid",
                     "broker run event key is not valid for this request",
-                    retryable=False,
                     tool=tool.get("name"),
                 )
-                return JSONResponse(
-                    status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
-                    content=env,
-                )
+                return JSONResponse(status_code=status, content=env)
             if decision in {"leased", "executing"}:
                 admission = None
                 retryable = decision == "leased"
@@ -2641,9 +2652,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # runs — for BOTH the live and the mock paths.
     perrs = validate_params(tool, params)
     if perrs:
-        return (err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
-                             retryable=False, tool=tool.get("name")),
-                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+        return _classified_bad_params(
+            "tool_params_invalid",
+            "params schema: " + "; ".join(perrs),
+            tool=tool.get("name"),
+        )
 
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
@@ -2712,9 +2725,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             env["error"]["reason_code"] = exc.reason_code
             return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
         except ValueError as exc:
-            return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                 tool=tool.get("name")),
-                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+            return _classified_bad_params(
+                "uploaded_resolution_invalid",
+                str(exc),
+                tool=tool.get("name"),
+            )
         try:
             da = _get_da()
         except Exception:
@@ -2733,14 +2748,14 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             # mismatch this guard originally caught was fixed in PR #15).
             if live_dwg_is_temporary:
                 live_dwg.unlink(missing_ok=True)
-            return (err_envelope(
-                ErrorCode.BAD_PARAMS,
+            return _classified_bad_params(
+                "live_activity_unavailable",
                 f"tool {tool.get('name')!r} has no usable live (APS) implementation "
-                f"(its resolved Activity script is empty/unreadable) — live "
+                f"(its resolved Activity script is empty/unreadable); live "
                 f"(APS_LIVE=1) runs of this tool are not supported; run with "
                 f"aps_live=false",
-                retryable=False, tool=tool.get("name")),
-                DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+                tool=tool.get("name"),
+            )
         else:
             try:
                 # Validated before any live branch: app input is a drawing name,
@@ -2832,9 +2847,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                                  retryable=True, tool=tool.get("name")),
                     503)
         except (KeyError, ValueError) as exc:
-            return (err_envelope(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
-                                 retryable=False, tool=tool.get("name")),
-                    DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+            return _classified_bad_params(
+                "uploaded_resolution_invalid",
+                f"drawing/version unavailable: {exc}",
+                tool=tool.get("name"),
+            )
     else:
         # Default drawing, no pin: the UNCHANGED cached-intake path,
         # byte-identical to the pre-§19 demo.
