@@ -1379,6 +1379,14 @@ def _resolve_upload_dwg(name: str, tenant_id: str) -> Path:
     raise ValueError(f"unknown uploaded drawing: {name}")
 
 
+class LiveReadResolutionError(ValueError):
+    """A tenant-safe, machine-classified uploaded-DWG resolution failure."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
     """Resolve one live read to a curated or tenant-store DWG.
 
@@ -1396,35 +1404,67 @@ def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
     backend = write_loop.upload_backend_for_tenant(req.tenant_id)
     marker = guest_uploads.read_marker(backend, req.tenant_id, req.dwg)
     if not isinstance(marker, dict):
-        raise ValueError(
+        raise LiveReadResolutionError(
+            "uploaded_marker_unreadable",
             f"dwg_version selects uploaded drawing {req.dwg!r}, which has no "
             f"readable upload marker")
     if marker.get("status") != "ready":
-        raise ValueError(
+        raise LiveReadResolutionError(
+            "uploaded_marker_not_ready",
             f"uploaded drawing {req.dwg!r} is not ready for a live run")
     source_ext = str(marker.get("source_ext") or "").lower()
     if not source_ext:
         source_ext = Path(str(marker.get("filename") or "")).suffix.lower()
     if source_ext != ".dwg":
-        raise ValueError(
+        raise LiveReadResolutionError(
+            "uploaded_source_not_dwg",
             f"live runs need a DWG source; drawing {req.dwg!r} was "
             f"uploaded as {source_ext or 'an unknown format'}")
 
+    unavailable_message = (
+        f"dwg_version not in tenant store: "
+        f"{req.tenant_id}/{req.dwg}@{req.dwg_version}"
+    )
     try:
         store.load_manifest(backend, req.tenant_id, req.dwg)
+    except (KeyError, ValueError) as exc:
+        raise LiveReadResolutionError(
+            "uploaded_manifest_unavailable",
+            unavailable_message if isinstance(exc, KeyError) else str(exc),
+        ) from exc
+    try:
         version, version_key = store.resolve_version(
             backend, req.tenant_id, req.dwg, req.dwg_version)
+    except (KeyError, ValueError) as exc:
+        raise LiveReadResolutionError(
+            "uploaded_version_unavailable",
+            unavailable_message if isinstance(exc, KeyError) else str(exc),
+        ) from exc
+    try:
         write_loop.read_intake(backend, req.tenant_id, req.dwg, version)
+    except (KeyError, ValueError) as exc:
+        raise LiveReadResolutionError(
+            "uploaded_intake_unavailable",
+            unavailable_message if isinstance(exc, KeyError) else str(exc),
+        ) from exc
+    try:
         stored_source = backend.get(version_key)
-        source, bridged = write_loop._live_execution_source_bytes(stored_source)
     except KeyError as exc:
-        raise ValueError(
-            f"dwg_version not in tenant store: "
-            f"{req.tenant_id}/{req.dwg}@{req.dwg_version}") from exc
+        raise LiveReadResolutionError(
+            "uploaded_source_unavailable", unavailable_message) from exc
+    try:
+        source, bridged = write_loop._live_execution_source_bytes(stored_source)
+    except ValueError as exc:
+        raise LiveReadResolutionError(
+            "uploaded_source_not_immutable", str(exc)) from exc
     if bridged:
-        raise ValueError("uploaded drawing source is not an immutable DWG")
+        raise LiveReadResolutionError(
+            "uploaded_source_not_immutable",
+            "uploaded drawing source is not an immutable DWG",
+        )
     if not source:
-        raise ValueError("tenant drawing DWG source is empty")
+        raise LiveReadResolutionError(
+            "uploaded_source_empty", "tenant drawing DWG source is empty")
 
     fd, tmp_name = tempfile.mkstemp(suffix=".dwg")
     try:
@@ -2662,6 +2702,15 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             return (err_envelope(ErrorCode.INTERNAL, str(exc), retryable=True,
                                  tool=tool.get("name")),
                     503)
+        except LiveReadResolutionError as exc:
+            env = err_envelope(
+                ErrorCode.BAD_PARAMS,
+                str(exc),
+                retryable=False,
+                tool=tool.get("name"),
+            )
+            env["error"]["reason_code"] = exc.reason_code
+            return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
         except ValueError as exc:
             return (err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
                                  tool=tool.get("name")),
