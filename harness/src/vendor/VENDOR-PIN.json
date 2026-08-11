@@ -22,7 +22,7 @@
     "ports/fakes/fakeUpstreamSink.ts": "c65dadd5142705fa11a10b30b6992d648f983d9481539b63af0c68d1d5e14d06",
     "ports/impl/agentSdkRunner.ts": "82b756adcb63332c0a78ffdf404564ce6910531e7b3bb1d37158d4e5ee8b11f5",
     "ports/impl/agentSdkTurnRunner.ts": "2f8bcaec9c5f99d4e7ad7357ef1a100560a618f6f32b08dd4bc5dd22a5c386b0",
-    "ports/impl/converseSdkRunner.ts": "8a127baa09bffa9a8906c18da9bf23bffd8979306baf544dc4a3c75bf8a396e0",
+    "ports/impl/converseSdkRunner.ts": "8e6fc7517365dcbeb0fdaef61b5fe49eafe62fe771cac56e44d0a9f204ca6cd1",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
@@ -55,5 +55,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "eaf0c5865478afadb79552613fe29243cf7a48f3"
+  "upstream_commit": "63dce011a7365f90d7be3770fcab540b4443fba9"
 }
