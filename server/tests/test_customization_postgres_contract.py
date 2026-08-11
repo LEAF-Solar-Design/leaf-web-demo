@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 ASYNC_MIGRATION = (
     ROOT / "platform" / "migrations" / "0026_customization_async_stage.sql"
 ).read_text(encoding="utf-8")
+REMOVAL_MIGRATION = (
+    ROOT / "platform" / "migrations" / "0037_customization_removal_requests.sql"
+).read_text(encoding="utf-8")
 MIGRATION = (
     ROOT / "platform" / "migrations" / "0020_customization_authority.sql"
 ).read_text(encoding="utf-8")
@@ -70,9 +73,24 @@ def test_async_stage_migration_owns_durable_request_and_fenced_lease() -> None:
     assert "customization_stage_claim_idx" in ASYNC_MIGRATION
 
 
+def test_removal_migration_owns_exact_predecessor_binding() -> None:
+    assert "CREATE TABLE IF NOT EXISTS customization_removal_requests" in REMOVAL_MIGRATION
+    for column in (
+        "target_tool_name", "expected_catalog_digest",
+        "predecessor_change_set_id", "predecessor_catalog_commit",
+        "predecessor_catalog_digest", "predecessor_platform_release",
+        "predecessor_workspace_contract_digest",
+    ):
+        assert column in REMOVAL_MIGRATION
+    assert "PRIMARY KEY (tenant_id, change_set_id)" in REMOVAL_MIGRATION
+
+
 def test_migration_owns_every_reconciliation_table() -> None:
     for table in RECONCILE.TABLE_COLUMNS:
-        assert f"CREATE TABLE IF NOT EXISTS {table}" in MIGRATION
+        assert (
+            f"CREATE TABLE IF NOT EXISTS {table}" in MIGRATION
+            or f"CREATE TABLE IF NOT EXISTS {table}" in REMOVAL_MIGRATION
+        )
     assert "customization_recovery_idx" in MIGRATION
     assert "customization_confirmation_lookup_idx" in MIGRATION
 

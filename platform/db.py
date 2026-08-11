@@ -349,6 +349,13 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "audit_id", "snapshot_id", "action", "result", "idempotency_key",
             "created_at",
         },
+        "customization_removal_requests": {
+            "tenant_id", "change_set_id", "target_tool_name",
+            "expected_catalog_digest", "predecessor_change_set_id",
+            "predecessor_catalog_commit", "predecessor_catalog_digest",
+            "predecessor_platform_release",
+            "predecessor_workspace_contract_digest", "created_at",
+        },
     },
 }
 
@@ -694,6 +701,16 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES customization_deployment_snapshots(snapshot_id)"),
         "customization_deployment_audit_idempotency_key_key": _catalog_contract(
             "customization_deployment_audit", "UNIQUE (idempotency_key)"),
+        "customization_removal_requests_pkey": _catalog_contract(
+            "customization_removal_requests",
+            "PRIMARY KEY (tenant_id, change_set_id)"),
+        "customization_removal_requests_change_set_id_fkey": _catalog_contract(
+            "customization_removal_requests", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_removal_requests_predecessor_change_set_id_fkey": _catalog_contract(
+            "customization_removal_requests",
+            "FOREIGN KEY (predecessor_change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
     },
 }
 
