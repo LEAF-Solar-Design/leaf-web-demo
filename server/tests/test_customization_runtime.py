@@ -938,6 +938,36 @@ def test_live_author_preserves_requested_mode(monkeypatch):
     }]
 
 
+def test_tenant_row_removal_uses_authenticated_tenant_gate_and_exact_intent(monkeypatch):
+    calls = []
+    tenant = SimpleNamespace(tenant_id="tenant-a", subject="auth0|owner")
+    monkeypatch.setattr(author_router, "_customization_gate", lambda wave, seen: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: SimpleNamespace(
+            stage_removal=lambda **kwargs: calls.append(kwargs) or {
+                "contract": "leaf.customization.v1", "state": "staged"
+            }
+        )),
+    )
+    request = author_router.RemovalRequest(
+        tool_name="count-by-layer",
+        expected_catalog_digest="a" * 64,
+        idempotency_key="remove-count-by-layer",
+    )
+
+    result = author_router.remove_tool(request, tenant=tenant)
+
+    assert result["state"] == "staged"
+    assert calls == [{
+        "tenant": tenant,
+        "tool_name": "count-by-layer",
+        "expected_catalog_digest": "a" * 64,
+        "idempotency_key": "remove-count-by-layer",
+    }]
+
+
 def test_live_author_reports_unsupported_one_off_mode(tmp_path, monkeypatch):
     service = CustomizationService(
         SQLiteCustomizationStore(tmp_path / "customization.db")

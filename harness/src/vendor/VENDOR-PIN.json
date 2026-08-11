@@ -1,7 +1,7 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "files": {
-    "agent/authorLoop.ts": "e584214820e999cc5bda2d73f839d628e27090755a087322e83aeef101a355c9",
+    "agent/authorLoop.ts": "0a533db44497ce7546af8ab6307790d243d798da513b757680952c26c1d75c6a",
     "agent/systemPrompt.ts": "48a671cc826db22ae1a4d539cd2c2fc11b70f584218caf113e5564d919bbc732",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
     "agent/tools/fsTenantRepo.ts": "d706e4596dbbe2c5b3753231d95a292b88c83fdbc5ac86b99a95c8cbf968adb3",
@@ -55,5 +55,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "63dce011a7365f90d7be3770fcab540b4443fba9"
+  "upstream_commit": "d1b9cf6019c1c4b39d82b4b29c6c7e80cdc7ddc0"
 }
