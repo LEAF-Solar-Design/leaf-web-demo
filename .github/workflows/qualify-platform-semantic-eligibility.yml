@@ -1,0 +1,64 @@
+name: Qualify platform semantic eligibility contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadow_enabled:
+        description: Run the dormant contract preflight only
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leaf-platform-semantic-eligibility-contract-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  contract-preflight:
+    name: Dormant semantic contract preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prove S1 is not configured for receipt publication
+        shell: bash
+        env:
+          SHADOW_ENABLED: ${{ inputs.shadow_enabled }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/platform_semantic_qualification.py workflow-preflight \
+            --shadow-enabled "$SHADOW_ENABLED" > preflight.json
+          status=$?
+          set -e
+          test "$status" -eq 78
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path("preflight.json").read_text(encoding="utf-8"))
+          assert value == {
+              "deployment_effect": False,
+              "producer_signing_configured": False,
+              "receipt_published": False,
+              "schema": "leaf.platform-semantic-qualification-preflight.v1",
+              "shadow_enabled": value["shadow_enabled"],
+              "state": "UNCONFIGURED",
+              "terminal_p6_verifier_configured": False,
+          }
+          PY
+
+      - name: Report dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "S1 is fixture-only and UNCONFIGURED."
+          echo "No eligibility receipt was published."
+          echo "No deployment selector or live resource was touched."
