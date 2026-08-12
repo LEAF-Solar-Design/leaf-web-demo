@@ -150,11 +150,14 @@ def _proposal_script(cid: str, capability: Optional[str], dwg: Optional[str]):
 def _run_proposing_turn(stub, tenant: str, sid: str, dwg: str, cid: str,
                         capability: Optional[str] = "drawing.read",
                         with_dwg: bool = True,
-                        resume_script: Optional[List[Dict[str, Any]]] = None):
+                        resume_script: Optional[List[Dict[str, Any]]] = None,
+                        subject: Optional[str] = None):
     stub.SCRIPTS.append(_proposal_script(cid, capability, dwg if with_dwg else None))
     if resume_script is not None:
         stub.SCRIPTS.append(resume_script)
-    turn_runner.start_turn(tenant, sid, text="count my panels")
+    turn_runner.start_turn(
+        tenant, sid, text="count my panels", subject=subject,
+    )
     assert _wait_until(
         lambda: session_store.get_session(sid)["active_turn_id"] is None
         and not turn_runner._cancellers)
@@ -240,6 +243,135 @@ def test_auto_approve_reads_confirms_a_drawing_read_proposal(monkeypatch, turn_s
     assert resolved[0]["seq"] < started[1]["seq"]
     assert [event["data"].get("job_id") for event in events
             if event["type"] == "job_linked"] == ["job-auto"]
+
+
+def test_live_policy_resume_keeps_authenticated_subject(monkeypatch, turn_stub):
+    """The private gate and resumed turn retain the proposal principal.
+
+    The public transcript still attributes the decision to the policy. One
+    resumed harness turn yields exactly one durable job handoff.
+    """
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    gate = {"record": {"confirmation_id": "cid-subject", "decided_by": None}}
+    actors: List[str] = []
+    turn_subjects: List[Optional[str]] = []
+
+    real_try_begin = turn_runner.session_store.try_begin_turn
+
+    def _try_begin(session_id, turn_id, stale_after_s, tier=None, subject=None):
+        turn_subjects.append(subject)
+        return real_try_begin(
+            session_id, turn_id, stale_after_s, tier=tier, subject=subject,
+        )
+
+    monkeypatch.setattr(
+        turn_runner.session_store, "try_begin_turn", _try_begin,
+    )
+
+    monkeypatch.setattr(
+        turn_runner.agent_gate, "read_pending_strict",
+        lambda cid: (dict(gate["record"]), "ok"),
+    )
+
+    def _grant(cid, *, by="tenant"):
+        actors.append(by)
+        gate["record"] = {"confirmation_id": cid, "decided_by": by}
+        return True, dict(gate["record"]), "granted"
+
+    monkeypatch.setattr(turn_runner.agent_gate, "grant_approval", _grant)
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    _run_proposing_turn(
+        stub, "tenant-p", sid, sess["drawing_id"], "cid-subject",
+        subject="auth0|alice",
+        resume_script=[
+            {"type": "job_linked", "data": {
+                "job_id": "job-subject", "tool": "count-by-layer"}},
+            {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+        ],
+    )
+
+    assert _wait_until(lambda: len(stub.BODIES) == 2)
+    assert actors == ["auth0|alice"]
+    assert turn_subjects == ["auth0|alice", "auth0|alice"]
+    events = session_store.recent_events(sid, 100)
+    assert [event["data"].get("job_id") for event in events
+            if event["type"] == "job_linked"] == ["job-subject"]
+    resolved = [event for event in events
+                if event["type"] == "confirmation_resolved"]
+    assert len(resolved) == 1
+    assert resolved[0]["data"]["by"] == turn_runner.POLICY_DECIDER
+
+
+def test_live_policy_resume_without_subject_fails_before_dispatch(
+        monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    grants: List[str] = []
+    monkeypatch.setattr(
+        turn_runner.agent_gate, "read_pending_strict",
+        lambda cid: ({"confirmation_id": cid, "decided_by": None}, "ok"),
+    )
+    monkeypatch.setattr(
+        turn_runner.agent_gate, "grant_approval",
+        lambda cid, *, by="tenant": grants.append(by),
+    )
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    _run_proposing_turn(
+        stub, "tenant-p", sid, sess["drawing_id"], "cid-no-subject",
+    )
+
+    time.sleep(0.15)
+    assert len(stub.BODIES) == 1
+    assert grants == []
+    assert session_store.get_approval("cid-no-subject")["decided"] is False
+    assert not [event for event in session_store.recent_events(sid, 100)
+                if event["type"] in {"confirmation_resolved", "job_linked"}]
+
+
+def test_live_policy_resume_rejects_subject_mismatch(monkeypatch, turn_stub):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setattr(
+        turn_runner.agent_gate, "read_pending_strict",
+        lambda cid: ({"confirmation_id": cid,
+                      "decided_by": "auth0|alice"}, "ok"),
+    )
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-mismatch", session_id=sid,
+        tenant_id="tenant-p", turn_id="origin-mismatch",
+        tool="count-by-layer", params={}, capability="drawing.read",
+        rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600,
+    )
+    session_store.decide_approval(
+        "cid-mismatch", True, by=turn_runner.POLICY_DECIDER,
+    )
+
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid,
+        {"cid-mismatch": {"capability": "drawing.read"}},
+        None, "demo", subject="auth0|bob",
+    )
+
+    time.sleep(0.1)
+    assert stub.BODIES == []
+    assert session_store.get_approval("cid-mismatch")["consumed"] is False
+    assert not [event for event in session_store.recent_events(sid, 100)
+                if event["type"] in {"confirmation_resolved", "job_linked"}]
 
 
 def test_policy_resolution_projection_repairs_before_resume(monkeypatch, turn_stub):
