@@ -747,7 +747,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # same way as the kick: a nested attempt on a cid that is mid-flight
         # sees its transient consumed/claimed state and stands down.
         _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier,
-                            entitlement_roles, entitlement_elevated)
+                            entitlement_roles, entitlement_elevated, subject)
         _kick_queued(session_id)
 
     def _rejected(*args: Any, **kwargs: Any) -> TurnRejected:
@@ -947,6 +947,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                  tier=tier, entitlement_tier=entitlement_tier,
                  entitlement_roles=entitlement_roles,
                  entitlement_elevated=entitlement_elevated,
+                 subject=subject,
                  request_id=request_id)
     return turn_id
 
@@ -1023,6 +1024,7 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     # resolves to the demo tier, which under live auth would run the retry
     # with entitlements the tenant may not hold.
     tier = getattr(tenant_id, "tier", None)
+    subject = getattr(tenant_id, "subject", None)
     entitlement_tier = entitlements.resolve_tier(tenant_id)
     entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     tenant_id = str(tenant_id)
@@ -1070,7 +1072,7 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     # BOTH follow-ups run here or a parked policy decision / queued prompt
     # waits forever (review rounds 3 and 9).
     _auto_confirm_reads(tenant_id, session_id, {}, tier, entitlement_tier,
-                        entitlement_roles, entitlement_elevated)
+                        entitlement_roles, entitlement_elevated, subject)
     _kick_queued(session_id)
     return "cancelled"
 
@@ -1225,10 +1227,11 @@ def drain_session_followups(tenant_id: Any, session_id: str) -> None:
     resolve exactly as start_turn would.
     """
     tier = getattr(tenant_id, "tier", None)
+    subject = getattr(tenant_id, "subject", None)
     entitlement_tier = entitlements.resolve_tier(tenant_id)
     entitlement_roles, entitlement_elevated = entitlements.resolve_roles(tenant_id)
     _auto_confirm_reads(str(tenant_id), session_id, {}, tier, entitlement_tier,
-                        entitlement_roles, entitlement_elevated)
+                        entitlement_roles, entitlement_elevated, subject)
     _kick_queued(session_id)
 
 
@@ -1528,7 +1531,8 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
                         tier: Optional[str],
                         entitlement_tier: Optional[str],
                         entitlement_roles: tuple = (),
-                        entitlement_elevated: bool = False) -> None:
+                        entitlement_elevated: bool = False,
+                        subject: Optional[str] = None) -> None:
     """Policy auto-approval: under `auto_approve_reads`, decide and confirm the
     turn's FIRST `drawing.read` proposal at its terminal. NEVER raises - it
     runs on relay threads whose cleanup must complete.
@@ -1590,7 +1594,8 @@ def _auto_confirm_reads(tenant_id: str, session_id: str,
             return
 
         for cid in candidates:
-            if _try_one_policy_confirm(tenant_id, session_id, cid, tier):
+            if _try_one_policy_confirm(
+                    tenant_id, session_id, cid, tier, subject=subject):
                 return  # one turn started; the rest keep for a later terminal
     except Exception as exc:  # noqa: BLE001
         try:
@@ -1654,7 +1659,8 @@ def _ensure_policy_resolution_event(approval: Dict[str, Any], cid: str) -> None:
 
 
 def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
-                            tier: Optional[str]) -> bool:
+                            tier: Optional[str], *,
+                            subject: Optional[str] = None) -> bool:
     """One candidate. True iff a confirm turn STARTED (the caller then stops:
     at most one auto-started turn per terminal). False means "not this one" —
     ineligible, raced, or the CAS was lost — and the caller tries the next, so
@@ -1679,6 +1685,11 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # Expired / vanished / foreign: a parked retry for it is dead.
             _forget_parked()
             return False
+        # Once auth is live, policy confirmation must retain the exact
+        # authenticated subject that opened the proposal turn. Refuse before
+        # deciding or projecting anything when that snapshot is missing.
+        if agent_gate._subject_bound_grants_required(subject):
+            return False
         if approval.get("consumed"):
             # CONSUMED IS TRANSIENT, not terminal: a winner sits between its
             # consume and its own outcome handling (success forgets the slot;
@@ -1694,6 +1705,11 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # Only OUR OWN unfinished decision may be resumed; a human's
             # decision is theirs to redeem.
             return False
+        if approval.get("decided") and subject:
+            gate_record, gate_status = agent_gate.read_pending_strict(cid)
+            if (gate_status != "ok" or gate_record is None
+                    or gate_record.get("decided_by") != str(subject)):
+                return False
         # RESERVE THE SLOT before doing anything that can end in a park, and
         # for EVERY candidate — decided (a resume) or not. Two lock
         # acquisitions (read the length, append later) let N concurrent
@@ -1735,9 +1751,10 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             # gate we could not grant.
             _gate_rec, gate_status = agent_gate.read_pending_strict(cid)
             if gate_status == "ok":
+                gate_actor = str(subject) if subject else POLICY_DECIDER
                 try:
                     granted, _rec, reason = agent_gate.grant_approval(
-                        cid, by=POLICY_DECIDER)
+                        cid, by=gate_actor)
                 except Exception as exc:  # noqa: BLE001
                     _forget_parked()  # nothing decided: release the reservation
                     print(f"[leaf-agent] policy auto-confirm: gate write failed "
@@ -1817,7 +1834,8 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             },
         }
         try:
-            start_turn(tenant_id, session_id, confirm=confirm_payload, tier=tier)
+            start_turn(tenant_id, session_id, confirm=confirm_payload,
+                       tier=tier, subject=subject)
             _forget_parked()
             return True
         except TurnBusy:
@@ -1879,6 +1897,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  entitlement_tier: Optional[str] = None,
                  entitlement_roles: tuple = (),
                  entitlement_elevated: bool = False,
+                 subject: Optional[str] = None,
                  request_id: Optional[str] = None) -> None:
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
@@ -2029,7 +2048,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
         # below sees busy and parks correctly. Both never raise.
         _auto_confirm_reads(tenant_id, session_id, proposals,
                             tier, entitlement_tier,
-                            entitlement_roles, entitlement_elevated)
+                            entitlement_roles, entitlement_elevated, subject)
         # The session is free — hand it to the queued prompt, if one is
         # waiting. Runs on the terminalizing thread (drain, watchdog, or a
         # cancel); _kick_queued never raises, and start_turn's blocking span
