@@ -511,6 +511,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "SELECT tenant_id, change_set_id FROM customization_change_sets "
                 "WHERE state = ? AND stage_next_attempt_at <= ? "
                 "AND (stage_lease_owner IS NULL OR stage_lease_expires_at <= ?) "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id) "
                 "ORDER BY created_at, change_set_id LIMIT 1",
                 (ChangeState.STAGING.value, now_ms, now_ms),
             ).fetchone()
@@ -526,7 +531,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE tenant_id = ? AND change_set_id = ? AND state = ? "
-                "AND (stage_lease_owner IS NULL OR stage_lease_expires_at <= ?)",
+                "AND (stage_lease_owner IS NULL OR stage_lease_expires_at <= ?) "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
                 (owner, expires_ms, now_ms, False, candidate["tenant_id"],
                  candidate["change_set_id"], ChangeState.STAGING.value, now_ms),
             )

@@ -87,6 +87,54 @@ def queued(store, *, tenant="tenant-a", key="request-a"):
     )
 
 
+def bind_removal_marker(store, change):
+    with store._transaction() as conn:
+        conn.execute(
+            "INSERT INTO customization_removal_requests "
+            "(tenant_id, change_set_id, target_tool_name, "
+            "expected_catalog_digest, predecessor_change_set_id, "
+            "predecessor_catalog_commit, predecessor_catalog_digest, "
+            "predecessor_platform_release, "
+            "predecessor_workspace_contract_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                change.tenant_id, change.change_set_id, "count-by-layer",
+                DIGEST, f"predecessor-{change.change_set_id}", BASE, DIGEST,
+                "release-a", WORKSPACE,
+            ),
+        )
+
+
+def seed_effective_catalog(store, *, tenant="tenant-a"):
+    predecessor = store.create_change_set(
+        tenant_id=tenant, idempotency_key=f"{tenant}-predecessor",
+        base_commit=BASE, desired_platform_release="release-a",
+        workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|author",
+    )
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET state = ?, "
+            "staged_commit = ?, catalog_digest = ? WHERE tenant_id = ? "
+            "AND change_set_id = ?",
+            (
+                ChangeState.PUBLISHED.value, BASE, DIGEST, tenant,
+                predecessor.change_set_id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO effective_catalogs "
+            "(tenant_id, change_set_id, catalog_commit, catalog_digest, "
+            "effective_platform_release, workspace_contract_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                tenant, predecessor.change_set_id, BASE, DIGEST,
+                "release-a", WORKSPACE,
+            ),
+        )
+    return predecessor
+
+
 def test_exact_reservation_is_atomic_and_conflicting_prompt_is_rejected(store):
     ids = [
         "11111111-1111-4111-8111-111111111111",
@@ -308,6 +356,95 @@ def test_claim_is_fenced_and_expired_claim_is_recoverable(store, monkeypatch):
         tenant_id="tenant-a", change_set_id=first.change_set_id,
         owner="worker-a", reason_code="stale", delay_seconds=1,
     )
+
+
+def test_async_worker_never_claims_bound_removal_before_or_after_lease_time(
+    store, monkeypatch,
+):
+    removal = queued(store, key="remove-bound")
+    bind_removal_marker(store, removal)
+    clock = [1000.0]
+    monkeypatch.setattr(customization_store.time, "time", lambda: clock[0])
+
+    assert store.claim_stage(owner="worker-a", lease_seconds=10) is None
+    clock[0] += 11
+    assert store.claim_stage(owner="worker-b", lease_seconds=10) is None
+    durable = store.get_change_set(
+        tenant_id=removal.tenant_id, change_set_id=removal.change_set_id
+    )
+    assert durable.state is ChangeState.STAGING
+    assert durable.stage_attempt == 0
+
+
+def test_unrelated_removal_bindings_do_not_hide_ordinary_stage_work(store):
+    for tenant in ("tenant-removal-a", "tenant-removal-b"):
+        removal = queued(store, tenant=tenant, key=f"{tenant}-remove")
+        bind_removal_marker(store, removal)
+    ordinary = queued(store, tenant="tenant-ordinary", key="ordinary-stage")
+
+    claimed = store.claim_stage(owner="worker-a", lease_seconds=10)
+
+    assert claimed and claimed.change_set_id == ordinary.change_set_id
+
+
+def test_failed_bound_removal_is_not_resumed_by_async_worker(store):
+    removal = queued(store, key="remove-failed")
+    bind_removal_marker(store, removal)
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET state = ? "
+            "WHERE tenant_id = ? AND change_set_id = ?",
+            (
+                ChangeState.FAILED.value, removal.tenant_id,
+                removal.change_set_id,
+            ),
+        )
+
+    assert store.claim_stage(owner="worker-a", lease_seconds=10) is None
+
+
+def test_synchronous_removal_records_staged_without_async_worker_claim(
+    store, monkeypatch,
+):
+    seed_effective_catalog(store)
+    service = CustomizationService(store)
+    monkeypatch.setattr(customization_service, "enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda _tenant: SimpleNamespace(subject="auth0|author", role="owner"),
+    )
+    monkeypatch.setattr(service, "_verify_bound_stage_policy", lambda *_args: None)
+
+    def harness_remove(change, _expected_catalog_digest):
+        assert store.claim_stage(owner="worker-a", lease_seconds=10) is None
+        return {
+            "receipt": {
+                "contract": customization_service.CONTRACT,
+                "tenant_id": change.tenant_id,
+                "change_set_id": change.change_set_id,
+                "state": "staged",
+                "base_commit": change.base_commit,
+                "staged_commit": "e" * 40,
+                "catalog_digest": "f" * 64,
+                "platform_release": change.desired_platform_release,
+                "workspace_contract_digest": change.workspace_contract_digest,
+                "idempotency_key": change.idempotency_key,
+            }
+        }
+
+    monkeypatch.setattr(service, "_harness_remove", harness_remove)
+    result = service.stage_removal(
+        tenant="tenant-a", tool_name="count-by-layer",
+        expected_catalog_digest=DIGEST, idempotency_key="remove-sync",
+    )
+
+    assert result["receipt"]["state"] == "staged"
+    durable = store.get_change_set(
+        tenant_id="tenant-a",
+        change_set_id=result["receipt"]["change_set_id"],
+    )
+    assert durable.state is ChangeState.STAGED
+    assert durable.stage_attempt == 0
 
 
 def test_stale_worker_success_cannot_overwrite_reclaimed_generation(store, monkeypatch):

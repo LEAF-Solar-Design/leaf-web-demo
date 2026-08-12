@@ -372,6 +372,60 @@ def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
     assert sum(claim is not None for claim in claims) == 1
 
 
+def test_postgres_async_worker_skips_bound_removal_and_claims_ordinary(store) -> None:
+    tenant = "pg-removal-worker-boundary"
+    _published_authority(store, tenant, "pg-removal-worker-predecessor")
+    effective = store.get_effective_catalog(tenant_id=tenant)
+    removal = store.create_change_set(
+        tenant_id=tenant, idempotency_key="pg-removal-worker-removal",
+        base_commit=effective.catalog_commit,
+        desired_platform_release=effective.effective_platform_release,
+        workspace_contract_digest=effective.workspace_contract_digest,
+        author_subject="auth0|author", change_kind="revise",
+        target_tool_name="count-by-layer",
+    )
+    store.bind_removal_request(
+        tenant_id=tenant, change_set_id=removal.change_set_id,
+        target_tool_name="count-by-layer",
+        expected_catalog_digest=effective.catalog_digest,
+    )
+    store.transition(
+        tenant_id=tenant, change_set_id=removal.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=removal.version,
+        expected_state=ChangeState.CREATED,
+        idempotency_key="pg-removal-worker-staging",
+    )
+
+    description = "postgres ordinary stage remains claimable"
+    ordinary, created = store.reserve_stage(
+        tenant_id=tenant, idempotency_key="pg-removal-worker-ordinary",
+        base_commit=BASE, desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject="auth0|author",
+        change_kind="create", target_tool_name=None,
+        request_description=description,
+        request_fingerprint=__import__("hashlib").sha256(
+            description.encode()
+        ).hexdigest(),
+    )
+    assert created
+    store.transition(
+        tenant_id=tenant, change_set_id=ordinary.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=ordinary.version,
+        expected_state=ChangeState.CREATED,
+        idempotency_key="pg-removal-worker-ordinary-staging",
+    )
+
+    claimed = store.claim_stage(owner="pg-worker-a", lease_seconds=30)
+
+    assert claimed and claimed.change_set_id == ordinary.change_set_id
+    assert store.claim_stage(owner="pg-worker-b", lease_seconds=30) is None
+    durable_removal = store.get_change_set(
+        tenant_id=tenant, change_set_id=removal.change_set_id
+    )
+    assert durable_removal.state is ChangeState.STAGING
+    assert durable_removal.stage_attempt == 0
+
+
 def test_postgres_stale_worker_cannot_commit_after_lease_reclaim(store) -> None:
     description = "postgres stale worker fence"
     change, created = store.reserve_stage(
