@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import platform as stdlib_platform
 import sys
 from pathlib import Path
@@ -966,6 +967,143 @@ def test_tenant_row_removal_uses_authenticated_tenant_gate_and_exact_intent(monk
         "expected_catalog_digest": "a" * 64,
         "idempotency_key": "remove-count-by-layer",
     }]
+
+
+def test_removal_authority_route_is_closed_and_authenticated(monkeypatch):
+    calls = []
+    tenant = SimpleNamespace(tenant_id="tenant-a", subject="auth0|owner")
+    expected = {
+        "contract": "leaf.customization-removal-authority.v1",
+        "tool_name": "count-by-layer",
+        "effective_catalog_digest": "a" * 64,
+        "target_row_count": 1,
+        "target_provenance": "tenant_repo",
+        "removal_authorized": True,
+    }
+    monkeypatch.setattr(author_router, "_customization_gate", lambda wave, seen: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService,
+        "configured",
+        classmethod(lambda cls: SimpleNamespace(
+            removal_authority=lambda **kwargs: calls.append(kwargs) or expected
+        )),
+    )
+
+    result = author_router.removal_authority(
+        author_router.RemovalAuthorityRequest(tool_name="count-by-layer"),
+        tenant=tenant,
+    )
+
+    assert result == expected
+    assert set(result) == {
+        "contract", "tool_name", "effective_catalog_digest", "target_row_count",
+        "target_provenance", "removal_authorized",
+    }
+    assert calls == [{"tenant": tenant, "tool_name": "count-by-layer"}]
+    assert not ({"tenant_id", "subject", "path", "commit", "registry"} & set(result))
+    with pytest.raises(ValueError):
+        author_router.RemovalAuthorityRequest(
+            tool_name="count-by-layer", tenant_id="forbidden"
+        )
+
+
+def test_removal_authority_refuses_read_only_role(monkeypatch):
+    service = CustomizationService(SimpleNamespace())
+    monkeypatch.setattr(customization_service, "_binding", lambda _tenant:
+                        TenantBinding("tenant-a", "auth0|reader", "read_only", True))
+    with pytest.raises(CustomizationServiceError, match="tenant_role_denied"):
+        service.removal_authority(tenant="tenant-a", tool_name="count-by-layer")
+
+
+@pytest.mark.parametrize(
+    ("rows", "digest_matches", "reason"),
+    [
+        ([{"name": "count-by-layer"}, {"name": "count-by-layer"}], True,
+         "removal_target_ambiguous"),
+        ([{"name": "count-by-layer"}], False,
+         "effective_catalog_digest_mismatch"),
+        ([{"not_name": "count-by-layer"}], True, "effective_catalog_malformed"),
+    ],
+)
+def test_removal_authority_fails_closed_on_invalid_pinned_registry(
+    rows, digest_matches, reason, tmp_path, monkeypatch
+):
+    raw = json.dumps({"tools": rows}, separators=(",", ":")).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    current = SimpleNamespace(catalog_commit=BASE, catalog_digest=(
+        digest if digest_matches else "f" * 64
+    ))
+    service = CustomizationService(SimpleNamespace(
+        get_effective_catalog=lambda **_kwargs: current
+    ))
+    monkeypatch.setattr(customization_service, "_binding", lambda _tenant:
+                        TenantBinding("tenant-a", "auth0|owner", "owner", True))
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda _tenant: tmp_path)
+    monkeypatch.setattr(customization_service, "_git_blob", lambda *_args: raw)
+
+    with pytest.raises(CustomizationServiceError, match=reason):
+        service.removal_authority(
+            tenant="tenant-a",
+            tool_name="count-by-layer",
+        )
+
+
+@pytest.mark.parametrize("role", ["owner", "editor"])
+def test_removal_authority_reads_only_pinned_tenant_registry(
+    role, tmp_path, monkeypatch
+):
+    raw = json.dumps({
+        "tools": [
+            {"name": "other", "value": "preserved"},
+            {"name": "count-by-layer", "entry": "tenant.py"},
+        ]
+    }, separators=(",", ":")).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    current = SimpleNamespace(catalog_commit=BASE, catalog_digest=digest)
+    service = CustomizationService(SimpleNamespace(
+        get_effective_catalog=lambda **kwargs: current
+    ))
+    monkeypatch.setattr(customization_service, "_binding", lambda _tenant:
+                        TenantBinding("tenant-a", "auth0|owner", role, True))
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda _tenant: tmp_path)
+    monkeypatch.setattr(customization_service, "_git_blob", lambda *_args: raw)
+
+    assert service.removal_authority(
+        tenant="tenant-a",
+        tool_name="count-by-layer",
+    ) == {
+        "contract": "leaf.customization-removal-authority.v1",
+        "tool_name": "count-by-layer",
+        "effective_catalog_digest": digest,
+        "target_row_count": 1,
+        "target_provenance": "tenant_repo",
+        "removal_authorized": True,
+    }
+
+
+def test_removal_authority_reports_closed_absent_postcondition(tmp_path, monkeypatch):
+    raw = b'{"tools":[{"name":"other"}]}'
+    digest = hashlib.sha256(raw).hexdigest()
+    service = CustomizationService(SimpleNamespace(
+        get_effective_catalog=lambda **_kwargs: SimpleNamespace(
+            catalog_commit=BASE, catalog_digest=digest
+        )
+    ))
+    monkeypatch.setattr(customization_service, "_binding", lambda _tenant:
+                        TenantBinding("tenant-a", "auth0|owner", "owner", True))
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda _tenant: tmp_path)
+    monkeypatch.setattr(customization_service, "_git_blob", lambda *_args: raw)
+
+    assert service.removal_authority(
+        tenant="tenant-a", tool_name="count-by-layer"
+    ) == {
+        "contract": "leaf.customization-removal-authority.v1",
+        "tool_name": "count-by-layer",
+        "effective_catalog_digest": digest,
+        "target_row_count": 0,
+        "target_provenance": "operator_owned_engine_expected",
+        "removal_authorized": False,
+    }
 
 
 def test_live_author_reports_unsupported_one_off_mode(tmp_path, monkeypatch):

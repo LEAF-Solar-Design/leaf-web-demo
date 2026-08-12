@@ -111,6 +111,13 @@ class RemovalRequest(BaseModel):
         extra = "forbid"
 
 
+class RemovalAuthorityRequest(BaseModel):
+    tool_name: str = Field(..., min_length=1, max_length=64)
+
+    class Config:
+        extra = "forbid"
+
+
 class InternalConfirmRequest(BaseModel):
     change_set_id: str
 
@@ -906,6 +913,31 @@ def remove_tool(
     except Exception as exc:
         return _customization_error(
             CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
+
+
+@router.post("/api/author/removals/authority")
+def removal_authority(
+    req: RemovalAuthorityRequest, tenant=Depends(deps.require_tenant)
+) -> Dict[str, Any]:
+    """Return only the immutable tenant-row authority needed for removal CAS."""
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
+    try:
+        return CustomizationService.configured().removal_authority(
+            tenant=tenant, tool_name=req.tool_name
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_authority_read_failed", 503),
+            cause=exc,
         )
 
 
