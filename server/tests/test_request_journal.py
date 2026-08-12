@@ -51,6 +51,7 @@ class FakeDb:
 
     def __init__(self):
         self.rows = {}
+        self.sessions = {}
         self.sql = []
 
     @contextmanager
@@ -88,6 +89,31 @@ class FakeDb:
         if normalized.startswith("SELECT * FROM app_session_requests WHERE request_id"):
             row = self.rows.get(params[0])
             return _Result([dict(row)] if row else [])
+        if normalized.startswith("SELECT session_id FROM app_session_requests"):
+            row = self.rows.get(params[0])
+            return _Result([{"session_id": row["session_id"]}]
+                           if row and row["state"] == "admitted" else [])
+        if normalized.startswith("SELECT 1 FROM app_session_requests WHERE session_id"):
+            session_id, request_id = params
+            found = any(row["session_id"] == session_id
+                        and row["state"] == "executing"
+                        and row["request_id"] != request_id
+                        for row in self.rows.values())
+            return _Result([{"?column?": 1}] if found else [])
+        if normalized.startswith(
+            "SELECT active_turn_id, turn_started_at FROM app_sessions"
+        ):
+            row = self.sessions.get(params[0])
+            return _Result([dict(row)] if row else [])
+        if normalized.startswith("UPDATE app_sessions SET active_turn_id=%s"):
+            turn_id, started, tier, subject, updated, session_id = params
+            row = self.sessions.get(session_id)
+            if row is None:
+                return _Result([])
+            row.update(active_turn_id=turn_id, turn_started_at=started,
+                       active_turn_tier=tier, active_turn_subject=subject,
+                       updated_at=updated)
+            return _Result([{"session_id": session_id}])
         if normalized.startswith(
             "UPDATE app_session_requests SET state='abandoned', response_status=503"
         ) and "WHERE state='executing' AND lease_expires_at <" in normalized:
@@ -120,7 +146,8 @@ class FakeDb:
                                 "session_id": row["session_id"],
                                 "turn_id": row["turn_id"]})
             return _Result(changed)
-        if "SET state='executing'" in normalized and normalized.startswith("UPDATE"):
+        if normalized.startswith("UPDATE app_session_requests SET state='executing'") \
+                and "recoverable_json=NULL" not in normalized:
             turn_id, owner, lease, updated, request_id = params
             row = self.rows.get(request_id)
             blocked = row is None or row["state"] != "admitted" or any(
@@ -166,8 +193,8 @@ class FakeDb:
                        turn_id=None, lease_owner=None,
                        lease_expires_at=None, updated_at=updated)
             return _Result([{"request_id": request_id}])
-        if normalized.startswith("WITH next_request AS"):
-            session_id, _same, turn_id, owner, lease, updated = params
+        if normalized.startswith("SELECT queued.* FROM app_session_requests AS queued"):
+            session_id, _same = params
             candidates = [row for row in self.rows.values() if row["state"] == "queued"]
             if session_id is not None:
                 candidates = [row for row in candidates if row["session_id"] == session_id]
@@ -183,13 +210,18 @@ class FakeDb:
             if not candidates:
                 return _Result([])
             row = candidates[0]
-            recoverable = row["recoverable_json"]
+            return _Result([dict(row)])
+        if normalized.startswith(
+            "UPDATE app_session_requests SET state='executing', recoverable_json=NULL"
+        ):
+            turn_id, owner, lease, updated, request_id = params
+            row = self.rows.get(request_id)
+            if row is None or row["state"] != "queued":
+                return _Result([])
             row.update(state="executing", turn_id=turn_id, lease_owner=owner,
                        lease_expires_at=lease, updated_at=updated,
                        recoverable_json=None)
-            result = dict(row)
-            result["claimed_recoverable_json"] = recoverable
-            return _Result([result])
+            return _Result([dict(row)])
         if normalized.startswith("SELECT * FROM app_session_requests WHERE session_id"):
             row = next((row for row in self.rows.values()
                         if row["session_id"] == params[0] and row["state"] == "queued"), None)
@@ -259,6 +291,10 @@ def journal(monkeypatch):
 
 def _admit(db, *, request_id=None, tenant="tenant-a", drawing="drawing-a",
            session="session-a", text="first"):
+    db.sessions.setdefault(session, {
+        "session_id": session, "active_turn_id": None, "turn_started_at": None,
+        "active_turn_tier": None, "active_turn_subject": None,
+    })
     request_id = request_id or str(uuid.uuid4())
     row, inserted = request_journal.admit_request(
         request_id=request_id, tenant_id=tenant, drawing_id=drawing,
@@ -296,9 +332,15 @@ def test_admission_replays_exact_binding_and_rejects_cross_tenant(journal):
     request_id, first, inserted = _admit(journal)
     assert inserted is True and first["state"] == "admitted"
     assert first["recoverable_json"] is None
-    assert request_journal.begin_request(request_id, "turn-1", lease_seconds=30)
+    assert request_journal.begin_request_and_turn(
+        request_id, "turn-1", lease_seconds=30, session_id="session-a",
+        stale_after_s=30,
+    )
     assert journal.rows[request_id]["recoverable_json"] is None
-    request_journal.release_execution(request_id, "turn-1", requeue=False)
+    request_journal.finish_request(
+        request_id, "turn-1", state="failed", response_status=409,
+        response={"status": "failed"},
+    )
     _, replay, inserted = _admit(journal, request_id=request_id)
     assert inserted is False and replay["request_id"] == request_id
     with pytest.raises(request_journal.RequestConflict):
@@ -311,37 +353,30 @@ def test_one_active_turn_fence_is_per_session(journal):
     first, *_ = _admit(journal, session="session-a", text="one")
     second, *_ = _admit(journal, session="session-a", text="two")
     other, *_ = _admit(journal, session="session-b", drawing="drawing-b", text="three")
-    assert request_journal.begin_request(first, "turn-1", lease_seconds=30) is True
-    assert request_journal.begin_request(second, "turn-2", lease_seconds=30) is False
-    assert request_journal.begin_request(other, "turn-3", lease_seconds=30) is True
+    assert request_journal.begin_request_and_turn(
+        first, "turn-1", lease_seconds=30, session_id="session-a", stale_after_s=30,
+    ) is True
+    assert request_journal.begin_request_and_turn(
+        second, "turn-2", lease_seconds=30, session_id="session-a", stale_after_s=30,
+    ) is False
+    assert request_journal.begin_request_and_turn(
+        other, "turn-3", lease_seconds=30, session_id="session-b", stale_after_s=30,
+    ) is True
 
 
-def test_release_execution_queue_slot_race_preserves_admitted_retry(journal):
-    older, *_ = _admit(journal, session="session-a", text="older")
-    newer, *_ = _admit(journal, session="session-a", text="newer")
-    recovered = {"text": "older", "classifier_hint": {"layout": "solar"}}
-
-    assert request_journal.begin_request(older, "turn-older", lease_seconds=30)
-    assert request_journal.queue_request(newer, {"text": "newer"})
-
-    assert request_journal.release_execution(
-        older, "turn-older", requeue=True, recoverable=recovered,
+def test_foreign_session_turn_leaves_queued_payload_intact(journal):
+    request_id, *_ = _admit(journal)
+    recoverable = _recoverable()
+    assert request_journal.queue_request(request_id, recoverable)
+    journal.sessions["session-a"].update(
+        active_turn_id="foreign", turn_started_at=request_journal.time.time(),
     )
-    older_row = journal.rows[older]
-    assert older_row["state"] == "admitted"
-    assert older_row["recoverable_json"] is None
-    assert older_row["response_status"] is None
-    assert older_row["terminal_at"] is None
-    assert journal.rows[newer]["state"] == "queued"
-
-    # The immutable request survives for an exact retry and is never replayed
-    # from the displaced recoverable payload.
-    _, replay, inserted = _admit(
-        journal, request_id=older, session="session-a", text="older",
+    claimed = request_journal.claim_next_queued_and_turn(
+        lease_seconds=30, stale_after_s=10,
     )
-    assert inserted is False
-    assert replay["state"] == "admitted"
-    assert request_journal.begin_request(older, "turn-retry", lease_seconds=30)
+    assert claimed is None
+    assert journal.rows[request_id]["state"] == "queued"
+    assert journal.rows[request_id]["recoverable_json"] == recoverable
 
 
 def test_queue_payload_is_written_only_by_transition_and_cleared_on_claim(journal):
@@ -350,7 +385,9 @@ def test_queue_payload_is_written_only_by_transition_and_cleared_on_claim(journa
     recoverable = _recoverable(classifier_hint={"layout": {"mode": "solar"}})
     assert request_journal.queue_request(request_id, recoverable) is True
     assert journal.rows[request_id]["recoverable_json"]["text"] == "first"
-    claimed = request_journal.claim_next_queued(lease_seconds=30)
+    claimed = request_journal.claim_next_queued_and_turn(
+        lease_seconds=30, stale_after_s=30,
+    )
     assert claimed["request_id"] == request_id
     assert claimed["recoverable_json"]["text"] == "first"
     assert claimed["recoverable_json"]["classifier_hint"] == {
@@ -374,12 +411,14 @@ def test_unscoped_queue_claim_types_the_nullable_postgres_parameter(journal):
     request_id, *_ = _admit(journal)
     assert request_journal.queue_request(request_id, _recoverable()) is True
 
-    claimed = request_journal.claim_next_queued(lease_seconds=30)
+    claimed = request_journal.claim_next_queued_and_turn(
+        lease_seconds=30, stale_after_s=30,
+    )
 
     assert claimed["request_id"] == request_id
     claim_sql = next(
         sql for sql, _params in reversed(journal.sql)
-        if sql.startswith("WITH next_request AS")
+        if sql.startswith("SELECT queued.* FROM app_session_requests AS queued")
     )
     assert "CAST(%s AS TEXT) IS NULL OR queued.session_id=%s" in claim_sql
 
@@ -388,7 +427,10 @@ def test_replacement_settles_execution_that_expires_after_startup(journal, monke
     clock = [100.0]
     monkeypatch.setattr(request_journal.time, "time", lambda: clock[0])
     request_id, *_ = _admit(journal)
-    assert request_journal.begin_request(request_id, "turn-1", lease_seconds=600)
+    assert request_journal.begin_request_and_turn(
+        request_id, "turn-1", lease_seconds=600, session_id="session-a",
+        stale_after_s=600,
+    )
 
     # The replacement starts while the crashed task's lease still looks live.
     assert request_journal.settle_abandoned() == 0
@@ -402,7 +444,9 @@ def test_replacement_settles_execution_that_expires_after_startup(journal, monke
     assert request_journal.active_counts("tenant-a", "drawing-a") == {
         "queued": 0, "executing": 0, "active": 0,
     }
-    assert request_journal.claim_next_queued(lease_seconds=30) is None
+    assert request_journal.claim_next_queued_and_turn(
+        lease_seconds=30, stale_after_s=30,
+    ) is None
 
 
 def test_startup_recovery_rearms_until_live_lease_expires(journal, monkeypatch):
@@ -410,7 +454,10 @@ def test_startup_recovery_rearms_until_live_lease_expires(journal, monkeypatch):
     monkeypatch.setattr(request_journal.time, "time", lambda: clock[0])
     executing, *_ = _admit(journal, text="already running")
     queued, *_ = _admit(journal, text="recover me")
-    assert request_journal.begin_request(executing, "turn-1", lease_seconds=600)
+    assert request_journal.begin_request_and_turn(
+        executing, "turn-1", lease_seconds=600, session_id="session-a",
+        stale_after_s=600,
+    )
     assert request_journal.queue_request(queued, _recoverable("recover me"))
 
     timers = []
@@ -478,12 +525,6 @@ def test_every_request_journal_json_write_uses_psycopg_jsonb():
         recoverable = _recoverable()
         request_journal._settle_expired_executions(db, now=100.0)
         request_journal.queue_request("request-id", recoverable)
-        request_journal.release_execution(
-            "request-id", "turn-id", requeue=True, recoverable=recoverable,
-        )
-        request_journal.release_execution(
-            "request-id", "turn-id", requeue=False,
-        )
         request_journal.finish_request(
             "request-id", "turn-id", state="failed",
             response_status=500, response=response,
@@ -512,7 +553,7 @@ def test_every_request_journal_json_write_uses_psycopg_jsonb():
             if value is not None:
                 json_values.append(value)
 
-    assert len(json_values) == 8
+    assert len(json_values) == 7
     assert all(isinstance(value, request_journal.Jsonb) for value in json_values)
     assert all(type(value.obj) is dict for value in json_values)
 
@@ -523,8 +564,14 @@ def test_active_counts_are_tenant_and_drawing_scoped(journal):
     foreign, *_ = _admit(journal, tenant="tenant-b", drawing="drawing-b",
                          session="session-c", text="three")
     assert request_journal.queue_request(queued, _recoverable())
-    assert request_journal.begin_request(executing, "turn-2", lease_seconds=30)
-    assert request_journal.begin_request(foreign, "turn-3", lease_seconds=30)
+    assert request_journal.begin_request_and_turn(
+        executing, "turn-2", lease_seconds=30, session_id="session-b",
+        stale_after_s=30,
+    )
+    assert request_journal.begin_request_and_turn(
+        foreign, "turn-3", lease_seconds=30, session_id="session-c",
+        stale_after_s=30,
+    )
     assert request_journal.active_counts("tenant-a", "drawing-a") == {
         "queued": 1, "executing": 1, "active": 2,
     }
@@ -542,7 +589,9 @@ def test_durable_kicker_dispatches_claimed_payload_once(monkeypatch):
         },
     }, None]
     monkeypatch.setattr(request_journal, "enabled", lambda: True)
-    monkeypatch.setattr(request_journal, "claim_next_queued", lambda **_kw: claims.pop(0))
+    monkeypatch.setattr(
+        request_journal, "claim_next_queued_and_turn", lambda **_kw: claims.pop(0),
+    )
     monkeypatch.setattr(
         turn_runner.entitlements, "entitlements_for",
         lambda *_a, **_kw: {"converse": True},

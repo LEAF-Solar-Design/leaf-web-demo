@@ -383,6 +383,28 @@ jobs:
             exit 1
           fi
 
+      - name: Run fused request activation PostgreSQL tests
+        working-directory: server
+        run: |
+          [[ -n "${PG_CUSTOMIZATION_TEST_URL:-}" ]]
+          if ! out=$(python -m pytest -q -rs \
+              "$GITHUB_WORKSPACE/server/tests/test_request_journal_activation_postgres.py"); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: fused request activation PostgreSQL tests skipped.'
+            exit 1
+          fi
+          ran=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1 | cut -d' ' -f1)
+          if [ "${ran:-0}" -lt 8 ]; then
+            printf '%s\n' "$out"
+            echo "FAIL: only ${ran:-0} fused request activation tests executed, floor is 8."
+            exit 1
+          fi
+
       # The gate a LEAF_SESSIONS_STORE promotion out of dual_write_shadow rests
       # on. DATABASE_URL is set at job level, so the live half of this suite
       # EXECUTES here; the "did not skip" assertion below is what stops it

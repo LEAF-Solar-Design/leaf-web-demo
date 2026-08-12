@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
+import session_store
+
 SERVER_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = SERVER_DIR.parent
 _REQUEST_ID = re.compile(
@@ -289,7 +291,11 @@ def admit_request(
     return row, inserted is not None
 
 
-def begin_request(request_id: str, turn_id: str, *, lease_seconds: float) -> bool:
+def begin_request_and_turn(
+    request_id: str, turn_id: str, *, lease_seconds: float,
+    session_id: str, stale_after_s: float, tier: Optional[str] = None,
+    subject: Optional[str] = None,
+) -> bool:
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     now = time.time()
@@ -297,16 +303,27 @@ def begin_request(request_id: str, turn_id: str, *, lease_seconds: float) -> boo
     db = platform_db()
     try:
         with db.transaction() as conn:
+            candidate = conn.execute(
+                "SELECT session_id FROM app_session_requests"
+                " WHERE request_id=%s AND state='admitted' FOR UPDATE",
+                (request_id,),
+            ).fetchone()
+            if candidate is None or str(candidate["session_id"]) != str(session_id):
+                return False
+            competing = conn.execute(
+                "SELECT 1 FROM app_session_requests WHERE session_id=%s"
+                " AND state='executing' AND request_id<>%s LIMIT 1",
+                (session_id, request_id),
+            ).fetchone()
+            if competing is not None or not session_store.pg_try_begin_turn_in_transaction(
+                conn, session_id, turn_id, stale_after_s, tier=tier,
+                subject=subject, started_at=now,
+            ):
+                return False
             row = conn.execute(
-                "UPDATE app_session_requests AS candidate"
-                " SET state='executing', turn_id=%s, lease_owner=%s,"
-                " lease_expires_at=%s, updated_at=%s"
-                " WHERE request_id=%s AND state='admitted'"
-                " AND NOT EXISTS ("
-                "   SELECT 1 FROM app_session_requests AS active"
-                "   WHERE active.session_id=candidate.session_id"
-                "   AND active.state='executing' AND active.request_id<>candidate.request_id"
-                " ) RETURNING request_id",
+                "UPDATE app_session_requests SET state='executing', turn_id=%s,"
+                " lease_owner=%s, lease_expires_at=%s, updated_at=%s"
+                " WHERE request_id=%s AND state='admitted' RETURNING request_id",
                 (turn_id, owner, now + lease_seconds, now, request_id),
             ).fetchone()
     except UniqueViolation:
@@ -336,48 +353,11 @@ def queue_request(request_id: str, recoverable: Dict[str, Any]) -> bool:
     return row is not None
 
 
-def release_execution(
-    request_id: str, turn_id: str, *, requeue: bool,
-    recoverable: Optional[Dict[str, Any]] = None,
-) -> bool:
-    state = "queued" if requeue else "admitted"
-    safe_recoverable = None
-    if requeue:
-        if recoverable is None:
-            raise ValueError("requeued execution requires recoverable payload")
-        safe_recoverable = validate_recoverable_payload(recoverable)
-    now = time.time()
-    db = platform_db()
-    try:
-        with db.transaction() as conn:
-            row = conn.execute(
-                "UPDATE app_session_requests SET state=%s, recoverable_json=%s, turn_id=NULL,"
-                " lease_owner=NULL, lease_expires_at=NULL, updated_at=%s"
-                " WHERE request_id=%s AND state='executing' AND turn_id=%s"
-                " RETURNING request_id",
-                (
-                    state,
-                    Jsonb(safe_recoverable) if safe_recoverable is not None else None,
-                    now,
-                    request_id,
-                    turn_id,
-                ),
-            ).fetchone()
-    except UniqueViolation:
-        if not requeue:
-            return False
-        # A newer request can occupy the one queued slot after this request was
-        # claimed but before the session CAS. Keep this request durable and
-        # retryable without persisting its recovered payload or falsely
-        # terminalizing it as a queue-start failure.
-        return release_execution(request_id, turn_id, requeue=False)
-    return row is not None
-
-
-def claim_next_queued(
-    *, lease_seconds: float, session_id: Optional[str] = None,
+def claim_next_queued_and_turn(
+    *, lease_seconds: float, stale_after_s: float,
+    session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Atomically claim one queue row whose session has no executing request."""
+    """Atomically claim one queued request and its exact session turn."""
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     now = time.time()
@@ -385,25 +365,36 @@ def claim_next_queued(
     owner = str(uuid.uuid4())
     db = platform_db()
     with db.transaction() as conn:
-        row = conn.execute(
-            "WITH next_request AS ("
-            " SELECT queued.request_id, queued.recoverable_json"
-            " AS claimed_recoverable_json FROM app_session_requests AS queued"
-            " JOIN app_sessions AS session ON session.session_id=queued.session_id"
-            " WHERE queued.state='queued' AND session.active_turn_id IS NULL"
+        candidate = conn.execute(
+            "SELECT queued.* FROM app_session_requests AS queued"
+            " WHERE queued.state='queued'"
             " AND (CAST(%s AS TEXT) IS NULL OR queued.session_id=%s) AND NOT EXISTS ("
             "   SELECT 1 FROM app_session_requests AS active"
             "   WHERE active.session_id=queued.session_id AND active.state='executing'"
             " ) ORDER BY queued.created_at, queued.request_id"
-            " FOR UPDATE SKIP LOCKED LIMIT 1"
-            ") UPDATE app_session_requests AS claimed"
-            " SET state='executing', recoverable_json=NULL, turn_id=%s, lease_owner=%s,"
-            " lease_expires_at=%s, updated_at=%s"
-            " FROM next_request WHERE claimed.request_id=next_request.request_id"
-            " RETURNING claimed.*, next_request.claimed_recoverable_json",
-            (session_id, session_id, turn_id, owner, now + lease_seconds, now),
+            " FOR UPDATE OF queued SKIP LOCKED LIMIT 1",
+            (session_id, session_id),
         ).fetchone()
-    return _row(row)
+        if candidate is None:
+            return None
+        payload = _row(candidate) or {}
+        if not session_store.pg_try_begin_turn_in_transaction(
+            conn, payload["session_id"], turn_id, stale_after_s,
+            tier=(payload.get("recoverable_json") or {}).get("tier"),
+            subject=(payload.get("recoverable_json") or {}).get("subject"),
+            started_at=now,
+        ):
+            return None
+        row = conn.execute(
+            "UPDATE app_session_requests SET state='executing', recoverable_json=NULL,"
+            " turn_id=%s, lease_owner=%s, lease_expires_at=%s, updated_at=%s"
+            " WHERE request_id=%s AND state='queued' RETURNING *",
+            (turn_id, owner, now + lease_seconds, now, payload["request_id"]),
+        ).fetchone()
+        result = _row(row)
+        if result is not None:
+            result["recoverable_json"] = payload.get("recoverable_json")
+        return result
 
 
 def queued_for_session(session_id: str) -> Optional[Dict[str, Any]]:
