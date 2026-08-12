@@ -262,16 +262,19 @@ def test_policy_resolution_projection_repairs_before_resume(monkeypatch, turn_st
         capability="drawing.read", rationale="r", kind="run_capability",
         payload={"dwg": sess["drawing_id"]}, ttl_s=600)
 
-    real_append = session_store.append_event
+    real_append = session_store.append_confirmation_resolved_once
     failed = {"once": False}
 
-    def _fail_first_projection(session_id, turn_id, event_type, data):
-        if event_type == "confirmation_resolved" and not failed["once"]:
+    def _fail_first_projection(session_id, turn_id, cid, approved, by):
+        if not failed["once"]:
             failed["once"] = True
             raise RuntimeError("injected projection failure")
-        return real_append(session_id, turn_id, event_type, data)
+        return real_append(session_id, turn_id, cid, approved, by)
 
-    monkeypatch.setattr(turn_runner.session_store, "append_event", _fail_first_projection)
+    monkeypatch.setattr(
+        turn_runner.session_store, "append_confirmation_resolved_once",
+        _fail_first_projection,
+    )
     turn_runner._auto_confirm_reads(
         "tenant-p", sid, {"cid-projection": {"capability": "drawing.read"}},
         None, "demo")
@@ -279,7 +282,9 @@ def test_policy_resolution_projection_repairs_before_resume(monkeypatch, turn_st
     assert approval["decided"] is True and approval["consumed"] is False
     assert stub.BODIES == [], "resume started before its public decision projected"
 
-    monkeypatch.setattr(turn_runner.session_store, "append_event", real_append)
+    monkeypatch.setattr(
+        turn_runner.session_store, "append_confirmation_resolved_once", real_append,
+    )
     turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
     assert _wait_until(lambda: len(stub.BODIES) == 1)
     resolved = [event for event in session_store.recent_events(sid, 100)

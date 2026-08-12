@@ -276,6 +276,41 @@ def test_shadow_append_never_writes_postgres(monkeypatch):
     ) == 7
 
 
+def test_shadow_confirmation_resolution_never_writes_postgres(monkeypatch):
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "shadow")
+    monkeypatch.setattr(
+        session_store, "_legacy_append_confirmation_resolved_once",
+        lambda *_args: (7, True),
+    )
+    monkeypatch.setattr(
+        session_store, "_pg_append_confirmation_resolved_once",
+        lambda *_args, **_kwargs: pytest.fail("shadow mode must not write PostgreSQL"),
+    )
+    assert session_store.append_confirmation_resolved_once(
+        "session-1", "turn-1", "0123456789abcdef", True, "policy",
+    ) == (7, True)
+
+
+def test_dual_write_confirmation_resolution_repairs_postgres_partial(monkeypatch):
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "dual_write")
+    monkeypatch.setattr(session_store, "_pg_get_session", lambda _sid: {"last_seq": 7})
+    monkeypatch.setattr(
+        session_store, "_legacy_append_confirmation_resolved_once",
+        lambda *_args: (7, False),
+    )
+    calls = []
+
+    def pg(*_args, **kwargs):
+        calls.append(kwargs)
+        return 7, True
+
+    monkeypatch.setattr(session_store, "_pg_append_confirmation_resolved_once", pg)
+    assert session_store.append_confirmation_resolved_once(
+        "session-1", "turn-1", "0123456789abcdef", True, "policy",
+    ) == (7, True)
+    assert calls == [{"expected_seq": 7}]
+
+
 def test_pending_approval_read_routes_to_postgres_with_one_timestamp(monkeypatch):
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "postgres")
     calls = []
@@ -357,6 +392,85 @@ def test_two_database_writers_allocate_gapless_event_sequence(
     assert sorted(sequences) == list(range(1, 51))
     stored = session_store.events_after(session_id, 0, 100)
     assert [event["seq"] for event in stored] == list(range(1, 51))
+
+
+@requires_database
+def test_two_database_writers_append_confirmation_resolution_once(
+    postgres_session_schema,
+):
+    token = uuid.uuid4().hex
+    session = session_store.get_or_create_session(
+        f"pg-resolution-tenant-{token}", f"pg-resolution-drawing-{token}",
+    )
+    session_id = session["session_id"]
+    barrier = threading.Barrier(2)
+    outcomes = []
+    errors = []
+    lock = threading.Lock()
+
+    def writer():
+        try:
+            barrier.wait(timeout=10)
+            outcome = session_store._pg_append_confirmation_resolved_once(
+                session_id, "turn-origin", "0123456789abcdef", True,
+                "policy:auto_approve_reads",
+            )
+            with lock:
+                outcomes.append(outcome)
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert sorted(inserted for _, inserted in outcomes) == [False, True]
+    assert len({seq for seq, _ in outcomes}) == 1
+    stored = session_store.events_after(session_id, 0, 10)
+    matching = [event for event in stored if event["type"] == "confirmation_resolved"]
+    assert len(matching) == 1
+
+
+@requires_database
+def test_postgres_confirmation_resolution_retry_is_unbounded(
+    postgres_session_schema,
+):
+    token = uuid.uuid4().hex
+    session = session_store.get_or_create_session(
+        f"pg-resolution-old-tenant-{token}",
+        f"pg-resolution-old-drawing-{token}",
+    )
+    session_id = session["session_id"]
+    assert session_store._pg_append_confirmation_resolved_once(
+        session_id, "turn-origin", "fedcba9876543210", True,
+        "policy:auto_approve_reads",
+    ) == (1, True)
+    db = session_store._platform_db()
+    with db.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO app_session_events"
+                " (session_id, seq, turn_id, type, data_json, created_at)"
+                " VALUES (%s,%s,%s,'text_delta','{}'::jsonb,%s)",
+                [
+                    (session_id, seq, f"later-{seq}", 1.0)
+                    for seq in range(2, 10003)
+                ],
+            )
+        conn.execute(
+            "UPDATE app_sessions SET last_seq = 10002 WHERE session_id = %s",
+            (session_id,),
+        )
+    # This is also the committed-response-loss retry: the first insertion
+    # committed, the caller acts as though it did not receive the response.
+    assert session_store._pg_append_confirmation_resolved_once(
+        session_id, "turn-origin", "fedcba9876543210", True,
+        "policy:auto_approve_reads",
+    ) == (1, False)
 
 
 @requires_database

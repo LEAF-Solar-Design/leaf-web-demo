@@ -1648,22 +1648,9 @@ def _ensure_policy_resolution_event(approval: Dict[str, Any], cid: str) -> None:
     """
     session_id = str(approval["session_id"])
     turn_id = str(approval["turn_id"])
-    expected = {
-        "confirmation_id": cid,
-        "approved": True,
-        "by": POLICY_DECIDER,
-    }
-    # The policy lock makes lookup + append one process-local critical section.
-    # Relay terminals for a session can overlap, but only one can project this
-    # cid. The durable event remains the restart/replay witness.
-    with _pending_policy_lock:
-        for event in session_store.recent_events(session_id, 10000):
-            if (event.get("type") == "confirmation_resolved"
-                    and str(event.get("turn_id")) == turn_id
-                    and event.get("data") == expected):
-                return
-        session_store.append_event(
-            session_id, turn_id, "confirmation_resolved", expected)
+    session_store.append_confirmation_resolved_once(
+        session_id, turn_id, cid, True, POLICY_DECIDER,
+    )
 
 
 def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,

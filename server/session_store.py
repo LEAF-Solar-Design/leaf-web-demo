@@ -18,11 +18,10 @@ JOBS_DB — see tests/test_wave2.py etc. for the precedent).
 Event envelope (every stored/streamed event, frozen shape):
     {v: 1, session_id, turn_id, seq, type, data}
 
-``seq`` is a durable, monotonic, session-scoped cursor. It is allocated in
-EXACTLY ONE place in the whole codebase: append_event() below, inside a single
-locked read-modify-write transaction (SELECT current last_seq -> seq = last_seq+1
--> INSERT the event row -> UPDATE sessions.last_seq -> commit). No other code
-path may compute or assign a seq value.
+``seq`` is a durable, monotonic, session-scoped cursor. It is allocated only by
+the event append primitives below, inside one locked read-modify-write
+transaction (SELECT current last_seq -> seq = last_seq+1 -> INSERT the event
+row -> UPDATE sessions.last_seq -> commit). No caller computes or assigns it.
 
 Concurrency model: every public function that touches the database acquires
 the module-level ``_lock`` for its ENTIRE read-modify-write sequence (not just
@@ -86,6 +85,8 @@ Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
     get_or_create_session(tenant_id, drawing_id) -> dict
     get_session(session_id) -> Optional[dict]
     append_event(session_id, turn_id, type, data) -> int
+    append_confirmation_resolved_once(session_id, turn_id, confirmation_id,
+                                      approved, by) -> (seq, inserted)
     events_after(session_id, after_seq, limit=500) -> list
     recent_events(session_id, limit) -> list
     try_begin_turn(session_id, turn_id, stale_after_s) -> bool
@@ -396,6 +397,67 @@ def append_event(session_id: str, turn_id: Optional[str], type: str,
             )
         conn.commit()
         return seq
+
+
+def append_confirmation_resolved_once(
+    session_id: str, turn_id: str, confirmation_id: str,
+    approved: bool, by: str,
+) -> tuple[int, bool]:
+    """Atomically find or append one exact confirmation resolution event.
+
+    Unlike transcript reads, this lookup is unbounded. It is the durable
+    restart/replay uniqueness boundary for a policy decision projection.
+    """
+    expected = {
+        "confirmation_id": confirmation_id,
+        "approved": bool(approved),
+        "by": by,
+    }
+    now = time.time()
+    with _lock:
+        conn = _db()
+        conn.row_factory = sqlite3.Row
+        session = conn.execute(
+            "SELECT last_seq FROM sessions WHERE session_id = ?", (session_id,),
+        ).fetchone()
+        if session is None:
+            raise KeyError(f"unknown session_id {session_id!r}")
+        rows = conn.execute(
+            "SELECT seq, data_json FROM session_events"
+            " WHERE session_id = ? AND turn_id = ?"
+            " AND type = 'confirmation_resolved' ORDER BY seq ASC",
+            (session_id, turn_id),
+        ).fetchall()
+        exact = []
+        for row in rows:
+            try:
+                data = json.loads(row["data_json"] or "{}")
+            except (TypeError, ValueError):
+                raise RuntimeError("malformed confirmation resolution projection")
+            if not isinstance(data, dict):
+                raise RuntimeError("malformed confirmation resolution projection")
+            if data == expected:
+                exact.append(int(row["seq"]))
+            elif data.get("confirmation_id") == confirmation_id:
+                raise RuntimeError("conflicting confirmation resolution projection")
+        if len(exact) > 1:
+            raise RuntimeError("duplicate confirmation resolution projection")
+        if exact:
+            return exact[0], False
+        seq = int(session["last_seq"]) + 1
+        conn.execute(
+            "INSERT INTO session_events"
+            " (session_id, seq, turn_id, type, data_json, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (session_id, seq, turn_id, "confirmation_resolved",
+             json.dumps(expected), now),
+        )
+        conn.execute(
+            "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE session_id = ?",
+            (seq, now, session_id),
+        )
+        conn.commit()
+        return seq, True
 
 
 def events_after(session_id: str, after_seq: int, limit: int = 500) -> List[Dict[str, Any]]:
@@ -766,6 +828,7 @@ _legacy_ensure_started = ensure_started
 _legacy_get_or_create_session = get_or_create_session
 _legacy_get_session = get_session
 _legacy_append_event = append_event
+_legacy_append_confirmation_resolved_once = append_confirmation_resolved_once
 _legacy_events_after = events_after
 _legacy_recent_events = recent_events
 _legacy_try_begin_turn = try_begin_turn
@@ -999,6 +1062,70 @@ def _pg_append_event(
                 (session_id, turn_id),
             )
     return seq
+
+
+def _pg_append_confirmation_resolved_once(
+    session_id: str, turn_id: str, confirmation_id: str,
+    approved: bool, by: str, *, expected_seq: Optional[int] = None,
+) -> tuple[int, bool]:
+    expected = {
+        "confirmation_id": confirmation_id,
+        "approved": bool(approved),
+        "by": by,
+    }
+    data_json = json.dumps(expected)
+    now = time.time()
+    db = _platform_db()
+    with db.transaction() as conn:
+        session = conn.execute(
+            "SELECT last_seq FROM app_sessions WHERE session_id = %s FOR UPDATE",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            raise KeyError(f"unknown session_id {session_id!r}")
+        rows = conn.execute(
+            "SELECT seq, data_json FROM app_session_events"
+            " WHERE session_id = %s AND turn_id = %s"
+            " AND type = 'confirmation_resolved' ORDER BY seq ASC",
+            (session_id, turn_id),
+        ).fetchall()
+        exact = []
+        for row in rows:
+            data = _json_value(row["data_json"])
+            if not isinstance(data, dict):
+                raise RuntimeError("malformed confirmation resolution projection")
+            if data == expected:
+                exact.append(int(row["seq"]))
+            elif data.get("confirmation_id") == confirmation_id:
+                raise RuntimeError("conflicting confirmation resolution projection")
+        if len(exact) > 1:
+            raise RuntimeError("duplicate confirmation resolution projection")
+        if exact:
+            seq = exact[0]
+            if expected_seq is not None and seq != expected_seq:
+                raise RuntimeError(
+                    "confirmation resolution sequence mismatch: "
+                    f"legacy={expected_seq}, postgres={seq}"
+                )
+            return seq, False
+        seq = int(session["last_seq"]) + 1
+        if expected_seq is not None and seq != expected_seq:
+            raise RuntimeError(
+                "confirmation resolution sequence mismatch: "
+                f"legacy={expected_seq}, postgres={seq}"
+            )
+        conn.execute(
+            "INSERT INTO app_session_events"
+            " (session_id, seq, turn_id, type, data_json, created_at)"
+            " VALUES (%s,%s,%s,'confirmation_resolved',%s::jsonb,%s)",
+            (session_id, seq, turn_id, data_json, now),
+        )
+        conn.execute(
+            "UPDATE app_sessions SET last_seq = %s, updated_at = %s"
+            " WHERE session_id = %s",
+            (seq, now, session_id),
+        )
+        return seq, True
 
 
 def _pg_events_after(
@@ -1300,6 +1427,30 @@ def append_event(
             updated_at=mirrored["updated_at"] if mirrored else None,
         )
     return seq
+
+
+def append_confirmation_resolved_once(
+    session_id: str, turn_id: str, confirmation_id: str,
+    approved: bool, by: str,
+) -> tuple[int, bool]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_append_confirmation_resolved_once(
+            session_id, turn_id, confirmation_id, approved, by,
+        )
+    if mode in _DUAL_WRITE_MODES and _pg_get_session(session_id) is None:
+        raise RuntimeError("PostgreSQL session mirror is missing")
+    legacy_seq, legacy_inserted = _legacy_append_confirmation_resolved_once(
+        session_id, turn_id, confirmation_id, approved, by,
+    )
+    if mode in _DUAL_WRITE_MODES:
+        pg_seq, pg_inserted = _pg_append_confirmation_resolved_once(
+            session_id, turn_id, confirmation_id, approved, by,
+            expected_seq=legacy_seq,
+        )
+        _shadow_equal("confirmation resolution sequence", legacy_seq, pg_seq)
+        return legacy_seq, legacy_inserted or pg_inserted
+    return legacy_seq, legacy_inserted
 
 
 def events_after(
