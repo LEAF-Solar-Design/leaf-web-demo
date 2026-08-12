@@ -212,6 +212,77 @@ describe("ConverseLoop — sessions", () => {
 });
 
 describe("ConverseLoop — turn lock", () => {
+  it("publishes terminal only after the private turn lock is released", async () => {
+    const runner = new FakeConverseRunner();
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const realEndTurn = store.endTurn.bind(store);
+    let enteredEndTurn!: () => void;
+    const endTurnEntered = new Promise<void>((resolve) => { enteredEndTurn = resolve; });
+    let releaseEndTurn!: () => void;
+    const endTurnBarrier = new Promise<void>((resolve) => { releaseEndTurn = resolve; });
+    store.endTurn = async (...args) => {
+      enteredEndTurn();
+      await endTurnBarrier;
+      await realEndTurn(...args);
+    };
+    const terminalSnapshots: Array<{ activeTurnId: string | null; seq: number }> = [];
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const started = await loop.handleMessage({
+      sessionId: session.session_id,
+      tenantId: session.tenant_id,
+      text: "hello",
+      contextPacket: PACKET,
+      onEvent: (event) => {
+        if (event.type === "turn_complete") {
+          void store.getActiveTurn(session.session_id).then((active) => {
+            terminalSnapshots.push({ activeTurnId: active?.turn_id ?? null, seq: event.seq });
+          });
+        }
+      },
+    });
+
+    await endTurnEntered;
+    const persisted = await store.eventsAfter(session.session_id, 0);
+    expect(ofType(persisted, "turn_complete")).toHaveLength(1);
+    expect(terminalSnapshots).toHaveLength(0);
+
+    releaseEndTurn();
+    await started.done;
+    await Promise.resolve();
+    expect(terminalSnapshots).toEqual([{
+      activeTurnId: null,
+      seq: ofType(persisted, "turn_complete")[0]!.seq,
+    }]);
+  });
+
+  it("does not publish terminal when private lock release fails", async () => {
+    const runner = new FakeConverseRunner();
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    store.endTurn = async () => {
+      throw new Error("injected durable release failure");
+    };
+    const live: ConverseEvent[] = [];
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const started = await loop.handleMessage({
+      sessionId: session.session_id,
+      tenantId: session.tenant_id,
+      text: "hello",
+      contextPacket: PACKET,
+      onEvent: (event) => live.push(event),
+    });
+    await started.done;
+
+    expect(ofType(await store.eventsAfter(session.session_id, 0), "turn_complete")).toHaveLength(1);
+    expect(live.some((event) => event.type === "turn_complete")).toBe(false);
+    expect((await store.getActiveTurn(session.session_id))?.turn_id).toBe(started.turnId);
+  });
+
   it("a second message during an active turn -> TurnInProgressError carrying the active turnId", async () => {
     const { loop, runner, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

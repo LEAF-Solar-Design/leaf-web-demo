@@ -1638,6 +1638,34 @@ def _return_policy_consume(cid: str, session_id: str, tenant_id: str) -> bool:
     return False
 
 
+def _ensure_policy_resolution_event(approval: Dict[str, Any], cid: str) -> None:
+    """Project one policy decision onto its origin proposal turn.
+
+    The decision row and transcript are separate durable writes, as on the
+    human route. A failed append leaves the decided row parked; a later policy
+    drain repairs the projection before it may consume or start the resumed
+    turn. The exact event lookup keeps that recovery idempotent.
+    """
+    session_id = str(approval["session_id"])
+    turn_id = str(approval["turn_id"])
+    expected = {
+        "confirmation_id": cid,
+        "approved": True,
+        "by": POLICY_DECIDER,
+    }
+    # The policy lock makes lookup + append one process-local critical section.
+    # Relay terminals for a session can overlap, but only one can project this
+    # cid. The durable event remains the restart/replay witness.
+    with _pending_policy_lock:
+        for event in session_store.recent_events(session_id, 10000):
+            if (event.get("type") == "confirmation_resolved"
+                    and str(event.get("turn_id")) == turn_id
+                    and event.get("data") == expected):
+                return
+        session_store.append_event(
+            session_id, turn_id, "confirmation_resolved", expected)
+
+
 def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                             tier: Optional[str]) -> bool:
     """One candidate. True iff a confirm turn STARTED (the caller then stops:
@@ -1778,6 +1806,11 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                 if current is None or current.get("decided_by") != POLICY_DECIDER:
                     _forget_parked()
                 return False
+        # Match the human approval route's public contract. The policy decision
+        # belongs to the proposal turn, while the distinct resumed turn is bound
+        # later by turn_started.data.confirm.confirmation_id. Project only after
+        # the server-owned decision records, and before consuming or starting.
+        _ensure_policy_resolution_event(approval, cid)
 
         try:
             consumed = session_store.consume_approval(cid, session_id, tenant_id)
@@ -2049,6 +2082,12 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                 ev_type = ev.get("type") if isinstance(ev, dict) else None
                 data = (ev.get("data") if isinstance(ev, dict) else None) or {}
                 if not ev_type:
+                    continue
+                if ev_type == "confirmation_resolved":
+                    # The harness mirrors its private confirmation record on the
+                    # resumed turn. Public decision truth is server-owned and is
+                    # projected once onto the origin proposal turn above. Never
+                    # relay the private mirror or treat its turn as resumed identity.
                     continue
                 if ev_type == "turn_usage" and isinstance(data, dict):
                     turn_usage.clear()
