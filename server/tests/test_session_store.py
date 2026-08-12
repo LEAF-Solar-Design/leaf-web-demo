@@ -10,6 +10,7 @@ This guarantees the real server/sessions.db is never touched by this suite
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import tempfile
 import threading
@@ -200,6 +201,125 @@ def test_append_event_unknown_session_raises_keyerror():
         assert False, "expected KeyError"
     except KeyError:
         pass
+
+
+def test_confirmation_resolution_append_is_exactly_once_under_race():
+    sess = session_store.get_or_create_session(
+        "tenant-resolution-race", "drawing-resolution-race",
+    )
+    barrier = threading.Barrier(2)
+    outcomes = []
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=5)
+            outcomes.append(session_store.append_confirmation_resolved_once(
+                sess["session_id"], "turn-origin", "0123456789abcdef",
+                True, "policy:auto_approve_reads",
+            ))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert sorted(inserted for _, inserted in outcomes) == [False, True]
+    assert len({seq for seq, _ in outcomes}) == 1
+    rows = session_store._query(
+        "SELECT seq FROM session_events WHERE session_id = ?"
+        " AND turn_id = ? AND type = 'confirmation_resolved'",
+        (sess["session_id"], "turn-origin"),
+    )
+    assert len(rows) == 1
+
+
+def test_confirmation_resolution_lookup_is_unbounded_and_semantically_exact():
+    sess = session_store.get_or_create_session(
+        "tenant-resolution-old", "drawing-resolution-old",
+    )
+    session_id = sess["session_id"]
+    original = session_store.append_confirmation_resolved_once(
+        session_id, "turn-origin", "fedcba9876543210", True,
+        "policy:auto_approve_reads",
+    )
+    assert original == (1, True)
+    now = time.time()
+    with session_store._lock:
+        conn = session_store._db()
+        conn.executemany(
+            "INSERT INTO session_events"
+            " (session_id, seq, turn_id, type, data_json, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            [
+                (session_id, seq, f"later-{seq}", "text_delta", "{}", now)
+                for seq in range(2, 10003)
+            ],
+        )
+        conn.execute(
+            "UPDATE sessions SET last_seq = 10002 WHERE session_id = ?",
+            (session_id,),
+        )
+        conn.commit()
+
+    assert session_store.append_confirmation_resolved_once(
+        session_id, "turn-origin", "fedcba9876543210", True,
+        "policy:auto_approve_reads",
+    ) == (1, False)
+    different = session_store.append_confirmation_resolved_once(
+        session_id, "turn-origin", "fedcba9876543211", True,
+        "policy:auto_approve_reads",
+    )
+    assert different == (10003, True)
+
+
+def test_confirmation_resolution_refuses_conflict_duplicate_and_malformed():
+    cases = [
+        ({"confirmation_id": "0123456789abcdef", "approved": False,
+          "by": "policy:auto_approve_reads"}, "conflicting"),
+        ({"confirmation_id": "0123456789abcdef", "approved": True,
+          "by": "policy:auto_approve_reads"}, "duplicate"),
+        (["not", "an", "object"], "malformed"),
+    ]
+    for index, (second, reason) in enumerate(cases):
+        sess = session_store.get_or_create_session(
+            f"tenant-resolution-{reason}", f"drawing-resolution-{reason}",
+        )
+        session_id = sess["session_id"]
+        first = {"confirmation_id": "0123456789abcdef", "approved": True,
+                 "by": "policy:auto_approve_reads"}
+        with session_store._lock:
+            conn = session_store._db()
+            rows = [(session_id, 1, "turn-origin", "confirmation_resolved",
+                     json.dumps(first), time.time())]
+            if reason == "duplicate":
+                rows.append((session_id, 2, "turn-origin", "confirmation_resolved",
+                             json.dumps(second), time.time()))
+            else:
+                rows[0] = (session_id, 1, "turn-origin", "confirmation_resolved",
+                           json.dumps(second), time.time())
+            conn.executemany(
+                "INSERT INTO session_events"
+                " (session_id, seq, turn_id, type, data_json, created_at)"
+                " VALUES (?,?,?,?,?,?)", rows,
+            )
+            conn.execute(
+                "UPDATE sessions SET last_seq = ? WHERE session_id = ?",
+                (len(rows), session_id),
+            )
+            conn.commit()
+        try:
+            session_store.append_confirmation_resolved_once(
+                session_id, "turn-origin", "0123456789abcdef", True,
+                "policy:auto_approve_reads",
+            )
+            assert False, f"expected {reason} refusal for case {index}"
+        except RuntimeError as exc:
+            assert reason in str(exc)
 
 
 # --------------------------------------------------------------------------- #

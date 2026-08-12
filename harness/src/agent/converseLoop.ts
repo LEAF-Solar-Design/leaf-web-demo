@@ -383,11 +383,11 @@ export class ConverseLoop {
 
     // Persist FIRST (seq is store truth), then fan out live. A throwing sink must
     // never corrupt the turn.
-    const emit = async (
+    const publish = (
+      stored: { seq: number },
       type: ConverseEventType,
       data: Record<string, unknown>,
-    ): Promise<void> => {
-      const stored = await store.appendEvent(sessionId, turnId, type, data);
+    ): void => {
       if (input.onEvent) {
         try {
           input.onEvent({
@@ -402,6 +402,13 @@ export class ConverseLoop {
           // live sink failure is the subscriber's problem; the transcript has it
         }
       }
+    };
+    const emit = async (
+      type: ConverseEventType,
+      data: Record<string, unknown>,
+    ): Promise<void> => {
+      const stored = await store.appendEvent(sessionId, turnId, type, data);
+      publish(stored, type, data);
     };
 
     const state: TurnState = {
@@ -529,20 +536,34 @@ export class ConverseLoop {
         // resume id lost; the next turn simply starts a fresh SDK conversation
       }
     }
+    const terminalData = { stop_reason: stopReason };
+    let storedTerminal: { seq: number } | null = null;
     try {
-      await emit("turn_complete", { stop_reason: stopReason });
+      // Persist before releasing the lock so seq order remains durable. Do not
+      // publish yet: the app may immediately start the policy-confirmed turn,
+      // and that request must never observe this private turn as still active.
+      storedTerminal = await store.appendEvent(
+        sessionId, turnId, "turn_complete", terminalData,
+      );
     } catch {
-      // transcript is short one terminal event; the turns row still records it
+      // transcript is short one terminal event; finalization still releases it
     }
+    let turnReleased = false;
     try {
       await store.endTurn(sessionId, turnId, stopReason === "error" ? "failed" : "complete", stopReason);
+      turnReleased = true;
     } catch {
       // the store's stale-turn recovery (sessionStore) is the backstop here
     }
-    try {
-      await store.updateSession(sessionId, { status: "idle" });
-    } catch {
-      // status is cosmetic next to the turn lock; the next turn rewrites it
+    if (turnReleased) {
+      try {
+        await store.updateSession(sessionId, { status: "idle" });
+      } catch {
+        // status is cosmetic next to the turn lock; the next turn rewrites it
+      }
+    }
+    if (storedTerminal && turnReleased) {
+      publish(storedTerminal, "turn_complete", terminalData);
     }
   }
 

@@ -149,8 +149,11 @@ def _proposal_script(cid: str, capability: Optional[str], dwg: Optional[str]):
 
 def _run_proposing_turn(stub, tenant: str, sid: str, dwg: str, cid: str,
                         capability: Optional[str] = "drawing.read",
-                        with_dwg: bool = True):
+                        with_dwg: bool = True,
+                        resume_script: Optional[List[Dict[str, Any]]] = None):
     stub.SCRIPTS.append(_proposal_script(cid, capability, dwg if with_dwg else None))
+    if resume_script is not None:
+        stub.SCRIPTS.append(resume_script)
     turn_runner.start_turn(tenant, sid, text="count my panels")
     assert _wait_until(
         lambda: session_store.get_session(sid)["active_turn_id"] is None
@@ -193,7 +196,17 @@ def test_auto_approve_reads_confirms_a_drawing_read_proposal(monkeypatch, turn_s
     sid = sess["session_id"]
     session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
 
-    _run_proposing_turn(stub, "tenant-p", sid, sess["drawing_id"], "cid-auto")
+    _run_proposing_turn(
+        stub, "tenant-p", sid, sess["drawing_id"], "cid-auto",
+        resume_script=[
+            {"type": "confirmation_resolved", "data": {
+                "confirmation_id": "cid-auto", "approved": True,
+                "by": "harness-private-tenant"}},
+            {"type": "job_linked", "data": {
+                "job_id": "job-auto", "tool": "count-by-layer"}},
+            {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+        ],
+    )
 
     ok = _wait_until(lambda: len(stub.BODIES) >= 2)
     assert ok, "no confirm turn auto-started under auto_approve_reads"
@@ -210,6 +223,100 @@ def test_auto_approve_reads_confirms_a_drawing_read_proposal(monkeypatch, turn_s
         "the audit trail must name the policy, not a human")
     assert approval["consumed"] is True
     assert _wait_until(lambda: session_store.get_session(sid)["active_turn_id"] is None)
+
+    events = session_store.recent_events(sid, 100)
+    proposed = [event for event in events if event["type"] == "proposed_run"]
+    resolved = [event for event in events if event["type"] == "confirmation_resolved"]
+    started = [event for event in events if event["type"] == "turn_started"]
+    assert len(resolved) == 1
+    assert resolved[0]["turn_id"] == proposed[0]["turn_id"]
+    assert resolved[0]["data"] == {
+        "confirmation_id": "cid-auto",
+        "approved": True,
+        "by": turn_runner.POLICY_DECIDER,
+    }
+    assert len(started) == 2 and started[0]["turn_id"] != started[1]["turn_id"]
+    assert started[1]["data"]["confirm"]["confirmation_id"] == "cid-auto"
+    assert resolved[0]["seq"] < started[1]["seq"]
+    assert [event["data"].get("job_id") for event in events
+            if event["type"] == "job_linked"] == ["job-auto"]
+
+
+def test_policy_resolution_projection_repairs_before_resume(monkeypatch, turn_stub):
+    """A transcript write failure may not start an unprojected resumed turn.
+
+    The durable decision remains policy-owned and parked. A later drain repairs
+    exactly one origin-turn event, then consumes and starts the distinct turn.
+    """
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    monkeypatch.setattr(turn_runner.agent_gate, "read_pending_strict",
+                        lambda cid: (None, "absent"))
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_policy.set_policy(sid, "tenant-p", "auto_approve_reads")
+    session_store.create_approval(
+        confirmation_id="cid-projection", session_id=sid, tenant_id="tenant-p",
+        turn_id="origin-proposal", tool="panel_count", params={},
+        capability="drawing.read", rationale="r", kind="run_capability",
+        payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+
+    real_append = session_store.append_confirmation_resolved_once
+    failed = {"once": False}
+
+    def _fail_first_projection(session_id, turn_id, cid, approved, by):
+        if not failed["once"]:
+            failed["once"] = True
+            raise RuntimeError("injected projection failure")
+        return real_append(session_id, turn_id, cid, approved, by)
+
+    monkeypatch.setattr(
+        turn_runner.session_store, "append_confirmation_resolved_once",
+        _fail_first_projection,
+    )
+    turn_runner._auto_confirm_reads(
+        "tenant-p", sid, {"cid-projection": {"capability": "drawing.read"}},
+        None, "demo")
+    approval = session_store.get_approval("cid-projection")
+    assert approval["decided"] is True and approval["consumed"] is False
+    assert stub.BODIES == [], "resume started before its public decision projected"
+
+    monkeypatch.setattr(
+        turn_runner.session_store, "append_confirmation_resolved_once", real_append,
+    )
+    turn_runner._auto_confirm_reads("tenant-p", sid, {}, None, "demo")
+    assert _wait_until(lambda: len(stub.BODIES) == 1)
+    resolved = [event for event in session_store.recent_events(sid, 100)
+                if event["type"] == "confirmation_resolved"]
+    assert len(resolved) == 1
+    assert resolved[0]["turn_id"] == "origin-proposal"
+    assert resolved[0]["data"]["by"] == turn_runner.POLICY_DECIDER
+
+
+def test_concurrent_policy_projection_is_exactly_once():
+    sess = _new_session()
+    sid = sess["session_id"]
+    session_store.create_approval(
+        confirmation_id="cid-project-once", session_id=sid,
+        tenant_id="tenant-p", turn_id="origin-once", tool="panel_count",
+        params={}, capability="drawing.read", rationale="r",
+        kind="run_capability", payload={"dwg": sess["drawing_id"]}, ttl_s=600)
+    approval = session_store.get_approval("cid-project-once")
+    assert approval is not None
+
+    threads = [threading.Thread(
+        target=turn_runner._ensure_policy_resolution_event,
+        args=(approval, "cid-project-once")) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    resolved = [event for event in session_store.recent_events(sid, 100)
+                if event["type"] == "confirmation_resolved"]
+    assert len(resolved) == 1
 
 
 # =========================================================================== #
@@ -359,6 +466,8 @@ def test_a_refusing_gate_leaves_the_chip_manual(monkeypatch, turn_stub):
     assert approval["decided"] is False, (
         "the session row was decided even though the gate refused")
     assert len(stub.BODIES) == 1
+    assert not [event for event in session_store.recent_events(sid, 100)
+                if event["type"] == "confirmation_resolved"]
 
 
 def test_an_unreadable_gate_fails_closed(monkeypatch, turn_stub):
@@ -375,6 +484,8 @@ def test_an_unreadable_gate_fails_closed(monkeypatch, turn_stub):
     time.sleep(0.2)
     assert session_store.get_approval("cid-ioerr")["decided"] is False
     assert len(stub.BODIES) == 1
+    assert not [event for event in session_store.recent_events(sid, 100)
+                if event["type"] == "confirmation_resolved"]
 
 
 def test_a_policy_decision_left_unconsumed_is_resumable(monkeypatch, turn_stub):
@@ -435,6 +546,9 @@ def test_a_humans_decision_is_never_resumed_by_the_policy(monkeypatch, turn_stub
     time.sleep(0.15)
     assert session_store.get_approval("cid-human")["consumed"] is False, (
         "the policy consumed a decision a HUMAN made")
+    assert not [event for event in session_store.recent_events(sid, 100)
+                if event["type"] == "confirmation_resolved"], (
+        "the policy projected a resolution for another actor's decision")
 
 
 def test_a_lost_cas_is_retried_at_the_next_terminal(monkeypatch, turn_stub):
