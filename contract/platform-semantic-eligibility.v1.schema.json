@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-semantic-eligibility.v1.schema.json",
+  "title": "Leaf platform semantic eligibility receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_digest",
+    "producer_identity",
+    "signature",
+    "assertions",
+    "verifier_version",
+    "topology_version",
+    "rollback_result",
+    "cleanup_census_digest",
+    "issued_at",
+    "expires_at",
+    "payload_digest"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-semantic-eligibility.v1"},
+    "manifest_digest": {"$ref": "#/$defs/sha256"},
+    "producer_identity": {"type": "string", "minLength": 1, "maxLength": 200},
+    "signature": {"$ref": "#/$defs/signature"},
+    "assertions": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/assertion"}
+    },
+    "verifier_version": {"type": "string", "pattern": "^v[0-9]+$"},
+    "topology_version": {"type": "string", "pattern": "^v[0-9]+$"},
+    "rollback_result": {"$ref": "#/$defs/rollback"},
+    "cleanup_census_digest": {"$ref": "#/$defs/sha256"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "payload_digest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signed_payload_digest", "value"],
+      "properties": {
+        "algorithm": {"const": "external-v1"},
+        "key_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "signed_payload_digest": {"$ref": "#/$defs/sha256"},
+        "value": {"type": "string", "minLength": 16, "maxLength": 4096}
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "result", "evidence_digest"],
+      "properties": {
+        "id": {
+          "enum": [
+            "deployment_identity",
+            "app_to_harness_auth",
+            "removal_worker_fence",
+            "ordinary_authoring_recovery",
+            "publication_terminal_state",
+            "closed_projection",
+            "tenant_upload_isolation",
+            "rollback_cleanup"
+          ]
+        },
+        "result": {"const": true},
+        "evidence_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["restored", "images_rebuilt", "service_definitions_mutated"],
+      "properties": {
+        "restored": {"const": true},
+        "images_rebuilt": {"const": false},
+        "service_definitions_mutated": {"const": false}
+      }
+    }
+  }
+}
