@@ -1162,25 +1162,44 @@ def _pg_try_begin_turn(
     *, started_at: Optional[float] = None,
 ) -> bool:
     now = started_at if started_at is not None else time.time()
-    stale_before = now - stale_after_s
-    # Same holder-window rule as the legacy CAS (see RESERVATION_PREFIX),
-    # SQL-side so the CAS stays one atomic statement.
-    reservation_stale_before = now - RESERVATION_STALE_S
     db = _platform_db()
     with db.transaction() as conn:
-        row = conn.execute(
-            "UPDATE app_sessions SET active_turn_id = %s, turn_started_at = %s,"
-            " active_turn_tier = %s, active_turn_subject = %s, updated_at = %s"
-            " WHERE session_id = %s AND (active_turn_id IS NULL"
-            " OR turn_started_at IS NULL"
-            " OR turn_started_at <"
-            "   (CASE WHEN active_turn_id LIKE 'restore-%%'"
-            "         THEN %s ELSE %s END))"
-            " RETURNING session_id",
-            (turn_id, now, tier, subject, now, session_id,
-             reservation_stale_before, stale_before),
-        ).fetchone()
-    return row is not None
+        return pg_try_begin_turn_in_transaction(
+            conn, session_id, turn_id, stale_after_s, tier=tier,
+            subject=subject, started_at=now,
+        )
+
+
+def pg_try_begin_turn_in_transaction(
+    conn: Any, session_id: str, turn_id: str, stale_after_s: float,
+    tier: Optional[str] = None, subject: Optional[str] = None, *,
+    started_at: Optional[float] = None,
+) -> bool:
+    """Lock and acquire a PostgreSQL session turn on the caller's transaction."""
+    now = started_at if started_at is not None else time.time()
+    row = conn.execute(
+        "SELECT active_turn_id, turn_started_at FROM app_sessions"
+        " WHERE session_id=%s FOR UPDATE",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    active = row["active_turn_id"]
+    started = row["turn_started_at"]
+    holder_window = RESERVATION_STALE_S if is_reservation_holder(active) else stale_after_s
+    is_free = active is None
+    is_stale = not is_free and (
+        started is None or now - float(started) > float(holder_window)
+    )
+    if not (is_free or is_stale):
+        return False
+    updated = conn.execute(
+        "UPDATE app_sessions SET active_turn_id=%s, turn_started_at=%s,"
+        " active_turn_tier=%s, active_turn_subject=%s, updated_at=%s"
+        " WHERE session_id=%s RETURNING session_id",
+        (turn_id, now, tier, subject, now, session_id),
+    ).fetchone()
+    return updated is not None
 
 
 def _pg_active_turn_tier(

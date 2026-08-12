@@ -612,8 +612,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                entitlement_elevated: Optional[bool] = None,
                request_id: Optional[str] = None,
                turn_id: Optional[str] = None,
-               journal_claimed: bool = False,
-               journal_recoverable: Optional[Dict[str, Any]] = None) -> str:
+               journal_claimed: bool = False) -> str:
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -650,18 +649,16 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
 
     turn_id = turn_id or str(uuid.uuid4())
     max_s = turn_max_s()
-    if request_id is not None and request_journal.enabled() and not journal_claimed:
-        if not request_journal.begin_request(
-            request_id, turn_id, lease_seconds=max_s,
+    fused_journal_turn = request_id is not None and request_journal.enabled()
+    if fused_journal_turn and not journal_claimed:
+        if not request_journal.begin_request_and_turn(
+            request_id, turn_id, lease_seconds=max_s, session_id=session_id,
+            stale_after_s=max_s, tier=tier, subject=subject,
         ):
             raise TurnBusy(f"request {request_id!r} is already active")
-    if not session_store.try_begin_turn(session_id, turn_id, max_s, tier=tier,
-                                        subject=subject):
-        if request_id is not None and request_journal.enabled():
-            request_journal.release_execution(
-                request_id, turn_id, requeue=journal_claimed,
-                recoverable=journal_recoverable,
-            )
+    if not fused_journal_turn and not session_store.try_begin_turn(
+        session_id, turn_id, max_s, tier=tier, subject=subject,
+    ):
         raise TurnBusy(f"session {session_id!r} already has an active turn")
 
     # The durable transcript source: whatever drove this turn (a fresh user
@@ -1238,16 +1235,17 @@ def drain_session_followups(tenant_id: Any, session_id: str) -> None:
 def _kick_durable_queued(session_id: Optional[str] = None) -> int:
     """Claim and start durable queue rows without ever replaying execution.
 
-    A claimed row already owns its journal execution fence. The existing
-    session CAS remains the final one-active-turn guard. Losing that CAS puts
-    the exact row back in ``queued``; every other start failure terminalizes it.
+    A claimed row owns both its journal execution fence and the exact session
+    turn in one commit. Every later start failure releases that exact session
+    turn before terminalizing the request.
     """
     attempts = 0
     processed = 0
     while attempts < _KICK_MAX_ATTEMPTS:
         attempts += 1
-        row = request_journal.claim_next_queued(
-            lease_seconds=turn_max_s(), session_id=session_id,
+        row = request_journal.claim_next_queued_and_turn(
+            lease_seconds=turn_max_s(), stale_after_s=turn_max_s(),
+            session_id=session_id,
         )
         if row is None:
             return processed
@@ -1264,6 +1262,7 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
             allowed = False
         if not allowed:
             processed += 1
+            session_store.end_turn(row["session_id"], turn_id)
             request_journal.finish_request(
                 request_id, turn_id, state="failed", response_status=403,
                 response={"request_id": request_id, "status": "failed",
@@ -1293,17 +1292,17 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
                 request_id=request_id,
                 turn_id=turn_id,
                 journal_claimed=True,
-                journal_recoverable=payload,
             )
             processed += 1
             if session_id is not None:
                 return processed
             continue
         except TurnBusy:
-            # start_turn already returned the claim to queued after losing CAS.
+            # Defensive only: a fused claim already owns the session turn.
             return processed
         except TurnRejected as exc:
             processed += 1
+            session_store.end_turn(row["session_id"], turn_id)
             request_journal.finish_request(
                 request_id, turn_id, state="failed",
                 response_status=exc.status_code,
@@ -1324,6 +1323,7 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
             continue
         except Exception as exc:  # noqa: BLE001
             processed += 1
+            session_store.end_turn(row["session_id"], turn_id)
             request_journal.finish_request(
                 request_id, turn_id, state="failed", response_status=503,
                 response={"request_id": request_id, "status": "failed",
