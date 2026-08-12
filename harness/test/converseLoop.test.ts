@@ -513,7 +513,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
     });
     await turn.done;
 
-    // Dispatch went through submitRun with the section-7 payload + 15s wait budget.
+    // Dispatch returns only the accepted job identity; polling happens after the durable link.
     expect(appRun.submitCalls).toHaveLength(1);
     expect(appRun.submitCalls[0]).toMatchObject({
       tenantId: "demo-tenant",
@@ -523,8 +523,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
       params: {},
       dwg: "rooftop_demo",
       drawingVersion: 1,
-      wait: true,
-      waitTimeoutS: 15,
+      wait: false,
     });
 
     // The gate ran before the execution — in the app policy catalog's vocabulary.
@@ -540,6 +539,70 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(ofType(events, "turn_usage")[0]!.data).toMatchObject({ cost_tokens: 170 });
     expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
   });
+
+  it.each([
+    ["ordinary", "pre_ack", 0, false],
+    ["ordinary", "post_ack", 1, false],
+    ["ordinary", "timeout", 1, false],
+    ["ordinary", "success", 1, true],
+    ["batch_fallback", "pre_ack", 0, false],
+    ["batch_fallback", "post_ack", 1, false],
+    ["batch_fallback", "timeout", 1, false],
+    ["batch_fallback", "success", 1, true],
+  ] as const)(
+    "%s preserves acknowledgement cardinality for %s",
+    async (route, outcome, expectedLinks, expectedOk) => {
+      class BoundaryAppRunClient extends FakeAppRunClient {
+        override async submitRun(
+          req: Parameters<FakeAppRunClient["submitRun"]>[0],
+        ): ReturnType<FakeAppRunClient["submitRun"]> {
+          if (outcome === "pre_ack") throw new Error("private pre-ack detail");
+          return super.submitRun(req);
+        }
+
+        override async getJob(
+          tenantId: string,
+          jobId: string,
+        ): Promise<Record<string, unknown>> {
+          if (outcome === "post_ack") throw new Error("private poll detail");
+          return super.getJob(tenantId, jobId);
+        }
+      }
+
+      const runner = new FakeConverseRunner();
+      const appRun = new BoundaryAppRunClient();
+      if (route === "batch_fallback") {
+        appRun.catalog = appRun.catalog.map((entry) => entry.name === "count-by-layer"
+          ? { ...entry, execution_class: "instant", batch_fallback: true }
+          : entry);
+      }
+      const gate = new FakeGateClient();
+      const store = new FakeSessionStore();
+      const loop = new ConverseLoop(
+        { runner, appRun, gate, store },
+        { readWaitS: outcome === "timeout" ? 0 : 15 },
+      );
+      const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+      await sendText(loop, session, "RUN:count-by-layer");
+
+      const events = await store.eventsAfter(session.session_id, 0);
+      const links = ofType(events, "job_linked");
+      expect(links).toHaveLength(expectedLinks);
+      if (route === "batch_fallback" && expectedLinks === 1) {
+        expect(links[0]!.data).toMatchObject({ route: "batch_fallback" });
+      }
+      const results = ofType(events, "tool_result");
+      expect(results).toHaveLength(1);
+      expect(results[0]!.data).toMatchObject({
+        tool: "run_capability",
+        ok: expectedOk,
+      });
+      if (!expectedOk) {
+        expect(JSON.stringify(results[0]!.data)).not.toContain("private");
+      }
+      expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
+    },
+  );
 
   it("replaces a malformed model read pin with the current drawing head", async () => {
     const appRun = new FakeAppRunClient();
@@ -566,7 +629,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls[0]).toMatchObject({
       tool: "count-by-layer",
       drawingVersion: 3,
-      wait: true,
+      wait: false,
     });
   });
 
@@ -595,7 +658,7 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls[0]).toMatchObject({
       tool: "count-by-layer",
       drawingVersion: 4,
-      wait: true,
+      wait: false,
     });
   });
 
@@ -982,8 +1045,7 @@ describe("ConverseLoop — live-APS split turns (submit_live_solve, R4)", () => 
       tool: "count-by-layer",
       dwg: "rooftop_demo",
       drawingVersion: 7,
-      wait: true,
-      waitTimeoutS: 15,
+      wait: false,
     });
     expect(appRun.submitCalls[0]).not.toHaveProperty("expectedDrawingHead");
     expect(appRun.submitCalls[0]).not.toHaveProperty("catalogCommit");

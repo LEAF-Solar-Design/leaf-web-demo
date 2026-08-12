@@ -66,6 +66,16 @@ export class HttpAppRunClient implements AppRunClient {
     body?: Record<string, unknown>,
     extraHeaders?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
+    return (await this.requestWithStatus(tenantId, method, path, body, extraHeaders)).body;
+  }
+
+  private async requestWithStatus(
+    tenantId: string,
+    method: "GET" | "POST",
+    path: string,
+    body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: { ...this.headers(tenantId), ...extraHeaders },
@@ -82,7 +92,7 @@ export class HttpAppRunClient implements AppRunClient {
         reasonCode ?? (typeof err.error_code === "string" ? err.error_code : undefined),
       );
     }
-    return json;
+    return { status: res.status, body: json };
   }
 
   /** GET /api/capabilities → flatten the family grouping into one entry list. */
@@ -200,7 +210,7 @@ export class HttpAppRunClient implements AppRunClient {
    * out — the caller gets {job_id, status} and the model can job_status later.
    */
   async submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse> {
-    const body = await this.request(
+    const response = await this.requestWithStatus(
       req.tenantId,
       "POST",
       `/api/run`,
@@ -230,9 +240,17 @@ export class HttpAppRunClient implements AppRunClient {
           : {}),
       },
     );
-    const jobId = String(body.job_id ?? "");
-    let status = String(body.status ?? "submitted");
-    if (!req.wait || !jobId) return { job_id: jobId, status };
+    if (response.status !== 202) {
+      throw new AppRunClientError("app run submission was not accepted", response.status);
+    }
+    const jobId = typeof response.body.job_id === "string"
+      ? response.body.job_id.trim()
+      : "";
+    if (!jobId) {
+      throw new AppRunClientError("app run submission omitted job identity", response.status);
+    }
+    let status = String(response.body.status ?? "submitted");
+    if (!req.wait) return { job_id: jobId, status };
 
     const deadline = Date.now() + (req.waitTimeoutS ?? 15) * 1000;
     while (Date.now() < deadline) {
