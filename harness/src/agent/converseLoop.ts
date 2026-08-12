@@ -158,6 +158,41 @@ export class ConverseLoop {
     this.ttlS = opts.confirmationTtlS ?? 300;
   }
 
+  private async pollReadJob(
+    appRun: AppRunClient,
+    tenantId: string,
+    jobId: string,
+  ): Promise<
+    | { ok: true; status: "complete"; result?: unknown }
+    | { ok: false; message: string }
+  > {
+    const deadline = Date.now() + this.readWaitS * 1000;
+    while (Date.now() < deadline) {
+      let row: Record<string, unknown>;
+      try {
+        row = await appRun.getJob(tenantId, jobId);
+      } catch {
+        return { ok: false, message: "job status was unavailable after dispatch" };
+      }
+      const status = String(row.status ?? "");
+      if (status === "complete") {
+        return {
+          ok: true,
+          status,
+          ...(row.result !== undefined ? { result: row.result } : {}),
+        };
+      }
+      if (status === "failed") {
+        return { ok: false, message: "job failed after dispatch" };
+      }
+      if (!status || !["submitted", "running"].includes(status)) {
+        return { ok: false, message: "job status was invalid after dispatch" };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return { ok: false, message: "job polling timed out after dispatch" };
+  }
+
   /** Idempotent per (tenant, drawing) — section-1 POST /converse/sessions. */
   async createOrGetSession(tenantId: string, drawingId: string): Promise<SessionRecord> {
     return this.ports.store.createOrGetSession(tenantId, drawingId);
@@ -1019,20 +1054,27 @@ export class ConverseLoop {
             : undefined;
         if (catalogEntry?.execution_class === "instant") {
           const batchFallback = async (reason: string): Promise<SpineToolResult> => {
-            const fallback = await appRun.submitRun({
-              tenantId, tool: target, params, dwg, catalogDigest,
-              ...(drawingVersion !== undefined ? { drawingVersion } : {}),
-              authoritySessionId: ctx.authoritySessionId,
-              authorityTurnId: ctx.authorityTurnId,
-              wait: true, waitTimeoutS: this.readWaitS,
-            });
+            let fallback;
+            try {
+              fallback = await appRun.submitRun({
+                tenantId, tool: target, params, dwg, catalogDigest,
+                ...(drawingVersion !== undefined ? { drawingVersion } : {}),
+                authoritySessionId: ctx.authoritySessionId,
+                authorityTurnId: ctx.authorityTurnId,
+                wait: false,
+              });
+            } catch {
+              return err("job dispatch was not accepted");
+            }
             await ctx.emit("job_linked", {
               job_id: fallback.job_id, tool: target, route: "batch_fallback", reason,
             });
+            const terminal = await this.pollReadJob(appRun, tenantId, fallback.job_id);
+            if (!terminal.ok) return err(terminal.message);
             return ok(JSON.stringify({
               route: "batch_fallback", reason,
-              job_id: fallback.job_id, status: fallback.status,
-              ...(fallback.result !== undefined ? { result: fallback.result } : {}),
+              job_id: fallback.job_id, status: terminal.status,
+              ...(terminal.result !== undefined ? { result: terminal.result } : {}),
             }));
           };
           const instant = validateInstantRoute({
@@ -1076,33 +1118,46 @@ export class ConverseLoop {
         const effectiveCatalogDigest = args.effective_catalog_digest;
         const toolManifestSha256 = args.tool_manifest_sha256;
         // Read tools may wait inline (fast path); writes are long jobs — async row.
-        const res = await appRun.submitRun({
-          tenantId,
-          authoritySessionId: ctx.authoritySessionId,
-          authorityTurnId: ctx.authorityTurnId,
-          tool: target,
-          params,
-          dwg,
-          catalogDigest,
-          ...(drawingVersion !== undefined
-            ? { drawingVersion }
-            : {}),
-          ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
-            ? { expectedDrawingHead }
-            : {}),
-          ...(capability === "drawing.write" && typeof catalogCommit === "string"
-            ? { catalogCommit }
-            : {}),
-          ...(capability === "drawing.write" && typeof effectiveCatalogDigest === "string"
-            ? { effectiveCatalogDigest }
-            : {}),
-          ...(capability === "drawing.write" && typeof toolManifestSha256 === "string"
-            ? { toolManifestSha256 }
-            : {}),
-          wait: capability === "drawing.read",
-          waitTimeoutS: this.readWaitS,
-        });
+        let res;
+        try {
+          res = await appRun.submitRun({
+            tenantId,
+            authoritySessionId: ctx.authoritySessionId,
+            authorityTurnId: ctx.authorityTurnId,
+            tool: target,
+            params,
+            dwg,
+            catalogDigest,
+            ...(drawingVersion !== undefined
+              ? { drawingVersion }
+              : {}),
+            ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
+              ? { expectedDrawingHead }
+              : {}),
+            ...(capability === "drawing.write" && typeof catalogCommit === "string"
+              ? { catalogCommit }
+              : {}),
+            ...(capability === "drawing.write" && typeof effectiveCatalogDigest === "string"
+              ? { effectiveCatalogDigest }
+              : {}),
+            ...(capability === "drawing.write" && typeof toolManifestSha256 === "string"
+              ? { toolManifestSha256 }
+              : {}),
+            wait: false,
+          });
+        } catch {
+          return err("job dispatch was not accepted");
+        }
         await ctx.emit("job_linked", { job_id: res.job_id, tool: target });
+        if (capability === "drawing.read") {
+          const terminal = await this.pollReadJob(appRun, tenantId, res.job_id);
+          if (!terminal.ok) return err(terminal.message);
+          return ok(JSON.stringify({
+            job_id: res.job_id,
+            status: terminal.status,
+            ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+          }));
+        }
         return ok(
           JSON.stringify({
             job_id: res.job_id,

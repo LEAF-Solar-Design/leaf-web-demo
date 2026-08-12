@@ -122,4 +122,57 @@ describe("HttpAppRunClient run identity", () => {
     expect(body).not.toHaveProperty("authoritySessionId");
     expect(body).not.toHaveProperty("authorityTurnId");
   });
+
+  it.each([
+    [200, { job_id: "job-1", status: "submitted" }, "was not accepted"],
+    [202, { status: "submitted" }, "omitted job identity"],
+    [202, { job_id: "   ", status: "submitted" }, "omitted job identity"],
+  ])("refuses a run before acknowledgement for status %s and body %j", async (
+    status,
+    responseBody,
+    expected,
+  ) => {
+    const client = new HttpAppRunClient({
+      baseUrl: "https://app.invalid",
+      dispatchSecret: "test-secret",
+      fetchImpl: async () => new Response(JSON.stringify(responseBody), {
+        status,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    await expect(client.submitRun({
+      tenantId: "tenant-a",
+      tool: "count-by-layer",
+      params: {},
+      dwg: "drawing-a",
+      catalogDigest: "digest-1",
+      wait: false,
+    })).rejects.toThrow(expected);
+  });
+
+  it("returns the validated 202 job identity without polling when wait is false", async () => {
+    let calls = 0;
+    const client = new HttpAppRunClient({
+      baseUrl: "https://app.invalid",
+      dispatchSecret: "test-secret",
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ job_id: "job-ack", status: "submitted" }), {
+          status: 202,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(client.submitRun({
+      tenantId: "tenant-a",
+      tool: "count-by-layer",
+      params: {},
+      dwg: "drawing-a",
+      catalogDigest: "digest-1",
+      wait: false,
+    })).resolves.toEqual({ job_id: "job-ack", status: "submitted" });
+    expect(calls).toBe(1);
+  });
 });
