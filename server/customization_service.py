@@ -492,6 +492,45 @@ class CustomizationService:
             confirmations=_StoreConfirmations(self.store),
         )
 
+    def removal_authority(self, *, tenant: Any, tool_name: str) -> dict[str, Any]:
+        """Project one immutable tenant-row removal authority tuple."""
+        tenant_id = _tenant_id(tenant)
+        if not isinstance(tool_name, str) or not re.fullmatch(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*", tool_name
+        ):
+            raise CustomizationServiceError("invalid_removal_request", 422)
+        binding = _binding(tenant)
+        if binding.role not in {"owner", "editor"}:
+            raise CustomizationServiceError("tenant_role_denied", 403)
+        current = self.store.get_effective_catalog(tenant_id=tenant_id)
+        raw = _git_blob(_bare_repo(tenant_id), f"{current.catalog_commit}:registry.json")
+        if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), current.catalog_digest):
+            raise CustomizationServiceError("effective_catalog_digest_mismatch", 409)
+        try:
+            registry = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CustomizationServiceError("effective_catalog_malformed", 503) from exc
+        if not isinstance(registry, dict) or not isinstance(registry.get("tools"), list):
+            raise CustomizationServiceError("effective_catalog_malformed", 503)
+        names = []
+        for row in registry["tools"]:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise CustomizationServiceError("effective_catalog_malformed", 503)
+            names.append(row["name"])
+        row_count = names.count(tool_name)
+        if row_count > 1:
+            raise CustomizationServiceError("removal_target_ambiguous", 409)
+        return {
+            "contract": "leaf.customization-removal-authority.v1",
+            "tool_name": tool_name,
+            "effective_catalog_digest": current.catalog_digest,
+            "target_row_count": row_count,
+            "target_provenance": (
+                "tenant_repo" if row_count == 1 else "operator_owned_engine_expected"
+            ),
+            "removal_authorized": row_count == 1,
+        }
+
     @staticmethod
     def _release():
         policy = load_policy()
