@@ -867,10 +867,11 @@ def main() -> None:
             "matrix.image == 'canonical-worker' && "
             "steps.chain.outputs.skip != 'true'"
             if lane == "warm"
-            else (
-                "matrix.image == 'canonical-worker' && "
-                "steps.resume.outputs.skip != 'true'"
-            )
+                else (
+                    "matrix.image == 'canonical-worker' && "
+                    "steps.surface.outputs.reuse != 'true' && "
+                    "steps.resume.outputs.skip != 'true'"
+                )
         )
         for step in (require_step, checkout_step):
             conditions = [
@@ -1654,19 +1655,19 @@ def main() -> None:
         assert assignments == [
             'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
         ], lane
-        # build: the exact release-output resume probe, the current-warm
-        # probe, the predecessor probe, the
+        # build: the signed-surface discovery and baked-source witness probes,
+        # the exact release-output resume probe, the current-warm probe, the predecessor probe, the
         # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
         # batch-get-image, never an ECR listing — the roles are not granted
         # one), and the existence check before export. warm adds the
         # chain-keeper decide step's predecessor probe.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == {"warm": 5, "build": 5}[lane], (lane, probes)
+        assert len(probes) == {"warm": 5, "build": 7}[lane], (lane, probes)
         release_probes = [
             p for p in probes
             if re.search(r'--repository-name "\$IMAGE_NAME"(?!-)', p)
         ]
-        assert len(release_probes) == {"warm": 0, "build": 1}[lane], (
+        assert len(release_probes) == {"warm": 0, "build": 3}[lane], (
             lane, release_probes)
         for probe in probes:
             if probe not in release_probes:
@@ -1682,7 +1683,7 @@ def main() -> None:
             "consciously" % lane)
         assert len(re.findall(
             r'--repository-name "\$IMAGE_NAME"(?!-)', "\n".join(live)
-        )) == {"warm": 0, "build": 1}[lane], lane
+        )) == {"warm": 0, "build": 3}[lane], lane
     # The speculative lane: its cache IMPORT reads the *-buildcache
     # repository, while its image-existence probe reads the RELEASE
     # repository (it asks whether the spec image tag itself is present).
@@ -1900,8 +1901,9 @@ def main() -> None:
         "both refusal arms — no proven tree at all, and a foreign tree — "
         "must stay fail-closed")
     # The tree binding stays unconditional. The push has one permitted
-    # condition: the exact-output resume guard may skip a complete immutable
-    # image. Any other condition could bypass the gate (sol-critic round 6:
+        # conditions: the exact-output resume guard or the signed exact-surface
+        # reuse guard may skip a complete immutable image. Any other condition
+        # could bypass the gate (sol-critic round 6:
     # `if: ${{ false }}` on the binding step left the push enabled while
     # every literal stayed green).
     for step in re.split(r"\n      - ", build_block):
@@ -1912,8 +1914,11 @@ def main() -> None:
             conditions = [
                 _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
             ]
-            assert conditions == ["steps.resume.outputs.skip != 'true'"], (
-                "the image push may only be skipped by the exact-output guard"
+            assert conditions == [
+                "steps.surface.outputs.reuse != 'true' && "
+                "steps.resume.outputs.skip != 'true'"
+            ], (
+                "the image push may only be skipped by an exact-output guard"
             )
     bind_at = build_block.index("Require the green gate verdict to bind")
     push_at = build_block.index("uses: docker/build-push-action")
@@ -2264,9 +2269,13 @@ def main() -> None:
         s for s in build_steps
         if s.get("name") == "Select immutable cache references"
     )
-    assert cache_step["if"] == "steps.resume.outputs.skip != 'true'"
-    assert build_steps[build_push_at]["if"] == (
+    digest_aware_build_guard = (
+        "steps.surface.outputs.reuse != 'true' && "
         "steps.resume.outputs.skip != 'true'"
+    )
+    assert cache_step["if"] == digest_aware_build_guard
+    assert build_steps[build_push_at]["if"] == (
+        digest_aware_build_guard
     )
 
     # src- identity stamp, bound to PARSED EXECUTABLE values (the raw-text
@@ -2295,6 +2304,9 @@ def main() -> None:
         "${{ matrix.image == 'app' && startsWith(env.IMAGE_TAG, 'prod-') && "
         "format('{0}/{1}:src-{2}', env.ECR_REGISTRY, env.IMAGE_NAME, "
         "needs.prepare.outputs.source_sha) || '' }}",
+        "${{ env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && "
+        "format('{0}/{1}:surface-v1-{2}', env.ECR_REGISTRY, "
+        "env.IMAGE_NAME, steps.surface.outputs.fingerprint) || '' }}",
     ], src_tag_lines
     # The adopt stamp is checked on the decide step's parsed run scalar by
     # a dedicated checker with its own decoy battery below.
@@ -2396,7 +2408,7 @@ def main() -> None:
         assert step.get("if") == "steps.decide.outputs.adopted == 'true'", step
         assert "continue-on-error" not in step, step
 
-    # The two supply-set writers are byte-identical where bytes matter,
+    # The two legacy supply-set writers are byte-identical where bytes matter,
     # the same idiom that keeps warm's and build's cache-bearing inputs
     # aligned: drift between them would make the adopted path attest a
     # different artifact than the full-build path for the same tag. The
@@ -2415,7 +2427,16 @@ def main() -> None:
     for step_name in (web_step_name, write_step_name):
         adopt_copy = _sole_named(adopt_steps, step_name)
         verify_copy = _sole_named(verify_steps, step_name)
-        assert adopt_copy["run"] == verify_copy["run"], step_name
+        if step_name == write_step_name:
+            legacy_start = 'if [[ ! "$TAG" =~'
+            assert legacy_start in adopt_copy["run"]
+            assert legacy_start in verify_copy["run"]
+            assert (
+                adopt_copy["run"][adopt_copy["run"].index(legacy_start):]
+                == verify_copy["run"][verify_copy["run"].index(legacy_start):]
+            ), step_name
+        else:
+            assert adopt_copy["run"] == verify_copy["run"], step_name
         for job_name, job in wf_jobs.items():
             if job_name in ("adopt", "verify"):
                 continue
@@ -2522,7 +2543,12 @@ def main() -> None:
     cache_expr_to = "${{ steps.cache.outputs.to }}"
     for job_name, step_name, expected_if in (
         ("warm", cache_step_name, "steps.chain.outputs.skip != 'true'"),
-        ("build", cache_step_name, "steps.resume.outputs.skip != 'true'"),
+        (
+            "build",
+            cache_step_name,
+            "steps.surface.outputs.reuse != 'true' && "
+            "steps.resume.outputs.skip != 'true'",
+        ),
         ("speculate", "Select the merged-onto main tip's cache, import-only",
          "steps.exists.outputs.present != 'true'"),
     ):
@@ -2809,6 +2835,8 @@ def check_docs_noop_filter(text: str) -> None:
         "BUILD_RUN_ID": "${{ github.event.workflow_run.id }}",
         "BUILD_HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
         "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
+        "DIGEST_AWARE_CONVERGENCE_ENABLED": "false",
+        "DIGEST_AWARE_CONSUMER_MARKER": "leaf.staging-digest-aware-consumer.v1",
     }
     assert dispatch_job["if"] == (
         "github.event.workflow_run.conclusion == 'success' && "
@@ -2849,6 +2877,10 @@ def check_docs_noop_filter(text: str) -> None:
         "GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}",
         "HOME_TOKEN": "${{ github.token }}",
         "IMAGE_TAG": "${{ steps.manifest.outputs.image_tag }}",
+        "SUPPLY_SCHEMA": "${{ steps.manifest.outputs.schema }}",
+        "SUPPLY_SHA256": "${{ steps.manifest.outputs.artifact_sha256 }}",
+        "SUPPLY_ARTIFACT_ID": "${{ steps.manifest.outputs.artifact_id }}",
+        "SUPPLY_ARTIFACT_NAME": "${{ steps.manifest.outputs.artifact_name }}",
     }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
     assert dispatch_step["if"] == (
@@ -3133,7 +3165,12 @@ def check_docs_noop_filter(text: str) -> None:
         # fail closed. Control-flow + text change inside the manifest script; no
         # dispatch change: still exactly ONE `gh workflow run` in the deploy step
         # with the same four inputs, no new secret reference, and no new gh call.
-        "d1110d4e32e3a3e0e3b9f5446ebe825577f1652ee3b96878d644a2e37645f6fb"
+        # Hash updated for the dormant digest-aware v3 producer/consumer
+        # handshake. The guarded step still has one workflow dispatch site;
+        # v1/v2 retain their exact legacy inputs, while v3 can run only when
+        # the hardcoded source flag is deliberately enabled with the
+        # reviewed Terraform consumer marker present.
+        "b5a7e1dc3991fbd162bd9b3b6aa67311243414db5f57cf2a3544bda7e27f21d5"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3210,7 +3247,7 @@ def check_docs_noop_filter(text: str) -> None:
     for dispatch_input in (
         '"service=$SERVICE"',
         '"expected_task_definition=auto-live"',
-        '"image_tag=$IMAGE_TAG"',
+        '"image_tag=$SERVICE_TAG"',
         '"app_deploy_intent=forward"',
     ):
         assert dispatch_input in dispatch_code
@@ -3883,8 +3920,9 @@ def check_staging_relay_convergence(text: str) -> None:
     # BACKWARDS — the exact thing latest-main-only staging exists to stop.
     assert "branches/main" in code, (
         "each dispatch must be preceded by a fresh tip-of-main read")
-    assert (code.index("for SERVICE in $SERVICES")
-            < code.index("branches/main") < dispatch_at), (
+    service_loop_at = code.index("for SERVICE in $SERVICES")
+    per_service_tip_at = code.find("branches/main", service_loop_at)
+    assert service_loop_at < per_service_tip_at < dispatch_at, (
         "the tip re-check must sit inside the loop and before each dispatch")
 
     # The tip read is the FIRST statement of every dispatch attempt and is
@@ -4360,9 +4398,9 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "a second dispatch nobody watches",
             mutate(original,
-                   '              echo "Dispatched $SERVICE deploy of $IMAGE_TAG',
+                   '              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG',
                    '              gh workflow run "$DEPLOY_WORKFLOW" --repo "$INFRA_REPO"\n'
-                   '              echo "Dispatched $SERVICE deploy of $IMAGE_TAG'),
+                   '              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG'),
         ),
         (
             "job timeout cut below the step's own watch deadline",
@@ -4414,8 +4452,8 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "loop advances without the deploy having landed",
             mutate(original,
-                   'landed (run $RUN_ID)."\n                break\n',
-                   'landed (run $RUN_ID)."\n'),
+                   '                fi\n                break\n              fi\n',
+                   '                fi\n              fi\n'),
         ),
         # --- the 2026-08-07 reporting hole and its escape hatch ---
         (
@@ -5447,6 +5485,142 @@ def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
     check_staging_relay_convergence(relay.read_text(encoding="utf-8"))
     check_staging_relay_convergence_battery(relay)
     check_staging_relay_classifier_behaviour(relay.read_text(encoding="utf-8"))
+
+
+def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:
+    parsed = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    assert parsed["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "false"
+    build = parsed["jobs"]["build"]
+    assert build["permissions"]["attestations"] == "write"
+    surface = next(
+        step for step in build["steps"]
+        if step.get("name") == "Resolve one signed reusable surface"
+    )
+    code = _executable_bash(surface["run"])
+    dormant = code.index(
+        '[ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]'
+    )
+    first_registry_read = code.index("aws ecr batch-get-image")
+    assert dormant < first_registry_read
+    assert surface["env"]["FORCE_REBUILD_ALL"] == "${{ inputs.force_rebuild_all }}"
+    forced = code.index('[ "${FORCE_REBUILD_ALL:-false}" = "true" ]')
+    assert dormant < forced < first_registry_read
+    assert "surface-v1-$fingerprint" in code
+    assert "gh attestation verify" in code
+    assert '--predicate-type "$SURFACE_PREDICATE_TYPE"' in code
+    assert 'compare/$producer...$SOURCE_SHA' in code
+    assert 'git fetch --no-tags --depth=1 origin "$producer"' in code
+    assert "verify-surface-predicate" in code
+    assert 'git rev-parse "$producer^{tree}"' in code
+    assert 'git rev-parse "$producer:.github/workflows/build-platform-images.yml"' in code
+    assert 'imageTag=sha-$producer' in code
+    adopt = parsed["jobs"]["adopt"]
+    decide = next(step for step in adopt["steps"] if step.get("id") == "decide")
+    decide_code = _executable_bash(decide["run"])
+    guard = decide_code.index(
+        '[ "$DIGEST_AWARE_CONVERGENCE_ENABLED" = "true" ]'
+    )
+    first_adoption_read = decide_code.index('gh api "repos/$GITHUB_REPOSITORY"')
+    assert guard < first_adoption_read
+    assert "finish false" in decide_code[guard:first_adoption_read]
+
+
+def test_digest_aware_build_attests_each_built_digest_and_never_restamps_reuse() -> None:
+    parsed = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    steps = parsed["jobs"]["build"]["steps"]
+    image = next(step for step in steps if step.get("id") == "build-image")
+    assert "steps.surface.outputs.reuse != 'true'" in image["if"]
+    assert any("surface-v1-" in tag for tag in image["with"]["tags"].splitlines())
+    attestation = next(
+        step for step in steps if step.get("name") == "Sign exact surface provenance"
+    )
+    assert attestation["uses"] == "actions/attest@v4"
+    assert attestation["with"]["subject-digest"] == (
+        "${{ steps.build-image.outputs.digest }}"
+    )
+    assert attestation["with"]["push-to-registry"] is True
+    result = next(
+        step for step in steps
+        if step.get("name") == "Materialize one exact v3 service entry"
+    )
+    code = _executable_bash(result["run"])
+    assert "if [ \"$REUSED\" = \"true\" ]" in code
+    assert "disposition=reused" in code
+    assert "disposition=built" in code
+    assert "producer_source_revision" in code
+    assert "release_source_revision" not in code
+
+
+def test_digest_aware_fan_in_requires_all_five_exact_service_entries() -> None:
+    parsed = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    verify = parsed["jobs"]["verify"]
+    writer = next(
+        step for step in verify["steps"]
+        if step.get("name") == "Write the immutable five-service staging supply set"
+    )
+    code = _executable_bash(writer["run"])
+    assert "for image in app broker canonical-worker harness web" in code
+    assert 'if [ "${#matches[@]}" != "1" ]' in code
+    assert code.count("--service-entry") == 5
+    assert "generate-v3" in code
+    assert "imageDigest=$digest" in code
+    assert "exit 0" in code
+    assert code.index("generate-v3") < code.index("exit 0")
+
+
+def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts() -> None:
+    relay_path = WORKFLOW.parent / "dispatch-staging-deploys.yml"
+    parsed = _strict_yaml(relay_path.read_text(encoding="utf-8"))
+    job = parsed["jobs"]["dispatch"]
+    assert job["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "false"
+    assert job["env"]["DIGEST_AWARE_CONSUMER_MARKER"] == (
+        "leaf.staging-digest-aware-consumer.v1"
+    )
+    code = _executable_bash(_relay_deploy_step(job)["run"])
+    assert 'grep -Fq "$DIGEST_AWARE_CONSUMER_MARKER"' in code
+    assert 'CURRENT_TF_BLOB" = "$TF_CONSUMER_BLOB' in code
+    for field in (
+        "digest_aware_reconcile=true",
+        "expected_image_digest=$SERVICE_DIGEST",
+        "component_producer_source_revision=$PRODUCER_SOURCE",
+        "component_producer_source_tree=$PRODUCER_TREE",
+        "surface_fingerprint=$SURFACE_FINGERPRINT",
+        "recipe_fingerprint=$RECIPE_FINGERPRINT",
+        "producer_workflow_path=$PRODUCER_WORKFLOW",
+        "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB",
+        "producer_run_id=$PRODUCER_RUN_ID",
+        "producer_run_attempt=$PRODUCER_RUN_ATTEMPT",
+        "provenance_subject=$PROVENANCE_SUBJECT",
+        "provenance_digest=$PROVENANCE_DIGEST",
+        "release_source_revision=$BUILD_HEAD_SHA",
+        "release_source_tree=$RELEASE_SOURCE_TREE",
+        "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID",
+        "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME",
+        "supply_set_sha256=$SUPPLY_SHA256",
+        "convergence_id=$CONVERGENCE_ID",
+    ):
+        assert field in code
+    assert 'OUTCOME=$(jq -er \'.outcome\'' in code
+    assert 'if [ "$OUTCOME" = "deployed" ]' in code
+    assert "DEPLOYED_ANY=true" in code
+    assert 'schema: "leaf.staging-converged.v2"' in code
+    assert "candidate_supply_set: $supply[0]" in code
+    assert 'full_fleet_identity_stamped: false' in code
+    assert 'harness: "not_automatically_reconciled"' in code
+
+
+def test_digest_aware_relay_keeps_v1_v2_compatibility_and_refuses_v3_while_dormant() -> None:
+    relay = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+        encoding="utf-8"
+    )
+    executable = _executable_bash(relay)
+    assert "leaf.staging-supply-set.v1|leaf.staging-supply-set.v2" in executable
+    assert "leaf.staging-supply-set.v3" in executable
+    assert (
+        "V3 supply set arrived while its source-controlled consumer handshake is dormant"
+        in executable
+    )
+    assert 'schema: "leaf.staging-converged.v1"' in executable
 
 
 if __name__ == "__main__":

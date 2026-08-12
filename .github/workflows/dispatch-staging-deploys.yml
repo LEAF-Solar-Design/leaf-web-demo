@@ -188,6 +188,10 @@ jobs:
     env:
       INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
       DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
+      # Source constant. Flip only after the Terraform consumer marker and
+      # locked receipt path merge. A repository variable cannot activate it.
+      DIGEST_AWARE_CONVERGENCE_ENABLED: "false"
+      DIGEST_AWARE_CONSUMER_MARKER: leaf.staging-digest-aware-consumer.v1
       BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
       BUILD_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       # Job-level, not step-level: the manifest step names the build's own
@@ -227,6 +231,8 @@ jobs:
           # either way, which the no-op marker check reads.
           fetch_supply_set() {
             local run_id=$1 name=$2 artifact_id
+            SUPPLY_ARTIFACT_ID=""
+            SUPPLY_ARTIFACT_NAME=""
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
               > artifacts.json
             artifact_id=$(jq -r --arg name "$name" '
@@ -245,6 +251,8 @@ jobs:
               echo "::error::Artifact $name carried no staging-supply-set.json."
               exit 1
             }
+            SUPPLY_ARTIFACT_ID="$artifact_id"
+            SUPPLY_ARTIFACT_NAME="$name"
           }
 
           # Validate the downloaded supply set and print its build_tag. BOTH the
@@ -252,11 +260,42 @@ jobs:
           # reconcile can never deploy a manifest the ordinary path would have
           # refused. Diagnostics go to STDERR because every caller runs it as
           # $(supply_set_tag), so anything on stdout is captured into the tag.
+          supply_set_source() {
+            local schema
+            schema=$(jq -er '.schema' staging-supply-set.json)
+            case "$schema" in
+              leaf.staging-supply-set.v1|leaf.staging-supply-set.v2)
+                jq -er '.source_revision' staging-supply-set.json
+                ;;
+              leaf.staging-supply-set.v3)
+                jq -er '.release_source_revision' staging-supply-set.json
+                ;;
+              *) return 1 ;;
+            esac
+          }
+
           supply_set_tag() {
             local schema tag
             schema=$(jq -er '.schema' staging-supply-set.json)
             case "$schema" in
               leaf.staging-supply-set.v1|leaf.staging-supply-set.v2) ;;
+              leaf.staging-supply-set.v3)
+                if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]; then
+                  echo "::error::V3 supply set arrived while its source-controlled consumer handshake is dormant." >&2
+                  exit 1
+                fi
+                jq -e '
+                  .schema == "leaf.staging-supply-set.v3"
+                  and (.services | keys | sort == ["app","broker","canonical-worker","harness","web"])
+                  and all(.services[];
+                    (.image_digest | test("^sha256:[0-9a-f]{64}$"))
+                    and (.immutable_lookup_tag | test("^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}|surface-v1-[0-9a-f]{64})$"))
+                    and (.surface_fingerprint | test("^[0-9a-f]{64}$"))
+                    and (.recipe_fingerprint | test("^[0-9a-f]{64}$")))
+                ' staging-supply-set.json >/dev/null
+                printf 'v3-%s' "$(jq -er '.release_source_revision[0:12]' staging-supply-set.json)"
+                return 0
+                ;;
               *)
                 echo "::error::Supply-set schema '$schema' is not an accepted staging supply-set schema." >&2
                 exit 1
@@ -277,13 +316,17 @@ jobs:
           # deploy exactly the tag it names and require its provenance to match.
           if fetch_supply_set "$BUILD_RUN_ID" "$ARTIFACT_NAME"; then
             IMAGE_TAG=$(supply_set_tag)
-            MANIFEST_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+            MANIFEST_SHA=$(supply_set_source)
             [ "$MANIFEST_SHA" = "$BUILD_HEAD_SHA" ] || {
               echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
               exit 1
             }
             echo "deploy=true" >> "$GITHUB_OUTPUT"
             echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+            echo "schema=$(jq -er '.schema' staging-supply-set.json)" >> "$GITHUB_OUTPUT"
+            echo "artifact_sha256=$(sha256sum staging-supply-set.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+            echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -355,7 +398,7 @@ jobs:
               echo "::error::Docs-only build $BUILD_RUN_ID cannot reconcile safely: successful main build run $RUN_ID ($RUN_SHA) published neither a supply set nor a docs-noop marker (expired, deleted, or a partial upload), so its images cannot be read. Scanning past it to an older tag could roll a service backwards, so failing closed. Converge staging with a successful main build, or dispatch $DEPLOY_WORKFLOW by hand with an exact task-definition ARN."
               exit 1
             fi
-            CANDIDATE_SHA=$(jq -er '.source_revision' staging-supply-set.json)
+            CANDIDATE_SHA=$(supply_set_source)
             # Bind the supply set to its run. The ordinary path requires
             # source_revision == the build head; the reconcile requires the same
             # of every candidate, so an artifact that names a DIFFERENT (possibly
@@ -450,6 +493,10 @@ jobs:
           echo "Reconciling both staging services onto $IMAGE_TAG, built from $TARGET_SHA ($SCANNED run(s) scanned)."
           echo "deploy=true" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "schema=$(jq -er '.schema' staging-supply-set.json)" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$(sha256sum staging-supply-set.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Deploy each staging service in turn and prove each one landed
         id: deploy
@@ -462,12 +509,41 @@ jobs:
           # scoped for; the job's own token is.
           HOME_TOKEN: ${{ github.token }}
           IMAGE_TAG: ${{ steps.manifest.outputs.image_tag }}
+          SUPPLY_SCHEMA: ${{ steps.manifest.outputs.schema }}
+          SUPPLY_SHA256: ${{ steps.manifest.outputs.artifact_sha256 }}
+          SUPPLY_ARTIFACT_ID: ${{ steps.manifest.outputs.artifact_id }}
+          SUPPLY_ARTIFACT_NAME: ${{ steps.manifest.outputs.artifact_name }}
         run: |
           set -euo pipefail
 
           POLL_SECONDS=15
           EVICTION_RETRIES=2
           DEADLINE=$(( $(date +%s) + 95 * 60 ))
+          # The extracted executable tests run the legacy path without the
+          # workflow env wrapper. Defaults preserve that exact active path.
+          SUPPLY_SCHEMA="${SUPPLY_SCHEMA:-leaf.staging-supply-set.v1}"
+          SUPPLY_SHA256="${SUPPLY_SHA256:-legacy-v1-v2}"
+          DIGEST_AWARE_CONVERGENCE_ENABLED="${DIGEST_AWARE_CONVERGENCE_ENABLED:-false}"
+
+          TF_CONSUMER_BLOB=""
+          if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+            [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" = "true" ] || {
+              echo "::error::V3 relay cannot run while the source-controlled handshake is dormant."
+              exit 1
+            }
+            TF_MAIN=$(GH_TOKEN="$GH_TOKEN" gh api \
+              "repos/$INFRA_REPO/branches/main" --jq '.commit.sha')
+            TF_FILE=$(GH_TOKEN="$GH_TOKEN" gh api \
+              "repos/$INFRA_REPO/contents/.github/workflows/$DEPLOY_WORKFLOW?ref=$TF_MAIN")
+            TF_CONSUMER_BLOB=$(jq -er '.sha' <<<"$TF_FILE")
+            printf '%s' "$TF_FILE" | jq -er '.content' | tr -d '\n' | base64 -d \
+              > terraform-consumer.yml
+            grep -Fq "$DIGEST_AWARE_CONSUMER_MARKER" terraform-consumer.yml || {
+              echo "::error::Terraform main $TF_MAIN does not contain the reviewed digest-aware consumer marker."
+              exit 1
+            }
+            echo "Digest-aware consumer handshake passed at Terraform $TF_MAIN / $TF_CONSUMER_BLOB."
+          fi
 
           before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 
@@ -717,9 +793,22 @@ jobs:
           }
 
           DEPLOYED_ANY=false
+          mkdir -p surface-results
 
           for SERVICE in $SERVICES; do
-            WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+            SERVICE_TAG="$IMAGE_TAG"
+            SERVICE_DIGEST=""
+            CONVERGENCE_ID=""
+            if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+              SERVICE_TAG=$(jq -er --arg service "$SERVICE" \
+                '.services[$service].immutable_lookup_tag' staging-supply-set.json)
+              SERVICE_DIGEST=$(jq -er --arg service "$SERVICE" \
+                '.services[$service].image_digest' staging-supply-set.json)
+              CONVERGENCE_ID="$BUILD_HEAD_SHA-$BUILD_RUN_ATTEMPT-$SERVICE"
+              WANT="Deploy leaf-platform staging $SERVICE ($CONVERGENCE_ID)"
+            else
+              WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+            fi
             ATTEMPT=0
 
             while :; do
@@ -792,14 +881,59 @@ jobs:
               fi
 
               BEFORE=$(latest_any_run_id)
-              gh workflow run "$DEPLOY_WORKFLOW" \
-                --repo "$INFRA_REPO" \
-                --ref main \
-                -f "service=$SERVICE" \
-                -f "expected_task_definition=auto-live" \
-                -f "image_tag=$IMAGE_TAG" \
+              dispatch_args=(
+                --repo "$INFRA_REPO"
+                --ref main
+                -f "service=$SERVICE"
+                -f "expected_task_definition=auto-live"
+                -f "image_tag=$SERVICE_TAG"
                 -f "app_deploy_intent=forward"
-              echo "Dispatched $SERVICE deploy of $IMAGE_TAG (attempt $((ATTEMPT + 1)))."
+              )
+              if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+                SERVICE_ENTRY="$(jq -cer --arg service "$SERVICE" '.services[$service]' staging-supply-set.json)"
+                PRODUCER_SOURCE="$(jq -er '.producer_source_revision' <<<"$SERVICE_ENTRY")"
+                PRODUCER_TREE="$(jq -er '.producer_source_tree' <<<"$SERVICE_ENTRY")"
+                SURFACE_FINGERPRINT="$(jq -er '.surface_fingerprint' <<<"$SERVICE_ENTRY")"
+                RECIPE_FINGERPRINT="$(jq -er '.recipe_fingerprint' <<<"$SERVICE_ENTRY")"
+                PRODUCER_WORKFLOW="$(jq -er '.producer_workflow_path' <<<"$SERVICE_ENTRY")"
+                PRODUCER_WORKFLOW_BLOB="$(jq -er '.producer_workflow_blob' <<<"$SERVICE_ENTRY")"
+                PRODUCER_RUN_ID="$(jq -er '.producer_run_id' <<<"$SERVICE_ENTRY")"
+                PRODUCER_RUN_ATTEMPT="$(jq -er '.producer_run_attempt' <<<"$SERVICE_ENTRY")"
+                PROVENANCE_SUBJECT="$(jq -er '.provenance_subject' <<<"$SERVICE_ENTRY")"
+                PROVENANCE_DIGEST="$(jq -er '.provenance_digest' <<<"$SERVICE_ENTRY")"
+                RELEASE_SOURCE_TREE="$(jq -er '.release_source_tree' staging-supply-set.json)"
+                CURRENT_TF_BLOB=$(GH_TOKEN="$GH_TOKEN" gh api \
+                  "repos/$INFRA_REPO/contents/.github/workflows/$DEPLOY_WORKFLOW?ref=main" \
+                  --jq '.sha')
+                [ "$CURRENT_TF_BLOB" = "$TF_CONSUMER_BLOB" ] || {
+                  echo "::error::Terraform consumer moved from $TF_CONSUMER_BLOB to $CURRENT_TF_BLOB before dispatch."
+                  exit 1
+                }
+                dispatch_args+=(
+                  -f "digest_aware_reconcile=true"
+                  -f "expected_image_digest=$SERVICE_DIGEST"
+                  -f "component_producer_source_revision=$PRODUCER_SOURCE"
+                  -f "component_producer_source_tree=$PRODUCER_TREE"
+                  -f "surface_fingerprint=$SURFACE_FINGERPRINT"
+                  -f "recipe_fingerprint=$RECIPE_FINGERPRINT"
+                  -f "producer_workflow_path=$PRODUCER_WORKFLOW"
+                  -f "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB"
+                  -f "producer_run_id=$PRODUCER_RUN_ID"
+                  -f "producer_run_attempt=$PRODUCER_RUN_ATTEMPT"
+                  -f "provenance_subject=$PROVENANCE_SUBJECT"
+                  -f "provenance_digest=$PROVENANCE_DIGEST"
+                  -f "release_source_revision=$BUILD_HEAD_SHA"
+                  -f "release_source_tree=$RELEASE_SOURCE_TREE"
+                  -f "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID"
+                  -f "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME"
+                  -f "supply_set_sha256=$SUPPLY_SHA256"
+                  -f "build_run_id=$BUILD_RUN_ID"
+                  -f "build_run_attempt=$BUILD_RUN_ATTEMPT"
+                  -f "convergence_id=$CONVERGENCE_ID"
+                )
+              fi
+              gh workflow run "$DEPLOY_WORKFLOW" "${dispatch_args[@]}"
+              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG (attempt $((ATTEMPT + 1)))."
 
               # Transient gh failures inside poll loops are tolerated and fail
               # CLOSED: an unresolved run exhausts its budget and errors below.
@@ -833,8 +967,63 @@ jobs:
                 exit 1
               fi
               if [ "$CONCLUSION" = "success" ]; then
-                DEPLOYED_ANY=true
-                echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
+                if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+                  RESULT_NAME="staging-surface-result-$CONVERGENCE_ID"
+                  RESULT_LIST=$(gh api \
+                    "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100")
+                  RESULT_COUNT=$(jq --arg name "$RESULT_NAME" \
+                    '[.artifacts[] | select(.name == $name and (.expired | not))] | length' \
+                    <<<"$RESULT_LIST")
+                  [ "$RESULT_COUNT" = "1" ] || {
+                    echo "::error::Successful v3 run $RUN_ID published $RESULT_COUNT exact $RESULT_NAME artifacts."
+                    exit 1
+                  }
+                  RESULT_ID=$(jq -er --arg name "$RESULT_NAME" \
+                    '.artifacts[] | select(.name == $name and (.expired | not)) | .id' \
+                    <<<"$RESULT_LIST")
+                  rm -rf "surface-result-$SERVICE"
+                  mkdir "surface-result-$SERVICE"
+                  gh api "repos/$INFRA_REPO/actions/artifacts/$RESULT_ID/zip" \
+                    > "surface-result-$SERVICE.zip"
+                  unzip -q "surface-result-$SERVICE.zip" -d "surface-result-$SERVICE"
+                  RESULT_FILE="surface-result-$SERVICE/surface-result.json"
+                  jq -e --arg release "$BUILD_HEAD_SHA" \
+                    --arg service "$SERVICE" \
+                    --arg convergence "$CONVERGENCE_ID" \
+                    --arg digest "$SERVICE_DIGEST" \
+                    --arg tf_blob "$TF_CONSUMER_BLOB" '
+                    (keys | sort) == [
+                      "aws_mutation_count", "candidate_image_digest",
+                      "convergence_id", "outcome", "release_source_revision",
+                      "schema", "service", "surface_receipt_sha256",
+                      "terminal_image_digest", "terraform_workflow_blob"
+                    ]
+                    and .schema == "leaf.staging-surface-result.v1"
+                    and .release_source_revision == $release
+                    and .service == $service
+                    and .convergence_id == $convergence
+                    and .candidate_image_digest == $digest
+                    and .terminal_image_digest == $digest
+                    and .terraform_workflow_blob == $tf_blob
+                    and (.surface_receipt_sha256 | test("^[0-9a-f]{64}$"))
+                    and (
+                      (.outcome == "skipped" and .aws_mutation_count == 0)
+                      or (.outcome == "deployed" and (.aws_mutation_count | type == "number") and .aws_mutation_count > 0)
+                    )
+                  ' "$RESULT_FILE" >/dev/null || {
+                    echo "::error::V3 run $RUN_ID returned an invalid or mismatched surface result."
+                    exit 1
+                  }
+                  cp "$RESULT_FILE" "surface-results/$SERVICE.json"
+                  OUTCOME=$(jq -er '.outcome' "$RESULT_FILE")
+                  if [ "$OUTCOME" = "deployed" ]; then
+                    DEPLOYED_ANY=true
+                  fi
+                  echo "$SERVICE $OUTCOME at $SERVICE_DIGEST (run $RUN_ID)."
+                else
+                  DEPLOYED_ANY=true
+                  echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
+                fi
                 break
               fi
 
@@ -868,18 +1057,61 @@ jobs:
           # docs-noop marker, so a superseded relay can compute this name from
           # the build record it already reads. The services array records the
           # ACTUAL order this relay deployed, not a hardcoded pair.
-          jq -n \
-            --arg sha "$BUILD_HEAD_SHA" \
-            --arg attempt "$BUILD_RUN_ATTEMPT" \
-            --arg tag "$IMAGE_TAG" \
-            --arg relay "$GITHUB_RUN_ID" \
-            --arg services "$SERVICES" \
-            '{schema: "leaf.staging-converged.v1",
-              source_revision: $sha,
-              build_run_attempt: $attempt,
-              build_tag: $tag,
-              relay_run_id: $relay,
-              services: ($services | split(" "))}' > staging-converged.json
+          if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+            FINAL_MAIN=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+            [ "$FINAL_MAIN" = "$BUILD_HEAD_SHA" ] || {
+              echo "::error::main moved to $FINAL_MAIN before the v3 convergence receipt was frozen."
+              exit 1
+            }
+            FINAL_TF_BLOB=$(GH_TOKEN="$GH_TOKEN" gh api \
+              "repos/$INFRA_REPO/contents/.github/workflows/$DEPLOY_WORKFLOW?ref=main" \
+              --jq '.sha')
+            [ "$FINAL_TF_BLOB" = "$TF_CONSUMER_BLOB" ] || {
+              echo "::error::Terraform consumer moved before the v3 convergence receipt was frozen."
+              exit 1
+            }
+            jq -s \
+              --slurpfile supply staging-supply-set.json \
+              --arg sha "$BUILD_HEAD_SHA" \
+              --arg attempt "$BUILD_RUN_ATTEMPT" \
+              --arg relay "$GITHUB_RUN_ID" \
+              --arg supply_sha "$SUPPLY_SHA256" '
+              if (map(.service) | sort) != ["app", "web"] then
+                error("automatic surface result set is incomplete")
+              else
+                {
+                  schema: "leaf.staging-converged.v2",
+                  release_source_revision: $sha,
+                  build_run_attempt: ($attempt | tonumber),
+                  relay_run_id: ($relay | tonumber),
+                  supply_set_sha256: $supply_sha,
+                  candidate_supply_set: $supply[0],
+                  automatic_surfaces: ["web", "app"],
+                  surface_results: (map({key: .service, value: .}) | from_entries),
+                  non_relay_services: {
+                    broker: "not_automatically_reconciled",
+                    harness: "not_automatically_reconciled",
+                    "canonical-worker": "not_automatically_reconciled"
+                  },
+                  full_fleet_identity_stamped: false
+                }
+              end
+            ' surface-results/web.json surface-results/app.json > staging-converged.json
+          else
+            jq -n \
+              --arg sha "$BUILD_HEAD_SHA" \
+              --arg attempt "$BUILD_RUN_ATTEMPT" \
+              --arg tag "$IMAGE_TAG" \
+              --arg relay "$GITHUB_RUN_ID" \
+              --arg services "$SERVICES" \
+              '{schema: "leaf.staging-converged.v1",
+                source_revision: $sha,
+                build_run_attempt: $attempt,
+                build_tag: $tag,
+                relay_run_id: $relay,
+                services: ($services | split(" "))}' > staging-converged.json
+          fi
           echo "converged=true" >> "$GITHUB_OUTPUT"
 
       # Publishing is a SEPARATE step because the deploy step above exits
