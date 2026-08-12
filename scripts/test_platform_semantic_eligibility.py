@@ -104,6 +104,28 @@ def test_mixed_provenance_manifest_round_trips_with_digest_only_images():
 
 
 @pytest.mark.parametrize(
+    ("deployment_path", "provenance"),
+    [
+        ("adopted_supply", "full_build"),
+        ("full_build", "adopted"),
+        ("both", "adopted"),
+        ("both", "full_build"),
+    ],
+)
+def test_deployment_path_and_service_provenance_cannot_be_confused(deployment_path, provenance):
+    value = manifest()
+    value["supported_deployment_path"] = deployment_path
+    for service in value["services"]:
+        service["provenance"] = provenance
+    value.pop("signature")
+    value.pop("payload_digest")
+    value = attach_integrity(value, fixture_signer)
+
+    with pytest.raises(ContractError, match="SCHEMA_INVALID"):
+        validate_manifest_fixture(value)
+
+
+@pytest.mark.parametrize(
     ("mutation", "code"),
     [
         (lambda value: value["services"][0].update(image_digest="prod-latest"), "SCHEMA_INVALID"),

@@ -47,6 +47,41 @@
     "signature": {"$ref": "#/$defs/signature"},
     "payload_digest": {"$ref": "#/$defs/sha256"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"supported_deployment_path": {"const": "adopted_supply"}}},
+      "then": {
+        "properties": {
+          "services": {
+            "items": {"properties": {"provenance": {"const": "adopted"}}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"supported_deployment_path": {"const": "full_build"}}},
+      "then": {
+        "properties": {
+          "services": {
+            "items": {"properties": {"provenance": {"const": "full_build"}}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"supported_deployment_path": {"const": "both"}}},
+      "then": {
+        "properties": {
+          "services": {
+            "allOf": [
+              {"contains": {"properties": {"provenance": {"const": "adopted"}}, "required": ["provenance"]}},
+              {"contains": {"properties": {"provenance": {"const": "full_build"}}, "required": ["provenance"]}}
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "service": {

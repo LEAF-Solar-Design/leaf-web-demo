@@ -247,6 +247,14 @@ def validate_manifest(
     service_names = [entry.get("name") for entry in value["services"]]
     if tuple(sorted(service_names)) != tuple(sorted(SERVICES)) or len(set(service_names)) != len(SERVICES):
         raise ContractError("SERVICE_SET_INVALID")
+    provenances = {entry["provenance"] for entry in value["services"]}
+    expected_provenances = {
+        "adopted_supply": {"adopted"},
+        "full_build": {"full_build"},
+        "both": {"adopted", "full_build"},
+    }[value["supported_deployment_path"]]
+    if provenances != expected_provenances:
+        raise ContractError("PROVENANCE_PATH_MISMATCH")
     if value["producer"]["identity"] != expected_producer:
         raise ContractError("PRODUCER_MISMATCH")
     if value["verifier_version"] != expected_verifier_version:
