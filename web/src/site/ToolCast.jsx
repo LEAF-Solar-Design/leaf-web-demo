@@ -28,6 +28,7 @@ import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
 import JobRail from '../components/JobRail.jsx'
 import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
@@ -61,6 +62,7 @@ import {
   stageRunIntent,
 } from '../runIntent.js'
 import { navigate } from './router.js'
+import { productSurfaceFromSearch, productSurfaceStates, searchForProductSurface } from './productSurfaces.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
 import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
@@ -205,6 +207,7 @@ export default function ToolCast({
   onResultOverlayChange,
 }) {
   const [prompt, setPrompt] = useState(PROOF_MODE ? CAT_REQUEST : '')
+  const [activeSurface, setActiveSurface] = useState(() => productSurfaceFromSearch(window.location.search))
   const { converse, drawing, drawingEvent, drawingError, instanceId } = useWorkspaceControllers()
   const { sessionId, turns, startTurn, clear: clearConverse, resetCached } = converse
   const startTurnRef = useRef(startTurn)
@@ -225,6 +228,11 @@ export default function ToolCast({
   useEffect(() => {
     if (platformSession.status === 'active') sessionWasActiveThisPageLoad = true
   }, [platformSession.status])
+  useEffect(() => {
+    const restoreSurface = () => setActiveSurface(productSurfaceFromSearch(window.location.search))
+    window.addEventListener('popstate', restoreSurface)
+    return () => window.removeEventListener('popstate', restoreSurface)
+  }, [])
   const requireAuth = platformSession.actions.requireAuth
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
@@ -1142,25 +1150,42 @@ export default function ToolCast({
   }
 
   const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
+  const productStates = productSurfaceStates({
+    sessionActive: platformSession.status === 'active',
+    hasDrawing,
+    apsLive: platform.health?.aps_live,
+    iosReady: false,
+  })
+  const selectProductSurface = useCallback((surfaceId) => {
+    const search = searchForProductSurface(window.location.search, surfaceId)
+    window.history.pushState({}, '', `${window.location.pathname}${search}${window.location.hash}`)
+    setActiveSurface(surfaceId)
+  }, [])
+  const projectSlot = (
+    <ProjectSwitcher
+      mock={transportMock}
+      projectName={activeDrawingId}
+      orgId={workspace.orgId}
+      projects={workspace.projects}
+      openProjectId={workspace.openProjectId}
+      currentName={currentProjectName}
+      unavailable={workspace.projectsError}
+      loading={workspace.projectsLoading}
+      orgBusy={workspace.orgBusy}
+      projectBusy={workspace.projectBusy}
+      onCreateOrg={createWorkspaceOrg}
+      onCreateProject={createWorkspaceProject}
+      onOpenProject={openWorkspaceProject}
+    />
+  )
 
   return (
     <>
-      <div className="tc-topcluster" data-cast="tool" style={{ '--rank': 3 }}>
-        <ProjectSwitcher
-          mock={transportMock}
-          projectName={activeDrawingId}
-          orgId={workspace.orgId}
-          projects={workspace.projects}
-          openProjectId={workspace.openProjectId}
-          currentName={currentProjectName}
-          unavailable={workspace.projectsError}
-          loading={workspace.projectsLoading}
-          orgBusy={workspace.orgBusy}
-          projectBusy={workspace.projectBusy}
-          onCreateOrg={createWorkspaceOrg}
-          onCreateProject={createWorkspaceProject}
-          onOpenProject={openWorkspaceProject}
-        />
+      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} />
+      {activeSurface === 'cad' ? (
+      <>
+      <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
+        {projectSlot}
         <span className="tc-solve" data-testid="operator-phase">
           <span className={`dot ${statusClass}${phase === 'running' ? ' pulse' : ''}`} />
           {phaseLabel(phase)}
@@ -1715,6 +1740,15 @@ export default function ToolCast({
           signedIn={platformSession.status === 'active'}
           active={!focusView}
           sceneActive={active}
+        />
+      )}
+      </>
+      ) : (
+        <ProductSurfaceFrame
+          activeSurface={activeSurface}
+          states={productStates}
+          projectSlot={projectSlot}
+          onOpenCad={() => selectProductSurface('cad')}
         />
       )}
     </>
