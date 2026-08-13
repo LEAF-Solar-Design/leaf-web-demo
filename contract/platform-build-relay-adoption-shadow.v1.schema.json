@@ -55,7 +55,7 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["predicate_body_sha256", "signed_predicate_verified", "registry_candidate_digest", "live_digest", "component_source_exact", "runtime_contract_exact", "migration_exact", "route_stable", "health_stable"],
+      "required": ["predicate_body_sha256", "signed_predicate_verified", "registry_candidate_digest", "live_digest", "component_source_exact", "runtime_contract_exact", "expected_migration_fingerprint", "live_migration_fingerprint", "route_stable", "health_stable"],
       "properties": {
         "predicate_body_sha256": {"$ref": "#/$defs/digest"},
         "signed_predicate_verified": {"type": "boolean"},
@@ -63,7 +63,8 @@
         "live_digest": {"$ref": "#/$defs/digest"},
         "component_source_exact": {"type": "boolean"},
         "runtime_contract_exact": {"type": "boolean"},
-        "migration_exact": {"type": "boolean"},
+        "expected_migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "live_migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
         "route_stable": {"type": "boolean"},
         "health_stable": {"type": "boolean"}
       }

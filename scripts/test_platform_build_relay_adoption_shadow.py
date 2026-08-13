@@ -109,7 +109,12 @@ def _evidence() -> dict:
                 "live_digest": manifest["services"][name]["image_digest"],
                 "component_source_exact": True,
                 "runtime_contract_exact": True,
-                "migration_exact": True,
+                "expected_migration_fingerprint": (
+                    "sha256:" + "8" * 64 if name == "app" else None
+                ),
+                "live_migration_fingerprint": (
+                    "sha256:" + "8" * 64 if name == "app" else None
+                ),
                 "route_stable": True,
                 "health_stable": True,
             }
@@ -228,7 +233,6 @@ def test_stale_tail_projects_three_deploys_and_shadow_restamp() -> None:
     [
         "component_source_exact",
         "runtime_contract_exact",
-        "migration_exact",
         "route_stable",
         "health_stable",
     ],
@@ -240,6 +244,54 @@ def test_any_runtime_surface_drift_prevents_relay_skip(field: str) -> None:
     result = compare_adoption(evidence)
 
     assert result["relay_dispositions"]["app"] == "shadow_deploy"
+
+
+@pytest.mark.parametrize(
+    ("expected", "live"),
+    [
+        (None, None),
+        (None, "sha256:" + "8" * 64),
+        ("sha256:" + "8" * 64, None),
+        ("sha256:" + "8" * 64, "sha256:" + "9" * 64),
+    ],
+)
+def test_unknown_or_unequal_app_migration_evidence_deploys(
+    expected: str | None, live: str | None
+) -> None:
+    evidence = _evidence()
+    service = evidence["services"]["app"]
+    service["expected_migration_fingerprint"] = expected
+    service["live_migration_fingerprint"] = live
+
+    result = compare_adoption(evidence)
+
+    assert result["relay_dispositions"]["app"] == "shadow_deploy"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_migration_fingerprint", "bad"),
+        ("live_migration_fingerprint", "sha256:" + "z" * 64),
+    ],
+)
+def test_malformed_app_migration_fingerprint_rejects(field: str, value: str) -> None:
+    evidence = _evidence()
+    evidence["services"]["app"][field] = value
+
+    with pytest.raises(ContractError, match="service_evidence_invalid"):
+        compare_adoption(evidence)
+
+
+@pytest.mark.parametrize(
+    "field", ["expected_migration_fingerprint", "live_migration_fingerprint"]
+)
+def test_non_app_migration_fingerprint_rejects(field: str) -> None:
+    evidence = _evidence()
+    evidence["services"]["broker"][field] = "sha256:" + "8" * 64
+
+    with pytest.raises(ContractError, match="service_evidence_invalid"):
+        compare_adoption(evidence)
 
 
 @pytest.mark.parametrize("shape", ["absent", "source", "digest", "decorated"])

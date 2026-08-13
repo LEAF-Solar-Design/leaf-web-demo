@@ -174,14 +174,23 @@ SERVICE_KEYS = {
     "live_digest",
     "component_source_exact",
     "runtime_contract_exact",
-    "migration_exact",
+    "expected_migration_fingerprint",
+    "live_migration_fingerprint",
     "route_stable",
     "health_stable",
 }
 
 
-def _service(value: Any) -> dict[str, Any]:
+def _service(name: str, value: Any) -> dict[str, Any]:
     service = _exact(value, SERVICE_KEYS, "service_evidence_invalid")
+    expected_migration = _nullable_digest(
+        service["expected_migration_fingerprint"], "service_evidence_invalid"
+    )
+    live_migration = _nullable_digest(
+        service["live_migration_fingerprint"], "service_evidence_invalid"
+    )
+    if name != "app" and (expected_migration is not None or live_migration is not None):
+        raise ContractError("service_evidence_invalid")
     return {
         "predicate_body_sha256": _pattern(
             service["predicate_body_sha256"], _DIGEST, "service_evidence_invalid"
@@ -201,9 +210,8 @@ def _service(value: Any) -> dict[str, Any]:
         "runtime_contract_exact": _boolean(
             service["runtime_contract_exact"], "service_evidence_invalid"
         ),
-        "migration_exact": _boolean(
-            service["migration_exact"], "service_evidence_invalid"
-        ),
+        "expected_migration_fingerprint": expected_migration,
+        "live_migration_fingerprint": live_migration,
         "route_stable": _boolean(service["route_stable"], "service_evidence_invalid"),
         "health_stable": _boolean(
             service["health_stable"], "service_evidence_invalid"
@@ -262,7 +270,7 @@ def validate_evidence(value: Any) -> dict[str, Any]:
     elif envelope["identity_body_sha256"] != _canonical_sha256(identity):
         raise ContractError("deployment_identity_envelope_invalid")
     services = _exact(root["services"], set(SERVICES), "services_invalid")
-    normalized_services = {name: _service(services[name]) for name in SERVICES}
+    normalized_services = {name: _service(name, services[name]) for name in SERVICES}
     for name in SERVICES:
         if (
             normalized_services[name]["predicate_body_sha256"]
@@ -349,11 +357,18 @@ def compare_adoption(value: Any) -> dict[str, Any]:
     for name in SERVICES:
         candidate = manifest["services"][name]
         observed = evidence["services"][name]
+        migration_exact = (
+            observed["expected_migration_fingerprint"] is not None
+            and observed["expected_migration_fingerprint"]
+            == observed["live_migration_fingerprint"]
+            if name == "app"
+            else True
+        )
         skip = (
             observed["live_digest"] == candidate["image_digest"]
             and observed["component_source_exact"]
             and observed["runtime_contract_exact"]
-            and observed["migration_exact"]
+            and migration_exact
             and observed["route_stable"]
             and observed["health_stable"]
         )
