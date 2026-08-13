@@ -3180,7 +3180,10 @@ def check_docs_noop_filter(text: str) -> None:
         # deploy step retains one `gh workflow run` site and adds one protected
         # input to that existing call for v2/v3. V1 dispatch inputs, credentials,
         # service order, polling, rollback, selectors, and receipts are unchanged.
-        "b436389dc39cba4fc0124c5f93e2d21c5de8896603c4838a5747c3fac8cdb76f"
+        # Hash updated after the R3 producer made the manifest lookup-tag
+        # relation authoritative and the relay replaced duplicate v3 fields
+        # with one closed supply envelope.
+        "3b9f650fb70fadd73d8eb084c62641aeb541d081b28ed7be4785f59a30f2baeb"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -6022,27 +6025,30 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     code = _executable_bash(_relay_deploy_step(job)["run"])
     assert 'grep -Fq "$DIGEST_AWARE_CONSUMER_MARKER"' in code
     assert 'CURRENT_TF_BLOB" = "$TF_CONSUMER_BLOB' in code
-    for field in (
-        "digest_aware_reconcile=true",
-        "expected_image_digest=$SERVICE_DIGEST",
-        "component_producer_source_revision=$PRODUCER_SOURCE",
-        "component_producer_source_tree=$PRODUCER_TREE",
-        "surface_fingerprint=$SURFACE_FINGERPRINT",
-        "recipe_fingerprint=$RECIPE_FINGERPRINT",
-        "producer_workflow_path=$PRODUCER_WORKFLOW",
-        "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB",
-        "producer_run_id=$PRODUCER_RUN_ID",
-        "producer_run_attempt=$PRODUCER_RUN_ATTEMPT",
-        "provenance_subject=$PROVENANCE_SUBJECT",
-        "provenance_digest=$PROVENANCE_DIGEST",
-        "release_source_revision=$BUILD_HEAD_SHA",
-        "release_source_tree=$RELEASE_SOURCE_TREE",
-        "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID",
-        "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME",
-        "supply_set_sha256=$SUPPLY_SHA256",
-        "convergence_id=$CONVERGENCE_ID",
+    assert '-f "digest_aware_reconcile=true"' in code
+    assert code.count(
+        'dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")'
+    ) == 1
+    assert '-f "convergence_id=$CONVERGENCE_ID"' in code
+    for removed_field in (
+        "expected_image_digest=",
+        "component_producer_source_revision=",
+        "component_producer_source_tree=",
+        "surface_fingerprint=",
+        "recipe_fingerprint=",
+        "producer_workflow_path=",
+        "producer_workflow_blob=",
+        "producer_run_id=",
+        "producer_run_attempt=",
+        "provenance_subject=",
+        "provenance_digest=",
+        "release_source_revision=",
+        "release_source_tree=",
+        "supply_set_artifact_id=",
+        "supply_set_artifact_name=",
+        "supply_set_sha256=",
     ):
-        assert field in code
+        assert f'-f "{removed_field}' not in code
     assert 'OUTCOME=$(jq -er \'.outcome\'' in code
     assert 'if [ "$OUTCOME" = "deployed" ]' in code
     assert "DEPLOYED_ANY=true" in code
