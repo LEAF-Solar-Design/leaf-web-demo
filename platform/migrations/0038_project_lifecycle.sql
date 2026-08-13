@@ -116,8 +116,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS project_lifecycle_receipts_create_idempotency
   ON project_lifecycle_receipts(org_id, action, idempotency_key)
   WHERE action = 'project_created';
 
-DROP TRIGGER IF EXISTS project_lifecycle_receipts_immutable
-  ON project_lifecycle_receipts;
-CREATE TRIGGER project_lifecycle_receipts_immutable
-  BEFORE UPDATE OR DELETE ON project_lifecycle_receipts
-  FOR EACH ROW EXECUTE FUNCTION leaf_reject_ledger_mutation();
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgrelid = 'project_lifecycle_receipts'::regclass
+      AND tgname = 'project_lifecycle_receipts_immutable'
+      AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER project_lifecycle_receipts_immutable
+      BEFORE UPDATE OR DELETE ON project_lifecycle_receipts
+      FOR EACH ROW EXECUTE FUNCTION leaf_reject_ledger_mutation();
+  END IF;
+END
+$$;
