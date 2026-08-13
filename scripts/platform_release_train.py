@@ -533,12 +533,22 @@ def validate_train(value: Any) -> dict[str, Any]:
     normalized["receipts"] = []
     seen_stages: set[str] = set()
     seen_mutations: set[str] = set()
+    last_ordinal = -1
+    failed_ordinal: int | None = None
     for item in train["receipts"]:
         receipt = _validate_receipt(item, train=normalized)
         stage = receipt["stage"]
         if stage in seen_stages:
             raise ContractError("duplicate_stage_receipt")
         seen_stages.add(stage)
+        ordinal = STAGE_ORDINAL[stage]
+        if ordinal <= last_ordinal or (
+            failed_ordinal is not None and ordinal > failed_ordinal
+        ):
+            raise ContractError("stage_receipt_order_invalid")
+        last_ordinal = ordinal
+        if receipt["state"] == "failed":
+            failed_ordinal = ordinal
         mutation_key = receipt["mutation_idempotency_key"]
         if mutation_key is not None:
             if mutation_key in seen_mutations:
@@ -635,10 +645,31 @@ def compile_resume_plan(value: Any) -> dict[str, Any]:
         return _stopped(train, "live_surface_unstable")
 
     plan = _base_plan(train)
+    terminal_services = {
+        receipt["stage"]
+        for receipt in train["receipts"]
+        if receipt["state"] == "terminal" and receipt["stage"] in SERVICES
+    }
+    for terminal_service in terminal_services:
+        terminal_ordinal = STAGE_ORDINAL[terminal_service]
+        for earlier_service in SERVICES:
+            if STAGE_ORDINAL[earlier_service] >= terminal_ordinal:
+                break
+            if earlier_service in terminal_services:
+                continue
+            earlier_evidence = train["services"][earlier_service]
+            earlier_candidate = train["supply"]["services"][earlier_service]
+            if not _service_is_exact(
+                earlier_service, earlier_evidence, earlier_candidate
+            ):
+                return _stopped(train, "stage_receipt_order_invalid")
+
     for service in SERVICES:
         evidence = train["services"][service]
         candidate_digest = train["supply"]["services"][service]
         exact = _service_is_exact(service, evidence, candidate_digest)
+        if service in terminal_services and not exact:
+            return _stopped(train, "terminal_stage_drift")
         plan["dispositions"][service] = "skipped" if exact else "deploy"
         if exact:
             continue

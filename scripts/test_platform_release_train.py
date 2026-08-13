@@ -239,6 +239,31 @@ def test_resume_after_broker_terminal_starts_at_harness():
     ]
 
 
+def test_terminal_service_drift_stops_instead_of_replaying_the_stage():
+    value = train()
+    value["receipts"].append(receipt(value, "web"))
+    value["services"]["web"]["runtime_contract_sha256"] = digest(999)
+
+    plan = compile_resume_plan(value)
+
+    assert plan["status"] == "stopped"
+    assert plan["code"] == "terminal_stage_drift"
+    assert plan["preserved_stages"] == ["build", "web"]
+    assert plan["actions"] == []
+
+
+def test_later_terminal_receipt_cannot_skip_an_incomplete_earlier_stage():
+    value = train()
+    make_stale(value, "app")
+    value["receipts"].append(receipt(value, "broker"))
+
+    plan = compile_resume_plan(value)
+
+    assert plan["status"] == "stopped"
+    assert plan["code"] == "stage_receipt_order_invalid"
+    assert plan["actions"] == []
+
+
 def test_exact_five_service_identity_produces_an_empty_complete_plan():
     plan = compile_resume_plan(train())
 
@@ -342,6 +367,21 @@ def test_duplicate_stage_and_mutation_receipts_are_rejected():
     with pytest.raises(ContractError, match="duplicate_mutation_idempotency_key"):
         compile_resume_plan(value)
 
+
+def test_receipts_must_be_ordered_and_a_failure_is_terminal_for_the_attempt():
+    value = train()
+    value["receipts"] = [receipt(value, "web"), receipt(value, "build")]
+    with pytest.raises(ContractError, match="stage_receipt_order_invalid"):
+        compile_resume_plan(value)
+
+    value = train()
+    value["receipts"] = [
+        receipt(value, "build"),
+        receipt(value, "app", state="failed"),
+        receipt(value, "broker"),
+    ]
+    with pytest.raises(ContractError, match="stage_receipt_order_invalid"):
+        compile_resume_plan(value)
 
 def test_terminal_receipt_must_match_fresh_digest_and_be_written_after_verify():
     value = train()
