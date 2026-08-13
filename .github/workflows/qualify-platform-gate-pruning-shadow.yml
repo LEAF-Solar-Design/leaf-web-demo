@@ -1,0 +1,76 @@
+name: Qualify dormant platform gate-pruning shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      gate_pruning_evidence_json:
+        description: Closed fixture or captured marker-equivalence evidence JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-platform-gate-pruning-shadow-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Evaluate marker gate evidence without changing a gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compile the dormant recommendation
+        shell: bash
+        env:
+          GATE_PRUNING_EVIDENCE_JSON: ${{ inputs.gate_pruning_evidence_json }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GATE_PRUNING_EVIDENCE_JSON" |
+            python3 scripts/platform_gate_pruning_shadow.py \
+              --input - \
+              --output "$RUNNER_TEMP/platform-gate-pruning-shadow-plan.json"
+          python3 - "$RUNNER_TEMP/platform-gate-pruning-shadow-plan.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert plan["schema"] == "leaf.platform-gate-pruning-shadow-plan.v1"
+          assert plan["disposition"] in {
+              "retain_blocking_gate",
+              "eligible_for_downgrade_review",
+          }
+          assert plan["gate_change_authorized"] is False
+          assert plan["selector_activation_authorized"] is False
+          assert plan["dispatch_authorized"] is False
+          assert plan["live_mutation_authorized"] is False
+          with Path("gate-pruning-summary.txt").open("w", encoding="utf-8") as output:
+              output.write(f"disposition={plan['disposition']}\n")
+              output.write(f"code={plan['code']}\n")
+              output.write(f"comparison_count={plan['comparison_count']}\n")
+              output.write(f"disagreement_count={plan['disagreement_count']}\n")
+          PY
+
+      - name: Upload the safe recommendation and summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dormant-platform-gate-pruning-shadow-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/platform-gate-pruning-shadow-plan.json
+            gate-pruning-summary.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report the dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "The output is a review recommendation with every execution authority false."
+          echo "No gate, selector, workflow, marker, provider, or live resource was changed."
