@@ -159,13 +159,14 @@ def _surface_repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _v3_entry(name: str) -> dict:
+    surface_fingerprint = format(SERVICES.index(name) + 20, "064x")
     entry = {
         "repository": f"leaf-platform-{name}",
         "image_digest": DIGESTS[name],
-        "immutable_lookup_tag": "surface-v1-" + format(SERVICES.index(name) + 10, "064x"),
+        "immutable_lookup_tag": f"surface-v1-{surface_fingerprint}",
         "producer_source_revision": "a" * 40,
         "producer_source_tree": "e" * 40,
-        "surface_fingerprint": format(SERVICES.index(name) + 20, "064x"),
+        "surface_fingerprint": surface_fingerprint,
         "recipe_fingerprint": format(SERVICES.index(name) + 30, "064x"),
         "producer_workflow_path": BUILD_WORKFLOW_PATH,
         "producer_workflow_blob": "f" * 40,
@@ -677,6 +678,11 @@ def test_v3_manifest_preserves_mixed_component_producer_identity():
     assert manifest["schema"] == "leaf.staging-supply-set.v3"
     assert manifest["release_source_revision"] == "a" * 40
     assert manifest["services"]["web"]["build_disposition"] == "reused"
+    assert all(
+        entry["immutable_lookup_tag"]
+        == f"surface-v1-{entry['surface_fingerprint']}"
+        for entry in manifest["services"].values()
+    )
     assert manifest["services"]["canonical-worker"]["solver_provenance"] == {
         "solver_source_revision": SOLVER_REVISION,
         "solver_source_sha256": SOLVER_HASH,
@@ -690,6 +696,14 @@ def test_v3_manifest_preserves_mixed_component_producer_identity():
         lambda value: value["services"]["app"].update(extra="field"),
         lambda value: value["services"]["web"].update(
             immutable_lookup_tag="prod-latest"
+        ),
+        lambda value: value["services"]["web"].pop("immutable_lookup_tag"),
+        lambda value: value["services"]["web"].update(
+            immutable_lookup_tag="surface-v1-not-a-fingerprint"
+        ),
+        lambda value: value["services"]["app"].pop("surface_fingerprint"),
+        lambda value: value["services"]["app"].update(
+            surface_fingerprint="g" * 64
         ),
         lambda value: value["services"]["broker"].update(
             provenance_subject=(
@@ -715,6 +729,52 @@ def test_v3_manifest_rejects_partial_mutable_or_restamped_evidence(mutate):
     mutate(manifest)
 
     with pytest.raises(ContractError):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "lookup_tag",
+    [
+        "prod-abcdef1",
+        "sha-" + "1" * 40,
+        "surface-v1-" + "2" * 64,
+    ],
+)
+def test_v3_manifest_builder_rejects_valid_format_lookup_tag_rebinding(lookup_tag):
+    services = {name: _v3_entry(name) for name in SERVICES}
+    services["app"]["immutable_lookup_tag"] = lookup_tag
+
+    with pytest.raises(ContractError, match="does not bind its surface fingerprint"):
+        build_v3_manifest(
+            "a" * 40,
+            "b" * 40,
+            "31415926535",
+            "2",
+            services,
+        )
+
+
+@pytest.mark.parametrize(
+    "lookup_tag",
+    [
+        "prod-abcdef1",
+        "sha-" + "1" * 40,
+        "surface-v1-" + "2" * 64,
+    ],
+)
+def test_v3_manifest_validator_rejects_valid_format_lookup_tag_rebinding(
+    lookup_tag,
+):
+    manifest = build_v3_manifest(
+        "a" * 40,
+        "b" * 40,
+        "31415926535",
+        "2",
+        {name: _v3_entry(name) for name in SERVICES},
+    )
+    manifest["services"]["app"]["immutable_lookup_tag"] = lookup_tag
+
+    with pytest.raises(ContractError, match="does not bind its surface fingerprint"):
         validate_manifest(manifest)
 
 
