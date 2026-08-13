@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-build-relay-adoption-shadow.v1.schema.json",
+  "title": "Leaf platform build and relay adoption shadow evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "envelope", "selectors", "active_writers", "open_markers", "manifest", "identity", "services"],
+  "properties": {
+    "schema": {"const": "leaf.platform-build-relay-adoption-shadow.v1"},
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supply_body_sha256", "identity_body_sha256", "checkpoint_sha256", "observed_at"],
+      "properties": {
+        "supply_body_sha256": {"$ref": "#/$defs/digest"},
+        "identity_body_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "selectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest_aware_reconcile", "marker_ledger_mode"],
+      "properties": {
+        "digest_aware_reconcile": {"const": false},
+        "marker_ledger_mode": {"const": "disabled"}
+      }
+    },
+    "active_writers": {"type": "integer", "minimum": 0},
+    "open_markers": {"type": "integer", "minimum": 0},
+    "manifest": {"type": "object"},
+    "identity": {
+      "anyOf": [
+        {"$ref": "#/$defs/identity"},
+        {"type": "null"}
+      ]
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "broker", "canonical-worker", "harness", "web"],
+      "properties": {
+        "app": {"$ref": "#/$defs/service"},
+        "broker": {"$ref": "#/$defs/service"},
+        "canonical-worker": {"$ref": "#/$defs/service"},
+        "harness": {"$ref": "#/$defs/service"},
+        "web": {"$ref": "#/$defs/service"}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate_body_sha256", "signed_predicate_verified", "registry_candidate_digest", "live_digest", "component_source_exact", "runtime_contract_exact", "migration_exact", "route_stable", "health_stable"],
+      "properties": {
+        "predicate_body_sha256": {"$ref": "#/$defs/digest"},
+        "signed_predicate_verified": {"type": "boolean"},
+        "registry_candidate_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "live_digest": {"$ref": "#/$defs/digest"},
+        "component_source_exact": {"type": "boolean"},
+        "runtime_contract_exact": {"type": "boolean"},
+        "migration_exact": {"type": "boolean"},
+        "route_stable": {"type": "boolean"},
+        "health_stable": {"type": "boolean"}
+      }
+    },
+    "identityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_digest", "source_revision"],
+      "properties": {
+        "image_digest": {"$ref": "#/$defs/digest"},
+        "source_revision": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "environment", "source_revision", "services"],
+      "properties": {
+        "schema": {"const": "leaf.deployment-identity.v1"},
+        "environment": {"const": "staging"},
+        "source_revision": {"$ref": "#/$defs/sha"},
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["app", "broker", "canonical-worker", "harness", "web"],
+          "properties": {
+            "app": {"$ref": "#/$defs/identityService"},
+            "broker": {"$ref": "#/$defs/identityService"},
+            "canonical-worker": {"$ref": "#/$defs/identityService"},
+            "harness": {"$ref": "#/$defs/identityService"},
+            "web": {"$ref": "#/$defs/identityService"}
+          }
+        }
+      }
+    }
+  }
+}
