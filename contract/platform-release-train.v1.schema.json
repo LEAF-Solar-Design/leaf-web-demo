@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-release-train.v1.schema.json",
+  "title": "Leaf platform release train evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "convergence_id",
+    "parent_run_id",
+    "run_attempt",
+    "source",
+    "supply",
+    "fresh_state",
+    "services",
+    "receipts"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-release-train.v1"},
+    "convergence_id": {"$ref": "#/$defs/id"},
+    "parent_run_id": {"type": "integer", "minimum": 1},
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree", "workflow_blob"],
+      "properties": {
+        "commit": {"$ref": "#/$defs/sha"},
+        "tree": {"$ref": "#/$defs/sha"},
+        "workflow_blob": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "supply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "artifact_sha256",
+        "predicate_sha256",
+        "producer_ancestry_verified",
+        "services"
+      ],
+      "properties": {
+        "artifact_id": {"type": "integer", "minimum": 1},
+        "artifact_sha256": {"$ref": "#/$defs/digest"},
+        "predicate_sha256": {"$ref": "#/$defs/digest"},
+        "producer_ancestry_verified": {"const": true},
+        "services": {"$ref": "#/$defs/digests"}
+      }
+    },
+    "fresh_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_writers",
+        "open_markers",
+        "retained_snapshot_count",
+        "snapshot_overflow_acknowledgement",
+        "drawing_fence",
+        "identity"
+      ],
+      "properties": {
+        "active_writers": {"type": "integer", "minimum": 0},
+        "open_markers": {"type": "integer", "minimum": 0},
+        "retained_snapshot_count": {"type": "integer", "minimum": 0},
+        "snapshot_overflow_acknowledgement": {
+          "type": ["string", "null"],
+          "pattern": "^snapshot-overflow:807034087062:us-east-1:leaf-platform-staging:[0-9]+$"
+        },
+        "drawing_fence": {"enum": ["open", "closed"]},
+        "identity": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["schema", "environment", "source_revision", "services", "body_sha256"],
+              "properties": {
+                "schema": {"const": "leaf.deployment-identity.v1"},
+                "environment": {"const": "staging"},
+                "source_revision": {"$ref": "#/$defs/sha"},
+                "services": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["web", "app", "broker", "harness", "canonical-worker"],
+                  "properties": {
+                    "web": {"$ref": "#/$defs/identityService"},
+                    "app": {"$ref": "#/$defs/identityService"},
+                    "broker": {"$ref": "#/$defs/identityService"},
+                    "harness": {"$ref": "#/$defs/identityService"},
+                    "canonical-worker": {"$ref": "#/$defs/identityService"}
+                  }
+                },
+                "body_sha256": {"$ref": "#/$defs/digest"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "app", "broker", "harness", "canonical-worker"],
+      "properties": {
+        "web": {"$ref": "#/$defs/service"},
+        "app": {"$ref": "#/$defs/service"},
+        "broker": {"$ref": "#/$defs/service"},
+        "harness": {"$ref": "#/$defs/service"},
+        "canonical-worker": {"$ref": "#/$defs/service"}
+      }
+    },
+    "receipts": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {"$ref": "platform-release-stage-receipt.v1.schema.json"}
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,199}$"},
+    "taskDefinition": {
+      "type": "string",
+      "pattern": "^arn:aws:ecs:us-east-1:[0-9]{12}:task-definition/leaf-platform-[a-z-]+:[1-9][0-9]*$"
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "app", "broker", "harness", "canonical-worker"],
+      "properties": {
+        "web": {"$ref": "#/$defs/digest"},
+        "app": {"$ref": "#/$defs/digest"},
+        "broker": {"$ref": "#/$defs/digest"},
+        "harness": {"$ref": "#/$defs/digest"},
+        "canonical-worker": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "live_digest",
+        "live_task_definition",
+        "rollback_task_definition",
+        "component_source_sha256",
+        "expected_component_source_sha256",
+        "runtime_contract_sha256",
+        "expected_runtime_contract_sha256",
+        "migration_fingerprint",
+        "expected_migration_fingerprint",
+        "route_stable",
+        "health_stable"
+      ],
+      "properties": {
+        "live_digest": {"$ref": "#/$defs/digest"},
+        "live_task_definition": {"$ref": "#/$defs/taskDefinition"},
+        "rollback_task_definition": {"$ref": "#/$defs/taskDefinition"},
+        "component_source_sha256": {"$ref": "#/$defs/digest"},
+        "expected_component_source_sha256": {"$ref": "#/$defs/digest"},
+        "runtime_contract_sha256": {"$ref": "#/$defs/digest"},
+        "expected_runtime_contract_sha256": {"$ref": "#/$defs/digest"},
+        "migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "expected_migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "route_stable": {"type": "boolean"},
+        "health_stable": {"type": "boolean"}
+      }
+    },
+    "identityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_digest", "source_revision"],
+      "properties": {
+        "image_digest": {"$ref": "#/$defs/digest"},
+        "source_revision": {"$ref": "#/$defs/sha"}
+      }
+    }
+  }
+}
