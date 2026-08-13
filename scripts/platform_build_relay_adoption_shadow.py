@@ -254,6 +254,13 @@ def validate_evidence(value: Any) -> dict[str, Any]:
     elif envelope["identity_body_sha256"] != _canonical_sha256(identity):
         raise ContractError("deployment_identity_envelope_invalid")
     services = _exact(root["services"], set(SERVICES), "services_invalid")
+    normalized_services = {name: _service(services[name]) for name in SERVICES}
+    for name in SERVICES:
+        if (
+            normalized_services[name]["predicate_body_sha256"]
+            != root["manifest"]["services"][name]["provenance_digest"]
+        ):
+            raise ContractError("predicate_body_hash_mismatch")
     return {
         "manifest": root["manifest"],
         "identity": identity,
@@ -262,7 +269,7 @@ def validate_evidence(value: Any) -> dict[str, Any]:
             root["active_writers"], "active_writers_invalid"
         ),
         "open_markers": _integer(root["open_markers"], "open_markers_invalid"),
-        "services": {name: _service(services[name]) for name in SERVICES},
+        "services": normalized_services,
     }
 
 
@@ -320,9 +327,7 @@ def compare_adoption(value: Any) -> dict[str, Any]:
         candidate = manifest["services"][name]
         observed = evidence["services"][name]
         adopt = (
-            candidate["build_disposition"] == "reused"
-            and observed["signed_predicate_verified"]
-            and observed["predicate_body_sha256"] == candidate["provenance_digest"]
+            observed["signed_predicate_verified"]
             and observed["registry_candidate_digest"] == candidate["image_digest"]
         )
         result["build_dispositions"][name] = (

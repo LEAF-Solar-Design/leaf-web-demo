@@ -154,7 +154,6 @@ def test_five_verified_candidates_and_live_surfaces_are_fully_skipped() -> None:
         ("signed_predicate_verified", False),
         ("registry_candidate_digest", None),
         ("registry_candidate_digest", "sha256:" + "f" * 64),
-        ("predicate_body_sha256", "sha256:" + "e" * 64),
     ],
 )
 def test_unproven_candidate_requires_build_and_blocks_relay(
@@ -171,7 +170,7 @@ def test_unproven_candidate_requires_build_and_blocks_relay(
     assert result["identity_disposition"] is None
 
 
-def test_manifest_built_disposition_is_not_reclassified_as_adopted() -> None:
+def test_manifest_history_does_not_override_current_verified_adoption() -> None:
     evidence = _evidence()
     evidence["manifest"] = _manifest("built")
     evidence["identity"] = _identity(evidence["manifest"])
@@ -186,8 +185,18 @@ def test_manifest_built_disposition_is_not_reclassified_as_adopted() -> None:
 
     result = compare_adoption(evidence)
 
-    assert result["status"] == "blocked"
-    assert set(result["build_dispositions"].values()) == {"shadow_build"}
+    assert result["status"] == "comparison_ready"
+    assert set(result["build_dispositions"].values()) == {"shadow_adopt_build"}
+
+
+def test_predicate_body_hash_drift_fails_closed_before_decisions() -> None:
+    evidence = _evidence()
+    evidence["services"]["broker"]["predicate_body_sha256"] = (
+        "sha256:" + "e" * 64
+    )
+
+    with pytest.raises(ContractError, match="predicate_body_hash_mismatch"):
+        compare_adoption(evidence)
 
 
 def test_stale_tail_projects_three_deploys_and_shadow_restamp() -> None:
