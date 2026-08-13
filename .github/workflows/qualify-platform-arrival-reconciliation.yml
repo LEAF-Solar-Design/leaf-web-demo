@@ -1,0 +1,68 @@
+name: Qualify platform arrival reconciliation contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadow_enabled:
+        description: Prove the dormant arrival contract remains unconfigured
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leaf-platform-arrival-reconciliation-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  contract-preflight:
+    name: Dormant arrival-frontier preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prove Layer 4 remains unconfigured
+        shell: bash
+        env:
+          SHADOW_ENABLED: ${{ inputs.shadow_enabled }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/platform_arrival_reconcile.py workflow-preflight \
+            --shadow-enabled "$SHADOW_ENABLED" > preflight.json
+          status=$?
+          set -e
+          test "$status" -eq 78
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path("preflight.json").read_text(encoding="utf-8"))
+          assert value == {
+              "dispatch_authorized": False,
+              "live_mutation_authorized": False,
+              "provider_calls": 0,
+              "receipt_published": False,
+              "schema": "leaf.platform-arrival-reconciliation-preflight.v1",
+              "selectors": {
+                  "arrival_observation": "UNCONFIGURED",
+                  "frontier_reconciliation": "UNCONFIGURED",
+              },
+              "shadow_enabled": value["shadow_enabled"],
+              "state": "UNCONFIGURED",
+              "writer_acquisition_authorized": False,
+          }
+          PY
+
+      - name: Report dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Layer 4 is fixture-only and UNCONFIGURED."
+          echo "No receipt, provider, dispatch, writer, build, relay, or live action was authorized."

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-arrival-reconciliation.v1.schema.json",
+  "title": "Leaf platform arrival-frontier reconciliation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "state", "arrival_id", "previous_source_revision",
+    "current_source_revision", "current_source_tree", "product_impact",
+    "trigger_impact", "supply_effect", "live_effect", "producer_run_ids",
+    "relay_run_ids", "supply_artifact_id", "supply_artifact_digest",
+    "convergence_artifact_id", "convergence_artifact_digest",
+    "terminal_receipt_digests", "preserved_stages",
+    "failed_or_remaining_stage", "owner_class", "disposition", "reason_code",
+    "current_writer_count", "marker_count", "next_level2_action",
+    "rollback_source_revision", "evidence_binding_digest", "authority",
+    "selectors"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-arrival-reconciliation.v1"},
+    "state": {"const": "SHADOW"},
+    "arrival_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "previous_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "current_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "current_source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "product_impact": {"enum": ["nil", "build_input", "unknown"]},
+    "trigger_impact": {"enum": ["none", "build", "relay", "writer", "unknown"]},
+    "supply_effect": {"enum": ["none", "complete_new_supply", "partial_supply", "unknown"]},
+    "live_effect": {"enum": ["none", "in_progress", "converged", "failed_stage", "unknown"]},
+    "producer_run_ids": {
+      "type": "array", "maxItems": 32, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "relay_run_ids": {
+      "type": "array", "maxItems": 32, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "supply_artifact_id": {"type": ["integer", "null"], "minimum": 1},
+    "supply_artifact_digest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "convergence_artifact_id": {"type": ["integer", "null"], "minimum": 1},
+    "convergence_artifact_digest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "terminal_receipt_digests": {
+      "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    },
+    "preserved_stages": {
+      "type": "array", "maxItems": 16, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"}
+    },
+    "failed_or_remaining_stage": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "owner_class": {"enum": ["same_train", "external_owner", "unknown"]},
+    "disposition": {
+      "enum": ["preserve", "adopt_frontier", "resume_failed_stage", "rebind", "stand_down", "hold"]
+    },
+    "reason_code": {
+      "enum": [
+        "owner_unattributed", "current_main_drift", "newer_frontier_terminal",
+        "frontier_occupied", "later_writer_supply_changed",
+        "later_writer_nonterminal", "relay_nonterminal", "partial_supply",
+        "live_frontier_inexact", "failed_stage_product_mismatch",
+        "failed_stage_not_terminal", "failed_stage_predecessor_missing",
+        "single_failed_stage_preserved", "live_frontier_in_progress",
+        "new_supply_not_converged", "level3_adoption_evidence_incomplete",
+        "product_nil_operational_frontier", "no_operational_frontier",
+        "product_reclassification_required", "evidence_incomplete"
+      ]
+    },
+    "current_writer_count": {"type": "integer", "minimum": 0},
+    "marker_count": {"type": "integer", "minimum": 0},
+    "next_level2_action": {
+      "enum": ["preserve", "adopt", "resume_failed_stage", "reclassify", "stand_down", "hold"]
+    },
+    "rollback_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "evidence_binding_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispatch", "cancel", "merge", "selector_activation",
+        "source_mutation", "build_or_relay", "writer_or_marker_mutation",
+        "deployment_or_aws", "auth0_or_credentials", "live_state_mutation"
+      ],
+      "properties": {
+        "dispatch": {"const": false},
+        "cancel": {"const": false},
+        "merge": {"const": false},
+        "selector_activation": {"const": false},
+        "source_mutation": {"const": false},
+        "build_or_relay": {"const": false},
+        "writer_or_marker_mutation": {"const": false},
+        "deployment_or_aws": {"const": false},
+        "auth0_or_credentials": {"const": false},
+        "live_state_mutation": {"const": false}
+      }
+    },
+    "selectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arrival_observation", "frontier_reconciliation"],
+      "properties": {
+        "arrival_observation": {"const": "UNCONFIGURED"},
+        "frontier_reconciliation": {"const": "UNCONFIGURED"}
+      }
+    }
+  }
+}
