@@ -129,6 +129,81 @@ def test_request_journal_migration_unconditionally_declares_runtime_schema():
     }
 
 
+def test_project_lifecycle_migration_unconditionally_declares_runtime_schema():
+    migration = (
+        db._PKG_DIR / "migrations" / "0038_project_lifecycle.sql"
+    ).read_text(encoding="utf-8")
+    expected_tables = {
+        "project_member_bindings",
+        "project_files",
+        "project_lifecycle_receipts",
+    }
+    assert expected_tables == {
+        line.split("IF NOT EXISTS ", 1)[1].split()[0]
+        for line in migration.splitlines()
+        if line.startswith("CREATE TABLE IF NOT EXISTS ")
+    }
+    expected_indexes = {
+        "project_member_bindings_one_active",
+        "idx_project_member_bindings_scope",
+        "idx_project_files_scope",
+        "idx_project_lifecycle_receipts_scope",
+        "project_lifecycle_receipts_create_idempotency",
+    }
+    assert expected_indexes == {
+        line.split("IF NOT EXISTS ", 1)[1].split()[0]
+        for line in migration.splitlines()
+        if "INDEX IF NOT EXISTS " in line
+    }
+    expected_constraints = {
+        "identity_bindings_tenant_binding_unique",
+        "project_member_bindings_project_fk",
+        "project_member_bindings_binding_fk",
+        "project_member_bindings_inviter_fk",
+        "project_member_bindings_role_check",
+        "project_member_bindings_status_check",
+        "project_member_bindings_revocation_shape_check",
+        "project_files_project_fk",
+        "project_files_creator_fk",
+        "project_files_path_check",
+        "project_files_media_type_check",
+        "project_files_content_sha256_check",
+        "project_files_revision_check",
+        "project_files_scope_path_unique",
+        "project_lifecycle_receipts_project_fk",
+        "project_lifecycle_receipts_actor_fk",
+        "project_lifecycle_receipts_action_check",
+        "project_lifecycle_receipts_idempotency_key_check",
+        "project_lifecycle_receipts_input_digest_check",
+        "project_lifecycle_receipts_idempotency_unique",
+    }
+    assert expected_constraints == {
+        line.strip().split()[2 if line.strip().startswith("ADD CONSTRAINT") else 1]
+        for line in migration.splitlines()
+        if line.strip().startswith(("CONSTRAINT ", "ADD CONSTRAINT "))
+    }
+    assert db._REQUIRED_COLUMNS["project_member_bindings"] == {
+        "membership_id", "org_id", "project_id", "binding_id", "role", "status",
+        "invited_by_binding_id", "created_at", "revoked_at",
+    }
+    assert db._REQUIRED_COLUMNS["project_files"] == {
+        "file_id", "org_id", "project_id", "path", "media_type", "content",
+        "content_sha256", "revision", "created_by_binding_id", "created_at",
+        "updated_at",
+    }
+    assert db._REQUIRED_COLUMNS["project_lifecycle_receipts"] == {
+        "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
+        "idempotency_key", "input_digest", "result_json", "created_at",
+    }
+    assert expected_constraints <= set(db._REQUIRED_CONSTRAINTS)
+    assert expected_indexes == set(db._REQUIRED_INDEXES)
+    assert db._REQUIRED_TRIGGERS == {
+        "project_lifecycle_receipts_immutable": db._catalog_contract(
+            "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+    }
+
+
 def test_customization_authority_migration_follows_tenant_mcp_journal():
     manifest = [item["name"] for item in db.migration_manifest()]
     # 0031 follows 0030 immediately (intent preserved even as later
