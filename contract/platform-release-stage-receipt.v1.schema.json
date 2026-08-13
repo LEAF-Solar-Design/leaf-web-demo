@@ -17,6 +17,7 @@
     "workflow_blob",
     "supply_artifact_id",
     "supply_sha256",
+    "supply_predicate_sha256",
     "service",
     "decision",
     "candidate_digest",
@@ -56,6 +57,7 @@
     "workflow_blob": {"$ref": "#/$defs/sha"},
     "supply_artifact_id": {"type": "integer", "minimum": 1},
     "supply_sha256": {"$ref": "#/$defs/digest"},
+    "supply_predicate_sha256": {"$ref": "#/$defs/digest"},
     "service": {
       "type": ["string", "null"],
       "enum": ["web", "app", "broker", "harness", "canonical-worker", null]

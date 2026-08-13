@@ -150,6 +150,7 @@ def receipt(value: dict, stage: str, *, state: str = "terminal") -> dict:
         "workflow_blob": value["source"]["workflow_blob"],
         "supply_artifact_id": value["supply"]["artifact_id"],
         "supply_sha256": value["supply"]["artifact_sha256"],
+        "supply_predicate_sha256": value["supply"]["predicate_sha256"],
         "service": service,
         "decision": decision,
         "candidate_digest": value["supply"]["services"].get(stage),
@@ -397,6 +398,7 @@ def test_mutable_tag_without_closed_signed_supply_shape_is_rejected():
         lambda item: item.update(source_commit="d" * 40),
         lambda item: item.update(run_attempt=2),
         lambda item: item.update(supply_artifact_id=999),
+        lambda item: item.update(supply_predicate_sha256=digest(999)),
         lambda item: item.update(workflow_blob="d" * 40),
     ],
 )
