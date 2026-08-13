@@ -610,6 +610,16 @@ def build_suites() -> List[Suite]:
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
               _py_pytest("tests/test_deployment_identity.py"), 12),
+        # Registered WITH the file, per the #29 fix-then-register rule: an
+        # unregistered suite runs nowhere, and a deploy-safety gate that runs
+        # nowhere is exactly the advisory this one exists to replace. Floor 41 =
+        # 4 unparametrized tests + 4 parametrizations over the 9 declared
+        # task-local state paths (36) + 1 selector test over the single
+        # selector-guarded path. Measured on this tree 2026-08-13. The floor
+        # moves with the ledger: each new state path adds 4.
+        Suite("server-task-local-state-authority",
+              "server tests/test_task_local_state_authority_gate.py", "pytest", SERVER,
+              _py_pytest("tests/test_task_local_state_authority_gate.py"), 41),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
         # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
