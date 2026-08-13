@@ -1,0 +1,74 @@
+name: Qualify dormant build and relay adoption shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      adoption_shadow_json:
+        description: Closed fixture or captured adoption evidence JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-platform-build-relay-adoption-shadow-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    name: Compare dormant build and relay evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compile the non-executable adoption result
+        shell: bash
+        env:
+          ADOPTION_SHADOW_JSON: ${{ inputs.adoption_shadow_json }}
+        run: |
+          set -euo pipefail
+          set +e
+          printf '%s' "$ADOPTION_SHADOW_JSON" |
+            python3 scripts/platform_build_relay_adoption_shadow.py \
+              --input - \
+              --output "$RUNNER_TEMP/platform-build-relay-adoption-shadow-result.json"
+          status=$?
+          set -e
+          test "$status" -eq 0 -o "$status" -eq 78
+          python3 - "$RUNNER_TEMP/platform-build-relay-adoption-shadow-result.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert result["schema"] == "leaf.platform-build-relay-adoption-shadow-result.v1"
+          assert result["status"] in {"comparison_ready", "blocked"}
+          assert result["selector_activation_authorized"] is False
+          assert result["dispatch_authorized"] is False
+          assert result["identity_restamp_authorized"] is False
+          Path("adoption-shadow-summary.txt").write_text(
+              f"status={result['status']}\ncode={result['code']}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload safe adoption evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dormant-platform-build-relay-adoption-shadow-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/platform-build-relay-adoption-shadow-result.json
+            adoption-shadow-summary.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "No build, relay, restamp, selector, or provider action was authorized."
