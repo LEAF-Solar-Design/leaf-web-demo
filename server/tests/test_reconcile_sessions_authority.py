@@ -459,7 +459,16 @@ def test_backfill_then_parity_passes_and_carries_every_column(source, target):
 
 @requires_database
 def test_target_only_rows_are_expected_and_never_a_failure(source, target):
-    """Staging dual-writes while this runs, so PostgreSQL leads the source."""
+    """A DUAL-WRITING source leads to target-only rows, so they are not a failure.
+
+    Named by the condition rather than by the environment, deliberately. This
+    said "Staging dual-writes while this runs", which was true when written and
+    stopped being true when staging's LEAF_SESSIONS_STORE went to `postgres`:
+    only `dual_write` and `dual_write_shadow` are in
+    `session_store._DUAL_WRITE_MODES`. The tolerance under test is a property of
+    the MODE, and reading it as a property of staging is what makes a frozen
+    source against a growing target look like a clean parity run.
+    """
     session = source.session()
     RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
     with target.transaction() as conn:
