@@ -22,15 +22,34 @@ export class FakeRepoEditor implements RepoEditor {
   calls = 0;
 
   async edit(input: RepoEditInput): Promise<RepoEditResult> {
+    if (input.signal?.aborted) throw new Error("in-app edit session was cancelled");
     this.calls += 1;
     const changed = new Set<string>();
     const acts: string[] = [];
+    let attemptedWrites = false;
     const lines = input.instruction.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     let commanded = false;
     for (const line of lines) {
-      let m = line.match(/^write\s+(\S+):\s?([\s\S]*)$/);
+      // A read-only reply: no writes, summary = the text. Lets hermetic tests
+      // drive the ANSWERED outcome the same way live Claude answers a
+      // question about the repo without editing anything.
+      let m = line.match(/^answer\s+([\s\S]+)$/);
       if (m) {
         commanded = true;
+        acts.push(m[1]!);
+        continue;
+      }
+      m = line.match(/^wait\s+(\d+)$/);
+      if (m) {
+        const delayMs = Math.min(5000, Number.parseInt(m[1], 10));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (input.signal?.aborted) throw new Error("in-app edit session was cancelled");
+        continue;
+      }
+      m = line.match(/^write\s+(\S+):\s?([\s\S]*)$/);
+      if (m) {
+        commanded = true;
+        attemptedWrites = true;
         const abs = safeRepoRelative(input.repoDir, m[1]);
         if (!abs) throw new Error(`fake editor: path escapes the repo: ${m[1]}`);
         mkdirSync(dirname(abs), { recursive: true });
@@ -42,6 +61,7 @@ export class FakeRepoEditor implements RepoEditor {
       m = line.match(/^append\s+(\S+):\s?([\s\S]*)$/);
       if (m) {
         commanded = true;
+        attemptedWrites = true;
         const abs = safeRepoRelative(input.repoDir, m[1]);
         if (!abs) throw new Error(`fake editor: path escapes the repo: ${m[1]}`);
         appendFileSync(abs, m[2] + "\n", "utf8");
@@ -52,14 +72,20 @@ export class FakeRepoEditor implements RepoEditor {
       m = line.match(/^replace\s+(\S+):\s?([\s\S]*?)\s=>\s([\s\S]*)$/);
       if (m) {
         commanded = true;
-        applyRepoEdit(input.repoDir, m[1]!, m[2]!, m[3]!);
-        changed.add(m[1]!);
-        acts.push(`replaced in ${m[1]}`);
+        attemptedWrites = true;
+        const result = applyRepoEdit(input.repoDir, m[1]!, m[2]!, m[3]!);
+        if (result.changed) {
+          changed.add(m[1]!);
+          acts.push(`replaced in ${m[1]}`);
+        } else {
+          acts.push(`no change to ${m[1]}`);
+        }
         continue;
       }
       m = line.match(/^delete\s+(\S+)$/);
       if (m) {
         commanded = true;
+        attemptedWrites = true;
         const abs = safeRepoRelative(input.repoDir, m[1]);
         if (!abs) throw new Error(`fake editor: path escapes the repo: ${m[1]}`);
         rmSync(abs);
@@ -68,12 +94,13 @@ export class FakeRepoEditor implements RepoEditor {
       }
     }
     if (!commanded) {
+      attemptedWrites = true;
       const abs = safeRepoRelative(input.repoDir, ".mushy-note.md");
       if (!abs) throw new Error("fake editor: repo dir unusable");
       writeFileSync(abs, `# fake edit\n\n${input.instruction}\n`, "utf8");
       changed.add(".mushy-note.md");
       acts.push("wrote .mushy-note.md (fake fallback: no model attached)");
     }
-    return { summary: acts.join("; "), changedFiles: [...changed].sort() };
+    return { summary: acts.join("; "), changedFiles: [...changed].sort(), attemptedWrites };
   }
 }

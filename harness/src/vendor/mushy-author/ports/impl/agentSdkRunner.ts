@@ -38,6 +38,7 @@ import type {
   ToolPackage,
   ToolSubmissionResult,
 } from "../index.js";
+import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "../../agent/captureGuards.js";
 import { acceptBrokerTestResult } from "../../agent/tools/toolExecutionReceipt.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
@@ -454,19 +455,38 @@ export class AgentSdkRunner implements AgentRunner {
    * grant into the SDK's child env, SDK faults quote the offending value, and
    * the shell's author lane persists whatever escapes into the durable
    * conversation log that later models read back. (sol-critic PR #4, finding 1.)
+   *
+   * CARRY THE FAILURE BRAND ACROSS THE REWRAP. `runInner` brands its terminal
+   * throws with `withFailureCategory(err, "auth_failure" | "quota_exhausted" |
+   * "rate_limited")`, and that brand is a non-enumerable symbol property on THAT
+   * ERROR OBJECT. `new Error(scrubbed)` is a different object, so redacting used
+   * to silently drop every category and land the capture on "unknown". Nothing
+   * downstream could recover it: classification-by-message was removed on purpose
+   * as a side channel (see `failureCategory`), and this wrapper redacts the
+   * message anyway. The loss is worse under `trustRunnerFailureCategories`, which
+   * `examples/webapp/server.mjs` sets in live mode: that flag declares this runner
+   * first-party and trusted to brand its own failures, so stripping the brands
+   * produced trusted-but-unbranded -- exactly the "unknown" the flag exists to
+   * prevent.
+   *
+   * Read with `carriedFailureCategory`, NOT `failureCategory`: the latter returns
+   * "unknown" for an unbranded error, and `withFailureCategory` defines the
+   * property `configurable: false`, so branding unconditionally would pin
+   * "unknown" onto errors that carried nothing and make a later brand impossible.
    */
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     try {
       return await this.runInner(input);
     } catch (e) {
       const scrubbed = redactSecrets(
-        e instanceof Error ? e.message : String(e),
+        safeErrorMessage(e),
         grantSecrets(input.grant),
       );
       const wrapped = new Error(scrubbed);
       // Drop the original stack: it can quote the offending value too.
       wrapped.stack = `${wrapped.name}: ${scrubbed}`;
-      throw wrapped;
+      const carried = carriedFailureCategory(e);
+      throw carried ? withFailureCategory(wrapped, carried) : wrapped;
     }
   }
 
@@ -767,8 +787,12 @@ export class AgentSdkRunner implements AgentRunner {
 
     // 6b) Surface a terminal auth / spend-cap failure (usage is now captured above).
     if (loopError) throw loopError;
-    if (authFailure) throw new Error(`Agent SDK auth failure: ${authFailure}`);
-    if (capHit) throw new Error(capHit);
+    if (authFailure)
+      throw withFailureCategory(
+        new Error(`Agent SDK auth failure: ${authFailure}`),
+        authFailure === "billing_error" ? "quota_exhausted" : "auth_failure",
+      );
+    if (capHit) throw withFailureCategory(new Error(capHit), "quota_exhausted");
     // B3 (ADDITIVE): rate-limit terminal, with the retry-after horizon exposed on
     // the instance (lastRateLimit) and named in the thrown error.
     if (rateLimitHit) {
@@ -779,9 +803,12 @@ export class AgentSdkRunner implements AgentRunner {
             ? Math.round(retryDelayMs / 1000)
             : null;
       this.lastRateLimit = { error: "rate_limit", retry_after_s: retryAfterS };
-      throw new Error(
-        `Agent SDK rate limited` +
-          (retryAfterS !== null ? ` (retry after ~${retryAfterS}s)` : " (retry horizon unknown)"),
+      throw withFailureCategory(
+        new Error(
+          `Agent SDK rate limited` +
+            (retryAfterS !== null ? ` (retry after ~${retryAfterS}s)` : " (retry horizon unknown)"),
+        ),
+        "rate_limited",
       );
     }
 

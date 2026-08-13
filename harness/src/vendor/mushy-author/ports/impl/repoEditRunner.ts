@@ -18,9 +18,32 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import {
+  closeSync,
+  ftruncateSync,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+  writeSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { AgentGrant, AuthorTelemetry } from "../index.js";
+import {
+  assertOpenedFileIdentity,
+  isWindowsUnsafeRepoComponent,
+  resolveContainedRepoPath,
+  revalidateResolvedRepoPath,
+  type ResolvedRepoPath,
+} from "../../agent/tools/repoPathSafety.js";
+import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "../../agent/captureGuards.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { scrubSecrets } from "./envScrub.js";
@@ -43,6 +66,8 @@ export interface RepoEditInput {
   grant: AgentGrant;
   /** Optional extra context the shell wants the editor to know (routes, conventions). */
   context?: string;
+  /** Cooperative cancellation supplied by a request scheduler or client. */
+  signal?: AbortSignal;
   /**
    * Optional live progress sink: the model's text as it streams
    * (`text_delta`), every repo tool invocation as it happens (`tool`), and
@@ -55,7 +80,7 @@ export interface RepoEditInput {
 
 export type RepoEditEvent =
   | { type: "text_delta"; text: string }
-  | { type: "tool"; tool: "list" | "read" | "write" | "edit" | "delete" | "history"; path: string }
+  | { type: "tool"; tool: "list" | "read" | "grep" | "write" | "edit" | "delete" | "history"; path: string }
   | { type: "turn"; count: number };
 
 /**
@@ -73,18 +98,39 @@ export function applyRepoEdit(
   oldString: string,
   newString: string,
   replaceAll = false,
-): { occurrences: number } {
-  const abs = safeRepoRelative(repoDir, relPath);
-  if (!abs) throw new Error(`path escapes the repo: ${relPath}`);
-  const before = readFileSync(abs, "utf8");
-  if (!oldString) throw new Error("old_string must be non-empty");
-  const occurrences = before.split(oldString).length - 1;
-  if (occurrences === 0) throw new Error("old_string not found (must match the file exactly)");
-  if (occurrences > 1 && !replaceAll) {
-    throw new Error(`old_string matches ${occurrences} times; make it unique or set replace_all`);
+): { occurrences: number; changed: boolean } {
+  const target = operationPath(repoDir, relPath);
+  const fd = openSync(target.path, "r+");
+  try {
+    assertOpenedFileIdentity(target, fstatSync(fd));
+    const before = readFileSync(fd, "utf8");
+    if (!oldString) throw new Error("old_string must be non-empty");
+    const occurrences = before.split(oldString).length - 1;
+    if (occurrences === 0) throw new Error("old_string not found (must match the file exactly)");
+    if (occurrences > 1 && !replaceAll) {
+      throw new Error(`old_string matches ${occurrences} times; make it unique or set replace_all`);
+    }
+    const changed = oldString !== newString;
+    if (changed) {
+      const bytes = Buffer.from(before.split(oldString).join(newString), "utf8");
+      ftruncateSync(fd, 0);
+      writeSync(fd, bytes, 0, bytes.length, 0);
+    }
+    return { occurrences, changed };
+  } finally {
+    closeSync(fd);
   }
-  writeFileSync(abs, before.split(oldString).join(newString), "utf8");
-  return { occurrences };
+}
+
+/** Refuse a tool-loop exhaustion that never produced the SDK's final result. */
+export function assertRepoEditTerminalResult(sawResult: boolean, changedFiles: string[]): void {
+  if (sawResult) return;
+  const touched = changedFiles.length
+    ? ` after touching ${changedFiles.join(", ")}`
+    : "";
+  throw new Error(
+    `in-app edit session ended without a terminal SDK result${touched}; changes were not committed`,
+  );
 }
 
 export interface RepoEditResult {
@@ -92,6 +138,14 @@ export interface RepoEditResult {
   summary: string;
   /** Repo-relative paths written or deleted this session, sorted. */
   changedFiles: string[];
+  /** True when the model invoked a mutating tool, even if it was a no-op. */
+  attemptedWrites?: boolean;
+  /** Bounded inspection usage for operator diagnostics. */
+  inspection?: {
+    bytesRead: number;
+    matches: number;
+    truncated: boolean;
+  };
   telemetry?: AuthorTelemetry;
 }
 
@@ -107,15 +161,233 @@ export interface RepoEditor {
  * Exported for the shell's own file endpoints and for hermetic tests.
  */
 export function safeRepoRelative(repoDir: string, rel: unknown): string | null {
-  if (typeof rel !== "string" || !rel.trim() || rel.includes("\0")) return null;
-  const norm = rel.replaceAll("\\", "/").replace(/^\.\//, "");
-  if (norm.startsWith("/") || /^[A-Za-z]:/.test(norm)) return null;
-  const parts = norm.split("/");
-  if (parts.includes("..") || parts[0] === ".git") return null;
-  const root = realpathSync(repoDir);
-  const abs = resolve(root, norm);
-  if (abs !== root && !abs.startsWith(root + sep)) return null;
-  return abs;
+  return resolveContainedRepoPath(repoDir, rel)?.path ?? null;
+}
+
+function operationPath(repoDir: string, relPath: string): ResolvedRepoPath {
+  const target = resolveContainedRepoPath(repoDir, relPath);
+  if (!target) throw new Error(`path escapes the repo: ${relPath}`);
+  return revalidateResolvedRepoPath(target);
+}
+
+/**
+ * Atomically detach one validated file from its caller-visible name before
+ * unlinking it. The optional seam exists only for a deterministic race test.
+ */
+export function quarantineDeleteRepoFile(
+  repoDir: string,
+  relPath: string,
+  beforeRename?: () => void,
+): void {
+  let target = operationPath(repoDir, relPath);
+  const final = target.components.at(-1);
+  if (!final || final.kind !== "file") throw new Error("repo_delete path must be a regular file");
+  const normalized = relPath.replaceAll("\\", "/");
+  const parentRel = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : ".";
+  let parent = operationPath(repoDir, parentRel || ".");
+  const quarantine = mkdtempSync(join(parent.path, ".mushy-delete-"));
+  const quarantineRel = parentRel === "."
+    ? basename(quarantine)
+    : `${parentRel}/${basename(quarantine)}`;
+  let quarantineTarget = operationPath(repoDir, quarantineRel);
+  const destination = join(quarantine, "entry");
+  let moved = false;
+  let preserveEvidence = false;
+  let admittedFd = -1;
+  try {
+    parent = revalidateResolvedRepoPath(parent);
+    target = revalidateResolvedRepoPath(target);
+    quarantineTarget = revalidateResolvedRepoPath(quarantineTarget);
+    // Keep the admitted inode alive across the path race. Without this handle,
+    // Linux may reuse the inode immediately after unlink, making a replacement
+    // look identical even though it is different content.
+    admittedFd = openSync(target.path, "r");
+    assertOpenedFileIdentity(target, fstatSync(admittedFd));
+    if (lstatSync(destination, { throwIfNoEntry: false })) {
+      preserveEvidence = true;
+      throw new Error(`repo_delete quarantine destination is not exclusive; evidence preserved at ${quarantineRel}/entry`);
+    }
+    beforeRename?.();
+    renameSync(target.path, destination);
+    moved = true;
+    try {
+      assertOpenedFileIdentity(target, lstatSync(destination));
+    } catch {
+      preserveEvidence = true;
+      throw new Error(`repo_delete identity changed; unproven entry preserved at ${quarantineRel}/entry`);
+    }
+    rmSync(destination);
+    moved = false;
+  } finally {
+    if (admittedFd >= 0) closeSync(admittedFd);
+    // Never unlink an entry whose identity did not match the admitted target.
+    // A mismatch remains in the contained quarantine for operator recovery.
+    if (!moved && !preserveEvidence) rmdirSync(quarantine);
+  }
+}
+
+export interface RepoReadRange {
+  path: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  text: string;
+  bytesReturned: number;
+  truncated: boolean;
+}
+
+/** Hard input ceiling for one ranged read. Output has its own smaller cap. */
+export const REPO_READ_MAX_INPUT_BYTES = 8_388_608;
+
+function readRepoFileWithinInputCap(target: ResolvedRepoPath): string {
+  const fd = openSync(target.path, "r");
+  try {
+    const stat = fstatSync(fd);
+    assertOpenedFileIdentity(target, stat);
+    if (stat.size > REPO_READ_MAX_INPUT_BYTES) {
+      throw new Error(
+        `repo_read input exceeds ${REPO_READ_MAX_INPUT_BYTES}-byte cap; narrow the source file before reading it`,
+      );
+    }
+
+    const bytes = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+
+    // Fail closed if a concurrent writer grew the file after fstatSync. The
+    // extra one-byte probe keeps the allocation and decoded input bounded.
+    const probe = Buffer.allocUnsafe(1);
+    if (readSync(fd, probe, 0, 1, offset) > 0) {
+      throw new Error(
+        `repo_read input changed during inspection or exceeds ${REPO_READ_MAX_INPUT_BYTES}-byte cap; retry the read`,
+      );
+    }
+    return bytes.subarray(0, offset).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Read a bounded, one-based line range with explicit truncation metadata. */
+export function readRepoFileRange(
+  repoDir: string,
+  relPath: string,
+  options: { startLine?: number; endLine?: number; maxBytes?: number } = {},
+): RepoReadRange {
+  const target = operationPath(repoDir, relPath);
+  const source = readRepoFileWithinInputCap(target);
+  const lines = source.split(/\r?\n/);
+  const totalLines = lines.length;
+  const startLine = Math.max(1, Math.trunc(options.startLine ?? 1));
+  const requestedEnd = Math.max(startLine, Math.trunc(options.endLine ?? (startLine + 199)));
+  const endLimit = Math.min(totalLines, requestedEnd);
+  const maxBytes = Math.max(1, Math.min(262_144, Math.trunc(options.maxBytes ?? 65_536)));
+  const chunks: string[] = [];
+  let bytesReturned = 0;
+  let lastLine = startLine - 1;
+  let byteTruncated = false;
+  for (let lineNo = startLine; lineNo <= endLimit; lineNo += 1) {
+    const value = lines[lineNo - 1] ?? "";
+    const prefix = chunks.length ? "\n" : "";
+    const encoded = Buffer.from(prefix + value, "utf8");
+    if (bytesReturned + encoded.length > maxBytes) {
+      const remaining = maxBytes - bytesReturned;
+      if (remaining > 0) chunks.push(encoded.subarray(0, remaining).toString("utf8"));
+      bytesReturned = maxBytes;
+      lastLine = lineNo;
+      byteTruncated = true;
+      break;
+    }
+    chunks.push(prefix + value);
+    bytesReturned += encoded.length;
+    lastLine = lineNo;
+  }
+  return {
+    path: relPath.replaceAll("\\", "/"),
+    startLine,
+    endLine: Math.max(startLine - 1, lastLine),
+    totalLines,
+    text: chunks.join(""),
+    bytesReturned,
+    truncated: byteTruncated || lastLine < totalLines || requestedEnd < totalLines,
+  };
+}
+
+export interface RepoGrepResult {
+  query: string;
+  matches: Array<{ path: string; line: number; text: string; contextBefore: string[]; contextAfter: string[] }>;
+  filesScanned: number;
+  bytesScanned: number;
+  truncated: boolean;
+}
+
+/** Literal, recursive, bounded repository search with small context windows. */
+export function grepRepoFiles(
+  repoDir: string,
+  options: {
+    query: string;
+    path?: string;
+    maxMatches?: number;
+    contextLines?: number;
+    maxBytes?: number;
+  },
+): RepoGrepResult {
+  if (!options.query) throw new Error("query must be non-empty");
+  const rootRel = options.path?.trim() || ".";
+  const root = operationPath(repoDir, rootRel);
+  const maxMatches = Math.max(1, Math.min(500, Math.trunc(options.maxMatches ?? 100)));
+  const contextLines = Math.max(0, Math.min(5, Math.trunc(options.contextLines ?? 2)));
+  const maxBytes = Math.max(1, Math.min(8_388_608, Math.trunc(options.maxBytes ?? 2_097_152)));
+  const matches: RepoGrepResult["matches"] = [];
+  let filesScanned = 0;
+  let bytesScanned = 0;
+  let truncated = false;
+  const queue: Array<{ target: ResolvedRepoPath; rel: string }> = [{
+    target: root,
+    rel: rootRel === "." ? "" : rootRel.replaceAll("\\", "/"),
+  }];
+  while (queue.length && !truncated) {
+    const current = queue.shift()!;
+    const target = revalidateResolvedRepoPath(current.target);
+    const stat = lstatSync(target.path);
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(target.path).sort()) {
+        if (name === ".git" || name === "__pycache__" || name === "node_modules") continue;
+        const rel = current.rel ? `${current.rel}/${name}` : name;
+        const child = resolveContainedRepoPath(repoDir, rel);
+        if (child) queue.push({ target: child, rel });
+      }
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    if (bytesScanned + stat.size > maxBytes) {
+      truncated = true;
+      break;
+    }
+    const source = readRepoFileWithinInputCap(target);
+    bytesScanned += Buffer.byteLength(source, "utf8");
+    filesScanned += 1;
+    const lines = source.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!lines[i]!.includes(options.query)) continue;
+      matches.push({
+        path: current.rel,
+        line: i + 1,
+        text: lines[i]!,
+        contextBefore: lines.slice(Math.max(0, i - contextLines), i),
+        contextAfter: lines.slice(i + 1, i + 1 + contextLines),
+      });
+      if (matches.length >= maxMatches) {
+        truncated = true;
+        break;
+      }
+    }
+  }
+  return { query: options.query, matches, filesScanned, bytesScanned, truncated };
 }
 
 const EDITOR_SYSTEM_PROMPT = `You are the in-app editor of a MUSHY application.
@@ -124,9 +396,12 @@ The entire soft substance of the app lives in this git repository:
 - tools/<name>/  deterministic capability artifacts: tool.py exposing run(intake, params) -> (result, overlay)
 - registry.json  {"tools":[{name, description, engine_op, params, returns, capabilities, kind:"script", version, provenance, entry:"tools/<name>/tool.py"}]} — the catalog, folded at call time
 Apply the operator's instruction by editing files with the repo tools you are given.
-Your toolset is CLOSED and exact: repo_list, repo_read, repo_edit, repo_write,
+Your toolset is CLOSED and exact: repo_list, repo_read, repo_grep, repo_edit, repo_write,
 repo_delete, repo_history. No other tool exists in this session — never search
 for more, and never attempt native file/shell tools (they are denied).
+repo_read is a bounded ranged reader. Use start_line/end_line to inspect large
+files in pieces. Use repo_grep for exact text or symbol discovery. Both return
+explicit truncation metadata; continue with another range when truncated.
 PREFER repo_edit (exact-match surgical replacement) for changes to existing
 files; repo_write is for NEW files or full rewrites the instruction demands.
 Keep edits minimal and complete; do not invent files outside the instruction's scope.
@@ -205,19 +480,28 @@ export class SdkRepoEditor implements RepoEditor {
    * for TOKENISH, so the pattern pass alone would leak it. Same shape as
    * ConverseSdkRunner.run (sol-critic PR #117 round 2, blocker 1); this is the
    * repo-edit lane's copy of it (sol-critic PR #4, finding 1).
+   *
+   * It carries the failure brand across the rewrap for the same reason its twin
+   * does -- see `AgentSdkRunner.run` for the full account. `editInner` brands
+   * nothing TODAY, so on this lane the carry is currently a no-op. It is written
+   * anyway because the twin's bug was created by exactly this asymmetry: a
+   * wrapper added for redaction, a brand added later in the inner function, and
+   * no textual conflict between them to make the loss visible. A `withFailureCategory`
+   * added below this line will now survive rather than be silently dropped.
   */
   async edit(input: RepoEditInput): Promise<RepoEditResult> {
     try {
       return await this.editInner(input);
     } catch (e) {
       const scrubbed = redactSecrets(
-        e instanceof Error ? e.message : String(e),
+        safeErrorMessage(e),
         grantSecrets(input.grant),
       );
       const wrapped = new Error(scrubbed);
       // Drop the original stack: it can quote the offending value too.
       wrapped.stack = `${wrapped.name}: ${scrubbed}`;
-      throw wrapped;
+      const carried = carriedFailureCategory(e);
+      throw carried ? withFailureCategory(wrapped, carried) : wrapped;
     }
   }
 
@@ -226,14 +510,27 @@ export class SdkRepoEditor implements RepoEditor {
     const { z } = (await (this.opts.zodImport?.() ?? dynImport(["zod"]))) as { z: Record<string, (...a: never[]) => unknown> & {
       enum(v: readonly string[]): unknown;
       string(): unknown;
+      number(): unknown;
+      boolean(): unknown;
       record(inner: unknown): unknown;
       unknown(): unknown;
     } };
+    type IntegerSchema = {
+      int(): IntegerSchema;
+      min(value: number): IntegerSchema;
+      max(value: number): IntegerSchema;
+      default(value: number): unknown;
+    };
+    const boundedInteger = (minimum: number, maximum: number, fallback: number): unknown =>
+      (z.number() as IntegerSchema).int().min(minimum).max(maximum).default(fallback);
     const childEnv = buildScrubbedEnv(input.grant, process.env);
     const changed = new Set<string>();
+    let attemptedWrites = false;
+    let inspectionBytes = 0;
+    let inspectionMatches = 0;
+    let inspectionTruncated = false;
     const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
     const bad = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
-    const contained = (rel: unknown): string | null => safeRepoRelative(input.repoDir, rel);
     const emit = (event: RepoEditEvent): void => {
       try { input.onEvent?.(event); } catch { /* progress is advisory */ }
     };
@@ -242,74 +539,122 @@ export class SdkRepoEditor implements RepoEditor {
       sdk.tool("repo_list", "List a repo directory (repo-relative path; '' = root). Returns name+kind entries.",
         { path: z.string() },
         async (a) => {
-          const abs = contained(String(a.path ?? "") || ".");
-          if (!abs) return bad("path escapes the repo");
           emit({ type: "tool", tool: "list", path: String(a.path ?? "") || "." });
           try {
-            return ok(JSON.stringify(readdirSync(abs).filter((n) => n !== ".git" && n !== "__pycache__")
-              .map((n) => ({ name: n, kind: lstatSync(join(abs, n)).isDirectory() ? "dir" : "file" }))));
+            const target = operationPath(input.repoDir, String(a.path ?? "") || ".");
+            return ok(JSON.stringify(readdirSync(target.path)
+              .filter((n) => !isWindowsUnsafeRepoComponent(n) && n !== "__pycache__")
+              .map((n) => ({ name: n, kind: lstatSync(join(target.path, n)).isDirectory() ? "dir" : "file" }))));
           } catch (e) { return bad(`list error: ${(e as Error).message}`); }
         }),
-      sdk.tool("repo_read", "Read a repo file (repo-relative path).",
-        { path: z.string() },
+      sdk.tool("repo_read", "Read a bounded line range from a repo file. Returns text plus total lines, returned byte count, and explicit truncation metadata.",
+        { path: z.string(),
+          start_line: boundedInteger(1, 10_000_000, 1),
+          end_line: boundedInteger(1, 10_000_000, 200),
+          max_bytes: boundedInteger(1, 262_144, 65_536) },
         async (a) => {
-          const abs = contained(a.path);
-          if (!abs) return bad("path escapes the repo");
           emit({ type: "tool", tool: "read", path: String(a.path) });
-          try { return ok(readFileSync(abs, "utf8")); }
+          try {
+            const result = readRepoFileRange(input.repoDir, String(a.path), {
+              startLine: a.start_line as number,
+              endLine: a.end_line as number,
+              maxBytes: a.max_bytes as number,
+            });
+            inspectionBytes += result.bytesReturned;
+            inspectionTruncated ||= result.truncated;
+            return ok(JSON.stringify(result));
+          }
           catch (e) { return bad(`read error: ${(e as Error).message}`); }
+        }),
+      sdk.tool("repo_grep", "Search for exact text or a symbol across bounded repo files. Returns line numbers, small context windows, scan counts, and explicit truncation metadata.",
+        { query: z.string(),
+          path: (z.string() as { optional(): unknown }).optional(),
+          max_matches: boundedInteger(1, 500, 100),
+          context_lines: boundedInteger(0, 5, 2),
+          max_bytes: boundedInteger(1, 8_388_608, 2_097_152) },
+        async (a) => {
+          emit({ type: "tool", tool: "grep", path: String(a.path ?? ".") });
+          try {
+            const result = grepRepoFiles(input.repoDir, {
+              query: String(a.query ?? ""),
+              path: String(a.path ?? "."),
+              maxMatches: a.max_matches as number,
+              contextLines: a.context_lines as number,
+              maxBytes: a.max_bytes as number,
+            });
+            inspectionBytes += result.bytesScanned;
+            inspectionMatches += result.matches.length;
+            inspectionTruncated ||= result.truncated;
+            return ok(JSON.stringify(result));
+          } catch (e) { return bad(`grep error: ${(e as Error).message}`); }
         }),
       sdk.tool("repo_write", "Create or overwrite ONE repo file with exact full content (repo-relative path; parent dirs are created).",
         { path: z.string(), content: z.string() },
         async (a) => {
-          const abs = contained(a.path);
-          if (!abs) return bad("path escapes the repo");
+          attemptedWrites = true;
           emit({ type: "tool", tool: "write", path: String(a.path) });
           try {
-            mkdirSync(dirname(abs), { recursive: true });
-            writeFileSync(abs, String(a.content ?? ""), "utf8");
+            let target = operationPath(input.repoDir, String(a.path));
+            mkdirSync(dirname(target.path), { recursive: true });
+            target = operationPath(input.repoDir, String(a.path));
+            const final = target.components.at(-1);
+            const flags = final?.path === target.path ? "r+" : "wx";
+            const fd = openSync(target.path, flags);
+            try {
+              const stat = fstatSync(fd);
+              if (flags === "r+") assertOpenedFileIdentity(target, stat);
+              else if (!stat.isFile() || stat.nlink !== 1) {
+                throw new Error("repository file identity changed before operation");
+              }
+              const bytes = Buffer.from(String(a.content ?? ""), "utf8");
+              if (flags === "r+") ftruncateSync(fd, 0);
+              writeSync(fd, bytes, 0, bytes.length, 0);
+            } finally {
+              closeSync(fd);
+            }
             changed.add(String(a.path).replaceAll("\\", "/"));
             return ok(`wrote ${a.path}`);
           } catch (e) { return bad(`write error: ${(e as Error).message}`); }
         }),
       sdk.tool("repo_edit", "Surgically replace text in ONE repo file: old_string must match the file content EXACTLY ONCE (or set replace_all to 'true'). STRONGLY PREFER this over repo_write for changes to an existing file — never regenerate a whole file to change part of it.",
         { path: z.string(), old_string: z.string(), new_string: z.string(),
-          replace_all: (z.string() as { optional(): unknown }).optional() },
+          replace_all: (z.boolean() as { default(value: boolean): unknown }).default(false) },
         async (a) => {
+          attemptedWrites = true;
           emit({ type: "tool", tool: "edit", path: String(a.path) });
           try {
-            const { occurrences } = applyRepoEdit(
+            const { occurrences, changed: didChange } = applyRepoEdit(
               input.repoDir, String(a.path), String(a.old_string ?? ""),
-              String(a.new_string ?? ""), String(a.replace_all ?? "") === "true");
-            changed.add(String(a.path).replaceAll("\\", "/"));
-            return ok(`edited ${a.path} (${occurrences} replacement${occurrences === 1 ? "" : "s"})`);
+              String(a.new_string ?? ""), a.replace_all === true);
+            if (didChange) changed.add(String(a.path).replaceAll("\\", "/"));
+            return ok(didChange
+              ? `edited ${a.path} (${occurrences} replacement${occurrences === 1 ? "" : "s"})`
+              : `no change to ${a.path} (old_string and new_string are identical)`);
           } catch (e) { return bad(`edit error: ${(e as Error).message}`); }
         }),
       sdk.tool("repo_delete", "Delete ONE repo file (repo-relative path).",
         { path: z.string() },
         async (a) => {
-          const abs = contained(a.path);
-          if (!abs) return bad("path escapes the repo");
+          attemptedWrites = true;
           emit({ type: "tool", tool: "delete", path: String(a.path) });
           try {
-            rmSync(abs);
+            quarantineDeleteRepoFile(input.repoDir, String(a.path));
             changed.add(String(a.path).replaceAll("\\", "/"));
             return ok(`deleted ${a.path}`);
           } catch (e) { return bad(`delete error: ${(e as Error).message}`); }
         }),
       sdk.tool("repo_history", "READ-ONLY commit history of this repo (newest first): sha, author, ISO date, subject, body (chat-edit commits carry Edit-Wall-Ms / Edit-Cost-USD trailers). Use for provenance questions: when something landed, what an edit was, how long it took.",
-        { limit: z.string() },
+        { limit: boundedInteger(1, 200, 30) },
         async (a) => {
           emit({ type: "tool", tool: "history", path: "git log" });
           try {
-            const n = Number.parseInt(String(a.limit ?? "30"), 10) || 30;
-            return ok(JSON.stringify(readRepoHistory(input.repoDir, n)));
+            return ok(JSON.stringify(readRepoHistory(input.repoDir, a.limit as number)));
           } catch (e) { return bad(`history error: ${(e as Error).message}`); }
         }),
     ];
 
     const server = sdk.createSdkMcpServer({ name: "repo", version: "1.0.0", tools });
-    const allowedNames = ["mcp__repo__repo_list", "mcp__repo__repo_read", "mcp__repo__repo_edit", "mcp__repo__repo_write", "mcp__repo__repo_delete", "mcp__repo__repo_history"];
+    const allowedNames = ["mcp__repo__repo_list", "mcp__repo__repo_read", "mcp__repo__repo_grep", "mcp__repo__repo_edit", "mcp__repo__repo_write", "mcp__repo__repo_delete", "mcp__repo__repo_history"];
     const services = this.opts.standardServices
       ? createStandardServicesFacade({
           sdk,
@@ -335,11 +680,15 @@ export class SdkRepoEditor implements RepoEditor {
     });
     const allowed = new Set(composition.allowedTools ?? []);
     const abort = new AbortController();
+    const abortFromCaller = () => abort.abort();
+    if (input.signal?.aborted) abort.abort();
+    else input.signal?.addEventListener("abort", abortFromCaller, { once: true });
     const maxWall = this.opts.maxWallTimeMs ?? 480_000;
     let wallCapHit = false;
     const wallTimer = setTimeout(() => { wallCapHit = true; abort.abort(); }, maxWall);
 
     let summary = "";
+    let sawResult = false;
     let telemetry: AuthorTelemetry | undefined;
     try {
       const q = sdk.query({
@@ -385,6 +734,7 @@ export class SdkRepoEditor implements RepoEditor {
           turns += 1;
           emit({ type: "turn", count: turns });
         } else if (type === "result") {
+          sawResult = true;
           const m = msg as { result?: unknown; usage?: Record<string, unknown>; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: Record<string, unknown> };
           summary = typeof m.result === "string" ? m.result : summary;
           const u = m.usage ?? {};
@@ -399,6 +749,10 @@ export class SdkRepoEditor implements RepoEditor {
       }
     } finally {
       clearTimeout(wallTimer);
+      input.signal?.removeEventListener("abort", abortFromCaller);
+    }
+    if (input.signal?.aborted) {
+      throw new Error("in-app edit session was cancelled");
     }
     if (wallCapHit) {
       throw new Error(
@@ -406,12 +760,19 @@ export class SdkRepoEditor implements RepoEditor {
         (changed.size ? ` after touching ${[...changed].sort().join(", ")} (reset to last commit)` : "") +
         " — retry with a narrower instruction or raise maxWallTimeMs");
     }
+    assertRepoEditTerminalResult(sawResult, [...changed].sort());
     if (!summary && changed.size === 0) {
       throw new Error("in-app edit session ended with no summary and no changes");
     }
     return {
       summary: summary || `edited: ${[...changed].sort().join(", ")}`,
       changedFiles: [...changed].sort(),
+      attemptedWrites,
+      inspection: {
+        bytesRead: inspectionBytes,
+        matches: inspectionMatches,
+        truncated: inspectionTruncated,
+      },
       ...(telemetry ? { telemetry } : {}),
     };
   }

@@ -33,24 +33,22 @@ export * from "./ports/impl/e2bAgentRunner.js";
 export * from "./ports/impl/converseSdkRunner.js";
 export * from "./ports/impl/mcpProxy.js";
 export * from "./ports/impl/repoEditRunner.js";
+export * from "./ports/impl/requestScheduler.js";
+export * from "./ports/impl/conversationManager.js";
+export * from "./ports/impl/requestJournal.js";
 export * from "./ports/impl/httpUpstreamSink.js";
 export * from "./ports/impl/standardServices.js";
 export * from "./ports/impl/standardServicesRuntime.js";
 export * from "./ports/impl/tenantBrokerStandardServiceProvider.js";
 export * from "./ports/impl/runnerCapabilities.js";
 export * from "./ports/impl/standardServicesFacade.js";
+export * from "./browser/conversationWorkspace.js";
+export * from "./browser/historyFeed.js";
 
-// Hermetic fakes (contract-test doubles; also the CI path for consumers)
-export * from "./ports/fakes/fakeAgentRunner.js";
-export * from "./ports/fakes/fakeConverseRunner.js";
-export * from "./ports/fakes/fakeIntentSynthesizer.js";
-export * from "./ports/fakes/fakeOAuthGrant.js";
-export * from "./ports/fakes/fakeSessionStore.js";
-export * from "./ports/fakes/fakeTenantRepo.js";
-export * from "./ports/fakes/fakeTurnRunner.js";
-export * from "./ports/fakes/fakeRepoEditor.js";
-export * from "./ports/fakes/fakeUpstreamSink.js";
-export * from "./ports/fakes/fakeStandardServiceProvider.js";
+// Hermetic fakes are the CONSUMER-facing test doubles and live behind the
+// `mushy-author/testing` subpath (see src/testing/index.ts), NOT the production
+// root barrel — a product bundle must not pull a fake in by importing the root.
+// (The package's own tests + examples import them straight from ports/fakes/*.)
 
 // Registry + author loop
 export * from "./registry/registerTool.js";

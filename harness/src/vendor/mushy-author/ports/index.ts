@@ -574,16 +574,33 @@ export interface ConverseEvent {
 }
 
 /** turn_usage payload (wire contract section 3; key names exact). */
+/**
+ * Metered usage for one turn.
+ *
+ * Every numeric field is OPTIONAL because absence is a real state: a runner that
+ * never measured a metric must not report a number for it. `undefined` means "not
+ * measured" and is the only truthful encoding of that. Writing 0 instead makes an
+ * unmeasured metric indistinguishable from a measured zero, and anything that later
+ * SUMS these records (Build Metrics is specified to be rebuilt from usage events)
+ * would count fabricated zeros as real measurements.
+ */
 export interface ConverseTurnUsage {
-  turns: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_tokens: number;
-  cache_read_tokens: number;
+  turns?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
   /** Cost-relevant tokens = input + output + cache_creation (cache_read excluded). */
-  cost_tokens: number;
+  cost_tokens?: number;
   total_cost_usd?: number;
   models?: string[];
+  /**
+   * Names the metrics that were never measured for this turn. Every name listed
+   * here is ABSENT from this record, never present as 0. Only emitted when at least
+   * one metric was unmeasured, so its presence is itself the signal that the record
+   * is partial.
+   */
+  unmetered?: string[];
 }
 
 /** The result a spine tool hands back to the model (mirrors MCP CallToolResult). */
@@ -1005,7 +1022,21 @@ export interface UpstreamCapture {
   /** The host platform this instance is bolted onto (sink-configured label). */
   platform: string | null;
   route: "build" | "stage" | "one-off";
+  /**
+   * The consumer's prose -- EXCEPT when the invocation failed before a grant
+   * resolved, where it carries a fixed sentinel instead: with nothing known to
+   * scrub against, shipping raw prose could export a credential the consumer
+   * pasted in. `prompt_withheld` states that this is what happened.
+   *
+   * ALWAYS PRESENT AND NON-EMPTY, and that is a cross-repo requirement rather
+   * than a convenience. The receiving queue declares `prompt TEXT NOT NULL` and
+   * answers 400 "prompt is required" for an absent or empty one, while the sink
+   * swallows transport errors -- so a capture that omits it is dropped with no
+   * trace on either side. An earlier revision of this contract said "absent",
+   * and captures written to it disappeared (sol-critic PR #2 round 9).
+   */
   prompt: string;
+  prompt_withheld?: "grant-unresolved";
   authoring_status: "authored" | "failed";
   tool_name?: string;
   tool_manifest?: ToolPackage;
@@ -1013,9 +1044,63 @@ export interface UpstreamCapture {
   commit_sha?: string;
   telemetry?: AuthorTelemetry;
   platform_release?: string;
-  /** Token-redacted failure message (redactTokens applied by the loop). */
+  /**
+     * Allowlisted failure category, always present on a failed capture.
+   *
+   * One of six allowlisted values, carried by a trusted first-party brand or
+   * derived from `AuthorLoopError.status`. Deliberately NOT an enumeration of
+   * the branding sites -- an earlier version listed three and missed others,
+   * and a list that must stay in sync with every call site is a defect waiting
+   * to happen. What holds is the property: the value is allowlisted, so no
+   * input bytes reach it, and a runner-thrown error is forced to "unknown"
+   * unless the composition declared the runner trusted.
+   */
+  failure_category?:
+    | "rate_limited"
+    | "quota_exhausted"
+    | "auth_failure"
+    | "validation_failed"
+    | "unavailable"
+    | "unknown";
+  /**
+   * The failure detail, in one of TWO forms.
+   *
+   * By DEFAULT it carries the allowlisted `failure_category` value, because the
+   * receiving queue stores this field and has no category column -- without it
+   * a failed authoring arrives with no reason at all. With the model-output
+   * opt-in enabled it carries the raw token-redacted message instead, which is
+   * MODEL-REACHABLE: any runner may throw model text. Only the raw form rides
+   * the opt-in; the field itself is always populated on a failure.
+   */
   error_message?: string;
+  /**
+   * WHY the tool_* fields were omitted. Four causes, not one:
+   *
+   *   held-secret-present     a credential this invocation HELD appeared in
+   *                           the prompt or in the artifacts;
+   *   credential-shaped-input the prompt contained something the system would
+   *                           accept as a credential, held or not;
+   *   unverifiable-artifact   the payload could not be snapshotted or scanned;
+   *   not-opted-in            model output export is off (the default).
+   *
+   * Artifacts are dropped WHOLE rather than rewritten, because editing bytes
+   * inside generated code yields a capture that misrepresents what the consumer
+   * authored -- and the reviewer sees which rule fired instead of guessing.
+   */
+  artifacts_withheld?:
+    | "held-secret-present"
+    | "credential-shaped-input"
+    | "unverifiable-artifact"
+    | "not-opted-in";
   captured_at: string; // ISO-8601
+  /**
+   * Identity of the authoring invocation that produced this capture, minted
+   * once at the route entry point. It is what makes dedupe_key an IDEMPOTENCY
+   * key rather than a content hash: without it two distinct invocations that
+   * happen to look identical collapse into one row on the queue's unique
+   * index, and the demand signal loses its frequency.
+   */
+  invocation_id: string;
   /** Idempotency key so a retried push never duplicates the queue row. */
   dedupe_key?: string;
 }
@@ -1024,12 +1109,64 @@ export interface UpstreamCapture {
  * Fire-and-forget capture. Implementations own their own timeout and MUST
  * swallow transport errors: a sink outage may never fail, slow, or otherwise
  * observe back into the consumer's authoring path.
+ *
+ * capture() takes ALREADY-SERIALIZED BYTES, not an object, and that is a
+ * security property rather than a style choice. The caller serializes once
+ * and scans the parsed form of those exact bytes; an implementation that
+ * re-serialized would reopen the hole this closes, because a stateful
+ * toJSON (installable on Object.prototype by anything sharing the process,
+ * including an AgentRunner that holds the tenant's grant) can return a clean
+ * object on the first serialization and the credential on the second
+ * (sol-critic PR #2 round 4, reproduced). Implementations MUST transmit the
+ * string verbatim: no parse, no spread, no re-stringify.
  */
 export interface UpstreamSink {
-  capture(event: UpstreamCapture): Promise<void>;
+  /**
+   * The platform label this sink stamps on events. The caller reads it so it
+   * can build the COMPLETE payload before the single serialization; a sink
+   * that added fields afterwards would be serializing again.
+   */
+  readonly platform?: string | null;
+  capture(body: string): Promise<void>;
 }
 
-export interface HarnessPorts {
+/**
+ * WHAT THIS CAPTURE PATH DEFENDS, and what it does not. Third statement; the
+ * first two were wrong in opposite directions and both were disproved by
+ * execution, so this one claims less on purpose.
+ *
+ * DEFENDED: hostile DATA. Generated code, a tool manifest, a thrown message, a
+ * pasted credential, an object carrying a getter or an own `toJSON`, a Proxy, a
+ * hostile `map`. This is the reachable, ordinary threat -- an HONEST runner
+ * passing through model output it did not author -- and it is what every guard
+ * here is for. The runner result is snapshotted once at the boundary; own
+ * accessors and proxies are refused rather than inspected. (Inherited
+ * properties are simply not copied, which is not the same as refusing them.)
+ *
+ * NOT DEFENDED, AND NOT DEFENSIBLE HERE: a hostile RUNNER sharing this realm.
+ * It can import this module, replace a method on any prototype, or swap
+ * `Function.prototype.call` itself, and no check written in JavaScript survives
+ * that -- including every check in this package. It was demonstrated three
+ * separate ways: corrupting the guards, defeating the bound intrinsics through
+ * `.call`, and simply replacing `HttpUpstreamSink.prototype.capture` to read
+ * the operator's queue token out of the live sink with no guard corruption at
+ * all (sol-critic PR #2 rounds 22-24).
+ *
+ * I twice wrote a rationale here for scoping that threat out, and twice it was
+ * disproved. The honest position is not a better rationale: it is that
+ * IN-REALM HARDENING CANNOT WIN THIS, so this file makes no security claim
+ * about it. What hardening exists -- pristine bindings, a runtime-private sink
+ * token, a non-writable `capture` -- RAISES COST. It does not create a boundary.
+ *
+ * THE REQUIREMENT THAT FOLLOWS: if `upstreamSink` is wired and the AgentRunner
+ * is not first-party code you control, run authoring in a separate process
+ * with its own credentials, environment and IPC surface (`e2bAgentRunner`).
+ * This implementation makes NO hostile same-realm security guarantee, and no
+ * amount of in-realm hardening would let it make one. That is a deployment
+ * decision this type cannot enforce, which is why it is stated in the contract
+ * rather than implied by a guard.
+ */
+export interface HarnessPortsBase {
   oauth: OAuthGrantProvider;
   tenantRepo: TenantRepoProvider;
   broker: BrokerApsClient;
@@ -1060,11 +1197,85 @@ export interface HarnessPorts {
   gate?: GateClient;
   sessionStore?: SessionStore;
   /**
-   * OPTIONAL platform-improvement capture sink. When present, the author loop
-   * pushes every authoring event (prompt + authored artifacts, or the
-   * failure) to the operator's upstream queue, fire-and-forget. Absent in
-   * hermetic tests that don't exercise capture; authoring behavior is
-   * identical either way.
+   * OPTIONAL platform-improvement capture sink. When present, an eligible
+   * authoring event (prompt + authored artifacts, or the failure) makes ONE
+   * best-effort push to the operator's upstream queue, fire-and-forget. Best
+   * effort is literal: an unverifiable held secret or a serialization refusal
+   * fails before the push is sent and drops the event silently; a transport
+   * failure leaves delivery UNKNOWN, because the server may have committed the
+   * row before the response was lost. None is retried, so the queue is a demand
+   * SIGNAL and never an audit log. Absent in hermetic tests that don't exercise
+   * capture; authoring behavior is identical either way.
    */
   upstreamSink?: UpstreamSink;
+  /**
+   * Does this deployment trust its AgentRunner to categorise its own failures?
+   *
+   * AgentRunner is a PLUGGABLE PORT. Anything it throws is untrusted by
+   * default, because in-process nothing stops a runner branding its own error
+   * with whatever category it likes -- so `failureCategory` reports "unknown"
+   * for every runner failure unless the operator says otherwise here.
+   *
+   * A COMPOSITION-TIME DECISION, deliberately. It cannot live on the error (a
+   * Proxy answers its way out) or be detected at runtime (a hostile runner
+   * self-registers); the one party that genuinely knows which implementation
+   * was wired is whoever wired it. Set it only for a first-party runner whose
+   * throw sites you own -- the bundled AgentSdkRunner brands structured auth,
+   * quota, spend-cap and rate-limit failures, and those are exactly the signals
+   * lost when this is off (sol-critic PR #2 round 16).
+   */
+  trustRunnerFailureCategories?: boolean;
+  /**
+   * DANGEROUS. Exports the model's OUTPUT -- generated code, the tool
+   * manifest, and raw failure messages -- to the upstream queue. Default
+   * false, and the name says "dangerously" because the safe reading of the
+   * old name was not obvious enough (sol-critic PR #2 round 3, finding 3).
+   *
+   * What you are authorizing is NOT merely "the operator owns the Agent SDK
+   * grant". The model reads tenant repository files, broker results and
+   * registry data as well as the prompt, and it can re-emit any of that in
+   * any encoding -- base64, case-folded, split across literals -- which no
+   * literal scan can reliably catch. Enabling this therefore exports a
+   * derivative of EVERY piece of tenant data the model can see, to whoever
+   * owns the queue.
+   *
+   * Only enable it when the queue owner is already authorized to read all
+   * model-visible tenant data for every tenant this instance serves. An
+   * operator-funded MULTI-TENANT deployment does not qualify.
+   *
+   * With it off, captures still carry the prompt, the authoring status, the
+   * commit, the platform release and an allowlisted failure category, which
+   * is the actionable demand-and-failure signal.
+   */
+  dangerouslyExportModelOutput?: boolean;
 }
+
+/**
+ * The wired ports.
+ *
+ * A UNION, not one interface with two optional booleans, and that is the whole
+ * point. Both capture policies USED TO default to the safe value, so an
+ * existing composition that added a sink COMPILED UNCHANGED and silently
+ * inherited them --
+ * which is how the bundled runner's real failure categories were downgraded to
+ * "unknown" in this repo's own example without a single error (sol-critic PR #2
+ * rounds 16-18; the same shape bit at rounds 12 and 17).
+ *
+ * Wiring `upstreamSink` therefore REQUIRES stating both policies explicitly.
+ * The safe answers are still `false`, but omission is now a compile error
+ * rather than a silent choice, and every future consumer has to look at them
+ * once. Compositions with no sink cannot set them at all.
+ */
+export type HarnessPorts =
+  | (HarnessPortsBase & {
+      upstreamSink?: undefined;
+      dangerouslyExportModelOutput?: never;
+      trustRunnerFailureCategories?: never;
+    })
+  | (HarnessPortsBase & {
+      upstreamSink: UpstreamSink;
+      /** See HarnessPortsBase. Required here so the choice is deliberate. */
+      dangerouslyExportModelOutput: boolean;
+      /** See HarnessPortsBase. Required here so the choice is deliberate. */
+      trustRunnerFailureCategories: boolean;
+    });

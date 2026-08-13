@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  createStandardServicesFacade,
-  FakeStandardServiceProvider,
-} from "../src/vendor/mushy-author/index.js";
+import { createStandardServicesFacade } from "../src/vendor/mushy-author/index.js";
+// Imported from its own module rather than the package barrel: the vendored
+// upstream stopped re-exporting this fake from index.ts, while still shipping
+// the module itself. Same class, same behaviour, one hop closer.
+import { FakeStandardServiceProvider } from "../src/vendor/mushy-author/ports/fakes/fakeStandardServiceProvider.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{
   content: Array<{ type: "text"; text: string }>;

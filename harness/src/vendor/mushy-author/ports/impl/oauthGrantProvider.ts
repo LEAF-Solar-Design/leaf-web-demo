@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { withFailureCategory } from "../../agent/captureGuards.js";
 import {
   closeSync,
   existsSync,
@@ -87,6 +88,10 @@ export class GrantRequiredError extends Error {
           `an attested Claude subscription credential, or a tenant-owned Anthropic API key.`,
     );
     this.name = "GrantRequiredError";
+    // An unlinked tenant is an AUTH failure, and it must say so on the
+    // operator's queue. Branded in the constructor so every throw site is
+    // covered; before this it fell through to "unknown" (sol-critic round 12).
+    withFailureCategory(this, "auth_failure");
   }
 }
 
@@ -184,6 +189,9 @@ export class GrantPoolUnavailableError extends Error {
     super("all authorized Claude mounts are temporarily unavailable");
     this.name = "GrantPoolUnavailableError";
     this.retryAfterS = retryAfterS;
+    // Every authorized mount cooled down is infrastructure unavailability, not
+    // a user error (sol-critic round 12).
+    withFailureCategory(this, "unavailable");
   }
 }
 
@@ -573,8 +581,11 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       candidate.leases.some((lease) => lease.id === leaseId));
     if (!account) return; // idempotent settlement or an expired crash lease
     account.leases = account.leases.filter((lease) => lease.id !== leaseId);
-    const costTokens = Number.isSafeInteger(outcome.usage.cost_tokens) && outcome.usage.cost_tokens > 0
-      ? outcome.usage.cost_tokens
+    // cost_tokens is optional: absent means the runner never metered it, which must
+    // bill as nothing rather than as a fabricated zero measurement upstream. Narrowed
+    // with the same idiom retry_after_s uses a few lines below.
+    const costTokens = Number.isSafeInteger(outcome.usage.cost_tokens) && (outcome.usage.cost_tokens ?? 0) > 0
+      ? outcome.usage.cost_tokens!
       : 0;
     account.usage_tokens += costTokens;
     if (outcome.stop_reason === "llm_quota_exhausted") {

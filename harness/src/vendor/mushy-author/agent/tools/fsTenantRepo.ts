@@ -8,16 +8,26 @@
  */
 
 import {
+  closeSync,
   existsSync,
-  lstatSync,
+  fstatSync,
+  ftruncateSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { FsTenantRepoTool } from "../../ports/index.js";
+import {
+  assertOpenedFileIdentity,
+  isWindowsUnsafeRepoComponent,
+  resolveContainedRepoPath,
+  revalidateResolvedRepoPath,
+  type ResolvedRepoPath,
+} from "./repoPathSafety.js";
 
 export class FsTenantRepo implements FsTenantRepoTool {
   readonly root: string;
@@ -30,7 +40,7 @@ export class FsTenantRepo implements FsTenantRepoTool {
   }
 
   /** Resolve a caller-supplied relative path and hard-reject any escape. */
-  private safe(relPath: string): string {
+  private safe(relPath: string): ResolvedRepoPath {
     if (isAbsolute(relPath)) {
       throw new Error(`fsTenantRepo: absolute paths are not allowed (${relPath})`);
     }
@@ -43,8 +53,9 @@ export class FsTenantRepo implements FsTenantRepoTool {
     // writable .git/config or .git/hooks would let model-authored repo content
     // install filters/hooks that run during the register commit with repo access.
     // Reads are blocked too — the session has no business inside git internals.
-    if (rel.split(sep).some((seg) => seg.toLowerCase() === ".git")) {
-      throw new Error(`fsTenantRepo: the .git directory is off-limits (${relPath})`);
+    if (rel.replaceAll("\\", "/").split("/")
+      .some((part) => part !== "." && isWindowsUnsafeRepoComponent(part))) {
+      throw new Error(`fsTenantRepo: unsafe Windows names are off-limits (${relPath})`);
     }
     // The lexical checks above are spoofable by a link committed in the checkout
     // (sol-critic round 3: `alias -> .git` lets `alias/config` reach `.git/config`,
@@ -52,38 +63,52 @@ export class FsTenantRepo implements FsTenantRepoTool {
     // follows links. Links only enter via the checkout itself (this tool writes
     // regular files), and the author session has no legitimate use for traversing
     // one, so reject any symlink/junction component outright.
-    let probe = this.root;
-    for (const seg of rel.split(sep)) {
-      if (seg === "") continue;
-      probe = resolve(probe, seg);
-      let stat;
-      try {
-        stat = lstatSync(probe);
-      } catch {
-        break; // deepest existing ancestor passed; missing components can't be links
-      }
-      if (stat.isSymbolicLink()) {
-        throw new Error(`fsTenantRepo: symlinked paths are off-limits (${relPath})`);
-      }
-    }
-    return abs;
+    const target = resolveContainedRepoPath(this.root, relPath);
+    if (!target) throw new Error(`fsTenantRepo: linked or unsafe paths are off-limits (${relPath})`);
+    return revalidateResolvedRepoPath(target);
   }
 
   readFile(relPath: string): string {
-    return readFileSync(this.safe(relPath), "utf8");
+    const target = this.safe(relPath);
+    const fd = openSync(target.path, "r");
+    try {
+      assertOpenedFileIdentity(target, fstatSync(fd));
+      return readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   }
 
   writeFile(relPath: string, content: string): void {
-    const abs = this.safe(relPath);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, content, "utf8");
+    let target = this.safe(relPath);
+    mkdirSync(dirname(target.path), { recursive: true });
+    target = this.safe(relPath);
+    const final = target.components.at(-1);
+    const flags = final?.path === target.path ? "r+" : "wx";
+    const fd = openSync(target.path, flags);
+    try {
+      const stat = fstatSync(fd);
+      if (flags === "r+") assertOpenedFileIdentity(target, stat);
+      else if (!stat.isFile() || stat.nlink !== 1) {
+        throw new Error("fsTenantRepo: repository file identity changed before operation");
+      }
+      const bytes = Buffer.from(content, "utf8");
+      if (flags === "r+") ftruncateSync(fd, 0);
+      writeSync(fd, bytes, 0, bytes.length, 0);
+    } finally {
+      closeSync(fd);
+    }
   }
 
   exists(relPath: string): boolean {
-    return existsSync(this.safe(relPath));
+    const target = this.safe(relPath);
+    revalidateResolvedRepoPath(target);
+    return existsSync(target.path);
   }
 
   listDir(relPath = "."): string[] {
-    return readdirSync(this.safe(relPath));
+    const target = this.safe(relPath);
+    revalidateResolvedRepoPath(target);
+    return readdirSync(target.path).filter((name) => !isWindowsUnsafeRepoComponent(name));
   }
 }

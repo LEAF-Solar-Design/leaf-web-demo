@@ -9,6 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { withFailureCategory } from "../../agent/captureGuards.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { scrubSecrets } from "./envScrub.js";
@@ -78,13 +79,19 @@ export function assertAuthoringModeSafe(
   mode: "disabled" | "singleton" | "fleet",
 ): void {
   if (mode === "disabled") {
-    throw new Error(
-      "build authoring is disabled; set LEAF_HARNESS_AUTHORING_MODE=singleton explicitly",
+    throw withFailureCategory(
+      new Error(
+        "build authoring is disabled; set LEAF_HARNESS_AUTHORING_MODE=singleton explicitly",
+      ),
+      "unavailable",
     );
   }
   if (mode === "fleet") {
-    throw new Error(
-      "multi-task build authoring is disabled until LEAF_GRANT_STORE=vault has a real Secrets Manager backend",
+    throw withFailureCategory(
+      new Error(
+        "multi-task build authoring is disabled until LEAF_GRANT_STORE=vault has a real Secrets Manager backend",
+      ),
+      "unavailable",
     );
   }
 }
@@ -93,6 +100,8 @@ export class TenantRepoLeaseHeldError extends Error {
   constructor(readonly tenantId: string) {
     super(`tenant repo lease is held: ${tenantId}`);
     this.name = "TenantRepoLeaseHeldError";
+    // Another worker owns this tenant row: contention, not a user error.
+    withFailureCategory(this, "unavailable");
   }
 }
 
@@ -100,6 +109,8 @@ export class TenantRepoLeaseLostError extends Error {
   constructor(readonly tenantId: string) {
     super(`tenant repo lease was lost: ${tenantId}`);
     this.name = "TenantRepoLeaseLostError";
+    // A stale worker lost its fence: infrastructure, not a user error.
+    withFailureCategory(this, "unavailable");
   }
 }
 
@@ -270,23 +281,32 @@ const trustedGitDirectories = new Set<string>();
 /**
  * Git accepts safe.directory only from protected configuration. Tenant repos
  * can be owned by the EFS access-point UID rather than the container UID, so
- * add only the exact resolved worktree and git-dir paths to this task's
- * ephemeral global config. Local clone/upload-pack children inherit the same
- * protected config. No wildcard trust is permitted.
+ * add only the exact resolved worktree and git-dir paths to this process's
+ * command-scope config. Local clone/upload-pack children inherit the same
+ * protected config. No wildcard trust or user-global mutation is permitted.
  */
 function trustSharedRepo(dir: string): void {
   const root = (existsSync(dir) ? realpathSync(dir) : resolve(dir)).replaceAll("\\", "/");
-  const configScope = process.env.GIT_CONFIG_GLOBAL ?? "<default>";
   for (const candidate of [root, join(root, ".git")].map((path) => path.replaceAll("\\", "/"))) {
-    const cacheKey = `${configScope}\0${candidate}`;
-    if (trustedGitDirectories.has(cacheKey)) continue;
-    execFileSync("git", ["config", "--global", "--add", "safe.directory", candidate], {
-      cwd: tmpdir(),
-      encoding: "utf8",
-      env: scrubSecrets(process.env),
-    });
-    trustedGitDirectories.add(cacheKey);
+    trustedGitDirectories.add(candidate);
   }
+}
+
+/** @internal Exported only so the protected-config boundary can be tested directly. */
+export function tenantGitEnvironment(): NodeJS.ProcessEnv {
+  const env = scrubSecrets(process.env);
+  for (const key of Object.keys(env)) {
+    if (key === "GIT_CONFIG" || key.startsWith("GIT_CONFIG_")) delete env[key];
+  }
+  const trusted = [...trustedGitDirectories].sort();
+  env.GIT_CONFIG_COUNT = String(trusted.length + 1);
+  env.GIT_CONFIG_KEY_0 = "safe.directory";
+  env.GIT_CONFIG_VALUE_0 = "";
+  for (const [index, candidate] of trusted.entries()) {
+    env[`GIT_CONFIG_KEY_${index + 1}`] = "safe.directory";
+    env[`GIT_CONFIG_VALUE_${index + 1}`] = candidate;
+  }
+  return env;
 }
 
 function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
@@ -296,7 +316,7 @@ function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
   try {
     // Scrubbed env (sol-critic R5, same rule as the git worker): git and anything
     // it runs (filters, hooks) must never inherit a credential or hop secret.
-    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8", env: scrubSecrets(process.env) });
+    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8", env: tenantGitEnvironment() });
   } catch (e) {
     const err = e as { status?: number; signal?: string; code?: string; stderr?: string; stdout?: string; message: string };
     throw new Error(
@@ -493,7 +513,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   ): Promise<T> {
     assertAuthoringModeSafe(this.authoringMode);
     if (!this.lease) {
-      throw new Error("PostgreSQL tenant repository writer lease is required");
+      throw withFailureCategory(
+        new Error("PostgreSQL tenant repository writer lease is required"),
+        "unavailable",
+      );
     }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, async () => {
@@ -532,7 +555,10 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   async withTenantReadLease<T>(tenantId: string, action: () => Promise<T>): Promise<T> {
     if (!this.lease) {
       if (this.authoringMode === "disabled") return action();
-      throw new Error("PostgreSQL tenant repository read lease is required while authoring is enabled");
+      throw withFailureCategory(
+        new Error("PostgreSQL tenant repository read lease is required while authoring is enabled"),
+        "unavailable",
+      );
     }
     return this.lease.withLease(tenantId, (lease) =>
       this.leaseContext.run(lease, action),
@@ -570,6 +596,35 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     }
     if (!existsSync(join(dir, ".git"))) {
       git(dir, ["init", "-q", "-b", "main"], identity);
+      // Disable the end-of-line conversion driven SOLELY by `core.autocrlf`,
+      // for repositories this provider creates. On a host with
+      // core.autocrlf=true that conversion rewrites content on the way into
+      // the index, so a source receipt taken from the WORKTREE can attest
+      // bytes the commit does not contain (reproduced: 14 bytes became 12,
+      // different sha256).
+      //
+      // `core.eol=lf` selects the WORKTREE form for files already attributed
+      // as text; it does not disable check-in normalization. Neither setting
+      // touches a `text` or `text=auto` attribute, from the repository or a
+      // global attributes file, and neither touches a custom clean filter.
+      //
+      // WHAT THIS DOES NOT DO, stated because an earlier version of this
+      // comment claimed all three and none were true:
+      //   - it does NOT make storage verbatim. Attribute-driven EOL
+      //     normalization (`text` / `text=auto`, from the repository or a
+      //     global attributes file) and custom clean filters both survive it;
+      //   - it does NOT make the receipt true, only more often true;
+      //   - there is NO remaining verifier that rejects such a transformation.
+      //     The pre-stage guard that would have was REMOVED, because checking
+      //     before `git add -A` runs the filter a second, separate time and
+      //     cannot prove what staging will store.
+      //
+      // The real fix -- stage once, verify the resulting INDEX blobs against
+      // the receipt, commit in the same fenced operation -- needs the receipt
+      // at commit time and is filed as its own change. See the disclosure at
+      // the verification site in authorLoop.ts.
+      git(dir, ["config", "core.autocrlf", "false"], identity);
+      git(dir, ["config", "core.eol", "lf"], identity);
     } else {
       git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"], identity);
     }

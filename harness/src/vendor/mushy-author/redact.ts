@@ -5,10 +5,20 @@
  * so a token-shaped string never reaches stderr no matter which site renders an
  * arbitrary error.
  */
+const rawSplit = String.prototype.split;
+const rawJoin = Array.prototype.join;
+const rawReplace = String.prototype.replace;
+const pristineSplit = (v: string, sep: string): string[] =>
+  (rawSplit as unknown as (this: string, sep: string) => string[]).call(v, sep);
+const pristineJoin = (v: string[], sep: string): string =>
+  (rawJoin as unknown as (this: string[], sep: string) => string).call(v, sep);
+const pristineReplace = (v: string, p: RegExp, out: string): string =>
+  (rawReplace as unknown as (this: string, p: RegExp, out: string) => string).call(v, p, out);
+
 export const TOKENISH = /\b(sk-ant-[A-Za-z0-9_-]{6,}|[A-Za-z0-9_-]{40,})\b/g;
 
 export function redactTokens(s: string): string {
-  return s.replace(TOKENISH, "[REDACTED]");
+  return pristineReplace(s, TOKENISH, "[REDACTED]");
 }
 
 /**
@@ -41,10 +51,17 @@ export function redactSecrets(s: string, secrets: readonly (string | undefined)[
  * (sol-critic PR #123 round 7, blocker 2.)
  */
 export function stripSecrets(s: string, secrets: readonly (string | undefined)[]): string {
+  // PRISTINE `split`/`join`, bound at module load. A pluggable AgentRunner runs
+  // in this realm and can replace String.prototype.split so this returns the
+  // input unchanged while every downstream check reports it clean
+  // (sol-critic PR #2 round 22, probed). Binding before any runner executes
+  // raises the cost of that specific swap. It does NOT close the class: the
+  // binding is still invoked through Function.prototype.call, which is equally
+  // replaceable. Process isolation is the control that holds.
   let out = s;
   for (const secret of secrets) {
     if (!isRedactableSecret(secret)) continue;
-    out = out.split(secret).join("[REDACTED]");
+    out = pristineJoin(pristineSplit(out, secret), "[REDACTED]");
   }
   return out;
 }
@@ -73,6 +90,46 @@ export const MIN_REDACTABLE_SECRET_LEN = 24;
  * credentials are long ASCII strings. (sol-critic PR #123 rounds 6-8.)
  */
 const PRINTABLE_ASCII = /^[\x21-\x7E]+$/;
+
+/**
+ * Any span the system would ACCEPT as a credential, for a telemetry copy only.
+ *
+ * TOKENISH is not a credential grammar, it is a log heuristic: it needs
+ * `sk-ant-` or a 40-character run. The system's own acceptance floor is 24
+ * printable-ASCII characters (MIN_REDACTABLE_SECRET_LEN, matching the app's
+ * _MIN_CREDENTIAL_LEN), so a 24-to-39 character credential is ACCEPTED
+ * everywhere and matched by nothing here.
+ *
+ * That gap is reachable and it leaked. With a grant resolved, `stripSecrets`
+ * removes the value we HOLD; a consumer who pastes a DIFFERENT credential into
+ * the prompt ("rotate to <key>") has it survive both the literal strip and
+ * TOKENISH, and the fail-closed sweep only searches for held values -- so it
+ * reached the operator's queue verbatim. (kimi-adversary PR #2 round 8 as a
+ * MINOR, which I under-rated; sol-critic round 13 as a BLOCKER, reproduced.)
+ *
+ * This pattern is the acceptance grammar itself, so nothing the system would
+ * take as a credential can survive it.
+ *
+ * ONLY EVER FOR THE UPSTREAM TELEMETRY COPY. Applying it to the prompt the
+ * model actually reads would rewrite ordinary long tokens -- a 40-character Git
+ * SHA, a URL, a base64 blob -- and change what the consumer asked. Corrupting a
+ * telemetry field costs nothing; corrupting the live prompt changes the work.
+ * See the note on `stripSecrets` for why user content gets literal removal only.
+ */
+const CREDENTIAL_SHAPED = new RegExp(`[\\x21-\\x7E]{${MIN_REDACTABLE_SECRET_LEN},}`, "g");
+
+/** Does this text contain anything the system would accept as a credential? */
+export function containsCredentialShaped(s: string): boolean {
+  // A FRESH REGEX PER CALL. CREDENTIAL_SHAPED carries /g, so it is stateful:
+  // reusing it across .test() calls advances lastIndex and makes alternate
+  // calls return false on identical input. A taint check that says "clean"
+  // every other time is worse than no check.
+  return new RegExp(CREDENTIAL_SHAPED.source).test(s);
+}
+
+export function redactCredentialShaped(s: string): string {
+  return pristineReplace(s, CREDENTIAL_SHAPED, "[REDACTED]");
+}
 
 export function isRedactableSecret(secret: string | undefined): secret is string {
   return (
