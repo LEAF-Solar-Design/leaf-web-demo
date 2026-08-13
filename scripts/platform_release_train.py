@@ -645,13 +645,14 @@ def compile_resume_plan(value: Any) -> dict[str, Any]:
         return _stopped(train, "live_surface_unstable")
 
     plan = _base_plan(train)
-    terminal_services = {
+    terminal_stages = {
         receipt["stage"]
         for receipt in train["receipts"]
-        if receipt["state"] == "terminal" and receipt["stage"] in SERVICES
+        if receipt["state"] == "terminal"
     }
-    for terminal_service in terminal_services:
-        terminal_ordinal = STAGE_ORDINAL[terminal_service]
+    terminal_services = terminal_stages.intersection(SERVICES)
+    for terminal_stage in terminal_stages.difference({"build"}):
+        terminal_ordinal = STAGE_ORDINAL[terminal_stage]
         for earlier_service in SERVICES:
             if STAGE_ORDINAL[earlier_service] >= terminal_ordinal:
                 break
