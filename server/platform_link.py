@@ -51,6 +51,10 @@ _pkg: Optional[tuple] = None  # (store, db, platform_deps) once loaded
 _STATUS_MAP = {"complete": "succeeded", "failed": "failed"}
 
 
+class ProjectSessionForbidden(PermissionError):
+    """The current verified identity lacks the required project role."""
+
+
 def _log(msg: str) -> None:
     print(f"[platform-link] {msg}", file=sys.stderr)
 
@@ -122,6 +126,55 @@ def overlay_store():
     import leaf_platform.overlay_store as store  # noqa: PLC0415
 
     return store
+
+
+def require_project_access(tenant: Any, project_id: Any, *, write: bool) -> str:
+    """Return the canonical org id after a fresh project-membership check.
+
+    ``tenant`` is the verified ``TenantContext`` supplied by server deps.  The
+    client never supplies an org or binding id.  A missing or cross-tenant
+    project returns ``LookupError`` so routes can preserve their identical 404
+    shape.  A same-tenant actor with the wrong or revoked role raises the
+    explicit forbidden type.
+    """
+    subject = getattr(tenant, "subject", None)
+    if not isinstance(subject, str) or not subject:
+        raise ProjectSessionForbidden("project access requires a verified identity")
+    _ensure_platform_package()
+    import leaf_platform.project_lifecycle as lifecycle  # noqa: PLC0415
+    try:
+        org_id = uuid.UUID(str(tenant))
+        project_uuid = uuid.UUID(str(project_id))
+        store, _db, _platform_deps = _load_platform()
+        binding = store.resolve_active_identity_binding("auth0", subject)
+        if binding is None or binding.platform_tenant_id != org_id:
+            raise LookupError("project session is unavailable")
+        lifecycle.require_project_role(
+            org_id, project_uuid, binding.binding_id, write=write,
+        )
+        return str(org_id)
+    except lifecycle.LifecycleUnavailable as exc:
+        raise LookupError("project session is unavailable") from exc
+    except lifecycle.LifecycleForbidden as exc:
+        raise ProjectSessionForbidden(str(exc)) from exc
+    except (ValueError, AttributeError) as exc:
+        raise LookupError("project session is unavailable") from exc
+
+
+def require_project_session_access(
+    session: Optional[Dict[str, Any]], tenant: Any, *, write: bool,
+) -> Optional[Dict[str, Any]]:
+    """Authorize one current session operation without changing legacy rows."""
+    if session is None or str(session.get("tenant_id")) != str(tenant):
+        return None
+    org_id = session.get("org_id")
+    project_id = session.get("project_id")
+    if org_id is None and project_id is None:
+        return session
+    if org_id is None or project_id is None or str(org_id) != str(tenant):
+        return None
+    require_project_access(tenant, project_id, write=write)
+    return session
 
 
 def _db_configured() -> bool:

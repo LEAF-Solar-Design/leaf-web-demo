@@ -21,6 +21,16 @@ const TENANT = config.tenant
 //   below RACE_MIN / build / solve      -> ConversePanel primary
 export const THRESHOLDS = { CHIP_ONLY: 0.80, RACE_MIN: 0.55 }
 
+const EMPTY_ACTIVITY = Object.freeze({ queued: 0, executing: 0, total: 0 })
+
+export function projectActivityProjection(value) {
+  if (!value || typeof value !== 'object') return EMPTY_ACTIVITY
+  const queued = Math.max(0, Number(value.queued) || 0)
+  const executing = Math.max(0, Number(value.executing) || 0)
+  const total = Math.max(queued + executing, Number(value.total) || 0)
+  return { queued, executing, total }
+}
+
 // §3 SSE event vocabulary (event name = type; each data line is the full
 // {v, session_id, turn_id, seq, type, data} envelope).
 // EVERY type the server can emit must appear here. EventSource dispatches by
@@ -114,20 +124,27 @@ export function classifyAgentError(err) {
 // POST /api/sessions is idempotent server-side; the cache here only saves the
 // round-trip on repeat dispatches. A failed create never sticks, and callers
 // drop a stale entry via resetSession when a message 404s (harness restarted).
-const sessionCache = new Map() // drawingId -> Promise<{session_id, status, created_at}>
+const sessionCache = new Map() // project+drawing -> Promise<{session_id, status, created_at}>
 
-async function createSession(drawingId) {
-  const { res, body } = await post('/api/sessions', { drawing_id: drawingId })
+export function sessionCacheKey(drawingId, projectId = null) {
+  const drawingKey = drawingId || 'default'
+  return projectId ? `project:${projectId}:drawing:${drawingKey}` : drawingKey
+}
+
+async function createSession(drawingId, projectId = null) {
+  const payload = { drawing_id: drawingId }
+  if (projectId) payload.project_id = projectId
+  const { res, body } = await post('/api/sessions', payload)
   if (!res.ok || !body || !body.session_id) {
     throw tagged(res, body, `POST /api/sessions -> ${res.status}`)
   }
   return body
 }
 
-export function ensureSession(drawingId) {
-  const key = drawingId || 'default'
+export function ensureSession(drawingId, projectId = null) {
+  const key = sessionCacheKey(drawingId, projectId)
   if (!sessionCache.has(key)) {
-    const p = createSession(drawingId).catch((e) => {
+    const p = createSession(drawingId, projectId).catch((e) => {
       sessionCache.delete(key)
       throw e
     })
@@ -136,8 +153,8 @@ export function ensureSession(drawingId) {
   return sessionCache.get(key)
 }
 
-export function resetSession(drawingId) {
-  sessionCache.delete(drawingId || 'default')
+export function resetSession(drawingId, projectId = null) {
+  sessionCache.delete(sessionCacheKey(drawingId, projectId))
 }
 
 // --- Start a turn ---------------------------------------------------------
@@ -147,7 +164,7 @@ export function resetSession(drawingId) {
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
-  text, confirm, images, classifier_hint, credential_grant, queue,
+  text, confirm, images, classifier_hint, credential_grant, queue, request_id,
 } = {}) {
   const payload = {}
   if (text != null) payload.text = text
@@ -156,6 +173,7 @@ export async function postMessage(sessionId, {
   if (classifier_hint != null) payload.classifier_hint = classifier_hint
   if (credential_grant != null) payload.credential_grant = credential_grant
   if (queue === true) payload.queue = true
+  if (request_id != null) payload.request_id = request_id
   const { res, body } = await post(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
   )

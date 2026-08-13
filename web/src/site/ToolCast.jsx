@@ -208,8 +208,23 @@ export default function ToolCast({
 }) {
   const [prompt, setPrompt] = useState(PROOF_MODE ? CAT_REQUEST : '')
   const [activeSurface, setActiveSurface] = useState(() => productSurfaceFromSearch(window.location.search))
-  const { converse, drawing, drawingEvent, drawingError, instanceId } = useWorkspaceControllers()
-  const { sessionId, turns, startTurn, clear: clearConverse, resetCached } = converse
+  const {
+    converse,
+    bindConverseProject,
+    drawing,
+    drawingEvent,
+    drawingError,
+    instanceId,
+  } = useWorkspaceControllers()
+  const {
+    sessionId,
+    turns,
+    activeRequests,
+    requestStatus,
+    startTurn,
+    clear: clearConverse,
+    resetCached,
+  } = converse
   const startTurnRef = useRef(startTurn)
   startTurnRef.current = startTurn
   const platformSession = useSessionController()
@@ -612,6 +627,9 @@ export default function ToolCast({
     await login()
   }, [checkout.actions])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
+  useEffect(() => {
+    bindConverseProject(workspace.openProjectId || null)
+  }, [bindConverseProject, workspace.openProjectId])
   const currentProjectName = selectCurrentProjectName(workspace)
   const activeDrawingId = drawing.drawingState?.drawing_id || null
   const catalogRunContext = useMemo(() => createCatalogRunContext({
@@ -1292,13 +1310,23 @@ export default function ToolCast({
           )}
           {leftView === 'workspace' && (
             workspace.workspace ? (
-              <WorkspaceSummary
-                workspace={workspace.workspace}
-                loading={workspace.workspaceLoading}
-                selectedVersionId={workspace.canonicalVersionId}
-                onSelectVersion={workspace.selectCanonicalVersion}
-                onClose={() => { workspace.closeProject(); setLeftView('operator') }}
-              />
+              <>
+                <div className="tc-panel-note" data-testid="project-conversation-activity">
+                  Conversation work: {activeRequests.queued} queued, {activeRequests.executing} running
+                  {requestStatus ? ` (${requestStatus})` : ''}.
+                </div>
+                <WorkspaceSummary
+                  workspace={workspace.workspace}
+                  loading={workspace.workspaceLoading}
+                  selectedVersionId={workspace.canonicalVersionId}
+                  onSelectVersion={workspace.selectCanonicalVersion}
+                  onClose={() => {
+                    bindConverseProject(null)
+                    workspace.closeProject()
+                    setLeftView('operator')
+                  }}
+                />
+              </>
             ) : (
               <div className="tc-panel-note">Choose a project from the header to load its drawing versions, jobs, and built tools.</div>
             )

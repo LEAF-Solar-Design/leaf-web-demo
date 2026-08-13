@@ -44,6 +44,7 @@ import deps
 import overlay_propose
 import overlay_registry
 import overlay_stream
+import platform_link
 import session_store
 from envelopes import ErrorCode, error_obj
 
@@ -77,6 +78,24 @@ def _store():
     return platform_link.overlay_store()
 
 
+def _require_project_session(session_id: str, tenant: Any, *, write: bool):
+    return platform_link.require_project_session_access(
+        session_store.get_session(session_id), tenant, write=write,
+    )
+
+
+def _recheck_proposal_session(session_id: str, tenant: Any):
+    """Recheck live project authority while preserving durable legacy decisions."""
+    session = session_store.get_session(session_id)
+    if session is None:
+        # Existing overlay decisions survive deletion of their requester
+        # transcript.  There is no live project session left to authorize.
+        return True
+    return platform_link.require_project_session_access(
+        session, tenant, write=True,
+    )
+
+
 class ProposeBody(BaseModel):
     tokens: Dict[str, str] = Field(..., description="token id -> requested value")
     request_text: str = ""
@@ -107,8 +126,11 @@ def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> A
     # ids. get_session's own docstring states the contract this now honours:
     # callers compare tenant_id and answer 404-not-403, so a prober cannot
     # distinguish "does not exist" from "is not yours".
-    session = session_store.get_session(body.session_id)
-    if session is None or str(session.get("tenant_id") or "") != str(tenant):
+    try:
+        session = _require_project_session(body.session_id, tenant, write=True)
+    except platform_link.ProjectSessionForbidden:
+        return _fail("project_forbidden", "current project role cannot propose an overlay", 403)
+    if session is None:
         return _fail("session_not_found",
                      f"no such session {body.session_id!r}", 404)
 
@@ -164,6 +186,16 @@ def decide_overlay(body: DecideBody,
         return _fail("actor_required", "X-Actor is required to decide", 400)
 
     store = _store()
+    proposal = store.latest_proposal(body.proposal_id, str(tenant))
+    if proposal is not None:
+        try:
+            session = _recheck_proposal_session(
+                str(proposal.get("session_id") or ""), tenant,
+            )
+        except platform_link.ProjectSessionForbidden:
+            return _fail("project_forbidden", "current project role cannot decide an overlay", 403)
+        if session is None:
+            return _fail("proposal_not_found", body.proposal_id, 404)
     try:
         if body.approve:
             proposal, document = store.approve(
@@ -240,6 +272,16 @@ def revoke_overlay(body: RevokeBody,
         return _fail("actor_required", "X-Actor is required to revoke", 400)
 
     store = _store()
+    proposal = store.latest_proposal(body.proposal_id, str(tenant))
+    if proposal is not None:
+        try:
+            session = _recheck_proposal_session(
+                str(proposal.get("session_id") or ""), tenant,
+            )
+        except platform_link.ProjectSessionForbidden:
+            return _fail("project_forbidden", "current project role cannot revoke an overlay", 403)
+        if session is None:
+            return _fail("proposal_not_found", body.proposal_id, 404)
     try:
         proposal, document = store.revert(
             proposal_id=body.proposal_id, tenant_id=str(tenant),
@@ -288,6 +330,13 @@ def read_overlay(session_id: Optional[str] = None,
     the preview's: the preview is not a committed state and has no version to
     decide against.
     """
+    if session_id:
+        try:
+            session = _require_project_session(session_id, tenant, write=False)
+        except platform_link.ProjectSessionForbidden:
+            return _fail("project_forbidden", "current project role cannot read this overlay", 403)
+        if session is None:
+            return _fail("session_not_found", f"no such session {session_id!r}", 404)
     store = _store()
     document = store.document(str(tenant))
     tokens = store.effective_tokens(str(tenant), session_id)

@@ -96,16 +96,18 @@ import os
 import re
 import sys
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import deps
 import emf_metrics
 import entitlements
 import instant_execution
+import platform_link
 import request_journal
 import session_policy
 import session_store
@@ -237,6 +239,10 @@ _RETRYABLE_BY_CODE = {
 
 class CreateSessionRequest(BaseModel):
     drawing_id: str
+    # Optional canonical browser-project binding. The server derives its org
+    # and membership from the verified identity; no client org/binding hint is
+    # accepted.
+    project_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     # Per-session "mount your LLM" model choice (persisted). Validated against the
     # allowlist; overrides the runner env default for this session's turns.
     model: Optional[str] = None
@@ -431,13 +437,22 @@ def _session_not_found(session_id: str) -> JSONResponse:
     )
 
 
-def _require_owned_session(session_id: str, tenant: Any) -> Optional[Dict[str, Any]]:
-    """Look up session_id and enforce the tenant guard. Returns the session row
-    on success, None on a 404-worthy miss (caller returns _session_not_found)."""
+def _require_owned_session(
+    session_id: str, tenant: Any, write: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Look up one session and re-read project membership when it is bound."""
     sess = session_store.get_session(session_id)
-    if sess is None or str(sess.get("tenant_id")) != str(tenant):
-        return None
-    return sess
+    return platform_link.require_project_session_access(
+        sess, tenant, write=write,
+    )
+
+
+def _project_forbidden_response() -> JSONResponse:
+    return error_response(
+        ErrorCode.BAD_PARAMS,
+        "current project role does not permit this conversation action",
+        retryable=False, status_code=403,
+    )
 
 
 def _give_back_unredeemed_approval(confirmation_id: str, session_id: str,
@@ -619,9 +634,15 @@ def _journal_response(row: Dict[str, Any], tenant) -> JSONResponse:
     body.setdefault("request_id", row["request_id"])
     body.setdefault("turn_id", row.get("turn_id"))
     body.setdefault("status", "started" if state == "executing" else state)
-    body["active_requests"] = request_journal.active_counts(
-        row["tenant_id"], row["drawing_id"],
-    )
+    if row.get("org_id") is not None and row.get("project_id") is not None:
+        body["active_requests"] = request_journal.active_counts(
+            row["tenant_id"], row["drawing_id"],
+            org_id=row["org_id"], project_id=row["project_id"],
+        )
+    else:
+        body["active_requests"] = request_journal.active_counts(
+            row["tenant_id"], row["drawing_id"],
+        )
     return JSONResponse(
         status_code=int(status_code or 202),
         content=deps.tenant_echo(with_envelope_fields(body), tenant),
@@ -651,7 +672,34 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             f"policy {req.policy!r} is not allowed; choose one of: {allowed}",
             retryable=False, status_code=400,
         )
-    sess = session_store.get_or_create_session(str(tenant), req.drawing_id, req.model)
+    org_id = None
+    project_id = None
+    if req.project_id is not None:
+        if not request_journal.enabled():
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "project conversations require PostgreSQL session authority",
+                retryable=False, status_code=409,
+            )
+        try:
+            project_id = str(uuid.UUID(req.project_id))
+            org_id = platform_link.require_project_access(
+                tenant, project_id, write=False,
+            )
+        except (ValueError, LookupError):
+            return _session_not_found("project")
+        except platform_link.ProjectSessionForbidden:
+            return _project_forbidden_response()
+    if project_id is not None:
+        sess = session_store.get_or_create_session(
+            str(tenant), req.drawing_id, req.model,
+            org_id=org_id, project_id=project_id,
+        )
+    else:
+        # Preserve the legacy call contract for existing adapters and tests.
+        sess = session_store.get_or_create_session(
+            str(tenant), req.drawing_id, req.model,
+        )
     if req.policy is not None:
         session_policy.set_policy(sess["session_id"], str(tenant), req.policy)
     instant = instant_execution.prepare_session(
@@ -663,7 +711,26 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             "status": sess["status"],
             "created_at": sess["created_at"],
             "model": sess.get("model"),
+            **(
+                {"project_id": sess["project_id"]}
+                if sess.get("project_id") is not None
+                else {}
+            ),
             "policy": session_policy.get_policy(sess["session_id"], str(tenant)),
+            "active_requests": (
+                request_journal.active_counts(
+                    str(tenant), sess["drawing_id"],
+                    org_id=sess["org_id"], project_id=sess["project_id"],
+                ) if (
+                    request_journal.enabled()
+                    and sess.get("org_id") is not None
+                    and sess.get("project_id") is not None
+                ) else (
+                    request_journal.active_counts(str(tenant), sess["drawing_id"])
+                    if request_journal.enabled()
+                    else {"executing": 0, "queued": 0}
+                )
+            ),
             # Safe readiness only. The executor endpoint and signed lease stay
             # on the authenticated app-to-harness back-edge.
             "instant_ready": bool(instant["ready"]),
@@ -686,7 +753,10 @@ async def post_message_route(session_id: str, request: Request,
 def post_message(session_id: str, req: MessageRequest, request: Request,
                  tenant=Depends(deps.require_active_tenant)):
     # 1. ownership guard (404-not-403, no existence leak).
-    session = _require_owned_session(session_id, tenant)
+    try:
+        session = _require_owned_session(session_id, tenant, True)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden_response()
     if session is None:
         return _session_not_found(session_id)
 
@@ -823,11 +893,6 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 "text": req.text,
                 "classifier_hint": req.classifier_hint,
                 "model": req.model,
-                "tier": getattr(tenant, "tier", None),
-                "subject": getattr(tenant, "subject", None),
-                "entitlement_tier": tier,
-                "entitlement_roles": list(roles),
-                "entitlement_elevated": elevated is True,
             }
             try:
                 request_journal.validate_recoverable_payload(queue_probe)
@@ -851,6 +916,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 session_id=session_id,
                 principal_key=str(getattr(tenant, "subject", None) or ""),
                 digest=digest,
+                org_id=session.get("org_id"),
+                project_id=session.get("project_id"),
             )
         except request_journal.RequestConflict:
             return error_response(
@@ -1083,7 +1150,11 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
     replaced it.
     """
     # ownership guard first (404-not-403, no existence leak) — mirrors post_message.
-    if _require_owned_session(session_id, tenant) is None:
+    try:
+        owned = _require_owned_session(session_id, tenant, True)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden_response()
+    if owned is None:
         return _session_not_found(session_id)
 
     try:
@@ -1136,7 +1207,11 @@ async def stream_session(session_id: str, after_seq: int = 0,
     endpoint in the app. The poll cadence now awaits on the event loop; the
     404 pre-check and each per-tick store read hop to a thread so the loop
     never blocks on the session_store lock. Wire format/timing unchanged."""
-    if await asyncio.to_thread(_require_owned_session, session_id, tenant) is None:
+    try:
+        owned = await asyncio.to_thread(_require_owned_session, session_id, tenant)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden_response()
+    if owned is None:
         return _session_not_found(session_id)
 
     async def event_stream():
@@ -1144,6 +1219,14 @@ async def stream_session(session_id: str, after_seq: int = 0,
         deadline = time.time() + STREAM_DEADLINE_S
         last_activity = time.time()
         while time.time() < deadline:
+            try:
+                current = await asyncio.to_thread(
+                    _require_owned_session, session_id, tenant,
+                )
+            except platform_link.ProjectSessionForbidden:
+                break
+            if current is None:
+                break
             events = await asyncio.to_thread(
                 session_store.events_after, session_id, cursor, 500
             )
@@ -1171,7 +1254,11 @@ def get_transcript(session_id: str, limit: int = TRANSCRIPT_DEFAULT_LIMIT,
     """Most-recent-N envelopes, ascending by seq — no after_seq cursor (§2.1.4:
     'most recent N, ascending by seq'). `limit` is clamped to
     [1, TRANSCRIPT_MAX_LIMIT] regardless of what the caller sends."""
-    if _require_owned_session(session_id, tenant) is None:
+    try:
+        owned = _require_owned_session(session_id, tenant)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden_response()
+    if owned is None:
         return _session_not_found(session_id)
 
     clamped = max(1, min(int(limit), TRANSCRIPT_MAX_LIMIT))

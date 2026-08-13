@@ -48,6 +48,13 @@ class FakeStore:
         return {**kw, "state": "pending", "revision": 0,
                 "lease_expires_at": "2026-08-05T00:00:00Z"}
 
+    def latest_proposal(self, proposal_id, tenant_id):
+        return {
+            "proposal_id": proposal_id,
+            "tenant_id": tenant_id,
+            "session_id": self.session_id,
+        }
+
     def approve(self, **kw):
         self.decided = ("approve", kw)
         return ({"proposal_id": kw["proposal_id"], "state": "approved",

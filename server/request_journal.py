@@ -156,6 +156,23 @@ def validate_recoverable_payload(value: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _canonical_project_scope(
+    tenant_id: str, org_id: Optional[str], project_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    if org_id is None and project_id is None:
+        return None, None
+    if org_id is None or project_id is None:
+        raise ValueError("org_id and project_id must be provided together")
+    try:
+        canonical_org = str(uuid.UUID(str(org_id)))
+        canonical_project = str(uuid.UUID(str(project_id)))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("org_id and project_id must be canonical UUIDs") from exc
+    if str(tenant_id) != canonical_org:
+        raise ValueError("tenant_id must match the project organization")
+    return canonical_org, canonical_project
+
+
 def _row(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -169,6 +186,9 @@ def _row(value: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(claimed, (dict, list)):
             claimed = json.loads(claimed)
         row["recoverable_json"] = claimed
+    for key in ("org_id", "project_id"):
+        if row.get(key) is not None:
+            row[key] = str(row[key])
     return row
 
 
@@ -185,6 +205,8 @@ def _abandoned_response() -> Dict[str, Any]:
 def _settle_expired_executions(
     conn: Any, *, now: float, request_id: Optional[str] = None,
     tenant_id: Optional[str] = None, drawing_id: Optional[str] = None,
+    org_id: Optional[str] = None, project_id: Optional[str] = None,
+    legacy_only: bool = False,
 ) -> int:
     """Atomically close expired execution leases in one trusted scope."""
     clauses = ["state='executing'", "lease_expires_at < %s"]
@@ -198,6 +220,14 @@ def _settle_expired_executions(
     if drawing_id is not None:
         clauses.append("drawing_id=%s")
         params.append(drawing_id)
+    if org_id is not None:
+        clauses.append("org_id=%s")
+        params.append(org_id)
+    if project_id is not None:
+        clauses.append("project_id=%s")
+        params.append(project_id)
+    if legacy_only:
+        clauses.extend(["org_id IS NULL", "project_id IS NULL"])
     rows = conn.execute(
         "UPDATE app_session_requests SET state='abandoned', response_status=503,"
         " response_json=%s, terminal_at=%s, updated_at=%s,"
@@ -246,7 +276,8 @@ def get_request(request_id: str) -> Optional[Dict[str, Any]]:
 
 def admit_request(
     *, request_id: str, tenant_id: str, drawing_id: str, session_id: str,
-    principal_key: str, digest: str,
+    principal_key: str, digest: str, org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> tuple[Dict[str, Any], bool]:
     """Insert once, then require exact immutable binding on every retry."""
     request_id = canonical_request_id(request_id)
@@ -260,17 +291,20 @@ def admit_request(
         raise ValueError("principal_key must be a string")
     if type(digest) is not str or _DIGEST.fullmatch(digest) is None:
         raise ValueError("payload digest must be lowercase SHA-256")
+    canonical_org, canonical_project = _canonical_project_scope(
+        tenant_id, org_id, project_id,
+    )
     now = time.time()
     db = platform_db()
     with db.transaction() as conn:
         inserted = conn.execute(
             "INSERT INTO app_session_requests"
             " (request_id, tenant_id, drawing_id, session_id, principal_key,"
-            " payload_digest, state, created_at, updated_at)"
-            " VALUES (%s,%s,%s,%s,%s,%s,'admitted',%s,%s)"
+            " payload_digest, state, created_at, updated_at, org_id, project_id)"
+            " VALUES (%s,%s,%s,%s,%s,%s,'admitted',%s,%s,%s,%s)"
             " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
             (request_id, tenant_id, drawing_id, session_id, principal_key,
-             digest, now, now),
+             digest, now, now, canonical_org, canonical_project),
         ).fetchone()
         row = _row(conn.execute(
             "SELECT * FROM app_session_requests WHERE request_id = %s FOR UPDATE",
@@ -278,9 +312,13 @@ def admit_request(
         ).fetchone())
     if row is None:
         raise RuntimeError("request admission did not return a row")
-    expected = (tenant_id, drawing_id, session_id, principal_key, digest)
+    expected = (
+        tenant_id, drawing_id, session_id, principal_key, digest,
+        canonical_org, canonical_project,
+    )
     actual = tuple(row.get(key) for key in (
         "tenant_id", "drawing_id", "session_id", "principal_key", "payload_digest",
+        "org_id", "project_id",
     ))
     if actual != expected:
         raise RequestConflict("request_id is already bound to another request")
@@ -519,17 +557,32 @@ def fail_queued(
     return row is not None
 
 
-def active_counts(tenant_id: str, drawing_id: str) -> Dict[str, int]:
+def active_counts(
+    tenant_id: str, drawing_id: str, *, org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, int]:
+    canonical_org, canonical_project = _canonical_project_scope(
+        tenant_id, org_id, project_id,
+    )
     db = platform_db()
     with db.transaction() as conn:
         _settle_expired_executions(
             conn, now=time.time(), tenant_id=tenant_id, drawing_id=drawing_id,
+            org_id=canonical_org, project_id=canonical_project,
+            legacy_only=canonical_org is None,
         )
+        clauses = ["tenant_id=%s", "drawing_id=%s"]
+        params: list[Any] = [tenant_id, drawing_id]
+        if canonical_org is not None:
+            clauses.extend(["org_id=%s", "project_id=%s"])
+            params.extend([canonical_org, canonical_project])
+        else:
+            clauses.extend(["org_id IS NULL", "project_id IS NULL"])
         rows = conn.execute(
             "SELECT state, COUNT(*) AS count FROM app_session_requests"
-            " WHERE tenant_id=%s AND drawing_id=%s"
+            " WHERE " + " AND ".join(clauses) +
             " AND state IN ('queued','executing') GROUP BY state",
-            (tenant_id, drawing_id),
+            tuple(params),
         ).fetchall()
     counts = {"queued": 0, "executing": 0}
     for row in rows:

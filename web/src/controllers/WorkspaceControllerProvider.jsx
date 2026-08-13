@@ -27,6 +27,7 @@ export function WorkspaceControllerProvider({ drawingId, drawingOptions = {}, re
   })
   const value = useMemo(() => ({
     converse,
+    bindConverseProject: converse.setProjectContext,
     drawing,
     drawingEvent,
     drawingError,

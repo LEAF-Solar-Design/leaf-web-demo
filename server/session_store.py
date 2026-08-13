@@ -893,9 +893,13 @@ def _json_value(value: Any) -> Any:
 
 
 def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    project_scoped = row.get("project_id") is not None
+    session = {
         "session_id": row["session_id"],
-        "tenant_id": row["tenant_id"],
+        # Project rows use a reserved storage tenant so a previous image fails
+        # its legacy tenant ownership check. The current image returns the
+        # canonical organization identity to every caller.
+        "tenant_id": str(row["org_id"]) if project_scoped else row["tenant_id"],
         "drawing_id": row["drawing_id"],
         "status": row["status"],
         "created_at": row["created_at"],
@@ -905,6 +909,12 @@ def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
         "turn_started_at": row["turn_started_at"],
         "model": row["model"],
     }
+    # Keep legacy and unscoped PostgreSQL responses byte-compatible.  The
+    # project keys appear only for a project-bound durable conversation.
+    if project_scoped:
+        session["org_id"] = str(row["org_id"])
+        session["project_id"] = str(row["project_id"])
+    return session
 
 
 def _pg_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -960,28 +970,65 @@ def _pg_get_or_create_session(
     tenant_id: str, drawing_id: str, *,
     session_id: Optional[str] = None, created_at: Optional[float] = None,
     model: Optional[str] = None,
+    org_id: Optional[str] = None, project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    project_scoped = org_id is not None or project_id is not None
+    if project_scoped:
+        if org_id is None or project_id is None:
+            raise ValueError("org_id and project_id must be provided together")
+        canonical_org = str(uuid.UUID(str(org_id)))
+        canonical_project = str(uuid.UUID(str(project_id)))
+        if str(tenant_id) != canonical_org:
+            raise ValueError("tenant_id must match the project organization")
+        storage_tenant = (
+            f"project:{canonical_org}:{canonical_project}"
+        )
+    else:
+        canonical_org = None
+        canonical_project = None
+        storage_tenant = tenant_id
     candidate_id = session_id or str(uuid.uuid4())
     now = created_at if created_at is not None else time.time()
     db = _platform_db()
     with db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO app_sessions"
-            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
-            " VALUES (%s,%s,%s,'active',%s,%s,0,%s)"
-            " ON CONFLICT (tenant_id, drawing_id) DO NOTHING",
-            (candidate_id, tenant_id, drawing_id, now, now, model),
-        )
-        if model is not None:
+        if project_scoped:
             conn.execute(
-                "UPDATE app_sessions SET model = %s, updated_at = %s"
-                " WHERE tenant_id = %s AND drawing_id = %s",
-                (model, now, tenant_id, drawing_id),
+                "INSERT INTO app_sessions"
+                " (session_id, tenant_id, drawing_id, status, created_at,"
+                " updated_at, last_seq, model, org_id, project_id)"
+                " VALUES (%s,%s,%s,'active',%s,%s,0,%s,%s,%s)"
+                " ON CONFLICT DO NOTHING",
+                (candidate_id, storage_tenant, drawing_id, now, now, model,
+                 canonical_org, canonical_project),
             )
-        row = conn.execute(
-            "SELECT * FROM app_sessions WHERE tenant_id = %s AND drawing_id = %s",
-            (tenant_id, drawing_id),
-        ).fetchone()
+            if model is not None:
+                conn.execute(
+                    "UPDATE app_sessions SET model = %s, updated_at = %s"
+                    " WHERE org_id = %s AND project_id = %s",
+                    (model, now, canonical_org, canonical_project),
+                )
+            row = conn.execute(
+                "SELECT * FROM app_sessions WHERE org_id = %s AND project_id = %s",
+                (canonical_org, canonical_project),
+            ).fetchone()
+        else:
+            conn.execute(
+                "INSERT INTO app_sessions"
+                " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
+                " VALUES (%s,%s,%s,'active',%s,%s,0,%s)"
+                " ON CONFLICT (tenant_id, drawing_id) DO NOTHING",
+                (candidate_id, tenant_id, drawing_id, now, now, model),
+            )
+            if model is not None:
+                conn.execute(
+                    "UPDATE app_sessions SET model = %s, updated_at = %s"
+                    " WHERE tenant_id = %s AND drawing_id = %s",
+                    (model, now, tenant_id, drawing_id),
+                )
+            row = conn.execute(
+                "SELECT * FROM app_sessions WHERE tenant_id = %s AND drawing_id = %s",
+                (tenant_id, drawing_id),
+            ).fetchone()
     if row is None:
         raise RuntimeError("PostgreSQL session insert did not return a row")
     return _pg_session(row)
@@ -1395,10 +1442,18 @@ def ensure_started() -> None:
 
 def get_or_create_session(
     tenant_id: str, drawing_id: str, model: Optional[str] = None,
+    *, org_id: Optional[str] = None, project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     mode = _store_mode()
+    project_scoped = org_id is not None or project_id is not None
+    if project_scoped and mode != "postgres":
+        raise RuntimeError(
+            "project-bound sessions require PostgreSQL session authority")
     if mode == "postgres":
-        return _pg_get_or_create_session(tenant_id, drawing_id, model=model)
+        return _pg_get_or_create_session(
+            tenant_id, drawing_id, model=model, org_id=org_id,
+            project_id=project_id,
+        )
     if mode in _DUAL_WRITE_MODES:
         # Do not mutate the legacy authority when its required mirror is
         # already known to be unavailable.

@@ -192,6 +192,28 @@ def _require_project_role(
     )
 
 
+def require_project_role(
+    org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
+    write: bool,
+) -> str:
+    """Re-read one current project membership at a request boundary.
+
+    Conversation, approval, checkpoint, and execution routes use this public
+    seam instead of copying lifecycle SQL.  The project row and both identity
+    layers are checked inside one transaction, so a revoked member cannot keep
+    using a session merely because its durable row predates the revocation.
+    """
+    def operation(conn: Any) -> str:
+        with conn.cursor() as cur:
+            _project_row(cur, org_id, project_id, lock=False)
+            return _require_project_role(
+                cur, org_id, project_id, actor_binding_id,
+                write=write, lock=False,
+            )
+
+    return run_transaction(operation, isolation="repeatable read")
+
+
 def _target_binding_role(cur: Any, org_id: uuid.UUID, binding_id: uuid.UUID) -> str:
     cur.execute(
         "SELECT role FROM identity_bindings "
