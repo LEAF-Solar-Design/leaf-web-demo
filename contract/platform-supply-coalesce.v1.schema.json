@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://leafdesign.ai/contracts/platform-supply-coalesce.v2.schema.json",
+  "$id": "https://leafdesign.ai/contracts/platform-supply-coalesce.v3.schema.json",
   "title": "Leaf platform supply coalescing",
   "type": "object",
   "additionalProperties": false,
@@ -11,10 +11,15 @@
     "selector_activation_authorized", "supply_mint_authorized"
   ],
   "properties": {
-    "schema": {"const": "leaf.platform-supply-coalesce.v2"},
+    "schema": {"const": "leaf.platform-supply-coalesce.v3"},
     "state": {"const": "SHADOW"},
     "decision": {"enum": ["plan", "refuse"]},
-    "reason_code": {"enum": ["complete_supply_equivalent", "product_impact_present", "producer_inputs_changed", "producer_evidence_changed"]},
+    "reason_code": {
+      "enum": [
+        "complete_supply_equivalent", "product_impact_present",
+        "producer_evidence_changed"
+      ]
+    },
     "movement_count": {"type": "integer", "minimum": 1, "maximum": 100},
     "affected_services": {
       "type": "array",

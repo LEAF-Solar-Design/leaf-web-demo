@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
-"""Dormant planning for one complete five-service supply lineage."""
+"""Dormant supply coalescing from independently verified full tokens."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from copy import deepcopy
 import re
 from typing import Any
 
 from platform_semantic_eligibility import ContractError, sha256_digest
+from platform_source_impact import (
+    SERVICES,
+    TrustedProducerRoots,
+    _impact_from_validated,
+    verify_producer_evidence_token,
+)
 
 
-SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
-_SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_SERVICE_KEYS = {
-    "name",
-    "image_digest",
-    "provenance_digest",
-    "producer_source_revision",
-    "producer_source_tree",
-    "surface_fingerprint",
-    "recipe_fingerprint",
-    "toolchain_digest",
-    "dependencies_digest",
-    "build_arguments_digest",
-    "required_config_digest",
-}
 
 
 def _exact(value: Any, keys: set[str], code: str) -> dict[str, Any]:
@@ -35,68 +25,14 @@ def _exact(value: Any, keys: set[str], code: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _sha(value: Any, code: str) -> str:
-    if not isinstance(value, str) or _SHA.fullmatch(value) is None:
-        raise ContractError(code)
-    return value
-
-
-def _digest(value: Any, code: str) -> str:
-    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
-        raise ContractError(code)
-    return value
-
-
-def _service_manifest(raw: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(raw, list):
-        raise ContractError("SUPPLY_SERVICE_SET_INVALID")
-    result: dict[str, dict[str, Any]] = {}
-    for item in raw:
-        service = _exact(item, _SERVICE_KEYS, "SUPPLY_SERVICE_INVALID")
-        name = service["name"]
-        if name not in SERVICES or name in result:
-            raise ContractError("SUPPLY_SERVICE_SET_INVALID")
-        _digest(service["image_digest"], "SUPPLY_PROVENANCE_INVALID")
-        _digest(service["provenance_digest"], "SUPPLY_PROVENANCE_INVALID")
-        _sha(service["producer_source_revision"], "SUPPLY_PROVENANCE_INVALID")
-        _sha(service["producer_source_tree"], "SUPPLY_PROVENANCE_INVALID")
-        for key in (
-            "surface_fingerprint",
-            "recipe_fingerprint",
-            "toolchain_digest",
-            "dependencies_digest",
-            "build_arguments_digest",
-            "required_config_digest",
-        ):
-            _digest(service[key], "SUPPLY_PROVENANCE_INVALID")
-        result[name] = service
-    if set(result) != set(SERVICES):
-        raise ContractError("SUPPLY_SERVICE_SET_INVALID")
-    return result
-
-
-def _build_identity(service: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(
-        service[key]
-        for key in (
-            "image_digest",
-            "provenance_digest",
-            "producer_source_revision",
-            "producer_source_tree",
-            "surface_fingerprint",
-            "recipe_fingerprint",
-            "toolchain_digest",
-            "dependencies_digest",
-            "build_arguments_digest",
-            "required_config_digest",
-        )
-    )
-
-
 def evaluate_supply_coalescing(
-    document: Mapping[str, Any], *, fixture_enabled: bool = False
+    document: Mapping[str, Any],
+    *,
+    trusted_roots: TrustedProducerRoots | Any,
+    now_epoch: int,
+    fixture_enabled: bool = False,
 ) -> dict[str, Any]:
-    """Plan at most one lineage and refuse partial or changed supply evidence."""
+    """Verify each movement token and plan at most one exact lineage."""
 
     if not fixture_enabled:
         raise ContractError("UNCONFIGURED")
@@ -105,61 +41,57 @@ def evaluate_supply_coalescing(
         {"schema", "selector", "admission_window_digest", "movements"},
         "COALESCE_INPUT_INVALID",
     )
-    if root["schema"] != "leaf.platform-supply-coalesce-input.v2" or root["selector"] != "UNCONFIGURED":
-        raise ContractError("COALESCE_INPUT_INVALID")
-    window = _digest(root["admission_window_digest"], "COALESCE_INPUT_INVALID")
-    if not isinstance(root["movements"], list) or not 1 <= len(root["movements"]) <= 100:
+    if (
+        root["schema"] != "leaf.platform-supply-coalesce-input.v3"
+        or root["selector"] != "UNCONFIGURED"
+        or not isinstance(root["admission_window_digest"], str)
+        or _DIGEST.fullmatch(root["admission_window_digest"]) is None
+        or not isinstance(root["movements"], list)
+        or not 1 <= len(root["movements"]) <= 100
+    ):
         raise ContractError("COALESCE_INPUT_INVALID")
 
     movements: list[dict[str, Any]] = []
-    trees: set[str] = set()
+    token_digests: set[str] = set()
     for raw in root["movements"]:
         movement = _exact(
             raw,
-            {
-                "source_revision",
-                "source_tree",
-                "impact_classification",
-                "impact_digest",
-                "producer_evidence_digest",
-                "evidence_binding_digest",
-                "release_scope_digest",
-                "services",
-            },
+            {"producer_token", "relay_base_tree", "deferred"},
             "COALESCE_MOVEMENT_INVALID",
         )
-        _sha(movement["source_revision"], "COALESCE_MOVEMENT_INVALID")
-        tree = _sha(movement["source_tree"], "COALESCE_MOVEMENT_INVALID")
-        if tree in trees:
-            raise ContractError("COALESCE_MOVEMENT_DUPLICATE")
-        trees.add(tree)
-        if movement["impact_classification"] not in {"nil_impact", "product_impact"}:
-            raise ContractError("COALESCE_MOVEMENT_INVALID")
-        _digest(movement["impact_digest"], "COALESCE_MOVEMENT_INVALID")
-        _digest(movement["producer_evidence_digest"], "COALESCE_MOVEMENT_INVALID")
-        _digest(movement["evidence_binding_digest"], "COALESCE_MOVEMENT_INVALID")
-        _digest(movement["release_scope_digest"], "COALESCE_MOVEMENT_INVALID")
-        movement["services"] = _service_manifest(movement["services"])
-        movements.append(movement)
+        validated = verify_producer_evidence_token(
+            movement["producer_token"], trusted_roots, now_epoch=now_epoch
+        )
+        if validated.content_digest in token_digests:
+            raise ContractError("COALESCE_EVIDENCE_REPLAY")
+        token_digests.add(validated.content_digest)
+        impact = _impact_from_validated(
+            validated,
+            relay_base_tree=movement["relay_base_tree"],
+            deferred=movement["deferred"],
+        )
+        movements.append({"validated": validated, "impact": impact})
 
-    evidence_pairs = {
-        (movement["producer_evidence_digest"], movement["evidence_binding_digest"])
-        for movement in movements
-    }
-    if len(evidence_pairs) != len(movements):
-        raise ContractError("COALESCE_EVIDENCE_REPLAY")
+    first = movements[0]["validated"]
+    changed_services: set[str] = set()
+    product_impact = False
+    scope_mismatch = False
+    for movement in movements:
+        validated = movement["validated"]
+        impact = movement["impact"]
+        product_impact = product_impact or impact["classification"] != "nil_impact"
+        changed_services.update(impact["affected_services"])
+        if (
+            validated.release_scope_digest != first.release_scope_digest
+            or validated.tenant_binding_digest != first.tenant_binding_digest
+            or validated.approval_scope_digest != first.approval_scope_digest
+            or validated.rollback_digest != first.rollback_digest
+            or validated.verifier_digest != first.verifier_digest
+            or validated.environment != first.environment
+        ):
+            scope_mismatch = True
 
-    baseline = movements[0]["services"]
-    changed_services: list[str] = []
-    for name in SERVICES:
-        expected = _build_identity(baseline[name])
-        if any(_build_identity(movement["services"][name]) != expected for movement in movements[1:]):
-            changed_services.append(name)
-    product_impact = any(
-        movement["impact_classification"] != "nil_impact" for movement in movements
-    )
-    release_scopes = {movement["release_scope_digest"] for movement in movements}
-    if len(release_scopes) != 1:
+    if scope_mismatch:
         decision = "refuse"
         reason = "producer_evidence_changed"
         lineage = None
@@ -167,54 +99,55 @@ def evaluate_supply_coalescing(
         decision = "refuse"
         reason = "product_impact_present"
         lineage = None
-    elif changed_services:
-        decision = "refuse"
-        reason = "producer_inputs_changed"
-        lineage = None
     else:
         decision = "plan"
         reason = "complete_supply_equivalent"
         lineage = sha256_digest(
             {
-                "admission_window_digest": window,
-                "release_scope_digest": movements[-1]["release_scope_digest"],
+                "admission_window_digest": root["admission_window_digest"],
+                "release_scope_digest": first.release_scope_digest,
                 "movements": [
                     {
-                        "source_revision": movement["source_revision"],
-                        "source_tree": movement["source_tree"],
-                        "impact_digest": movement["impact_digest"],
-                        "producer_evidence_digest": movement["producer_evidence_digest"],
-                        "evidence_binding_digest": movement["evidence_binding_digest"],
+                        "producer_token_digest": item[
+                            "validated"
+                        ].content_digest,
+                        "candidate_source_revision": item[
+                            "validated"
+                        ].candidate_source_revision,
+                        "candidate_source_tree": item[
+                            "validated"
+                        ].candidate_source_tree,
+                        "impact_digest": item["impact"]["impact_digest"],
                     }
-                    for movement in movements
+                    for item in movements
                 ],
-                "services": [deepcopy(baseline[name]) for name in SERVICES],
+                "services": list(first.services),
             }
         )
 
     evidence_chain = sha256_digest(
         [
             {
-                "source_revision": movement["source_revision"],
-                "source_tree": movement["source_tree"],
-                "impact_digest": movement["impact_digest"],
-                "producer_evidence_digest": movement["producer_evidence_digest"],
-                "evidence_binding_digest": movement["evidence_binding_digest"],
-                "release_scope_digest": movement["release_scope_digest"],
+                "producer_token_digest": item["validated"].content_digest,
+                "release_scope_digest": item[
+                    "validated"
+                ].release_scope_digest,
+                "impact_digest": item["impact"]["impact_digest"],
             }
-            for movement in movements
+            for item in movements
         ]
     )
-
     return {
-        "schema": "leaf.platform-supply-coalesce.v2",
+        "schema": "leaf.platform-supply-coalesce.v3",
         "state": "SHADOW",
         "decision": decision,
         "reason_code": reason,
         "movement_count": len(movements),
-        "affected_services": changed_services,
-        "admission_window_digest": window,
-        "release_scope_digest": movements[-1]["release_scope_digest"],
+        "affected_services": [
+            name for name in SERVICES if name in changed_services
+        ],
+        "admission_window_digest": root["admission_window_digest"],
+        "release_scope_digest": first.release_scope_digest,
         "evidence_chain_digest": evidence_chain,
         "planned_lineage_digest": lineage,
         "selector_activation_authorized": False,

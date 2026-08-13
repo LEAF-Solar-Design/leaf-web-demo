@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import importlib
 import importlib.util
 import json
@@ -11,10 +12,17 @@ import pytest
 
 from platform_proof_reuse import PROFILES, evaluate_proof_reuse
 from platform_semantic_eligibility import ContractError, sha256_digest
+from platform_source_impact import (
+    FIXTURE_NOW,
+    _fixture_token_payload,
+    _fixture_trusted_roots,
+    _seal_token,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "contract" / "platform-proof-reuse.v1.schema.json"
+BASE_TREE = "698efba6b35b2a08eece8c548ba77f71d8859c21"
 
 
 def jsonschema_module():
@@ -29,69 +37,43 @@ def jsonschema_module():
     return importlib.import_module("jsonschema")
 
 
-def digest(name: str) -> str:
-    return sha256_digest({"name": name})
-
-
 def evidence() -> dict:
+    token = _fixture_token_payload()
+    lineage = token["terminal"]["release_lineage_digest"]
     return {
-        "schema": "leaf.platform-proof-reuse-input.v2",
+        "schema": "leaf.platform-proof-reuse-input.v3",
         "selector": "UNCONFIGURED",
+        "current_token": deepcopy(token),
+        "admitted_token": deepcopy(token),
         "prior_receipt": {
             "terminal_state": "terminal_green",
             "verifier_result": "pass",
             "rollback_result": "pass",
             "product_mutation_result": "clean",
-            "tenant_set_digest": digest("tenants"),
-            "approval_scope_digest": digest("scope"),
-            "identity_shape_digest": digest("identity"),
-            "rollback_digest": digest("rollback"),
-            "verifier_digest": digest("verifier"),
-            "producer_graph_digest": digest("producer-graph"),
-            "producer_supply_digest": digest("producer-supply"),
-            "release_scope_digest": digest("release-scope"),
-            "source_impact_digest": digest("impact"),
-            "lineage_digest": digest("prior-lineage"),
-            "receipt_digest": digest("receipt"),
-            "workspace_profiles": list(PROFILES),
-            "lineage_complete": True,
+            "receipt_digest": token["terminal"]["receipt_digest"],
         },
         "candidate": {
-            "tenant_set_digest": digest("tenants"),
-            "approval_scope_digest": digest("scope"),
-            "identity_shape_digest": digest("identity"),
-            "rollback_digest": digest("rollback"),
-            "verifier_digest": digest("verifier"),
-            "source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
-            "admitted_source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
-            "source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
-            "admitted_source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
-            "producer_graph_digest": digest("producer-graph"),
-            "admitted_producer_graph_digest": digest("producer-graph"),
-            "producer_supply_digest": digest("producer-supply"),
-            "admitted_producer_supply_digest": digest("producer-supply"),
-            "producer_evidence_digest": digest("producer-evidence"),
-            "admitted_producer_evidence_digest": digest("producer-evidence"),
-            "evidence_binding_digest": digest("evidence-binding"),
-            "admitted_evidence_binding_digest": digest("evidence-binding"),
-            "release_scope_digest": digest("release-scope"),
-            "admitted_release_scope_digest": digest("release-scope"),
-            "source_impact_digest": digest("new-nil-impact"),
-            "admitted_source_impact_digest": digest("new-nil-impact"),
-            "source_impact_classification": "nil_impact",
-            "predecessor_lineage_digest": digest("prior-lineage"),
-            "admitted_lineage_digest": digest("new-lineage"),
+            "current_lineage_digest": lineage,
+            "admitted_lineage_digest": lineage,
             "workspace_profiles": list(PROFILES),
             "lineage_complete": True,
+            "relay_base_tree": BASE_TREE,
+            "deferred": False,
         },
     }
 
 
 def evaluate(value: dict) -> dict:
-    return evaluate_proof_reuse(value, fixture_enabled=True)
+    return evaluate_proof_reuse(
+        value,
+        current_trusted_roots=_fixture_trusted_roots(),
+        admitted_trusted_roots=_fixture_trusted_roots(),
+        now_epoch=FIXTURE_NOW,
+        fixture_enabled=True,
+    )
 
 
-def test_exact_terminal_proof_is_atomically_attached_to_new_lineage():
+def test_exact_full_tokens_attach_terminal_proof_once():
     result = evaluate(evidence())
 
     assert result["decision"] == "reuse"
@@ -102,83 +84,154 @@ def test_exact_terminal_proof_is_atomically_attached_to_new_lineage():
     assert result["proof_execution_authorized"] is False
 
 
-def test_verifier_failed_receipt_is_nonterminal_even_after_cleanup_and_rollback():
-    value = evidence()
-    value["prior_receipt"]["verifier_result"] = "failed"
-    result = evaluate(value)
-    assert result["decision"] == "fresh_proof"
-    assert result["reason_code"] == "verifier_not_green"
-    assert result["reuse_attachment_digest"] is None
-
-
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
-        (lambda value: value["prior_receipt"].update(terminal_state="failed"), "prior_not_terminal_green"),
-        (lambda value: value["prior_receipt"].update(rollback_result="failed"), "rollback_not_green"),
-        (lambda value: value["prior_receipt"].update(product_mutation_result="dirty"), "product_mutation_not_clean"),
-        (lambda value: value["candidate"].update(lineage_complete=False), "lineage_incomplete"),
-        (lambda value: value["candidate"].update(source_impact_classification="product_impact"), "source_impact_not_nil"),
-        (lambda value: value["candidate"].update(predecessor_lineage_digest=digest("other")), "lineage_mismatch"),
-        (lambda value: value["candidate"].update(tenant_set_digest=digest("other")), "tenant_set_mismatch"),
-        (lambda value: value["candidate"].update(approval_scope_digest=digest("other")), "approval_scope_mismatch"),
-        (lambda value: value["candidate"].update(identity_shape_digest=digest("other")), "identity_shape_mismatch"),
-        (lambda value: value["candidate"].update(rollback_digest=digest("other")), "rollback_binding_mismatch"),
-        (lambda value: value["candidate"].update(verifier_digest=digest("other")), "verifier_binding_mismatch"),
-        (lambda value: value["candidate"].update(admitted_source_tree="f" * 40), "source_binding_mismatch"),
         (
-            lambda value: value["candidate"].update(admitted_producer_graph_digest=digest("other")),
-            "graph_binding_mismatch",
+            lambda value: value["prior_receipt"].update(
+                terminal_state="failed"
+            ),
+            "prior_not_terminal_green",
         ),
         (
-            lambda value: value["candidate"].update(admitted_producer_supply_digest=digest("other")),
-            "supply_binding_mismatch",
+            lambda value: value["prior_receipt"].update(
+                verifier_result="failed"
+            ),
+            "verifier_not_green",
         ),
         (
-            lambda value: value["candidate"].update(admitted_producer_evidence_digest=digest("other")),
-            "producer_evidence_mismatch",
+            lambda value: value["prior_receipt"].update(
+                rollback_result="failed"
+            ),
+            "rollback_not_green",
         ),
         (
-            lambda value: value["candidate"].update(admitted_evidence_binding_digest=digest("other")),
-            "evidence_binding_mismatch",
+            lambda value: value["prior_receipt"].update(
+                product_mutation_result="dirty"
+            ),
+            "product_mutation_not_clean",
         ),
         (
-            lambda value: value["candidate"].update(admitted_release_scope_digest=digest("other")),
-            "release_scope_mismatch",
+            lambda value: value["prior_receipt"].update(
+                receipt_digest=sha256_digest("other")
+            ),
+            "receipt_binding_mismatch",
         ),
         (
             lambda value: value["candidate"].update(
-                admitted_source_impact_digest=digest("other")
+                lineage_complete=False
             ),
-            "source_impact_mismatch",
+            "lineage_incomplete",
+        ),
+        (
+            lambda value: value["candidate"].update(
+                current_lineage_digest=sha256_digest("other")
+            ),
+            "current_lineage_mismatch",
+        ),
+        (
+            lambda value: value["candidate"].update(
+                admitted_lineage_digest=sha256_digest("other")
+            ),
+            "admitted_lineage_mismatch",
         ),
     ],
 )
-def test_each_reuse_predicate_fails_closed(mutation, reason: str):
+def test_each_receipt_and_lineage_relation_fails_closed(mutation, reason: str):
     value = evidence()
     mutation(value)
     result = evaluate(value)
     assert result["decision"] == "fresh_proof"
     assert result["reason_code"] == reason
+    assert result["reuse_attachment_digest"] is None
 
 
-def test_malleable_profiles_share_one_identity_and_separate_state_is_refused():
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda token: token["terminal"].update(
+            tenant_binding={
+                **token["terminal"]["tenant_binding"],
+                "tenant_scope": "other-tenant",
+            }
+        ),
+        lambda token: token["terminal"].update(
+            approval_scope={
+                **token["terminal"]["approval_scope"],
+                "class": "other-approval",
+            }
+        ),
+        lambda token: token["terminal"].update(
+            rollback={
+                **token["terminal"]["rollback"],
+                "source_revision": "f" * 40,
+            }
+        ),
+        lambda token: token["terminal"].update(
+            verifier={
+                **token["terminal"]["verifier"],
+                "contract": "other-verifier",
+            }
+        ),
+        lambda token: token["deployment_identity"].update(
+            body_digest=sha256_digest("other-identity")
+        ),
+    ],
+)
+def test_current_admitted_pair_cannot_rebind_authority(mutation):
     value = evidence()
-    assert evaluate(value)["decision"] == "reuse"
+    mutation(value["current_token"])
+    value["current_token"] = _seal_token(value["current_token"])
+    with pytest.raises(ContractError):
+        evaluate(value)
 
-    value["candidate"]["workspace_profiles"] = ["browser", "cad", "ios", "solar_cad"]
+
+def test_digest_pairs_and_digest_only_tokens_never_authorize_reuse():
+    r2_counterexample = {
+        "schema": "leaf.platform-proof-reuse-input.v2",
+        "selector": "UNCONFIGURED",
+        "prior_receipt": {},
+        "candidate": {
+            "producer_evidence_digest": sha256_digest("producer"),
+            "admitted_producer_evidence_digest": sha256_digest("producer"),
+            "evidence_binding_digest": sha256_digest("binding"),
+            "admitted_evidence_binding_digest": sha256_digest("binding"),
+        },
+    }
+    with pytest.raises(ContractError, match="PROOF_REUSE_INPUT_INVALID"):
+        evaluate(r2_counterexample)
+
+    value = evidence()
+    value["current_token"] = value["current_token"]["content_digest"]
+    with pytest.raises(ContractError, match="PRODUCER_TOKEN_INVALID"):
+        evaluate(value)
+
+
+def test_profile_order_is_one_malleable_workspace_contract():
+    value = evidence()
+    value["candidate"]["workspace_profiles"] = [
+        "browser",
+        "cad",
+        "ios",
+        "solar_cad",
+    ]
     with pytest.raises(ContractError, match="WORKSPACE_PROFILE_SET_INVALID"):
         evaluate(value)
 
 
-def test_default_is_unconfigured_and_output_is_closed_and_redacted():
+def test_default_unconfigured_and_output_schema_is_closed():
     with pytest.raises(ContractError, match="UNCONFIGURED"):
-        evaluate_proof_reuse(evidence())
+        evaluate_proof_reuse(
+            evidence(),
+            current_trusted_roots=_fixture_trusted_roots(),
+            admitted_trusted_roots=_fixture_trusted_roots(),
+            now_epoch=FIXTURE_NOW,
+        )
     result = evaluate(evidence())
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     jsonschema = jsonschema_module()
     jsonschema.Draft202012Validator.check_schema(schema)
     jsonschema.Draft202012Validator(schema).validate(result)
     lowered = json.dumps(result).casefold()
-    for token in ("tenant", "subject", "secret", "token", "browser", "solar_cad"):
+    for token in ("subject", "secret", "artifact_name", "raw_catalog"):
         assert token not in lowered
