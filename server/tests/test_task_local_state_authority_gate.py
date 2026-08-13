@@ -36,7 +36,18 @@ from destroying it without anyone deciding to:
 
   ``manifest_required``   the NAME is in ``deploy/required-config.*.json``, so
                           the terraform manifest check refuses a task
-                          definition that omits it. Absence cannot be silent.
+                          definition that omits it. Read this one precisely: it
+                          removes the SILENT default, and that is all it does.
+                          The manifest is a flat list of names and the check
+                          only asserts membership, so a task definition that
+                          sets ``JOBS_DB=/app/server/jobs.db`` satisfies it and
+                          still loses the database on every replacement. What
+                          the control buys is that SOMEBODY had to type a path,
+                          which is reviewable, instead of a default nobody saw.
+                          The ECS values live in the terraform repo, so no test
+                          here can close that gap; the durability of an actual
+                          value is only verified for the one deployment
+                          producer this repo owns, ``docker-compose.yml``.
   ``selector_guarded``    the path is authoritative only under certain modes of
                           a selector variable, and every one of those selectors
                           is itself manifest-required. This is the shape
@@ -47,6 +58,28 @@ from destroying it without anyone deciding to:
   ``read_only_input``     nothing ever writes it, so a task replacement removes
                           no state. Verified by scanning the resolving modules
                           for write primitives, not by assertion.
+  ``derived_from``        the default is built from another state path, so it
+                          inherits that one's durability. The anchor must itself
+                          be governed.
+  ``dark_unless``         the surface that reads it is not mounted unless a flag
+                          is armed, and no producer in this repo arms it. Arming
+                          it anywhere in-repo turns the gate red, which is the
+                          point at which the path has to become durable.
+
+TWO TIERS, because the alternative fails open. Tier one (``_TASK_LOCAL_STATE``)
+is discovered mechanically: the scan evaluates the default expression and the
+ledger is checked against what it found. Tier two (``_UNREADABLE_DEFAULTS``) is
+for defaults the evaluator cannot compute -- a helper call, ``__file__``
+arithmetic, a relative ``os.path.join``. Teaching the evaluator all of Python is
+an endless job, and an evaluator that silently skips what it cannot read is the
+worst outcome: the variable never reaches the ledger and nothing says a path
+went unexamined. So the rule is NOT "the evaluator reads everything", it is
+"nothing goes unexamined". Anything path-shaped and unreadable must be declared
+by hand with its resolved path and its control, and its source expression is
+pinned verbatim so an edit forces a human to re-derive rather than let the
+recorded path drift. Tier two is how the operator control plane's four files and
+three derived paths entered this ledger at all; the first version of this gate
+could not see any of them.
 
 WHY IT IS BUILT OUT OF THE REAL PRODUCERS, and not out of a hand-kept list.
 Two green tests once pinned a Dockerfile COPY target and a documented command
@@ -259,6 +292,127 @@ _TASK_LOCAL_STATE: dict[str, _State] = {
 }
 
 
+class _Unreadable:
+    """A task-local default the evaluator cannot compute, declared by hand.
+
+    The second tier exists because the alternative is worse. Teaching
+    ``_literal_path`` every expression Python can write is an endless job, and
+    an evaluator that silently skips what it cannot read fails OPEN: the
+    variable never reaches the ledger and nothing says a path went unexamined.
+    So the rule is not "the evaluator must read everything", it is "nothing goes
+    unexamined". An unreadable default is allowed exactly once somebody writes
+    down what it resolves to and what stops a deploy destroying it.
+
+    ``source`` is pinned verbatim, so editing the expression turns the gate red
+    and the resolved path gets re-derived by a human instead of drifting.
+    """
+
+    def __init__(
+        self,
+        *,
+        source: str,
+        container_default: str,
+        why: str,
+        derived_from: str = "",
+        read_only: bool = False,
+        dark_unless: str = "",
+    ) -> None:
+        self.source = source
+        self.container_default = PurePosixPath(container_default)
+        self.why = why
+        self.derived_from = derived_from
+        self.read_only = read_only
+        self.dark_unless = dark_unless
+
+
+_UNREADABLE_DEFAULTS: dict[str, _Unreadable] = {
+    "server/broker.py:BROKER_ACTIVE_WORKITEMS_PATH": _Unreadable(
+        source="str(Path(LEDGER_PATH).parent / 'active_workitems.jsonl')",
+        container_default="/app/server/active_workitems.jsonl",
+        derived_from="BROKER_LEDGER",
+        why=(
+            "Sits beside the broker ledger by construction, so it is durable "
+            "exactly when BROKER_LEDGER is and task-local exactly when it is "
+            "not. Pointing the ledger at /data/state carries this with it."
+        ),
+    ),
+    "server/jobs.py:PENDING_REAPS_PATH": _Unreadable(
+        source="str(DB_PATH.parent / 'pending_reaps.jsonl')",
+        container_default="/app/server/pending_reaps.jsonl",
+        derived_from="JOBS_DB",
+        why=(
+            "Sits beside the jobs database by construction, so JOBS_DB's "
+            "durability decides this one's. Same inheritance as the broker's "
+            "active-workitems file."
+        ),
+    ),
+    "server/customization_service.py:LEAF_CUSTOMIZATION_WORKTREES": _Unreadable(
+        source="str(database_path().parent / 'customization-worktrees')",
+        container_default="/app/server/customization-worktrees",
+        derived_from="LEAF_CUSTOMIZATION_DB",
+        why=(
+            "database_path() returns LEAF_CUSTOMIZATION_DB when set and a module "
+            "default otherwise, so the worktree directory follows the "
+            "customization database. LEAF_CUSTOMIZATION_DB is required in the "
+            "app manifest, so a deploy must state it and this follows."
+        ),
+    ),
+    "server/operator_policy.py:LEAF_OPERATOR_POLICY_FILE": _Unreadable(
+        source="str(Path(__file__).resolve().parent / 'operator_policy.json')",
+        container_default="/app/server/operator_policy.json",
+        read_only=True,
+        dark_unless="LEAF_OPERATOR_ENABLED",
+        why=(
+            "Operator control-plane policy, shipped IN the image and only read. "
+            "A task replacement restores it rather than destroying it."
+        ),
+    ),
+    "server/operator_secret_broker.py:LEAF_OPERATOR_SECRETS_FILE": _Unreadable(
+        source="str(Path(__file__).resolve().parent / 'operator_secrets.json')",
+        container_default="/app/server/operator_secrets.json",
+        read_only=True,
+        dark_unless="LEAF_OPERATOR_ENABLED",
+        why=(
+            "Operator secret-broker descriptor, image-shipped and only read by "
+            "server/operator_secret_broker.py."
+        ),
+    ),
+    "server/operator_external_adapters.py:LEAF_OPERATOR_DESTINATIONS_FILE": _Unreadable(
+        source="str(Path(__file__).resolve().parent / 'operator_external_destinations.json')",
+        container_default="/app/server/operator_external_destinations.json",
+        read_only=True,
+        dark_unless="LEAF_OPERATOR_ENABLED",
+        why=(
+            "Allowed external destinations for the operator plane, image-shipped "
+            "and only read."
+        ),
+    ),
+    "server/operator_authority.py:LEAF_OPERATOR_KILL_FILE": _Unreadable(
+        source="str(os.path.join('data', 'operator.disabled'))",
+        container_default="/app/server/data/operator.disabled",
+        dark_unless="LEAF_OPERATOR_ENABLED",
+        why=(
+            "The one entry here that is NOT read-only in the sense that matters, "
+            "and it is deliberately not declared as such. The app never writes "
+            "it -- kill_switch_active() only calls os.path.exists -- so the write "
+            "scan sees nothing and would happily call it read-only. But the file "
+            "is created OUT OF BAND by an operator to disable the control plane, "
+            "and the default is a RELATIVE path, resolved against the image "
+            "WORKDIR /app/server. So an operator who kills the surface loses the "
+            "kill on the next deploy and the plane silently re-arms itself: the "
+            "same hazard class as SESSIONS_DB, with a worse failure. Compare "
+            "LEAF_AGENT_KILL_FILE, which docker-compose.yml puts on "
+            "/data/state/agent.disabled. The reason this is not a live defect is "
+            "reachability, not durability: the operator plane is dark unless "
+            "LEAF_OPERATOR_ENABLED=1 (server/app.py _mount_operator_router), and "
+            "no producer in this repo arms it. The dark_unless check below is "
+            "what keeps that true -- arm the flag anywhere in-repo and this goes "
+            "red, which is the moment to move the file to a durable mount."
+        ),
+    ),
+}
+
+
 # --------------------------------------------------------------------------- #
 # derivations from the real producers                                          #
 # --------------------------------------------------------------------------- #
@@ -313,6 +467,75 @@ def _literal_path(node: ast.expr) -> str | None:
     return None
 
 
+# Every way this package reads an env var WITH a fallback. A form absent from
+# here is a form the scan cannot see, which is why
+# test_the_default_expression_scan_reads_every_env_lookup_form exercises each
+# one against a fixture instead of trusting this list.
+def _env_default_calls(tree: ast.Module):
+    """Yield (variable, default expression) for each env read with a default.
+
+    ``os.environ["X"]`` is deliberately absent: a subscript has no default, so
+    it cannot silently select a task-local path. Only the fallback forms can.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "attr", None) or getattr(func, "id", None)
+        if name == "get":
+            if not isinstance(func, ast.Attribute):
+                continue
+            if ast.unparse(func.value) not in {"os.environ", "environ"}:
+                continue
+        elif name != "getenv":
+            continue
+        elif isinstance(func, ast.Attribute) and ast.unparse(func.value) not in {
+            "os",
+            "environ",
+        }:
+            continue
+
+        if not node.args:
+            continue
+        key = node.args[0]
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            continue
+
+        default = None
+        if len(node.args) >= 2:
+            default = node.args[1]
+        else:
+            for keyword in node.keywords:
+                if keyword.arg == "default":
+                    default = keyword.value
+        if default is None:
+            continue
+        yield key.value, default
+
+
+# Markers that a default expression is TRYING to be a path. Used only to decide
+# whether an expression the evaluator could not read is worth failing over.
+_PATH_SHAPED = ("SERVER_DIR", "PROJECT_ROOT", "ROOT", "Path(", "os.path", "/")
+
+
+def _unreadable_path_defaults() -> dict[str, str]:
+    """Env defaults that LOOK like a path and that the evaluator cannot read.
+
+    Without this the scan fails open on exactly the interesting case: a default
+    built by a helper or an f-string is skipped, so its variable never reaches
+    the ledger and nothing says so.
+    """
+    unreadable: dict[str, str] = {}
+    for rel, tree in _scanned_modules().items():
+        for var, default in _env_default_calls(tree):
+            if _literal_path(default) is not None:
+                continue
+            source = ast.unparse(default)
+            if any(marker in source for marker in _PATH_SHAPED):
+                unreadable[f"{rel}:{var}"] = source
+    return unreadable
+
+
 def _discovered_state_paths() -> dict[str, dict]:
     """Env vars whose DEFAULT resolves to a path inside the repo working tree.
 
@@ -322,18 +545,8 @@ def _discovered_state_paths() -> dict[str, dict]:
     """
     found: dict[str, dict] = {}
     for rel, tree in _scanned_modules().items():
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or len(node.args) != 2:
-                continue
-            func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr == "get"):
-                continue
-            if ast.unparse(func.value) not in {"os.environ", "environ"}:
-                continue
-            key = node.args[0]
-            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                continue
-            default = _literal_path(node.args[1])
+        for var, default_node in _env_default_calls(tree):
+            default = _literal_path(default_node)
             if default is None or not Path(default).is_absolute():
                 continue
             try:
@@ -341,8 +554,7 @@ def _discovered_state_paths() -> dict[str, dict]:
             except ValueError:
                 continue
             entry = found.setdefault(
-                key.value,
-                {"container_default": IMAGE_ROOT / inside, "modules": set()},
+                var, {"container_default": IMAGE_ROOT / inside, "modules": set()}
             )
             entry["modules"].add(rel)
     return found
@@ -432,6 +644,159 @@ def test_the_source_scan_can_actually_see_the_server_package():
     }, (
         "the set of modules resolving SESSIONS_DB changed: "
         f"{sorted(discovered['SESSIONS_DB']['modules'])}"
+    )
+
+
+_SCAN_FIXTURE = '''
+import os
+from pathlib import Path
+SERVER_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SERVER_DIR.parent
+
+A = Path(os.environ.get("FORM_ENVIRON_GET", str(SERVER_DIR / "a.db")))
+B = Path(os.getenv("FORM_GETENV", str(SERVER_DIR / "b.db")))
+C = Path(os.environ.get("FORM_KEYWORD", default=str(PROJECT_ROOT / "data" / "c.db")))
+D = Path(os.environ.get("FORM_PATH_CALL", Path(SERVER_DIR) / "d.db"))
+E = os.environ.get("FORM_BARE_STRING", "/data/state/e.db")
+F = os.environ.get("FORM_NOT_A_PATH", str(64 * 1024))
+G = os.environ["FORM_NO_DEFAULT"]
+'''
+
+
+def test_the_default_expression_scan_reads_every_env_lookup_form():
+    """A positive control, because the anchor test only proves ONE form works.
+
+    Preserving SESSIONS_DB proves the scan did not die; it does not prove the
+    scan covers the next variable somebody writes. A form this fixture does not
+    exercise is a form a new task-local path can arrive through unseen, so the
+    fixture is the coverage claim and it is executed rather than asserted.
+    """
+    tree = ast.parse(_SCAN_FIXTURE)
+    seen = {var: _literal_path(default) for var, default in _env_default_calls(tree)}
+
+    assert "FORM_NO_DEFAULT" not in seen, (
+        "a bare os.environ[...] subscript has no default, so it cannot silently "
+        "select a task-local path and must not be treated as a state path"
+    )
+    for var in (
+        "FORM_ENVIRON_GET",
+        "FORM_GETENV",
+        "FORM_KEYWORD",
+        "FORM_PATH_CALL",
+        "FORM_BARE_STRING",
+        "FORM_NOT_A_PATH",
+    ):
+        assert var in seen, (
+            f"the scan does not see {var}. A shipped module written that way "
+            "could put state on a task-local path and never reach the ledger."
+        )
+
+    for var in ("FORM_ENVIRON_GET", "FORM_GETENV", "FORM_KEYWORD", "FORM_PATH_CALL"):
+        assert seen[var] is not None and Path(seen[var]).is_absolute(), (
+            f"the scan sees {var} but cannot evaluate its default to a path, so "
+            "it would be dropped before the in-repo test"
+        )
+    assert seen["FORM_BARE_STRING"] == "/data/state/e.db"
+    # Not a path, and correctly not treated as one -- the in-repo filter, not a
+    # special case, is what excludes it.
+    assert not Path(seen["FORM_NOT_A_PATH"] or "x").is_absolute()
+
+
+def test_no_env_default_that_looks_like_a_path_is_unreadable_to_the_scan():
+    """Fail CLOSED on an expression the evaluator cannot read.
+
+    Skipping what it cannot parse is how a scan fails open: the variable never
+    reaches the ledger, and nothing anywhere says a path went unexamined.
+    """
+    unreadable = _unreadable_path_defaults()
+
+    undeclared = sorted(set(unreadable) - set(_UNREADABLE_DEFAULTS))
+    assert not undeclared, "\n".join(
+        [
+            "these env defaults look like filesystem paths but the evaluator in "
+            "_literal_path cannot resolve them, so nothing has established "
+            "whether they are task-local:",
+        ]
+        + [f"  {where} = {unreadable[where]}" for where in undeclared]
+        + [
+            "",
+            "Teach _literal_path the form (and add it to _SCAN_FIXTURE), rewrite "
+            "the default as a plain path expression, or declare it in "
+            "_UNREADABLE_DEFAULTS with its resolved container path and the "
+            "control that stops a deploy destroying it silently.",
+        ]
+    )
+
+    stale = sorted(set(_UNREADABLE_DEFAULTS) - set(unreadable))
+    assert not stale, (
+        f"_UNREADABLE_DEFAULTS declares {stale}, which the scan no longer "
+        "reports as an unreadable path-shaped default. Either the expression "
+        "changed or the evaluator learned it; re-derive the entry or delete it."
+    )
+
+    for where, declared in sorted(_UNREADABLE_DEFAULTS.items()):
+        assert unreadable[where] == declared.source, (
+            f"{where}'s default expression is now {unreadable[where]!r}, not the "
+            f"pinned {declared.source!r}. The resolved container path was "
+            "derived by hand from the old expression and has to be re-derived."
+        )
+
+
+@pytest.mark.parametrize("where", sorted(_UNREADABLE_DEFAULTS))
+def test_every_hand_declared_task_local_path_names_a_control(where: str):
+    """Tier two answers to the same rule as tier one, by its own evidence."""
+    declared = _UNREADABLE_DEFAULTS[where]
+    assert declared.why.strip(), f"{where} declares no reason"
+    assert not _on_a_durable_mount(declared.container_default, _durable_mounts()), (
+        f"{where} resolves to {declared.container_default}, which is on a "
+        "declared durable mount, so it does not belong in this ledger"
+    )
+
+    controls = []
+
+    if declared.derived_from:
+        anchor = declared.derived_from
+        anchored = anchor in _TASK_LOCAL_STATE or any(
+            anchor in set(_manifest(name)["environment"]) for name in _MANIFESTS
+        )
+        assert anchored, (
+            f"{where} is declared to follow {anchor}, but {anchor} is neither a "
+            "declared task-local state path nor required by any deployment "
+            f"manifest. Then nothing governs {anchor}, so nothing governs this."
+        )
+        controls.append("derived_from")
+
+    if declared.read_only:
+        module = where.split(":")[0]
+        writes = _writes_anything(module)
+        assert not writes, (
+            f"{where} is declared read-only, but {module} now calls write "
+            f"primitives: {writes}. If any of them can reach "
+            f"{declared.container_default}, a task replacement destroys state."
+        )
+        controls.append("read_only_input")
+
+    if declared.dark_unless:
+        flag = declared.dark_unless
+        armed = []
+        dockerfile = (ROOT / "deploy" / "Dockerfile.app").read_text(encoding="utf-8")
+        if f"{flag}=1" in dockerfile:
+            armed.append("deploy/Dockerfile.app")
+        for service, spec in _compose().items():
+            if str((spec.get("environment") or {}).get(flag, "")).strip() == "1":
+                armed.append(f"docker-compose.yml:{service}")
+        assert not armed, (
+            f"{where} is only unreachable because {flag} is not armed, and "
+            f"{armed} now arms it. The surface that reads "
+            f"{declared.container_default} is live, and that path dies with the "
+            f"task. Move it to a declared durable mount before enabling "
+            f"{flag}.\n\n{declared.why}"
+        )
+        controls.append("dark_unless")
+
+    assert controls, (
+        f"{where} resolves to {declared.container_default}, which a deploy "
+        "destroys, and declares no control at all."
     )
 
 
@@ -629,7 +994,16 @@ _WRITE_ATTRIBUTES = frozenset(
 
 
 def _writes_anything(rel: str) -> list[str]:
-    """Write primitives called anywhere in a module. Empty means read-only."""
+    """Write primitives called ANYWHERE in a module. Empty means read-only.
+
+    Module-wide on purpose, and yes that over-triggers: a write added elsewhere
+    in the module turns the gate red even when it cannot reach the declared
+    path. That is the safe direction. Proving a write cannot reach a path needs
+    dataflow analysis this gate does not attempt, so the alternative to a false
+    red is a false green on the one question that matters. A false red costs a
+    human re-reading one module and either moving the write or replacing the
+    read_only_input claim with a real control.
+    """
     tree = _scanned_modules()[rel]
     hits: list[str] = []
     for node in ast.walk(tree):
@@ -672,7 +1046,9 @@ def test_every_task_local_state_path_names_a_control_a_deploy_cannot_bypass(var:
         "and declares no control: it is in no deployment manifest, behind no "
         "selector, and not read-only. A deploy would take it out silently. "
         "Require the name, gate it behind a manifest-required selector, or "
-        "prove nothing writes it."
+        "prove nothing writes it. Requiring the name makes the loss VISIBLE, "
+        "not impossible -- somebody still has to set a durable value in the "
+        "task definition, which lives outside this repo."
     )
 
     if state.read_only:
@@ -686,21 +1062,59 @@ def test_every_task_local_state_path_names_a_control_a_deploy_cannot_bypass(var:
         )
 
 
-def _selector_reachable(rel: str, selector: str) -> bool:
-    """True if the module names the selector, directly or via an import."""
-    source = (ROOT / rel).read_text(encoding="utf-8")
-    if selector in source:
-        return True
-    tree = _scanned_modules()[rel]
-    imported: set[str] = set()
+def _names_selector(tree: ast.Module, selector: str) -> bool:
+    """True only if a string literal EQUALS the selector.
+
+    Equality, not substring, and the AST, not the file text. A comment or a
+    docstring that discusses the selector in prose is not a module consulting
+    it, and both this package's docstrings do exactly that -- checkpoints.py
+    and session_policy.py describe LEAF_SESSION_ANNEX_STORE at length while
+    actually reaching it through ``import session_annex``. Matching on prose
+    would let the import branch below rot unnoticed.
+    """
+    return any(
+        isinstance(node, ast.Constant) and node.value == selector
+        for node in ast.walk(tree)
+    )
+
+
+def _imported_server_modules(tree: ast.Module) -> set[str]:
+    """Sibling module basenames this module imports, in any ordinary shape.
+
+    Handles ``import x``, ``import server.x``, ``from x import y``,
+    ``from server.x import y`` and the relative ``from .x import y``. Only the
+    last dotted component that names a real file is used, because that is the
+    module whose source could define the selector.
+    """
+    names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            imported.add(node.module.split(".")[0])
-    for name in imported:
-        sibling = SERVER / f"{name}.py"
-        if sibling.exists() and selector in sibling.read_text(encoding="utf-8"):
+            for alias in node.names:
+                names.update(alias.name.split("."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.update(node.module.split("."))
+            if node.level:
+                # `from . import session_annex` puts the module in names.
+                names.update(alias.name for alias in node.names)
+    return {name for name in names if (SERVER / f"{name}.py").exists()}
+
+
+def _selector_reachable(rel: str, selector: str) -> bool:
+    """True if the module consults the selector, directly or via an import.
+
+    A NECESSARY condition, not a sufficient one: it shows the selector is in
+    reach of the code that resolves the path, not that the selector governs
+    every access. Proving governance would need dataflow analysis this gate
+    does not attempt, and the weaker claim is still what catches the real
+    regression -- a new resolver wired up with no selector at all.
+    """
+    tree = _scanned_modules()[rel]
+    if _names_selector(tree, selector):
+        return True
+    for name in _imported_server_modules(tree):
+        sibling = _scanned_modules().get(f"server/{name}.py")
+        if sibling is not None and _names_selector(sibling, selector):
             return True
     return False
 
