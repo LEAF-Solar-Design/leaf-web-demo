@@ -308,13 +308,29 @@ def test_app_manifest_requires_an_explicit_session_annex_authority():
     ``SESSIONS_DB`` is unset. So an omitted selector silently picks an ephemeral
     authority, which is the criterion the test above states.
 
-    **This does not create a new safety property, and should not be sold as one.**
-    ``platform_link.validate_session_annex_authority`` already refuses to start a
-    task whose sessions authority is ``postgres`` while its annex is anything
-    else, and staging arms that unconditionally through
-    ``LEAF_PLATFORM_POSTGRES_REQUIRED=1``. What this entry buys is WHEN the
-    refusal happens: a deploy-time manifest failure instead of a task that
-    registers, starts, crashes, and drags a rollout through rollback.
+    On the ORDINARY path this adds no new safety property, only an earlier
+    failure. ``platform_link.validate_session_annex_authority`` already refuses to
+    start a task whose sessions authority is ``postgres`` while its annex is
+    anything else, and staging arms that unconditionally through
+    ``LEAF_PLATFORM_POSTGRES_REQUIRED=1``. The manifest entry converts that
+    task-start crash into a deploy-time refusal, before a rollout churns.
+
+    On ONE path it is the only guard there is, and that is the reason to keep it.
+    A build deploy may pass an explicit ``configuration_task_definition`` naming
+    any ACTIVE revision, and the manifest check diffs the source manifest against
+    THAT baseline. Selecting a revision from before the cutover therefore now
+    fails here. It should: read from live on 2026-08-13, no revision anywhere
+    carries ``LEAF_SESSIONS_STORE=postgres`` without the annex selector -- they
+    arrived together in the P4A typed cutover, with ``:580`` still
+    ``dual_write_shadow`` and no annex, and ``:590`` onward both ``postgres``. So
+    a baseline missing the annex selector is a PRE-CUTOVER baseline carrying
+    ``dual_write_shadow``, and deploying current source onto it silently
+    reinstates the ephemeral-sessions defect. The startup gate cannot catch that
+    one, because it only fires when the sessions authority is ``postgres``, and
+    that baseline's is not. This entry is what refuses it.
+
+    So the refusal is the feature. If a future reader hits it, the fix is to
+    select a post-cutover baseline, never to drop this entry.
 
     Why it was absent until now, so the gap does not read as an oversight: the
     terraform workflow's "Verify configuration baseline satisfies source manifest"
