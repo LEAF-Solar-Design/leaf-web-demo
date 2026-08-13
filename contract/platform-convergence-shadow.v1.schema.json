@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-convergence-shadow.v1.schema.json",
+  "title": "Leaf platform convergence shadow evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "checkpoint", "selectors", "active_writers", "markers", "services"],
+  "properties": {
+    "schema": {"const": "leaf.platform-convergence-shadow.v1"},
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "source_tree", "supply_sha256", "deployment_identity_sha256", "checkpoint_sha256", "observed_at"],
+      "properties": {
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "source_tree": {"$ref": "#/$defs/sha"},
+        "supply_sha256": {"$ref": "#/$defs/digest"},
+        "deployment_identity_sha256": {"$ref": "#/$defs/digest"},
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "selectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest_aware_reconcile", "marker_ledger_mode"],
+      "properties": {
+        "digest_aware_reconcile": {"const": false},
+        "marker_ledger_mode": {"const": "disabled"}
+      }
+    },
+    "active_writers": {"type": "integer", "minimum": 0},
+    "markers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full_scan", "indexed"],
+      "properties": {
+        "full_scan": {"$ref": "#/$defs/fullScan"},
+        "indexed": {"$ref": "#/$defs/indexed"}
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "app", "broker", "harness", "canonical-worker"],
+      "properties": {
+        "web": {"$ref": "#/$defs/service"},
+        "app": {"$ref": "#/$defs/service"},
+        "broker": {"$ref": "#/$defs/service"},
+        "harness": {"$ref": "#/$defs/service"},
+        "canonical-worker": {"$ref": "#/$defs/service"}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "markerResult": {"enum": ["EMPTY", "OPEN"]},
+    "fullScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "workflow_blob", "checkpoint_sha256", "result", "open_count", "open_set_sha256", "duration_seconds"],
+      "properties": {
+        "schema": {"const": "leaf.legacy-marker-census.v1"},
+        "workflow_blob": {"$ref": "#/$defs/sha"},
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "result": {"$ref": "#/$defs/markerResult"},
+        "open_count": {"type": "integer", "minimum": 0},
+        "open_set_sha256": {"$ref": "#/$defs/hash"},
+        "duration_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "indexed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkpoint_sha256", "receipt"],
+      "properties": {
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "result", "strong_consistent", "open_count", "open_set_sha256"],
+          "properties": {
+            "schema": {"const": "leaf.staging-marker-ledger-census.v1"},
+            "result": {"$ref": "#/$defs/markerResult"},
+            "strong_consistent": {"const": true},
+            "open_count": {"type": "integer", "minimum": 0},
+            "open_set_sha256": {"$ref": "#/$defs/hash"}
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_digest", "live_digest", "expected_component_source_sha256", "live_component_source_sha256", "expected_runtime_contract_sha256", "live_runtime_contract_sha256", "expected_migration_fingerprint", "live_migration_fingerprint", "route_stable", "health_stable"],
+      "properties": {
+        "candidate_digest": {"$ref": "#/$defs/digest"},
+        "live_digest": {"$ref": "#/$defs/digest"},
+        "expected_component_source_sha256": {"$ref": "#/$defs/digest"},
+        "live_component_source_sha256": {"$ref": "#/$defs/digest"},
+        "expected_runtime_contract_sha256": {"$ref": "#/$defs/digest"},
+        "live_runtime_contract_sha256": {"$ref": "#/$defs/digest"},
+        "expected_migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "live_migration_fingerprint": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "route_stable": {"type": "boolean"},
+        "health_stable": {"type": "boolean"}
+      }
+    }
+  }
+}
