@@ -253,6 +253,15 @@ def test_inventory_records_the_measured_staging_selection():
     )
     staging = entry["current_selection"]["staging"]
     assert staging["status"] in {"measured", "verified"}
+    if staging["status"] == "verified":
+        # Admitting the upgrade is not the same as admitting the CLAIM. The
+        # vocabulary defines verified as "measured AND reconciled", and this
+        # authority's reconciliation is the backfill and parity commands, so a
+        # record may only call itself verified once both report complete. Without
+        # this, widening the status set would have quietly retired a guard the
+        # old literal `== "measured"` gave for free.
+        assert entry["backfill"]["status"] == "complete"
+        assert entry["parity"]["status"] == "complete"
     selector = next(
         item for item in entry["selectors"]
         if item["name"] == "LEAF_SESSIONS_STORE"
