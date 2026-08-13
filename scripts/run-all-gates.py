@@ -292,6 +292,48 @@ def build_suites() -> List[Suite]:
         # (`server-customization-adversarial`'s own 17-vs-19 note is now stale
         # in its numbers -- Windows measured 21 executed, 2 skipped, on
         # 2026-08-13 -- but not in its conclusion, so its floor still stands.)
+        #
+        # Third re-baseline, 2026-08-13 (same day, NON-server suites): the pass
+        # above scoped itself to server-* and swept nothing else, so every
+        # platform-*, scripts-*, da-*, harness-*, web-*, executor and
+        # gate-runner-selftest floor was left unexamined -- and #584's own
+        # gate-shard-5 log was already reporting drift on one of them. All 35
+        # non-server suites were checked: 18 carry no floor at all (script /
+        # tsc kinds), 12 sat exactly AT their CI count, and 5 were raised.
+        #   da-mutation-apply 22 -> 24     production-web-release 9 -> 10
+        #   build-platform-images-workflow 4 -> 9
+        #   platform-release-manifest 21 -> 56   web-vitest 74 -> 79
+        # Method, cheapest first: `--collect-only` on every non-server pytest
+        # suite (collected >= executed, so a suite collecting at or under its
+        # floor cannot be above it) pruned 12; then the survivors were measured
+        # through this runner at --retry 0 AND cross-read against the CI
+        # runner's own executed counts in run 31697856838, which is the binding
+        # environment and the reason a local number alone is not enough.
+        # FIVE non-server suites execute above their floors and were LEFT
+        # ALONE, for the same reason the eight server ones above were: the
+        # floor is a CI MINIMUM and each of these can execute fewer somewhere.
+        #   executor        136, CI executes 166 with 2 skipped -- five
+        #     allowed_skip_reasons, backed by real unittest.skipIf /
+        #     skipUnless on os.name and on POSTGRES_CONTROL_PLANE_TEST_URL
+        #     (executor/tests/test_bootstrap.py, executor/runtime/tests/
+        #     test_runtime.py). Also MIRRORED BY VALUE at 136 in
+        #     scripts/test_gate_runner.py, so it could not move alone.
+        #   platform-static 122, CI executes 150 with 2 skipped -- the
+        #     DATABASE_URL-gated pytest.skip in test_db_primitives_static.py
+        #     and platform/tests/conftest.py. Re-baselining it honestly needs a
+        #     live Postgres. Also MIRRORED BY VALUE at 122 in
+        #     scripts/test_gate_runner.py.
+        #   harness-vitest  317, CI executes 716 with 10 skipped -- describe.skip
+        #     gated on DATABASE_URL / a Postgres test URL in
+        #     harnessSchema.pg.test.ts, pgSessionStore.contract.test.ts and
+        #     tenantRepoLease.test.ts, plus ctx.skip() on directory-symlink
+        #     capability in fsTenantRepo.test.ts.
+        #   da-mutation-apply-accoreconsole 1, CI executes 2 with 1 skipped --
+        #     declares the AutoCAD-console skip reason at its Suite(...) below.
+        #   platform         247, db_gated. Unchanged for the reason already
+        #     recorded at its Suite(...): re-baselining needs a live Postgres
+        #     and the test-gate workflow is hermetic. Without a DB this tree
+        #     collects only 150 there, so no honest number is measurable here.
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
@@ -849,8 +891,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_client_credentials.py"), 6),
         Suite("da-extract-dxf-activity", "da test_extract_dxf_activity.py", "pytest", DA,
               _py_pytest("test_extract_dxf_activity.py"), 5),
+        # 22 -> 24 on 2026-08-13 (non-server sweep): 24 collected, 24 executed,
+        # 0 skipped both locally and on the CI runner (run 31697856838,
+        # gate-shard-7). No conditional-skip construct in the file and no
+        # conftest.py on da/'s collection path, so 24 is the floor everywhere.
         Suite("da-mutation-apply", "da test_mutation_apply.py", "pytest", DA,
-              _py_pytest("test_mutation_apply.py"), 22),
+              _py_pytest("test_mutation_apply.py"), 24),
         # Windows operator hosts run the non-billable AutoCAD engine canary.
         # Linux CI must still collect the suite and may skip only when the named
         # local AutoCAD runtime or tracked demo DWG is unavailable.
@@ -1050,19 +1096,37 @@ def build_suites() -> List[Suite]:
               # executes the extracted manifest script against a fake gh and
               # asserts the tag a docs-only merge resolves, then feeds it to the
               # real dispatch script and asserts BOTH services deploy onto it.
-              _py_pytest("test_build_platform_images_workflow.py"), 4),
+              # 4 -> 9 on 2026-08-13 (non-server sweep): 9 collected, 9
+              # executed, 0 skipped on the CI runner (run 31697856838,
+              # gate-shard-6). No conditional-skip construct in the file. The
+              # local Windows run FAILS one assertion for an unrelated reason --
+              # core.autocrlf=true checks the workflow out CRLF and the byte
+              # exact LF pin rejects it -- so the green local measurement was
+              # taken with the file rewritten to its LF blob form: 9 executed,
+              # 0 skipped, all passing, matching CI exactly.
+              _py_pytest("test_build_platform_images_workflow.py"), 9),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
         # prove-the-checker-can-fail case.
         Suite("vendor-pin-verify", "scripts test_vendor_pin.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
+        # 21 -> 56 on 2026-08-13 (non-server sweep). This is the drift that
+        # started the sweep: PR #584 re-baselined only the server-* floors and
+        # its own gate-shard-5 log reported "(executed-count drift: expected
+        # 21)" against 56 executed. 56 collected, 56 executed, 0 skipped both
+        # locally and on the CI runner (run 31697856838); no conditional-skip
+        # construct in the file and no conftest.py on scripts/'s collection
+        # path, so 56 is the floor everywhere.
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),
+              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 56),
+        # 9 -> 10 on 2026-08-13 (non-server sweep): 10 collected, 10 executed,
+        # 0 skipped both locally and on the CI runner (run 31697856838,
+        # gate-shard-2). No conditional-skip construct in the file.
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
+              SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 10),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 57: the 29 measured 2026-07-28, plus the 18 sharding tests
         # (partition determinism, catalog fingerprint incl. toolchain-path
@@ -1133,8 +1197,16 @@ def build_suites() -> List[Suite]:
         # that pinned the removed machinery (exactly-one-row across three
         # flush/pagehide orderings, dedup_key sharing, same-signature
         # suppression) are gone with it. Measured on this tree 2026-08-08.
+        # 74 -> 79 on 2026-08-13 (non-server sweep): 79 executed, 0 skipped
+        # both locally and on the CI runner (run 31697856838, gate-shard-1).
+        # web/vitest.config.js includes ONLY src/**/*.test.{js,jsx} and
+        # excludes e2e/, and no file under web/src carries describe.skip /
+        # it.skip / .todo / .runIf / ctx.skip, so nothing here is
+        # environment-conditional. (The .skip calls that DO exist in this
+        # workspace are all in web/e2e/, which is Playwright's and which this
+        # suite never collects.) Contrast harness-vitest below, left alone.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 74),
+              [_npm(), "run", "test:unit"], 79),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
