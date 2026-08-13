@@ -236,9 +236,15 @@ def test_inventory_records_the_measured_staging_selection():
     own selector declares, and its evidence cites BOTH layers -- a task
     definition revision and an image digest -- because a task definition alone
     cannot establish a selection when an image ENV survives an absent override.
-    That last half is a strengthening: the old record cited only a revision.
-    None of it decays on the next remeasurement, and blanking the record, or
-    recording a mode the selector does not allow, still reds.
+    That last half is a strengthening: the old record cited only a revision, so
+    a revert to the pre-branch evidence now reds where it used to pass.
+
+    None of it decays on remeasurement. The status assertion admits ``verified``
+    as well, because the vocabulary defines that as "measured AND reconciled",
+    so pinning ``measured`` alone would red the one upgrade this record can
+    legitimately receive -- which is the same snapshot trap, one field over.
+    Blanking the evidence, dropping either layer's citation, downgrading the
+    status, or recording a mode the selector does not allow all still red.
     """
     inventory = json.loads(INVENTORY)
     entry = next(
@@ -246,7 +252,7 @@ def test_inventory_records_the_measured_staging_selection():
         if item["id"] == "app_sessions_and_approvals"
     )
     staging = entry["current_selection"]["staging"]
-    assert staging["status"] == "measured"
+    assert staging["status"] in {"measured", "verified"}
     selector = next(
         item for item in entry["selectors"]
         if item["name"] == "LEAF_SESSIONS_STORE"
