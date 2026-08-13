@@ -16,6 +16,7 @@ from typing import Any
 
 from .supervisor import CapacitySampler, ExecutorError, WarmExecutorSupervisor
 from .accounting import StructuredAccountingEmitter
+from .environment import EnvironmentLabelError, require_environment_label
 from executor.registry import ImmutableArtifactRegistry
 from .registration import HostRegistrar, HostRegistrationConfig, resolve_executor_id
 
@@ -279,6 +280,19 @@ def main() -> None:
     is_loopback = _is_loopback_host(args.host)
     if not is_loopback and not control_secret:
         raise SystemExit("LEAF_INSTANT_RUNTIME_CONTROL_SECRET is required for a non-loopback listener")
+    # Every Leaf/InstantExecution metric this process feeds is dimensioned on
+    # the environment label, and a record without it publishes no datapoint at
+    # all.  So an unset LEAF_INSTANT_ENV does not degrade monitoring, it
+    # removes it -- while the alarms stay green because absence is exactly what
+    # they were configured to tolerate.  Refuse to boot instead, alongside the
+    # other non-loopback preconditions: a container that will not start is the
+    # only version of this failure an operator actually sees.  A loopback
+    # development run is unaffected and emits the sentinel label.
+    if not is_loopback:
+        try:
+            require_environment_label()
+        except EnvironmentLabelError as exc:
+            raise SystemExit(str(exc)) from exc
     try:
         tls_config = RuntimeTlsConfig.from_environment()
     except ValueError as exc:

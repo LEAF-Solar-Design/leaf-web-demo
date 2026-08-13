@@ -8,9 +8,11 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import patch
 
 from executor.runtime import child
+from executor.runtime.environment import ENVIRONMENT_VARIABLE, UNSET_ENVIRONMENT_LABEL
 from executor.registry import ArtifactReference, ImmutableArtifactRegistry, SignedArtifact
 from executor.registry.artifacts import ImmutableArtifactRegistry as RegistryImplementation
 from executor.runtime.ed25519 import sign
@@ -530,6 +532,13 @@ class CapacityGaugeTests(unittest.TestCase):
     def test_sample_carries_exactly_the_fields_the_metric_filter_selects(self) -> None:
         self.supervisor.sample_capacity()
         [record] = self.samples()
+        # `env` is deliberately absent HERE. It is stamped by
+        # `emit_runtime_event`, the single writer of the envelope, rather than
+        # at this construction site, so that a record type added later cannot
+        # omit it. This sink is an injected test double standing in for that
+        # writer, so it sees the record before the stamp; the LINE is the
+        # contract with the terraform root and is pinned in
+        # test_sample_reaches_fd_two_in_the_runtime_envelope below.
         self.assertEqual(
             {"event_type", "executor_id", "state", "ready_slots",
              "bound_slots", "total_slots", "observed_at"},
@@ -540,29 +549,64 @@ class CapacityGaugeTests(unittest.TestCase):
         for field in ("ready_slots", "bound_slots", "total_slots"):
             self.assertIsInstance(record[field], int)
 
-    def test_sample_reaches_fd_two_in_the_runtime_envelope(self) -> None:
-        # The in-memory sink proves the record; only the real emitter proves
-        # the LINE, and the line is what CloudWatch Logs actually matches.
-        self.supervisor.sample_capacity()
-        [record] = self.samples()
+    def _emitted_line(self, record: dict, environment: str | None = "staging") -> dict:
+        """Push one record through the REAL emitter on fd 2 and parse the line."""
+        patched = {} if environment is None else {ENVIRONMENT_VARIABLE: environment}
         read_fd, write_fd = os.pipe()
         saved = os.dup(2)
         try:
             os.dup2(write_fd, 2)
-            emit_runtime_event(record)
+            with mock.patch.dict(os.environ, patched, clear=True):
+                emit_runtime_event(record)
         finally:
             os.dup2(saved, 2)
             os.close(saved)
             os.close(write_fd)
         with os.fdopen(read_fd, "rb") as stream:
             raw = stream.read()
-
         self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 4096)
-        line = json.loads(raw)
+        return json.loads(raw)
+
+    def test_sample_reaches_fd_two_in_the_runtime_envelope(self) -> None:
+        # The in-memory sink proves the record; only the real emitter proves
+        # the LINE, and the line is what CloudWatch Logs actually matches.
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        line = self._emitted_line(record)
         self.assertEqual("leaf.instant.runtime", line["event"])
         self.assertEqual("capacity_sample", line["record"]["event_type"])
         self.assertEqual(record["ready_slots"], line["record"]["ready_slots"])
+
+    def test_the_emitted_line_carries_the_env_the_filters_dimension_on(self) -> None:
+        """`dimensions = { env = "$.record.env" }` on the CapacityAvailableSlots
+        and RebindFailures filters selects THIS field. A line without it
+        publishes no datapoint at all, so both alarms would read nothing while
+        staying green -- the exact defect this namespace exists to remove.
+        """
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        self.assertEqual("staging", self._emitted_line(record)["record"]["env"])
+
+    def test_the_emitter_stamps_env_on_a_record_that_never_set_it(self) -> None:
+        """The stamp is at the WRITER, so a record type nobody has written yet
+        carries the dimension without its author doing anything.
+        """
+        line = self._emitted_line({"event_type": "some_future_record"})
+        self.assertEqual("staging", line["record"]["env"])
+
+    def test_a_caller_cannot_mislabel_which_deployment_emitted_the_line(self) -> None:
+        line = self._emitted_line({"event_type": "capacity_sample", "env": "production"})
+        self.assertEqual("staging", line["record"]["env"])
+
+    def test_an_unset_variable_still_emits_the_field(self) -> None:
+        """Never an omitted key: absence drops the datapoint, the sentinel does
+        not. The loud half is the entrypoint refusing to boot (test_service).
+        """
+        self.supervisor.sample_capacity()
+        [record] = self.samples()
+        line = self._emitted_line(record, environment=None)
+        self.assertEqual(UNSET_ENVIRONMENT_LABEL, line["record"]["env"])
 
     def test_sample_carries_no_tenant_or_lease_material(self) -> None:
         docs = documents(COUNTER_SOURCE)
