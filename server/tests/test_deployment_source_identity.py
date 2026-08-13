@@ -282,18 +282,56 @@ def test_app_manifest_requires_an_explicit_session_authority():
     ``scripts/reconcile_sessions_authority.py`` copies SQLite to PostgreSQL only.
 
     That is an argument against requiring the path HERE, not against the path.
-    ``SESSIONS_DB`` keeps real readers under every mode -- ``checkpoints.py`` and
-    ``session_policy.py`` resolve it independently of the selector -- so making it
-    durable stays a legitimate change, and no test forbids it. The rule that
-    would actually be worth enforcing (require the path whenever the mode touches
-    the legacy store) is conditional, which this flat manifest cannot express, so
-    it belongs in the app's startup validation.
+    ``SESSIONS_DB`` keeps real readers -- ``checkpoints.py`` and
+    ``session_policy.py`` still resolve it for their SQLite modes -- so making it
+    durable stays a legitimate change, and no test forbids it. Those two are no
+    longer selector-free, though: they answer to ``LEAF_SESSION_ANNEX_STORE``,
+    which the next test requires. The rule that would actually be worth enforcing
+    (require the path whenever a mode touches the legacy store) is conditional,
+    which this flat manifest cannot express, so it belongs in the app's startup
+    validation.
     """
     manifest = json.loads(
         (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
     )
 
     assert "LEAF_SESSIONS_STORE" in set(manifest["required"]["environment"])
+
+
+def test_app_manifest_requires_an_explicit_session_annex_authority():
+    """The annex selector has the same defect shape, and the same fix.
+
+    ``session_annex.store_mode`` defaults to ``legacy`` exactly as
+    ``session_store._store_mode`` does, and under every annex mode but
+    ``postgres`` the ``session_checkpoints`` and ``session_policies`` tables live
+    in the SQLite file at ``SESSIONS_DB`` -- task-local on staging, where
+    ``SESSIONS_DB`` is unset. So an omitted selector silently picks an ephemeral
+    authority, which is the criterion the test above states.
+
+    **This does not create a new safety property, and should not be sold as one.**
+    ``platform_link.validate_session_annex_authority`` already refuses to start a
+    task whose sessions authority is ``postgres`` while its annex is anything
+    else, and staging arms that unconditionally through
+    ``LEAF_PLATFORM_POSTGRES_REQUIRED=1``. What this entry buys is WHEN the
+    refusal happens: a deploy-time manifest failure instead of a task that
+    registers, starts, crashes, and drags a rollout through rollback.
+
+    Why it was absent until now, so the gap does not read as an oversight: the
+    terraform workflow's "Verify configuration baseline satisfies source manifest"
+    step diffs this manifest against a baseline cloned from the PREVIOUSLY LIVE
+    task definition, which by construction cannot carry a brand-new variable.
+    Requiring it before it existed on the live baseline would have failed every
+    build deploy. leaf-automation-aws-terraform PR #534 opened the delta rail
+    that could deliver it; both staging colors now carry
+    ``LEAF_SESSION_ANNEX_STORE=postgres`` (``leaf-platform-app:600`` and
+    ``leaf-platform-app-alt:81``, read 2026-08-13), so the entry is now
+    non-breaking on either family.
+    """
+    manifest = json.loads(
+        (ROOT / "deploy" / "required-config.app.json").read_text(encoding="utf-8")
+    )
+
+    assert "LEAF_SESSION_ANNEX_STORE" in set(manifest["required"]["environment"])
 
 
 def test_web_image_writes_source_identity_health_file():
