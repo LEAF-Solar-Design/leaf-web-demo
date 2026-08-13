@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -33,9 +34,15 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _constant(_: str) -> None:
+    raise ContractError("nonstandard_json_constant")
+
+
 def load_json(stream: TextIO) -> dict[str, Any]:
     try:
-        value = json.load(stream, object_pairs_hook=_object)
+        value = json.load(
+            stream, object_pairs_hook=_object, parse_constant=_constant
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise ContractError("shadow_json_invalid") from exc
     if not isinstance(value, dict):
@@ -128,7 +135,12 @@ def _full_scan(value: Any) -> dict[str, Any]:
         "full_scan_invalid",
     )
     duration = result["duration_seconds"]
-    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
         raise ContractError("full_scan_invalid")
     if result["schema"] != "leaf.legacy-marker-census.v1":
         raise ContractError("full_scan_invalid")
