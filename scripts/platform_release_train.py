@@ -150,7 +150,7 @@ def _validate_identity(value: Any) -> dict[str, Any] | None:
         return None
     identity = _exact_object(
         value,
-        {"schema", "environment", "source_revision", "services", "body_sha256"},
+        {"schema", "environment", "source_revision", "services"},
         "deployment_identity_invalid",
     )
     if (
@@ -185,14 +185,7 @@ def _validate_identity(value: Any) -> dict[str, Any] | None:
         "source_revision": source_revision,
         "services": services,
     }
-    expected_body_sha256 = "sha256:" + hashlib.sha256(
-        json.dumps(
-            body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        ).encode("ascii")
-    ).hexdigest()
-    if identity["body_sha256"] != expected_body_sha256:
-        raise ContractError("deployment_identity_invalid")
-    return {**body, "body_sha256": expected_body_sha256}
+    return body
 
 
 def _validate_fresh_state(value: Any) -> dict[str, Any]:
@@ -205,6 +198,7 @@ def _validate_fresh_state(value: Any) -> dict[str, Any]:
             "snapshot_overflow_acknowledgement",
             "drawing_fence",
             "identity",
+            "identity_body_sha256",
         },
         "fresh_state_invalid",
     )
@@ -219,6 +213,24 @@ def _validate_fresh_state(value: Any) -> dict[str, Any]:
             raise ContractError("snapshot_authority_invalid")
     if state["drawing_fence"] not in {"open", "closed"}:
         raise ContractError("drawing_fence_invalid")
+    identity = _validate_identity(state["identity"])
+    identity_body_sha256 = state["identity_body_sha256"]
+    if identity is None:
+        if identity_body_sha256 is not None:
+            raise ContractError("deployment_identity_envelope_invalid")
+    else:
+        identity_body_sha256 = _pattern(
+            identity_body_sha256,
+            _DIGEST,
+            "deployment_identity_envelope_invalid",
+        )
+        expected_body_sha256 = "sha256:" + hashlib.sha256(
+            json.dumps(
+                identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+        ).hexdigest()
+        if identity_body_sha256 != expected_body_sha256:
+            raise ContractError("deployment_identity_envelope_invalid")
     return {
         "active_writers": _integer(state["active_writers"], "fresh_state_invalid"),
         "open_markers": _integer(state["open_markers"], "fresh_state_invalid"),
@@ -227,7 +239,8 @@ def _validate_fresh_state(value: Any) -> dict[str, Any]:
         ),
         "snapshot_overflow_acknowledgement": acknowledgement,
         "drawing_fence": state["drawing_fence"],
-        "identity": _validate_identity(state["identity"]),
+        "identity": identity,
+        "identity_body_sha256": identity_body_sha256,
     }
 
 
