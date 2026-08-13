@@ -272,22 +272,87 @@ jobs:
           # "keep looking". Leaves the run's artifact listing in artifacts.json
           # either way, which the no-op marker check reads.
           fetch_supply_set() {
-            local run_id=$1 name=$2 artifact_id
+            local run_id=$1 name=$2 artifact_count artifact_id artifact_digest producer_source
             SUPPLY_ARTIFACT_ID=""
             SUPPLY_ARTIFACT_NAME=""
+            SUPPLY_ARTIFACT_PROVIDER_SHA256=""
+            SUPPLY_PRODUCER_RUN_ID=""
+            SUPPLY_PRODUCER_RUN_ATTEMPT=""
+            SUPPLY_PRODUCER_EVENT=""
+            SUPPLY_PRODUCER_SOURCE_REVISION=""
+            SUPPLY_PRODUCER_SOURCE_TREE=""
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
               > artifacts.json
-            artifact_id=$(jq -r --arg name "$name" '
-              first(.artifacts[] | select(.name == $name)).id // empty
+            artifact_count=$(jq -er --arg name "$name" '
+              [.artifacts[] | select(.name == $name)] | length
             ' artifacts.json)
-            [ -n "$artifact_id" ] || return 1
+            [ "$artifact_count" -gt 0 ] || return 1
+            [ "$artifact_count" -eq 1 ] || {
+              echo "::error::Run $run_id published $artifact_count artifacts named $name; exactly one is required."
+              exit 1
+            }
+            jq -e --arg name "$name" --argjson run "$run_id" '
+              first(.artifacts[] | select(.name == $name))
+              | .expired == false
+                and (.workflow_run.id == $run)
+                and (.workflow_run.head_sha | test("^[0-9a-f]{40}$"))
+                and (.digest | test("^sha256:[0-9a-f]{64}$"))
+            ' artifacts.json >/dev/null || {
+              echo "::error::Supply-set artifact $name is expired or is not bound to run $run_id with a full source and provider digest."
+              exit 1
+            }
+            artifact_id=$(jq -er --arg name "$name" '
+              first(.artifacts[] | select(.name == $name)).id
+            ' artifacts.json)
+            artifact_digest=$(jq -er --arg name "$name" '
+              first(.artifacts[] | select(.name == $name)).digest
+            ' artifacts.json)
             [[ "$artifact_id" =~ ^[0-9]+$ ]] || {
               echo "::error::Supply-set artifact ID '$artifact_id' is not numeric."
+              exit 1
+            }
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > supply-producer-run.json
+            jq -e \
+              --arg repo "$GITHUB_REPOSITORY" \
+              --arg path ".github/workflows/build-platform-images.yml" \
+              --arg name "$name" '
+              .repository.full_name == $repo
+              and .head_repository.full_name == $repo
+              and .path == $path
+              and .event == "push"
+              and .head_branch == "main"
+              and .status == "completed"
+              and .conclusion == "success"
+              and (.id | type == "number" and . > 0)
+              and (.run_attempt | type == "number" and . > 0)
+              and (.head_sha | test("^[0-9a-f]{40}$"))
+              and ($name == ("staging-supply-set-" + .head_sha
+                + "-attempt-" + (.run_attempt | tostring)))
+            ' supply-producer-run.json >/dev/null || {
+              echo "::error::Supply-set artifact $name is not bound to a successful canonical main build run."
+              exit 1
+            }
+            producer_source=$(jq -er '.head_sha' supply-producer-run.json)
+            gh api "repos/$GITHUB_REPOSITORY/git/commits/$producer_source" \
+              > supply-producer-commit.json
+            jq -e --arg source "$producer_source" '
+              .sha == $source
+              and (.tree.sha | test("^[0-9a-f]{40}$"))
+            ' supply-producer-commit.json >/dev/null || {
+              echo "::error::Provider commit evidence for supply source $producer_source has no exact tree."
               exit 1
             }
             rm -f staging-supply-set.json
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
               > supply-set.zip
+            [ "$(sha256sum supply-set.zip | awk '{print $1}')" = "${artifact_digest#sha256:}" ] || {
+              echo "::error::Downloaded archive for artifact $artifact_id does not match its provider digest."
+              exit 1
+            }
+            [ "$(unzip -Z1 supply-set.zip)" = "staging-supply-set.json" ] || {
+              echo "::error::Artifact $name must contain only staging-supply-set.json."
+              exit 1
+            }
             unzip -o supply-set.zip
             [ -f staging-supply-set.json ] || {
               echo "::error::Artifact $name carried no staging-supply-set.json."
@@ -295,6 +360,12 @@ jobs:
             }
             SUPPLY_ARTIFACT_ID="$artifact_id"
             SUPPLY_ARTIFACT_NAME="$name"
+            SUPPLY_ARTIFACT_PROVIDER_SHA256="${artifact_digest#sha256:}"
+            SUPPLY_PRODUCER_RUN_ID=$(jq -er '.id' supply-producer-run.json)
+            SUPPLY_PRODUCER_RUN_ATTEMPT=$(jq -er '.run_attempt' supply-producer-run.json)
+            SUPPLY_PRODUCER_EVENT=$(jq -er '.event' supply-producer-run.json)
+            SUPPLY_PRODUCER_SOURCE_REVISION="$producer_source"
+            SUPPLY_PRODUCER_SOURCE_TREE=$(jq -er '.tree.sha' supply-producer-commit.json)
           }
 
           # Validate the downloaded supply set and print its build_tag. BOTH the
@@ -333,6 +404,7 @@ jobs:
                     (.image_digest | test("^sha256:[0-9a-f]{64}$"))
                     and (.immutable_lookup_tag | test("^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}|surface-v1-[0-9a-f]{64})$"))
                     and (.surface_fingerprint | test("^[0-9a-f]{64}$"))
+                    and (.immutable_lookup_tag == ("surface-v1-" + .surface_fingerprint))
                     and (.recipe_fingerprint | test("^[0-9a-f]{64}$")))
                 ' staging-supply-set.json >/dev/null
                 printf 'v3-%s' "$(jq -er '.release_source_revision[0:12]' staging-supply-set.json)"
@@ -351,6 +423,326 @@ jobs:
             printf '%s' "$tag"
           }
 
+          # Emit one closed producer-owned evidence envelope for v2/v3. The
+          # legacy v1 relay stays byte-for-byte compatible and carries no new
+          # authority. The consumer must reject a missing envelope on v2/v3.
+          write_manifest_outputs() {
+            local evidence="" schema
+            schema=$(jq -er '.schema' staging-supply-set.json)
+            case "$schema" in
+              leaf.staging-supply-set.v1) ;;
+              leaf.staging-supply-set.v2|leaf.staging-supply-set.v3)
+                export SUPPLY_ARTIFACT_ID SUPPLY_ARTIFACT_NAME
+                export SUPPLY_ARTIFACT_PROVIDER_SHA256
+                export SUPPLY_PRODUCER_RUN_ID SUPPLY_PRODUCER_RUN_ATTEMPT
+                export SUPPLY_PRODUCER_EVENT SUPPLY_PRODUCER_SOURCE_REVISION
+                export SUPPLY_PRODUCER_SOURCE_TREE
+                export SUPPLY_DISPATCH_IMAGE_TAG="$IMAGE_TAG"
+                evidence=$(python - <<'SUPPLY_EVIDENCE_PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          MAX_BYTES = 16_384
+          SHA40 = re.compile(r"[0-9a-f]{40}")
+          SHA256 = re.compile(r"[0-9a-f]{64}")
+          DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+          SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
+          REPOSITORIES = {
+              "app": "leaf-platform-app",
+              "broker": "leaf-platform-broker",
+              "canonical-worker": "leaf-platform-canonical-worker",
+              "harness": "leaf-platform-harness",
+              "web": "leaf-platform-web",
+          }
+          SCHEMA = "leaf.staging-supply-dispatch-evidence.v1"
+
+          def required(name: str, pattern: re.Pattern[str] | None = None) -> str:
+              value = os.environ.get(name, "")
+              if not value or (pattern is not None and pattern.fullmatch(value) is None):
+                  raise SystemExit(f"invalid closed supply evidence field: {name}")
+              return value
+
+          def positive_int(name: str) -> int:
+              value = required(name)
+              if not value.isdecimal() or int(value) <= 0:
+                  raise SystemExit(f"invalid closed supply evidence field: {name}")
+              return int(value)
+
+          def manifest_positive_int(value: object, label: str) -> int:
+              if type(value) is not int or value <= 0:
+                  raise SystemExit(f"{label} must be a positive integer")
+              return value
+
+          def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result: dict[str, object] = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          raw = Path("staging-supply-set.json").read_bytes()
+          manifest = json.loads(raw, object_pairs_hook=strict_object)
+          if not isinstance(manifest, dict):
+              raise SystemExit("supply manifest must be an object")
+          manifest_schema = manifest.get("schema")
+          if manifest_schema == "leaf.staging-supply-set.v2":
+              if set(manifest) != {
+                  "build_tag", "schema", "services", "source_revision",
+                  "source_tree", "speculative",
+              }:
+                  raise SystemExit("v2 supply manifest keys are not closed")
+              source = manifest.get("source_revision")
+              tree = manifest.get("source_tree")
+              build_tag = manifest.get("build_tag")
+              if not isinstance(build_tag, str) or re.fullmatch(r"prod-[0-9a-f]{7,40}", build_tag) is None:
+                  raise SystemExit("v2 supply manifest has an invalid build tag")
+              if not source or not source.startswith(build_tag.removeprefix("prod-")):
+                  raise SystemExit("v2 supply manifest tag is not bound to its full source")
+              lookup_tags = {service: build_tag for service in SERVICES}
+              speculative = manifest.get("speculative")
+              if not isinstance(speculative, dict) or set(speculative) != {
+                  "built_from_revision", "pr_number", "workflow_run_id",
+              }:
+                  raise SystemExit("v2 speculative provenance keys are not closed")
+              if not isinstance(speculative.get("built_from_revision"), str) or SHA40.fullmatch(
+                  speculative["built_from_revision"]
+              ) is None:
+                  raise SystemExit("v2 speculative source is invalid")
+              manifest_positive_int(speculative.get("pr_number"), "v2 PR number")
+              manifest_positive_int(speculative.get("workflow_run_id"), "v2 workflow run")
+          elif manifest_schema == "leaf.staging-supply-set.v3":
+              if set(manifest) != {
+                  "build_run_attempt", "build_run_id", "release_source_revision",
+                  "release_source_tree", "schema", "services",
+              }:
+                  raise SystemExit("v3 supply manifest keys are not closed")
+              source = manifest.get("release_source_revision")
+              tree = manifest.get("release_source_tree")
+              lookup_tags = {
+                  service: manifest.get("services", {}).get(service, {}).get("immutable_lookup_tag")
+                  for service in SERVICES
+              }
+          else:
+              raise SystemExit("closed supply evidence requires a v2 or v3 manifest")
+          if not isinstance(source, str) or SHA40.fullmatch(source) is None:
+              raise SystemExit("supply manifest source must be a full SHA-40")
+          if not isinstance(tree, str) or SHA40.fullmatch(tree) is None:
+              raise SystemExit("supply manifest tree must be a full SHA-40")
+          producer_source = required("SUPPLY_PRODUCER_SOURCE_REVISION", SHA40)
+          if source != producer_source:
+              raise SystemExit("supply manifest source does not match its producer run")
+          producer_tree = required("SUPPLY_PRODUCER_SOURCE_TREE", SHA40)
+          if tree != producer_tree:
+              raise SystemExit("supply manifest tree does not match its provider source tree")
+          producer_run_id = positive_int("SUPPLY_PRODUCER_RUN_ID")
+          producer_run_attempt = positive_int("SUPPLY_PRODUCER_RUN_ATTEMPT")
+          if manifest_schema == "leaf.staging-supply-set.v3" and (
+              manifest_positive_int(manifest.get("build_run_id"), "v3 build run")
+              != producer_run_id
+              or manifest_positive_int(
+                  manifest.get("build_run_attempt"), "v3 build attempt"
+              ) != producer_run_attempt
+          ):
+              raise SystemExit("v3 build identity does not match its provider run")
+          dispatch_image_tag = required("SUPPLY_DISPATCH_IMAGE_TAG")
+          expected_dispatch_tag = (
+              build_tag
+              if manifest_schema == "leaf.staging-supply-set.v2"
+              else f"v3-{source[:12]}"
+          )
+          if dispatch_image_tag != expected_dispatch_tag:
+              raise SystemExit("relay dispatch tag does not match the supply manifest")
+          services = manifest.get("services")
+          if not isinstance(services, dict) or tuple(sorted(services)) != tuple(sorted(SERVICES)):
+              raise SystemExit("supply manifest must carry exactly the canonical five services")
+          ordered_services = []
+          for service in SERVICES:
+              row = services.get(service)
+              if not isinstance(row, dict):
+                  raise SystemExit(f"supply manifest service {service} must be an object")
+              if manifest_schema == "leaf.staging-supply-set.v2":
+                  expected_fields = {"image_digest", "repository", "source_revision"}
+                  if service == "canonical-worker":
+                      expected_fields.add("provenance")
+                  if service == "web":
+                      expected_fields.add("artifact_sha256")
+              else:
+                  expected_fields = {
+                      "build_disposition", "image_digest", "immutable_lookup_tag",
+                      "producer_run_attempt", "producer_run_id",
+                      "producer_source_revision", "producer_source_tree",
+                      "producer_workflow_blob", "producer_workflow_path",
+                      "provenance_digest", "provenance_subject", "recipe_fingerprint",
+                      "repository", "surface_fingerprint",
+                  }
+                  if service == "canonical-worker":
+                      expected_fields.add("solver_provenance")
+                  if service == "web":
+                      expected_fields.add("artifact_sha256")
+              if set(row) != expected_fields:
+                  raise SystemExit(f"supply manifest service {service} keys are not closed")
+              if row.get("repository") != REPOSITORIES[service]:
+                  raise SystemExit(f"supply manifest service {service} repository is foreign")
+              if manifest_schema == "leaf.staging-supply-set.v2" and row.get("source_revision") != source:
+                  raise SystemExit(f"supply manifest service {service} source is mixed")
+              digest = row.get("image_digest")
+              lookup_tag = lookup_tags.get(service)
+              if not isinstance(digest, str) or DIGEST.fullmatch(digest) is None:
+                  raise SystemExit(f"supply manifest service {service} has no immutable digest")
+              if not isinstance(lookup_tag, str) or re.fullmatch(
+                  r"(?:prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}|surface-v1-[0-9a-f]{64})",
+                  lookup_tag,
+              ) is None:
+                  raise SystemExit(f"supply manifest service {service} has no immutable lookup tag")
+              if service == "web" and (
+                  not isinstance(row.get("artifact_sha256"), str)
+                  or SHA256.fullmatch(row["artifact_sha256"]) is None
+              ):
+                  raise SystemExit("supply manifest web artifact hash is invalid")
+              if service == "canonical-worker":
+                  solver = row.get("provenance") if manifest_schema.endswith(".v2") else row.get("solver_provenance")
+                  expected_solver = (
+                      {"application_source_revision", "solver_source_revision", "solver_source_sha256"}
+                      if manifest_schema.endswith(".v2")
+                      else {"solver_source_revision", "solver_source_sha256"}
+                  )
+                  if not isinstance(solver, dict) or set(solver) != expected_solver:
+                      raise SystemExit("canonical-worker solver provenance keys are not closed")
+                  if manifest_schema.endswith(".v2") and solver.get("application_source_revision") != source:
+                      raise SystemExit("canonical-worker application provenance is mixed")
+                  if not isinstance(solver.get("solver_source_revision"), str) or SHA40.fullmatch(
+                      solver["solver_source_revision"]
+                  ) is None:
+                      raise SystemExit("canonical-worker solver source is invalid")
+                  if not isinstance(solver.get("solver_source_sha256"), str) or SHA256.fullmatch(
+                      solver["solver_source_sha256"]
+                  ) is None:
+                      raise SystemExit("canonical-worker solver hash is invalid")
+              if manifest_schema == "leaf.staging-supply-set.v3":
+                  for field in (
+                      "producer_source_revision", "producer_source_tree",
+                      "producer_workflow_blob",
+                  ):
+                      if not isinstance(row.get(field), str) or SHA40.fullmatch(row[field]) is None:
+                          raise SystemExit(f"{service} v3 {field} is invalid")
+                  if row.get("producer_workflow_path") != ".github/workflows/build-platform-images.yml":
+                      raise SystemExit(f"{service} v3 producer workflow is foreign")
+                  manifest_positive_int(row.get("producer_run_id"), f"{service} producer run")
+                  manifest_positive_int(
+                      row.get("producer_run_attempt"), f"{service} producer attempt"
+                  )
+                  for field in ("surface_fingerprint", "recipe_fingerprint"):
+                      if not isinstance(row.get(field), str) or SHA256.fullmatch(row[field]) is None:
+                          raise SystemExit(f"{service} v3 {field} is invalid")
+                  if row["immutable_lookup_tag"] != f"surface-v1-{row['surface_fingerprint']}":
+                      raise SystemExit(
+                          f"{service} v3 lookup tag does not bind its surface fingerprint"
+                      )
+                  expected_subject = (
+                      "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+                      + REPOSITORIES[service]
+                  )
+                  if row.get("provenance_subject") != expected_subject:
+                      raise SystemExit(f"{service} v3 provenance subject is foreign")
+                  if not isinstance(row.get("provenance_digest"), str) or DIGEST.fullmatch(
+                      row["provenance_digest"]
+                  ) is None:
+                      raise SystemExit(f"{service} v3 provenance digest is invalid")
+                  if row.get("build_disposition") not in {"built", "reused"}:
+                      raise SystemExit(f"{service} v3 build disposition is invalid")
+                  if row["build_disposition"] == "built" and (
+                      row["producer_run_id"] != producer_run_id
+                      or row["producer_run_attempt"] != producer_run_attempt
+                      or row["producer_source_revision"] != source
+                      or row["producer_source_tree"] != tree
+                  ):
+                      raise SystemExit(
+                          f"{service} built v3 evidence is not bound to its provider run"
+                      )
+              ordered_services.append({
+                  "dispatch_lookup_tag": lookup_tag,
+                  "manifest_entry": row,
+                  "name": service,
+              })
+
+          artifact_name = required("SUPPLY_ARTIFACT_NAME")
+          expected_name = (
+              f"staging-supply-set-{producer_source}-attempt-"
+              f"{positive_int('SUPPLY_PRODUCER_RUN_ATTEMPT')}"
+          )
+          if artifact_name != expected_name:
+              raise SystemExit("supply artifact name does not bind producer source and attempt")
+          evidence = {
+              "manifest": {
+                  "dispatch_image_tag": dispatch_image_tag,
+                  "json_b64": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
+                  "schema": manifest_schema,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "source_revision": source,
+                  "source_tree": producer_tree,
+              },
+              "producer": {
+                  "event": required("SUPPLY_PRODUCER_EVENT"),
+                  "repository": required("GITHUB_REPOSITORY"),
+                  "run_attempt": producer_run_attempt,
+                  "run_id": producer_run_id,
+                  "source_revision": producer_source,
+                  "source_tree": producer_tree,
+                  "workflow_path": ".github/workflows/build-platform-images.yml",
+              },
+              "relay": {
+                  "repository": required("GITHUB_REPOSITORY"),
+                  "run_attempt": positive_int("GITHUB_RUN_ATTEMPT"),
+                  "run_id": positive_int("GITHUB_RUN_ID"),
+                  "workflow_path": ".github/workflows/dispatch-staging-deploys.yml",
+              },
+              "schema": SCHEMA,
+              "supply_artifact": {
+                  "id": positive_int("SUPPLY_ARTIFACT_ID"),
+                  "name": artifact_name,
+                  "provider_archive_sha256": required(
+                      "SUPPLY_ARTIFACT_PROVIDER_SHA256", SHA256
+                  ),
+              },
+          }
+          if evidence["producer"]["event"] != "push":
+              raise SystemExit("supply producer must be a canonical push build")
+          if evidence["producer"]["repository"] != "LEAF-Solar-Design/leaf-web-demo":
+              raise SystemExit("supply producer repository is foreign")
+          if evidence["relay"]["repository"] != evidence["producer"]["repository"]:
+              raise SystemExit("relay repository does not match the supply producer")
+          encoded = json.dumps(
+              evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("utf-8")
+          if len(encoded) > MAX_BYTES:
+              raise SystemExit("closed supply evidence exceeds its size limit")
+          print(base64.urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii"))
+          SUPPLY_EVIDENCE_PY
+                )
+                [ -n "$evidence" ] || {
+                  echo "::error::V2/v3 supply evidence producer returned an empty envelope."
+                  exit 1
+                }
+                ;;
+              *)
+                echo "::error::Supply-set schema '$schema' cannot produce relay evidence."
+                exit 1
+                ;;
+            esac
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+            echo "schema=$schema" >> "$GITHUB_OUTPUT"
+            echo "artifact_sha256=$(sha256sum staging-supply-set.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+            echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+            echo "supply_evidence_b64=$evidence" >> "$GITHUB_OUTPUT"
+          }
+
           ARTIFACT_NAME="staging-supply-set-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
           NOOP_NAME="docs-noop-$BUILD_HEAD_SHA-attempt-$BUILD_RUN_ATTEMPT"
 
@@ -363,12 +755,7 @@ jobs:
               echo "::error::Supply-set source_revision $MANIFEST_SHA does not match the build head $BUILD_HEAD_SHA."
               exit 1
             }
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-            echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-            echo "schema=$(jq -er '.schema' staging-supply-set.json)" >> "$GITHUB_OUTPUT"
-            echo "artifact_sha256=$(sha256sum staging-supply-set.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-            echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
-            echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+            write_manifest_outputs
             exit 0
           fi
 
@@ -533,12 +920,7 @@ jobs:
           fi
 
           echo "Reconciling both staging services onto $IMAGE_TAG, built from $TARGET_SHA ($SCANNED run(s) scanned)."
-          echo "deploy=true" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "schema=$(jq -er '.schema' staging-supply-set.json)" >> "$GITHUB_OUTPUT"
-          echo "artifact_sha256=$(sha256sum staging-supply-set.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          write_manifest_outputs
 
       - name: Deploy each staging service in turn and prove each one landed
         id: deploy
@@ -555,6 +937,7 @@ jobs:
           SUPPLY_SHA256: ${{ steps.manifest.outputs.artifact_sha256 }}
           SUPPLY_ARTIFACT_ID: ${{ steps.manifest.outputs.artifact_id }}
           SUPPLY_ARTIFACT_NAME: ${{ steps.manifest.outputs.artifact_name }}
+          SUPPLY_EVIDENCE_B64: ${{ steps.manifest.outputs.supply_evidence_b64 }}
         run: |
           set -euo pipefail
 
@@ -931,19 +1314,14 @@ jobs:
                 -f "image_tag=$SERVICE_TAG"
                 -f "app_deploy_intent=forward"
               )
+              if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]; then
+                [ -n "$SUPPLY_EVIDENCE_B64" ] || {
+                  echo "::error::V2/v3 dispatch is missing its closed supply evidence envelope."
+                  exit 1
+                }
+                dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")
+              fi
               if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
-                SERVICE_ENTRY="$(jq -cer --arg service "$SERVICE" '.services[$service]' staging-supply-set.json)"
-                PRODUCER_SOURCE="$(jq -er '.producer_source_revision' <<<"$SERVICE_ENTRY")"
-                PRODUCER_TREE="$(jq -er '.producer_source_tree' <<<"$SERVICE_ENTRY")"
-                SURFACE_FINGERPRINT="$(jq -er '.surface_fingerprint' <<<"$SERVICE_ENTRY")"
-                RECIPE_FINGERPRINT="$(jq -er '.recipe_fingerprint' <<<"$SERVICE_ENTRY")"
-                PRODUCER_WORKFLOW="$(jq -er '.producer_workflow_path' <<<"$SERVICE_ENTRY")"
-                PRODUCER_WORKFLOW_BLOB="$(jq -er '.producer_workflow_blob' <<<"$SERVICE_ENTRY")"
-                PRODUCER_RUN_ID="$(jq -er '.producer_run_id' <<<"$SERVICE_ENTRY")"
-                PRODUCER_RUN_ATTEMPT="$(jq -er '.producer_run_attempt' <<<"$SERVICE_ENTRY")"
-                PROVENANCE_SUBJECT="$(jq -er '.provenance_subject' <<<"$SERVICE_ENTRY")"
-                PROVENANCE_DIGEST="$(jq -er '.provenance_digest' <<<"$SERVICE_ENTRY")"
-                RELEASE_SOURCE_TREE="$(jq -er '.release_source_tree' staging-supply-set.json)"
                 CURRENT_TF_BLOB=$(GH_TOKEN="$GH_TOKEN" gh api \
                   "repos/$INFRA_REPO/contents/.github/workflows/$DEPLOY_WORKFLOW?ref=main" \
                   --jq '.sha')
@@ -953,24 +1331,6 @@ jobs:
                 }
                 dispatch_args+=(
                   -f "digest_aware_reconcile=true"
-                  -f "expected_image_digest=$SERVICE_DIGEST"
-                  -f "component_producer_source_revision=$PRODUCER_SOURCE"
-                  -f "component_producer_source_tree=$PRODUCER_TREE"
-                  -f "surface_fingerprint=$SURFACE_FINGERPRINT"
-                  -f "recipe_fingerprint=$RECIPE_FINGERPRINT"
-                  -f "producer_workflow_path=$PRODUCER_WORKFLOW"
-                  -f "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB"
-                  -f "producer_run_id=$PRODUCER_RUN_ID"
-                  -f "producer_run_attempt=$PRODUCER_RUN_ATTEMPT"
-                  -f "provenance_subject=$PROVENANCE_SUBJECT"
-                  -f "provenance_digest=$PROVENANCE_DIGEST"
-                  -f "release_source_revision=$BUILD_HEAD_SHA"
-                  -f "release_source_tree=$RELEASE_SOURCE_TREE"
-                  -f "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID"
-                  -f "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME"
-                  -f "supply_set_sha256=$SUPPLY_SHA256"
-                  -f "build_run_id=$BUILD_RUN_ID"
-                  -f "build_run_attempt=$BUILD_RUN_ATTEMPT"
                   -f "convergence_id=$CONVERGENCE_ID"
                 )
               fi
