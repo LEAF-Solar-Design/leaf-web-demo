@@ -359,9 +359,16 @@ jobs:
           # the boundary step below justifies in full: three modules run in ONE
           # invocation here, and a `pytest_collection_modifyitems` hook that
           # REMOVES items produces a clean exit 0 that never prints "skipped".
-          # run-all-gates.py floors only two of the three (9 and 26 against the
-          # 10 + 7 + 39 that run), and test_customization_postgres_integration
-          # has no floor there at all, so 21 tests sit unpinned.
+          # run-all-gates.py floors only two of the three, and
+          # test_customization_postgres_integration has no floor there at all,
+          # so some of what runs here sits unpinned. The two floors were 9 and
+          # 26 when this was written; both were re-measured on 2026-08-13 (to 11
+          # and 50) because they had drifted below their executed counts, so
+          # read the current numbers off run-all-gates.py rather than from here.
+          # The unpinned remainder is deliberately not restated: it is a
+          # subtraction against those floors AND against what this live-PG
+          # invocation executes, and re-deriving it needs a measured run in
+          # THIS environment, not the hermetic one the floors come from.
           if ! out=$(PYTHONPATH="$RUNNER_TEMP/leaf-customization-pythonpath" \
               python -m pytest -q -rs \
               "$GITHUB_WORKSPACE/server/tests/test_customization_postgres_contract.py" \
