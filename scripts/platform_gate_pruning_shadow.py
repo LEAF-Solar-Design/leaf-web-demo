@@ -107,6 +107,13 @@ def _marker_result(value: Any, code: str) -> str:
     return value
 
 
+def _json_sha256(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 FULL_KEYS = {
     "schema",
     "workflow_blob",
@@ -147,6 +154,12 @@ INDEXED_RECEIPT_KEYS = {
     "schema",
     "result",
     "strong_consistent",
+    "writer_lock_held",
+    "ledger_union_delta_exact",
+    "pre_post_snapshot_stable",
+    "fallback_to_full_scan_on_error",
+    "bounded_delta_seconds",
+    "lock_acquired_at",
     "open_count",
     "open_set_sha256",
 }
@@ -160,7 +173,19 @@ def _indexed(value: Any) -> dict[str, Any]:
     if (
         receipt["schema"] != "leaf.staging-marker-ledger-census.v1"
         or receipt["strong_consistent"] is not True
+        or receipt["writer_lock_held"] is not True
+        or receipt["ledger_union_delta_exact"] is not True
+        or receipt["pre_post_snapshot_stable"] is not True
+        or receipt["fallback_to_full_scan_on_error"] is not True
     ):
+        raise ContractError("indexed_census_invalid")
+    bounded_delta_seconds = _number(
+        receipt["bounded_delta_seconds"], "indexed_census_invalid"
+    )
+    lock_acquired_at, lock_acquired_at_parsed = _timestamp(
+        receipt["lock_acquired_at"], "indexed_census_invalid"
+    )
+    if bounded_delta_seconds > 86400:
         raise ContractError("indexed_census_invalid")
     normalized = {
         "checkpoint_sha256": _pattern(
@@ -173,6 +198,13 @@ def _indexed(value: Any) -> dict[str, Any]:
             "schema": receipt["schema"],
             "result": _marker_result(receipt["result"], "indexed_census_invalid"),
             "strong_consistent": True,
+            "writer_lock_held": True,
+            "ledger_union_delta_exact": True,
+            "pre_post_snapshot_stable": True,
+            "fallback_to_full_scan_on_error": True,
+            "bounded_delta_seconds": bounded_delta_seconds,
+            "lock_acquired_at": lock_acquired_at,
+            "lock_acquired_at_parsed": lock_acquired_at_parsed,
             "open_count": _integer(receipt["open_count"], "indexed_census_invalid"),
             "open_set_sha256": _pattern(
                 receipt["open_set_sha256"], _HASH, "indexed_census_invalid"
@@ -250,6 +282,7 @@ COMPARISON_KEYS = {
     "terminal",
     "terminal_receipt_sha256",
     "completed_at",
+    "checkpoint_content",
     "legacy",
     "indexed",
 }
@@ -296,6 +329,7 @@ def _comparison(value: Any) -> dict[str, Any]:
         ),
         "completed_at": completed_at,
         "completed_at_parsed": completed_parsed,
+        "checkpoint_content": _checkpoint_content(item["checkpoint_content"]),
         "legacy": _legacy(item["legacy"]),
         "indexed": _indexed(item["indexed"]),
     }
@@ -303,7 +337,18 @@ def _comparison(value: Any) -> dict[str, Any]:
 
 CONTROL_KEYS = {
     "scenario",
+    "transaction_id",
     "source_evidence_sha256",
+    "source_commit",
+    "deploy_workflow_blob",
+    "migration_horizon_sha256",
+    "ledger_generation_sha256",
+    "writer_lock_generation_sha256",
+    "active_writers",
+    "terminal",
+    "terminal_receipt_sha256",
+    "completed_at",
+    "checkpoint_content",
     "replacement_blocks",
     "integrity_alarm",
     "legacy",
@@ -315,15 +360,54 @@ def _control(value: Any, expected: str) -> dict[str, Any]:
     item = _exact(value, CONTROL_KEYS, "negative_control_invalid")
     if item["scenario"] != expected:
         raise ContractError("negative_control_invalid")
-    if not isinstance(item["replacement_blocks"], bool) or not isinstance(
-        item["integrity_alarm"], bool
+    if (
+        not isinstance(item["replacement_blocks"], bool)
+        or not isinstance(item["integrity_alarm"], bool)
+        or not isinstance(item["terminal"], bool)
     ):
         raise ContractError("negative_control_invalid")
+    completed_at, completed_parsed = _timestamp(
+        item["completed_at"], "negative_control_invalid"
+    )
     return {
         "scenario": expected,
+        "transaction_id": _pattern(
+            item["transaction_id"], _ID, "negative_control_invalid"
+        ),
         "source_evidence_sha256": _pattern(
             item["source_evidence_sha256"], _DIGEST, "negative_control_invalid"
         ),
+        "source_commit": _pattern(
+            item["source_commit"], _SHA, "negative_control_invalid"
+        ),
+        "deploy_workflow_blob": _pattern(
+            item["deploy_workflow_blob"], _SHA, "negative_control_invalid"
+        ),
+        "migration_horizon_sha256": _pattern(
+            item["migration_horizon_sha256"],
+            _DIGEST,
+            "negative_control_invalid",
+        ),
+        "ledger_generation_sha256": _pattern(
+            item["ledger_generation_sha256"],
+            _DIGEST,
+            "negative_control_invalid",
+        ),
+        "writer_lock_generation_sha256": _pattern(
+            item["writer_lock_generation_sha256"],
+            _DIGEST,
+            "negative_control_invalid",
+        ),
+        "active_writers": _integer(
+            item["active_writers"], "negative_control_invalid"
+        ),
+        "terminal": item["terminal"],
+        "terminal_receipt_sha256": _pattern(
+            item["terminal_receipt_sha256"], _DIGEST, "negative_control_invalid"
+        ),
+        "completed_at": completed_at,
+        "completed_at_parsed": completed_parsed,
+        "checkpoint_content": _checkpoint_content(item["checkpoint_content"]),
         "replacement_blocks": item["replacement_blocks"],
         "integrity_alarm": item["integrity_alarm"],
         "legacy": _legacy(item["legacy"]),
@@ -331,11 +415,81 @@ def _control(value: Any, expected: str) -> dict[str, Any]:
     }
 
 
+CHECKPOINT_CONTENT_KEYS = {
+    "schema",
+    "source_commit",
+    "source_tree",
+    "deploy_workflow_blob",
+    "restore_workflow_blob",
+    "ledger_script_blob",
+    "legacy_census_script_blob",
+    "migration_horizon_sha256",
+    "scan_started_at",
+    "scan_completed_at",
+    "result",
+    "open_count",
+    "open_set_sha256",
+}
+
+
+def _checkpoint_content(value: Any) -> dict[str, Any]:
+    item = _exact(value, CHECKPOINT_CONTENT_KEYS, "checkpoint_content_invalid")
+    if item["schema"] != "leaf.staging-marker-checkpoint-anchor.v1":
+        raise ContractError("checkpoint_content_invalid")
+    started_at, started = _timestamp(
+        item["scan_started_at"], "checkpoint_content_invalid"
+    )
+    completed_at, completed = _timestamp(
+        item["scan_completed_at"], "checkpoint_content_invalid"
+    )
+    if completed < started:
+        raise ContractError("checkpoint_content_invalid")
+    normalized = {
+        "schema": item["schema"],
+        "source_commit": _pattern(
+            item["source_commit"], _SHA, "checkpoint_content_invalid"
+        ),
+        "source_tree": _pattern(
+            item["source_tree"], _SHA, "checkpoint_content_invalid"
+        ),
+        "deploy_workflow_blob": _pattern(
+            item["deploy_workflow_blob"], _SHA, "checkpoint_content_invalid"
+        ),
+        "restore_workflow_blob": _pattern(
+            item["restore_workflow_blob"], _SHA, "checkpoint_content_invalid"
+        ),
+        "ledger_script_blob": _pattern(
+            item["ledger_script_blob"], _SHA, "checkpoint_content_invalid"
+        ),
+        "legacy_census_script_blob": _pattern(
+            item["legacy_census_script_blob"], _SHA, "checkpoint_content_invalid"
+        ),
+        "migration_horizon_sha256": _pattern(
+            item["migration_horizon_sha256"],
+            _DIGEST,
+            "checkpoint_content_invalid",
+        ),
+        "scan_started_at": started_at,
+        "scan_completed_at": completed_at,
+        "result": _marker_result(item["result"], "checkpoint_content_invalid"),
+        "open_count": _integer(item["open_count"], "checkpoint_content_invalid"),
+        "open_set_sha256": _pattern(
+            item["open_set_sha256"], _HASH, "checkpoint_content_invalid"
+        ),
+    }
+    if (normalized["open_count"] == 0) != (normalized["result"] == "EMPTY"):
+        raise ContractError("checkpoint_content_invalid")
+    return normalized
+
+
 def _audit(value: Any) -> dict[str, Any]:
     audit = _exact(
         value,
         {
             "enabled",
+            "anchor_type",
+            "checkpoint_sha256",
+            "checkpoint_content",
             "workflow_blob",
             "last_completed_at",
             "maximum_age_seconds",
@@ -345,9 +499,20 @@ def _audit(value: Any) -> dict[str, Any]:
     )
     if not isinstance(audit["enabled"], bool):
         raise ContractError("scheduled_audit_invalid")
+    if audit["anchor_type"] != "successful_full_artifact_scan":
+        raise ContractError("scheduled_audit_invalid")
     completed, parsed = _timestamp(
         audit["last_completed_at"], "scheduled_audit_invalid"
     )
+    checkpoint_content = _checkpoint_content(audit["checkpoint_content"])
+    checkpoint_sha256 = _pattern(
+        audit["checkpoint_sha256"], _DIGEST, "scheduled_audit_invalid"
+    )
+    if (
+        checkpoint_sha256 != _json_sha256(checkpoint_content)
+        or completed != checkpoint_content["scan_completed_at"]
+    ):
+        raise ContractError("scheduled_audit_invalid")
     maximum_age_seconds = _number(
         audit["maximum_age_seconds"], "scheduled_audit_invalid"
     )
@@ -355,6 +520,9 @@ def _audit(value: Any) -> dict[str, Any]:
         raise ContractError("scheduled_audit_invalid")
     return {
         "enabled": audit["enabled"],
+        "anchor_type": audit["anchor_type"],
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_content": checkpoint_content,
         "workflow_blob": _pattern(
             audit["workflow_blob"], _SHA, "scheduled_audit_invalid"
         ),
@@ -409,8 +577,54 @@ def validate_evidence(value: Any) -> dict[str, Any]:
     comparisons = [_comparison(item) for item in root["comparisons"]]
     controls = _exact(
         root["negative_controls"],
-        {"planted_open_row", "artifact_without_ledger"},
+        {"planted_open_row", "artifact_without_ledger", "stale_or_missing_checkpoint"},
         "negative_controls_invalid",
+    )
+    checkpoint_control = _exact(
+        controls["stale_or_missing_checkpoint"],
+        {
+            "scenario",
+            "transaction_id",
+            "source_evidence_sha256",
+            "source_commit",
+            "deploy_workflow_blob",
+            "migration_horizon_sha256",
+            "ledger_generation_sha256",
+            "writer_lock_generation_sha256",
+            "active_writers",
+            "terminal",
+            "terminal_receipt_sha256",
+            "completed_at",
+            "checkpoint_state",
+            "observed_checkpoint_sha256",
+            "replacement_blocks",
+            "fallback_to_full_scan",
+            "fallback_checkpoint_content",
+            "legacy",
+        },
+        "checkpoint_control_invalid",
+    )
+    if (
+        checkpoint_control["scenario"] != "stale_or_missing_checkpoint"
+        or checkpoint_control["checkpoint_state"] not in {"stale", "missing"}
+        or checkpoint_control["replacement_blocks"] is not True
+        or checkpoint_control["fallback_to_full_scan"] is not True
+        or not isinstance(checkpoint_control["terminal"], bool)
+    ):
+        raise ContractError("checkpoint_control_invalid")
+    observed_checkpoint_sha256 = checkpoint_control["observed_checkpoint_sha256"]
+    if checkpoint_control["checkpoint_state"] == "missing":
+        if observed_checkpoint_sha256 is not None:
+            raise ContractError("checkpoint_control_invalid")
+    else:
+        observed_checkpoint_sha256 = _pattern(
+            observed_checkpoint_sha256, _DIGEST, "checkpoint_control_invalid"
+        )
+    checkpoint_completed_at, checkpoint_completed_parsed = _timestamp(
+        checkpoint_control["completed_at"], "checkpoint_control_invalid"
+    )
+    fallback_checkpoint_content = _checkpoint_content(
+        checkpoint_control["fallback_checkpoint_content"]
     )
     return {
         "gate": gate,
@@ -425,6 +639,62 @@ def validate_evidence(value: Any) -> dict[str, Any]:
             "artifact_without_ledger": _control(
                 controls["artifact_without_ledger"], "artifact_without_ledger"
             ),
+            "stale_or_missing_checkpoint": {
+                "scenario": checkpoint_control["scenario"],
+                "transaction_id": _pattern(
+                    checkpoint_control["transaction_id"],
+                    _ID,
+                    "checkpoint_control_invalid",
+                ),
+                "source_evidence_sha256": _pattern(
+                    checkpoint_control["source_evidence_sha256"],
+                    _DIGEST,
+                    "checkpoint_control_invalid",
+                ),
+                "source_commit": _pattern(
+                    checkpoint_control["source_commit"],
+                    _SHA,
+                    "checkpoint_control_invalid",
+                ),
+                "deploy_workflow_blob": _pattern(
+                    checkpoint_control["deploy_workflow_blob"],
+                    _SHA,
+                    "checkpoint_control_invalid",
+                ),
+                "migration_horizon_sha256": _pattern(
+                    checkpoint_control["migration_horizon_sha256"],
+                    _DIGEST,
+                    "checkpoint_control_invalid",
+                ),
+                "ledger_generation_sha256": _pattern(
+                    checkpoint_control["ledger_generation_sha256"],
+                    _DIGEST,
+                    "checkpoint_control_invalid",
+                ),
+                "writer_lock_generation_sha256": _pattern(
+                    checkpoint_control["writer_lock_generation_sha256"],
+                    _DIGEST,
+                    "checkpoint_control_invalid",
+                ),
+                "active_writers": _integer(
+                    checkpoint_control["active_writers"],
+                    "checkpoint_control_invalid",
+                ),
+                "terminal": checkpoint_control["terminal"],
+                "terminal_receipt_sha256": _pattern(
+                    checkpoint_control["terminal_receipt_sha256"],
+                    _DIGEST,
+                    "checkpoint_control_invalid",
+                ),
+                "completed_at": checkpoint_completed_at,
+                "completed_at_parsed": checkpoint_completed_parsed,
+                "checkpoint_state": checkpoint_control["checkpoint_state"],
+                "observed_checkpoint_sha256": observed_checkpoint_sha256,
+                "replacement_blocks": True,
+                "fallback_to_full_scan": True,
+                "fallback_checkpoint_content": fallback_checkpoint_content,
+                "legacy": _legacy(checkpoint_control["legacy"]),
+            },
         },
     }
 
@@ -441,6 +711,7 @@ def _base(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "disposition": "retain_blocking_gate",
         "code": "insufficient_evidence",
         "comparison_count": len(comparisons),
+        "shadow_case_count": len(comparisons) + 3,
         "scenario_coverage": sorted({item["scenario"] for item in comparisons}),
         "disagreement_count": 0,
         "measured_legacy_total_seconds": sum(legacy_times),
@@ -456,6 +727,7 @@ def _base(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "scheduled_audit_age_seconds": None,
         "planted_open_row_passed": False,
         "artifact_without_ledger_passed": False,
+        "stale_or_missing_checkpoint_passed": False,
         "rollback": {
             "marker_ledger_mode": "disabled",
             "blocking_control": "full-62-day-history-census",
@@ -490,6 +762,33 @@ def _source_hash(source: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _checkpoint_matches_source(
+    content: Mapping[str, Any], source: Mapping[str, Any]
+) -> bool:
+    return bool(
+        content["source_commit"] == source["source_commit"]
+        and content["source_tree"] == source["source_tree"]
+        and content["deploy_workflow_blob"] == source["deploy_workflow_blob"]
+        and content["restore_workflow_blob"] == source["restore_workflow_blob"]
+        and content["ledger_script_blob"] == source["ledger_script_blob"]
+        and content["legacy_census_script_blob"]
+        == source["legacy_census_script_blob"]
+        and content["migration_horizon_sha256"]
+        == source["migration_horizon_sha256"]
+    )
+
+
+def _legacy_matches_checkpoint(
+    legacy: Mapping[str, Any], content: Mapping[str, Any]
+) -> bool:
+    return bool(
+        legacy["checkpoint_sha256"] == _json_sha256(content)
+        and legacy["result"] == content["result"]
+        and legacy["open_count"] == content["open_count"]
+        and legacy["open_set_sha256"] == content["open_set_sha256"]
+    )
+
+
 def evaluate_gate(value: Any) -> dict[str, Any]:
     """Return a safe recommendation, never gate-change authority."""
 
@@ -513,30 +812,37 @@ def evaluate_gate(value: Any) -> dict[str, Any]:
         return _retain(plan, "scheduled_audit_unavailable")
 
     comparisons = evidence["comparisons"]
-    if len(comparisons) < 12:
+    if len(comparisons) != 6:
         return _retain(plan, "shadow_sample_too_small")
-    transaction_ids = [item["transaction_id"] for item in comparisons]
-    receipt_ids = [item["terminal_receipt_sha256"] for item in comparisons]
+    controls = list(evidence["negative_controls"].values())
+    shadow_items = [*comparisons, *controls]
+    transaction_ids = [item["transaction_id"] for item in shadow_items]
+    receipt_ids = [item["terminal_receipt_sha256"] for item in shadow_items]
     if len(transaction_ids) != len(set(transaction_ids)) or len(receipt_ids) != len(
         set(receipt_ids)
     ):
         return _retain(plan, "duplicate_shadow_evidence")
     if not REQUIRED_SCENARIOS.issubset(plan["scenario_coverage"]):
         return _retain(plan, "required_scenario_missing")
+    if sum(item["scenario"] == "normal_success" for item in comparisons) != 2:
+        return _retain(plan, "clean_shadow_count_invalid")
 
     source = evidence["source"]
     source_evidence_sha256 = _source_hash(source)
     if audit["workflow_blob"] != source["restore_workflow_blob"]:
         return _retain(plan, "scheduled_audit_unavailable")
-    disagreements = 0
-    for item in comparisons:
+    checkpoint_content = audit["checkpoint_content"]
+    if not _checkpoint_matches_source(checkpoint_content, source):
+        return _retain(plan, "checkpoint_anchor_source_drift")
+    for item in shadow_items:
         if (
             item["source_evidence_sha256"] != source_evidence_sha256
-            or
-            item["source_commit"] != source["source_commit"]
+            or item["source_commit"] != source["source_commit"]
             or item["deploy_workflow_blob"] != source["deploy_workflow_blob"]
-            or item["migration_horizon_sha256"] != source["migration_horizon_sha256"]
-            or item["ledger_generation_sha256"] != source["ledger_generation_sha256"]
+            or item["migration_horizon_sha256"]
+            != source["migration_horizon_sha256"]
+            or item["ledger_generation_sha256"]
+            != source["ledger_generation_sha256"]
             or item["writer_lock_generation_sha256"]
             != source["writer_lock_generation_sha256"]
         ):
@@ -547,6 +853,33 @@ def evaluate_gate(value: Any) -> dict[str, Any]:
             or item["completed_at_parsed"] > source["captured_at_parsed"]
         ):
             return _retain(plan, "shadow_not_terminal")
+    anchored_items = [
+        *comparisons,
+        evidence["negative_controls"]["planted_open_row"],
+        evidence["negative_controls"]["artifact_without_ledger"],
+    ]
+    for item in anchored_items:
+        checkpoint_completed_at = datetime.fromisoformat(
+            item["checkpoint_content"]["scan_completed_at"].replace("Z", "+00:00")
+        )
+        lock_acquired_at = item["indexed"]["receipt"]["lock_acquired_at_parsed"]
+        actual_delta_seconds = (
+            lock_acquired_at - checkpoint_completed_at
+        ).total_seconds()
+        if (
+            not _checkpoint_matches_source(item["checkpoint_content"], source)
+            or not _legacy_matches_checkpoint(
+                item["legacy"], item["checkpoint_content"]
+            )
+            or actual_delta_seconds <= 0
+            or actual_delta_seconds > 86400
+            or actual_delta_seconds
+            != item["indexed"]["receipt"]["bounded_delta_seconds"]
+            or lock_acquired_at > item["completed_at_parsed"]
+        ):
+            return _retain(plan, "shadow_checkpoint_anchor_invalid")
+    disagreements = 0
+    for item in comparisons:
         if (
             item["legacy"]["workflow_blob"] != source["deploy_workflow_blob"]
             or not _equal_markers(item["legacy"], item["indexed"])
@@ -589,8 +922,37 @@ def evaluate_gate(value: Any) -> dict[str, Any]:
     if not mismatch_passed:
         return _retain(plan, "artifact_without_ledger_control_failed")
 
+    checkpoint_control = evidence["negative_controls"]["stale_or_missing_checkpoint"]
+    checkpoint_passed = bool(
+        checkpoint_control["source_evidence_sha256"] == source_evidence_sha256
+        and checkpoint_control["legacy"]["workflow_blob"]
+        == source["deploy_workflow_blob"]
+        and (
+            checkpoint_control["checkpoint_state"] == "missing"
+            and checkpoint_control["observed_checkpoint_sha256"] is None
+            or checkpoint_control["checkpoint_state"] == "stale"
+            and checkpoint_control["observed_checkpoint_sha256"]
+            != audit["checkpoint_sha256"]
+        )
+        and checkpoint_control["replacement_blocks"]
+        and checkpoint_control["fallback_to_full_scan"]
+        and checkpoint_control["legacy"]["checkpoint_sha256"]
+        == _json_sha256(checkpoint_control["fallback_checkpoint_content"])
+        and _checkpoint_matches_source(
+            checkpoint_control["fallback_checkpoint_content"], source
+        )
+        and checkpoint_control["fallback_checkpoint_content"]["scan_completed_at"]
+        == checkpoint_control["completed_at"]
+    )
+    plan["stale_or_missing_checkpoint_passed"] = checkpoint_passed
+    if not checkpoint_passed:
+        return _retain(plan, "checkpoint_fallback_control_failed")
+
+    if plan["measured_indexed_median_seconds"] >= 10:
+        return _retain(plan, "indexed_path_too_slow")
+
     plan.update(
-        disposition="eligible_for_downgrade_review",
+        disposition="eligible_for_staging_cutover_review",
         code="shadow_equivalence_ready",
     )
     return plan
