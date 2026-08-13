@@ -11,7 +11,7 @@
     "source": {"$ref": "#/$defs/source"},
     "posture": {"$ref": "#/$defs/posture"},
     "scheduled_audit": {"$ref": "#/$defs/audit"},
-    "comparisons": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/comparison"}},
+    "comparisons": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/comparison"}},
     "negative_controls": {"$ref": "#/$defs/controls"}
   },
   "$defs": {
@@ -67,14 +67,46 @@
     "audit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "workflow_blob", "last_completed_at", "maximum_age_seconds", "terminal_receipt_sha256"],
+      "required": ["enabled", "anchor_type", "checkpoint_sha256", "checkpoint_content", "workflow_blob", "last_completed_at", "maximum_age_seconds", "terminal_receipt_sha256"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "anchor_type": {"const": "successful_full_artifact_scan"},
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "checkpoint_content": {"$ref": "#/$defs/checkpointContent"},
         "workflow_blob": {"$ref": "#/$defs/sha"},
         "last_completed_at": {"$ref": "#/$defs/timestamp"},
         "maximum_age_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 604800},
         "terminal_receipt_sha256": {"$ref": "#/$defs/digest"}
       }
+    },
+    "checkpointContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "source_commit", "source_tree", "deploy_workflow_blob",
+        "restore_workflow_blob", "ledger_script_blob", "legacy_census_script_blob",
+        "migration_horizon_sha256", "scan_started_at", "scan_completed_at",
+        "result", "open_count", "open_set_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "leaf.staging-marker-checkpoint-anchor.v1"},
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "source_tree": {"$ref": "#/$defs/sha"},
+        "deploy_workflow_blob": {"$ref": "#/$defs/sha"},
+        "restore_workflow_blob": {"$ref": "#/$defs/sha"},
+        "ledger_script_blob": {"$ref": "#/$defs/sha"},
+        "legacy_census_script_blob": {"$ref": "#/$defs/sha"},
+        "migration_horizon_sha256": {"$ref": "#/$defs/digest"},
+        "scan_started_at": {"$ref": "#/$defs/timestamp"},
+        "scan_completed_at": {"$ref": "#/$defs/timestamp"},
+        "result": {"enum": ["EMPTY", "OPEN"]},
+        "open_count": {"type": "integer", "minimum": 0},
+        "open_set_sha256": {"$ref": "#/$defs/hash"}
+      },
+      "allOf": [
+        {"if": {"properties": {"result": {"const": "EMPTY"}}}, "then": {"properties": {"open_count": {"const": 0}}}},
+        {"if": {"properties": {"result": {"const": "OPEN"}}}, "then": {"properties": {"open_count": {"minimum": 1}}}}
+      ]
     },
     "legacy": {
       "type": "object",
@@ -97,11 +129,23 @@
     "indexedReceipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "result", "strong_consistent", "open_count", "open_set_sha256"],
+      "required": [
+        "schema", "result", "strong_consistent", "writer_lock_held",
+        "ledger_union_delta_exact", "pre_post_snapshot_stable",
+        "fallback_to_full_scan_on_error", "bounded_delta_seconds",
+        "lock_acquired_at",
+        "open_count", "open_set_sha256"
+      ],
       "properties": {
         "schema": {"const": "leaf.staging-marker-ledger-census.v1"},
         "result": {"enum": ["EMPTY", "OPEN"]},
         "strong_consistent": {"const": true},
+        "writer_lock_held": {"const": true},
+        "ledger_union_delta_exact": {"const": true},
+        "pre_post_snapshot_stable": {"const": true},
+        "fallback_to_full_scan_on_error": {"const": true},
+        "bounded_delta_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400},
+        "lock_acquired_at": {"$ref": "#/$defs/timestamp"},
         "open_count": {"type": "integer", "minimum": 0},
         "open_set_sha256": {"$ref": "#/$defs/hash"}
       },
@@ -127,7 +171,7 @@
         "transaction_id", "source_evidence_sha256", "scenario", "source_commit",
         "deploy_workflow_blob", "migration_horizon_sha256", "ledger_generation_sha256",
         "writer_lock_generation_sha256", "active_writers", "terminal",
-        "terminal_receipt_sha256", "completed_at", "legacy", "indexed"
+        "terminal_receipt_sha256", "completed_at", "checkpoint_content", "legacy", "indexed"
       ],
       "properties": {
         "transaction_id": {"$ref": "#/$defs/id"},
@@ -142,6 +186,7 @@
         "terminal": {"type": "boolean"},
         "terminal_receipt_sha256": {"$ref": "#/$defs/digest"},
         "completed_at": {"$ref": "#/$defs/timestamp"},
+        "checkpoint_content": {"$ref": "#/$defs/checkpointContent"},
         "legacy": {"$ref": "#/$defs/legacy"},
         "indexed": {"$ref": "#/$defs/indexed"}
       }
@@ -149,10 +194,27 @@
     "control": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scenario", "source_evidence_sha256", "replacement_blocks", "integrity_alarm", "legacy", "indexed"],
+      "required": [
+        "scenario", "transaction_id", "source_evidence_sha256", "source_commit",
+        "deploy_workflow_blob", "migration_horizon_sha256", "ledger_generation_sha256",
+        "writer_lock_generation_sha256", "active_writers", "terminal",
+        "terminal_receipt_sha256", "completed_at", "replacement_blocks",
+        "integrity_alarm", "checkpoint_content", "legacy", "indexed"
+      ],
       "properties": {
         "scenario": {"enum": ["planted_open_row", "artifact_without_ledger"]},
+        "transaction_id": {"$ref": "#/$defs/id"},
         "source_evidence_sha256": {"$ref": "#/$defs/digest"},
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "deploy_workflow_blob": {"$ref": "#/$defs/sha"},
+        "migration_horizon_sha256": {"$ref": "#/$defs/digest"},
+        "ledger_generation_sha256": {"$ref": "#/$defs/digest"},
+        "writer_lock_generation_sha256": {"$ref": "#/$defs/digest"},
+        "active_writers": {"type": "integer", "minimum": 0},
+        "terminal": {"const": true},
+        "terminal_receipt_sha256": {"$ref": "#/$defs/digest"},
+        "completed_at": {"$ref": "#/$defs/timestamp"},
+        "checkpoint_content": {"$ref": "#/$defs/checkpointContent"},
         "replacement_blocks": {"type": "boolean"},
         "integrity_alarm": {"type": "boolean"},
         "legacy": {"$ref": "#/$defs/legacy"},
@@ -162,10 +224,45 @@
     "controls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planted_open_row", "artifact_without_ledger"],
+      "required": ["planted_open_row", "artifact_without_ledger", "stale_or_missing_checkpoint"],
       "properties": {
         "planted_open_row": {"$ref": "#/$defs/control"},
-        "artifact_without_ledger": {"$ref": "#/$defs/control"}
+        "artifact_without_ledger": {"$ref": "#/$defs/control"},
+        "stale_or_missing_checkpoint": {"$ref": "#/$defs/checkpointControl"}
+      }
+    },
+    "checkpointControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario", "transaction_id", "source_evidence_sha256", "source_commit",
+        "deploy_workflow_blob", "migration_horizon_sha256", "ledger_generation_sha256",
+        "writer_lock_generation_sha256", "active_writers", "terminal",
+        "terminal_receipt_sha256", "completed_at", "checkpoint_state",
+        "observed_checkpoint_sha256", "replacement_blocks", "fallback_to_full_scan",
+        "fallback_checkpoint_content", "legacy"
+      ],
+      "properties": {
+        "scenario": {"const": "stale_or_missing_checkpoint"},
+        "transaction_id": {"$ref": "#/$defs/id"},
+        "source_evidence_sha256": {"$ref": "#/$defs/digest"},
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "deploy_workflow_blob": {"$ref": "#/$defs/sha"},
+        "migration_horizon_sha256": {"$ref": "#/$defs/digest"},
+        "ledger_generation_sha256": {"$ref": "#/$defs/digest"},
+        "writer_lock_generation_sha256": {"$ref": "#/$defs/digest"},
+        "active_writers": {"type": "integer", "minimum": 0},
+        "terminal": {"const": true},
+        "terminal_receipt_sha256": {"$ref": "#/$defs/digest"},
+        "completed_at": {"$ref": "#/$defs/timestamp"},
+        "checkpoint_state": {"enum": ["stale", "missing"]},
+        "observed_checkpoint_sha256": {
+          "anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        },
+        "replacement_blocks": {"const": true},
+        "fallback_to_full_scan": {"const": true},
+        "fallback_checkpoint_content": {"$ref": "#/$defs/checkpointContent"},
+        "legacy": {"$ref": "#/$defs/legacy"}
       }
     }
   }

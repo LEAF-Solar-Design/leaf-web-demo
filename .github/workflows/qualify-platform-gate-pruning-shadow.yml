@@ -45,7 +45,7 @@ jobs:
           assert plan["schema"] == "leaf.platform-gate-pruning-shadow-plan.v1"
           assert plan["disposition"] in {
               "retain_blocking_gate",
-              "eligible_for_downgrade_review",
+              "eligible_for_staging_cutover_review",
           }
           assert plan["gate_change_authorized"] is False
           assert plan["selector_activation_authorized"] is False
@@ -55,6 +55,7 @@ jobs:
               output.write(f"disposition={plan['disposition']}\n")
               output.write(f"code={plan['code']}\n")
               output.write(f"comparison_count={plan['comparison_count']}\n")
+              output.write(f"shadow_case_count={plan['shadow_case_count']}\n")
               output.write(f"disagreement_count={plan['disagreement_count']}\n")
           PY
 
