@@ -316,16 +316,41 @@ class _Unreadable:
         derived_from: str = "",
         read_only: bool = False,
         dark_unless: str = "",
+        not_a_path: bool = False,
     ) -> None:
         self.source = source
-        self.container_default = PurePosixPath(container_default)
+        self.container_default = (
+            PurePosixPath(container_default) if container_default else None
+        )
         self.why = why
         self.derived_from = derived_from
         self.read_only = read_only
         self.dark_unless = dark_unless
+        self.not_a_path = not_a_path
 
 
 _UNREADABLE_DEFAULTS: dict[str, _Unreadable] = {
+    "server/jobs.py:JOB_WORKERS_SLOW": _Unreadable(
+        source="str(MAX_WORKERS)",
+        container_default="",
+        not_a_path=True,
+        why=(
+            "A worker count, not a path. Listed because the scan refuses to "
+            "guess: it could not fold MAX_WORKERS to a constant, and an "
+            "unreadable default it quietly assumed was harmless is exactly the "
+            "hole this tier exists to close. A human read it; it is an integer."
+        ),
+    ),
+    "server/customization_service.py:LEAF_CUSTOMIZATION_HARNESS_STAGE_TIMEOUT_S": _Unreadable(
+        source="str(fallback)",
+        container_default="",
+        not_a_path=True,
+        why=(
+            "A timeout in seconds, not a path. ``fallback`` is a local, so no "
+            "module-constant lookup can reach it. Same reason as the entry "
+            "above: declared rather than assumed."
+        ),
+    ),
     "server/broker.py:BROKER_ACTIVE_WORKITEMS_PATH": _Unreadable(
         source="str(Path(LEDGER_PATH).parent / 'active_workitems.jsonl')",
         container_default="/app/server/active_workitems.jsonl",
@@ -433,7 +458,95 @@ def _scanned_modules() -> dict[str, ast.Module]:
     return parsed
 
 
-def _literal_path(node: ast.expr) -> str | None:
+def _module_constants(tree: ast.Module) -> dict[str, ast.expr]:
+    """Module-level ``NAME = <expr>`` bindings, so a default can name one.
+
+    Plenty of defaults are a bare module constant (``DEFAULT_LEASE_SECONDS``,
+    ``MAX_WORKERS``). Without resolving them every one lands in the unreadable
+    pile and the ledger fills with noise, which is its own way of going
+    unreadable to a human.
+    """
+    constants: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                constants[node.target.id] = node.value
+    return constants
+
+
+def _fold_scalar(node: ast.expr, constants: dict[str, ast.expr], depth: int = 0):
+    """Evaluate a NON-path constant expression, or raise.
+
+    Covers the arithmetic ``ast.literal_eval`` refuses (it rejects ``*``), and
+    module-constant names, so ``str(64 * 1024)`` and ``str(MAX_WORKERS)`` are
+    recognised as numbers rather than filed as unreadable paths.
+    """
+    if depth > 6:
+        raise ValueError("too deep")
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in constants:
+            raise ValueError(f"unresolved name {node.id}")
+        return _fold_scalar(constants[node.id], constants, depth + 1)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _fold_scalar(node.operand, constants, depth + 1)
+        return -value if isinstance(node.op, ast.USub) else +value
+    if isinstance(node, ast.BinOp):
+        left = _fold_scalar(node.left, constants, depth + 1)
+        right = _fold_scalar(node.right, constants, depth + 1)
+        if isinstance(left, str) or isinstance(right, str):
+            raise ValueError("string operand is not a scalar fold")
+        for op, apply in (
+            (ast.Mult, lambda a, b: a * b),
+            (ast.Add, lambda a, b: a + b),
+            (ast.Sub, lambda a, b: a - b),
+            (ast.FloorDiv, lambda a, b: a // b),
+        ):
+            if isinstance(node.op, op):
+                return apply(left, right)
+        raise ValueError("unsupported operator")
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name in {"str", "int", "float"} and len(node.args) == 1:
+            value = _fold_scalar(node.args[0], constants, depth + 1)
+            return {"str": str, "int": int, "float": float}[name](value)
+    raise ValueError("not a scalar")
+
+
+def _classify_default(
+    node: ast.expr, constants: dict[str, ast.expr]
+) -> tuple[str, str | None]:
+    """Return ("path", resolved) | ("scalar", None) | ("opaque", None).
+
+    Three-way on purpose. A two-way evaluator that returns None for both "this
+    is a number" and "I cannot read this" has to guess which it met, and
+    guessing wrong on the second is how a task-local path goes unexamined.
+    """
+    resolved = _literal_path(node, constants)
+    if resolved is not None:
+        if "://" in resolved:
+            # A URL. It has slashes and is not a filesystem path; joining it
+            # onto the image root produced nonsense like
+            # /app/server/https:/api.leafdesign.ai before this case existed.
+            return "scalar", None
+        if Path(resolved).is_absolute() or "/" in resolved or "\\" in resolved:
+            return "path", resolved
+        # A bare token like "legacy" or "memory": a selector value, not a path.
+        return "scalar", None
+    try:
+        _fold_scalar(node, constants)
+    except (ValueError, TypeError, ZeroDivisionError, RecursionError):
+        return "opaque", None
+    return "scalar", None
+
+
+def _literal_path(node: ast.expr, constants: dict[str, ast.expr] | None = None) -> str | None:
     """Evaluate a default expression to a path, or None if it is not one.
 
     Only the forms this repo actually uses: a string constant, ``str(...)`` or
@@ -441,26 +554,31 @@ def _literal_path(node: ast.expr) -> str | None:
     Anything else (a call, an f-string, an int) returns None rather than a
     guess -- a scan that guesses would be the vacuous kind.
     """
+    _ANCHORS = {
+        "SERVER_DIR": str(SERVER),
+        "PROJECT_ROOT": str(ROOT),
+        "_PROJECT_ROOT": str(ROOT),
+    }
     if isinstance(node, ast.Constant):
         return node.value if isinstance(node.value, str) else None
     if isinstance(node, ast.Name):
-        return {
-            "SERVER_DIR": str(SERVER),
-            "PROJECT_ROOT": str(ROOT),
-            "_PROJECT_ROOT": str(ROOT),
-        }.get(node.id)
+        if node.id in _ANCHORS:
+            return _ANCHORS[node.id]
+        if constants and node.id in constants:
+            return _literal_path(constants[node.id], None)
+        return None
     if isinstance(node, ast.Attribute):
         # e.g. deps.SERVER_DIR
-        return {"SERVER_DIR": str(SERVER), "PROJECT_ROOT": str(ROOT)}.get(node.attr)
+        return _ANCHORS.get(node.attr)
     if isinstance(node, ast.Call):
         func = node.func
         name = getattr(func, "id", None) or getattr(func, "attr", None)
         if name in {"str", "Path"} and len(node.args) == 1:
-            return _literal_path(node.args[0])
+            return _literal_path(node.args[0], constants)
         return None
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        left = _literal_path(node.left)
-        right = _literal_path(node.right)
+        left = _literal_path(node.left, constants)
+        right = _literal_path(node.right, constants)
         if left is None or right is None:
             return None
         return str(Path(left) / right)
@@ -513,26 +631,25 @@ def _env_default_calls(tree: ast.Module):
         yield key.value, default
 
 
-# Markers that a default expression is TRYING to be a path. Used only to decide
-# whether an expression the evaluator could not read is worth failing over.
-_PATH_SHAPED = ("SERVER_DIR", "PROJECT_ROOT", "ROOT", "Path(", "os.path", "/")
+def _unreadable_defaults() -> dict[str, str]:
+    """Env defaults the evaluator cannot classify AT ALL.
 
-
-def _unreadable_path_defaults() -> dict[str, str]:
-    """Env defaults that LOOK like a path and that the evaluator cannot read.
-
-    Without this the scan fails open on exactly the interesting case: a default
-    built by a helper or an f-string is skipped, so its variable never reaches
-    the ledger and nothing says so.
+    Deliberately NOT filtered by "looks like a path". An earlier version kept a
+    marker list (``SERVER_DIR``, ``Path(``, ``/`` and friends) and only failed
+    over expressions matching one, which put the hole straight back: a default
+    written ``os.getenv("TASK_DB", default_state_file())`` matches no marker, so
+    it would have been invisible to BOTH ledger tiers. Guessing whether an
+    unreadable expression is path-shaped is exactly the judgement this gate
+    cannot make, so it does not try. Anything it cannot classify is declared by
+    a human, including the handful that turn out not to be paths at all.
     """
     unreadable: dict[str, str] = {}
     for rel, tree in _scanned_modules().items():
+        constants = _module_constants(tree)
         for var, default in _env_default_calls(tree):
-            if _literal_path(default) is not None:
-                continue
-            source = ast.unparse(default)
-            if any(marker in source for marker in _PATH_SHAPED):
-                unreadable[f"{rel}:{var}"] = source
+            kind, _ = _classify_default(default, constants)
+            if kind == "opaque":
+                unreadable[f"{rel}:{var}"] = ast.unparse(default)
     return unreadable
 
 
@@ -545,10 +662,15 @@ def _discovered_state_paths() -> dict[str, dict]:
     """
     found: dict[str, dict] = {}
     for rel, tree in _scanned_modules().items():
+        constants = _module_constants(tree)
         for var, default_node in _env_default_calls(tree):
-            default = _literal_path(default_node)
-            if default is None or not Path(default).is_absolute():
+            kind, default = _classify_default(default_node, constants)
+            if kind != "path" or default is None:
                 continue
+            if not Path(default).is_absolute():
+                # Relative defaults resolve against the image WORKDIR, which is
+                # inside the tree, so they are task-local too.
+                default = str(SERVER / default)
             try:
                 inside = Path(default).relative_to(ROOT).as_posix()
             except ValueError:
@@ -584,6 +706,55 @@ def _compose() -> dict:
     services = data.get("services") or {}
     assert services, "docker-compose.yml declares no services"
     return services
+
+
+def _deployment_producers() -> list[str]:
+    """Every file in this repo that can set container environment.
+
+    Enumerated by glob, not listed by hand. The dark_unless entry claims NO
+    producer in the repo arms a flag, and a check that reads two files cannot
+    support a claim about all of them -- a third producer could arm it while
+    the gate stayed green. Discovering the set means a NEW producer is covered
+    the day it is added.
+    """
+    producers = [
+        path.relative_to(ROOT).as_posix()
+        for pattern in ("deploy/*", ".github/workflows/*.yml", ".github/workflows/*.yaml")
+        for path in sorted(ROOT.glob(pattern))
+        if path.is_file()
+    ]
+    producers.append("docker-compose.yml")
+    assert len(producers) >= 5, (
+        f"only {len(producers)} deployment producers found; the glob is broken "
+        "and the dark_unless check would be near-vacuous"
+    )
+    return producers
+
+
+def _producers_arming(flag: str) -> list[str]:
+    """Producers that set ``flag`` to the arming value 1, in any spelling.
+
+    Text-matched across every producer shape (Dockerfile ENV, compose mapping,
+    workflow env, JSON) because these files have four different syntaxes and a
+    per-format parser would quietly skip the one it does not know.
+    """
+    armed = []
+    spellings = (
+        f"{flag}=1",
+        f'{flag}="1"',
+        f"{flag}='1'",
+        f"{flag}: 1",
+        f'{flag}: "1"',
+        f"{flag}: '1'",
+    )
+    for relative in _deployment_producers():
+        try:
+            text = (ROOT / relative).read_text(encoding="utf-8", errors="ignore")
+        except OSError:  # pragma: no cover - unreadable producer
+            continue
+        if any(spelling in text for spelling in spellings):
+            armed.append(relative)
+    return armed
 
 
 def _dockerfile_instructions(relative: str) -> list[tuple[str, str]]:
@@ -660,6 +831,10 @@ D = Path(os.environ.get("FORM_PATH_CALL", Path(SERVER_DIR) / "d.db"))
 E = os.environ.get("FORM_BARE_STRING", "/data/state/e.db")
 F = os.environ.get("FORM_NOT_A_PATH", str(64 * 1024))
 G = os.environ["FORM_NO_DEFAULT"]
+H = os.environ.get("FORM_URL", "https://api.example.com/v1")
+I = os.environ.get("FORM_RELATIVE", "data/relative.db")
+J = os.environ.get("FORM_TOKEN", "legacy")
+K = os.getenv("FORM_OPAQUE_HELPER", default_state_file())
 '''
 
 
@@ -701,6 +876,35 @@ def test_the_default_expression_scan_reads_every_env_lookup_form():
     # special case, is what excludes it.
     assert not Path(seen["FORM_NOT_A_PATH"] or "x").is_absolute()
 
+    # The three-way classifier, which is what decides whether a default is
+    # examined, skipped, or must be declared by hand.
+    constants = _module_constants(tree)
+    kinds = {
+        var: _classify_default(default, constants)[0]
+        for var, default in _env_default_calls(tree)
+    }
+    assert kinds["FORM_ENVIRON_GET"] == "path"
+    assert kinds["FORM_GETENV"] == "path"
+    assert kinds["FORM_KEYWORD"] == "path"
+    assert kinds["FORM_BARE_STRING"] == "path"
+    assert kinds["FORM_RELATIVE"] == "path", (
+        "a relative default resolves against the image WORKDIR, which is inside "
+        "the tree, so it is task-local and must be classified as a path"
+    )
+    assert kinds["FORM_URL"] == "scalar", (
+        "a URL has slashes and is not a filesystem path; treating it as one put "
+        "nonsense like /app/server/https:/api.example.com into the ledger"
+    )
+    assert kinds["FORM_TOKEN"] == "scalar"
+    assert kinds["FORM_NOT_A_PATH"] == "scalar"
+    assert kinds["FORM_OPAQUE_HELPER"] == "opaque", (
+        "a default built by a helper call names no path anchor and matches no "
+        "textual marker. It MUST classify as opaque so the fail-closed check "
+        "forces a declaration -- an earlier version filtered unreadable "
+        "defaults by 'looks path-shaped' and this form slipped through both "
+        "ledger tiers."
+    )
+
 
 def test_no_env_default_that_looks_like_a_path_is_unreadable_to_the_scan():
     """Fail CLOSED on an expression the evaluator cannot read.
@@ -708,14 +912,14 @@ def test_no_env_default_that_looks_like_a_path_is_unreadable_to_the_scan():
     Skipping what it cannot parse is how a scan fails open: the variable never
     reaches the ledger, and nothing anywhere says a path went unexamined.
     """
-    unreadable = _unreadable_path_defaults()
+    unreadable = _unreadable_defaults()
 
     undeclared = sorted(set(unreadable) - set(_UNREADABLE_DEFAULTS))
     assert not undeclared, "\n".join(
         [
-            "these env defaults look like filesystem paths but the evaluator in "
-            "_literal_path cannot resolve them, so nothing has established "
-            "whether they are task-local:",
+            "the evaluator cannot classify these env defaults, so nothing has "
+            "established whether they are filesystem paths, let alone whether "
+            "they are task-local:",
         ]
         + [f"  {where} = {unreadable[where]}" for where in undeclared]
         + [
@@ -747,6 +951,20 @@ def test_every_hand_declared_task_local_path_names_a_control(where: str):
     """Tier two answers to the same rule as tier one, by its own evidence."""
     declared = _UNREADABLE_DEFAULTS[where]
     assert declared.why.strip(), f"{where} declares no reason"
+
+    if declared.not_a_path:
+        # Nothing to govern: a human read the expression and it holds no state.
+        # The entry exists so the scan's inability to read it is RECORDED
+        # rather than assumed away, and so a change to the expression re-opens
+        # the question through the verbatim source pin above.
+        assert declared.container_default is None, (
+            f"{where} is declared not_a_path but also names a container path"
+        )
+        return
+
+    assert declared.container_default is not None, (
+        f"{where} names no container path and is not declared not_a_path"
+    )
     assert not _on_a_durable_mount(declared.container_default, _durable_mounts()), (
         f"{where} resolves to {declared.container_default}, which is on a "
         "declared durable mount, so it does not belong in this ledger"
@@ -778,13 +996,7 @@ def test_every_hand_declared_task_local_path_names_a_control(where: str):
 
     if declared.dark_unless:
         flag = declared.dark_unless
-        armed = []
-        dockerfile = (ROOT / "deploy" / "Dockerfile.app").read_text(encoding="utf-8")
-        if f"{flag}=1" in dockerfile:
-            armed.append("deploy/Dockerfile.app")
-        for service, spec in _compose().items():
-            if str((spec.get("environment") or {}).get(flag, "")).strip() == "1":
-                armed.append(f"docker-compose.yml:{service}")
+        armed = _producers_arming(flag)
         assert not armed, (
             f"{where} is only unreachable because {flag} is not armed, and "
             f"{armed} now arms it. The surface that reads "
@@ -1094,9 +1306,11 @@ def _imported_server_modules(tree: ast.Module) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 names.update(node.module.split("."))
-            if node.level:
-                # `from . import session_annex` puts the module in names.
-                names.update(alias.name for alias in node.names)
+            # Always take the imported aliases, not only on a relative import.
+            # `from server import session_annex` and `from . import
+            # session_annex` both name the module in the alias, not the module
+            # path, and taking only the path recorded "server" and missed it.
+            names.update(alias.name for alias in node.names)
     return {name for name in names if (SERVER / f"{name}.py").exists()}
 
 
