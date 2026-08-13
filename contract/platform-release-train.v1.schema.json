@@ -57,7 +57,8 @@
         "retained_snapshot_count",
         "snapshot_overflow_acknowledgement",
         "drawing_fence",
-        "identity"
+        "identity",
+        "identity_body_sha256"
       ],
       "properties": {
         "active_writers": {"type": "integer", "minimum": 0},
@@ -74,7 +75,7 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["schema", "environment", "source_revision", "services", "body_sha256"],
+              "required": ["schema", "environment", "source_revision", "services"],
               "properties": {
                 "schema": {"const": "leaf.deployment-identity.v1"},
                 "environment": {"const": "staging"},
@@ -90,11 +91,13 @@
                     "harness": {"$ref": "#/$defs/identityService"},
                     "canonical-worker": {"$ref": "#/$defs/identityService"}
                   }
-                },
-                "body_sha256": {"$ref": "#/$defs/digest"}
+                }
               }
             }
           ]
+        },
+        "identity_body_sha256": {
+          "anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
         }
       }
     },

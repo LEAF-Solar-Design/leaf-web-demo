@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -17,6 +18,13 @@ WORKFLOW = ROOT / ".github" / "workflows" / "qualify-platform-release-resume.yml
 TRAIN_SCHEMA = ROOT / "contract" / "platform-release-train.v1.schema.json"
 RECEIPT_SCHEMA = ROOT / "contract" / "platform-release-stage-receipt.v1.schema.json"
 SCRIPT = ROOT / "scripts" / "platform_release_train.py"
+
+_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "leaf_runtime_deployment_identity", ROOT / "server" / "deployment_identity.py"
+)
+assert _IDENTITY_SPEC is not None and _IDENTITY_SPEC.loader is not None
+_IDENTITY_MODULE = importlib.util.module_from_spec(_IDENTITY_SPEC)
+_IDENTITY_SPEC.loader.exec_module(_IDENTITY_MODULE)
 
 
 def digest(number: int) -> str:
@@ -47,8 +55,10 @@ def service_evidence(service: str, number: int) -> dict:
     }
 
 
-def deployment_identity(source: str, service_digests: dict[str, str]) -> dict:
-    body = {
+def deployment_identity_evidence(
+    source: str, service_digests: dict[str, str]
+) -> tuple[dict, str]:
+    raw = {
         "schema": "leaf.deployment-identity.v1",
         "environment": "staging",
         "source_revision": source,
@@ -60,10 +70,16 @@ def deployment_identity(source: str, service_digests: dict[str, str]) -> dict:
             for service in SERVICES
         },
     }
+    body = _IDENTITY_MODULE.deployment_identity(
+        {
+            "LEAF_DEPLOYMENT_IDENTITY": json.dumps(raw),
+            "LEAF_DEPLOYMENT_ENVIRONMENT": "staging",
+        }
+    )
     payload = json.dumps(
         body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
-    return {**body, "body_sha256": "sha256:" + hashlib.sha256(payload).hexdigest()}
+    return body, "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def train() -> dict:
@@ -71,6 +87,9 @@ def train() -> dict:
         service: digest(index) for index, service in enumerate(SERVICES, start=1)
     }
     source = "a" * 40
+    identity, identity_body_sha256 = deployment_identity_evidence(
+        source, service_digests
+    )
     result = {
         "schema": "leaf.platform-release-train.v1",
         "convergence_id": "release-evidence-1",
@@ -97,7 +116,8 @@ def train() -> dict:
                 "leaf-platform-staging:7"
             ),
             "drawing_fence": "open",
-            "identity": deployment_identity(source, service_digests),
+            "identity": identity,
+            "identity_body_sha256": identity_body_sha256,
         },
         "services": {
             service: service_evidence(service, index)
@@ -165,6 +185,7 @@ def make_stale(value: dict, *services: str) -> None:
     for offset, service in enumerate(services, start=50):
         value["services"][service]["live_digest"] = digest(offset)
     value["fresh_state"]["identity"] = None
+    value["fresh_state"]["identity_body_sha256"] = None
 
 
 def test_failed_app_resume_preserves_build_and_web_and_carries_child_inputs():
@@ -287,10 +308,17 @@ def test_exact_five_service_identity_produces_an_empty_complete_plan():
     assert plan["identity_restamp"] is False
 
 
-def test_deployment_identity_body_digest_and_service_revision_are_exact():
+def test_real_deployment_identity_and_separate_envelope_digest_are_exact():
     value = train()
-    value["fresh_state"]["identity"]["body_sha256"] = digest(999)
-    with pytest.raises(ContractError, match="deployment_identity_invalid"):
+    assert set(value["fresh_state"]["identity"]) == {
+        "schema",
+        "environment",
+        "source_revision",
+        "services",
+    }
+
+    value["fresh_state"]["identity_body_sha256"] = digest(999)
+    with pytest.raises(ContractError, match="deployment_identity_envelope_invalid"):
         compile_resume_plan(value)
 
     value = train()
@@ -299,10 +327,28 @@ def test_deployment_identity_body_digest_and_service_revision_are_exact():
         compile_resume_plan(value)
 
 
+def test_identity_payload_cannot_be_decorated_and_envelope_pair_is_atomic():
+    value = train()
+    value["fresh_state"]["identity"]["body_sha256"] = digest(999)
+    with pytest.raises(ContractError, match="deployment_identity_invalid"):
+        compile_resume_plan(value)
+
+    value = train()
+    value["fresh_state"]["identity_body_sha256"] = None
+    with pytest.raises(ContractError, match="deployment_identity_envelope_invalid"):
+        compile_resume_plan(value)
+
+    value = train()
+    value["fresh_state"]["identity"] = None
+    with pytest.raises(ContractError, match="deployment_identity_envelope_invalid"):
+        compile_resume_plan(value)
+
+
 def test_migration_or_runtime_drift_prevents_an_app_skip():
     value = train()
     value["services"]["app"]["expected_migration_fingerprint"] = digest(801)
     value["fresh_state"]["identity"] = None
+    value["fresh_state"]["identity_body_sha256"] = None
 
     plan = compile_resume_plan(value)
 
