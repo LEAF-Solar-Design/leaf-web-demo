@@ -324,6 +324,7 @@ RECEIPT_KEYS = {
     "workflow_blob",
     "supply_artifact_id",
     "supply_sha256",
+    "supply_predicate_sha256",
     "service",
     "decision",
     "candidate_digest",
@@ -381,6 +382,7 @@ def _validate_receipt(
         "workflow_blob": train["source"]["workflow_blob"],
         "supply_artifact_id": train["supply"]["artifact_id"],
         "supply_sha256": train["supply"]["artifact_sha256"],
+        "supply_predicate_sha256": train["supply"]["predicate_sha256"],
     }
     if any(receipt[key] != item for key, item in expected_identity.items()):
         raise ContractError("stage_receipt_identity_mismatch")
