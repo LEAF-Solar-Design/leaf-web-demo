@@ -130,6 +130,32 @@ def test_build_attestation_rejects_revision_source_digest_mismatch(tmp_path):
 # source fails the suite so a resolution bug can never skip-launder past the
 # gate floor. Hosts that genuinely lack the source opt out explicitly with
 # LEAF_AUTOFILL_SOLVER_ABSENT_OK=1, which produces a visible skip.
+def _main_checkout_root():
+    """Root of the PRIMARY checkout, even when this file runs from a linked
+    worktree. A fixed parent hop from server/tests is only correct in the
+    primary tree: under .claude/worktrees/<name> the same hop lands on the
+    worktrees directory, so the sibling probe below could never find a solver
+    checkout that is present on the host, and the required resolution-policy
+    test failed on every worktree session. In a linked worktree `.git` is a
+    file holding `gitdir: <main>/.git/worktrees/<name>`, which names the
+    primary tree exactly."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        dot_git = parent / ".git"
+        if dot_git.is_dir():
+            return parent
+        if dot_git.is_file():
+            raw = dot_git.read_text(encoding="utf-8").strip()
+            gitdir = Path(raw[len("gitdir:"):].strip())
+            if not gitdir.is_absolute():
+                gitdir = (parent / gitdir).resolve()
+            # <main>/.git/worktrees/<name> -> <main>
+            if len(gitdir.parents) >= 3:
+                return gitdir.parents[2]
+            return parent
+    return here.parents[2]
+
+
 def _resolve_solver_root():
     env_root = os.environ.get("AUTOFILL_SOLVER_ROOT")
     if env_root:
@@ -137,7 +163,7 @@ def _resolve_solver_root():
         if not (root / "solver.py").is_file():
             return None, f"AUTOFILL_SOLVER_ROOT is set but invalid: {env_root!r}"
         return root, None
-    sibling = Path(__file__).resolve().parents[3] / "autofill-solver"
+    sibling = _main_checkout_root().parent / "autofill-solver"
     if (sibling / "solver.py").is_file():
         return sibling, None
     return None, None
