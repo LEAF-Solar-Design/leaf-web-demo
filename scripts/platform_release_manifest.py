@@ -483,6 +483,11 @@ def validate_v3_manifest(manifest: dict[str, Any]) -> None:
             value = service[field]
             if not isinstance(value, str) or not _SOURCE_HASH.fullmatch(value):
                 raise ContractError(f"{name} v3 {field} is invalid")
+        expected_lookup_tag = f"surface-v1-{service['surface_fingerprint']}"
+        if service["immutable_lookup_tag"] != expected_lookup_tag:
+            raise ContractError(
+                f"{name} v3 lookup tag does not bind its surface fingerprint"
+            )
         if (
             not isinstance(service["producer_run_id"], int)
             or not _RUN_ID.fullmatch(str(service["producer_run_id"]))
