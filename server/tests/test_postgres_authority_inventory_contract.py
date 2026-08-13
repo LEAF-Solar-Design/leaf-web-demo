@@ -531,6 +531,87 @@ def test_contract_requires_postgres_annex_authority_for_postgres_sessions() -> N
     assert enforcement.count("validate_session_annex_authority()") >= 2
 
 
+# One row per place where a record points at a rule STATED IN ANOTHER RECORD
+# instead of restating it. Each row pins the pair, so the cited text cannot be
+# deleted while a live citation still points at it. A row is NOT a summary of
+# the rule and must never become one: `cited_must_contain` holds the shortest
+# phrases that fix the rule's SUBSTANCE (the variable it names, the ordering it
+# imposes), because a looser marker would pass over a record that kept the
+# wording and lost the meaning.
+#
+# Adding a citation means appending a row. REMOVING a citation means deleting
+# its row in the same change, and `removal_note` says so at the failure site so
+# the next session does not have to infer it.
+CROSS_RECORD_CITATIONS = [
+    {
+        "citing": ("session_annex", "rollback_mode"),
+        "citation_marker": "the ordering rule recorded for LEAF_SESSIONS_STORE",
+        "cited": ("app_sessions_and_approvals", "rollback_mode"),
+        "cited_must_contain": (
+            "SESSIONS_DB",
+            "rollback off postgres on staging must set SESSIONS_DB to durable "
+            "storage in the same transaction",
+            "before or with the selector change, never after",
+        ),
+        "removal_note": (
+            "If dropping the annex citation is deliberate, delete this row from "
+            "CROSS_RECORD_CITATIONS in the same change. Leaving the row makes "
+            "this test guard a pairing that no longer exists; deleting the row "
+            "without dropping the citation leaves the citation unguarded."
+        ),
+    },
+]
+
+
+def _authority_field(inventory: dict, authority_id: str, field: str) -> str:
+    authority = next(
+        item for item in inventory["authorities"] if item["id"] == authority_id
+    )
+    return authority[field]
+
+
+def test_cited_rules_survive_at_the_record_that_states_them() -> None:
+    """A citation must not outlive the text it points at.
+
+    `session_annex.rollback_mode` does not restate the SESSIONS_DB ordering
+    rule; it says the rule recorded for LEAF_SESSIONS_STORE "applies here
+    identically". That is only true while the rule is actually recorded there.
+    Before PR #587 it was not, and every gate stayed green, because the
+    surrounding checks assert `rollback_mode` is non-empty and nothing more.
+
+    So this asserts the PAIRING, not a substring in isolation: the cited text
+    is required BECAUSE the citation exists, and the requirement lifts when the
+    citation is deliberately removed. The rule stays stated once, at the cited
+    record, which is the whole point of #587 -- do not satisfy a failure here
+    by restating it in the citing record.
+    """
+    inventory = _load_inventory()
+
+    for citation in CROSS_RECORD_CITATIONS:
+        citing_id, citing_field = citation["citing"]
+        cited_id, cited_field = citation["cited"]
+        citing_text = _authority_field(inventory, citing_id, citing_field)
+        cited_text = _authority_field(inventory, cited_id, cited_field)
+        where = (
+            f"{citing_id}.{citing_field} -> {cited_id}.{cited_field}"
+        )
+
+        assert citation["citation_marker"] in citing_text, (
+            f"{where}: the citation is gone from {citing_id}.{citing_field}, so "
+            f"this row now guards nothing. {citation['removal_note']}"
+        )
+
+        for required in citation["cited_must_contain"]:
+            assert required in cited_text, (
+                f"{where}: DANGLING CITATION. {citing_id}.{citing_field} still "
+                f"cites this rule, but {cited_id}.{cited_field} no longer "
+                f"contains {required!r}. Restore it at {cited_id}."
+                f"{cited_field} (its single home) rather than restating it in "
+                f"{citing_id}, or drop the citation and this row together. "
+                f"{citation['removal_note']}"
+            )
+
+
 def test_contract_rejects_missing_or_weakened_dependencies() -> None:
     inventory = _load_inventory()
 

@@ -43,10 +43,10 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     suites = {suite.id: suite for suite in g.build_suites()}
 
     inventory = suites["server-postgres-authority-inventory"]
-    # 8 since the session_annex selector dependency was added (was 7). Mirrors
+    # 9 since the cross-record citation pin was added (was 7, then 8). Mirrors
     # the floor in run-all-gates.py; BOTH must move together when the contract
     # file gains a test, and only alongside a re-measured run-all-gates.py floor.
-    assert inventory.expected == 8
+    assert inventory.expected == 9
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     annex = suites["server-session-annex-store"]
