@@ -224,6 +224,24 @@ def test_enabled_selector_is_rejected(selectors: dict[str, object]) -> None:
         compare_shadow(evidence)
 
 
+@pytest.mark.parametrize(
+    "observed_at",
+    [
+        "2026-08-13 08:00:00+00:00",
+        "2026-W33-4T08:00:00+00:00",
+        "2026-08-13T08:00:00",
+        "2026-08-13T08:00Z",
+        "2026-13-13T08:00:00Z",
+    ],
+)
+def test_non_rfc3339_observation_time_is_rejected(observed_at: str) -> None:
+    evidence = _evidence()
+    evidence["checkpoint"]["observed_at"] = observed_at
+
+    with pytest.raises(ContractError, match="checkpoint_invalid"):
+        compare_shadow(evidence)
+
+
 def test_duplicate_json_key_is_rejected() -> None:
     with pytest.raises(ContractError, match="duplicate_json_key"):
         load_json(StringIO('{"schema":"first","schema":"second"}'))

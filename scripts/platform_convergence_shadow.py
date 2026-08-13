@@ -19,6 +19,9 @@ SERVICES = ("web", "app", "broker", "harness", "canonical-worker")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+_RFC3339 = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 class ContractError(ValueError):
@@ -92,7 +95,7 @@ def _checkpoint(value: Any) -> dict[str, Any]:
         "checkpoint_invalid",
     )
     observed = result["observed_at"]
-    if not isinstance(observed, str):
+    if not isinstance(observed, str) or _RFC3339.fullmatch(observed) is None:
         raise ContractError("checkpoint_invalid")
     try:
         parsed = datetime.fromisoformat(observed.replace("Z", "+00:00"))
