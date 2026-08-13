@@ -1,26 +1,49 @@
 # PostgreSQL production cutover
 
-PostgreSQL support now spans migrations `0001` through `0020`. Production
-authority has not been proven to have moved. Repository defaults still select
-SQLite, files, process memory, or disabled mutation for every opt-in shared
-authority.
+PostgreSQL support spans every migration file in
+[`platform/migrations/`](../platform/migrations). That directory is the list.
+`migration_manifest()` globs it, and
+`server/tests/test_postgres_authority_inventory_contract.py` fails when the
+inventory's `scope.migration_ids` does not match it exactly. Read the range
+from there rather than from this document, which cannot stay current across a
+merge that adds a file. Production authority has not been proven to have moved.
+Repository defaults still select SQLite, files, process memory, or disabled
+mutation for every opt-in shared authority.
 
 The machine-readable source for selector ownership and cutover readiness is
 [`platform/authority-inventory.json`](../platform/authority-inventory.json).
 It records PostgreSQL tables, legacy sources, backfill and parity status,
-cutover modes, rollback limits, and live selection evidence. The inventory
-marks the current staging and production selections as unknown because this
-repository has no current task-definition environment receipt for either
-environment. Do not infer a live selection from a Dockerfile or Compose
-default.
+cutover modes, rollback limits, and live selection evidence.
+
+To read the current staging and production selections, open that file and check
+each authority's `current_selection.staging.status` and
+`current_selection.production.status`, then read the top-level
+`selection_evidence` for what each environment has and has not receipted. Some
+selections carry a receipt and some are still `unknown`. Which is which changes
+every time a receipt lands, so this document does not restate them and no
+count here would survive the next one. A status of `measured_no_override` is
+not an operator selection for that environment: the task definition set
+nothing and the value is what the image bakes. `scope.reason` defines it, and
+the `app_sessions_and_approvals` production record works it through across both
+layers. So do not infer a live selection from a Dockerfile or Compose default,
+and do not treat a recorded status as current without re-reading the task
+definition revision and image digest it names, because both age.
 
 ## Migration inventory
 
-The migration runner applies every sorted `NNNN_*.sql` file, which is all 20
-files in this commit. `assert_schema_current()` validates the API and canonical
+The migration runner applies every sorted `NNNN_*.sql` file in
+`platform/migrations/`, so the set is whatever that directory holds at the
+commit you deploy. `assert_schema_current()` validates the API and canonical
 worker's required table and column subset and reports the shipped manifest
 count. It is not an applied-migration ledger and does not prove that every
 authority table exists.
+
+The table below covers `0001` through `0020` and is deliberately not extended
+per migration. A hand-kept row list decays on the next merge for exactly the
+reason a count does, and the per-authority rows under "Current authority
+summary" already carry the migration numbers that matter for a cutover
+decision. Read it as orientation for the early domains, not as the current
+list.
 
 | Migration | PostgreSQL implementation |
 |---|---|
