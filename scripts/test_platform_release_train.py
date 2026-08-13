@@ -113,7 +113,7 @@ def receipt(value: dict, stage: str, *, state: str = "terminal") -> dict:
     ordinal = ("build", *SERVICES, "identity").index(stage)
     service = stage if stage in SERVICES else None
     service_value = value["services"].get(stage)
-    mutation_started = service is not None and state == "terminal"
+    mutation_started = (service is not None or stage == "identity") and state == "terminal"
     decision = "failed" if state == "failed" else (
         "adopted" if stage == "build" else "restamped" if stage == "identity" else "deployed"
     )
@@ -261,6 +261,19 @@ def test_later_terminal_receipt_cannot_skip_an_incomplete_earlier_stage():
 
     assert plan["status"] == "stopped"
     assert plan["code"] == "stage_receipt_order_invalid"
+    assert plan["actions"] == []
+
+
+def test_terminal_identity_cannot_precede_a_service_that_needs_work():
+    value = train()
+    value["receipts"].append(receipt(value, "identity"))
+    value["services"]["web"]["runtime_contract_sha256"] = digest(999)
+
+    plan = compile_resume_plan(value)
+
+    assert plan["status"] == "stopped"
+    assert plan["code"] == "stage_receipt_order_invalid"
+    assert plan["preserved_stages"] == ["build", "identity"]
     assert plan["actions"] == []
 
 
