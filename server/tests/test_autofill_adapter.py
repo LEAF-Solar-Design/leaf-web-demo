@@ -145,12 +145,24 @@ def _main_checkout_root():
         if dot_git.is_dir():
             return parent
         if dot_git.is_file():
-            raw = dot_git.read_text(encoding="utf-8").strip()
+            # Every branch below falls back to `parent`, which IS a checkout
+            # root: this runs at import, so a raise here would error the whole
+            # module rather than fail one test.
+            try:
+                raw = dot_git.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                return parent
+            if not raw.startswith("gitdir:"):
+                return parent
             gitdir = Path(raw[len("gitdir:"):].strip())
             if not gitdir.is_absolute():
                 gitdir = (parent / gitdir).resolve()
-            # <main>/.git/worktrees/<name> -> <main>
-            if len(gitdir.parents) >= 3:
+            # Only a LINKED WORKTREE points at <main>/.git/worktrees/<name>,
+            # and only for it is the primary tree somewhere else. A submodule
+            # points at <super>/.git/modules/<name>, where hopping three
+            # parents would hand back the superproject; its own checkout root
+            # is `parent`.
+            if gitdir.parent.name == "worktrees" and len(gitdir.parents) >= 3:
                 return gitdir.parents[2]
             return parent
     return here.parents[2]
