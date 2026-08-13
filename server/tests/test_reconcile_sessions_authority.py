@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -220,17 +221,55 @@ def test_inventory_declares_both_commands_for_the_sessions_authority():
 
 
 def test_inventory_records_the_measured_staging_selection():
-    """The field this lane closed. It read 'is not recorded' before."""
+    """The field this lane closed. It read 'is not recorded' before.
+
+    WHAT CHANGED HERE, and why it is not a loosened gate. This test used to
+    assert the literal value ``dual_write_shadow`` and the literal revision
+    ``leaf-platform-app-alt:27``. Both were true when written and both are now
+    false: the P4A typed cutover moved the selector to ``postgres`` AND moved
+    the serving color, so a snapshot pin failed twice over. Worse, it made the
+    stale record load-bearing, so the next person to correct the inventory reded
+    a test for doing the right thing, which is how a false record survives.
+
+    So the snapshot is gone and the PROPERTY it existed to protect stays: the
+    staging selection is a real measurement, its value is one this authority's
+    own selector declares, and its evidence cites BOTH layers -- a task
+    definition revision and an image digest -- because a task definition alone
+    cannot establish a selection when an image ENV survives an absent override.
+    That last half is a strengthening: the old record cited only a revision, so
+    a revert to the pre-branch evidence now reds where it used to pass.
+
+    None of it decays on remeasurement. The status assertion admits ``verified``
+    as well, because the vocabulary defines that as "measured AND reconciled",
+    so pinning ``measured`` alone would red the one upgrade this record can
+    legitimately receive -- which is the same snapshot trap, one field over.
+    Blanking the evidence, dropping either layer's citation, downgrading the
+    status, or recording a mode the selector does not allow all still red.
+    """
     inventory = json.loads(INVENTORY)
     entry = next(
         item for item in inventory["authorities"]
         if item["id"] == "app_sessions_and_approvals"
     )
     staging = entry["current_selection"]["staging"]
-    assert staging["value"] == "dual_write_shadow"
-    assert staging["status"] == "measured"
-    # The evidence must name the task definition it was read from.
-    assert "leaf-platform-app-alt:27" in staging["evidence"]
+    assert staging["status"] in {"measured", "verified"}
+    if staging["status"] == "verified":
+        # Admitting the upgrade is not the same as admitting the CLAIM. The
+        # vocabulary defines verified as "measured AND reconciled", and this
+        # authority's reconciliation is the backfill and parity commands, so a
+        # record may only call itself verified once both report complete. Without
+        # this, widening the status set would have quietly retired a guard the
+        # old literal `== "measured"` gave for free.
+        assert entry["backfill"]["status"] == "complete"
+        assert entry["parity"]["status"] == "complete"
+    selector = next(
+        item for item in entry["selectors"]
+        if item["name"] == "LEAF_SESSIONS_STORE"
+    )
+    assert staging["value"] in selector["allowed_modes"]
+    # Both layers, or the record does not support its own status.
+    assert re.search(r"leaf-platform-app(-alt)?:\d+", staging["evidence"])
+    assert "@sha256:" in staging["evidence"]
 
 
 def test_app_image_contains_the_reconciliation_command():
@@ -429,7 +468,16 @@ def test_backfill_then_parity_passes_and_carries_every_column(source, target):
 
 @requires_database
 def test_target_only_rows_are_expected_and_never_a_failure(source, target):
-    """Staging dual-writes while this runs, so PostgreSQL leads the source."""
+    """A DUAL-WRITING source leads to target-only rows, so they are not a failure.
+
+    Named by the condition rather than by the environment, deliberately. This
+    said "Staging dual-writes while this runs", which was true when written and
+    stopped being true when staging's LEAF_SESSIONS_STORE went to `postgres`:
+    only `dual_write` and `dual_write_shadow` are in
+    `session_store._DUAL_WRITE_MODES`. The tolerance under test is a property of
+    the MODE, and reading it as a property of staging is what makes a frozen
+    source against a growing target look like a clean parity run.
+    """
     session = source.session()
     RECONCILE.reconcile(sqlite_path=source.path, mode="backfill")
     with target.transaction() as conn:
