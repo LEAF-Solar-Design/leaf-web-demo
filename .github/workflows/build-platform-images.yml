@@ -942,15 +942,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "reuse=false" >> "$GITHUB_OUTPUT"
-          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]; then
-            echo "::notice::Digest-aware producer is source-ready but dormant until the reviewed Terraform consumer lands."
-            exit 0
-          fi
-          if [ "${FORCE_REBUILD_ALL:-false}" = "true" ]; then
-            echo "::notice::The requested security refresh forces a fresh build and attestation for every surface."
-            exit 0
-          fi
-
           case "${{ matrix.image }}" in
             app) bases=(python:3.12-slim) ;;
             broker) bases=(node:20-slim python:3.12-slim) ;;
@@ -993,6 +984,18 @@ jobs:
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
           echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
           echo "lookup_tag=$lookup_tag" >> "$GITHUB_OUTPUT"
+
+          # Evidence identity is always produced. The selector below controls
+          # only signed reuse discovery and never whether the release carries
+          # a provider-bound v3 description of the images it actually chose.
+          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]; then
+            echo "::notice::Digest-aware reuse remains dormant; continuing with a fresh build and strong evidence."
+            exit 0
+          fi
+          if [ "${FORCE_REBUILD_ALL:-false}" = "true" ]; then
+            echo "::notice::The requested security refresh forces a fresh build and attestation for every surface."
+            exit 0
+          fi
 
           if ! response="$(aws ecr batch-get-image \
               --repository-name "$IMAGE_NAME" \
@@ -1362,7 +1365,7 @@ jobs:
           cache-to: ${{ steps.cache.outputs.to }}
 
       - name: Set up Node for the signed web artifact
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
+        if: matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -1371,7 +1374,7 @@ jobs:
 
       - name: Hash the signed web deployment artifact
         id: surface-web
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
+        if: matrix.image == 'web' && steps.surface.outputs.reuse != 'true'
         working-directory: web
         env:
           VITE_API_BASE: ""
@@ -1391,7 +1394,7 @@ jobs:
           echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the exact v3 web deployment artifact
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && matrix.image == 'web'
+        if: matrix.image == 'web'
         uses: actions/upload-artifact@v4
         with:
           name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -1400,7 +1403,7 @@ jobs:
           retention-days: 30
 
       - name: Create exact surface provenance predicate
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && steps.surface.outputs.reuse != 'true'
+        if: steps.surface.outputs.reuse != 'true'
         env:
           IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
@@ -1437,7 +1440,6 @@ jobs:
           push-to-registry: true
 
       - name: Materialize one exact v3 service entry
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
         env:
           BUILT_DIGEST: ${{ steps.build-image.outputs.digest }}
           REUSED_DIGEST: ${{ steps.surface.outputs.digest }}
@@ -1482,7 +1484,6 @@ jobs:
           ' "$RUNNER_TEMP/surface-predicate.json" > "$RUNNER_TEMP/service-entry.json"
 
       - name: Upload exact v3 service entry
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -1491,18 +1492,10 @@ jobs:
           retention-days: 30
 
   verify:
-    # The FULL-BUILD path's fan-in: the matrix succeeded, and the five
-    # release-tag digests plus the deterministic web artifact become the
-    # immutable staging supply set. The run's other green path — the
-    # matrix skipped because `adopt` aliased a verified speculative
-    # supply set — writes the same supply set INSIDE the adopt job since
-    # the 2026-08-05 fold (byte-identical steps, contract-test-pinned),
-    # so this job must not also run there: the two writers are mutually
-    # exclusive by construction (build runs only when adopted != 'true'),
-    # and upload-artifact would refuse the duplicate names anyway. Every
-    # other combination skips verify and the run carries whatever
-    # failure caused it. `adopt` stays in needs for the byte-identical
-    # env sources, not for gating.
+    # The full-build path fans five matrix-owned v3 entries into one strict
+    # provider-bound supply set. The selector-gated speculative adoption path
+    # owns its existing supply artifact inside adopt. Build and adopt remain
+    # mutually exclusive, so this job never rewrites an adopted artifact.
     needs: [prepare, adopt, build]
     if: >-
       ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
@@ -1527,46 +1520,16 @@ jobs:
           persist-credentials: false
 
       - name: Download exact v3 service entries
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: surface-result-*-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/surface-results
 
       - name: Download exact v3 web deployment artifact
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'
         uses: actions/download-artifact@v4
         with:
           name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: web/dist
-
-      - uses: actions/setup-node@v4
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED != 'true'
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build and hash the exact web deployment artifact
-        id: web-artifact
-        if: env.DIGEST_AWARE_CONVERGENCE_ENABLED != 'true'
-        working-directory: web
-        env:
-          VITE_API_BASE: ""
-          VITE_MOCK: "0"
-          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
-          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
-          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
-          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run build
-          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
-            "$LEAF_SOURCE_SHA" > dist/health.json
-          artifact_sha256=$(python ../scripts/platform_release_manifest.py \
-            digest-web-dist --root dist)
-          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -1583,110 +1546,52 @@ jobs:
           ADOPTED_SPEC_RUN_ID: ${{ needs.adopt.outputs.spec_run_id }}
         run: |
           set -euo pipefail
-          if [ "$DIGEST_AWARE_CONVERGENCE_ENABLED" = "true" ]; then
-            declare -A entries
-            for image in app broker canonical-worker harness web; do
-              mapfile -t matches < <(find "$RUNNER_TEMP/surface-results" -type f \
-                -path "*/surface-result-$image-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}/service-entry.json" \
-                -print)
-              if [ "${#matches[@]}" != "1" ]; then
-                echo "::error::Expected one exact v3 service entry for $image, found ${#matches[@]}."
-                exit 1
-              fi
-              entries["$image"]="${matches[0]}"
-              digest="$(jq -er '.image_digest' "${matches[0]}")"
-              repository="$(jq -er '.repository' "${matches[0]}")"
-              [ "$repository" = "leaf-platform-$image" ] || {
-                echo "::error::V3 service entry for $image names $repository."
-                exit 1
-              }
-              count="$(aws ecr batch-get-image \
-                --repository-name "$repository" \
-                --image-ids "imageDigest=$digest" \
-                --query 'length(images)' \
-                --output text)"
-              [ "$count" = "1" ] || {
-                echo "::error::V3 service entry for $image is absent from ECR."
-                exit 1
-              }
-            done
-            python scripts/platform_release_manifest.py generate-v3 \
-              --release-source-revision "${{ needs.prepare.outputs.source_sha }}" \
-              --release-source-tree "$(git rev-parse 'HEAD^{tree}')" \
-              --build-run-id "$GITHUB_RUN_ID" \
-              --build-run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --service-entry "app=${entries[app]}" \
-              --service-entry "broker=${entries[broker]}" \
-              --service-entry "canonical-worker=${entries[canonical-worker]}" \
-              --service-entry "harness=${entries[harness]}" \
-              --service-entry "web=${entries[web]}" \
-              --output "$RUNNER_TEMP/staging-supply-set.json"
-            {
-              echo "## Digest-aware five-service staging supply set verified"
-              echo ""
-              echo "Release source: \`${{ needs.prepare.outputs.source_sha }}\`"
-              for image in app broker canonical-worker harness web; do
-                disposition="$(jq -er '.build_disposition' "${entries[$image]}")"
-                digest="$(jq -er '.image_digest' "${entries[$image]}")"
-                producer="$(jq -er '.producer_source_revision' "${entries[$image]}")"
-                echo "- \`leaf-platform-$image@$digest\`: $disposition from \`$producer\`"
-              done
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
-            echo "::error::Refusing to verify an unapproved immutable tag: $TAG"
-            exit 1
-          fi
-          declare -A digests
+          declare -A entries
           for image in app broker canonical-worker harness web; do
-            repository="leaf-platform-$image"
-            digest="$(aws ecr batch-get-image \
-              --repository-name "$repository" \
-              --image-ids "imageTag=$TAG" \
-              --query 'images[0].imageId.imageDigest' \
-              --output text)"
-            if [[ -z "$digest" || "$digest" == "None" ]]; then
-              echo "::error::$repository does not contain $TAG"
+            mapfile -t matches < <(find "$RUNNER_TEMP/surface-results" -type f \
+              -path "*/surface-result-$image-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}/service-entry.json" \
+              -print)
+            if [ "${#matches[@]}" != "1" ]; then
+              echo "::error::Expected one exact v3 service entry for $image, found ${#matches[@]}."
               exit 1
             fi
-            digests["$image"]="$digest"
+            entries["$image"]="${matches[0]}"
+            digest="$(jq -er '.image_digest' "${matches[0]}")"
+            repository="$(jq -er '.repository' "${matches[0]}")"
+            [ "$repository" = "leaf-platform-$image" ] || {
+              echo "::error::V3 service entry for $image names $repository."
+              exit 1
+            }
+            count="$(aws ecr batch-get-image \
+              --repository-name "$repository" \
+              --image-ids "imageDigest=$digest" \
+              --query 'length(images)' \
+              --output text)"
+            [ "$count" = "1" ] || {
+              echo "::error::V3 service entry for $image is absent from ECR."
+              exit 1
+            }
           done
-          # Adopted digests get the v2 schema: same deployable fields, plus
-          # the tree identity and the speculative run that built them. The
-          # generator fails closed on a partial provenance set.
-          SPECULATIVE_ARGS=()
-          if [ "$ADOPTED" = "true" ]; then
-            SPECULATIVE_ARGS+=(
-              --source-tree "$(git rev-parse 'HEAD^{tree}')"
-              --speculative-built-from "$ADOPTED_BUILT_FROM"
-              --speculative-pr-number "$ADOPTED_PR_NUMBER"
-              --speculative-run-id "$ADOPTED_SPEC_RUN_ID"
-            )
-          fi
-          python scripts/platform_release_manifest.py generate \
-            --source-revision "${{ needs.prepare.outputs.source_sha }}" \
-            --build-tag "$TAG" \
-            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
-            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
-            --web-artifact-sha256 "${{ steps.web-artifact.outputs.sha256 }}" \
-            --image "app=${digests[app]}" \
-            --image "broker=${digests[broker]}" \
-            --image "canonical-worker=${digests[canonical-worker]}" \
-            --image "harness=${digests[harness]}" \
-            --image "web=${digests[web]}" \
-            ${SPECULATIVE_ARGS[@]+"${SPECULATIVE_ARGS[@]}"} \
+          python scripts/platform_release_manifest.py generate-v3 \
+            --release-source-revision "${{ needs.prepare.outputs.source_sha }}" \
+            --release-source-tree "$(git rev-parse 'HEAD^{tree}')" \
+            --build-run-id "$GITHUB_RUN_ID" \
+            --build-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --service-entry "app=${entries[app]}" \
+            --service-entry "broker=${entries[broker]}" \
+            --service-entry "canonical-worker=${entries[canonical-worker]}" \
+            --service-entry "harness=${entries[harness]}" \
+            --service-entry "web=${entries[web]}" \
             --output "$RUNNER_TEMP/staging-supply-set.json"
           {
-            echo "## Five-service staging supply set verified"
+            echo "## Provider-bound five-service staging supply set verified"
             echo ""
-            echo "Source: \`${{ needs.prepare.outputs.source_sha }}\`"
-            echo "Tag: \`$TAG\`"
-            if [ "$ADOPTED" = "true" ]; then
-              echo "Adopted from speculative run \`$ADOPTED_SPEC_RUN_ID\` (PR #$ADOPTED_PR_NUMBER) with zero rebuild."
-            fi
+            echo "Release source: \`${{ needs.prepare.outputs.source_sha }}\`"
             for image in app broker canonical-worker harness web; do
-              echo "- \`leaf-platform-$image@${digests[$image]}\`"
+              disposition="$(jq -er '.build_disposition' "${entries[$image]}")"
+              digest="$(jq -er '.image_digest' "${entries[$image]}")"
+              producer="$(jq -er '.producer_source_revision' "${entries[$image]}")"
+              echo "- \`leaf-platform-$image@$digest\`: $disposition from \`$producer\`"
             done
           } >> "$GITHUB_STEP_SUMMARY"
 

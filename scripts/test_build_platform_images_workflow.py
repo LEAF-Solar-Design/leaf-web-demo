@@ -977,15 +977,15 @@ def main() -> None:
     # execution receipt. The historical tag-only production dispatch is gone.
     assert re.search(r"handoff:\s*\n\s+needs: \[prepare\]", text)
     verify_start = text.index("  verify:")
-    verify_body = text[verify_start : text.index("  handoff:", verify_start)]
+    verify_body = text[verify_start : text.index("\n  speculate:", verify_start)]
     assert "for image in app broker canonical-worker harness web; do" in verify_body
     assert "aws ecr batch-get-image" in verify_body
-    assert '--image-ids "imageTag=$TAG"' in verify_body
-    assert "prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}" in verify_body
-    assert 'if [[ -z "$digest" || "$digest" == "None" ]]' in verify_body
-    assert "platform_release_manifest.py generate" in verify_body
-    assert "digest-web-dist --root dist" in verify_body
-    assert "--web-artifact-sha256" in verify_body
+    assert "imageDigest=$digest" in verify_body
+    assert '[ "$count" = "1" ]' in verify_body
+    assert "platform_release_manifest.py generate-v3" in verify_body
+    assert "platform_release_manifest.py generate \\" not in verify_body
+    assert "digest-web-dist --root dist" not in verify_body
+    assert "--web-artifact-sha256" not in verify_body
     assert (
         "staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}"
         in verify_body
@@ -2409,13 +2409,8 @@ def main() -> None:
         assert step.get("if") == "steps.decide.outputs.adopted == 'true'", step
         assert "continue-on-error" not in step, step
 
-    # The two legacy supply-set writers are byte-identical where bytes matter,
-    # the same idiom that keeps warm's and build's cache-bearing inputs
-    # aligned: drift between them would make the adopted path attest a
-    # different artifact than the full-build path for the same tag. The
-    # env SOURCES differ by construction — verify reads the adopt job's
-    # outputs across the needs edge, adopt reads its own decide step —
-    # and are pinned exactly.
+    # The full-build verifier consumes matrix-owned v3 entries and the exact
+    # web artifact. The dormant speculative adoption path remains isolated.
     verify_steps = wf_jobs["verify"]["steps"]
 
     def _sole_named(steps, name):
@@ -2423,32 +2418,12 @@ def main() -> None:
         assert len(found) == 1, name
         return found[0]
 
-    web_step_name = "Build and hash the exact web deployment artifact"
     write_step_name = "Write the immutable five-service staging supply set"
-    for step_name in (web_step_name, write_step_name):
-        adopt_copy = _sole_named(adopt_steps, step_name)
-        verify_copy = _sole_named(verify_steps, step_name)
-        if step_name == write_step_name:
-            legacy_start = 'if [[ ! "$TAG" =~'
-            assert legacy_start in adopt_copy["run"]
-            assert legacy_start in verify_copy["run"]
-            assert (
-                adopt_copy["run"][adopt_copy["run"].index(legacy_start):]
-                == verify_copy["run"][verify_copy["run"].index(legacy_start):]
-            ), step_name
-        else:
-            assert adopt_copy["run"] == verify_copy["run"], step_name
-        for job_name, job in wf_jobs.items():
-            if job_name in ("adopt", "verify"):
-                continue
-            for step in job.get("steps", []):
-                assert step.get("name") != step_name, (job_name, step_name)
-    adopt_web = _sole_named(adopt_steps, web_step_name)
-    verify_web = _sole_named(verify_steps, web_step_name)
-    assert adopt_web["env"] == verify_web["env"]
+    adopt_web = _sole_named(
+        adopt_steps, "Build and hash the exact web deployment artifact"
+    )
     assert adopt_web.get("working-directory") == "web"
-    assert verify_web.get("working-directory") == "web"
-    assert adopt_web.get("id") == "web-artifact" == verify_web.get("id")
+    assert adopt_web.get("id") == "web-artifact"
     adopt_write = _sole_named(adopt_steps, write_step_name)
     verify_write = _sole_named(verify_steps, write_step_name)
     assert verify_write["env"] == {
@@ -2463,15 +2438,14 @@ def main() -> None:
         "ADOPTED_PR_NUMBER": "${{ steps.decide.outputs.pr_number }}",
         "ADOPTED_SPEC_RUN_ID": "${{ steps.decide.outputs.spec_run_id }}",
     }
-    # Both writers' scripts read $TAG, so adopt must alias PROD_TAG and
-    # TAG to the same prepare output the verify job uses.
+    assert "platform_release_manifest.py generate-v3" in verify_write["run"]
+    assert "platform_release_manifest.py generate \\" not in verify_write["run"]
+    assert "surface-results" in verify_write["run"]
+    # Adopt keeps its legacy tag aliases while the full-build verifier binds
+    # immutable digests from the five v3 service entries.
     assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["verify"]["env"]["TAG"]
     assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["adopt"]["env"]["PROD_TAG"]
-    # Upload pairs: identical with: mappings, so either writer publishes
-    # the same artifact names with if-no-files-found: error — an adopted
-    # run can never conclude green without a supply set, and if both
-    # writers ever ran (they cannot: build gates verify off when adopted)
-    # upload-artifact would refuse the duplicate names loudly.
+    # Both mutually exclusive paths still fail closed on missing artifacts.
     adopt_uploads = [
         s for s in adopt_steps
         if str(s.get("uses", "")).startswith("actions/upload-artifact")
@@ -2482,8 +2456,15 @@ def main() -> None:
     ]
     assert len(adopt_uploads) == 2
     assert len(verify_uploads) == 2
-    for adopt_upload, verify_upload in zip(adopt_uploads, verify_uploads):
-        assert adopt_upload["with"] == verify_upload["with"], adopt_upload
+    assert adopt_uploads[0]["with"]["if-no-files-found"] == "error"
+    assert verify_uploads[0]["with"]["if-no-files-found"] == "error"
+    downloads = [
+        s for s in verify_steps
+        if str(s.get("uses", "")).startswith("actions/download-artifact")
+    ]
+    assert len(downloads) == 2
+    assert downloads[0]["with"]["pattern"].startswith("surface-result-")
+    assert downloads[1]["with"]["name"].startswith("surface-web-dist-")
     adopt_nodes = [
         s for s in adopt_steps
         if str(s.get("uses", "")).startswith("actions/setup-node")
@@ -2493,8 +2474,7 @@ def main() -> None:
         if str(s.get("uses", "")).startswith("actions/setup-node")
     ]
     assert len(adopt_nodes) == 1
-    assert len(verify_nodes) == 1
-    assert adopt_nodes[0]["with"] == verify_nodes[0]["with"]
+    assert verify_nodes == []
 
     # warm's and build's cache-select scripts are byte-identical, the same
     # idiom that binds their build-push inputs: drift would let one lane's
@@ -5946,8 +5926,9 @@ def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:
     dormant = code.index(
         '[ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]'
     )
+    fingerprint = code.index("surface-fingerprint")
     first_registry_read = code.index("aws ecr batch-get-image")
-    assert dormant < first_registry_read
+    assert fingerprint < dormant < first_registry_read
     assert surface["env"]["FORCE_REBUILD_ALL"] == "${{ inputs.force_rebuild_all }}"
     forced = code.index('[ "${FORCE_REBUILD_ALL:-false}" = "true" ]')
     assert dormant < forced < first_registry_read
@@ -5989,6 +5970,7 @@ def test_digest_aware_build_attests_each_built_digest_and_never_restamps_reuse()
         step for step in steps
         if step.get("name") == "Materialize one exact v3 service entry"
     )
+    assert "if" not in result
     code = _executable_bash(result["run"])
     assert "if [ \"$REUSED\" = \"true\" ]" in code
     assert "disposition=reused" in code
@@ -6010,8 +5992,66 @@ def test_digest_aware_fan_in_requires_all_five_exact_service_entries() -> None:
     assert code.count("--service-entry") == 5
     assert "generate-v3" in code
     assert "imageDigest=$digest" in code
-    assert "exit 0" in code
-    assert code.index("generate-v3") < code.index("exit 0")
+    assert "leaf.staging-supply-set.v1" not in code
+    assert "platform_release_manifest.py generate \\" not in code
+
+
+def test_selector_off_full_build_always_mints_v3_without_enabling_reuse() -> None:
+    parsed = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    assert parsed["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "false"
+    build_steps = parsed["jobs"]["build"]["steps"]
+    surface = next(step for step in build_steps if step.get("id") == "surface")
+    surface_code = _executable_bash(surface["run"])
+    fingerprint = surface_code.index("surface-fingerprint")
+    dormant = surface_code.index(
+        '[ "$DIGEST_AWARE_CONVERGENCE_ENABLED" != "true" ]'
+    )
+    registry_read = surface_code.index("aws ecr batch-get-image")
+    assert fingerprint < dormant < registry_read
+    build_image = next(step for step in build_steps if step.get("id") == "build-image")
+    assert "steps.surface.outputs.reuse != 'true'" in build_image["if"]
+    surface_tag = next(
+        tag for tag in build_image["with"]["tags"].splitlines()
+        if "surface-v1-" in tag
+    )
+    assert "env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true'" in surface_tag
+    predicate = next(
+        step for step in build_steps
+        if step.get("name") == "Create exact surface provenance predicate"
+    )
+    assert predicate["if"] == "steps.surface.outputs.reuse != 'true'"
+    attestation = next(
+        step for step in build_steps if step.get("name") == "Sign exact surface provenance"
+    )
+    assert attestation["if"] == (
+        "env.DIGEST_AWARE_CONVERGENCE_ENABLED == 'true' && "
+        "steps.surface.outputs.reuse != 'true'"
+    )
+    materialize = next(
+        step for step in build_steps
+        if step.get("name") == "Materialize one exact v3 service entry"
+    )
+    upload = next(
+        step for step in build_steps
+        if step.get("name") == "Upload exact v3 service entry"
+    )
+    assert "if" not in materialize
+    assert "if" not in upload
+    assert materialize["env"]["LOOKUP_TAG"] == "${{ steps.surface.outputs.lookup_tag }}"
+    verify_steps = parsed["jobs"]["verify"]["steps"]
+    for name in (
+        "Download exact v3 service entries",
+        "Download exact v3 web deployment artifact",
+    ):
+        step = next(candidate for candidate in verify_steps if candidate.get("name") == name)
+        assert "if" not in step
+    writer = next(
+        step for step in verify_steps
+        if step.get("name") == "Write the immutable five-service staging supply set"
+    )
+    assert writer["run"].count("--service-entry") == 5
+    assert "generate-v3" in writer["run"]
+    assert "leaf.staging-supply-set.v1" not in writer["run"]
 
 
 def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts() -> None:
