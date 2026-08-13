@@ -244,6 +244,14 @@ def validate_evidence(value: Any) -> dict[str, Any]:
         validate_v3_manifest(root["manifest"])
     except ManifestContractError as exc:
         raise ContractError("manifest_invalid") from exc
+    release_source = root["manifest"]["release_source_revision"]
+    release_tree = root["manifest"]["release_source_tree"]
+    if any(
+        service["producer_source_revision"] != release_source
+        or service["producer_source_tree"] != release_tree
+        for service in root["manifest"]["services"].values()
+    ):
+        raise ContractError("manifest_release_binding_mismatch")
     envelope = _envelope(root["envelope"])
     if envelope["supply_body_sha256"] != _canonical_sha256(root["manifest"]):
         raise ContractError("supply_body_hash_mismatch")

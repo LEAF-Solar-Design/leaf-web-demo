@@ -299,6 +299,21 @@ def test_supply_hash_and_canonical_manifest_drift_fail_closed() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [("producer_source_revision", "8" * 40), ("producer_source_tree", "9" * 40)],
+)
+def test_service_producer_must_bind_release_source_and_tree(
+    field: str, value: str
+) -> None:
+    evidence = _evidence()
+    evidence["manifest"]["services"]["broker"][field] = value
+    _rehash(evidence)
+
+    with pytest.raises(ContractError, match="manifest_release_binding_mismatch"):
+        compare_adoption(evidence)
+
+
+@pytest.mark.parametrize(
     ("field", "code"),
     [("active_writers", "active_writer_present"), ("open_markers", "open_marker_present")],
 )
