@@ -1,0 +1,72 @@
+name: Qualify dormant platform release watch
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_watch_json:
+        description: Closed fixture or captured release-event evidence JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-platform-release-watch-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Reduce captured events without execution authority
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compile the dormant watch plan
+        shell: bash
+        env:
+          RELEASE_WATCH_JSON: ${{ inputs.release_watch_json }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RELEASE_WATCH_JSON" |
+            python3 scripts/platform_release_watch.py \
+              --input - \
+              --output "$RUNNER_TEMP/platform-release-watch-plan.json"
+          python3 - "$RUNNER_TEMP/platform-release-watch-plan.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert plan["schema"] == "leaf.platform-release-watch-plan.v1"
+          assert plan["status"] in {"ready", "waiting", "complete"}
+          assert plan["dispatch_authorized"] is False
+          assert plan["selector_activation_authorized"] is False
+          assert plan["live_mutation_authorized"] is False
+          with Path("release-watch-summary.txt").open("w", encoding="utf-8") as output:
+              output.write(f"status={plan['status']}\n")
+              output.write(f"code={plan['code']}\n")
+              output.write(f"next_action={plan['next_action']}\n")
+              output.write(f"preserved_stage_count={len(plan['preserved_stages'])}\n")
+          PY
+
+      - name: Upload the safe plan and summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dormant-platform-release-watch-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/platform-release-watch-plan.json
+            release-watch-summary.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report the dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "The output is a fixture or captured-event plan with all execution authority false."
+          echo "No credential, provider API, workflow dispatch, selector, or live resource was used."
