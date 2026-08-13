@@ -308,7 +308,7 @@
         "shadow",
         "postgres"
       ],
-      "rollback_mode": "Return through shadow or dual_write only while single-task, then select legacy after reverse reconciliation. The two stores have no atomic transaction. Note that shadow is on the RETURN path, not the way forward: shadow is absent from session_store._DUAL_WRITE_MODES, so it stops mirroring to PostgreSQL entirely. Promote dual_write_shadow straight to postgres and never through shadow.",
+      "rollback_mode": "Return through shadow or dual_write only while single-task, then select legacy after reverse reconciliation. ORDERING IS MANDATORY: every mode on that return path except postgres reads legacy SQLite at SESSIONS_DB, which staging leaves unset, so on staging they all resolve to the task-local server/sessions.db that dies with the task. Any rollback off postgres on staging must set SESSIONS_DB to durable storage in the same transaction, before or with the selector change, never after. The two stores have no atomic transaction. Note that shadow is on the RETURN path, not the way forward: shadow is absent from session_store._DUAL_WRITE_MODES, so it stops mirroring to PostgreSQL entirely. Promote dual_write_shadow straight to postgres and never through shadow.",
       "current_selection": {
         "staging": {
           "value": "postgres",
