@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-release-admission.v3.schema.json",
+  "title": "Leaf platform release admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "state", "decision", "reason_code", "candidate_source_tree",
+    "impact_digest", "producer_token_digest", "release_scope_digest",
+    "prior_train_digest", "admission_window_digest", "queue_count",
+    "selector_activation_authorized", "writer_acquisition_authorized"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-release-admission.v3"},
+    "state": {"const": "SHADOW"},
+    "decision": {"enum": ["admit", "hold", "coalesce"]},
+    "reason_code": {
+      "enum": [
+        "admission_window_open", "prior_receipt_pending",
+        "nil_impact_held_during_settlement", "settlement_occupied",
+        "classification_or_census_stale", "queue_expired_reclassify",
+        "urgent_authority_exact", "settlement_in_progress"
+      ]
+    },
+    "candidate_source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "impact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_token_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "release_scope_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "prior_train_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "admission_window_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "queue_count": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "selector_activation_authorized": {"const": false},
+    "writer_acquisition_authorized": {"const": false}
+  }
+}

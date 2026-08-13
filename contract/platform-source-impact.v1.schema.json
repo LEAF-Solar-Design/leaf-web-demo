@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-source-impact.v3.schema.json",
+  "title": "Leaf platform source impact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "state", "classification", "reason_code", "affected_services",
+    "relay_base_tree", "impact_digest", "base_source_revision",
+    "base_source_tree", "candidate_source_revision", "candidate_source_tree",
+    "producer_token_digest", "release_scope_digest",
+    "selector_activation_authorized"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-source-impact.v3"},
+    "state": {"const": "SHADOW"},
+    "classification": {"enum": ["nil_impact", "product_impact"]},
+    "reason_code": {
+      "enum": [
+        "producer_inputs_equal", "producer_input_changed",
+        "producer_graph_incomplete", "deferred_reclassification_required"
+      ]
+    },
+    "affected_services": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["app", "broker", "canonical-worker", "harness", "web"]},
+      "maxItems": 5
+    },
+    "relay_base_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "impact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "base_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "base_source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate_source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "producer_token_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "release_scope_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "selector_activation_authorized": {"const": false}
+  }
+}
