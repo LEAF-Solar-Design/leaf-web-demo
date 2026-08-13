@@ -1,17 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://leafdesign.ai/contracts/platform-proof-reuse.v1.schema.json",
+  "$id": "https://leafdesign.ai/contracts/platform-proof-reuse.v2.schema.json",
   "title": "Leaf platform semantic proof reuse",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema", "state", "decision", "reason_code", "admitted_lineage_digest",
-    "prior_receipt_digest", "identity_shape_digest", "workspace_profile_count",
+    "prior_receipt_digest", "identity_shape_digest", "producer_evidence_digest",
+    "evidence_binding_digest", "release_scope_digest", "workspace_profile_count",
     "reuse_attachment_digest", "selector_activation_authorized",
     "proof_execution_authorized"
   ],
   "properties": {
-    "schema": {"const": "leaf.platform-proof-reuse.v1"},
+    "schema": {"const": "leaf.platform-proof-reuse.v2"},
     "state": {"const": "SHADOW"},
     "decision": {"enum": ["reuse", "fresh_proof"]},
     "reason_code": {
@@ -20,12 +21,19 @@
         "rollback_not_green", "product_mutation_not_clean", "lineage_incomplete",
         "source_impact_not_nil", "lineage_mismatch", "tenant_set_mismatch",
         "approval_scope_mismatch", "identity_shape_mismatch", "source_impact_mismatch",
-        "workspace_profile_mismatch"
+        "workspace_profile_mismatch", "rollback_binding_mismatch",
+        "verifier_binding_mismatch", "source_binding_mismatch",
+        "graph_binding_mismatch", "supply_binding_mismatch",
+        "producer_evidence_mismatch", "evidence_binding_mismatch",
+        "release_scope_mismatch"
       ]
     },
     "admitted_lineage_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "prior_receipt_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "identity_shape_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_evidence_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence_binding_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "release_scope_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "workspace_profile_count": {"const": 4},
     "reuse_attachment_digest": {
       "oneOf": [

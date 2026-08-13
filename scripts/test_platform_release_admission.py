@@ -38,13 +38,21 @@ def digest(name: str) -> str:
 
 
 def evidence() -> dict:
+    producer_evidence = digest("level2-producer-envelope")
+    evidence_binding = digest("level2-evidence-binding")
+    release_scope = digest("level2-release-scope")
+    impact = digest("level2-impact")
     return {
-        "schema": "leaf.platform-release-admission-input.v1",
+        "schema": "leaf.platform-release-admission-input.v2",
         "selector": "UNCONFIGURED",
         "candidate": {
-            "source_tree": "b" * 40,
+            "source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
+            "source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
             "impact_classification": "product_impact",
-            "impact_digest": digest("impact"),
+            "impact_digest": impact,
+            "producer_evidence_digest": producer_evidence,
+            "evidence_binding_digest": evidence_binding,
+            "release_scope_digest": release_scope,
             "classification_base_tree": "a" * 40,
             "approval_scope_digest": digest("scope"),
             "queue_age_seconds": 30,
@@ -63,6 +71,12 @@ def evidence() -> dict:
             "source_head": "a" * 40,
             "expected_approval_scope_digest": digest("scope"),
             "prior_train_digest": digest("prior"),
+            "expected_source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
+            "expected_source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
+            "expected_impact_digest": impact,
+            "expected_producer_evidence_digest": producer_evidence,
+            "expected_evidence_binding_digest": evidence_binding,
+            "expected_release_scope_digest": release_scope,
         },
         "limits": {"max_queue_age_seconds": 3600, "max_queue_count": 8},
         "urgent_authority": None,
@@ -129,6 +143,25 @@ def test_settlement_drift_and_bounded_queue_fail_closed(mutation, reason: str):
     assert result["reason_code"] == reason
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_revision",
+        "source_tree",
+        "impact_digest",
+        "producer_evidence_digest",
+        "evidence_binding_digest",
+        "release_scope_digest",
+    ],
+)
+def test_admission_cannot_rebind_producer_evidence_or_source(field: str):
+    value = evidence()
+    value["candidate"][field] = "f" * 40 if field in {"source_revision", "source_tree"} else digest(f"wrong-{field}")
+    result = evaluate(value)
+    assert result["decision"] == "hold"
+    assert result["reason_code"] == "producer_evidence_mismatch"
+
+
 def test_urgent_bypass_requires_exact_displaced_train_scope_and_rollback():
     value = evidence()
     value["candidate"]["urgent"] = True
@@ -137,6 +170,9 @@ def test_urgent_bypass_requires_exact_displaced_train_scope_and_rollback():
         "approval_scope_digest": digest("scope"),
         "displaced_train_digest": digest("prior"),
         "rollback_digest": digest("rollback"),
+        "producer_evidence_digest": value["candidate"]["producer_evidence_digest"],
+        "evidence_binding_digest": value["candidate"]["evidence_binding_digest"],
+        "release_scope_digest": value["candidate"]["release_scope_digest"],
     }
     assert evaluate(value)["reason_code"] == "urgent_authority_exact"
 
@@ -159,6 +195,7 @@ def test_output_schema_and_default_unconfigured_contract():
     jsonschema = jsonschema_module()
     jsonschema.Draft202012Validator.check_schema(schema)
     jsonschema.Draft202012Validator(schema).validate(result)
+    assert result["producer_evidence_digest"] == evidence()["candidate"]["producer_evidence_digest"]
 
 
 def test_manual_workflow_has_no_live_or_publication_surface(tmp_path: Path):

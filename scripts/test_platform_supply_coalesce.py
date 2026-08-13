@@ -54,16 +54,20 @@ def services() -> list[dict]:
 
 def movement(tree: str) -> dict:
     return {
+        "source_revision": ("c" if tree.startswith("c") else "d") * 40,
         "source_tree": tree,
         "impact_classification": "nil_impact",
         "impact_digest": digest(f"impact-{tree}"),
+        "producer_evidence_digest": digest(f"producer-evidence-{tree}"),
+        "evidence_binding_digest": digest(f"evidence-binding-{tree}"),
+        "release_scope_digest": digest("level2-release-scope"),
         "services": services(),
     }
 
 
 def evidence() -> dict:
     return {
-        "schema": "leaf.platform-supply-coalesce-input.v1",
+        "schema": "leaf.platform-supply-coalesce-input.v2",
         "selector": "UNCONFIGURED",
         "admission_window_digest": digest("window"),
         "movements": [movement("c" * 40), movement("d" * 40)],
@@ -130,6 +134,20 @@ def test_product_impact_refuses_even_when_supply_bytes_match():
     assert result["reason_code"] == "product_impact_present"
 
 
+def test_cross_release_replay_and_duplicate_evidence_are_refused():
+    value = evidence()
+    value["movements"][1]["release_scope_digest"] = digest("other-release")
+    result = evaluate(value)
+    assert result["decision"] == "refuse"
+    assert result["reason_code"] == "producer_evidence_changed"
+
+    duplicate = evidence()
+    duplicate["movements"][1]["producer_evidence_digest"] = duplicate["movements"][0]["producer_evidence_digest"]
+    duplicate["movements"][1]["evidence_binding_digest"] = duplicate["movements"][0]["evidence_binding_digest"]
+    with pytest.raises(ContractError, match="COALESCE_EVIDENCE_REPLAY"):
+        evaluate(duplicate)
+
+
 def test_duplicate_source_movement_is_rejected():
     value = evidence()
     value["movements"][1]["source_tree"] = value["movements"][0]["source_tree"]
@@ -148,5 +166,6 @@ def test_default_is_unconfigured_and_output_schema_is_closed():
     assert set(result) == {
         "schema", "state", "decision", "reason_code", "movement_count",
         "affected_services", "admission_window_digest", "planned_lineage_digest",
+        "release_scope_digest", "evidence_chain_digest",
         "selector_activation_authorized", "supply_mint_authorized",
     }

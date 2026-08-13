@@ -1,19 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://leafdesign.ai/contracts/platform-supply-coalesce.v1.schema.json",
+  "$id": "https://leafdesign.ai/contracts/platform-supply-coalesce.v2.schema.json",
   "title": "Leaf platform supply coalescing",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema", "state", "decision", "reason_code", "movement_count",
-    "affected_services", "admission_window_digest", "planned_lineage_digest",
+    "affected_services", "admission_window_digest", "release_scope_digest",
+    "evidence_chain_digest", "planned_lineage_digest",
     "selector_activation_authorized", "supply_mint_authorized"
   ],
   "properties": {
-    "schema": {"const": "leaf.platform-supply-coalesce.v1"},
+    "schema": {"const": "leaf.platform-supply-coalesce.v2"},
     "state": {"const": "SHADOW"},
     "decision": {"enum": ["plan", "refuse"]},
-    "reason_code": {"enum": ["complete_supply_equivalent", "product_impact_present", "producer_inputs_changed"]},
+    "reason_code": {"enum": ["complete_supply_equivalent", "product_impact_present", "producer_inputs_changed", "producer_evidence_changed"]},
     "movement_count": {"type": "integer", "minimum": 1, "maximum": 100},
     "affected_services": {
       "type": "array",
@@ -22,6 +23,8 @@
       "maxItems": 5
     },
     "admission_window_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "release_scope_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence_chain_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "planned_lineage_digest": {
       "oneOf": [
         {"type": "null"},

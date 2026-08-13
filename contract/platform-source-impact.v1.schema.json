@@ -1,16 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://leafdesign.ai/contracts/platform-source-impact.v1.schema.json",
+  "$id": "https://leafdesign.ai/contracts/platform-source-impact.v2.schema.json",
   "title": "Leaf platform source impact",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema", "state", "classification", "reason_code", "affected_services",
-    "old_tree", "new_tree", "relay_base_tree", "producer_graph_digest",
+    "old_tree", "new_tree", "relay_base_tree", "impact_digest",
+    "producer_evidence_digest", "evidence_binding_digest",
+    "producer_identity_digest", "producer_source_revision",
+    "producer_base_source_revision",
+    "producer_graph_digest", "producer_supply_digest",
+    "terminal_receipt_digest", "release_scope_digest",
     "selector_activation_authorized"
   ],
   "properties": {
-    "schema": {"const": "leaf.platform-source-impact.v1"},
+    "schema": {"const": "leaf.platform-source-impact.v2"},
     "state": {"const": "SHADOW"},
     "classification": {"enum": ["nil_impact", "product_impact"]},
     "reason_code": {
@@ -28,7 +33,16 @@
     "old_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "new_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "relay_base_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "impact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_evidence_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence_binding_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_identity_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "producer_base_source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "producer_graph_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer_supply_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "terminal_receipt_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "release_scope_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "selector_activation_authorized": {"const": false}
   }
 }

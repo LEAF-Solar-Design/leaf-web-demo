@@ -45,6 +45,9 @@ def _urgent_authority_valid(
     *,
     expected_scope: str,
     displaced_train: str,
+    producer_evidence_digest: str,
+    evidence_binding_digest: str,
+    release_scope_digest: str,
 ) -> bool:
     if not isinstance(authority, Mapping):
         return False
@@ -52,11 +55,17 @@ def _urgent_authority_valid(
         "approval_scope_digest",
         "displaced_train_digest",
         "rollback_digest",
+        "producer_evidence_digest",
+        "evidence_binding_digest",
+        "release_scope_digest",
     }:
         return False
     return (
         authority.get("approval_scope_digest") == expected_scope
         and authority.get("displaced_train_digest") == displaced_train
+        and authority.get("producer_evidence_digest") == producer_evidence_digest
+        and authority.get("evidence_binding_digest") == evidence_binding_digest
+        and authority.get("release_scope_digest") == release_scope_digest
         and isinstance(authority.get("rollback_digest"), str)
         and _DIGEST.fullmatch(authority["rollback_digest"]) is not None
     )
@@ -74,14 +83,18 @@ def evaluate_release_admission(
         {"schema", "selector", "candidate", "settlement", "limits", "urgent_authority"},
         "ADMISSION_INPUT_INVALID",
     )
-    if root["schema"] != "leaf.platform-release-admission-input.v1" or root["selector"] != "UNCONFIGURED":
+    if root["schema"] != "leaf.platform-release-admission-input.v2" or root["selector"] != "UNCONFIGURED":
         raise ContractError("ADMISSION_INPUT_INVALID")
     candidate = _exact(
         root["candidate"],
         {
             "source_tree",
+            "source_revision",
             "impact_classification",
             "impact_digest",
+            "producer_evidence_digest",
+            "evidence_binding_digest",
+            "release_scope_digest",
             "classification_base_tree",
             "approval_scope_digest",
             "queue_age_seconds",
@@ -104,6 +117,12 @@ def evaluate_release_admission(
             "source_head",
             "expected_approval_scope_digest",
             "prior_train_digest",
+            "expected_source_revision",
+            "expected_source_tree",
+            "expected_impact_digest",
+            "expected_producer_evidence_digest",
+            "expected_evidence_binding_digest",
+            "expected_release_scope_digest",
         },
         "SETTLEMENT_INVALID",
     )
@@ -120,15 +139,31 @@ def evaluate_release_admission(
         if not isinstance(settlement[key], bool):
             raise ContractError("SETTLEMENT_INVALID")
     source_tree = _sha(candidate["source_tree"], "CANDIDATE_INVALID")
+    source_revision = _sha(candidate["source_revision"], "CANDIDATE_INVALID")
     classification_base = _sha(candidate["classification_base_tree"], "CANDIDATE_INVALID")
     census_head = _sha(settlement["census_head"], "SETTLEMENT_INVALID")
     source_head = _sha(settlement["source_head"], "SETTLEMENT_INVALID")
     impact_digest = _digest(candidate["impact_digest"], "CANDIDATE_INVALID")
+    producer_evidence_digest = _digest(candidate["producer_evidence_digest"], "CANDIDATE_INVALID")
+    evidence_binding_digest = _digest(candidate["evidence_binding_digest"], "CANDIDATE_INVALID")
+    release_scope_digest = _digest(candidate["release_scope_digest"], "CANDIDATE_INVALID")
     approval_scope = _digest(candidate["approval_scope_digest"], "CANDIDATE_INVALID")
     expected_scope = _digest(
         settlement["expected_approval_scope_digest"], "SETTLEMENT_INVALID"
     )
     prior_train = _digest(settlement["prior_train_digest"], "SETTLEMENT_INVALID")
+    expected_source_revision = _sha(settlement["expected_source_revision"], "SETTLEMENT_INVALID")
+    expected_source_tree = _sha(settlement["expected_source_tree"], "SETTLEMENT_INVALID")
+    expected_impact_digest = _digest(settlement["expected_impact_digest"], "SETTLEMENT_INVALID")
+    expected_producer_evidence = _digest(
+        settlement["expected_producer_evidence_digest"], "SETTLEMENT_INVALID"
+    )
+    expected_evidence_binding = _digest(
+        settlement["expected_evidence_binding_digest"], "SETTLEMENT_INVALID"
+    )
+    expected_release_scope = _digest(
+        settlement["expected_release_scope_digest"], "SETTLEMENT_INVALID"
+    )
     queue_age = _bounded_integer(candidate["queue_age_seconds"], 0, 604800, "QUEUE_INVALID")
     queue_count = _bounded_integer(candidate["queue_count"], 1, 1000, "QUEUE_INVALID")
     max_age = _bounded_integer(limits["max_queue_age_seconds"], 1, 604800, "QUEUE_LIMIT_INVALID")
@@ -142,6 +177,15 @@ def evaluate_release_admission(
     reason = "settlement_in_progress"
     if queue_age > max_age or queue_count > max_count:
         reason = "queue_expired_reclassify"
+    elif (
+        source_revision != expected_source_revision
+        or source_tree != expected_source_tree
+        or impact_digest != expected_impact_digest
+        or producer_evidence_digest != expected_producer_evidence
+        or evidence_binding_digest != expected_evidence_binding
+        or release_scope_digest != expected_release_scope
+    ):
+        reason = "producer_evidence_mismatch"
     elif classification_base != source_head or census_head != source_head:
         reason = "classification_or_census_stale"
     elif approval_scope != expected_scope:
@@ -159,6 +203,9 @@ def evaluate_release_admission(
                 root["urgent_authority"],
                 expected_scope=expected_scope,
                 displaced_train=prior_train,
+                producer_evidence_digest=producer_evidence_digest,
+                evidence_binding_digest=evidence_binding_digest,
+                release_scope_digest=release_scope_digest,
             ):
                 decision = "admit"
                 reason = "urgent_authority_exact"
@@ -172,12 +219,15 @@ def evaluate_release_admission(
             reason = "admission_window_open"
 
     return {
-        "schema": "leaf.platform-release-admission.v1",
+        "schema": "leaf.platform-release-admission.v2",
         "state": "SHADOW",
         "decision": decision,
         "reason_code": reason,
         "candidate_source_tree": source_tree,
         "impact_digest": impact_digest,
+        "producer_evidence_digest": producer_evidence_digest,
+        "evidence_binding_digest": evidence_binding_digest,
+        "release_scope_digest": release_scope_digest,
         "prior_train_digest": prior_train,
         "admission_window_digest": sha256_digest(
             {
@@ -185,6 +235,9 @@ def evaluate_release_admission(
                 "census_head": census_head,
                 "prior_train_digest": prior_train,
                 "approval_scope_digest": expected_scope,
+                "producer_evidence_digest": producer_evidence_digest,
+                "evidence_binding_digest": evidence_binding_digest,
+                "release_scope_digest": release_scope_digest,
             }
         ),
         "queue_count": queue_count,

@@ -105,7 +105,7 @@ def evaluate_supply_coalescing(
         {"schema", "selector", "admission_window_digest", "movements"},
         "COALESCE_INPUT_INVALID",
     )
-    if root["schema"] != "leaf.platform-supply-coalesce-input.v1" or root["selector"] != "UNCONFIGURED":
+    if root["schema"] != "leaf.platform-supply-coalesce-input.v2" or root["selector"] != "UNCONFIGURED":
         raise ContractError("COALESCE_INPUT_INVALID")
     window = _digest(root["admission_window_digest"], "COALESCE_INPUT_INVALID")
     if not isinstance(root["movements"], list) or not 1 <= len(root["movements"]) <= 100:
@@ -116,9 +116,19 @@ def evaluate_supply_coalescing(
     for raw in root["movements"]:
         movement = _exact(
             raw,
-            {"source_tree", "impact_classification", "impact_digest", "services"},
+            {
+                "source_revision",
+                "source_tree",
+                "impact_classification",
+                "impact_digest",
+                "producer_evidence_digest",
+                "evidence_binding_digest",
+                "release_scope_digest",
+                "services",
+            },
             "COALESCE_MOVEMENT_INVALID",
         )
+        _sha(movement["source_revision"], "COALESCE_MOVEMENT_INVALID")
         tree = _sha(movement["source_tree"], "COALESCE_MOVEMENT_INVALID")
         if tree in trees:
             raise ContractError("COALESCE_MOVEMENT_DUPLICATE")
@@ -126,8 +136,18 @@ def evaluate_supply_coalescing(
         if movement["impact_classification"] not in {"nil_impact", "product_impact"}:
             raise ContractError("COALESCE_MOVEMENT_INVALID")
         _digest(movement["impact_digest"], "COALESCE_MOVEMENT_INVALID")
+        _digest(movement["producer_evidence_digest"], "COALESCE_MOVEMENT_INVALID")
+        _digest(movement["evidence_binding_digest"], "COALESCE_MOVEMENT_INVALID")
+        _digest(movement["release_scope_digest"], "COALESCE_MOVEMENT_INVALID")
         movement["services"] = _service_manifest(movement["services"])
         movements.append(movement)
+
+    evidence_pairs = {
+        (movement["producer_evidence_digest"], movement["evidence_binding_digest"])
+        for movement in movements
+    }
+    if len(evidence_pairs) != len(movements):
+        raise ContractError("COALESCE_EVIDENCE_REPLAY")
 
     baseline = movements[0]["services"]
     changed_services: list[str] = []
@@ -138,7 +158,12 @@ def evaluate_supply_coalescing(
     product_impact = any(
         movement["impact_classification"] != "nil_impact" for movement in movements
     )
-    if product_impact:
+    release_scopes = {movement["release_scope_digest"] for movement in movements}
+    if len(release_scopes) != 1:
+        decision = "refuse"
+        reason = "producer_evidence_changed"
+        lineage = None
+    elif product_impact:
         decision = "refuse"
         reason = "product_impact_present"
         lineage = None
@@ -152,19 +177,45 @@ def evaluate_supply_coalescing(
         lineage = sha256_digest(
             {
                 "admission_window_digest": window,
-                "source_tree": movements[-1]["source_tree"],
+                "release_scope_digest": movements[-1]["release_scope_digest"],
+                "movements": [
+                    {
+                        "source_revision": movement["source_revision"],
+                        "source_tree": movement["source_tree"],
+                        "impact_digest": movement["impact_digest"],
+                        "producer_evidence_digest": movement["producer_evidence_digest"],
+                        "evidence_binding_digest": movement["evidence_binding_digest"],
+                    }
+                    for movement in movements
+                ],
                 "services": [deepcopy(baseline[name]) for name in SERVICES],
             }
         )
 
+    evidence_chain = sha256_digest(
+        [
+            {
+                "source_revision": movement["source_revision"],
+                "source_tree": movement["source_tree"],
+                "impact_digest": movement["impact_digest"],
+                "producer_evidence_digest": movement["producer_evidence_digest"],
+                "evidence_binding_digest": movement["evidence_binding_digest"],
+                "release_scope_digest": movement["release_scope_digest"],
+            }
+            for movement in movements
+        ]
+    )
+
     return {
-        "schema": "leaf.platform-supply-coalesce.v1",
+        "schema": "leaf.platform-supply-coalesce.v2",
         "state": "SHADOW",
         "decision": decision,
         "reason_code": reason,
         "movement_count": len(movements),
         "affected_services": changed_services,
         "admission_window_digest": window,
+        "release_scope_digest": movements[-1]["release_scope_digest"],
+        "evidence_chain_digest": evidence_chain,
         "planned_lineage_digest": lineage,
         "selector_activation_authorized": False,
         "supply_mint_authorized": False,

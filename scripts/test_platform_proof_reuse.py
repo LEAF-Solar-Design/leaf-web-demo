@@ -35,7 +35,7 @@ def digest(name: str) -> str:
 
 def evidence() -> dict:
     return {
-        "schema": "leaf.platform-proof-reuse-input.v1",
+        "schema": "leaf.platform-proof-reuse-input.v2",
         "selector": "UNCONFIGURED",
         "prior_receipt": {
             "terminal_state": "terminal_green",
@@ -45,6 +45,11 @@ def evidence() -> dict:
             "tenant_set_digest": digest("tenants"),
             "approval_scope_digest": digest("scope"),
             "identity_shape_digest": digest("identity"),
+            "rollback_digest": digest("rollback"),
+            "verifier_digest": digest("verifier"),
+            "producer_graph_digest": digest("producer-graph"),
+            "producer_supply_digest": digest("producer-supply"),
+            "release_scope_digest": digest("release-scope"),
             "source_impact_digest": digest("impact"),
             "lineage_digest": digest("prior-lineage"),
             "receipt_digest": digest("receipt"),
@@ -55,6 +60,22 @@ def evidence() -> dict:
             "tenant_set_digest": digest("tenants"),
             "approval_scope_digest": digest("scope"),
             "identity_shape_digest": digest("identity"),
+            "rollback_digest": digest("rollback"),
+            "verifier_digest": digest("verifier"),
+            "source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
+            "admitted_source_revision": "6ebf16d2b032d3e460669b7aed253d16d06f7fb4",
+            "source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
+            "admitted_source_tree": "0a2eaab98582526b8f9579f443b6965a945270ec",
+            "producer_graph_digest": digest("producer-graph"),
+            "admitted_producer_graph_digest": digest("producer-graph"),
+            "producer_supply_digest": digest("producer-supply"),
+            "admitted_producer_supply_digest": digest("producer-supply"),
+            "producer_evidence_digest": digest("producer-evidence"),
+            "admitted_producer_evidence_digest": digest("producer-evidence"),
+            "evidence_binding_digest": digest("evidence-binding"),
+            "admitted_evidence_binding_digest": digest("evidence-binding"),
+            "release_scope_digest": digest("release-scope"),
+            "admitted_release_scope_digest": digest("release-scope"),
             "source_impact_digest": digest("new-nil-impact"),
             "admitted_source_impact_digest": digest("new-nil-impact"),
             "source_impact_classification": "nil_impact",
@@ -102,6 +123,29 @@ def test_verifier_failed_receipt_is_nonterminal_even_after_cleanup_and_rollback(
         (lambda value: value["candidate"].update(tenant_set_digest=digest("other")), "tenant_set_mismatch"),
         (lambda value: value["candidate"].update(approval_scope_digest=digest("other")), "approval_scope_mismatch"),
         (lambda value: value["candidate"].update(identity_shape_digest=digest("other")), "identity_shape_mismatch"),
+        (lambda value: value["candidate"].update(rollback_digest=digest("other")), "rollback_binding_mismatch"),
+        (lambda value: value["candidate"].update(verifier_digest=digest("other")), "verifier_binding_mismatch"),
+        (lambda value: value["candidate"].update(admitted_source_tree="f" * 40), "source_binding_mismatch"),
+        (
+            lambda value: value["candidate"].update(admitted_producer_graph_digest=digest("other")),
+            "graph_binding_mismatch",
+        ),
+        (
+            lambda value: value["candidate"].update(admitted_producer_supply_digest=digest("other")),
+            "supply_binding_mismatch",
+        ),
+        (
+            lambda value: value["candidate"].update(admitted_producer_evidence_digest=digest("other")),
+            "producer_evidence_mismatch",
+        ),
+        (
+            lambda value: value["candidate"].update(admitted_evidence_binding_digest=digest("other")),
+            "evidence_binding_mismatch",
+        ),
+        (
+            lambda value: value["candidate"].update(admitted_release_scope_digest=digest("other")),
+            "release_scope_mismatch",
+        ),
         (
             lambda value: value["candidate"].update(
                 admitted_source_impact_digest=digest("other")
