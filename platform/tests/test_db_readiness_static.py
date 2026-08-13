@@ -118,12 +118,13 @@ def test_request_journal_migration_unconditionally_declares_runtime_schema():
         "principal_key", "payload_digest", "recoverable_json", "state",
         "turn_id", "lease_owner", "lease_expires_at", "response_status",
         "response_json", "created_at", "updated_at", "terminal_at",
+        "org_id", "project_id",
     }
     assert expected_constraints | {"app_session_requests_pkey"} <= {
         name for name in db._AUTHORITY_REQUIRED_CONSTRAINTS["sessions"]
         if name.startswith("app_session_requests_")
     }
-    assert expected_indexes == {
+    assert expected_indexes <= {
         name for name in db._AUTHORITY_REQUIRED_INDEXES["sessions"]
         if name.startswith("idx_app_session_requests_")
     }
@@ -202,6 +203,57 @@ def test_project_lifecycle_migration_unconditionally_declares_runtime_schema():
             "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     }
+
+
+def test_project_session_scope_migration_preserves_legacy_and_binds_projects():
+    migration = (
+        db._PKG_DIR / "migrations" / "0039_project_session_scope.sql"
+    ).read_text(encoding="utf-8")
+    expected_constraints = {
+        "app_sessions_project_scope_shape_check",
+        "app_sessions_project_tenant_check",
+        "app_sessions_project_fk",
+        "app_sessions_project_scope_unique",
+        "app_session_requests_project_scope_shape_check",
+        "app_session_requests_project_tenant_check",
+        "app_session_requests_project_fk",
+        "app_session_requests_session_project_fk",
+    }
+    assert expected_constraints == {
+        line.strip().split()[2]
+        for line in migration.splitlines()
+        if line.strip().startswith("ADD CONSTRAINT app_session")
+    }
+    expected_indexes = {
+        "idx_app_sessions_one_project",
+        "idx_app_session_requests_project_scope",
+    }
+    assert expected_indexes == {
+        line.split("IF NOT EXISTS ", 1)[1].split()[0]
+        for line in migration.splitlines()
+        if "INDEX IF NOT EXISTS idx_app_session" in line
+    }
+    assert "CHECK ((org_id IS NULL) = (project_id IS NULL))" in migration
+    assert "'project:' || org_id::TEXT || ':' || project_id::TEXT" in migration
+    assert "DROP" not in migration.upper()
+    assert "REFERENCES projects(org_id, project_id) ON DELETE CASCADE" in migration
+    assert (
+        "REFERENCES app_sessions(session_id, org_id, project_id) ON DELETE CASCADE"
+        in migration
+    )
+    assert {"org_id", "project_id"} <= db._AUTHORITY_REQUIRED_COLUMNS[
+        "sessions"
+    ]["app_sessions"]
+    assert {"org_id", "project_id"} <= db._AUTHORITY_REQUIRED_COLUMNS[
+        "sessions"
+    ]["app_session_requests"]
+    assert expected_constraints <= set(
+        db._AUTHORITY_REQUIRED_CONSTRAINTS["sessions"]
+    )
+    assert "app_sessions_tenant_id_drawing_id_key" in (
+        db._AUTHORITY_REQUIRED_CONSTRAINTS["sessions"]
+    )
+    assert expected_indexes <= set(db._AUTHORITY_REQUIRED_INDEXES["sessions"])
 
 
 def test_customization_authority_migration_follows_tenant_mcp_journal():

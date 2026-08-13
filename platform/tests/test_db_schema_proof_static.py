@@ -483,6 +483,37 @@ def test_catalog_contract_accepts_postgres_deparser_grouping_and_casts():
     assert self_error not in errors["invalid_constraints"]
 
 
+@pytest.mark.parametrize(
+    ("name", "definition"),
+    [
+        (
+            "app_sessions_project_tenant_check",
+            "CHECK (((org_id IS NULL) OR (tenant_id = "
+            "((('project:'::text || (org_id)::text) || ':'::text) || "
+            "(project_id)::text))))",
+        ),
+        (
+            "app_session_requests_project_tenant_check",
+            "CHECK (((org_id IS NULL) OR (tenant_id = (org_id)::text)))",
+        ),
+    ],
+)
+def test_project_tenant_contract_accepts_postgres_text_cast_deparse(
+    name, definition,
+):
+    environ = {"LEAF_SESSIONS_STORE": "postgres"}
+    required = db.required_catalog_for_selected_authorities(environ)
+    rows = _complete_catalog_rows(environ)
+    row = next(
+        item for item in rows["constraints"] if item["conname"] == name
+    )
+    row["definition"] = definition
+
+    errors = db._catalog_contract_errors(required, rows)
+
+    assert f"{name}:definition-mismatch" not in errors["invalid_constraints"]
+
+
 def test_catalog_contract_rejects_cross_schema_foreign_key_target():
     environ = {"LEAF_UPLOAD_STORE": "postgres"}
     required = db.required_catalog_for_selected_authorities(environ)

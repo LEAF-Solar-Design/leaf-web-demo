@@ -21,12 +21,32 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import deps
 import mcp_authority
+import platform_link
 import session_store
 import standard_service_contract
 import turn_runner
 
 
 router = APIRouter()
+
+
+def _require_project_execution(
+    session_id: str, tenant_id: str, subject: str, tier: str,
+) -> None:
+    tenant = deps.TenantContext(
+        tenant_id, org_id=tenant_id, tier=tier, subject=subject,
+        authority_resolved=True,
+    )
+    try:
+        session = platform_link.require_project_session_access(
+            session_store.get_session(session_id), tenant, write=True,
+        )
+    except platform_link.ProjectSessionForbidden as exc:
+        raise HTTPException(
+            status_code=403, detail="current project role does not permit execution",
+        ) from exc
+    if session is None:
+        raise HTTPException(status_code=409, detail="MCP session is unavailable")
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _APPROVAL_ID = re.compile(r"^[A-Za-z0-9_-]{8,256}$")
@@ -428,6 +448,7 @@ def exchange_attachment(
     subject, tier = _active_authority(
         tenant_id, request.authority_session_id, request.authority_turn_id
     )
+    _require_project_execution(request.authority_session_id, tenant_id, subject, tier)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     try:
@@ -486,6 +507,9 @@ def exchange_human_approval_token(
     )
     if current_tenant != tenant_id or current_tier != active_tier:
         raise HTTPException(status_code=409, detail="platform authority changed")
+    _require_project_execution(
+        request.authority_session_id, tenant_id, tenant.subject, current_tier,
+    )
 
     try:
         mcp_authority.verify_subscription_mount(
@@ -577,6 +601,9 @@ def execute_human_approval(
             raise mcp_authority.McpAuthorityError(
                 "MCP approval receipt session is unavailable"
             )
+        _require_project_execution(
+            identity["session_id"], tenant_id, tenant.subject, current_tier,
+        )
         if approval_status in {"pending", "approved"}:
             mcp_authority.verify_subscription_mount(
                 tenant_id, identity["subscription_mount_id"]

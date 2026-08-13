@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import checkpoints
 import deps
+import platform_link
 import session_store
 import write_loop
 from routers import drawings
@@ -36,11 +37,18 @@ def _session_not_found(session_id: str) -> JSONResponse:
     )
 
 
-def _require_owned_session(session_id: str, tenant: Any):
-    session = session_store.get_session(session_id)
-    if session is None or str(session.get("tenant_id")) != str(tenant):
-        return None
-    return session
+def _require_owned_session(session_id: str, tenant: Any, *, write: bool = False):
+    return platform_link.require_project_session_access(
+        session_store.get_session(session_id), tenant, write=write,
+    )
+
+
+def _project_forbidden() -> JSONResponse:
+    return error_response(
+        ErrorCode.BAD_PARAMS,
+        "current project role does not permit this checkpoint action",
+        retryable=False, status_code=403,
+    )
 
 
 # The reservation's stale window lives in session_store (RESERVATION_STALE_S),
@@ -71,7 +79,10 @@ def _drawing_version(tenant_id: str, drawing_id: str) -> int:
 @router.post("/api/sessions/{session_id}/checkpoints")
 def create_checkpoint(session_id: str, req: CreateCheckpointRequest,
                       tenant=Depends(deps.require_active_tenant)):
-    session = _require_owned_session(session_id, tenant)
+    try:
+        session = _require_owned_session(session_id, tenant, write=True)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden()
     if session is None:
         return _session_not_found(session_id)
     if req.label is not None and len(req.label) > MAX_LABEL_LENGTH:
@@ -115,7 +126,11 @@ def create_checkpoint(session_id: str, req: CreateCheckpointRequest,
 
 @router.get("/api/sessions/{session_id}/checkpoints")
 def list_checkpoints(session_id: str, tenant=Depends(deps.require_active_tenant)):
-    if _require_owned_session(session_id, tenant) is None:
+    try:
+        session = _require_owned_session(session_id, tenant)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden()
+    if session is None:
         return _session_not_found(session_id)
     body = {"checkpoints": checkpoints.list_checkpoints(session_id, str(tenant))}
     return deps.tenant_echo(with_envelope_fields(body), tenant)
@@ -135,7 +150,10 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
     If the final append fails, the committed drawing restore is still reported
     with ``event_recorded: false``.
     """
-    session = _require_owned_session(session_id, tenant)
+    try:
+        session = _require_owned_session(session_id, tenant, write=True)
+    except platform_link.ProjectSessionForbidden:
+        return _project_forbidden()
     if session is None:
         return _session_not_found(session_id)
     checkpoint = checkpoints.get_checkpoint(session_id, str(tenant), checkpoint_id)

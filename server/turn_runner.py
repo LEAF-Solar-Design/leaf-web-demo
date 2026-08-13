@@ -73,10 +73,12 @@ import requests
 import agent_gate
 import agent_ledger
 import broker_client
+import deps
 import emf_metrics
 import entitlements
 import instant_execution
 import request_journal
+import platform_link
 import session_policy
 import session_store
 import standard_service_contract
@@ -1137,11 +1139,6 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
             "text": text,
             "classifier_hint": classifier_hint,
             "model": model,
-            "tier": tier,
-            "subject": subject,
-            "entitlement_tier": entitlement_tier,
-            "entitlement_roles": list(entitlement_roles),
-            "entitlement_elevated": entitlement_elevated is True,
         }
         try:
             queued = request_journal.queue_request(request_id, recoverable)
@@ -1252,11 +1249,56 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
         payload = row.get("recoverable_json") or {}
         request_id = row["request_id"]
         turn_id = row["turn_id"]
+        subject = row.get("principal_key") or None
+        live_tenant: Any = row["tenant_id"]
+        current_tier: Any = None
+        current_roles: tuple[Any, ...] = ()
+        current_elevated = False
         try:
+            project_bound = (
+                row.get("org_id") is not None or row.get("project_id") is not None
+            )
+            if subject is not None and project_bound:
+                current_tenant, current_tier = (
+                    deps.resolve_active_platform_tenant_authority(subject)
+                )
+                if current_tenant != row["tenant_id"]:
+                    raise PermissionError("project tenant authority changed")
+                live_tenant = deps.TenantContext(
+                    current_tenant, org_id=current_tenant, tier=current_tier,
+                    subject=subject, authority_resolved=True,
+                )
+                session = session_store.get_session(row["session_id"])
+                if platform_link.require_project_session_access(
+                    session, live_tenant, write=True,
+                ) is None:
+                    raise PermissionError("project session is unavailable")
+                current_roles, current_elevated = entitlements.resolve_roles(live_tenant)
+                current_tier = entitlements.resolve_tier(live_tenant)
+            elif payload.get("entitlement_tier") is not None:
+                # Rolling-upgrade compatibility for queue rows admitted before
+                # identity moved from recoverable JSON to immutable columns.
+                # New rows never persist these snapshots.
+                subject = payload.get("subject")
+                current_tier = payload.get("entitlement_tier")
+                current_roles = tuple(payload.get("entitlement_roles") or ())
+                current_elevated = payload.get("entitlement_elevated") is True
+            elif subject is not None:
+                current_tenant, current_tier = (
+                    deps.resolve_active_platform_tenant_authority(subject)
+                )
+                if current_tenant != row["tenant_id"]:
+                    raise PermissionError("session tenant authority changed")
+                live_tenant = deps.TenantContext(
+                    current_tenant, org_id=current_tenant, tier=current_tier,
+                    subject=subject, authority_resolved=True,
+                )
+                current_roles, current_elevated = entitlements.resolve_roles(live_tenant)
+                current_tier = entitlements.resolve_tier(live_tenant)
+            else:
+                raise PermissionError("queued principal authority is unavailable")
             allowed = entitlements.entitlements_for(
-                payload["entitlement_tier"],
-                tuple(payload.get("entitlement_roles") or ()),
-                payload.get("entitlement_elevated") is True,
+                current_tier, current_roles, current_elevated,
             ).get("converse", False)
         except Exception:  # noqa: BLE001
             allowed = False
@@ -1267,7 +1309,7 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
                 request_id, turn_id, state="failed", response_status=403,
                 response={"request_id": request_id, "status": "failed",
                           "error": {"error_code": "ENTITLEMENT_REQUIRED",
-                                    "message": "converse entitlement is unavailable"}},
+                                    "message": "current project or converse authority is unavailable"}},
             )
             try:
                 session_store.append_event(
@@ -1279,16 +1321,18 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
             continue
         try:
             start_turn(
-                row["tenant_id"], row["session_id"],
+                live_tenant, row["session_id"],
                 text=payload["text"],
                 classifier_hint=payload.get("classifier_hint"),
                 model=payload.get("model"),
-                tier=payload.get("tier"),
-                subject=payload.get("subject"),
+                tier=(payload.get("tier")
+                      if payload.get("entitlement_tier") is not None
+                      else getattr(live_tenant, "tier", None)),
+                subject=subject,
                 queued_id=request_id,
-                entitlement_tier=payload.get("entitlement_tier"),
-                entitlement_roles=tuple(payload.get("entitlement_roles") or ()),
-                entitlement_elevated=payload.get("entitlement_elevated") is True,
+                entitlement_tier=current_tier,
+                entitlement_roles=current_roles,
+                entitlement_elevated=current_elevated,
                 request_id=request_id,
                 turn_id=turn_id,
                 journal_claimed=True,

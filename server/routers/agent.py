@@ -58,6 +58,7 @@ import agent_audit
 import agent_gate
 import deps
 import entitlements
+import platform_link
 import session_store
 import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
@@ -137,6 +138,24 @@ def internal_gate(req: GateRequest,
     turn_subject = session_store.active_turn_subject(
         authority_session_id, authority_turn_id, req.tenant_id,
         turn_runner.turn_max_s())
+    session = session_store.get_session(authority_session_id)
+    if session is not None and (
+        session.get("org_id") is not None or session.get("project_id") is not None
+    ):
+        try:
+            live_tenant = deps.TenantContext(
+                req.tenant_id, org_id=req.tenant_id, tier=tier,
+                subject=turn_subject, authority_resolved=True,
+            )
+            if platform_link.require_project_session_access(
+                session, live_tenant, write=True,
+            ) is None:
+                raise LookupError("project session is unavailable")
+        except (LookupError, platform_link.ProjectSessionForbidden):
+            return error_response(
+                ErrorCode.BAD_PARAMS, "current project role does not permit this action",
+                retryable=False, status_code=403,
+            )
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
                              subject=turn_subject,
@@ -197,8 +216,16 @@ def _decision_actor(tenant: Any) -> str:
 def pending_approvals(session_id: str, limit: int = 100,
                       tenant=Depends(deps.require_active_tenant)) -> Any:
     """List live approvals for the current owned conversation session."""
-    session = session_store.get_session(session_id)
-    if session is None or session["tenant_id"] != str(tenant):
+    try:
+        session = platform_link.require_project_session_access(
+            session_store.get_session(session_id), tenant, write=False,
+        )
+    except platform_link.ProjectSessionForbidden:
+        return error_response(
+            ErrorCode.BAD_PARAMS, "current project role does not permit approval access",
+            retryable=False, status_code=403,
+        )
+    if session is None:
         return error_response(
             ErrorCode.SESSION_NOT_FOUND, f"unknown session_id {session_id!r}",
             retryable=False, status_code=404,
@@ -251,6 +278,18 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
     if approval is None or approval["tenant_id"] != str(tenant):
         # Unknown and cross-tenant collapse to the IDENTICAL response -- no
         # existence leak to a caller who isn't the owning tenant.
+        return _not_found(confirmation_id)
+
+    try:
+        session = platform_link.require_project_session_access(
+            session_store.get_session(approval["session_id"]), tenant, write=True,
+        )
+    except platform_link.ProjectSessionForbidden:
+        return error_response(
+            ErrorCode.BAD_PARAMS, "current project role does not permit approval decisions",
+            retryable=False, status_code=403,
+        )
+    if session is None:
         return _not_found(confirmation_id)
 
     decision_actor = _decision_actor(tenant)

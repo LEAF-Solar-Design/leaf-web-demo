@@ -166,7 +166,8 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "app_sessions": {
             "session_id", "tenant_id", "drawing_id", "status", "created_at",
             "updated_at", "last_seq", "active_turn_id", "turn_started_at",
-            "active_turn_tier", "active_turn_subject", "model",
+            "active_turn_tier", "active_turn_subject", "model", "org_id",
+            "project_id",
         },
         "app_session_events": {
             "session_id", "seq", "turn_id", "type", "data_json", "created_at",
@@ -181,6 +182,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "principal_key", "payload_digest", "recoverable_json", "state",
             "turn_id", "lease_owner", "lease_expires_at", "response_status",
             "response_json", "created_at", "updated_at", "terminal_at",
+            "org_id", "project_id",
         },
     },
     # Separate from "sessions" on purpose: LEAF_SESSION_ANNEX_STORE selects
@@ -492,7 +494,17 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "app_sessions_pkey": _catalog_contract(
             "app_sessions", "PRIMARY KEY (session_id)"),
         "app_sessions_tenant_id_drawing_id_key": _catalog_contract(
-            "app_sessions", "UNIQUE (tenant_id, drawing_id)"),
+            "app_sessions", "UNIQUE", "(tenant_id, drawing_id)"),
+        "app_sessions_project_scope_shape_check": _catalog_contract(
+            "app_sessions", "CHECK ((org_id IS NULL) = (project_id IS NULL))"),
+        "app_sessions_project_tenant_check": _catalog_contract(
+            "app_sessions", "CHECK", "org_id IS NULL", "tenant_id",
+            "'project:'", "org_id::text", "project_id::text"),
+        "app_sessions_project_fk": _catalog_contract(
+            "app_sessions", "FOREIGN KEY (org_id, project_id)",
+            "REFERENCES projects(org_id, project_id)", "ON DELETE CASCADE"),
+        "app_sessions_project_scope_unique": _catalog_contract(
+            "app_sessions", "UNIQUE (session_id, org_id, project_id)"),
         "app_session_events_pkey": _catalog_contract(
             "app_session_events", "PRIMARY KEY (session_id, seq)"),
         "app_session_events_session_id_fkey": _catalog_contract(
@@ -530,6 +542,20 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "app_session_requests", "CHECK", "completed", "failed",
             "abandoned", "terminal_at IS NOT NULL",
             "response_status IS NOT NULL", "response_json IS NOT NULL"),
+        "app_session_requests_project_scope_shape_check": _catalog_contract(
+            "app_session_requests",
+            "CHECK ((org_id IS NULL) = (project_id IS NULL))"),
+        "app_session_requests_project_tenant_check": _catalog_contract(
+            "app_session_requests", "CHECK", "org_id IS NULL",
+            "tenant_id = org_id::text"),
+        "app_session_requests_project_fk": _catalog_contract(
+            "app_session_requests", "FOREIGN KEY (org_id, project_id)",
+            "REFERENCES projects(org_id, project_id)", "ON DELETE CASCADE"),
+        "app_session_requests_session_project_fk": _catalog_contract(
+            "app_session_requests",
+            "FOREIGN KEY (session_id, org_id, project_id)",
+            "REFERENCES app_sessions(session_id, org_id, project_id)",
+            "ON DELETE CASCADE"),
     },
     "session_annex": {
         "app_session_checkpoints_pkey": _catalog_contract(
@@ -833,6 +859,9 @@ _AUTHORITY_REQUIRED_INDEXES = {
             "app_session_events", "(session_id, seq DESC)"),
         "idx_app_approvals_session": _catalog_contract(
             "app_approvals", "(session_id, created_at DESC)"),
+        "idx_app_sessions_one_project": _catalog_contract(
+            "app_sessions", "CREATE UNIQUE INDEX", "(org_id, project_id)",
+            "WHERE", "project_id IS NOT NULL"),
         "idx_app_session_requests_one_executing": _catalog_contract(
             "app_session_requests", "CREATE UNIQUE INDEX", "(session_id)",
             "WHERE", "state = 'executing'"),
@@ -844,6 +873,10 @@ _AUTHORITY_REQUIRED_INDEXES = {
         "idx_app_session_requests_scope": _catalog_contract(
             "app_session_requests",
             "(tenant_id, drawing_id, session_id, created_at DESC)"),
+        "idx_app_session_requests_project_scope": _catalog_contract(
+            "app_session_requests",
+            "(org_id, project_id, session_id, created_at DESC)",
+            "WHERE", "project_id IS NOT NULL"),
     },
     "session_annex": {
         "idx_app_session_checkpoints_scope": _catalog_contract(
@@ -1367,13 +1400,9 @@ def _normalize_catalog_definition(value: Any) -> str:
         "",
         normalized,
     )
-    normalized = re.sub(
-        rf"\(\s*({_SIMPLE_INDEX_TERM}(?:\s*,\s*{_SIMPLE_INDEX_TERM})*)\s*\)",
-        lambda match: "{columns:" + ",".join(
-            _catalog_column_list(match.group(0)) or (),
-        ) + "}",
-        normalized,
-    )
+    # Do not turn arbitrary grouping parentheses such as ``(org_id)::text``
+    # into index-column markers.  Exact simple column-list arity is enforced
+    # separately in _catalog_fragment_matches before general normalization.
     normalized = re.sub(r"\s+", "", normalized)
     normalized = normalized.replace("(", "").replace(")", "")
     return normalized
