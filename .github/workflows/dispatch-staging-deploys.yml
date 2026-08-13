@@ -680,8 +680,8 @@ jobs:
           evidence = {
               "manifest": {
                   "dispatch_image_tag": dispatch_image_tag,
+                  "json_b64": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
                   "schema": manifest_schema,
-                  "services": ordered_services,
                   "sha256": hashlib.sha256(raw).hexdigest(),
                   "source_revision": source,
                   "source_tree": producer_tree,
@@ -1322,18 +1322,6 @@ jobs:
                 dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")
               fi
               if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
-                SERVICE_ENTRY="$(jq -cer --arg service "$SERVICE" '.services[$service]' staging-supply-set.json)"
-                PRODUCER_SOURCE="$(jq -er '.producer_source_revision' <<<"$SERVICE_ENTRY")"
-                PRODUCER_TREE="$(jq -er '.producer_source_tree' <<<"$SERVICE_ENTRY")"
-                SURFACE_FINGERPRINT="$(jq -er '.surface_fingerprint' <<<"$SERVICE_ENTRY")"
-                RECIPE_FINGERPRINT="$(jq -er '.recipe_fingerprint' <<<"$SERVICE_ENTRY")"
-                PRODUCER_WORKFLOW="$(jq -er '.producer_workflow_path' <<<"$SERVICE_ENTRY")"
-                PRODUCER_WORKFLOW_BLOB="$(jq -er '.producer_workflow_blob' <<<"$SERVICE_ENTRY")"
-                PRODUCER_RUN_ID="$(jq -er '.producer_run_id' <<<"$SERVICE_ENTRY")"
-                PRODUCER_RUN_ATTEMPT="$(jq -er '.producer_run_attempt' <<<"$SERVICE_ENTRY")"
-                PROVENANCE_SUBJECT="$(jq -er '.provenance_subject' <<<"$SERVICE_ENTRY")"
-                PROVENANCE_DIGEST="$(jq -er '.provenance_digest' <<<"$SERVICE_ENTRY")"
-                RELEASE_SOURCE_TREE="$(jq -er '.release_source_tree' staging-supply-set.json)"
                 CURRENT_TF_BLOB=$(GH_TOKEN="$GH_TOKEN" gh api \
                   "repos/$INFRA_REPO/contents/.github/workflows/$DEPLOY_WORKFLOW?ref=main" \
                   --jq '.sha')
@@ -1343,24 +1331,6 @@ jobs:
                 }
                 dispatch_args+=(
                   -f "digest_aware_reconcile=true"
-                  -f "expected_image_digest=$SERVICE_DIGEST"
-                  -f "component_producer_source_revision=$PRODUCER_SOURCE"
-                  -f "component_producer_source_tree=$PRODUCER_TREE"
-                  -f "surface_fingerprint=$SURFACE_FINGERPRINT"
-                  -f "recipe_fingerprint=$RECIPE_FINGERPRINT"
-                  -f "producer_workflow_path=$PRODUCER_WORKFLOW"
-                  -f "producer_workflow_blob=$PRODUCER_WORKFLOW_BLOB"
-                  -f "producer_run_id=$PRODUCER_RUN_ID"
-                  -f "producer_run_attempt=$PRODUCER_RUN_ATTEMPT"
-                  -f "provenance_subject=$PROVENANCE_SUBJECT"
-                  -f "provenance_digest=$PROVENANCE_DIGEST"
-                  -f "release_source_revision=$BUILD_HEAD_SHA"
-                  -f "release_source_tree=$RELEASE_SOURCE_TREE"
-                  -f "supply_set_artifact_id=$SUPPLY_ARTIFACT_ID"
-                  -f "supply_set_artifact_name=$SUPPLY_ARTIFACT_NAME"
-                  -f "supply_set_sha256=$SUPPLY_SHA256"
-                  -f "build_run_id=$BUILD_RUN_ID"
-                  -f "build_run_attempt=$BUILD_RUN_ATTEMPT"
                   -f "convergence_id=$CONVERGENCE_ID"
                 )
               fi

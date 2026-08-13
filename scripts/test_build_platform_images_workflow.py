@@ -18,6 +18,7 @@ edits still pass.
 """
 
 from pathlib import Path
+import base64
 import hashlib
 import json
 import os
@@ -5709,13 +5710,11 @@ def test_relay_mints_closed_real_v2_supply_evidence() -> None:
         ),
     }
     assert evidence["manifest"]["dispatch_image_tag"] == "prod-aa7a7c9"
-    assert [row["name"] for row in evidence["manifest"]["services"]] == [
-        "app", "broker", "canonical-worker", "harness", "web"
-    ]
-    assert {
-        row["name"]: row["manifest_entry"]["image_digest"]
-        for row in evidence["manifest"]["services"]
-    } == _SUPPLY_DIGESTS
+    raw_manifest = base64.urlsafe_b64decode(
+        evidence["manifest"]["json_b64"]
+        + "=" * (-len(evidence["manifest"]["json_b64"]) % 4)
+    )
+    assert json.loads(raw_manifest) == manifest
     assert evidence["manifest"]["sha256"] == hashlib.sha256(
         json.dumps(manifest).encode("utf-8")
     ).hexdigest()
@@ -5776,12 +5775,17 @@ def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
     assert proc.returncode == 0, proc.stderr
     evidence = _decode_supply_evidence(proc.stdout.strip())
     assert evidence["manifest"]["schema"] == "leaf.staging-supply-set.v3"
-    assert all(
-        row["dispatch_lookup_tag"]
-        == f"surface-v1-{row['manifest_entry']['surface_fingerprint']}"
-        for row in evidence["manifest"]["services"]
+    raw_manifest = base64.urlsafe_b64decode(
+        evidence["manifest"]["json_b64"]
+        + "=" * (-len(evidence["manifest"]["json_b64"]) % 4)
     )
-    entries = {row["name"]: row["manifest_entry"] for row in evidence["manifest"]["services"]}
+    carried_manifest = json.loads(raw_manifest)
+    assert all(
+        row["immutable_lookup_tag"]
+        == f"surface-v1-{row['surface_fingerprint']}"
+        for row in carried_manifest["services"].values()
+    )
+    entries = carried_manifest["services"]
     assert entries["app"]["producer_run_id"] == 31738360788
     assert entries["broker"]["build_disposition"] == "reused"
     assert entries["broker"]["producer_run_id"] == 31730000000
@@ -5919,6 +5923,9 @@ def test_relay_binds_provider_archive_and_dispatches_one_unchanged_envelope() ->
     assert dispatch_code.count(
         'dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")'
     ) == 1
+    assert '-f "expected_image_digest=' not in dispatch_code
+    assert '-f "component_producer_source_revision=' not in dispatch_code
+    assert '-f "supply_set_artifact_id=' not in dispatch_code
     assert 'if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]' in dispatch_code
     assert 'V2/v3 dispatch is missing its closed supply evidence envelope' in dispatch_code
 
