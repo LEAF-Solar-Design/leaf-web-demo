@@ -1,0 +1,68 @@
+name: Qualify platform release admission contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadow_enabled:
+        description: Run the dormant contract preflight only
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leaf-platform-release-admission-contract-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  contract-preflight:
+    name: Dormant release admission preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prove Level 3 remains unconfigured
+        shell: bash
+        env:
+          SHADOW_ENABLED: ${{ inputs.shadow_enabled }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/platform_release_admission.py workflow-preflight \
+            --shadow-enabled "$SHADOW_ENABLED" > preflight.json
+          status=$?
+          set -e
+          test "$status" -eq 78
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path("preflight.json").read_text(encoding="utf-8"))
+          assert value == {
+              "deployment_effect": False,
+              "receipt_published": False,
+              "schema": "leaf.platform-release-admission-preflight.v1",
+              "selectors": {
+                  "release_admission": "UNCONFIGURED",
+                  "semantic_proof_reuse": "UNCONFIGURED",
+                  "source_impact": "UNCONFIGURED",
+                  "supply_coalescing": "UNCONFIGURED",
+              },
+              "shadow_enabled": value["shadow_enabled"],
+              "state": "UNCONFIGURED",
+              "writer_acquisition_authorized": False,
+          }
+          PY
+
+      - name: Report dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Level 3 is fixture-only and UNCONFIGURED."
+          echo "No receipt, writer, build, relay, provider, or deployment action was authorized."

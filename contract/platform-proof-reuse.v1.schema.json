@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-proof-reuse.v1.schema.json",
+  "title": "Leaf platform semantic proof reuse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "state", "decision", "reason_code", "admitted_lineage_digest",
+    "prior_receipt_digest", "identity_shape_digest", "workspace_profile_count",
+    "reuse_attachment_digest", "selector_activation_authorized",
+    "proof_execution_authorized"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-proof-reuse.v1"},
+    "state": {"const": "SHADOW"},
+    "decision": {"enum": ["reuse", "fresh_proof"]},
+    "reason_code": {
+      "enum": [
+        "proof_reuse_exact", "prior_not_terminal_green", "verifier_not_green",
+        "rollback_not_green", "product_mutation_not_clean", "lineage_incomplete",
+        "source_impact_not_nil", "lineage_mismatch", "tenant_set_mismatch",
+        "approval_scope_mismatch", "identity_shape_mismatch", "source_impact_mismatch",
+        "workspace_profile_mismatch"
+      ]
+    },
+    "admitted_lineage_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "prior_receipt_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "identity_shape_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "workspace_profile_count": {"const": 4},
+    "reuse_attachment_digest": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      ]
+    },
+    "selector_activation_authorized": {"const": false},
+    "proof_execution_authorized": {"const": false}
+  }
+}
