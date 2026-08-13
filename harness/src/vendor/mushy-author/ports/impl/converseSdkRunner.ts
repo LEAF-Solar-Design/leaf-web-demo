@@ -432,6 +432,11 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     // Per-RUN accumulators (never instance state).
     let turns = 0;
     const sums = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 };
+    // A running sum starts at 0, so a metric NOBODY reported is indistinguishable from
+    // one measured as 0 unless we track observation separately. Cache fields in
+    // particular are absent from many responses, and reporting 0 for them asserts a
+    // measurement that was never taken.
+    const observed = new Set<keyof typeof sums>();
     const models = new Set<string>();
     let sdkSessionId: string | null = input.resumeSdkSessionId ?? null;
     let result: Record<string, unknown> | null = null;
@@ -469,6 +474,10 @@ export class ConverseSdkRunner implements SpineConverseRunner {
               turns += 1;
               const message = (msg.message ?? {}) as Record<string, unknown>;
               const u = (message.usage ?? {}) as Record<string, number>;
+              if (typeof u.input_tokens === "number") observed.add("input_tokens");
+              if (typeof u.output_tokens === "number") observed.add("output_tokens");
+              if (typeof u.cache_creation_input_tokens === "number") observed.add("cache_creation_tokens");
+              if (typeof u.cache_read_input_tokens === "number") observed.add("cache_read_tokens");
               sums.input_tokens += u.input_tokens ?? 0;
               sums.output_tokens += u.output_tokens ?? 0;
               sums.cache_creation_tokens += u.cache_creation_input_tokens ?? 0;
@@ -534,24 +543,47 @@ export class ConverseSdkRunner implements SpineConverseRunner {
 
     // Usage (authoritative totals from the result message when present).
     const rUsage = (result?.usage ?? {}) as Record<string, number>;
-    const inputTokens = rUsage.input_tokens ?? sums.input_tokens;
-    const outputTokens = rUsage.output_tokens ?? sums.output_tokens;
-    const cacheCreation = rUsage.cache_creation_input_tokens ?? sums.cache_creation_tokens;
-    const cacheRead = rUsage.cache_read_input_tokens ?? sums.cache_read_tokens;
+    // A metric is MEASURED when the result message carried it, or when any assistant
+    // message did. One nobody reported is omitted and named in `unmetered`, never
+    // written as 0: a fabricated zero is indistinguishable from a measured zero once
+    // it is in the record, and these records are summed downstream.
+    const measure = (resultKey: string, sumKey: keyof typeof sums): number | undefined =>
+      typeof rUsage[resultKey] === "number"
+        ? rUsage[resultKey]
+        : (observed.has(sumKey) ? sums[sumKey] : undefined);
+    const inputTokens = measure("input_tokens", "input_tokens");
+    const outputTokens = measure("output_tokens", "output_tokens");
+    const cacheCreation = measure("cache_creation_input_tokens", "cache_creation_tokens");
+    const cacheRead = measure("cache_read_input_tokens", "cache_read_tokens");
     const modelUsage = (result?.modelUsage ?? {}) as Record<string, unknown>;
     for (const m of Object.keys(modelUsage)) models.add(m);
+    // Cost-relevant tokens = input + output + cache_creation (cache_read excluded).
+    // Derived from three inputs, so it is only real when all three were measured;
+    // otherwise it would be a partial sum presented as a total.
+    const costTokens =
+      inputTokens !== undefined && outputTokens !== undefined && cacheCreation !== undefined
+        ? inputTokens + outputTokens + cacheCreation
+        : undefined;
+    const unmetered: string[] = [];
+    const measured: Record<string, number> = {};
+    const put = (name: string, value: number | undefined): void => {
+      if (typeof value === "number") measured[name] = value;
+      else unmetered.push(name);
+    };
+    put("turns", typeof result?.num_turns === "number" ? (result.num_turns as number) : turns);
+    put("input_tokens", inputTokens);
+    put("output_tokens", outputTokens);
+    put("cache_creation_tokens", cacheCreation);
+    put("cache_read_tokens", cacheRead);
+    put("cost_tokens", costTokens);
+    put(
+      "total_cost_usd",
+      typeof result?.total_cost_usd === "number" ? (result.total_cost_usd as number) : undefined,
+    );
     const usage: ConverseTurnUsage = {
-      turns: typeof result?.num_turns === "number" ? (result.num_turns as number) : turns,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_creation_tokens: cacheCreation,
-      cache_read_tokens: cacheRead,
-      // Cost-relevant tokens = input + output + cache_creation (cache_read excluded).
-      cost_tokens: inputTokens + outputTokens + cacheCreation,
-      ...(typeof result?.total_cost_usd === "number"
-        ? { total_cost_usd: result.total_cost_usd as number }
-        : {}),
+      ...measured,
       ...(models.size > 0 ? { models: [...models] } : {}),
+      ...(unmetered.length ? { unmetered } : {}),
     };
     yield { type: "usage", usage };
 

@@ -9,5 +9,5 @@
   },
   "surface": "packages/fold-py/src/mushy_fold",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "d1b9cf6019c1c4b39d82b4b29c6c7e80cdc7ddc0"
+  "upstream_commit": "52e8a367d8ca322856e9cd3a7455a6f399a34b2a"
 }

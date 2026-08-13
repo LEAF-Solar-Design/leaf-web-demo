@@ -1026,6 +1026,7 @@ export async function startReal(port = 8130): Promise<Server> {
   );
   const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
+  const { upstreamSinkFromEnv } = await import("./ports/impl/httpUpstreamSink.js");
   const {
     AuthorStandardServicesRunner,
     StandardServicesOAuthGrantProvider,
@@ -1065,7 +1066,15 @@ export async function startReal(port = 8130): Promise<Server> {
       })
     : undefined;
 
-  const ports: HarnessPorts = {
+  // OPTIONAL platform-improvement capture. Constructed only when
+  // UPSTREAM_SINK_URL and UPSTREAM_SINK_TOKEN are BOTH set (see
+  // upstreamSinkFromEnv), so with the env absent the port stays unwired and
+  // this ports object is byte-identical to what it was before. The sink is
+  // fire-and-forget by vendored contract: authoring behavior is unchanged
+  // when the queue is slow, down, or unconfigured.
+  const upstreamSink = upstreamSinkFromEnv();
+
+  const basePorts = {
     agentRunner: new AuthorStandardServicesRunner(
       new AgentSdkRunner({
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
@@ -1085,6 +1094,27 @@ export async function startReal(port = 8130): Promise<Server> {
       : {}),
     ...(converseRunner ? { converseRunner } : {}),
   };
+
+  // Opting into the sink REQUIRES declaring the model-output posture: the
+  // vendored type makes those three inseparable so nobody enables capture and
+  // silently inherits an export default they never chose. Both stay FALSE.
+  // dangerouslyExportModelOutput=false keeps generated code and raw error text
+  // out of the queue (prompt, status and an allowlisted failure category still
+  // ship). trustRunnerFailureCategories=false re-derives a runner-supplied
+  // category rather than believing it, because any runner can throw model text.
+  //
+  // Branched rather than spread on purpose: HarnessPorts is a discriminated
+  // union, and a conditional spread produces OPTIONAL properties that satisfy
+  // neither arm. Two concrete objects type-check; one object with maybe-absent
+  // keys does not.
+  const ports: HarnessPorts = upstreamSink
+    ? {
+        ...basePorts,
+        upstreamSink,
+        dangerouslyExportModelOutput: false,
+        trustRunnerFailureCategories: false,
+      }
+    : basePorts;
   const server = createHarness(ports).listen(port);
   if (sessionStore) {
     server.once("close", () => { void sessionStore.close(); });

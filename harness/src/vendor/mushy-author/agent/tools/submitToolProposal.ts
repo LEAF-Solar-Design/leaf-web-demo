@@ -8,6 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { withFailureCategory } from "../captureGuards.js";
 import {
   closeSync,
   existsSync,
@@ -46,7 +47,7 @@ function sha256(bytes: Buffer | string): string {
 function assertInside(root: string, path: string): void {
   const rel = relative(root, path);
   if (rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith(sep)) {
-    throw new Error("tool proposal target escapes the tenant repository");
+    throw withFailureCategory(new Error("tool proposal target escapes the tenant repository"), "validation_failed");
   }
 }
 
@@ -75,17 +76,17 @@ function assertReplaceable(
   fallbackCreated: string,
 ): string {
   if (previous.entry !== entry || previous.manifest !== manifestPath) {
-    throw new Error("tool proposal replacement receipt path mismatch");
+    throw withFailureCategory(new Error("tool proposal replacement receipt path mismatch"), "validation_failed");
   }
   assertOrdinaryDirectory(targetDir, "existing proposal package");
   const names = readdirSync(targetDir).sort();
   if (JSON.stringify(names) !== JSON.stringify(["tool.json", "tool.py"])) {
-    throw new Error("tool proposal replacement target contains unexpected files");
+    throw withFailureCategory(new Error("tool proposal replacement target contains unexpected files"), "validation_failed");
   }
   for (const name of names) {
     const stat = lstatSync(join(targetDir, name));
     if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error("tool proposal replacement target must contain ordinary files");
+      throw withFailureCategory(new Error("tool proposal replacement target must contain ordinary files"), "validation_failed");
     }
   }
   const source = readFileSync(join(targetDir, "tool.py"));
@@ -96,14 +97,14 @@ function assertReplaceable(
     sha256(source) !== previous.source_sha256 ||
     sha256(manifest) !== previous.manifest_sha256
   ) {
-    throw new Error("tool proposal replacement receipt does not match existing bytes");
+    throw withFailureCategory(new Error("tool proposal replacement receipt does not match existing bytes"), "validation_failed");
   }
   try {
     const parsed = JSON.parse(manifest.toString("utf8")) as ToolPackage;
     const created = parsed.provenance?.created;
     return typeof created === "string" && created ? created : fallbackCreated;
   } catch {
-    throw new Error("tool proposal replacement manifest is not valid JSON");
+    throw withFailureCategory(new Error("tool proposal replacement manifest is not valid JSON"), "validation_failed");
   }
 }
 

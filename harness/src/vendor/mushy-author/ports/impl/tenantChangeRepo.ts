@@ -4,6 +4,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { withFailureCategory } from "../../agent/captureGuards.js";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,15 +43,18 @@ export class GitRefConflictError extends Error {
     readonly observedSha: string | null,
   ) {
     super(`Git ref conflict for ${ref}: expected ${expectedSha ?? "absent"}, observed ${observedSha ?? "absent"}`);
+    // A deterministic conflict on caller-supplied state, not an unknown fault.
+    // Branded at the class so every throw site is covered (sol-critic round 13).
+    withFailureCategory(this, "validation_failed");
   }
 }
 
 function assertSha(sha: string, label: string): void {
-  if (!SHA_RE.test(sha)) throw new Error(`${label} must be a 40-character Git SHA`);
+  if (!SHA_RE.test(sha)) throw withFailureCategory(new Error(`${label} must be a 40-character Git SHA`), "validation_failed");
 }
 
 function changeRef(changeSetId: string): string {
-  if (!CHANGE_SET_ID_RE.test(changeSetId)) throw new Error("changeSetId must be a UUID");
+  if (!CHANGE_SET_ID_RE.test(changeSetId)) throw withFailureCategory(new Error("changeSetId must be a UUID"), "validation_failed");
   return `refs/leaf/changes/${changeSetId.toLowerCase()}`;
 }
 
@@ -62,7 +66,7 @@ export class TenantChangeRepo {
   constructor(private readonly opts: TenantChangeRepoOptions) {
     const bare = this.git(["rev-parse", "--is-bare-repository"]).trim();
     if (bare !== "true") {
-      throw new Error("TenantChangeRepo requires a bare repository");
+      throw withFailureCategory(new Error("TenantChangeRepo requires a bare repository"), "unavailable");
     }
   }
 

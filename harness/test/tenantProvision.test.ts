@@ -20,8 +20,25 @@ import { HARNESS_IDENTITY } from "../src/registry/registerTool.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, "fixtures", "tenant-repo");
 
+/**
+ * The provider used to grant safe.directory trust by writing the USER'S GLOBAL
+ * git config, and this helper silently inherited that side effect. It now
+ * scopes trust to its own children via GIT_CONFIG_* env vars instead, which is
+ * the safer behaviour (no ~/.gitconfig mutation) but means an independent git
+ * call like this one is correctly NOT trusted. These tests deliberately create
+ * dubious-ownership repos, so the helper opts itself in the same command-scoped
+ * way rather than reaching for --global.
+ */
 function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  return execFileSync("git", ["-C", dir, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "*",
+    },
+  });
 }
 
 function provider(base: string) {
