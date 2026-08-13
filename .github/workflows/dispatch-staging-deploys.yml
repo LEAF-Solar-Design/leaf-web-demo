@@ -107,12 +107,54 @@ name: Dispatch staging deploys
 # put first on bad evidence, main moves at t=10, and web is skipped, where
 # web-first would have landed web at t=8 and dispatched app before the move.
 #
-# That trade is taken deliberately. The fixed order did not avoid the cost, it
-# just always charged it to the same service: web won every race and app lost
-# every race, forever. Occasionally swapping WHICH service lags is strictly
-# better than permanently starving one, and no ordering can stop the tip from
-# moving. The relay still announces the split it leaves, naming the skipped
-# service, so the cost is visible rather than silent.
+# AND A CORRECT READ CARRIES THE SAME COST, which an earlier version of this
+# block denied and is the sharper statement. The second service's tip re-check
+# does not run until the FIRST service's deploy reaches a TERMINAL STATE, so
+# whichever service goes first owns the whole exposure window, and a merge
+# arriving inside it costs the second service its dispatch. That happens on a
+# perfectly CORRECT read: app really is behind, app is correctly placed first,
+# and web is the one dropped. It needs no stale or wrong reading at all.
+#
+# The window has NO fixed length, and do not write one here. The ~8 min web /
+# ~14 min app figures on timeout-minutes below are OBSERVED DURATIONS "plus
+# time queued behind the shared staging lock", and a dispatch may additionally
+# be re-tried twice on lock eviction (EVICTION_RETRIES), so the window is
+# really: queue time + run resolution + polling + any retries, until terminal.
+# An earlier version of this very block asserted a tidy "(8, 14] window" and
+# that fixed `web app` "costs NOTHING" there; sol-critic returned RED, because
+# under lock contention a fixed-order web deploy can still be non-terminal at
+# minute 10 and fixed order then drops app too. BOTH orders can lose the
+# second service.
+#
+# What survives, and it is only a TENDENCY, not a bound: app's deploy is
+# typically the longer of the two, so putting app first typically lengthens
+# the interval in which the second service can be lost. That is the real cost
+# of need-first, and it is why the sentence that used to sit here -- "the fixed
+# order did not avoid the cost, it just always charged it to the same service"
+# -- is still wrong: there are schedules where fixed order loses nothing and
+# need-first loses web.
+#
+# The trade is still taken deliberately, on this narrower ground: the fixed
+# order starved app SYSTEMATICALLY (three consecutive relays landed web with no
+# app between them, and staging ran split for over two hours), while need-first
+# spreads the loss across both services instead of always billing app. No
+# ordering can stop the tip from moving, and the relay still announces the
+# split it leaves, naming the skipped service, so the cost stays visible.
+#
+# SCOPE, so nobody re-derives it: this ordering read only ever decides while
+# deploy runs are named `(<prod tag>)`. The v3 digest-aware path names its runs
+# `(<sha>-<attempt>-<service>)` instead (see CONVERGENCE_ID at the dispatch
+# site), which fails the `^prod-` guard at the ordering site, so ACTIVATING V3
+# SILENTLY REVERTS THIS TO FIXED `web app`. v3 is dormant today and staging
+# runs are still `prod-<sha>` named, so need-first is live; whoever turns v3 on
+# is also turning this off, and should decide that on purpose.
+#
+# NOT PINNED BY A TEST, deliberately flagged rather than implied: the
+# rehearsal models tip movement as a COUNT of tip reads (`tip_ok_reads`),
+# which is order-blind, so it cannot tell a short first deploy from a long one
+# and pins the skip as symmetric. Anyone tightening this ordering policy should
+# make that harness duration-aware first, or the pin will keep agreeing with
+# whatever the code does.
 #
 # Inferring live
 # state from CI run history is NOT sound, and an earlier cut of this change
