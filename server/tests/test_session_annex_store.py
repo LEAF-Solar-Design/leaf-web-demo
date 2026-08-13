@@ -639,36 +639,40 @@ def test_migration_policy_check_matches_the_python_policy_set():
         "0029's policy CHECK and session_policy.POLICIES disagree")
 
 
-def test_the_image_ships_a_legacy_default_and_the_manifest_stays_out_of_it():
-    """The image bakes the selector; `required-config.app.json` deliberately
-    does NOT require it yet, and that asymmetry is the finding this pins.
+def test_the_image_ships_a_legacy_default():
+    """The image bakes `LEAF_SESSION_ANNEX_STORE=legacy`, so an unset selector
+    still runs a STATED mode rather than an accidental one.
 
-    PR #499 required `LEAF_SESSIONS_STORE` in the manifest because its absence
-    means task-local SQLite and real loss. The same move here would WEDGE the
-    pipeline: the staging deploy's manifest check compares the manifest against
-    a configuration baseline cloned from the previously live task definition,
-    which cannot contain a brand-new variable, and the configuration-delta lane
-    cannot introduce it either because its allowlist is positive and
-    value-exact (`LEAF_JOBS_STORE=postgres` and the five `LEAF_SESSIONS_STORE`
-    values only).
+    This test used to also assert the manifest deliberately did NOT require the
+    selector, and it named the condition for reversing that: "Re-add it only
+    after the infrastructure repository carries the variable, in that order."
+    **That condition is now met, so the negative half is retired rather than
+    contradicted, and its ordering held exactly as written.**
 
-    The safety the manifest entry would buy is close to zero here, which is why
-    the sequencing wins: an absent selector resolves to `legacy`, which is
-    byte-identical to current behaviour, and the combination that actually harms
-    a user is refused at startup by validate_session_annex_authority whether or
-    not the manifest names the variable.
+    What changed, in the order the original docstring demanded:
 
-    Re-add it only after the infrastructure repository carries the variable, in
-    that order. See docs/POSTGRES-CUTOVER.md.
+    1. leaf-automation-aws-terraform PR #534 added
+       ``LEAF_SESSION_ANNEX_STORE=legacy`` and ``=postgres`` to the deploy
+       workflow's positive, value-exact delta allowlist. The docstring's
+       statement that the allowlist held only ``LEAF_JOBS_STORE=postgres`` and
+       the five ``LEAF_SESSIONS_STORE`` values was true when written and is now
+       stale.
+    2. Both staging colors carry the variable, read from live 2026-08-13:
+       ``leaf-platform-app:600`` and ``leaf-platform-app-alt:81``, both
+       ``postgres``. So the manifest check's baseline, cloned from the
+       previously live task definition, now contains it and cannot wedge.
+
+    The positive assertion lives in
+    ``test_deployment_source_identity.test_app_manifest_requires_an_explicit_session_annex_authority``,
+    beside the ``LEAF_SESSIONS_STORE`` one it mirrors. It also records the one
+    case the original docstring did not anticipate: because the two selectors
+    arrived together in the P4A typed cutover, a baseline missing the annex
+    selector is a PRE-CUTOVER baseline carrying ``dual_write_shadow``, which
+    ``validate_session_annex_authority`` cannot refuse -- that gate fires only
+    when the sessions authority is ``postgres``. So the manifest entry is not
+    "close to zero" safety on that path; it is the only guard.
+
+    The Dockerfile half below is unaffected and still load-bearing.
     """
-    import json
-
-    required = json.loads(
-        (REPO_ROOT / "deploy" / "required-config.app.json").read_text(
-            encoding="utf-8"))
-    assert "LEAF_SESSION_ANNEX_STORE" not in required["required"]["environment"], (
-        "requiring the selector before the task definitions carry it blocks the "
-        "next app deploy; see the docstring")
-
     dockerfile = (REPO_ROOT / "deploy" / "Dockerfile.app").read_text(encoding="utf-8")
     assert "LEAF_SESSION_ANNEX_STORE=legacy" in dockerfile
