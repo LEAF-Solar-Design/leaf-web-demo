@@ -50,9 +50,13 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     annex = suites["server-session-annex-store"]
-    # 27 collected, 0 skipped: the PostgreSQL halves run against a fake in
+    # 28 collected, 0 skipped: the PostgreSQL halves run against a fake in
     # place of platform.db, so a no-DB host executes every one of them.
-    assert annex.expected == 27
+    # 27 -> 28 on 2026-08-13, re-MEASURED alongside the run-all-gates.py floor.
+    # 27 was never the collected count -- the file already had 28 tests when
+    # #507 registered it -- so this mirror asserted the wrong number from the
+    # start and only the registry's silent drift note reported it.
+    assert annex.expected == 28
     assert "tests/test_session_annex_store.py" in annex.argv
 
     static = suites["platform-static"]
