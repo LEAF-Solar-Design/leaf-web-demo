@@ -35,8 +35,22 @@ because each one alone leaves a hole.
      fails the container at boot, where ECS makes it impossible to miss,
      instead of failing a dimension nobody is looking at.
 
-     The sentinel therefore cannot occur in a deployed environment.  It exists
-     so a loopback development run still emits well-formed lines.
+     Be precise about what that catches, because the obvious stronger claim is
+     false: the entrypoint requires the variable to be SET, not to hold any
+     particular value.  `require_environment_label` validates SYNTAX only, so
+     `LEAF_INSTANT_ENV=unset` -- the sentinel typed in literally -- passes it
+     and boots, as do case variants like `Staging` that CloudWatch treats as a
+     different dimension value.  What rule 2 removes is the realistic failure,
+     a variable nobody set.  Deliberately writing a wrong-but-well-formed label
+     is not caught here, and does not need to be: the value is generated, not
+     hand-typed.  `leaf_instant_execution.tf` sets `LEAF_INSTANT_ENV` from the
+     same terraform local that builds the alarms' dimension, so the published
+     label and the watched label cannot drift apart on the deployed path.
+
+     The sentinel exists so a loopback development run still emits well-formed
+     lines.  `test_the_sentinel_is_not_silently_acceptable_as_a_real_label`
+     pins that it passes validation, so anyone tightening this must change that
+     test deliberately rather than discover it.
 
 THE CHARACTER RULE IS LOAD-BEARING, not tidiness.  The executor writes JSON, so
 it would tolerate almost anything, but the control plane publishes its half of
