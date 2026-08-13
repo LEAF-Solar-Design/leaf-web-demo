@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contracts/platform-arrival-reconciliation.v1.schema.json",
+  "title": "Dormant platform arrival-frontier reconciliation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "state",
+    "selector",
+    "bundle_digest",
+    "arrival_source_revision",
+    "arrival_source_tree",
+    "arrival_sequence",
+    "frontier_source_revision",
+    "frontier_source_tree",
+    "frontier_sequence",
+    "producer_run_id",
+    "relay_run_id",
+    "supply_artifact_id",
+    "supply_manifest_digest",
+    "convergence_receipt_digest",
+    "prior_stage_receipt_digests",
+    "disposition",
+    "reason_code",
+    "resume_service",
+    "resume_stage",
+    "authority"
+  ],
+  "properties": {
+    "schema": {
+      "const": "leaf.platform-arrival-reconciliation.v2"
+    },
+    "state": {
+      "const": "SHADOW"
+    },
+    "selector": {
+      "const": "UNCONFIGURED"
+    },
+    "bundle_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "arrival_source_revision": {
+      "$ref": "#/$defs/sha"
+    },
+    "arrival_source_tree": {
+      "$ref": "#/$defs/sha"
+    },
+    "arrival_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "frontier_source_revision": {
+      "$ref": "#/$defs/sha"
+    },
+    "frontier_source_tree": {
+      "$ref": "#/$defs/sha"
+    },
+    "frontier_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "producer_run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "relay_run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "supply_artifact_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "supply_manifest_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "convergence_receipt_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "prior_stage_receipt_digests": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/digest"
+      }
+    },
+    "disposition": {
+      "enum": [
+        "adopt_frontier",
+        "resume_failed_stage",
+        "serialize_wait",
+        "superseded",
+        "blocked"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,95}$"
+    },
+    "resume_service": {
+      "oneOf": [
+        {
+          "enum": [
+            "app",
+            "broker",
+            "canonical-worker",
+            "harness",
+            "web"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resume_stage": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispatch",
+        "cancel",
+        "merge",
+        "claim",
+        "selector_activation",
+        "provider_call",
+        "source_mutation",
+        "live_mutation"
+      ],
+      "properties": {
+        "dispatch": {
+          "const": false
+        },
+        "cancel": {
+          "const": false
+        },
+        "merge": {
+          "const": false
+        },
+        "claim": {
+          "const": false
+        },
+        "selector_activation": {
+          "const": false
+        },
+        "provider_call": {
+          "const": false
+        },
+        "source_mutation": {
+          "const": false
+        },
+        "live_mutation": {
+          "const": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
