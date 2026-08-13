@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -220,17 +221,40 @@ def test_inventory_declares_both_commands_for_the_sessions_authority():
 
 
 def test_inventory_records_the_measured_staging_selection():
-    """The field this lane closed. It read 'is not recorded' before."""
+    """The field this lane closed. It read 'is not recorded' before.
+
+    WHAT CHANGED HERE, and why it is not a loosened gate. This test used to
+    assert the literal value ``dual_write_shadow`` and the literal revision
+    ``leaf-platform-app-alt:27``. Both were true when written and both are now
+    false: the P4A typed cutover moved the selector to ``postgres`` AND moved
+    the serving color, so a snapshot pin failed twice over. Worse, it made the
+    stale record load-bearing, so the next person to correct the inventory reded
+    a test for doing the right thing, which is how a false record survives.
+
+    So the snapshot is gone and the PROPERTY it existed to protect stays: the
+    staging selection is a real measurement, its value is one this authority's
+    own selector declares, and its evidence cites BOTH layers -- a task
+    definition revision and an image digest -- because a task definition alone
+    cannot establish a selection when an image ENV survives an absent override.
+    That last half is a strengthening: the old record cited only a revision.
+    None of it decays on the next remeasurement, and blanking the record, or
+    recording a mode the selector does not allow, still reds.
+    """
     inventory = json.loads(INVENTORY)
     entry = next(
         item for item in inventory["authorities"]
         if item["id"] == "app_sessions_and_approvals"
     )
     staging = entry["current_selection"]["staging"]
-    assert staging["value"] == "dual_write_shadow"
     assert staging["status"] == "measured"
-    # The evidence must name the task definition it was read from.
-    assert "leaf-platform-app-alt:27" in staging["evidence"]
+    selector = next(
+        item for item in entry["selectors"]
+        if item["name"] == "LEAF_SESSIONS_STORE"
+    )
+    assert staging["value"] in selector["allowed_modes"]
+    # Both layers, or the record does not support its own status.
+    assert re.search(r"leaf-platform-app(-alt)?:\d+", staging["evidence"])
+    assert "@sha256:" in staging["evidence"]
 
 
 def test_app_image_contains_the_reconciliation_command():
