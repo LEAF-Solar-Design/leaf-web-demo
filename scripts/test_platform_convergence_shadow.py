@@ -229,6 +229,12 @@ def test_duplicate_json_key_is_rejected() -> None:
         load_json(StringIO('{"schema":"first","schema":"second"}'))
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_nonstandard_json_constants_are_rejected(constant: str) -> None:
+    with pytest.raises(ContractError, match="nonstandard_json_constant"):
+        load_json(StringIO('{"duration":' + constant + "}"))
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -237,6 +243,8 @@ def test_duplicate_json_key_is_rejected() -> None:
         lambda value: value["services"].pop("web"),
         lambda value: value["markers"]["full_scan"].update(duration_seconds=True),
         lambda value: value["markers"]["full_scan"].update(duration_seconds=0),
+        lambda value: value["markers"]["full_scan"].update(duration_seconds=float("nan")),
+        lambda value: value["markers"]["full_scan"].update(duration_seconds=float("inf")),
         lambda value: value["markers"]["indexed"]["receipt"].update(raw_rows=[]),
     ],
 )
