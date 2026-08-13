@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-release-stage-receipt.v1.schema.json",
+  "title": "Leaf platform release stage receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "convergence_id",
+    "parent_run_id",
+    "run_attempt",
+    "stage",
+    "ordinal",
+    "state",
+    "source_commit",
+    "source_tree",
+    "workflow_blob",
+    "supply_artifact_id",
+    "supply_sha256",
+    "supply_predicate_sha256",
+    "service",
+    "decision",
+    "candidate_digest",
+    "terminal_digest",
+    "terminal_task_definition",
+    "rollback_task_definition",
+    "mutation_started",
+    "mutation_idempotency_key",
+    "started_at",
+    "completed_at",
+    "duration_seconds",
+    "finalized_after_verify",
+    "rollback_invoked",
+    "failure_class",
+    "payload_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-release-stage-receipt.v1"},
+    "convergence_id": {"$ref": "#/$defs/id"},
+    "parent_run_id": {"type": "integer", "minimum": 1},
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "stage": {
+      "enum": [
+        "build",
+        "web",
+        "app",
+        "broker",
+        "harness",
+        "canonical-worker",
+        "identity"
+      ]
+    },
+    "ordinal": {"type": "integer", "minimum": 0, "maximum": 6},
+    "state": {"enum": ["terminal", "failed"]},
+    "source_commit": {"$ref": "#/$defs/sha"},
+    "source_tree": {"$ref": "#/$defs/sha"},
+    "workflow_blob": {"$ref": "#/$defs/sha"},
+    "supply_artifact_id": {"type": "integer", "minimum": 1},
+    "supply_sha256": {"$ref": "#/$defs/digest"},
+    "supply_predicate_sha256": {"$ref": "#/$defs/digest"},
+    "service": {
+      "type": ["string", "null"],
+      "enum": ["web", "app", "broker", "harness", "canonical-worker", null]
+    },
+    "decision": {"enum": ["adopted", "skipped", "deployed", "restamped", "failed"]},
+    "candidate_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "terminal_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "terminal_task_definition": {"anyOf": [{"$ref": "#/$defs/taskDefinition"}, {"type": "null"}]},
+    "rollback_task_definition": {"anyOf": [{"$ref": "#/$defs/taskDefinition"}, {"type": "null"}]},
+    "mutation_started": {"type": "boolean"},
+    "mutation_idempotency_key": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "finalized_after_verify": {"type": "boolean"},
+    "rollback_invoked": {"type": "boolean"},
+    "failure_class": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "payload_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,199}$"},
+    "taskDefinition": {
+      "type": "string",
+      "pattern": "^arn:aws:ecs:us-east-1:[0-9]{12}:task-definition/leaf-platform-[a-z-]+:[1-9][0-9]*$"
+    }
+  }
+}
