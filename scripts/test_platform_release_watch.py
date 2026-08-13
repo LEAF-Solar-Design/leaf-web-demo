@@ -647,6 +647,20 @@ def test_schema_and_runtime_both_reject_extra_root_key() -> None:
         watch.compile_watch_plan(document)
 
 
+@pytest.mark.parametrize("field", ["event_timeout_seconds", "max_poll_seconds"])
+def test_schema_and_runtime_both_reject_subsecond_timeout(field: str) -> None:
+    jsonschema = jsonschema_module()
+    document = capture()
+    policy = document["watch"]
+    assert isinstance(policy, dict)
+    policy[field] = 0.5
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(document)
+    with pytest.raises(watch.ContractError, match="watch_policy_invalid"):
+        watch.compile_watch_plan(document)
+
+
 def test_workflow_is_manual_read_only_and_non_executable() -> None:
     import yaml
 

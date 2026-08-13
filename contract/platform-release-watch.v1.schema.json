@@ -81,8 +81,8 @@
       "properties": {
         "mode": {"enum": ["event", "poll"]},
         "observed_at": {"$ref": "#/$defs/timestamp"},
-        "event_timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
-        "max_poll_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "event_timeout_seconds": {"type": "number", "minimum": 1},
+        "max_poll_seconds": {"type": "number", "minimum": 1},
         "active_watcher_count": {"const": 1},
         "watcher_lease_generation_sha256": {"$ref": "#/$defs/digest"}
       }
