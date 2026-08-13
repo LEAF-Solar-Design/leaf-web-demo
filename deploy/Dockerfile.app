@@ -141,6 +141,10 @@ WORKDIR /app/server
 # every static check still green. A review confirmed it by replaying the
 # mutation. Exec form names the interpreter itself and ignores SHELL, so no
 # instruction above the guard can change what the guard means.
+# PROOF BRANCH ONLY -- NEVER MERGE. Deliberate deletion of a shipped
+# reconciler, immediately above the guard, so the BUILD must reject it.
+# Every static gate stays green on this tree; only the image catches it.
+RUN rm -f /app/scripts/reconcile_sessions_authority.py
 RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
