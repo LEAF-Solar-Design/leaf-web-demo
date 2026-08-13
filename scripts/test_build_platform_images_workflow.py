@@ -2881,6 +2881,9 @@ def check_docs_noop_filter(text: str) -> None:
         "SUPPLY_SHA256": "${{ steps.manifest.outputs.artifact_sha256 }}",
         "SUPPLY_ARTIFACT_ID": "${{ steps.manifest.outputs.artifact_id }}",
         "SUPPLY_ARTIFACT_NAME": "${{ steps.manifest.outputs.artifact_name }}",
+        "SUPPLY_EVIDENCE_B64": (
+            "${{ steps.manifest.outputs.supply_evidence_b64 }}"
+        ),
     }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
     assert dispatch_step["if"] == (
@@ -3170,7 +3173,13 @@ def check_docs_noop_filter(text: str) -> None:
         # v1/v2 retain their exact legacy inputs, while v3 can run only when
         # the hardcoded source flag is deliberately enabled with the
         # reviewed Terraform consumer marker present.
-        "b5a7e1dc3991fbd162bd9b3b6aa67311243414db5f57cf2a3544bda7e27f21d5"
+        # Hash updated for the closed producer-owned v2/v3 supply envelope.
+        # The manifest step adds only read-only provider association checks,
+        # archive hashing, and local canonical JSON construction. The guarded
+        # deploy step retains one `gh workflow run` site and adds one protected
+        # input to that existing call for v2/v3. V1 dispatch inputs, credentials,
+        # service order, polling, rollback, selectors, and receipts are unchanged.
+        "b436389dc39cba4fc0124c5f93e2d21c5de8896603c4838a5747c3fac8cdb76f"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3190,14 +3199,16 @@ def check_docs_noop_filter(text: str) -> None:
     # DOCS-ONLY RECONCILE (PR #519): the docs-only arm no longer skips. It
     # resolves the last tag built from main and sets deploy=true onto it, so a
     # docs-only merge converges both staging services instead of stranding a
-    # split until the next deployable merge. deploy=false is therefore GONE,
-    # and deploy=true now appears twice: the ordinary same-build path and the
-    # reconcile path, both routed through the SAME guarded dispatch step.
+    # split until the next deployable merge. deploy=false is therefore GONE.
+    # Both the ordinary same-build path and the reconcile path call the same
+    # closed output writer.
     assert manifest_code.count('echo "deploy=false"') == 0, (
         "the docs-only arm must reconcile, not skip: a deploy=false skip is "
         "exactly how a staging split outlived a docs-only merge")
-    assert manifest_code.count('echo "deploy=true"') == 2, (
-        "deploy=true is set by the same-build path and the reconcile path")
+    assert manifest_code.count('echo "deploy=true"') == 1, (
+        "deploy=true must be emitted only by the shared output writer")
+    assert manifest_code.count("write_manifest_outputs") == 3, (
+        "the shared writer must have one definition and exactly two callers")
     # Still ONE run-artifact listing endpoint, inside the shared
     # fetch_supply_set helper that both paths call; the reconcile's run scan
     # lists workflow RUNS, a different endpoint.
@@ -5199,16 +5210,13 @@ case "${args[0]}" in
         printf '%s\n' "$(printf '%s' "$FAKE_RELATIONS" | jq -r --arg s "$base" '.[$s] // "diverged"')"
         ;;
       *"/artifacts/"*"/zip")
-        # The listing call stashed the supply set for this run; materialise it.
-        if [ -f .pending_supply_set.json ]; then
-          cp .pending_supply_set.json staging-supply-set.json
-        fi
-        printf 'zip\n'
+        # The listing call made the exact one-file provider archive.
+        cat .pending_supply_set.zip
         ;;
       *"/artifacts?per_page=100")
         rest="${url#*/actions/runs/}"
         run_id="${rest%%/*}"
-        rm -f .pending_supply_set.json
+        rm -f .pending_supply_set.json .pending_supply_set.zip
         if [ "$run_id" = "$BUILD_RUN_ID" ]; then
           printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$BUILD_HEAD_SHA"'-attempt-'"$BUILD_RUN_ATTEMPT"'","id":1,"expired":false}]}'
         else
@@ -5219,10 +5227,27 @@ case "${args[0]}" in
             att=$(printf '%s' "$entry" | jq -r '.attempt')
             tag=$(printf '%s' "$entry" | jq -r '.tag')
             rev=$(printf '%s' "$entry" | jq -r '.rev // .sha')
-            jq -n --arg rev "$rev" --arg tag "$tag" \
-              '{schema:"leaf.staging-supply-set.v2",source_revision:$rev,build_tag:$tag}' \
+            tree=$(printf '%s:tree' "$rev" | sha1sum | awk '{print $1}')
+            digest="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+            jq -n --arg rev "$rev" --arg tree "$tree" --arg tag "$tag" \
+              --arg digest "$digest" --argjson run "$run_id" \
+              '{schema:"leaf.staging-supply-set.v2",source_revision:$rev,
+                source_tree:$tree,build_tag:$tag,
+                speculative:{built_from_revision:$rev,pr_number:1,workflow_run_id:$run},
+                services:{
+                  app:{repository:"leaf-platform-app",image_digest:$digest,source_revision:$rev},
+                  broker:{repository:"leaf-platform-broker",image_digest:$digest,source_revision:$rev},
+                  "canonical-worker":{repository:"leaf-platform-canonical-worker",image_digest:$digest,source_revision:$rev,
+                    provenance:{application_source_revision:$rev,solver_source_revision:$rev,
+                      solver_source_sha256:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+                  harness:{repository:"leaf-platform-harness",image_digest:$digest,source_revision:$rev},
+                  web:{repository:"leaf-platform-web",image_digest:$digest,source_revision:$rev,
+                    artifact_sha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                }}' \
               > .pending_supply_set.json
-            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-'"$sha"'-attempt-'"$att"'","id":'"$run_id"',"expired":false}]}'
+            python -c 'import zipfile; z=zipfile.ZipFile(".pending_supply_set.zip","w",zipfile.ZIP_DEFLATED); z.write(".pending_supply_set.json","staging-supply-set.json"); z.close()'
+            archive_digest=$(sha256sum .pending_supply_set.zip | awk '{print $1}')
+            printf '%s\n' '{"total_count":1,"artifacts":[{"name":"staging-supply-set-'"$sha"'-attempt-'"$att"'","id":'"$run_id"',"expired":false,"digest":"sha256:'"$archive_digest"'","workflow_run":{"id":'"$run_id"',"head_sha":"'"$sha"'"}}]}'
           elif [ -n "$marker" ]; then
             msha=$(printf '%s' "$marker" | jq -r '.sha')
             matt=$(printf '%s' "$marker" | jq -r '.attempt')
@@ -5231,6 +5256,25 @@ case "${args[0]}" in
             printf '%s\n' '{"total_count":0,"artifacts":[]}'
           fi
         fi
+        ;;
+      *"/actions/runs/"*)
+        run_id="${url##*/actions/runs/}"
+        entry=$(printf '%s' "$FAKE_SUPPLY_SETS" | jq -c --arg id "$run_id" '.[$id] // empty')
+        [ -n "$entry" ] || { echo "fake gh: no producer run $run_id" >&2; exit 9; }
+        sha=$(printf '%s' "$entry" | jq -r '.sha')
+        att=$(printf '%s' "$entry" | jq -r '.attempt')
+        jq -n --argjson id "$run_id" --argjson att "$att" --arg sha "$sha" \
+          '{id:$id,run_attempt:$att,event:"push",head_sha:$sha,
+            path:".github/workflows/build-platform-images.yml",status:"completed",
+            conclusion:"success",head_branch:"main",
+            repository:{full_name:"LEAF-Solar-Design/leaf-web-demo"},
+            head_repository:{full_name:"LEAF-Solar-Design/leaf-web-demo"}}'
+        ;;
+      *"/git/commits/"*)
+        source="${url##*/git/commits/}"
+        tree=$(printf '%s:tree' "$source" | sha1sum | awk '{print $1}')
+        jq -n --arg source "$source" --arg tree "$tree" \
+          '{sha:$source,tree:{sha:$tree}}'
         ;;
       *) echo "fake gh: unhandled api $url" >&2; exit 9 ;;
     esac
@@ -5252,6 +5296,43 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
     jq = shutil.which("jq")
     assert bash and jq, "the manifest reconcile rehearsal needs bash and jq on PATH"
 
+    # The production envelope refuses symbolic or shortened source identities.
+    # Keep the human-readable scenario labels at each call site, then map them
+    # to deterministic full SHA-40 values before the real script sees them.
+    sha_map = {}
+    for entry in supply_sets.values():
+        label = entry.get("rev", entry["sha"])
+        suffix = entry["tag"].removeprefix("prod-")
+        if re.fullmatch(r"[0-9a-f]{7,40}", suffix):
+            sha_map[label] = suffix + hashlib.sha1(
+                label.encode("utf-8")
+            ).hexdigest()[len(suffix):]
+            if "rev" not in entry:
+                sha_map[entry["sha"]] = sha_map[label]
+
+    def full_sha(value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+        return sha_map.get(value, hashlib.sha1(value.encode("utf-8")).hexdigest())
+
+    normalized_rows = []
+    for row in rows:
+        run_id, sha, attempt = row.split()
+        normalized_rows.append(f"{run_id} {full_sha(sha)} {attempt}")
+    normalized_supply_sets = json.loads(json.dumps(supply_sets))
+    for entry in normalized_supply_sets.values():
+        entry["sha"] = full_sha(entry["sha"])
+        if "rev" in entry:
+            entry["rev"] = full_sha(entry["rev"])
+    normalized_relations = {
+        full_sha(sha): relation for sha, relation in relations.items()
+    }
+    normalized_markers = json.loads(json.dumps(markers or {}))
+    for entry in normalized_markers.values():
+        entry["sha"] = full_sha(entry["sha"])
+    normalized_compare_fails = [full_sha(sha) for sha in (compare_fails or [])]
+    build_head_sha = full_sha(build_head_sha)
+
     relay = _strict_yaml(
         (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
             encoding="utf-8"))
@@ -5264,13 +5345,6 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
         bindir.mkdir()
         (bindir / "gh").write_text(_MANIFEST_FAKE_GH, encoding="utf-8", newline="\n")
         (bindir / "gh").chmod(0o755)
-        # unzip is shimmed: the fake gh writes staging-supply-set.json at the zip
-        # download, so the script's `unzip -o` only has to succeed. This keeps the
-        # rehearsal off any real unzip binary (not guaranteed on the dev host).
-        (bindir / "unzip").write_text(
-            "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
-        (bindir / "unzip").chmod(0o755)
-
         out = tmp / "github_output"
         out.write_text("", encoding="utf-8")
         script = tmp / "manifest.sh"
@@ -5280,6 +5354,8 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
         env.update(
             PATH=f"{bindir}{os.pathsep}{env['PATH']}",
             GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+            GITHUB_RUN_ID="500",
+            GITHUB_RUN_ATTEMPT="1",
             INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
             DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
             BUILD_RUN_ID=build_run_id,
@@ -5287,11 +5363,11 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
             BUILD_RUN_ATTEMPT=build_attempt,
             GH_TOKEN="fake-token",
             GITHUB_OUTPUT=str(out),
-            FAKE_ROWS="\n".join(rows),
-            FAKE_SUPPLY_SETS=json.dumps(supply_sets),
-            FAKE_RELATIONS=json.dumps(relations),
-            FAKE_MARKERS=json.dumps(markers or {}),
-            FAKE_COMPARE_FAILS=json.dumps(compare_fails or []),
+            FAKE_ROWS="\n".join(normalized_rows),
+            FAKE_SUPPLY_SETS=json.dumps(normalized_supply_sets),
+            FAKE_RELATIONS=json.dumps(normalized_relations),
+            FAKE_MARKERS=json.dumps(normalized_markers),
+            FAKE_COMPARE_FAILS=json.dumps(normalized_compare_fails),
         )
         proc = subprocess.run(
             [bash, str(script)], env=env, text=True, capture_output=True,
@@ -5485,6 +5561,355 @@ def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
     check_staging_relay_convergence(relay.read_text(encoding="utf-8"))
     check_staging_relay_convergence_battery(relay)
     check_staging_relay_classifier_behaviour(relay.read_text(encoding="utf-8"))
+
+
+def _supply_evidence_python() -> str:
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest = next(
+        step
+        for step in relay["jobs"]["dispatch"]["steps"]
+        if step.get("id") == "manifest"
+    )["run"]
+    match = re.search(
+        r"python - <<'SUPPLY_EVIDENCE_PY'\n(.*?)\n\s*SUPPLY_EVIDENCE_PY",
+        manifest,
+        re.S,
+    )
+    assert match, "the closed supply evidence producer must stay extractable"
+    return match.group(1)
+
+
+_SUPPLY_SOURCE = "aa7a7c9c5ad5021bea68b24843da3f197dd07ceb"
+_SUPPLY_TREE = "2a291fd10d60f844850bc1efda5ed206eadeac60"
+_SUPPLY_DIGESTS = {
+    "app": "sha256:1d9f84c0d98b0e87b830f194d614d961c0b40c907f17ec917b10b4d0fa913d3b",
+    "broker": "sha256:6cd7bceaba696e2a29ec677b4d3ca34e4f5f11bdf39241c04b7d7e3c7373affa",
+    "canonical-worker": "sha256:ccbc68ff1bc16eded47fcf2664b6eec3715b182655f8b8d0b06217cc98d9f323",
+    "harness": "sha256:d35c4107cb37d36f967007dfea5329cc7cf9bee867449c8fce76dea6c03a9a61",
+    "web": "sha256:d664a928c224c5c27412b3c18c8b2db89a1db740c3f8f895fc134263e3231dd2",
+}
+_SUPPLY_REPOSITORIES = {
+    "app": "leaf-platform-app",
+    "broker": "leaf-platform-broker",
+    "canonical-worker": "leaf-platform-canonical-worker",
+    "harness": "leaf-platform-harness",
+    "web": "leaf-platform-web",
+}
+
+
+def _real_v2_supply_manifest() -> dict:
+    services = {
+        name: {
+            "image_digest": _SUPPLY_DIGESTS[name],
+            "repository": _SUPPLY_REPOSITORIES[name],
+            "source_revision": _SUPPLY_SOURCE,
+        }
+        for name in _SUPPLY_DIGESTS
+    }
+    services["canonical-worker"]["provenance"] = {
+        "application_source_revision": _SUPPLY_SOURCE,
+        "solver_source_revision": "3ae53e274a5c6be3edeab30054234d09fdd74b41",
+        "solver_source_sha256": (
+            "c50ab70db1802f36af2af1ac24f8177d347a1083b9caf4bc85009310addcd721"
+        ),
+    }
+    services["web"]["artifact_sha256"] = (
+        "0c330d1e7460eeb5f74c5777c75223831609ded68b199442b8687c2e5192f6af"
+    )
+    return {
+        "build_tag": "prod-aa7a7c9",
+        "schema": "leaf.staging-supply-set.v2",
+        "services": services,
+        "source_revision": _SUPPLY_SOURCE,
+        "source_tree": _SUPPLY_TREE,
+        "speculative": {
+            "built_from_revision": "a67c8860594b428f5380b1587cb280d523e32e64",
+            "pr_number": 591,
+            "workflow_run_id": 31738039215,
+        },
+    }
+
+
+def _run_supply_evidence(manifest, **overrides):
+    env = dict(os.environ)
+    env.update(
+        GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+        GITHUB_RUN_ID="31738400000",
+        GITHUB_RUN_ATTEMPT="1",
+        SUPPLY_ARTIFACT_ID="9196079750",
+        SUPPLY_ARTIFACT_NAME=(
+            "staging-supply-set-aa7a7c9c5ad5021bea68b24843da3f197dd07ceb-"
+            "attempt-1"
+        ),
+        SUPPLY_ARTIFACT_PROVIDER_SHA256=(
+            "d3787ed751ee6271b1a8bbb8bb8f4c8165d1d48ab4a0c76ff968cbb9ad3ad186"
+        ),
+        SUPPLY_PRODUCER_RUN_ID="31738360788",
+        SUPPLY_PRODUCER_RUN_ATTEMPT="1",
+        SUPPLY_PRODUCER_EVENT="push",
+        SUPPLY_PRODUCER_SOURCE_REVISION=_SUPPLY_SOURCE,
+        SUPPLY_PRODUCER_SOURCE_TREE=_SUPPLY_TREE,
+        SUPPLY_DISPATCH_IMAGE_TAG="prod-aa7a7c9",
+    )
+    env.update({key: str(value) for key, value in overrides.items()})
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        raw = manifest if isinstance(manifest, str) else json.dumps(manifest)
+        (tmp / "staging-supply-set.json").write_text(
+            raw, encoding="utf-8", newline="\n"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", _supply_evidence_python()],
+            cwd=tmp,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+
+
+def _decode_supply_evidence(encoded: str) -> dict:
+    import base64
+
+    padding = "=" * (-len(encoded) % 4)
+    return json.loads(base64.urlsafe_b64decode(encoded + padding))
+
+
+def test_relay_mints_closed_real_v2_supply_evidence() -> None:
+    manifest = _real_v2_supply_manifest()
+    proc = _run_supply_evidence(manifest)
+    assert proc.returncode == 0, proc.stderr
+    encoded = proc.stdout.strip()
+    assert encoded and "=" not in encoded
+    evidence = _decode_supply_evidence(encoded)
+    assert set(evidence) == {
+        "manifest", "producer", "relay", "schema", "supply_artifact"
+    }
+    assert evidence["schema"] == "leaf.staging-supply-dispatch-evidence.v1"
+    assert evidence["producer"] == {
+        "event": "push",
+        "repository": "LEAF-Solar-Design/leaf-web-demo",
+        "run_attempt": 1,
+        "run_id": 31738360788,
+        "source_revision": _SUPPLY_SOURCE,
+        "source_tree": _SUPPLY_TREE,
+        "workflow_path": ".github/workflows/build-platform-images.yml",
+    }
+    assert evidence["supply_artifact"] == {
+        "id": 9196079750,
+        "name": (
+            "staging-supply-set-aa7a7c9c5ad5021bea68b24843da3f197dd07ceb-"
+            "attempt-1"
+        ),
+        "provider_archive_sha256": (
+            "d3787ed751ee6271b1a8bbb8bb8f4c8165d1d48ab4a0c76ff968cbb9ad3ad186"
+        ),
+    }
+    assert evidence["manifest"]["dispatch_image_tag"] == "prod-aa7a7c9"
+    assert [row["name"] for row in evidence["manifest"]["services"]] == [
+        "app", "broker", "canonical-worker", "harness", "web"
+    ]
+    assert {
+        row["name"]: row["manifest_entry"]["image_digest"]
+        for row in evidence["manifest"]["services"]
+    } == _SUPPLY_DIGESTS
+    assert evidence["manifest"]["sha256"] == hashlib.sha256(
+        json.dumps(manifest).encode("utf-8")
+    ).hexdigest()
+    decoded = json.dumps(evidence, separators=(",", ":"), sort_keys=True)
+    assert len(decoded.encode("utf-8")) <= 16_384
+    assert not re.search(r"(?i)(secret|token|password|authorization)", decoded)
+
+
+def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
+    services = {}
+    for name in _SUPPLY_DIGESTS:
+        row = {
+            "build_disposition": "built",
+            "image_digest": _SUPPLY_DIGESTS[name],
+            "immutable_lookup_tag": f"sha-{_SUPPLY_SOURCE}",
+            "producer_run_attempt": 1,
+            "producer_run_id": 31738360788,
+            "producer_source_revision": _SUPPLY_SOURCE,
+            "producer_source_tree": _SUPPLY_TREE,
+            "producer_workflow_blob": "1" * 40,
+            "producer_workflow_path": ".github/workflows/build-platform-images.yml",
+            "provenance_digest": _SUPPLY_DIGESTS[name],
+            "provenance_subject": (
+                "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+                f"{_SUPPLY_REPOSITORIES[name]}"
+            ),
+            "recipe_fingerprint": "2" * 64,
+            "repository": _SUPPLY_REPOSITORIES[name],
+            "surface_fingerprint": "3" * 64,
+        }
+        if name == "canonical-worker":
+            row["solver_provenance"] = {
+                "solver_source_revision": "3ae53e274a5c6be3edeab30054234d09fdd74b41",
+                "solver_source_sha256": "4" * 64,
+            }
+        if name == "web":
+            row["artifact_sha256"] = "5" * 64
+        services[name] = row
+    services["broker"].update(
+        build_disposition="reused",
+        producer_run_attempt=2,
+        producer_run_id=31730000000,
+        producer_source_revision="b" * 40,
+        producer_source_tree="c" * 40,
+    )
+    manifest = {
+        "build_run_attempt": 1,
+        "build_run_id": 31738360788,
+        "release_source_revision": _SUPPLY_SOURCE,
+        "release_source_tree": _SUPPLY_TREE,
+        "schema": "leaf.staging-supply-set.v3",
+        "services": services,
+    }
+    proc = _run_supply_evidence(
+        manifest, SUPPLY_DISPATCH_IMAGE_TAG=f"v3-{_SUPPLY_SOURCE[:12]}"
+    )
+    assert proc.returncode == 0, proc.stderr
+    evidence = _decode_supply_evidence(proc.stdout.strip())
+    assert evidence["manifest"]["schema"] == "leaf.staging-supply-set.v3"
+    assert all(
+        row["dispatch_lookup_tag"] == f"sha-{_SUPPLY_SOURCE}"
+        for row in evidence["manifest"]["services"]
+    )
+    entries = {row["name"]: row["manifest_entry"] for row in evidence["manifest"]["services"]}
+    assert entries["app"]["producer_run_id"] == 31738360788
+    assert entries["broker"]["build_disposition"] == "reused"
+    assert entries["broker"]["producer_run_id"] == 31730000000
+
+    negatives = []
+    wrong_outer = json.loads(json.dumps(manifest))
+    wrong_outer["build_run_id"] = 31738360789
+    negatives.append(("outer build run", wrong_outer))
+    wrong_attempt = json.loads(json.dumps(manifest))
+    wrong_attempt["build_run_attempt"] = 2
+    negatives.append(("outer build attempt", wrong_attempt))
+    wrong_built_run = json.loads(json.dumps(manifest))
+    wrong_built_run["services"]["app"]["producer_run_id"] = 31738360789
+    negatives.append(("built service run", wrong_built_run))
+    wrong_built_source = json.loads(json.dumps(manifest))
+    wrong_built_source["services"]["app"]["producer_source_revision"] = "d" * 40
+    negatives.append(("built service source", wrong_built_source))
+    malformed_reuse = json.loads(json.dumps(manifest))
+    malformed_reuse["services"]["broker"]["producer_run_attempt"] = 0
+    negatives.append(("reused service attempt", malformed_reuse))
+    coordinated_wrong_tree = json.loads(json.dumps(manifest))
+    coordinated_wrong_tree["release_source_tree"] = "d" * 40
+    for row in coordinated_wrong_tree["services"].values():
+        if row["build_disposition"] == "built":
+            row["producer_source_tree"] = "d" * 40
+    negatives.append(("coordinated outer and built tree", coordinated_wrong_tree))
+    extra_service_key = json.loads(json.dumps(manifest))
+    extra_service_key["services"]["harness"]["caller_authority"] = "forged"
+    negatives.append(("extra v3 service key", extra_service_key))
+    for name, candidate in negatives:
+        rejected = _run_supply_evidence(
+            candidate, SUPPLY_DISPATCH_IMAGE_TAG=f"v3-{_SUPPLY_SOURCE[:12]}"
+        )
+        assert rejected.returncode != 0, (name, rejected.stdout, rejected.stderr)
+        assert not rejected.stdout.strip(), (name, rejected.stdout)
+
+
+def test_relay_supply_evidence_fails_closed_on_rebinding_and_malformed_input() -> None:
+    base = _real_v2_supply_manifest()
+    cases = []
+
+    short_source = json.loads(json.dumps(base))
+    short_source["source_revision"] = _SUPPLY_SOURCE[:7]
+    cases.append(("short-only source", short_source, {}))
+
+    wrong_source = json.loads(json.dumps(base))
+    wrong_source["source_revision"] = "b" * 40
+    cases.append(("source/run mismatch", wrong_source, {}))
+
+    wrong_tree = json.loads(json.dumps(base))
+    wrong_tree["source_tree"] = "d" * 40
+    cases.append(("source/tree mismatch", wrong_tree, {}))
+
+    bad_digest = json.loads(json.dumps(base))
+    bad_digest["services"]["app"]["image_digest"] = "prod-aa7a7c9"
+    cases.append(("tag-only service evidence", bad_digest, {}))
+
+    wrong_tag = json.loads(json.dumps(base))
+    wrong_tag["build_tag"] = "prod-bbbbbbb"
+    cases.append(("tag/source mismatch", wrong_tag, {}))
+
+    foreign_service = json.loads(json.dumps(base))
+    foreign_service["services"]["broker"]["repository"] = "foreign-broker"
+    cases.append(("foreign service", foreign_service, {}))
+
+    missing_service = json.loads(json.dumps(base))
+    del missing_service["services"]["harness"]
+    cases.append(("missing service", missing_service, {}))
+
+    extra_key = json.loads(json.dumps(base))
+    extra_key["caller_authority"] = "forged"
+    cases.append(("extra manifest key", extra_key, {}))
+
+    mismatch = json.loads(json.dumps(base))
+    mismatch["schema"] = "leaf.staging-supply-set.v3"
+    cases.append(("v2/v3 shape mismatch", mismatch, {}))
+
+    cases.extend([
+        ("foreign repository", base, {"GITHUB_REPOSITORY": "other/repo"}),
+        ("wrong producer event", base, {"SUPPLY_PRODUCER_EVENT": "workflow_dispatch"}),
+        ("wrong artifact", base, {"SUPPLY_ARTIFACT_ID": "not-an-id"}),
+        ("wrong artifact name", base, {"SUPPLY_ARTIFACT_NAME": "prod-aa7a7c9"}),
+        ("wrong archive digest", base, {"SUPPLY_ARTIFACT_PROVIDER_SHA256": "short"}),
+        ("wrong run", base, {"SUPPLY_PRODUCER_RUN_ID": "0"}),
+    ])
+    for name, manifest, overrides in cases:
+        proc = _run_supply_evidence(manifest, **overrides)
+        assert proc.returncode != 0, (name, proc.stdout, proc.stderr)
+        assert not proc.stdout.strip(), (name, proc.stdout)
+
+    duplicate = json.dumps(base).replace(
+        '"schema": "leaf.staging-supply-set.v2"',
+        '"schema": "leaf.staging-supply-set.v2", '
+        '"schema": "leaf.staging-supply-set.v2"',
+        1,
+    )
+    proc = _run_supply_evidence(duplicate)
+    assert proc.returncode != 0
+    assert not proc.stdout.strip()
+
+
+def test_relay_binds_provider_archive_and_dispatches_one_unchanged_envelope() -> None:
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    job = relay["jobs"]["dispatch"]
+    manifest_code = _executable_bash(
+        next(step for step in job["steps"] if step.get("id") == "manifest")["run"]
+    )
+    dispatch_code = _executable_bash(_relay_deploy_step(job)["run"])
+    for proof in (
+        'artifact_count" -eq 1',
+        '.workflow_run.id == $run',
+        '.path == $path',
+        '.event == "push"',
+        'git/commits/$producer_source',
+        '.tree.sha | test("^[0-9a-f]{40}$")',
+        'sha256sum supply-set.zip',
+        '"${artifact_digest#sha256:}"',
+        'unzip -Z1 supply-set.zip',
+    ):
+        assert proof in manifest_code
+    assert dispatch_code.count("gh workflow run") == 1
+    assert dispatch_code.count(
+        'dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")'
+    ) == 1
+    assert 'if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]' in dispatch_code
+    assert 'V2/v3 dispatch is missing its closed supply evidence envelope' in dispatch_code
 
 
 def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:
