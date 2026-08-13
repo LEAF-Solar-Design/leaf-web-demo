@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-release-watch.v1.schema.json",
+  "title": "Dormant platform release watch capture v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "identity", "watch", "intents", "events"],
+  "properties": {
+    "schema": {"const": "leaf.platform-release-watch.v1"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "watch": {"$ref": "#/$defs/watch"},
+    "intents": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 14,
+      "prefixItems": [
+        {"$ref": "#/$defs/nonliveSource"},
+        {"$ref": "#/$defs/nonliveCi"},
+        {"$ref": "#/$defs/nonliveBuild"},
+        {"$ref": "#/$defs/nonliveMerge"},
+        {"$ref": "#/$defs/nonlivePreflight"},
+        {"$ref": "#/$defs/liveWeb"},
+        {"$ref": "#/$defs/liveApp"},
+        {"$ref": "#/$defs/liveBroker"},
+        {"$ref": "#/$defs/liveHarness"},
+        {"$ref": "#/$defs/liveWorker"},
+        {"$ref": "#/$defs/liveIdentity"},
+        {"$ref": "#/$defs/nonliveVerify"},
+        {"$ref": "#/$defs/nonliveSettlement"},
+        {"$ref": "#/$defs/nonliveReceipt"}
+      ],
+      "items": false
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/event"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,199}$"},
+    "lease": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{7,199}$"},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "rollback": {
+      "type": "string",
+      "pattern": "^arn:aws:ecs:us-east-1:[0-9]{12}:task-definition/leaf-platform-[a-z-]+:[1-9][0-9]*$"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id", "parent_run_id", "run_attempt", "watcher_id",
+        "source_commit", "source_tree", "workflow_blob", "supply_artifact_id",
+        "supply_predicate_sha256", "dependency_generation_sha256"
+      ],
+      "properties": {
+        "release_id": {"$ref": "#/$defs/id"},
+        "parent_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1},
+        "watcher_id": {"$ref": "#/$defs/id"},
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "source_tree": {"$ref": "#/$defs/sha"},
+        "workflow_blob": {"$ref": "#/$defs/sha"},
+        "supply_artifact_id": {"type": "integer", "minimum": 1},
+        "supply_predicate_sha256": {"$ref": "#/$defs/digest"},
+        "dependency_generation_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode", "observed_at", "event_timeout_seconds", "max_poll_seconds",
+        "active_watcher_count", "watcher_lease_generation_sha256"
+      ],
+      "properties": {
+        "mode": {"enum": ["event", "poll"]},
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "event_timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_poll_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "active_watcher_count": {"const": 1},
+        "watcher_lease_generation_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "intentBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "ordinal", "payload_sha256", "mutation_idempotency_key",
+        "resource_locks", "rollback_target", "changes_live_state"
+      ],
+      "properties": {
+        "stage": {"enum": [
+          "source", "ci", "build", "merge", "preflight", "web", "app",
+          "broker", "harness", "canonical-worker", "identity", "verify",
+          "settlement", "receipt"
+        ]},
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 13},
+        "payload_sha256": {"$ref": "#/$defs/digest"},
+        "mutation_idempotency_key": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "resource_locks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "rollback_target": {"anyOf": [{"$ref": "#/$defs/rollback"}, {"type": "null"}]},
+        "changes_live_state": {"type": "boolean"}
+      }
+    },
+    "nonliveIntent": {
+      "allOf": [
+        {"$ref": "#/$defs/intentBase"},
+        {
+          "properties": {
+            "mutation_idempotency_key": {"type": "null"},
+            "resource_locks": {"maxItems": 0},
+            "rollback_target": {"type": "null"},
+            "changes_live_state": {"const": false}
+          }
+        }
+      ]
+    },
+    "liveIntent": {
+      "allOf": [
+        {"$ref": "#/$defs/intentBase"},
+        {
+          "properties": {
+            "mutation_idempotency_key": {"$ref": "#/$defs/id"},
+            "resource_locks": {"minItems": 1},
+            "rollback_target": {"$ref": "#/$defs/rollback"},
+            "changes_live_state": {"const": true}
+          }
+        }
+      ]
+    },
+    "nonliveSource": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "source"}, "ordinal": {"const": 0}}}]},
+    "nonliveCi": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "ci"}, "ordinal": {"const": 1}}}]},
+    "nonliveBuild": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "build"}, "ordinal": {"const": 2}}}]},
+    "nonliveMerge": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "merge"}, "ordinal": {"const": 3}}}]},
+    "nonlivePreflight": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "preflight"}, "ordinal": {"const": 4}}}]},
+    "liveWeb": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "web"}, "ordinal": {"const": 5}}}]},
+    "liveApp": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "app"}, "ordinal": {"const": 6}}}]},
+    "liveBroker": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "broker"}, "ordinal": {"const": 7}}}]},
+    "liveHarness": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "harness"}, "ordinal": {"const": 8}}}]},
+    "liveWorker": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "canonical-worker"}, "ordinal": {"const": 9}}}]},
+    "liveIdentity": {"allOf": [{"$ref": "#/$defs/liveIntent"}, {"properties": {"stage": {"const": "identity"}, "ordinal": {"const": 10}}}]},
+    "nonliveVerify": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "verify"}, "ordinal": {"const": 11}}}]},
+    "nonliveSettlement": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "settlement"}, "ordinal": {"const": 12}}}]},
+    "nonliveReceipt": {"allOf": [{"$ref": "#/$defs/nonliveIntent"}, {"properties": {"stage": {"const": "receipt"}, "ordinal": {"const": 13}}}]},
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "release_id", "watcher_id", "watcher_lease_generation_sha256",
+        "release_identity_sha256", "dependency_generation_sha256",
+        "seq", "occurred_at", "kind", "stage", "attempt", "lease_id",
+        "payload_sha256", "mutation_idempotency_key", "resource_locks",
+        "changed_live_state", "rollback_target", "status",
+        "final_verification_passed", "writer_count", "open_marker_count",
+        "semantic_receipt_sha256", "event_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "leaf.platform-release-watch-event.v1"},
+        "release_id": {"$ref": "#/$defs/id"},
+        "watcher_id": {"$ref": "#/$defs/id"},
+        "watcher_lease_generation_sha256": {"$ref": "#/$defs/digest"},
+        "release_identity_sha256": {"$ref": "#/$defs/digest"},
+        "dependency_generation_sha256": {"$ref": "#/$defs/digest"},
+        "seq": {"type": "integer", "minimum": 1},
+        "occurred_at": {"$ref": "#/$defs/timestamp"},
+        "kind": {"enum": ["stage_started", "stage_terminal", "rollback_started", "rollback_terminal"]},
+        "stage": {"enum": [
+          "source", "ci", "build", "merge", "preflight", "web", "app",
+          "broker", "harness", "canonical-worker", "identity", "verify",
+          "settlement", "receipt"
+        ]},
+        "attempt": {"type": "integer", "minimum": 1},
+        "lease_id": {"anyOf": [{"$ref": "#/$defs/lease"}, {"type": "null"}]},
+        "payload_sha256": {"$ref": "#/$defs/digest"},
+        "mutation_idempotency_key": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "resource_locks": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "changed_live_state": {"type": "boolean"},
+        "rollback_target": {"anyOf": [{"$ref": "#/$defs/rollback"}, {"type": "null"}]},
+        "status": {"enum": ["active", "success", "failed"]},
+        "final_verification_passed": {"type": "boolean"},
+        "writer_count": {"type": "integer", "minimum": 0, "maximum": 2},
+        "open_marker_count": {"type": "integer", "minimum": 0},
+        "semantic_receipt_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "event_sha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}
