@@ -443,7 +443,14 @@ def test_schema_and_workflow_freeze_the_dormant_boundary() -> None:
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     assert schema["additionalProperties"] is False
     assert schema["$defs"]["identity"]["additionalProperties"] is False
-    assert schema["$defs"]["service"]["additionalProperties"] is False
+    assert schema["$defs"]["appService"]["additionalProperties"] is False
+    assert schema["$defs"]["nonAppService"]["additionalProperties"] is False
+    assert schema["$defs"]["nonAppService"]["properties"][
+        "expected_migration_fingerprint"
+    ] == {"type": "null"}
+    assert schema["$defs"]["nonAppService"]["properties"][
+        "live_migration_fingerprint"
+    ] == {"type": "null"}
 
     text = WORKFLOW.read_text(encoding="utf-8")
     lowered = text.lower()
