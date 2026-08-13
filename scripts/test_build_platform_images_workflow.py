@@ -5726,11 +5726,12 @@ def test_relay_mints_closed_real_v2_supply_evidence() -> None:
 
 def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
     services = {}
-    for name in _SUPPLY_DIGESTS:
+    for index, name in enumerate(_SUPPLY_DIGESTS, start=1):
+        surface_fingerprint = format(index + 2, "064x")
         row = {
             "build_disposition": "built",
             "image_digest": _SUPPLY_DIGESTS[name],
-            "immutable_lookup_tag": f"sha-{_SUPPLY_SOURCE}",
+            "immutable_lookup_tag": f"surface-v1-{surface_fingerprint}",
             "producer_run_attempt": 1,
             "producer_run_id": 31738360788,
             "producer_source_revision": _SUPPLY_SOURCE,
@@ -5744,7 +5745,7 @@ def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
             ),
             "recipe_fingerprint": "2" * 64,
             "repository": _SUPPLY_REPOSITORIES[name],
-            "surface_fingerprint": "3" * 64,
+            "surface_fingerprint": surface_fingerprint,
         }
         if name == "canonical-worker":
             row["solver_provenance"] = {
@@ -5776,7 +5777,8 @@ def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
     evidence = _decode_supply_evidence(proc.stdout.strip())
     assert evidence["manifest"]["schema"] == "leaf.staging-supply-set.v3"
     assert all(
-        row["dispatch_lookup_tag"] == f"sha-{_SUPPLY_SOURCE}"
+        row["dispatch_lookup_tag"]
+        == f"surface-v1-{row['manifest_entry']['surface_fingerprint']}"
         for row in evidence["manifest"]["services"]
     )
     entries = {row["name"]: row["manifest_entry"] for row in evidence["manifest"]["services"]}
@@ -5809,6 +5811,14 @@ def test_relay_mints_closed_real_shape_v3_supply_evidence() -> None:
     extra_service_key = json.loads(json.dumps(manifest))
     extra_service_key["services"]["harness"]["caller_authority"] = "forged"
     negatives.append(("extra v3 service key", extra_service_key))
+    for label, lookup_tag in (
+        ("prod lookup tag rebinding", "prod-aa7a7c9"),
+        ("sha lookup tag rebinding", f"sha-{_SUPPLY_SOURCE}"),
+        ("surface lookup tag rebinding", f"surface-v1-{'f' * 64}"),
+    ):
+        rebound = json.loads(json.dumps(manifest))
+        rebound["services"]["app"]["immutable_lookup_tag"] = lookup_tag
+        negatives.append((label, rebound))
     for name, candidate in negatives:
         rejected = _run_supply_evidence(
             candidate, SUPPLY_DISPATCH_IMAGE_TAG=f"v3-{_SUPPLY_SOURCE[:12]}"
@@ -5902,6 +5912,7 @@ def test_relay_binds_provider_archive_and_dispatches_one_unchanged_envelope() ->
         'sha256sum supply-set.zip',
         '"${artifact_digest#sha256:}"',
         'unzip -Z1 supply-set.zip',
+        '.immutable_lookup_tag == ("surface-v1-" + .surface_fingerprint)',
     ):
         assert proof in manifest_code
     assert dispatch_code.count("gh workflow run") == 1

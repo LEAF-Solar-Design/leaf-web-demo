@@ -404,6 +404,7 @@ jobs:
                     (.image_digest | test("^sha256:[0-9a-f]{64}$"))
                     and (.immutable_lookup_tag | test("^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40}|surface-v1-[0-9a-f]{64})$"))
                     and (.surface_fingerprint | test("^[0-9a-f]{64}$"))
+                    and (.immutable_lookup_tag == ("surface-v1-" + .surface_fingerprint))
                     and (.recipe_fingerprint | test("^[0-9a-f]{64}$")))
                 ' staging-supply-set.json >/dev/null
                 printf 'v3-%s' "$(jq -er '.release_source_revision[0:12]' staging-supply-set.json)"
@@ -638,6 +639,10 @@ jobs:
                   for field in ("surface_fingerprint", "recipe_fingerprint"):
                       if not isinstance(row.get(field), str) or SHA256.fullmatch(row[field]) is None:
                           raise SystemExit(f"{service} v3 {field} is invalid")
+                  if row["immutable_lookup_tag"] != f"surface-v1-{row['surface_fingerprint']}":
+                      raise SystemExit(
+                          f"{service} v3 lookup tag does not bind its surface fingerprint"
+                      )
                   expected_subject = (
                       "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
                       + REPOSITORIES[service]
