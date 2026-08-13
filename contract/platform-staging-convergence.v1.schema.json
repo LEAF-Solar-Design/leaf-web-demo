@@ -1,0 +1,394 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-staging-convergence.v1.schema.json",
+  "title": "Leaf platform staging convergence receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "environment",
+    "finalizer",
+    "producer",
+    "supply",
+    "relay",
+    "frontier_run_id",
+    "services",
+    "deployment_identity",
+    "operational_posture",
+    "terminal_complete",
+    "evidence_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-staging-convergence.v1"},
+    "environment": {"const": "staging"},
+    "finalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow_path"],
+      "properties": {
+        "repository": {"const": "LEAF-Solar-Design/leaf-web-demo"},
+        "workflow_path": {"const": ".github/workflows/finalize-platform-staging-convergence.yml"}
+      }
+    },
+    "producer": {"$ref": "#/$defs/producer"},
+    "supply": {"$ref": "#/$defs/supply"},
+    "relay": {"$ref": "#/$defs/relay"},
+    "frontier_run_id": {"$ref": "#/$defs/runId"},
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "broker", "canonical-worker", "harness", "web"],
+      "properties": {
+        "app": {"$ref": "#/$defs/serviceEvidence"},
+        "broker": {"$ref": "#/$defs/serviceEvidence"},
+        "canonical-worker": {"$ref": "#/$defs/serviceEvidence"},
+        "harness": {"$ref": "#/$defs/serviceEvidence"},
+        "web": {"$ref": "#/$defs/serviceEvidence"}
+      }
+    },
+    "deployment_identity": {"$ref": "#/$defs/deploymentIdentity"},
+    "operational_posture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route", "p4a", "marker", "writer_census"],
+      "properties": {
+        "route": {"$ref": "#/$defs/closedJsonSlot"},
+        "p4a": {"$ref": "#/$defs/closedJsonSlot"},
+        "marker": {"$ref": "#/$defs/closedJsonSlot"},
+        "writer_census": {"$ref": "#/$defs/closedJsonSlot"}
+      }
+    },
+    "terminal_complete": {"const": true},
+    "evidence_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "runId": {"type": "integer", "minimum": 1},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_name", "provider_zip_sha256", "file_sha256"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/runId"},
+        "artifact_name": {"type": "string", "minLength": 1},
+        "provider_zip_sha256": {"$ref": "#/$defs/sha256"},
+        "file_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion", "workflow_blob", "source_tree"],
+      "properties": {
+        "repository": {"const": "LEAF-Solar-Design/leaf-web-demo"},
+        "workflow_path": {"const": ".github/workflows/build-platform-images.yml"},
+        "run_id": {"$ref": "#/$defs/runId"},
+        "run_attempt": {"$ref": "#/$defs/runId"},
+        "event": {"const": "push"},
+        "head_sha": {"$ref": "#/$defs/sha40"},
+        "conclusion": {"const": "success"},
+        "workflow_blob": {"$ref": "#/$defs/sha40"},
+        "source_tree": {"$ref": "#/$defs/sha40"}
+      }
+    },
+    "supply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_name", "provider_zip_sha256", "file_sha256", "schema", "source_revision", "source_tree", "build_tag", "manifest_sha256", "service_digests"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/runId"},
+        "artifact_name": {"type": "string", "pattern": "^staging-supply-set-[0-9a-f]{40}-attempt-[1-9][0-9]*$"},
+        "provider_zip_sha256": {"$ref": "#/$defs/sha256"},
+        "file_sha256": {"$ref": "#/$defs/sha256"},
+        "schema": {"enum": ["leaf.staging-supply-set.v1", "leaf.staging-supply-set.v2", "leaf.staging-supply-set.v3"]},
+        "source_revision": {"$ref": "#/$defs/sha40"},
+        "source_tree": {"$ref": "#/$defs/sha40"},
+        "build_tag": {"type": "string", "minLength": 1},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "service_digests": {"$ref": "#/$defs/digests"}
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "broker", "canonical-worker", "harness", "web"],
+      "properties": {
+        "app": {"$ref": "#/$defs/imageDigest"},
+        "broker": {"$ref": "#/$defs/imageDigest"},
+        "canonical-worker": {"$ref": "#/$defs/imageDigest"},
+        "harness": {"$ref": "#/$defs/imageDigest"},
+        "web": {"$ref": "#/$defs/imageDigest"}
+      }
+    },
+    "relay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion", "workflow_blob", "artifact", "logs_sha256", "children"],
+      "properties": {
+        "repository": {"const": "LEAF-Solar-Design/leaf-web-demo"},
+        "workflow_path": {"const": ".github/workflows/dispatch-staging-deploys.yml"},
+        "run_id": {"$ref": "#/$defs/runId"},
+        "run_attempt": {"$ref": "#/$defs/runId"},
+        "event": {"const": "workflow_run"},
+        "head_sha": {"$ref": "#/$defs/sha40"},
+        "conclusion": {"const": "success"},
+        "workflow_blob": {"$ref": "#/$defs/sha40"},
+        "artifact": {"$ref": "#/$defs/artifact"},
+        "logs_sha256": {"$ref": "#/$defs/sha256"},
+        "children": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "app"],
+          "properties": {"web": {"$ref": "#/$defs/runId"}, "app": {"$ref": "#/$defs/runId"}}
+        }
+      }
+    },
+    "stringSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {"type": "object", "additionalProperties": false, "required": ["status", "value"], "properties": {"status": {"const": "produced"}, "value": {"type": "string", "minLength": 1}}}
+      ]
+    },
+    "integerSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {"type": "object", "additionalProperties": false, "required": ["status", "value"], "properties": {"status": {"const": "produced"}, "value": {"type": "integer", "minimum": 0}}}
+      ]
+    },
+    "digestSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {"type": "object", "additionalProperties": false, "required": ["status", "value"], "properties": {"status": {"const": "produced"}, "value": {"$ref": "#/$defs/imageDigest"}}}
+      ]
+    },
+    "supplySlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {"const": "produced"},
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["artifact_id", "artifact_name", "manifest_sha256", "producer_run_id", "producer_run_attempt"],
+              "properties": {
+                "artifact_id": {"$ref": "#/$defs/runId"},
+                "artifact_name": {"type": "string"},
+                "manifest_sha256": {"$ref": "#/$defs/sha256"},
+                "producer_run_id": {"$ref": "#/$defs/runId"},
+                "producer_run_attempt": {"$ref": "#/$defs/runId"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "closedJsonSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {"type": "object", "additionalProperties": false, "required": ["status", "canonical_json", "sha256"], "properties": {"status": {"const": "produced"}, "canonical_json": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}}
+      ]
+    },
+    "failedStage": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {"const": "produced"},
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["primary", "additional", "unique"],
+              "properties": {
+                "primary": {"$ref": "#/$defs/failedStep"},
+                "additional": {"type": "array", "items": {"$ref": "#/$defs/failedStep"}},
+                "unique": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "failedStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "step", "number"],
+      "properties": {"job": {"type": "string"}, "step": {"type": "string"}, "number": {"type": "integer", "minimum": 1}}
+    },
+    "terminalSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {"const": "produced"},
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "task_definition", "image_digest", "capacity", "primary_deployments", "stable_1_1_0"],
+              "properties": {
+                "service": {"type": "string", "minLength": 1},
+                "task_definition": {"type": "string", "minLength": 1},
+                "image_digest": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["status", "value"],
+                  "properties": {"status": {"const": "produced"}, "value": {"$ref": "#/$defs/imageDigest"}}
+                },
+                "capacity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["desired", "running", "pending"],
+                  "properties": {"desired": {"const": 1}, "running": {"const": 1}, "pending": {"const": 0}}
+                },
+                "primary_deployments": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_definition", "rollout_state", "status"],
+                    "properties": {
+                      "task_definition": {"type": "string"},
+                      "rollout_state": {"const": "COMPLETED"},
+                      "status": {"const": "PRIMARY"}
+                    }
+                  }
+                },
+                "stable_1_1_0": {"const": true}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "deploymentIdentitySlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {"const": "produced"},
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["body", "sha256"],
+              "properties": {"body": {"$ref": "#/$defs/identityBody"}, "sha256": {"$ref": "#/$defs/sha256"}}
+            }
+          }
+        }
+      ]
+    },
+    "providerChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow_path", "workflow_blob", "source_tree", "run_id", "run_attempt", "event", "head_sha", "conclusion", "created_at", "updated_at"],
+      "properties": {
+        "repository": {"const": "LEAF-Solar-Design/leaf-automation-aws-terraform"},
+        "workflow_path": {"const": ".github/workflows/deploy-leaf-platform-staging.yml"},
+        "workflow_blob": {"$ref": "#/$defs/sha40"},
+        "source_tree": {"$ref": "#/$defs/sha40"},
+        "run_id": {"$ref": "#/$defs/runId"},
+        "run_attempt": {"$ref": "#/$defs/runId"},
+        "event": {"const": "workflow_dispatch"},
+        "head_sha": {"$ref": "#/$defs/sha40"},
+        "conclusion": {"enum": ["success", "failure"]},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"}
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "provider", "artifact", "service_receipt_sha256", "requested_sha256", "service", "source_revision", "source_revision_evidence", "source_tree", "image_tag", "app_deploy_intent", "path", "preflight_result", "deploy_result", "terminal_result", "failed_stage", "facts_sha256", "supply_evidence", "predecessor_task_definition", "candidate", "terminal", "mutation_count", "rollback", "posture", "deployment_identity"],
+      "properties": {
+        "role": {"enum": ["relay_web", "relay_app", "frontier_app_identity", "terminal_broker", "terminal_harness", "terminal_canonical_worker", "prior_failed_app", "prior_failed_broker", "prior_failed_canonical_worker", "prior_failed_harness", "prior_failed_web"]},
+        "provider": {"$ref": "#/$defs/providerChild"},
+        "artifact": {"$ref": "#/$defs/artifact"},
+        "service_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "requested_sha256": {"$ref": "#/$defs/sha256"},
+        "service": {"enum": ["app", "broker", "canonical-worker", "harness", "web"]},
+        "source_revision": {"$ref": "#/$defs/sha40"},
+        "source_revision_evidence": {"$ref": "#/$defs/stringSlot"},
+        "source_tree": {"$ref": "#/$defs/stringSlot"},
+        "image_tag": {"type": "string"},
+        "app_deploy_intent": {"type": "string"},
+        "path": {"enum": ["deploy", "digest_aware_skip"]},
+        "preflight_result": {"type": "string"},
+        "deploy_result": {"type": "string"},
+        "terminal_result": {"enum": ["success", "failure"]},
+        "failed_stage": {"$ref": "#/$defs/failedStage"},
+        "facts_sha256": {"$ref": "#/$defs/sha256"},
+        "supply_evidence": {"$ref": "#/$defs/supplySlot"},
+        "predecessor_task_definition": {"$ref": "#/$defs/stringSlot"},
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_definition", "image_digest"],
+          "properties": {"task_definition": {"$ref": "#/$defs/stringSlot"}, "image_digest": {"$ref": "#/$defs/digestSlot"}}
+        },
+        "terminal": {"$ref": "#/$defs/terminalSlot"},
+        "mutation_count": {"$ref": "#/$defs/integerSlot"},
+        "rollback": {"$ref": "#/$defs/closedJsonSlot"},
+        "posture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["route", "p4a", "marker", "writer_census"],
+          "properties": {"route": {"$ref": "#/$defs/closedJsonSlot"}, "p4a": {"$ref": "#/$defs/closedJsonSlot"}, "marker": {"$ref": "#/$defs/closedJsonSlot"}, "writer_census": {"$ref": "#/$defs/closedJsonSlot"}}
+        },
+        "deployment_identity": {"$ref": "#/$defs/deploymentIdentitySlot"}
+      }
+    },
+    "serviceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempts", "selected_run_id", "terminal_image_digest"],
+      "properties": {
+        "attempts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/attempt"}},
+        "selected_run_id": {"$ref": "#/$defs/runId"},
+        "terminal_image_digest": {"$ref": "#/$defs/imageDigest"}
+      }
+    },
+    "identityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_digest", "source_revision"],
+      "properties": {"image_digest": {"$ref": "#/$defs/imageDigest"}, "source_revision": {"$ref": "#/$defs/sha40"}}
+    },
+    "identityBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "environment", "source_revision", "services"],
+      "properties": {
+        "schema": {"const": "leaf.deployment-identity.v1"},
+        "environment": {"const": "staging"},
+        "source_revision": {"$ref": "#/$defs/sha40"},
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["app", "broker", "canonical-worker", "harness", "web"],
+          "properties": {"app": {"$ref": "#/$defs/identityService"}, "broker": {"$ref": "#/$defs/identityService"}, "canonical-worker": {"$ref": "#/$defs/identityService"}, "harness": {"$ref": "#/$defs/identityService"}, "web": {"$ref": "#/$defs/identityService"}}
+        }
+      }
+    },
+    "deploymentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["body", "body_sha256", "producer_run_id"],
+      "properties": {"body": {"$ref": "#/$defs/identityBody"}, "body_sha256": {"$ref": "#/$defs/sha256"}, "producer_run_id": {"$ref": "#/$defs/runId"}}
+    }
+  }
+}
