@@ -1,0 +1,74 @@
+name: Qualify dormant platform convergence shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      convergence_shadow_json:
+        description: Closed fixture or captured shadow evidence JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-platform-convergence-shadow-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    name: Compare dormant digest and marker evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compile the non-executable shadow result
+        shell: bash
+        env:
+          CONVERGENCE_SHADOW_JSON: ${{ inputs.convergence_shadow_json }}
+        run: |
+          set -euo pipefail
+          set +e
+          printf '%s' "$CONVERGENCE_SHADOW_JSON" |
+            python3 scripts/platform_convergence_shadow.py \
+              --input - \
+              --output "$RUNNER_TEMP/platform-convergence-shadow-result.json"
+          status=$?
+          set -e
+          test "$status" -eq 0 -o "$status" -eq 78
+          python3 - "$RUNNER_TEMP/platform-convergence-shadow-result.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert result["schema"] == "leaf.platform-convergence-shadow-result.v1"
+          assert result["status"] in {"comparison_ready", "blocked"}
+          assert result["selector_activation_authorized"] is False
+          assert result["dispatch_authorized"] is False
+          Path("shadow-summary.txt").write_text(
+              f"status={result['status']}\ncode={result['code']}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload safe shadow evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dormant-platform-convergence-shadow-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/platform-convergence-shadow-result.json
+            shadow-summary.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report dormant boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Selectors remain off and no provider was queried."
+          echo "The result cannot authorize dispatch or activation."
