@@ -86,6 +86,19 @@ _REQUIRED_COLUMNS = {
     "solve_records": {"solve_id", "org_id", "project_id", "hash_value"},
     "outbox_entries": {"outbox_id", "org_id", "project_id", "event_type"},
     "project_share_grants": {"grant_id", "org_id", "project_id", "token_digest"},
+    "project_member_bindings": {
+        "membership_id", "org_id", "project_id", "binding_id", "role", "status",
+        "invited_by_binding_id", "created_at", "revoked_at",
+    },
+    "project_files": {
+        "file_id", "org_id", "project_id", "path", "media_type", "content",
+        "content_sha256", "revision", "created_by_binding_id", "created_at",
+        "updated_at",
+    },
+    "project_lifecycle_receipts": {
+        "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
+        "idempotency_key", "input_digest", "result_json", "created_at",
+    },
     "platform_snapshots": {"snapshot_id", "snapshot_kind", "content_sha256"},
     "snapshot_channels": {"snapshot_kind", "channel", "snapshot_id"},
     "job_snapshot_pins": {"org_id", "project_id", "job_id", "snapshot_id"},
@@ -370,6 +383,94 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
         "relation": relation,
         "definition_fragments": definition_fragments,
     }
+
+
+# Catalog objects required on every application boot.  Unlike selector-bound
+# stores, the project lifecycle is part of the canonical platform API whenever
+# this application image is running.
+_REQUIRED_CONSTRAINTS = {
+    "identity_bindings_tenant_binding_unique": _catalog_contract(
+        "identity_bindings", "UNIQUE (platform_tenant_id, binding_id)"),
+    "project_member_bindings_pkey": _catalog_contract(
+        "project_member_bindings", "PRIMARY KEY (membership_id)"),
+    "project_member_bindings_project_fk": _catalog_contract(
+        "project_member_bindings", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_member_bindings_binding_fk": _catalog_contract(
+        "project_member_bindings", "FOREIGN KEY (org_id, binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_member_bindings_inviter_fk": _catalog_contract(
+        "project_member_bindings", "FOREIGN KEY (org_id, invited_by_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_member_bindings_role_check": _catalog_contract(
+        "project_member_bindings", "CHECK", "owner", "editor", "reviewer", "read_only"),
+    "project_member_bindings_status_check": _catalog_contract(
+        "project_member_bindings", "CHECK", "active", "revoked"),
+    "project_member_bindings_revocation_shape_check": _catalog_contract(
+        "project_member_bindings", "CHECK", "status = 'active'", "revoked_at IS NULL",
+        "status = 'revoked'", "revoked_at IS NOT NULL"),
+    "project_files_pkey": _catalog_contract(
+        "project_files", "PRIMARY KEY (file_id)"),
+    "project_files_project_fk": _catalog_contract(
+        "project_files", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_files_creator_fk": _catalog_contract(
+        "project_files", "FOREIGN KEY (org_id, created_by_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_files_path_check": _catalog_contract(
+        "project_files", "CHECK", "char_length(path) >= 1", "char_length(path) <= 512"),
+    "project_files_media_type_check": _catalog_contract(
+        "project_files", "CHECK", "char_length(media_type) >= 1",
+        "char_length(media_type) <= 200"),
+    "project_files_content_sha256_check": _catalog_contract(
+        "project_files", "CHECK", "content_sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_files_revision_check": _catalog_contract(
+        "project_files", "CHECK (revision > 0)"),
+    "project_files_scope_path_unique": _catalog_contract(
+        "project_files", "UNIQUE (org_id, project_id, path)"),
+    "project_lifecycle_receipts_pkey": _catalog_contract(
+        "project_lifecycle_receipts", "PRIMARY KEY (receipt_id)"),
+    "project_lifecycle_receipts_project_fk": _catalog_contract(
+        "project_lifecycle_receipts", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_lifecycle_receipts_actor_fk": _catalog_contract(
+        "project_lifecycle_receipts", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_lifecycle_receipts_action_check": _catalog_contract(
+        "project_lifecycle_receipts", "CHECK", "project_created", "member_invited",
+        "member_revoked", "file_put", "file_deleted", "project_cloned",
+        "project_exported", "project_reset", "project_deleted"),
+    "project_lifecycle_receipts_idempotency_key_check": _catalog_contract(
+        "project_lifecycle_receipts", "CHECK", "char_length(idempotency_key) >= 1",
+        "char_length(idempotency_key) <= 200"),
+    "project_lifecycle_receipts_input_digest_check": _catalog_contract(
+        "project_lifecycle_receipts", "CHECK",
+        "input_digest ~ '^[0-9a-f]{64}$'"),
+    "project_lifecycle_receipts_idempotency_unique": _catalog_contract(
+        "project_lifecycle_receipts",
+        "UNIQUE (org_id, project_id, action, idempotency_key)"),
+}
+
+_REQUIRED_INDEXES = {
+    "project_member_bindings_one_active": _catalog_contract(
+        "project_member_bindings", "CREATE UNIQUE INDEX",
+        "(org_id, project_id, binding_id)", "WHERE", "status = 'active'"),
+    "idx_project_member_bindings_scope": _catalog_contract(
+        "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
+    "idx_project_files_scope": _catalog_contract(
+        "project_files", "(org_id, project_id, path)"),
+    "idx_project_lifecycle_receipts_scope": _catalog_contract(
+        "project_lifecycle_receipts", "(org_id, project_id, created_at, receipt_id)"),
+    "project_lifecycle_receipts_create_idempotency": _catalog_contract(
+        "project_lifecycle_receipts", "CREATE UNIQUE INDEX",
+        "(org_id, action, idempotency_key)", "WHERE", "action = 'project_created'"),
+}
+
+_REQUIRED_TRIGGERS = {
+    "project_lifecycle_receipts_immutable": _catalog_contract(
+        "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+}
 
 
 # Names below are stable database API. They enforce idempotency, fencing, state
@@ -897,7 +998,9 @@ def required_catalog_for_selected_authorities(
     """Return runtime-critical constraints, indexes, and triggers by selector."""
     source = os.environ if environ is None else environ
     catalog: Dict[str, Dict[str, Dict[str, Any]]] = {
-        "constraints": {}, "indexes": {}, "triggers": {},
+        "constraints": dict(_REQUIRED_CONSTRAINTS),
+        "indexes": dict(_REQUIRED_INDEXES),
+        "triggers": dict(_REQUIRED_TRIGGERS),
     }
     contracts = {
         "constraints": _AUTHORITY_REQUIRED_CONSTRAINTS,

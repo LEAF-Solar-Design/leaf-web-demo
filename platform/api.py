@@ -14,12 +14,12 @@ from __future__ import annotations
 import hmac
 import os
 import uuid
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import billing, entitlements, store
+from . import billing, deps as platform_deps, entitlements, project_lifecycle, store
 from .db import cursor
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -50,6 +50,33 @@ class CreateOrgBody(BaseModel):
 
 
 class CreateProjectBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class CreateBlankProjectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+
+
+class InviteProjectMemberBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: uuid.UUID
+    role: Literal["owner", "editor", "reviewer", "read_only"]
+
+
+class PutProjectFileBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=512)
+    media_type: str = Field(min_length=3, max_length=200)
+    content: str = Field(max_length=1_048_576)
+
+
+class CloneProjectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(min_length=1, max_length=200)
 
 
@@ -190,6 +217,56 @@ def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
 # --------------------------------------------------------------------------- #
 # projects
 # --------------------------------------------------------------------------- #
+class _LifecycleActor(NamedTuple):
+    org_id: uuid.UUID
+    binding_id: uuid.UUID
+
+
+def _get_lifecycle_actor(
+    x_org_id: str | None = Header(default=None),
+    x_actor_binding_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> _LifecycleActor:
+    """Resolve any active actor; project_lifecycle enforces the project role.
+
+    The existing write dependency intentionally permits only tenant-level
+    owners/editors.  Lifecycle membership is narrower: an invited project
+    editor may write only that project and a reviewer/read-only member may read
+    it.  Live identity still comes only from the verified Auth0 subject.
+    """
+    if platform_deps.auth_live():
+        binding = platform_deps._verified_identity(authorization)
+        return _LifecycleActor(
+            binding.platform_tenant_id, binding.binding_id,
+        )
+    if not x_org_id:
+        raise HTTPException(status_code=400, detail="missing X-Org-Id")
+    try:
+        org_id = uuid.UUID(x_org_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="invalid X-Org-Id") from None
+    if not x_actor_binding_id:
+        raise HTTPException(status_code=400, detail="missing X-Actor-Binding-Id")
+    try:
+        binding_id = uuid.UUID(x_actor_binding_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="invalid X-Actor-Binding-Id") from None
+    return _LifecycleActor(org_id, binding_id)
+
+
+def _lifecycle_response(operation):
+    try:
+        return operation()
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail="project resource not found") from None
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(status_code=403, detail="project access denied") from None
+    except project_lifecycle.LifecycleConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
 @router.post("/projects")
 def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_write_org_id)):
     # This route is the canonical platform project factory. Authority remains a
@@ -200,6 +277,17 @@ def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_writ
         authority_mode="postgres_canonical",
     )
     return {"project": project.to_dict()}
+
+
+@router.post("/projects/blank", status_code=201)
+def create_blank_project(
+    body: CreateBlankProjectBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.create_blank_project(
+        actor.org_id, actor.binding_id, name=body.name, idempotency_key=idempotency_key,
+    ))
 
 
 @router.get("/projects")
@@ -214,6 +302,115 @@ def open_project(project_id: uuid.UUID, org_id: uuid.UUID = Depends(get_org_id))
     if payload is None:
         raise HTTPException(status_code=404, detail="project not found")
     return payload
+
+
+@router.get("/projects/{project_id}/lifecycle")
+def get_project_lifecycle(
+    project_id: uuid.UUID,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.project_snapshot(
+        actor.org_id, project_id, actor.binding_id,
+    ))
+
+
+@router.post("/projects/{project_id}/members", status_code=201)
+def invite_project_member(
+    project_id: uuid.UUID,
+    body: InviteProjectMemberBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.invite_project_member(
+        actor.org_id, project_id, actor.binding_id, member_binding_id=body.binding_id,
+        role=body.role, idempotency_key=idempotency_key,
+    ))
+
+
+@router.delete("/projects/{project_id}/members/{membership_id}")
+def revoke_project_member(
+    project_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.revoke_project_member(
+        actor.org_id, project_id, actor.binding_id, membership_id=membership_id,
+        idempotency_key=idempotency_key,
+    ))
+
+
+@router.put("/projects/{project_id}/files")
+def put_project_file(
+    project_id: uuid.UUID,
+    body: PutProjectFileBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.put_project_file(
+        actor.org_id, project_id, actor.binding_id, path=body.path,
+        media_type=body.media_type, content=body.content,
+        idempotency_key=idempotency_key,
+    ))
+
+
+@router.delete("/projects/{project_id}/files/{file_id}")
+def delete_project_file(
+    project_id: uuid.UUID,
+    file_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.delete_project_file(
+        actor.org_id, project_id, actor.binding_id, file_id=file_id,
+        idempotency_key=idempotency_key,
+    ))
+
+
+@router.post("/projects/{project_id}/clone", status_code=201)
+def clone_project(
+    project_id: uuid.UUID,
+    body: CloneProjectBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.clone_project(
+        actor.org_id, project_id, actor.binding_id, name=body.name,
+        idempotency_key=idempotency_key,
+    ))
+
+
+@router.post("/projects/{project_id}/export")
+def export_project(
+    project_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.export_project(
+        actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+    ))
+
+
+@router.post("/projects/{project_id}/reset")
+def reset_project(
+    project_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.reset_project(
+        actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+    ))
+
+
+@router.delete("/projects/{project_id}")
+def delete_project(
+    project_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.delete_project(
+        actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+    ))
 
 
 @router.post("/projects/{project_id}/drawing-versions/import", status_code=201)
