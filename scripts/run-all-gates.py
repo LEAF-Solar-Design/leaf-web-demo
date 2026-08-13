@@ -242,22 +242,68 @@ def build_suites() -> List[Suite]:
         # `platform` HAS since been re-baselined: 199 -> 223 (an interim bump of
         # exactly what one new file added) -> 234 -> 235, the last two each a
         # measured green count on a pristine database.
-        # `server-customization-adversarial` is now the only
+        # `server-customization-adversarial` was for a while the only
         # floor still pinned BELOW its CI executed count -- 17 is the Windows
         # count, Linux CI executes 19 and reports drift -- because no single
         # number is honest for both. Details at each Suite(...) below.
+        #
+        # Second re-baseline, 2026-08-13: THIRTY-EIGHT more floors had drifted
+        # below their executed counts, so the 2026-07-25 pass held for about
+        # three weeks. That is the shape of the problem -- a floor decays every
+        # time a PR adds a test to an already-registered file and does not
+        # touch this line, and nothing turns red when it happens. Same method as
+        # above: one file per pytest subprocess from the suite's registered cwd,
+        # then re-confirmed through this runner at --retry 0 (wall 713s).
+        #   server-agent-approvals 19 -> 24     server-agent-gate 55 -> 57
+        #   server-auth 11 -> 14                server-auth-vocab-freeze 11 -> 18
+        #   server-author-quota 57 -> 64        server-canonical-worker 24 -> 25
+        #   server-authored-execution-live-gate 13 -> 25
+        #   server-catalog-version-pin 21 -> 23 server-contract-freeze 8 -> 14
+        #   server-customization-async-stage 47 -> 51
+        #   server-customization-postgres-contract 9 -> 11
+        #   server-customization-runtime 26 -> 50
+        #   server-customization-store 8 -> 11  server-dependency-health 17 -> 20
+        #   server-deployment-source-identity 9 -> 14
+        #   server-drawings-bootstrap 18 -> 23  server-engine-registry-scripts 5 -> 7
+        #   server-guest-purge 13 -> 14         server-guest-uploads 57 -> 61
+        #   server-hardening-1c 12 -> 57        server-hardening-2b 15 -> 17
+        #   server-live-mutation-plan 30 -> 34  server-marathon-orchestration 17 -> 18
+        #   server-mcp-gateway-authority 21 -> 55  server-microvm 14 -> 20
+        #   server-ops-metrics 13 -> 22         server-overlay-registry 55 -> 56
+        #   server-overlay-routes-stream 8 -> 11   server-platform-customize 41 -> 95
+        #   server-postgres-container-wiring 48 -> 49
+        #   server-session-annex-store 27 -> 28 server-session-store 20 -> 24
+        #   server-sessions-router 45 -> 46     server-sessions-routes 41 -> 43
+        #   server-submit-latency-metric 11 -> 23  server-turn-runner 24 -> 62
+        #   server-wave2-trust-boundary 13 -> 14   server-wave5 15 -> 21
+        # EIGHT other suites also execute above their floors and were left
+        # alone, because for them the floor is a CI MINIMUM and the local count
+        # is the wrong input: each either declares allowed_skip_reasons, is
+        # db_gated, or carries a skipif/pytest.skip/importorskip that fires in a
+        # different environment. They are server-wave3 (the recorded case:
+        # raising 13 to the local count red-failed CI at 13 executed),
+        # server-agent-gate-postgres, server-broker-upload-resolver,
+        # server-customization-adversarial, server-drawing-authority-postgres,
+        # server-guest-fail-closed, server-product-capability-catalog and
+        # server-session-store-postgres. The 38 raised above are the complement:
+        # each ran with ZERO skips and carries no conditional-skip construct
+        # anywhere in its file, and server/tests/conftest.py has no skip
+        # machinery either, so there is no environment where they execute fewer.
+        # (`server-customization-adversarial`'s own 17-vs-19 note is now stale
+        # in its numbers -- Windows measured 21 executed, 2 skipped, on
+        # 2026-08-13 -- but not in its conclusion, so its floor still stands.)
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
-              SERVER, _py_pytest("tests/test_dependency_health.py"), 17),
+              SERVER, _py_pytest("tests/test_dependency_health.py"), 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
-              _py_pytest("test_auth.py"), 11),
+              _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
               _py_pytest("tests/test_auth_envelope.py"), 7),
         Suite("server-mcp-gateway-authority",
               "server tests/test_mcp_gateway_authority.py", "pytest", SERVER,
-              _py_pytest("tests/test_mcp_gateway_authority.py"), 21),
+              _py_pytest("tests/test_mcp_gateway_authority.py"), 55),
         Suite("server-mcp-staging-probe",
               "server tests/test_mcp_staging_probe.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
@@ -298,11 +344,11 @@ def build_suites() -> List[Suite]:
         Suite("server-wave4", "server tests/test_wave4.py", "pytest", SERVER,
               _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
-              _py_pytest("tests/test_wave5.py"), 15),
+              _py_pytest("tests/test_wave5.py"), 21),
         Suite("server-grant-admin-authority", "server tests/test_grant_admin_authority.py",
               "pytest", SERVER, _py_pytest("tests/test_grant_admin_authority.py"), 9),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2c_microvm.py"), 14),
+              _py_pytest("tests/test_hardening_2c_microvm.py"), 20),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
               SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 12),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
@@ -316,12 +362,12 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-policy", "server tests/test_agent_policy.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
-              _py_pytest("tests/test_agent_gate.py"), 55),
+              _py_pytest("tests/test_agent_gate.py"), 57),
         # W14 admin self-edit lane (R7): branch-only platform-repo writes,
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.
         Suite("server-platform-customize", "server tests/test_platform_customize.py",
-              "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 41),
+              "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 95),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason
@@ -330,13 +376,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_router.py"), 26,
               allowed_skip_reasons=(_PARKED_AGENT_ROUTER_REASON,)),
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
-              _py_pytest("tests/test_sessions_router.py"), 45),
+              _py_pytest("tests/test_sessions_router.py"), 46),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
               _py_pytest("tests/test_context_packet.py"), 16),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
-              _py_pytest("tests/test_contract_freeze.py"), 8),
+              _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",
-              SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 11),
+              SERVER, _py_pytest("tests/test_auth_vocab_freeze.py"), 18),
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         # The per-tenant DAILY AUTHORING cap. Shipped without a gate entry, the
@@ -345,7 +391,7 @@ def build_suites() -> List[Suite]:
         # test of the cap only ever ran by hand. The cap is a precondition for
         # stranger-facing authoring, so it does not get to be unenforced in CI.
         Suite("server-author-quota", "server tests/test_author_quota.py", "pytest", SERVER,
-              _py_pytest("tests/test_author_quota.py"), 57),
+              _py_pytest("tests/test_author_quota.py"), 64),
         Suite("server-job-lanes", "server tests/test_job_lanes.py", "pytest", SERVER,
               _py_pytest("tests/test_job_lanes.py"), 12),
         # The T1 overlay lane's SERVER half. Only its platform/ half was
@@ -377,11 +423,11 @@ def build_suites() -> List[Suite]:
         Suite("server-overlay-decision", "server tests/test_overlay_decision.py", "pytest",
               SERVER, _py_pytest("tests/test_overlay_decision.py"), 21),
         Suite("server-overlay-routes-stream", "server tests/test_overlay_routes_stream.py",
-              "pytest", SERVER, _py_pytest("tests/test_overlay_routes_stream.py"), 8),
+              "pytest", SERVER, _py_pytest("tests/test_overlay_routes_stream.py"), 11),
         Suite("server-overlay-stream", "server tests/test_overlay_stream.py", "pytest",
               SERVER, _py_pytest("tests/test_overlay_stream.py"), 18),
         Suite("server-overlay-registry", "server tests/test_overlay_registry.py", "pytest",
-              SERVER, _py_pytest("tests/test_overlay_registry.py"), 55),
+              SERVER, _py_pytest("tests/test_overlay_registry.py"), 56),
         # One process per file (below) is exactly why the cross-file connection
         # leak this pins was invisible to CI: every file passed alone.
         Suite("server-jobs-connection-ownership",
@@ -394,7 +440,7 @@ def build_suites() -> List[Suite]:
         # these toggle LEAF_AUTH_LIVE / LEAF_GUEST_* env and share the guest
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_uploads.py"), 57),
+              _py_pytest("tests/test_guest_uploads.py"), 61),
         # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
         # The one real-binary test runs wherever dwg2dxf is installed (the app
         # container ships it; see deploy/Dockerfile.app) and skips with this
@@ -410,7 +456,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 36,
               allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_purge.py"), 13),
+              _py_pytest("tests/test_guest_purge.py"), 14),
         Suite("server-guest-session-auth", "server tests/test_guest_session_auth.py", "pytest",
               SERVER, _py_pytest("tests/test_guest_session_auth.py"), 14),
         Suite("server-broker-upload-resolver", "server tests/test_broker_upload_resolver.py",
@@ -421,7 +467,7 @@ def build_suites() -> List[Suite]:
         # --- registration sweep 2026-07-22 (census #17: suites shipped without --- #
         # --- gate entries; every count below measured one-process-per-file)   --- #
         Suite("server-catalog-version-pin", "server tests/test_catalog_and_version_pin.py",
-              "pytest", SERVER, _py_pytest("tests/test_catalog_and_version_pin.py"), 21),
+              "pytest", SERVER, _py_pytest("tests/test_catalog_and_version_pin.py"), 23),
         Suite("server-live-lsp-resolution", "server tests/test_live_lsp_resolution.py",
               "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
@@ -433,9 +479,9 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 24),
+              SERVER, _py_pytest("tests/test_canonical_worker.py"), 25),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
-              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 17),
+              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 18),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 1,
               allowed_skip_reasons=(
@@ -452,11 +498,11 @@ def build_suites() -> List[Suite]:
                   r"autofill-solver source absent, acknowledged via LEAF_AUTOFILL_SOLVER_ABSENT_OK=1",
               )),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
-              SERVER, _py_pytest("tests/test_agent_approvals.py"), 19),
+              SERVER, _py_pytest("tests/test_agent_approvals.py"), 24),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 18),
+              SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 23),
         # NOT db_gated on purpose: this file's authority-selector and legacy-contract
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
@@ -474,11 +520,11 @@ def build_suites() -> List[Suite]:
         Suite("server-entitlements-converse", "server tests/test_entitlements_converse.py",
               "pytest", SERVER, _py_pytest("tests/test_entitlements_converse.py"), 6),
         Suite("server-hardening-1c", "server tests/test_hardening_1c.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_1c.py"), 12),
+              _py_pytest("tests/test_hardening_1c.py"), 57),
         Suite("server-hardening-1f", "server test_hardening_1f.py", "pytest", SERVER,
               _py_pytest("test_hardening_1f.py"), 8),
         Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2b.py"), 15),
+              _py_pytest("tests/test_hardening_2b.py"), 17),
         # (test_hardening_2c_microvm.py is registered above as "server-microvm";
         # it was listed twice, running the same 14 tests for no added coverage.)
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
@@ -499,17 +545,17 @@ def build_suites() -> List[Suite]:
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
               _py_pytest("tests/test_quota_shape.py"), 12),
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
-              _py_pytest("tests/test_session_store.py"), 20),
+              _py_pytest("tests/test_session_store.py"), 24),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
-              SERVER, _py_pytest("tests/test_sessions_routes.py"), 41),
+              SERVER, _py_pytest("tests/test_sessions_routes.py"), 43),
         Suite("server-turn-runner", "server tests/test_turn_runner.py", "pytest", SERVER,
-              _py_pytest("tests/test_turn_runner.py"), 24),
+              _py_pytest("tests/test_turn_runner.py"), 62),
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
-              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 5),
+              "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 7),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
@@ -556,7 +602,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_broker_boundary.py"), 59),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
-              _py_pytest("tests/test_live_mutation_plan.py"), 30),
+              _py_pytest("tests/test_live_mutation_plan.py"), 34),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),
@@ -565,13 +611,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_cat_litmus_offline_e2e.py"), 1),
         Suite("server-authored-execution-live-gate",
               "server tests/test_authored_execution_live_gate.py", "pytest",
-              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 13),
+              SERVER, _py_pytest("tests/test_authored_execution_live_gate.py"), 25),
         Suite("server-authored-tenant-isolation",
               "server tests/test_authored_tenant_isolation.py", "pytest",
               SERVER, _py_pytest("tests/test_authored_tenant_isolation.py"), 5),
         Suite("server-wave2-trust-boundary",
               "server tests/test_wave2_trust_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 13),
+              SERVER, _py_pytest("tests/test_wave2_trust_boundary.py"), 14),
         Suite("server-no-da-imports", "server tests/test_no_da_imports_static.py", "pytest",
               SERVER, _py_pytest("tests/test_no_da_imports_static.py"), 8),
         Suite("server-broker-ledger-schema", "server tests/test_broker_ledger_schema_static.py",
@@ -606,7 +652,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_customization_store_scaling.py"), 3),
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_source_identity.py"), 9),
+              _py_pytest("tests/test_deployment_source_identity.py"), 14),
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
               _py_pytest("tests/test_deployment_identity.py"), 12),
@@ -624,14 +670,18 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_task_local_state_authority_gate.py"), 52),
         Suite("server-emf-metrics-stream", "server tests/test_emf_metrics_stream.py",
               "pytest", SERVER, _py_pytest("tests/test_emf_metrics_stream.py"), 1),
-        # Floor 11 = 4 tests + the 7 parametrized cases of the unusable-reading
-        # test. Every case is hermetic and unconditional (no skipif, no DB, no
+        # Every case is hermetic and unconditional (no skipif, no DB, no
         # subprocess), so the count is the same on every runner.
+        # 11 -> 23 on 2026-08-13, MEASURED. 11 was 4 tests + the 7 parametrized
+        # cases of the unusable-reading test, correct when it was written at 5
+        # test defs and one parametrize; #233 grew the file to 9 defs and two
+        # parametrizes for the environment dimension and left the floor alone,
+        # so 12 of the 23 cases could have vanished under a green gate.
         Suite("server-submit-latency-metric",
               "server tests/test_submit_latency_metric.py", "pytest", SERVER,
-              _py_pytest("tests/test_submit_latency_metric.py"), 11),
+              _py_pytest("tests/test_submit_latency_metric.py"), 23),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
-              SERVER, _py_pytest("tests/test_ops_metrics.py"), 13),
+              SERVER, _py_pytest("tests/test_ops_metrics.py"), 22),
         # P2 telemetry (waves A + B). Floors are the measured local executed
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
@@ -689,9 +739,13 @@ def build_suites() -> List[Suite]:
         # They read the repository tree (harness/scripts/) as well as file text,
         # which does not change the reasoning above: a checkout always has it,
         # and its absence would fail LOUD rather than skip.
+        # 48 -> 49 on 2026-08-13, re-MEASURED. That 2026-08-07 commit added
+        # THREE tests to this file (19 -> 22 defs) and raised the floor by two,
+        # so it landed one low -- the same one-low shape the paragraph above
+        # documents, from the same kind of arithmetic rather than a merge.
         Suite("server-postgres-container-wiring",
               "server tests/test_postgres_container_wiring.py", "pytest", SERVER,
-              _py_pytest("tests/test_postgres_container_wiring.py"), 48),
+              _py_pytest("tests/test_postgres_container_wiring.py"), 49),
         # Offline restore coverage always runs. The one real PostgreSQL case is
         # separately enforced by upload-authority-postgres.yml and is the only
         # allowed skip on the hermetic test-gate runner.
@@ -778,9 +832,12 @@ def build_suites() -> List[Suite]:
         # offline: the PostgreSQL halves run against a fake in place of
         # platform.db, so nothing here skips on a no-DB host and the floor
         # is the exact collected count.
+        # 27 -> 28 on 2026-08-13, MEASURED. It was never the exact count: the
+        # file already had 28 tests when #507 registered it at 27, so the claim
+        # above was true of the intent and false of the number.
         Suite("server-session-annex-store",
               "server tests/test_session_annex_store.py", "pytest",
-              SERVER, _py_pytest("tests/test_session_annex_store.py"), 27),
+              SERVER, _py_pytest("tests/test_session_annex_store.py"), 28),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
@@ -853,16 +910,16 @@ def build_suites() -> List[Suite]:
         Suite("server-customization-authority", "server customization authority", "pytest",
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
         Suite("server-customization-store", "server customization store", "pytest",
-              SERVER, _py_pytest("tests/test_customization_store.py"), 8),
+              SERVER, _py_pytest("tests/test_customization_store.py"), 11),
         Suite("server-customization-reconcile", "server customization reconcile", "pytest",
               SERVER, _py_pytest("tests/test_customization_reconcile.py"), 8),
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 26),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 50),
         Suite("server-customization-postgres-contract",
               "server customization PostgreSQL contract", "pytest",
-              SERVER, _py_pytest("tests/test_customization_postgres_contract.py"), 9),
+              SERVER, _py_pytest("tests/test_customization_postgres_contract.py"), 11),
         # Holds both halves of a refusal: the cause reaches the operator log, and
         # never the tenant's response body.
         Suite("server-customization-refusal-observability",
@@ -889,7 +946,7 @@ def build_suites() -> List[Suite]:
         # change set on attempt 1 with the harness's reason readable from stage
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
-              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 47),
+              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 51),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- platform (cwd=repo parent; DB-gated) --- #
