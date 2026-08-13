@@ -1,0 +1,88 @@
+name: Finalize platform staging convergence
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_build_run_id:
+        description: "Exact canonical build run that produced the five-service supply set"
+        type: string
+        required: true
+      current_frontier_run_id:
+        description: "Optional exact final app identity-restamp run"
+        type: string
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: finalize-platform-staging-convergence-${{ inputs.producer_build_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: Verify provider evidence and publish one closed receipt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the provider verifier
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate identifier-only inputs
+        shell: bash
+        env:
+          PRODUCER_BUILD_RUN_ID: ${{ inputs.producer_build_run_id }}
+          CURRENT_FRONTIER_RUN_ID: ${{ inputs.current_frontier_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::producer_build_run_id must be one positive decimal identifier."
+            exit 1
+          }
+          if [ -n "$CURRENT_FRONTIER_RUN_ID" ]; then
+            [[ "$CURRENT_FRONTIER_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::current_frontier_run_id must be one positive decimal identifier."
+              exit 1
+            }
+          fi
+
+      - name: Resolve the complete provider-associated convergence receipt
+        id: finalize
+        env:
+          APP_GITHUB_TOKEN: ${{ github.token }}
+          TERRAFORM_GITHUB_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          PRODUCER_BUILD_RUN_ID: ${{ inputs.producer_build_run_id }}
+          CURRENT_FRONTIER_RUN_ID: ${{ inputs.current_frontier_run_id }}
+        run: |
+          set -euo pipefail
+          args=(
+            --producer-build-run-id "$PRODUCER_BUILD_RUN_ID"
+            --output platform-staging-convergence.json
+          )
+          if [ -n "$CURRENT_FRONTIER_RUN_ID" ]; then
+            args+=(--current-frontier-run-id "$CURRENT_FRONTIER_RUN_ID")
+          fi
+          python scripts/platform_staging_convergence.py "${args[@]}"
+          test -s platform-staging-convergence.json
+          RESOLVED_FRONTIER=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path("platform-staging-convergence.json").read_text(encoding="utf-8"))
+          print(value["frontier_run_id"])
+          PY
+          )
+          [[ "$RESOLVED_FRONTIER" =~ ^[1-9][0-9]*$ ]]
+          echo "resolved_frontier_run_id=$RESOLVED_FRONTIER" >> "$GITHUB_OUTPUT"
+          echo "Validated one complete five-service provider receipt; body withheld."
+
+      - name: Upload the complete convergence receipt
+        if: steps.finalize.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: leaf-platform-staging-convergence-build-${{ inputs.producer_build_run_id }}-frontier-${{ steps.finalize.outputs.resolved_frontier_run_id }}
+          path: platform-staging-convergence.json
+          if-no-files-found: error
+          retention-days: 30
