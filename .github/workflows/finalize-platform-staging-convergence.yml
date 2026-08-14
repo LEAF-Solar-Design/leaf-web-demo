@@ -65,7 +65,7 @@ jobs:
           if [ -n "$CURRENT_FRONTIER_RUN_ID" ]; then
             args+=(--current-frontier-run-id "$CURRENT_FRONTIER_RUN_ID")
           fi
-          python scripts/platform_staging_convergence.py "${args[@]}"
+          python -m scripts.platform_staging_convergence "${args[@]}"
           test -s platform-staging-convergence.json
           RESOLVED_FRONTIER=$(python - <<'PY'
           import json
