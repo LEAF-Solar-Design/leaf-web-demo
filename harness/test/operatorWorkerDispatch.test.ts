@@ -74,6 +74,10 @@ describe("operator worker dispatch (Lane D binding)", () => {
         ...REQ,
         commands: [process.platform === "win32" ? "set" : "env"],
       });
+      // The env dump must actually have run and landed in the receipt —
+      // otherwise the canary assertion below would pass vacuously.
+      expect(receipt.status).toBe("succeeded");
+      expect(receipt.stdoutTail).toContain("LEAF_OPERATOR_JOB");
       expect(JSON.stringify(receipt)).not.toContain("canary-aws-secret");
     } finally {
       delete process.env.AWS_SECRET_ACCESS_KEY;
