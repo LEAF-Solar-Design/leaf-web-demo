@@ -173,6 +173,37 @@ def test_live_auth_post_orgs_with_valid_session_succeeds(client, live_auth):
                     headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 200, r.text
     assert r.json()["org"]["name"] == "legit org"
+    assert r.json()["created"] is True
+
+    replay = client.post("/api/orgs", json={"name": "  LEGIT ORG  "},
+                         headers={"Authorization": "Bearer " + tok})
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["org"]["org_id"] == r.json()["org"]["org_id"]
+
+
+def test_live_auth_project_create_replays_same_uuid(client, live_auth):
+    tok = _mint("unused", with_org=False, subject="auth0|workspace-project-replay")
+    headers = {"Authorization": "Bearer " + tok}
+    org = client.post("/api/orgs", json={"name": "Leaf Automation"}, headers=headers)
+    assert org.status_code == 200, org.text
+
+    first = client.post("/api/projects", json={"name": "SoundBeam"}, headers=headers)
+    replay = client.post("/api/projects", json={"name": " soundbeam "}, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["created"] is True
+    assert replay.json()["created"] is False
+    assert replay.json()["project"]["project_id"] == first.json()["project"]["project_id"]
+
+
+def test_workspace_project_name_migration_is_fail_closed_and_unique():
+    sql = (pathlib.Path(__file__).parents[1] / "migrations" /
+           "0041_workspace_project_name_uniqueness.sql").read_text(encoding="utf-8")
+    assert "HAVING count(*) > 1" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS projects_active_org_normalized_name_uq" in sql
+    assert "org_id, lower(btrim(name))" in sql
 
 
 def test_off_auth_post_orgs_stays_open_bootstrap(client, off_auth):
