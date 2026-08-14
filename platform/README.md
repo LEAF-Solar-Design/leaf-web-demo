@@ -140,10 +140,11 @@ exit 1. Tests: `platform/tests/test_entitlement.py`.
 
 ## Org bootstrap route — `POST /api/orgs` (dev posture: OPEN)
 
-`POST /api/orgs {name, tier?}` mints an org and returns `{org: {org_id, name,
-tier, status, created_at, ...}}` (calls `store.create_org`). It is the HTTP way
-to mint the `org_id` every project/job route requires — the true blocker the
-exposure map named (`create_org` existed in the store but was unexposed).
+`POST /api/orgs {name, tier?}` creates or reuses the verified identity's org and
+returns `{org: {org_id, name, tier, status, created_at, ...}, created}`. A live
+replay with the same normalized name returns the same `org_id`; a different
+name for an already-bound identity returns 409. It never searches tenants by a
+display name.
 
 **This endpoint is intentionally OPEN in dev** (no auth gate) to solve the
 bootstrap chicken/egg: you cannot present an `X-Org-Id` you do not yet have.
@@ -163,6 +164,12 @@ Auth0. With `LEAF_AUTH_LIVE=1` the field is refused (422).
 project/job reads: a caller may read only its OWN org (the `X-Org-Id` header
 must equal the path `org_id`); a cross-org or unknown id returns 404, never 403
 (a 403 leaks existence).
+
+`POST /api/projects {name}` follows the same replay contract inside the caller's
+org. One active normalized project name maps to one stable `project_id`; the
+response adds `created`. The migration fails closed if historical active
+duplicates exist before it installs the uniqueness constraint. See
+`docs/workspace-project-bootstrap.md` for the app and provider binding process.
 
 ## Open integration note — orgs-table ownership
 

@@ -175,11 +175,8 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         subject = _auth.get("sub")
         if not subject:
             raise HTTPException(status_code=403, detail="verified token has no external subject")
-        if store.resolve_active_identity_binding("auth0", str(subject)) is not None:
-            raise HTTPException(status_code=409, detail="verified subject already has a platform identity binding")
-    if _auth is not None:
         try:
-            org = store.create_org_with_identity(
+            org, created = store.ensure_org_with_identity(
                 body.name, "auth0", str(subject),
                 tier=body.tier or "hosted_starter",
             )
@@ -193,13 +190,16 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
                 body.name, body.external_authority, body.external_subject,
                 tier=body.tier or "hosted_starter",
             )
+            created = True
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
     else:
         org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
                else store.create_org(body.name))
-    _emit_org_event("org.created", str(org.org_id), {"tier": org.tier})
-    return {"org": org.to_dict()}
+        created = True
+    if created:
+        _emit_org_event("org.created", str(org.org_id), {"tier": org.tier})
+    return {"org": org.to_dict(), "created": created}
 
 
 @router.get("/orgs/{org_id}")
@@ -271,12 +271,15 @@ def _lifecycle_response(operation):
 def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_write_org_id)):
     # This route is the canonical platform project factory. Authority remains a
     # server policy and cannot be selected by request headers or body fields.
-    project = store.create_project(
-        org_id,
-        body.name,
-        authority_mode="postgres_canonical",
-    )
-    return {"project": project.to_dict()}
+    try:
+        project, created = store.get_or_create_project(
+            org_id,
+            body.name,
+            authority_mode="postgres_canonical",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"project": project.to_dict(), "created": created}
 
 
 @router.post("/projects/blank", status_code=201)
