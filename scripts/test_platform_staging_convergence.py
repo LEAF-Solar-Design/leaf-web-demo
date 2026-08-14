@@ -135,6 +135,47 @@ def manifest() -> dict:
     }
 
 
+def v3_manifest() -> dict:
+    entries = {}
+    for index, service in enumerate(SERVICES, 1):
+        fingerprint = format(index, "064x")
+        entry = {
+            "repository": f"leaf-platform-{service}",
+            "image_digest": DIGESTS[service],
+            "immutable_lookup_tag": f"surface-v1-{fingerprint}",
+            "producer_source_revision": SOURCE,
+            "producer_source_tree": APP_TREE,
+            "surface_fingerprint": fingerprint,
+            "recipe_fingerprint": format(index + 10, "064x"),
+            "producer_workflow_path": subject.BUILD_WORKFLOW,
+            "producer_workflow_blob": BUILD_BLOB,
+            "producer_run_id": 31415926535,
+            "producer_run_attempt": 1,
+            "provenance_subject": (
+                "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+                f"leaf-platform-{service}"
+            ),
+            "provenance_digest": "sha256:" + format(index + 20, "064x"),
+            "build_disposition": "reused",
+        }
+        if service == "canonical-worker":
+            entry["solver_provenance"] = {
+                "solver_source_revision": "7" * 40,
+                "solver_source_sha256": "8" * 64,
+            }
+        if service == "web":
+            entry["artifact_sha256"] = "9" * 64
+        entries[service] = entry
+    return {
+        "schema": "leaf.staging-supply-set.v3",
+        "release_source_revision": SOURCE,
+        "release_source_tree": APP_TREE,
+        "build_run_id": 31415926535,
+        "build_run_attempt": 1,
+        "services": entries,
+    }
+
+
 def missing() -> dict:
     return {"status": "not_produced"}
 
@@ -171,6 +212,7 @@ def service_receipt(
         "configuration_delta": missing(),
         "configuration_task_definition": predecessor if with_identity else "not_produced",
         "convergence_id": "not_produced",
+        "consumer_contract": missing(),
         "deploy_strategy": "direct",
         "digest_aware_evidence": missing(),
         "digest_aware_reconcile": False,
@@ -185,6 +227,7 @@ def service_receipt(
         "source_revision": SOURCE,
         "start_from_zero": False,
         "start_from_zero_confirmation": missing(),
+        "supply_evidence": missing(),
         "target_color": "live",
     }
     facts = {
@@ -541,6 +584,50 @@ class ConvergenceFinalizerTests(unittest.TestCase):
     def assert_reason(self, reason: str, provider: FakeProvider) -> None:
         with self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
             subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+
+    def test_v3_relay_binds_raw_supply_file_sha_and_exact_candidate(self) -> None:
+        candidate = v3_manifest()
+        raw = (json.dumps(candidate, indent=2, sort_keys=True) + "\n").encode()
+        raw_sha = hashlib.sha256(raw).hexdigest()
+        canonical_sha = hashlib.sha256(canonical(candidate)).hexdigest()
+        self.assertNotEqual(raw_sha, canonical_sha)
+        build = {"run_id": 31415926535, "run_attempt": 1, "head_sha": SOURCE}
+        supply = subject._supply(
+            candidate,
+            build,
+            APP_TREE,
+            file_sha256=raw_sha,
+        )
+        self.assertEqual(supply["manifest_sha256"], raw_sha)
+        receipt = {
+            "schema": "leaf.staging-converged.v2",
+            "release_source_revision": SOURCE,
+            "build_run_attempt": 1,
+            "relay_run_id": RELAY_RUN,
+            "supply_set_sha256": raw_sha,
+            "candidate_supply_set": copy.deepcopy(candidate),
+            "automatic_surfaces": ["web", "app"],
+            "surface_results": {"web": {}, "app": {}},
+            "non_relay_services": {
+                "broker": "not_automatically_reconciled",
+                "harness": "not_automatically_reconciled",
+                "canonical-worker": "not_automatically_reconciled",
+            },
+            "full_fleet_identity_stamped": False,
+        }
+        subject._relay_receipt(receipt, build, supply, RELAY_RUN, candidate)
+
+        wrong_hash = copy.deepcopy(receipt)
+        wrong_hash["supply_set_sha256"] = canonical_sha
+        with self.assertRaisesRegex(subject.ContractError, "^RELAY_RECEIPT_LINEAGE_MISMATCH$"):
+            subject._relay_receipt(wrong_hash, build, supply, RELAY_RUN, candidate)
+
+        changed_candidate = copy.deepcopy(receipt)
+        changed_candidate["candidate_supply_set"]["services"]["app"]["image_digest"] = (
+            "sha256:" + "f" * 64
+        )
+        with self.assertRaisesRegex(subject.ContractError, "^RELAY_RECEIPT_LINEAGE_MISMATCH$"):
+            subject._relay_receipt(changed_candidate, build, supply, RELAY_RUN, candidate)
 
     def test_future_provider_shape_produces_one_complete_strict_receipt(self) -> None:
         provider = fixture()
@@ -1035,6 +1122,43 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         receipt["receipt_sha256"] = "0" * 64
         provider.byte_values[key] = archive(subject.ARTIFACT_FILE, canonical(receipt))
         self.assert_reason("SERVICE_RECEIPT_CHECKSUM_INVALID", provider)
+
+    def test_service_receipt_accepts_closed_requested_evidence_summaries(self) -> None:
+        receipt = service_receipt(
+            "app",
+            306,
+            predecessor="leaf-platform-app:2",
+            terminal_td="leaf-platform-app:3",
+            with_identity=True,
+        )
+        requested = receipt["requested"]
+        requested["consumer_contract"] = {
+            "status": "produced",
+            "sha256": "1" * 64,
+            "utf8_bytes": 2312,
+        }
+        requested["supply_evidence"] = {
+            "status": "produced",
+            "sha256": "2" * 64,
+            "utf8_bytes": 11982,
+        }
+        receipt["receipt_sha256"] = ""
+        receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
+        self.assertEqual(subject._service_receipt(receipt), receipt)
+
+        for key, value in (
+            ("consumer_contract", {"status": "produced", "sha256": "1" * 64, "utf8_bytes": 0}),
+            ("supply_evidence", {"status": "produced", "sha256": "2" * 64, "utf8_bytes": True}),
+            ("supply_evidence", {"status": "produced", "sha256": "bad", "utf8_bytes": 1}),
+            ("consumer_contract", {"status": "not_produced", "extra": True}),
+        ):
+            with self.subTest(key=key, value=value):
+                invalid = copy.deepcopy(receipt)
+                invalid["requested"][key] = value
+                invalid["receipt_sha256"] = ""
+                invalid["receipt_sha256"] = hashlib.sha256(canonical(invalid)).hexdigest()
+                with self.assertRaisesRegex(subject.ContractError, "SERVICE_RECEIPT_REQUEST_INVALID"):
+                    subject._service_receipt(invalid)
 
     def test_failed_step_must_match_jobs_api(self) -> None:
         provider = fixture()
