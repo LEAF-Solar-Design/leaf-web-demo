@@ -27,6 +27,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
+import zipfile
 
 import yaml  # gate venv + prepare job: installed from scripts/requirements-ci.txt
 
@@ -2873,6 +2875,8 @@ def check_docs_noop_filter(text: str) -> None:
         "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
         "DIGEST_AWARE_CONVERGENCE_ENABLED": "true",
         "DIGEST_AWARE_CONSUMER_MARKER": "leaf.staging-digest-aware-consumer.v1",
+        "CONSUMER_CONTRACT_WORKFLOW": "publish-leaf-platform-staging-consumer-contract.yml",
+        "CONSUMER_CONTRACT_WORKFLOW_PATH": ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
     }
     assert dispatch_job["if"] == (
         "github.event.workflow_run.conclusion == 'success' && "
@@ -2880,17 +2884,17 @@ def check_docs_noop_filter(text: str) -> None:
         "github.event.workflow_run.head_branch == 'main'"
     )
     relay_steps = dispatch_job["steps"]
-    # FOUR steps since 2026-08-07: tip check, manifest read, guarded dispatch,
-    # receipt publish. The fourth is the ONLY step permitted to carry `uses:`,
-    # asserted exactly below. Adding a fifth, importing another action, or
+    # Five steps: tip check, manifest read, provider contract read, guarded
+    # dispatch, and receipt publish. The fifth is the only step with `uses:`.
     # reordering must break this harness and force a co-review.
     assert [s.get("id") for s in relay_steps] == [
-        "tip", "manifest", "deploy", None]
-    tip_step, manifest_step, dispatch_step, receipt_step = relay_steps
+        "tip", "manifest", "consumer_contract", "deploy", None]
+    tip_step, manifest_step, contract_step, dispatch_step, receipt_step = relay_steps
     # Step KEY SETS are exact: no shell:, no working-directory:,
     # no continue-on-error: may appear on any step without breaking this.
     assert set(tip_step) == {"name", "id", "env", "run"}
     assert set(manifest_step) == {"name", "id", "if", "env", "run"}
+    assert set(contract_step) == {"name", "id", "if", "env", "run"}
     assert set(dispatch_step) == {"name", "id", "if", "env", "run"}
     # THE RECEIPT STEP RUNS NO SCRIPT AND HOLDS NO TOKEN. It is a pure upload
     # of a file the guarded step already wrote, so it carries no `env:` at all
@@ -2904,6 +2908,9 @@ def check_docs_noop_filter(text: str) -> None:
     # read-scoped workflow token, never the infra-repo PAT.
     assert tip_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
     assert manifest_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert contract_step["env"] == {
+        "GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+    }
     # HOME_TOKEN added 2026-08-07. The per-service tip re-check reads THIS
     # repo, which the infra PAT is not scoped for; github.token is, and the
     # workflow's permissions block above still pins it read-only. This is a
@@ -2920,16 +2927,25 @@ def check_docs_noop_filter(text: str) -> None:
         "SUPPLY_EVIDENCE_B64": (
             "${{ steps.manifest.outputs.supply_evidence_b64 }}"
         ),
+        "CONSUMER_CONTRACT_B64": (
+            "${{ steps.consumer_contract.outputs.consumer_contract_b64 }}"
+        ),
+        "TF_CONTRACT_HEAD": "${{ steps.consumer_contract.outputs.terraform_head_sha }}",
+        "TF_CONSUMER_BLOB": "${{ steps.consumer_contract.outputs.deploy_workflow_blob }}",
+        "TF_CONTRACT_RUN_ID": "${{ steps.consumer_contract.outputs.producer_run_id }}",
     }
     assert manifest_step["if"] == "steps.tip.outputs.current == 'true'"
+    assert _folded(contract_step["if"]) == (
+        "steps.tip.outputs.current == 'true' && "
+        "steps.manifest.outputs.deploy == 'true' && "
+        "steps.manifest.outputs.schema == 'leaf.staging-supply-set.v3'"
+    )
     assert dispatch_step["if"] == (
         "steps.tip.outputs.current == 'true' && "
         "steps.manifest.outputs.deploy == 'true'"
     ), "without this exact guard a docs-only run dispatches an empty tag"
 
-    # The PAT appears EXACTLY once in the whole parsed workflow, at the
-    # guarded dispatch step's GH_TOKEN. Walking parsed values (not raw
-    # text) keeps comments out of the count in both directions.
+    # The PAT appears only in the provider read and guarded dispatch steps.
     def _walk_strings(node, path=""):
         if isinstance(node, dict):
             for key, value in node.items():
@@ -2945,14 +2961,17 @@ def check_docs_noop_filter(text: str) -> None:
         for path, value in _walk_strings(relay_wf)
         if "secrets." in value
     ]
-    assert len(secret_refs) == 1, (
-        f"exactly one secret reference may exist in the relay: {secret_refs}"
+    assert len(secret_refs) == 2, (
+        f"exactly two scoped secret references may exist in the relay: {secret_refs}"
     )
-    assert secret_refs[0][1] == "${{ secrets.TERRAFORM_REPO_TOKEN }}"
-    assert ".steps[2].env.GH_TOKEN" in secret_refs[0][0]
+    assert all(value == "${{ secrets.TERRAFORM_REPO_TOKEN }}" for _, value in secret_refs)
+    assert {path.rsplit(".", 2)[-2] for path, _ in secret_refs} == {"env"}
+    assert any(".steps[2].env.GH_TOKEN" in path for path, _ in secret_refs)
+    assert any(".steps[3].env.GH_TOKEN" in path for path, _ in secret_refs)
 
     tip_code = _executable_bash(tip_step["run"])
     manifest_code = _executable_bash(manifest_step["run"])
+    contract_code = _executable_bash(contract_step["run"])
     dispatch_code = _executable_bash(dispatch_step["run"])
 
     # ALL THREE scripts are content-frozen: any edit to their executable
@@ -2976,6 +2995,7 @@ def check_docs_noop_filter(text: str) -> None:
     # which is stricter than modelling it and cannot itself drift.
     for step_name, raw in (("tip", tip_step["run"]),
                            ("manifest", manifest_step["run"]),
+                           ("consumer_contract", contract_step["run"]),
                            ("dispatch", dispatch_step["run"])):
         raw_lines = raw.splitlines()
         for idx, line in enumerate(raw_lines[:-1]):
@@ -2989,7 +3009,7 @@ def check_docs_noop_filter(text: str) -> None:
                     "Put the comment above the statement instead.")
 
     frozen = hashlib.sha256(
-        "\n===\n".join((tip_code, manifest_code, dispatch_code)).encode("utf-8")
+        "\n===\n".join((tip_code, manifest_code, contract_code, dispatch_code)).encode("utf-8")
     ).hexdigest()
     # Hash updated 2026-08-07: the dispatch step now deploys one service at a
     # time and watches each run to a terminal state, instead of firing both
@@ -3218,7 +3238,7 @@ def check_docs_noop_filter(text: str) -> None:
         # Hash updated after the R3 producer made the manifest lookup-tag
         # relation authoritative and the relay replaced duplicate v3 fields
         # with one closed supply envelope.
-        "3b9f650fb70fadd73d8eb084c62641aeb541d081b28ed7be4785f59a30f2baeb"
+        "21fd783e5f2f6efb86801feb37c298fab00ecac872835441d7b5c11c332974a4"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -6191,14 +6211,42 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert job["env"]["DIGEST_AWARE_CONSUMER_MARKER"] == (
         "leaf.staging-digest-aware-consumer.v1"
     )
-    code = _executable_bash(_relay_deploy_step(job)["run"])
-    assert 'grep -Fq "$DIGEST_AWARE_CONSUMER_MARKER"' in code
-    assert 'CURRENT_TF_BLOB" = "$TF_CONSUMER_BLOB' in code
+    assert job["env"]["CONSUMER_CONTRACT_WORKFLOW"] == (
+        "publish-leaf-platform-staging-consumer-contract.yml"
+    )
+    contract_step = next(
+        step for step in job["steps"]
+        if step.get("name") == "Read the provider-associated Terraform consumer contract"
+    )
+    assert contract_step["env"]["GH_TOKEN"] == "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+    contract_code = _executable_bash(contract_step["run"])
+    assert "actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs" in contract_code
+    assert "actions/runs/$RUN_ID/artifacts" in contract_code
+    assert "actions/artifacts/$ARTIFACT_ID/zip" in contract_code
+    assert "contents/" not in contract_code
+    assert "branches/main" not in contract_code
+    assert 'steps.manifest.outputs.schema == \'leaf.staging-supply-set.v3\'' in _folded(
+        contract_step["if"]
+    )
+    deploy_step = _relay_deploy_step(job)
+    assert deploy_step["env"]["CONSUMER_CONTRACT_B64"] == (
+        "${{ steps.consumer_contract.outputs.consumer_contract_b64 }}"
+    )
+    assert deploy_step["env"]["TF_CONTRACT_HEAD"] == (
+        "${{ steps.consumer_contract.outputs.terraform_head_sha }}"
+    )
+    assert deploy_step["env"]["TF_CONSUMER_BLOB"] == (
+        "${{ steps.consumer_contract.outputs.deploy_workflow_blob }}"
+    )
+    code = _executable_bash(deploy_step["run"])
+    assert 'repos/$INFRA_REPO/contents/' not in code
+    assert 'repos/$INFRA_REPO/branches/main' not in code
     assert '-f "digest_aware_reconcile=true"' in code
     assert code.count(
         'dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")'
     ) == 1
     assert '-f "convergence_id=$CONVERGENCE_ID"' in code
+    assert '-f "consumer_contract_b64=$CONSUMER_CONTRACT_B64"' in code
     for removed_field in (
         "expected_image_digest=",
         "component_producer_source_revision=",
@@ -6225,6 +6273,161 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert "candidate_supply_set: $supply[0]" in code
     assert 'full_fleet_identity_stamped: false' in code
     assert 'harness: "not_automatically_reconciled"' in code
+
+
+def _consumer_contract_validator_python() -> str:
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    step = next(
+        item for item in relay["jobs"]["dispatch"]["steps"]
+        if item.get("name")
+        == "Read the provider-associated Terraform consumer contract"
+    )
+    match = re.search(r"python3 - <<'PY'\n(.*?)\n\s*PY", step["run"], re.S)
+    assert match, "consumer contract validator heredoc missing"
+    return textwrap.dedent(match.group(1))
+
+
+def _canonical_json(value) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+
+
+def _run_consumer_contract_fixture(
+    *, run_change=None, contract_change=None, artifact_change=None, duplicate=False
+):
+    run_id = 31770000001
+    attempt = 2
+    head = "a" * 40
+    name = f"leaf-platform-staging-consumer-contract-run-{run_id}-attempt-{attempt}"
+    contract = {
+        "artifact": {"file": "consumer-contract.json", "name": name},
+        "consumer": {
+            "contract_schema_path": "contract/leaf-platform-staging-consumer-contract.v1.schema.json",
+            "contract_schema_blob": "b" * 40,
+            "contract_version": 1,
+            "deploy_workflow_path": ".github/workflows/deploy-leaf-platform-staging.yml",
+            "deploy_workflow_blob": "c" * 40,
+            "pins": {
+                "deployment_environment": "aws-apply",
+                "digest_aware_marker": "leaf.staging-digest-aware-consumer.v1",
+                "mutation_group": "leaf-platform-staging-ecs-mutation",
+            },
+        },
+        "producer": {
+            "repository": "LEAF-Solar-Design/leaf-automation-aws-terraform",
+            "workflow_path": ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
+            "workflow_blob": "d" * 40,
+            "run_id": run_id,
+            "run_attempt": attempt,
+            "event": "push",
+            "branch": "main",
+            "head_sha": head,
+            "head_tree": "e" * 40,
+        },
+        "schema": "leaf.platform-staging-consumer-contract.v1",
+        "version": 1,
+    }
+    if contract_change:
+        contract_change(contract)
+    unsigned = dict(contract)
+    unsigned.pop("payload_sha256", None)
+    contract["payload_sha256"] = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+    raw_contract = _canonical_json(contract) + b"\n"
+
+    run = {
+        "id": run_id,
+        "run_attempt": attempt,
+        "repository": {"full_name": "LEAF-Solar-Design/leaf-automation-aws-terraform"},
+        "path": ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": head,
+        "status": "completed",
+        "conclusion": "success",
+    }
+    if run_change:
+        run_change(run)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        archive_path = root / "consumer-contract.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("consumer-contract.json", raw_contract)
+            if duplicate:
+                bundle.writestr("foreign.json", b"{}")
+        archive_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        artifact = {
+            "archive_download_url": "https://api.github.com/artifacts/9207000001/zip",
+            "created_at": "2026-08-14T00:00:00Z",
+            "digest": f"sha256:{archive_sha}",
+            "expired": False,
+            "expires_at": "2026-09-13T00:00:00Z",
+            "id": 9207000001,
+            "name": name,
+            "node_id": "artifact-node",
+            "size_in_bytes": len(archive_path.read_bytes()),
+            "updated_at": "2026-08-14T00:00:01Z",
+            "url": "https://api.github.com/artifacts/9207000001",
+            "workflow_run": {
+                "head_branch": "main",
+                "head_repository_id": 1,
+                "head_sha": head,
+                "id": run_id,
+                "repository_id": 2,
+            },
+        }
+        if artifact_change:
+            artifact_change(artifact)
+        (root / "consumer-contract-run.json").write_text(
+            json.dumps(run), encoding="utf-8"
+        )
+        (root / "consumer-contract-artifact.json").write_text(
+            json.dumps(artifact), encoding="utf-8"
+        )
+        output = root / "github-output"
+        completed = subprocess.run(
+            [sys.executable, "-c", _consumer_contract_validator_python()],
+            cwd=root,
+            env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        return completed.returncode, completed.stdout, (
+            output.read_text(encoding="utf-8") if output.exists() else ""
+        )
+
+
+def test_provider_consumer_contract_validator_accepts_real_shape() -> None:
+    rc, output, github_output = _run_consumer_contract_fixture()
+    assert rc == 0, output
+    assert "Validated one provider-associated Terraform consumer contract" in output
+    assert "consumer_contract_b64=" in github_output
+    assert "terraform_head_sha=" + "a" * 40 in github_output
+    assert "deploy_workflow_blob=" + "c" * 40 in github_output
+
+
+def test_provider_consumer_contract_validator_fails_closed_on_rebinding() -> None:
+    cases = (
+        {"run_change": lambda run: run.update(path=".github/workflows/foreign.yml")},
+        {"run_change": lambda run: run.update(conclusion="failure")},
+        {"run_change": lambda run: run.update(head_sha="f" * 40)},
+        {"artifact_change": lambda artifact: artifact.update(digest="sha256:" + "f" * 64)},
+        {"artifact_change": lambda artifact: artifact.update(expired=True)},
+        {"artifact_change": lambda artifact: artifact.update(name="foreign")},
+        {"contract_change": lambda contract: contract.update(authority_digest="f" * 64)},
+        {"contract_change": lambda contract: contract["consumer"]["pins"].update(digest_aware_marker="foreign")},
+        {"duplicate": True},
+    )
+    for case in cases:
+        rc, output, github_output = _run_consumer_contract_fixture(**case)
+        assert rc != 0, (case, output)
+        assert github_output == "", (case, github_output)
 
 
 def test_digest_aware_relay_enables_only_v3_and_keeps_v1_v2_compatibility() -> None:
