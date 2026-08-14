@@ -84,6 +84,7 @@ from tool_loader import (  # noqa: E402
 )
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
+import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
     import emf_metrics
@@ -391,6 +392,7 @@ def _ledger_append(entry: Dict[str, Any], event_key: Optional[str] = None) -> No
 # not break broker boot)
 # --------------------------------------------------------------------------- #
 _da_mod = None
+_blank_dwg_mod = None
 
 
 def _in_test_process() -> bool:
@@ -448,6 +450,35 @@ def _get_da():
             print(f"[broker] da/client.py import failed: {exc}", file=sys.stderr)
             return None
     return _da_mod
+
+
+def _get_blank_dwg_producer():
+    """Load the broker-owned no-input producer without importing credentials."""
+    global _blank_dwg_mod
+    if _blank_dwg_mod is None:
+        import importlib.util
+
+        path = SERVER_DIR / "da" / "blank_dwg.py"
+        spec = importlib.util.spec_from_file_location("leaf_blank_dwg", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("blank DWG producer is unavailable")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _blank_dwg_mod = mod
+    return _blank_dwg_mod
+
+
+def _blank_dwg_read_tool() -> Dict[str, Any]:
+    """Return the exact operator-owned read witness from the engine registry."""
+    registry = json.loads((PROJECT_ROOT / "engine" / "registry.json").read_text(
+        encoding="utf-8"))
+    matches = [
+        tool for tool in registry.get("tools", [])
+        if tool.get("name") == "count-by-layer"
+    ]
+    if len(matches) != 1 or matches[0].get("engine_op") != "count_by_layer":
+        raise RuntimeError("operator count-by-layer tool is unavailable")
+    return dict(matches[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -1266,6 +1297,99 @@ class BrokerRunRequest(BaseModel):
     # identifies the WORK, and adding a per-job field would make an existing
     # ledger row's fingerprint unrecognisable on replay.
     job_id: Optional[str] = None
+
+
+class _BlankDwgBrokerRunRequest(BrokerRunRequest):
+    """Internal-only run type. The public /broker/run parser never creates it."""
+
+
+class BlankDwgFeasibilityRequest(BaseModel):
+    """Closed input for the protected one-shot feasibility route."""
+    tenant_id: str
+    project_id: str
+    ledger_event_key: str
+    job_id: str
+    source_sha: str
+    drawing_name: str = "APS blank drawing feasibility"
+
+
+def _blank_dwg_tool() -> Dict[str, Any]:
+    return {
+        "name": "aps-blank-dwg-feasibility",
+        "version": "1.0.0",
+        "kind": "broker_operator",
+        "engine_op": "aps_blank_dwg_feasibility",
+        "params": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "source_sha": {"type": "string"},
+                "drawing_name": {"type": "string"},
+            },
+            "required": ["project_id", "source_sha", "drawing_name"],
+            "additionalProperties": False,
+        },
+        "capabilities": ["drawing.write"],
+        "provenance": {"source": "server/da/blank_dwg.py"},
+    }
+
+
+def _is_blank_dwg_tool(tool: Dict[str, Any]) -> bool:
+    return (
+        tool.get("name") == "aps-blank-dwg-feasibility"
+        and tool.get("engine_op") == "aps_blank_dwg_feasibility"
+        and tool.get("provenance") == {"source": "server/da/blank_dwg.py"}
+    )
+
+
+def _is_blank_dwg_request(req: BrokerRunRequest, tool: Dict[str, Any]) -> bool:
+    return isinstance(req, _BlankDwgBrokerRunRequest) and _is_blank_dwg_tool(tool)
+
+
+def _publish_blank_dwg(
+    *, tenant_id: str, project_id: str, drawing_name: str, payload: bytes, digest: str
+) -> Dict[str, Any]:
+    """Publish the validated bytes as one tenant and project-owned version 1."""
+    import store as drawing_store  # da/store.py, made importable by write_loop
+
+    org_id = uuid.UUID(tenant_id)
+    project_uuid = uuid.UUID(project_id)
+    canonical = platform_link.platform_store()
+    project = canonical.get_project(org_id, project_uuid)
+    if project is None or project.status != "active":
+        raise ValueError("project is unavailable for this tenant")
+
+    artifact = canonical.create_drawing_artifact(org_id, project_uuid, drawing_name)
+    drawing_id = str(artifact.drawing_id)
+    backend = write_loop.default_backend(aps_live=True, da=_get_da())
+    with tempfile.TemporaryDirectory(prefix="leaf-blank-dwg-publish-") as tmp:
+        local = Path(tmp) / "blank.dwg"
+        local.write_bytes(payload)
+        stored = drawing_store.ingest_drawing(
+            backend, tenant_id, str(local), drawing_id=drawing_id
+        )
+    if stored != {"drawing_id": drawing_id, "version": 1}:
+        raise RuntimeError("blank DWG store did not publish exact version 1")
+    object_key = drawing_store.drawing_version_key(tenant_id, drawing_id, 1)
+    version = canonical.create_drawing_version(
+        org_id,
+        project_uuid,
+        drawing_id=artifact.drawing_id,
+        oss_object=object_key,
+        intake_ref=f"sha256:{digest}",
+        created_by="aps_blank_dwg_feasibility",
+    )
+    if version.seq != 1:
+        raise RuntimeError("blank DWG project version is not version 1")
+    return {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "drawing_id": drawing_id,
+        "version_id": str(version.version_id),
+        "version": 1,
+        "object_key": object_key,
+        "sha256": digest,
+    }
 
 
 def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
@@ -2305,6 +2429,52 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     return JSONResponse(status_code=terminal_status, content=terminal_env)
 
 
+@app.post(
+    "/broker/blank-dwg/feasibility",
+    dependencies=[Depends(require_broker_reconcile_auth)],
+)
+def blank_dwg_feasibility(req: BlankDwgFeasibilityRequest) -> JSONResponse:
+    """Protected one-shot source for the dormant APS feasibility workflow."""
+    try:
+        tenant_id = str(uuid.UUID(req.tenant_id))
+        project_id = str(uuid.UUID(req.project_id))
+    except (TypeError, ValueError):
+        env, status = _classified_bad_params(
+            "blank_dwg_scope_invalid",
+            "tenant_id and project_id must be canonical UUIDs",
+            tool="aps-blank-dwg-feasibility",
+        )
+        return JSONResponse(status_code=status, content=env)
+    if not re.fullmatch(r"[0-9a-f]{40}", req.source_sha or ""):
+        env, status = _classified_bad_params(
+            "blank_dwg_source_invalid",
+            "source_sha must be 40 lowercase hexadecimal characters",
+            tool="aps-blank-dwg-feasibility",
+        )
+        return JSONResponse(status_code=status, content=env)
+    if not req.drawing_name.strip() or len(req.drawing_name) > 200:
+        env, status = _classified_bad_params(
+            "blank_dwg_name_invalid",
+            "drawing_name must contain 1 to 200 characters",
+            tool="aps-blank-dwg-feasibility",
+        )
+        return JSONResponse(status_code=status, content=env)
+    run = _BlankDwgBrokerRunRequest(
+        tenant_id=tenant_id,
+        tool=_blank_dwg_tool(),
+        params={
+            "project_id": project_id,
+            "source_sha": req.source_sha,
+            "drawing_name": req.drawing_name.strip(),
+        },
+        dwg="blank",
+        aps_live=True,
+        ledger_event_key=req.ledger_event_key,
+        job_id=req.job_id,
+    )
+    return broker_run(run)
+
+
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
     if not write_loop.is_write_tool(req.tool or {}):
@@ -2593,7 +2763,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # pins the provider-based micro-VM tier. Rejected here as defense in
     # depth even if startup validation (the same floor) was bypassed by a
     # direct function call.
-    if _deployed_runtime() and not is_trusted_builtin_tool(tool, req.tenant_id):
+    if (
+        _deployed_runtime()
+        and not _is_blank_dwg_request(req, tool)
+        and not is_trusted_builtin_tool(tool, req.tenant_id)
+    ):
         engaged = _tool_sandbox_tier() in ("subprocess", "microvm")
         if (not _authored_execution_enabled() or not engaged
                 or (_production_runtime() and not _sandbox_configured())):
@@ -2628,6 +2802,74 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         capped_runs = _run_quota_preflight(req.tenant_id, tier, tool)
         if capped_runs is not None:
             return capped_runs  # (quota_exceeded envelope, HTTP 429)
+
+    if _is_blank_dwg_request(req, tool):
+        if not req.aps_live or req.test_source is not None:
+            return _classified_bad_params(
+                "blank_dwg_live_required",
+                "blank DWG feasibility requires the live broker path",
+                tool=tool.get("name"),
+            )
+        project_id = str((req.params or {}).get("project_id") or "")
+        source_sha = str((req.params or {}).get("source_sha") or "")
+        drawing_name = str((req.params or {}).get("drawing_name") or "")
+        try:
+            org_id = uuid.UUID(req.tenant_id)
+            project_uuid = uuid.UUID(project_id)
+        except (TypeError, ValueError):
+            return _classified_bad_params(
+                "blank_dwg_scope_invalid",
+                "blank DWG scope is invalid",
+                tool=tool.get("name"),
+            )
+        project = platform_link.platform_store().get_project(org_id, project_uuid)
+        if project is None or project.status != "active":
+            return _classified_bad_params(
+                "blank_dwg_project_unavailable",
+                "project is unavailable for this tenant",
+                tool=tool.get("name"),
+            )
+        _require_supported_live_completion_mode()
+        da = _get_da()
+        if da is None:
+            return (
+                err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "APS client is unavailable",
+                    retryable=False,
+                    tool=tool.get("name"),
+                ),
+                DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
+            )
+        _start_admitted_execution(req, admission, aps_submission=True)
+        producer = _get_blank_dwg_producer()
+        result = producer.run(
+            da,
+            tenant_id=req.tenant_id,
+            source_sha=source_sha,
+            read_tool=_blank_dwg_read_tool(),
+            publish=functools.partial(
+                _publish_blank_dwg,
+                tenant_id=req.tenant_id,
+                project_id=project_id,
+                drawing_name=drawing_name,
+            ),
+            on_submitted=_submission_recorder(req, run_token),
+        )
+        cost = result.get("cost") if isinstance(result, dict) else None
+        if isinstance(cost, dict):
+            entry["engine_seconds"] = cost.get("engine_seconds")
+            entry["usd_est"] = cost.get("usd_est")
+        envelope = ok_envelope(
+            tool=tool.get("name"),
+            version=tool.get("version", "1.0.0"),
+            result=result,
+            overlay=None,
+            timing_ms=int((time.perf_counter() - t0) * 1000),
+            cost=cost,
+        )
+        envelope["degraded_mode"] = False
+        return envelope, 200
 
     params = dict(req.params or {})
     if req.test_source is not None and write_loop.is_write_tool(tool):

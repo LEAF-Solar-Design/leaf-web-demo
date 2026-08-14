@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/aps-blank-dwg-feasibility.v1.schema.json",
+  "title": "Leaf APS blank DWG feasibility receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "source_sha",
+    "activity",
+    "workitem_id",
+    "output",
+    "drawing",
+    "read",
+    "cost",
+    "fallback",
+    "reason",
+    "degraded_mode"
+  ],
+  "properties": {
+    "contract": {"const": "leaf.aps-blank-dwg-feasibility.v1"},
+    "status": {"enum": ["supported", "unsupported"]},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "activity": {"const": "LeafBlankDwgFeasibility"},
+    "workitem_id": {"type": ["string", "null"], "minLength": 1},
+    "output": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "bytes", "version"],
+          "properties": {
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "bytes": {"type": "integer", "minimum": 6},
+            "version": {"const": 1}
+          }
+        }
+      ]
+    },
+    "drawing": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tenant_id", "project_id", "drawing_id", "version_id",
+            "version", "object_key", "sha256"
+          ],
+          "properties": {
+            "tenant_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "drawing_id": {"type": "string", "format": "uuid"},
+            "version_id": {"type": "string", "format": "uuid"},
+            "version": {"const": 1},
+            "object_key": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "read": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "ok", "result"],
+          "properties": {
+            "tool": {"const": "count-by-layer"},
+            "ok": {"const": true},
+            "result": {"type": "object"}
+          }
+        }
+      ]
+    },
+    "cost": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["engine_seconds", "usd_est"],
+          "properties": {
+            "engine_seconds": {"type": "number", "minimum": 0},
+            "usd_est": {"type": "number", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "fallback": {"enum": ["upload_only", null]},
+    "reason": {
+      "enum": [
+        "no_input_activity_rejected",
+        "invalid_dwg_output",
+        "read_tool_failed",
+        null
+      ]
+    },
+    "degraded_mode": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "supported"}}},
+      "then": {
+        "properties": {
+          "output": {"type": "object"},
+          "drawing": {"type": "object"},
+          "read": {"type": "object"},
+          "fallback": {"type": "null"},
+          "reason": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "output": {"type": "null"},
+          "drawing": {"type": "null"},
+          "read": {"type": "null"},
+          "fallback": {"const": "upload_only"},
+          "reason": {"type": "string"}
+        }
+      }
+    }
+  ]
+}
