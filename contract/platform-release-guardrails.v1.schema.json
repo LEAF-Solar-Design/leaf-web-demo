@@ -70,10 +70,10 @@
     "provider_oracle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["raw_provider_bytes_sha256", "recomputed_raw_sha256", "shared_predicate_sha256", "binding_recomputed_from_raw"],
+      "required": ["raw_provider_bytes_b64", "declared_raw_provider_bytes_sha256", "shared_predicate_sha256", "binding_recomputed_from_raw"],
       "properties": {
-        "raw_provider_bytes_sha256": {"$ref": "#/$defs/digest"},
-        "recomputed_raw_sha256": {"$ref": "#/$defs/digest"},
+        "raw_provider_bytes_b64": {"type": "string", "minLength": 4, "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"},
+        "declared_raw_provider_bytes_sha256": {"$ref": "#/$defs/digest"},
         "shared_predicate_sha256": {"$ref": "#/$defs/digest"},
         "binding_recomputed_from_raw": {"type": "boolean"}
       }
@@ -183,7 +183,7 @@
     "markerProof": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["checkpoint_sha256", "delta", "indexed_open_count", "indexed_open_set_sha256", "full_audit_open_count", "full_audit_open_set_sha256", "artifact_without_ledger_count", "scheduled_full_audit_fresh"],
+      "required": ["checkpoint_sha256", "delta", "indexed_open_count", "indexed_open_set_sha256", "full_audit_open_count", "full_audit_open_set_sha256", "artifact_without_ledger_count", "last_completed_full_audit_age_seconds", "maximum_full_audit_age_seconds"],
       "properties": {
         "checkpoint_sha256": {"$ref": "#/$defs/digest"},
         "delta": {
@@ -215,7 +215,8 @@
         "full_audit_open_count": {"type": "integer", "minimum": 0},
         "full_audit_open_set_sha256": {"$ref": "#/$defs/digest"},
         "artifact_without_ledger_count": {"type": "integer", "minimum": 0},
-        "scheduled_full_audit_fresh": {"type": "boolean"}
+        "last_completed_full_audit_age_seconds": {"type": "integer", "minimum": 0},
+        "maximum_full_audit_age_seconds": {"type": "integer", "minimum": 1}
       }
     },
     "gate": {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import base64
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -80,6 +82,8 @@ def positive_payload() -> dict[str, object]:
         "result_open_set_sha256": digest("0"),
     }
     base_receipt = receipt()
+    provider_bytes = b"raw provider evidence\n"
+    provider_digest = f"sha256:{hashlib.sha256(provider_bytes).hexdigest()}"
     return {
         "schema": "leaf.platform-release-guardrails.v1",
         "substitute_evidence": {
@@ -113,8 +117,8 @@ def positive_payload() -> dict[str, object]:
             ],
         },
         "provider_oracle": {
-            "raw_provider_bytes_sha256": digest("5"),
-            "recomputed_raw_sha256": digest("5"),
+            "raw_provider_bytes_b64": base64.b64encode(provider_bytes).decode("ascii"),
+            "declared_raw_provider_bytes_sha256": provider_digest,
             "shared_predicate_sha256": digest("6"),
             "binding_recomputed_from_raw": True,
         },
@@ -129,7 +133,8 @@ def positive_payload() -> dict[str, object]:
             "full_audit_open_count": 0,
             "full_audit_open_set_sha256": digest("0"),
             "artifact_without_ledger_count": 0,
-            "scheduled_full_audit_fresh": True,
+            "last_completed_full_audit_age_seconds": 300,
+            "maximum_full_audit_age_seconds": 86400,
         },
         "proposed_gates": [
             {
@@ -247,11 +252,18 @@ def test_standalone_or_duplicate_restamp_executor_is_rejected() -> None:
 
 def test_shared_predicate_agreement_cannot_replace_raw_oracle() -> None:
     payload = positive_payload()
-    payload["provider_oracle"]["raw_provider_bytes_sha256"] = digest("7")
-    payload["provider_oracle"]["recomputed_raw_sha256"] = digest("6")
+    payload["provider_oracle"]["declared_raw_provider_bytes_sha256"] = digest("6")
+    payload["provider_oracle"]["shared_predicate_sha256"] = digest("6")
     decision = guardrails.evaluate(payload)["decisions"]["provider_oracle"]
     assert decision["decision"] == "reject"
     assert decision["shared_predicate_agreement"] is True
+
+
+def test_provider_oracle_rejects_noncanonical_raw_encoding() -> None:
+    payload = positive_payload()
+    payload["provider_oracle"]["raw_provider_bytes_b64"] += "\n"
+    with pytest.raises(guardrails.ContractError, match="provider_raw_bytes_invalid"):
+        guardrails.evaluate(payload)
 
 
 @pytest.mark.parametrize(
@@ -271,7 +283,7 @@ def test_marker_failures_block(mutation: str) -> None:
     elif mutation == "artifact_gap":
         marker["artifact_without_ledger_count"] = 1
     else:
-        marker["scheduled_full_audit_fresh"] = False
+        marker["last_completed_full_audit_age_seconds"] = 86401
     decision = guardrails.evaluate(payload)["decisions"]["marker_proof"]
     assert decision["decision"] == "reject"
 
