@@ -745,16 +745,20 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             "artifacts": [artifact(1307, name, failed_run_id, TF_HEAD)],
         }
         receipt = service_receipt(
-            "broker",
+            "app",
             failed_run_id,
-            predecessor="leaf-platform-broker:1",
-            terminal_td="leaf-platform-broker:1",
+            predecessor="leaf-platform-app:2",
+            terminal_td="leaf-platform-app:2",
         )
         receipt["deploy_result"] = "failure"
         receipt["terminal_result"] = "failure"
         receipt["failed_stage"] = produced(
             {
-                "primary": {"job": "Deploy", "step": "Resolve inputs", "number": 1},
+                "primary": {
+                    "job": "deploy",
+                    "step": "Resolve reviewed live deployment identity",
+                    "number": 33,
+                },
                 "additional": [],
                 "unique": True,
             }
@@ -775,17 +779,25 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             "total_count": 1,
             "jobs": [
                 {
-                    "name": "Deploy",
-                    "steps": [{"name": "Resolve inputs", "number": 1, "conclusion": "failure"}],
+                    "name": "deploy",
+                    "steps": [
+                        {
+                            "name": "Resolve reviewed live deployment identity",
+                            "number": 33,
+                            "conclusion": "failure",
+                        }
+                    ],
                 }
             ],
         }
         result = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
-        broker = result["services"]["broker"]
-        self.assertEqual(len(broker["attempts"]), 2)
-        self.assertEqual(broker["attempts"][0]["role"], "prior_failed_broker")
+        app = result["services"]["app"]
+        self.assertEqual(len(app["attempts"]), 3)
+        failed_attempt = next(
+            attempt for attempt in app["attempts"] if attempt["role"] == "prior_failed_app"
+        )
         self.assertEqual(
-            broker["attempts"][0]["outcome"],
+            failed_attempt["outcome"],
             {
                 "preflight_state": "not_required",
                 "mutation_state": "not_started",
@@ -798,7 +810,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 "terminal_healthy": False,
             },
         )
-        self.assertEqual(broker["selected_run_id"], 303)
+        self.assertEqual(app["selected_run_id"], FRONTIER_RUN)
         jsonschema.Draft202012Validator(self.schema).validate(result)
 
     def test_post_mutation_failure_is_normalized_only_after_exact_predecessor_restore(self) -> None:
