@@ -142,9 +142,21 @@ The one-shot migration container applies all migrations and then calls
 `db.assert_schema_current()`. The API can run the same subset check at startup
 with `LEAF_PLATFORM_POSTGRES_REQUIRED=1`. The canonical worker checks its
 required schema before entering its claim loop. Each opt-in store also has its
-own startup or first-use table check. Save all of those results because the
-platform assertion alone does not cover every table in migrations `0011`
-through `0019`. These checks do not print the connection string.
+own startup or first-use table check. Save all of those results, because what
+the platform assertion covers is scoped by SELECTOR, not by migration range.
+`schema_status()` builds its required set from
+`required_columns_for_selected_authorities()`, which takes the base schema and
+adds only the tables of authorities whose selector currently names PostgreSQL
+(`platform/db.py` `_AUTHORITY_SELECTORS`). An authority left on `legacy`
+contributes nothing to the check, whichever migration created its tables, so a
+passing assertion says nothing about the tables you have not selected yet. Do
+not read a migration number range here: an earlier version of this paragraph
+named `0011` through `0019` and was wrong in both directions, because it
+excluded selected authorities the check does cover and implied unselected
+tables above `0019` are checked. One part IS selector-blind: `missing_migrations`
+and `migration_hash_drift` compare the shipped manifest against the ledger for
+every migration, which is why an unapplied migration fails the assertion for
+any connected deployment. These checks do not print the connection string.
 
 Capture the credential-free aggregate snapshot from the same platform package
 as the API:
@@ -154,8 +166,13 @@ python -c "import json,sys; sys.path.insert(0,'/app/platform'); import db; print
 ```
 
 This snapshot proves schema status, aggregate record counts, and canonical
-authority-mode counts only. It is not row-level parity evidence for migrations
-`0011` through `0019`.
+authority-mode counts only. Its counts come from the fixed nine-table
+`_RECONCILIATION_TABLES` tuple in `platform/db.py`, every entry of which is a
+canonical-ledger table created in `0001`, `0003` or `0010`. So it is not
+row-level parity evidence for any opt-in shared authority at all, rather than
+for one range of migrations. Read the tuple rather than a range: an earlier
+version of this sentence said `0011` through `0019`, which understated the gap
+by implying the snapshot covers the authorities added since.
 
 For a local schema rehearsal:
 
