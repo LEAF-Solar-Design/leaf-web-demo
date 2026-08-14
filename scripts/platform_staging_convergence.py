@@ -886,7 +886,15 @@ def _normalized_failed_stage(receipt_stage: dict[str, Any], provider_stage: dict
     return code
 
 
-def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_conclusion: str) -> str:
+def _rollback_outcome(
+    value: dict[str, Any],
+    *,
+    mutation_count: int,
+    provider_conclusion: str,
+    terminal_healthy: bool,
+    terminal_td: str | None,
+    predecessor_td: str | None,
+) -> str:
     if value["status"] != "produced" or not isinstance(value.get("value"), dict):
         raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
     raw = value["value"]
@@ -904,8 +912,10 @@ def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_co
             raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
     if raw["bluegreen_detail"] not in ROLLBACK_DETAIL_CODES or raw["authority_result"] not in ROLLBACK_AUTHORITY_CODES:
         raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
+    rollback_steps = ("bluegreen_step", "direct_failure_step", "direct_cancel_step")
+    handler_succeeded = any(raw[key] == "success" for key in rollback_steps)
     restored = (
-        any(raw[key] == "success" for key in ("bluegreen_step", "direct_failure_step", "direct_cancel_step"))
+        handler_succeeded
         or raw["authority_result"] in {"restored", "restored-digest-pinned-revision"}
     )
     if provider_conclusion == "success" and mutation_count in {0, 1}:
@@ -916,10 +926,20 @@ def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_co
         ):
             raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
         return "not_required"
+    if provider_conclusion == "failure" and mutation_count == 0:
+        if any(raw[key] == "failure" for key in rollback_steps):
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        if raw["authority_result"] in {"restored", "restored-digest-pinned-revision"}:
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        # A successful failure handler proves that the handler completed. It
+        # does not claim a rollback mutation when the receipt records zero.
+        if handler_succeeded and (
+            not terminal_healthy or predecessor_td is None or terminal_td != predecessor_td
+        ):
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        return "not_required"
     if mutation_count == 2 and provider_conclusion == "failure" and restored:
         return "succeeded"
-    if provider_conclusion == "failure" and not restored and mutation_count == 0:
-        return "not_required"
     raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
 
 
@@ -973,7 +993,12 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
     candidate_digest = candidate_digest_slot.get("value") if candidate_digest_slot.get("status") == "produced" else None
     terminal_healthy, terminal_td, terminal_digest = _terminal_evidence(facts)
     rollback_outcome = _rollback_outcome(
-        facts["rollback"], mutation_count=mutation_count, provider_conclusion=run["conclusion"]
+        facts["rollback"],
+        mutation_count=mutation_count,
+        provider_conclusion=run["conclusion"],
+        terminal_healthy=terminal_healthy,
+        terminal_td=terminal_td,
+        predecessor_td=predecessor_td,
     )
     path = receipt["path"]
     digest_aware = receipt["requested"]["digest_aware_reconcile"]
