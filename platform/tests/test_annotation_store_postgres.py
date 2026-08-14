@@ -26,7 +26,7 @@ from leaf_platform.annotation_source import (  # noqa: E402
     VerifiedSourceReceipt,
 )
 
-MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0041_annotation_batches.sql"
+MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0042_annotation_batches.sql"
 BASE_DDL = """
 CREATE TABLE orgs (
   org_id UUID PRIMARY KEY, name TEXT NOT NULL, tier TEXT NOT NULL DEFAULT 'hosted_starter',

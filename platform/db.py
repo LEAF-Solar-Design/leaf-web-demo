@@ -43,7 +43,7 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
-    # P7 drawing annotation authority (0041). Immutable Git objects hold the
+    # P7 drawing annotation authority (0042). Immutable Git objects hold the
     # content; these rows own the exact effective head and its decision trail.
     "annotation_targets": {
         "tenant_id", "org_id", "project_id", "drawing_id", "version",

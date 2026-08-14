@@ -65,8 +65,8 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
 def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     manifest_names = [item["name"] for item in db.migration_manifest()]
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest_names[-1] == "0041_annotation_batches.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0041"
+    assert manifest_names[-1] == "0042_annotation_batches.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0042"
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
     assert "annotation_audit" in db._REQUIRED_COLUMNS
