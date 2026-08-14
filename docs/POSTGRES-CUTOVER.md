@@ -143,18 +143,28 @@ The one-shot migration container applies all migrations and then calls
 with `LEAF_PLATFORM_POSTGRES_REQUIRED=1`. The canonical worker checks its
 required schema before entering its claim loop. Each opt-in store also has its
 own startup or first-use table check. Save all of those results, because what
-the platform assertion covers is scoped by SELECTOR, not by migration range.
+the platform assertion covers is bounded by SELECTOR, not by migration number.
 `schema_status()` builds its required set from
-`required_columns_for_selected_authorities()`, which takes the base schema and
-adds only the tables of authorities whose selector currently names PostgreSQL
-(`platform/db.py` `_AUTHORITY_SELECTORS`). An authority left on `legacy`
-contributes nothing to the check, whichever migration created its tables, so a
-passing assertion says nothing about the tables you have not selected yet. Do
-not read a migration number range here: an earlier version of this paragraph
-named `0011` through `0019` and was wrong in both directions, because it
-excluded selected authorities the check does cover and implied unselected
-tables above `0019` are checked. One part IS selector-blind: `missing_migrations`
-and `migration_hash_drift` compare the shipped manifest against the ledger for
+`required_columns_for_selected_authorities()`, which is the selector-blind base
+`_REQUIRED_COLUMNS` plus the tables of authorities whose selector currently
+names a PostgreSQL mode (`platform/db.py` `_AUTHORITY_SELECTORS`). Both halves
+matter, and reading only one of them is how the range wording below arose.
+
+The base half is checked unconditionally and is not confined to the early
+migrations: it holds tables created as late as `0038`. The selector half is
+what an unselected authority loses. `legacy` appears in no selector's mode map,
+so an authority left there adds none of its own tables, and those tables can be
+absent while the assertion still passes. `app_sessions` is the concrete case:
+it is absent from the base set and is required only when `LEAF_SESSIONS_STORE`
+names a PostgreSQL mode. That is the gap the per-store checks exist to close.
+
+An earlier version of this paragraph named migrations `0011` through `0019`
+here. That statement was TRUE, not false, and it is corrected for shape rather
+than for accuracy: the boundary is the selector and the base set, so a reader
+who takes the range literally will both miss unchecked authority tables added
+after `0019` and assume base tables inside the range go unchecked when they do
+not. One part is genuinely selector-blind: `missing_migrations` and
+`migration_hash_drift` compare the shipped manifest against the ledger for
 every migration, which is why an unapplied migration fails the assertion for
 any connected deployment. These checks do not print the connection string.
 
@@ -170,9 +180,10 @@ authority-mode counts only. Its counts come from the fixed nine-table
 `_RECONCILIATION_TABLES` tuple in `platform/db.py`, every entry of which is a
 canonical-ledger table created in `0001`, `0003` or `0010`. So it is not
 row-level parity evidence for any opt-in shared authority at all, rather than
-for one range of migrations. Read the tuple rather than a range: an earlier
-version of this sentence said `0011` through `0019`, which understated the gap
-by implying the snapshot covers the authorities added since.
+for one range of migrations. An earlier version of this sentence named `0011`
+through `0019`. As above, that was true and is corrected for shape: a negative
+scoped to a range invites the reader to assume the complement is covered, and
+here nothing outside those nine tables is. Read the tuple.
 
 For a local schema rehearsal:
 
