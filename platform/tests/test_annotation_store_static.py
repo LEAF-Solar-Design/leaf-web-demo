@@ -8,7 +8,7 @@ from leaf_platform.db import (MIGRATION_GLOB, _AUTHORITY_REQUIRED_CONSTRAINTS,
                               required_catalog_for_selected_authorities)
 
 PLATFORM = Path(__file__).resolve().parent.parent
-MIGRATION = PLATFORM / "migrations" / "0041_annotation_batches.sql"
+MIGRATION = PLATFORM / "migrations" / "0042_annotation_batches.sql"
 STORE = PLATFORM / "annotation_store.py"
 
 
