@@ -827,7 +827,7 @@ def build_suites() -> List[Suite]:
         # in lockstep with the assertion in scripts/test_gate_runner.py.
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 8),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 9),
         # The annex authority the sessions flip strands without. Fully
         # offline: the PostgreSQL halves run against a fake in place of
         # platform.db, so nothing here skips on a no-DB host and the floor
@@ -1003,8 +1003,10 @@ def build_suites() -> List[Suite]:
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
         # invariant to DB presence. The floor below is the EXECUTED count on a
-        # host with no DATABASE_URL: 124 collected minus the 2 DB-gated skips
-        # named in allowed_skip_reasons = 122, measured on this tree
+        # host with no DATABASE_URL. The A1 migration/readiness change executes
+        # 164 of 166 collected tests. Registering annotation_store_static adds
+        # 8 dependency-free tests, so this tree executes 172 of 174 collected;
+        # the 2 DB-gated skips remain the ones named in allowed_skip_reasons.
         # 2026-08-04. History of the floor: 96 (2026-07-28, 98 collected);
         # #256 and #401 then added 6 tests that only surfaced as a drift
         # note (#432 moved the floor to 102 for those);
@@ -1022,7 +1024,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
-                 f"{repo_name}/platform/tests/test_ios_ship_schema_static.py"], 163,
+                 f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
+                 f"{repo_name}/platform/tests/test_annotation_store_static.py"], 172,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
