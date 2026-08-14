@@ -1867,7 +1867,19 @@ jobs:
             "$LEAF_SOURCE_SHA" > dist/health.json
           artifact_sha256="$(python ../scripts/platform_release_manifest.py \
             digest-web-dist --root dist)"
+          python ../scripts/platform_release_manifest.py pack-web-dist \
+            --root dist \
+            --output "$RUNNER_TEMP/spec-web-dist.zip" >/dev/null
           echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the provider-bound speculative web deployment artifact
+        if: matrix.image == 'web' && steps.exists.outputs.present != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/spec-web-dist.zip
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Materialize one producer-owned speculative v3 service entry
         if: steps.exists.outputs.present != 'true'
@@ -2255,8 +2267,41 @@ jobs:
           mapfile -t archive_paths < <(unzip -Z1 spec-candidate/spec.zip 2>/dev/null || true)
           [ "${#archive_paths[@]}" = "1" ] && [ "${archive_paths[0]}" = "spec-v3-supply-set.json" ] || finish false "speculative provider archive is not closed"
           unzip -o -q spec-candidate/spec.zip -d spec-candidate || finish false "speculative provider archive is malformed"
+          candidate_source="$(jq -er '.release_source_revision' spec-candidate/spec-v3-supply-set.json 2>/dev/null)" \
+            || finish false "speculative v3 source is unavailable"
+          [[ "$candidate_source" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative v3 source is invalid"
+          web_artifact_name="spec-web-dist-$candidate_source-attempt-$candidate_run_attempt"
+          web_listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run/artifacts?per_page=100" 2>/dev/null || true)"
+          [[ -n "$web_listing" ]] || finish false "speculative web artifact listing is unavailable"
+          mapfile -t web_candidates < <(jq -r --arg name "$web_artifact_name" '
+            [.artifacts[] | select((.expired | not) and .name == $name)]
+            | .[] | [.id, .digest] | @tsv
+          ' <<<"$web_listing" 2>/dev/null || true)
+          [ "${#web_candidates[@]}" = "1" ] || finish false "expected one provider-bound speculative web artifact, found ${#web_candidates[@]}"
+          IFS=$'\t' read -r web_artifact_id web_archive_digest <<<"${web_candidates[0]}"
+          [[ "$web_archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || finish false "speculative web artifact has no immutable provider digest"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$web_artifact_id/zip" \
+            > spec-candidate/web-provider.zip 2>/dev/null || finish false "speculative web artifact download failed"
+          actual_web_archive_digest="sha256:$(sha256sum spec-candidate/web-provider.zip | awk '{print $1}')"
+          [ "$actual_web_archive_digest" = "$web_archive_digest" ] || finish false "speculative web provider archive digest changed"
+          mapfile -t web_archive_paths < <(unzip -Z1 spec-candidate/web-provider.zip 2>/dev/null || true)
+          [ "${#web_archive_paths[@]}" = "1" ] && [ "${web_archive_paths[0]}" = "spec-web-dist.zip" ] || finish false "speculative web provider archive is not closed"
+          unzip -o -q spec-candidate/web-provider.zip -d spec-candidate || finish false "speculative web provider archive is malformed"
+          claimed_old_web_artifact="$(jq -er '.services.web.artifact_sha256' spec-candidate/spec-v3-supply-set.json 2>/dev/null)" \
+            || finish false "speculative v3 web artifact hash is unavailable"
+          python scripts/platform_release_manifest.py restamp-web-artifact \
+            --input-archive spec-candidate/spec-web-dist.zip \
+            --output-archive spec-candidate/main-web-dist.zip \
+            --output-root spec-candidate/restamped-web \
+            --old-source-revision "$candidate_source" \
+            --new-source-revision "$SOURCE_SHA" \
+            --common-tree "$tree" \
+            --expect-old-artifact-sha256 "$claimed_old_web_artifact" \
+            --receipt spec-candidate/web-source-restamp.json \
+            || finish false "speculative web artifact cannot be deterministically restamped"
           python scripts/platform_release_manifest.py re-envelope-speculative-v3 \
             --manifest spec-candidate/spec-v3-supply-set.json \
+            --web-restamp-receipt spec-candidate/web-source-restamp.json \
             --speculative-run-id "$candidate_run" \
             --speculative-run-attempt "$candidate_run_attempt" \
             --expect-candidate-tree "$tree" \
@@ -2428,33 +2473,32 @@ jobs:
       # ----- Adopted-path verify half. It preserves the verify job's terminal
       # artifact duties but consumes the main-run provider-bound v3 envelope;
       # see the job comment above for the fold rationale and failure semantics. -----
-      - uses: actions/setup-node@v4
+      - name: Verify the provider-bound web source restamp
         if: steps.decide.outputs.adopted == 'true'
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build and hash the exact web deployment artifact
-        if: steps.decide.outputs.adopted == 'true'
-        id: web-artifact
-        working-directory: web
-        env:
-          VITE_API_BASE: ""
-          VITE_MOCK: "0"
-          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
-          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
-          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
-          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
-          npm ci
-          npm run build
-          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
-            "$LEAF_SOURCE_SHA" > dist/health.json
-          artifact_sha256=$(python ../scripts/platform_release_manifest.py \
-            digest-web-dist --root dist)
-          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+          receipt_hash="$(jq -er '.new_artifact_sha256' spec-candidate/web-source-restamp.json)"
+          materialized_hash="$(python scripts/platform_release_manifest.py \
+            digest-web-dist --root spec-candidate/restamped-web/dist)"
+          [ "$receipt_hash" = "$materialized_hash" ] || {
+            echo "::error::The materialized web artifact differs from its source-restamp receipt."
+            exit 1
+          }
+          jq -e \
+            --arg old "${{ steps.decide.outputs.built_from }}" \
+            --arg new "${{ needs.prepare.outputs.source_sha }}" \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" '
+              .schema == "leaf.web-source-restamp.v1"
+              and .algorithm == "leaf.web-source-restamp.v1"
+              and .old_source_revision == $old
+              and .new_source_revision == $new
+              and .common_tree == $tree
+              and .changed_path == "dist/health.json"
+              and .changed_field == "source_sha"
+            ' spec-candidate/web-source-restamp.json >/dev/null || {
+              echo "::error::The web source-restamp receipt is not bound to this main release."
+              exit 1
+            }
 
       - name: Write the immutable five-service staging supply set
         if: steps.decide.outputs.adopted == 'true'
@@ -2498,8 +2542,9 @@ jobs:
               exit 1
             }
           claimed_web_artifact="$(jq -er '.services.web.artifact_sha256' spec-candidate/main-v3-supply-set.json)"
-          [ "$claimed_web_artifact" = "${{ steps.web-artifact.outputs.sha256 }}" ] || {
-            echo "::error::The rebuilt web artifact does not match the speculative producer evidence."
+          restamped_web_artifact="$(jq -er '.new_artifact_sha256' spec-candidate/web-source-restamp.json)"
+          [ "$claimed_web_artifact" = "$restamped_web_artifact" ] || {
+            echo "::error::The adopted v3 web entry does not match the source-restamp receipt."
             exit 1
           }
           cp spec-candidate/main-v3-supply-set.json "$RUNNER_TEMP/staging-supply-set.json"
@@ -2528,7 +2573,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
-          path: web/dist
+          path: spec-candidate/restamped-web/dist
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload provider-bound web source-restamp receipt
+        if: steps.decide.outputs.adopted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-source-restamp-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/spec-candidate/web-source-restamp.json
           if-no-files-found: error
           retention-days: 30
 

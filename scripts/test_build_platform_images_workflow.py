@@ -2035,6 +2035,17 @@ def main() -> None:
     assert "Upload one producer-owned speculative v3 service entry" in (
         speculate_block
     )
+    assert "pack-web-dist \\\n            --root dist" in speculate_block
+    assert "--output \"$RUNNER_TEMP/spec-web-dist.zip\"" in speculate_block
+    assert "Upload the provider-bound speculative web deployment artifact" in (
+        speculate_block
+    )
+    assert (
+        "name: spec-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-"
+        "${{ github.run_attempt }}"
+        in speculate_block
+    )
+    assert "path: ${{ runner.temp }}/spec-web-dist.zip" in speculate_block
     # The push step and the solver steps are conditional on the
     # existence-skip: a tree already pushed is adopted as-is and the solver
     # key is never fetched for it. Pinned by parsed value, as elsewhere.
@@ -2460,10 +2471,11 @@ def main() -> None:
 
     write_step_name = "Write the immutable five-service staging supply set"
     adopt_web = _sole_named(
-        adopt_steps, "Build and hash the exact web deployment artifact"
+        adopt_steps, "Verify the provider-bound web source restamp"
     )
-    assert adopt_web.get("working-directory") == "web"
-    assert adopt_web.get("id") == "web-artifact"
+    assert "leaf.web-source-restamp.v1" in adopt_web["run"]
+    assert "spec-candidate/restamped-web/dist" in adopt_web["run"]
+    assert "steps.decide.outputs.built_from" in adopt_web["run"]
     adopt_write = _sole_named(adopt_steps, write_step_name)
     verify_write = _sole_named(verify_steps, write_step_name)
     assert verify_write.get("env") is None
@@ -2474,9 +2486,16 @@ def main() -> None:
     assert "spec-candidate/main-v3-supply-set.json" in adopt_write["run"]
     assert "platform_release_manifest.py generate-v3" not in adopt_write["run"]
     assert ".services.web.artifact_sha256" in adopt_write["run"]
-    assert "${{ steps.web-artifact.outputs.sha256 }}" in adopt_write["run"]
-    assert "rebuilt web artifact does not match" in adopt_write["run"]
+    assert ".new_artifact_sha256" in adopt_write["run"]
+    assert "source-restamp receipt" in adopt_write["run"]
     assert "cp spec-candidate/main-v3-supply-set.json" in adopt_write["run"]
+    decide_run = adopt_steps[4]["run"]
+    assert "actions/runs/$candidate_run/artifacts?per_page=100" in decide_run
+    assert "spec-web-dist-$candidate_source-attempt-$candidate_run_attempt" in decide_run
+    assert "spec-candidate/web-provider.zip" in decide_run
+    assert "restamp-web-artifact" in decide_run
+    assert "--web-restamp-receipt spec-candidate/web-source-restamp.json" in decide_run
+    assert "rebuilt web artifact does not match" not in decide_run
     # Adopt keeps its legacy tag aliases while the full-build verifier binds
     # immutable digests from the five v3 service entries.
     assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["verify"]["env"]["TAG"]
@@ -2490,7 +2509,7 @@ def main() -> None:
         s for s in verify_steps
         if str(s.get("uses", "")).startswith("actions/upload-artifact")
     ]
-    assert len(adopt_uploads) == 2
+    assert len(adopt_uploads) == 3
     assert len(verify_uploads) == 2
     assert adopt_uploads[0]["with"]["if-no-files-found"] == "error"
     assert verify_uploads[0]["with"]["if-no-files-found"] == "error"
@@ -2509,7 +2528,7 @@ def main() -> None:
         s for s in verify_steps
         if str(s.get("uses", "")).startswith("actions/setup-node")
     ]
-    assert len(adopt_nodes) == 1
+    assert adopt_nodes == []
     assert verify_nodes == []
 
     # warm's and build's cache-select scripts are byte-identical, the same
