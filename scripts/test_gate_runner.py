@@ -75,6 +75,18 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         for arg in static.argv
     )
 
+    measured_residual_floors = {
+        "da-mutation-apply": 24,
+        "build-platform-images-workflow": 17,
+        "platform-release-manifest": 88,
+        "production-web-release": 10,
+        "web-vitest": 86,
+    }
+    assert {
+        suite_id: suites[suite_id].expected
+        for suite_id in measured_residual_floors
+    } == measured_residual_floors
+
     restore = suites["server-version-restore"]
     assert restore.expected == 26
     assert restore.allowed_skip_reasons == (
