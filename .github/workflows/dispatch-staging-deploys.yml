@@ -230,9 +230,10 @@ jobs:
     env:
       INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
       DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
-      # Source constant. Flip only after the Terraform consumer marker and
-      # locked receipt path merge. A repository variable cannot activate it.
-      DIGEST_AWARE_CONVERGENCE_ENABLED: "false"
+      # Relay-local consumer handshake. The build and adoption selectors stay
+      # dormant; only a strict v3 envelope may reach the pinned Terraform path.
+      # A repository variable cannot activate or weaken this boundary.
+      DIGEST_AWARE_CONVERGENCE_ENABLED: "true"
       DIGEST_AWARE_CONSUMER_MARKER: leaf.staging-digest-aware-consumer.v1
       BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
       BUILD_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}

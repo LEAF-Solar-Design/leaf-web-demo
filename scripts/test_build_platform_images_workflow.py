@@ -2871,7 +2871,7 @@ def check_docs_noop_filter(text: str) -> None:
         "BUILD_RUN_ID": "${{ github.event.workflow_run.id }}",
         "BUILD_HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
         "BUILD_RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
-        "DIGEST_AWARE_CONVERGENCE_ENABLED": "false",
+        "DIGEST_AWARE_CONVERGENCE_ENABLED": "true",
         "DIGEST_AWARE_CONSUMER_MARKER": "leaf.staging-digest-aware-consumer.v1",
     }
     assert dispatch_job["if"] == (
@@ -6185,7 +6185,9 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     relay_path = WORKFLOW.parent / "dispatch-staging-deploys.yml"
     parsed = _strict_yaml(relay_path.read_text(encoding="utf-8"))
     job = parsed["jobs"]["dispatch"]
-    assert job["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "false"
+    assert job["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "true"
+    build = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    assert build["env"]["DIGEST_AWARE_CONVERGENCE_ENABLED"] == "false"
     assert job["env"]["DIGEST_AWARE_CONSUMER_MARKER"] == (
         "leaf.staging-digest-aware-consumer.v1"
     )
@@ -6225,13 +6227,18 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert 'harness: "not_automatically_reconciled"' in code
 
 
-def test_digest_aware_relay_keeps_v1_v2_compatibility_and_refuses_v3_while_dormant() -> None:
+def test_digest_aware_relay_enables_only_v3_and_keeps_v1_v2_compatibility() -> None:
     relay = (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
         encoding="utf-8"
     )
     executable = _executable_bash(relay)
     assert "leaf.staging-supply-set.v1|leaf.staging-supply-set.v2" in executable
     assert "leaf.staging-supply-set.v3" in executable
+    assert 'if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]' in executable
+    assert executable.count('-f "digest_aware_reconcile=true"') == 1
+    assert executable.count(
+        'dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")'
+    ) == 1
     assert (
         "V3 supply set arrived while its source-controlled consumer handshake is dormant"
         in executable
