@@ -40,7 +40,8 @@
       "0036",
       "0037",
       "0038",
-      "0039"
+      "0039",
+      "0040"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -131,7 +132,12 @@
         "professional_credentials",
         "professional_credential_events",
         "review_signatures",
-        "drawing_artifacts"
+        "drawing_artifacts",
+        "ios_ship_grants",
+        "ios_ship_readiness",
+        "ios_ship_revision_approvals",
+        "ios_ship_executions",
+        "ios_ship_receipts"
       ],
       "legacy_source": [
         "server JOBS_DB SQLite",
