@@ -3238,7 +3238,11 @@ def check_docs_noop_filter(text: str) -> None:
         # Hash updated after the R3 producer made the manifest lookup-tag
         # relation authoritative and the relay replaced duplicate v3 fields
         # with one closed supply envelope.
-        "21fd783e5f2f6efb86801feb37c298fab00ecac872835441d7b5c11c332974a4"
+        # Hash updated for the provider consumer contract handshake. The relay
+        # adds only read-only Actions artifact discovery and one closed,
+        # unpadded base64url input on the existing strict-v3 dispatch. It adds
+        # no dispatch site, credential, selector, or v1/v2 behavior.
+        "2ca86f29c1ea09a60f40088bdcd18e5c35d4945e79f6b93b385caba873544462"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
