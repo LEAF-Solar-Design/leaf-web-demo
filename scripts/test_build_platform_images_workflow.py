@@ -979,9 +979,8 @@ def main() -> None:
     verify_start = text.index("  verify:")
     verify_body = text[verify_start : text.index("\n  speculate:", verify_start)]
     assert "for image in app broker canonical-worker harness web; do" in verify_body
-    assert "aws ecr batch-get-image" in verify_body
-    assert "imageDigest=$digest" in verify_body
-    assert '[ "$count" = "1" ]' in verify_body
+    assert "docker buildx imagetools inspect --raw" in verify_body
+    assert '"$ECR_REGISTRY/$repository@$digest"' in verify_body
     assert "platform_release_manifest.py generate-v3" in verify_body
     assert "platform_release_manifest.py generate \\" not in verify_body
     assert "digest-web-dist --root dist" not in verify_body
@@ -6028,9 +6027,81 @@ def test_digest_aware_fan_in_requires_all_five_exact_service_entries() -> None:
     assert 'if [ "${#matches[@]}" != "1" ]' in code
     assert code.count("--service-entry") == 5
     assert "generate-v3" in code
-    assert "imageDigest=$digest" in code
+    assert "docker buildx imagetools inspect --raw" in code
+    assert '"$ECR_REGISTRY/$repository@$digest"' in code
     assert "leaf.staging-supply-set.v1" not in code
     assert "platform_release_manifest.py generate \\" not in code
+
+
+def test_v3_digest_existence_probe_accepts_oci_index_and_fails_closed() -> None:
+    """Run the shipped digest probe against the exact OCI-index response shape.
+
+    Build 31758917297 pushed an immutable Buildx digest and then proved the
+    false-negative counterexample: BatchGetImage returned no leaf manifest for
+    that digest. An authenticated registry inspect is the correct existence
+    boundary because it accepts the index media type and addresses it by the
+    exact immutable digest.
+    """
+    parsed = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    writer = next(
+        step for step in parsed["jobs"]["verify"]["steps"]
+        if step.get("name") == "Write the immutable five-service staging supply set"
+    )
+    shipped = writer["run"]
+    match = re.search(
+        r"# BEGIN V3_DIGEST_EXISTENCE_PROBE\n(?P<body>.*?)"
+        r"\n\s*# END V3_DIGEST_EXISTENCE_PROBE",
+        shipped,
+        re.S,
+    )
+    assert match, "the executable immutable-digest probe must remain extractable"
+    probe = "set -euo pipefail\n" + match.group("body") + "\n"
+    assert "docker buildx imagetools inspect --raw" in probe
+    assert "aws ecr batch-get-image" not in probe
+    assert "aws ecr describe-images" not in probe
+
+    bash = shutil.which("bash")
+    assert bash, "the immutable-digest rehearsal needs bash on PATH"
+    expected = "sha256:" + "b" * 64
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        docker = bindir / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            "[ \"$1 $2 $3 $4\" = \"buildx imagetools inspect --raw\" ] || exit 2\n"
+            "[ \"$5\" = \"$EXPECTED_ECR_REF\" ] || exit 1\n"
+            "printf '%s\\n' "
+            "'{\"mediaType\":\"application/vnd.oci.image.index.v1+json\"}'\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        docker.chmod(0o755)
+        script = tmp / "probe.sh"
+        script.write_text(probe, encoding="utf-8", newline="\n")
+
+        def run(candidate_digest: str) -> subprocess.CompletedProcess[str]:
+            env = dict(os.environ)
+            env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+            env["ECR_REGISTRY"] = "807034087062.dkr.ecr.us-east-1.amazonaws.com"
+            env["repository"] = "leaf-platform-app"
+            env["digest"] = candidate_digest
+            env["image"] = "app"
+            env["EXPECTED_ECR_REF"] = (
+                f"{env['ECR_REGISTRY']}/{env['repository']}@{expected}"
+            )
+            return subprocess.run(
+                [bash, str(script)],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+        assert run(expected).returncode == 0
+        altered = "sha256:" + "a" * 64
+        result = run(altered)
+        assert result.returncode != 0
 
 
 def test_selector_off_full_build_always_mints_v3_without_enabling_reuse() -> None:

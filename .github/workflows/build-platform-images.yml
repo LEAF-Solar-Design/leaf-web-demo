@@ -1546,6 +1546,9 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
 
+      - name: Login to ECR for immutable digest verification
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Write the immutable five-service staging supply set
         run: |
           set -euo pipefail
@@ -1565,15 +1568,17 @@ jobs:
               echo "::error::V3 service entry for $image names $repository."
               exit 1
             }
-            count="$(aws ecr batch-get-image \
-              --repository-name "$repository" \
-              --image-ids "imageDigest=$digest" \
-              --query 'length(images)' \
-              --output text)"
-            [ "$count" = "1" ] || {
+            # BEGIN V3_DIGEST_EXISTENCE_PROBE
+            # BatchGetImage filters unsupported manifest-list media types, and
+            # the release role deliberately has no listing permission. Probe
+            # the authenticated registry by the exact immutable digest. This
+            # reads only the manifest or index and never pulls image layers.
+            if ! docker buildx imagetools inspect --raw \
+              "$ECR_REGISTRY/$repository@$digest" >/dev/null; then
               echo "::error::V3 service entry for $image is absent from ECR."
               exit 1
-            }
+            fi
+            # END V3_DIGEST_EXISTENCE_PROBE
           done
           python scripts/platform_release_manifest.py generate-v3 \
             --release-source-revision "${{ needs.prepare.outputs.source_sha }}" \
