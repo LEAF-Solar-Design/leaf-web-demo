@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/platform-release-guardrails.v1.schema.json",
+  "title": "Leaf platform release guardrails v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "substitute_evidence",
+    "effective_state",
+    "authority_diff",
+    "identity_restamp",
+    "provider_oracle",
+    "marker_proof",
+    "proposed_gates"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.platform-release-guardrails.v1"},
+    "substitute_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_tool_failed", "expected_binding", "substitute_binding"],
+      "properties": {
+        "receipt_tool_failed": {"const": true},
+        "expected_binding": {"$ref": "#/$defs/receiptBinding"},
+        "substitute_binding": {"$ref": "#/$defs/receiptBinding"}
+      }
+    },
+    "effective_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_services", "live_services", "deployment_identity"],
+      "properties": {
+        "candidate_services": {"$ref": "#/$defs/serviceMap"},
+        "live_services": {"$ref": "#/$defs/serviceMap"},
+        "deployment_identity": {"$ref": "#/$defs/deploymentIdentity"}
+      }
+    },
+    "authority_diff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved", "corrected"],
+      "properties": {
+        "approved": {"$ref": "#/$defs/authority"},
+        "corrected": {"$ref": "#/$defs/authority"}
+      }
+    },
+    "identity_restamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_parent_run_id", "expected_workflow_blob", "executions"],
+      "properties": {
+        "expected_parent_run_id": {"type": "integer", "minimum": 1},
+        "expected_workflow_blob": {"$ref": "#/$defs/sha"},
+        "executions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["parent_run_id", "workflow_blob", "intent"],
+            "properties": {
+              "parent_run_id": {"type": "integer", "minimum": 1},
+              "workflow_blob": {"$ref": "#/$defs/sha"},
+              "intent": {"const": "configuration"}
+            }
+          }
+        }
+      }
+    },
+    "provider_oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_provider_bytes_sha256", "recomputed_raw_sha256", "shared_predicate_sha256", "binding_recomputed_from_raw"],
+      "properties": {
+        "raw_provider_bytes_sha256": {"$ref": "#/$defs/digest"},
+        "recomputed_raw_sha256": {"$ref": "#/$defs/digest"},
+        "shared_predicate_sha256": {"$ref": "#/$defs/digest"},
+        "binding_recomputed_from_raw": {"type": "boolean"}
+      }
+    },
+    "marker_proof": {"$ref": "#/$defs/markerProof"},
+    "proposed_gates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gate"}
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,199}$"},
+    "receiptBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["convergence_id", "parent_run_id", "run_attempt", "dependency_generation", "source_commit", "source_tree", "workflow_blob", "supply_artifact_id", "supply_sha256", "supply_predicate_sha256", "payload_sha256", "mutation_idempotency_key"],
+      "properties": {
+        "convergence_id": {"$ref": "#/$defs/id"},
+        "parent_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1},
+        "dependency_generation": {"type": "integer", "minimum": 1},
+        "source_commit": {"$ref": "#/$defs/sha"},
+        "source_tree": {"$ref": "#/$defs/sha"},
+        "workflow_blob": {"$ref": "#/$defs/sha"},
+        "supply_artifact_id": {"type": "integer", "minimum": 1},
+        "supply_sha256": {"$ref": "#/$defs/digest"},
+        "supply_predicate_sha256": {"$ref": "#/$defs/digest"},
+        "payload_sha256": {"$ref": "#/$defs/digest"},
+        "mutation_idempotency_key": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      }
+    },
+    "serviceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_digest", "source_revision", "runtime_contract_sha256", "migration_fingerprint_sha256", "configuration_fingerprint_sha256", "route_state", "health_state"],
+      "properties": {
+        "image_digest": {"$ref": "#/$defs/digest"},
+        "source_revision": {"$ref": "#/$defs/sha"},
+        "runtime_contract_sha256": {"$ref": "#/$defs/digest"},
+        "migration_fingerprint_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "configuration_fingerprint_sha256": {"$ref": "#/$defs/digest"},
+        "route_state": {"enum": ["stable", "not_applicable"]},
+        "health_state": {"const": "healthy"}
+      }
+    },
+    "serviceMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "app", "broker", "harness", "canonical-worker"],
+      "properties": {
+        "web": {"$ref": "#/$defs/serviceState"},
+        "app": {"$ref": "#/$defs/serviceState"},
+        "broker": {"$ref": "#/$defs/serviceState"},
+        "harness": {"$ref": "#/$defs/serviceState"},
+        "canonical-worker": {"$ref": "#/$defs/serviceState"}
+      }
+    },
+    "identityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_digest", "source_revision"],
+      "properties": {
+        "image_digest": {"$ref": "#/$defs/digest"},
+        "source_revision": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "deploymentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "environment", "source_revision", "services"],
+      "properties": {
+        "schema": {"const": "leaf.deployment-identity.v1"},
+        "environment": {"const": "staging"},
+        "source_revision": {"$ref": "#/$defs/sha"},
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "app", "broker", "harness", "canonical-worker"],
+          "properties": {
+            "web": {"$ref": "#/$defs/identityService"},
+            "app": {"$ref": "#/$defs/identityService"},
+            "broker": {"$ref": "#/$defs/identityService"},
+            "harness": {"$ref": "#/$defs/identityService"},
+            "canonical-worker": {"$ref": "#/$defs/identityService"}
+          }
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_sha256", "blast_radius_sha256", "rollback_sha256", "permissions_sha256", "credentials_sha256", "destructive_actions_sha256", "external_recipients_sha256", "workflow_blobs_sha256", "rendered_actions_sha256"],
+      "properties": {
+        "target_sha256": {"$ref": "#/$defs/digest"},
+        "blast_radius_sha256": {"$ref": "#/$defs/digest"},
+        "rollback_sha256": {"$ref": "#/$defs/digest"},
+        "permissions_sha256": {"$ref": "#/$defs/digest"},
+        "credentials_sha256": {"$ref": "#/$defs/digest"},
+        "destructive_actions_sha256": {"$ref": "#/$defs/digest"},
+        "external_recipients_sha256": {"$ref": "#/$defs/digest"},
+        "workflow_blobs_sha256": {"$ref": "#/$defs/digest"},
+        "rendered_actions_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "markerProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkpoint_sha256", "delta", "indexed_open_count", "indexed_open_set_sha256", "full_audit_open_count", "full_audit_open_set_sha256", "artifact_without_ledger_count", "scheduled_full_audit_fresh"],
+      "properties": {
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+        "delta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checkpoint_sha256", "settlements", "result_open_set_sha256", "delta_sha256"],
+          "properties": {
+            "checkpoint_sha256": {"$ref": "#/$defs/digest"},
+            "settlements": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ordinal", "transaction_id", "marker_sha256", "artifact_status"],
+                "properties": {
+                  "ordinal": {"type": "integer", "minimum": 0},
+                  "transaction_id": {"$ref": "#/$defs/id"},
+                  "marker_sha256": {"$ref": "#/$defs/digest"},
+                  "artifact_status": {"enum": ["terminal", "rolled_back"]}
+                }
+              }
+            },
+            "result_open_set_sha256": {"$ref": "#/$defs/digest"},
+            "delta_sha256": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "indexed_open_count": {"type": "integer", "minimum": 0},
+        "indexed_open_set_sha256": {"$ref": "#/$defs/digest"},
+        "full_audit_open_count": {"type": "integer", "minimum": 0},
+        "full_audit_open_set_sha256": {"$ref": "#/$defs/digest"},
+        "artifact_without_ledger_count": {"type": "integer", "minimum": 0},
+        "scheduled_full_audit_fresh": {"type": "boolean"}
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate_id", "stage", "enabled_path_failure", "harm_class", "reachable", "current_evidence_id", "evidence_fresh", "duplicates_stronger_evidence", "stronger_green_evidence_id", "why_unique"],
+      "properties": {
+        "gate_id": {"$ref": "#/$defs/id"},
+        "stage": {"type": "string", "minLength": 1},
+        "enabled_path_failure": {"type": "string", "minLength": 1},
+        "harm_class": {"enum": ["externally_required_control", "irreversibility_without_verified_rollback", "authority_or_secret_mutation", "live_lifecycle_ownership_conflict", "cross_session_shared_state_collision", "tenancy_authorization_or_data_integrity", null]},
+        "reachable": {"type": "boolean"},
+        "current_evidence_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "evidence_fresh": {"type": "boolean"},
+        "duplicates_stronger_evidence": {"type": "boolean"},
+        "stronger_green_evidence_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "why_unique": {"type": "string"}
+      }
+    }
+  }
+}
