@@ -752,6 +752,9 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         receipt["deploy_result"] = "failure"
         receipt["terminal_result"] = "failure"
+        receipt["requested"]["app_deploy_intent"] = "configuration"
+        receipt["requested"]["hold_seconds"] = "180"
+        receipt["requested"]["source_revision"] = "not_produced"
         receipt["failed_stage"] = produced(
             {
                 "primary": {
@@ -765,11 +768,11 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         receipt["facts"]["candidate"] = {
             "task_definition": missing(),
-            "image_digest": missing(),
+            "image_digest": produced(DIGESTS["app"]),
         }
-        receipt["facts"]["terminal"] = missing()
         receipt["facts"]["mutation_count"] = produced(0)
         receipt["facts"]["prior_job_status"] = produced("failure")
+        receipt["facts"]["rollback"]["value"]["direct_failure_step"] = "success"
         receipt["receipt_sha256"] = ""
         receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
         provider.byte_values[(subject.TF_REPOSITORY, "/actions/artifacts/1307/zip")] = archive(
@@ -807,11 +810,40 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 "receipt_outcome": "verified",
                 "failed_stage": "input_resolution",
                 "terminal_reason_code": "pre_mutation_failure",
-                "terminal_healthy": False,
+                "terminal_healthy": True,
             },
         )
         self.assertEqual(app["selected_run_id"], FRONTIER_RUN)
         jsonschema.Draft202012Validator(self.schema).validate(result)
+
+        def terminal_differs(value: dict) -> None:
+            terminal = value["facts"]["terminal"]["value"]
+            terminal["task_definition"] = "leaf-platform-app:99"
+            terminal["primary_deployments"][0]["task_definition"] = "leaf-platform-app:99"
+
+        def mutation_started(value: dict) -> None:
+            value["facts"]["mutation_count"] = produced(1)
+
+        def rollback_absent(value: dict) -> None:
+            value["facts"]["rollback"] = missing()
+
+        def rollback_failed(value: dict) -> None:
+            value["facts"]["rollback"]["value"]["direct_failure_step"] = "failure"
+
+        def terminal_unhealthy(value: dict) -> None:
+            value["facts"]["terminal"]["value"]["stable_1_1_0"] = False
+
+        for mutate, reason in (
+            (terminal_differs, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (mutation_started, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (rollback_absent, "SERVICE_ROLLBACK_EVIDENCE_INVALID"),
+            (rollback_failed, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (terminal_unhealthy, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+        ):
+            with self.subTest(reason=reason, mutate=mutate.__name__):
+                invalid = copy.deepcopy(provider)
+                replace_receipt(invalid, failed_run_id, mutate)
+                self.assert_reason(reason, invalid)
 
     def test_post_mutation_failure_is_normalized_only_after_exact_predecessor_restore(self) -> None:
         provider = fixture()
