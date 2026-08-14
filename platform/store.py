@@ -80,6 +80,85 @@ class IdentityBindingPairConflict(ValueError):
 class IdentityBindingPairPrincipalDrift(ValueError):
     """The verified operator principal changed before the transaction locked it."""
 
+
+class ProjectRepositoryAuthorityConflict(ValueError):
+    """A project mapping conflicts with the immutable server-owned authority."""
+
+
+def _canonical_authority_uuid(value: object, field: str) -> uuid.UUID:
+    if not isinstance(value, (str, uuid.UUID)):
+        raise ValueError(f"{field} must be a canonical UUID")
+    raw = str(value)
+    try:
+        parsed = uuid.UUID(raw)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a canonical UUID") from exc
+    if str(parsed) != raw:
+        raise ValueError(f"{field} must be a canonical UUID")
+    return parsed
+
+
+def register_project_repository_authority(
+    tenant_id: object, organization_id: object, project_id: object, repo_key: object,
+) -> Dict[str, str]:
+    """Create or replay one immutable server-owned project repository mapping."""
+    tenant = _canonical_authority_uuid(tenant_id, "tenant_id")
+    organization = _canonical_authority_uuid(organization_id, "organization_id")
+    project = _canonical_authority_uuid(project_id, "project_id")
+    repository = _canonical_authority_uuid(repo_key, "repo_key")
+    if tenant != organization:
+        raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT project_id FROM projects WHERE org_id = %(organization)s "
+            "AND project_id = %(project)s AND status = 'active' FOR UPDATE",
+            {"organization": organization, "project": project},
+        )
+        if cur.fetchone() is None:
+            raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+        cur.execute(
+            "INSERT INTO project_repository_authorities "
+            "(tenant_id, organization_id, project_id, repo_key) VALUES "
+            "(%(tenant)s, %(organization)s, %(project)s, %(repo)s) "
+            "ON CONFLICT (tenant_id, organization_id, project_id) DO NOTHING",
+            {"tenant": tenant, "organization": organization, "project": project,
+             "repo": repository},
+        )
+        cur.execute(
+            "SELECT tenant_id, organization_id, project_id, repo_key "
+            "FROM project_repository_authorities WHERE tenant_id = %(tenant)s "
+            "AND organization_id = %(organization)s AND project_id = %(project)s FOR UPDATE",
+            {"tenant": tenant, "organization": organization, "project": project},
+        )
+        row = cur.fetchone()
+        if row is None or row["repo_key"] != repository:
+            raise ProjectRepositoryAuthorityConflict("project repository authority conflicts")
+    return {key: str(row[key]) for key in
+            ("tenant_id", "organization_id", "project_id", "repo_key")}
+
+
+def resolve_project_repository_authority(
+    tenant_id: object, organization_id: object, project_id: object,
+) -> Optional[Dict[str, str]]:
+    """Resolve by the complete authority tuple without accepting repository hints."""
+    tenant = _canonical_authority_uuid(tenant_id, "tenant_id")
+    organization = _canonical_authority_uuid(organization_id, "organization_id")
+    project = _canonical_authority_uuid(project_id, "project_id")
+    if tenant != organization:
+        return None
+    with cursor() as cur:
+        cur.execute(
+            "SELECT tenant_id, organization_id, project_id, repo_key "
+            "FROM project_repository_authorities WHERE tenant_id = %(tenant)s "
+            "AND organization_id = %(organization)s AND project_id = %(project)s",
+            {"tenant": tenant, "organization": organization, "project": project},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {key: str(row[key]) for key in
+            ("tenant_id", "organization_id", "project_id", "repo_key")}
+
 # --------------------------------------------------------------------------- #
 # writes
 # --------------------------------------------------------------------------- #
