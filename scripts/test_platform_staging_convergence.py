@@ -78,6 +78,14 @@ def archive(filename: str, payload: bytes) -> bytes:
     return buffer.getvalue()
 
 
+def archive_members(entries: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as value:
+        for filename, payload in entries.items():
+            value.writestr(filename, payload)
+    return buffer.getvalue()
+
+
 def run(
     run_id: int,
     *,
@@ -1110,6 +1118,18 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 provider = fixture()
                 provider.byte_values[(subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/logs")] = archive("logs.txt", log)
                 self.assert_reason("RELAY_CHILD_CARDINALITY", provider)
+
+    def test_relay_log_summary_and_step_may_repeat_the_same_exact_children(self) -> None:
+        provider = fixture()
+        children = b"Watching web deploy run 301.\nWatching app deploy run 302.\n"
+        provider.byte_values[(subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/logs")] = archive_members(
+            {
+                "0_dispatch.txt": children,
+                "dispatch/5_Deploy each staging service in turn and prove each one landed.txt": children,
+            }
+        )
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        self.assertEqual(receipt["relay"]["children"], {"web": 301, "app": 302})
 
     def test_service_receipt_extra_field_and_bad_checksum_fail(self) -> None:
         provider = fixture()
