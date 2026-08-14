@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import shlex
+import stat
 import subprocess
 from typing import Any, Sequence
+import zipfile
 
 
 SCHEMA = "leaf.staging-supply-set.v1"
@@ -27,6 +31,9 @@ SPECULATIVE_SCHEMA = "leaf.speculative-supply-set.v1"
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 SURFACE_PREDICATE_TYPE = "https://leafdesign.ai/attestations/platform-surface/v1"
 BUILD_WORKFLOW_PATH = ".github/workflows/build-platform-images.yml"
+WEB_RESTAMP_SCHEMA = "leaf.web-source-restamp.v1"
+WEB_RESTAMP_ALGORITHM = "leaf.web-source-restamp.v1"
+WEB_HEALTH_PATH = "dist/health.json"
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
 REPOSITORIES = {name: f"leaf-platform-{name}" for name in SERVICES}
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -425,6 +432,7 @@ def build_v3_manifest(
 def re_envelope_speculative_v3_manifest(
     manifest: dict[str, Any],
     *,
+    web_restamp_receipt: dict[str, Any],
     speculative_run_id: str,
     speculative_run_attempt: str,
     expected_candidate_tree: str,
@@ -436,9 +444,9 @@ def re_envelope_speculative_v3_manifest(
 ) -> dict[str, Any]:
     """Bind one speculative v3 producer artifact to its merged main release.
 
-    The service entries stay producer-owned. Only the outer release and
-    provider-run identity changes, so an adopter cannot restamp an image as if
-    the main run built it.
+    The immutable image and producer fields stay producer-owned. The adopter
+    records reuse and replaces only the web artifact hash proved by the
+    source-restamp receipt, so it cannot claim the main run built the images.
     """
 
     validate_v3_manifest(manifest)
@@ -473,12 +481,27 @@ def re_envelope_speculative_v3_manifest(
             raise ContractError(
                 f"{name} speculative v3 evidence is rebound or not producer-owned"
             )
+    validate_web_restamp_receipt(web_restamp_receipt)
+    speculative_web_hash = manifest["services"]["web"]["artifact_sha256"]
+    if (
+        web_restamp_receipt["old_source_revision"] != candidate_source
+        or web_restamp_receipt["new_source_revision"] != release_source_revision
+        or web_restamp_receipt["common_tree"] != release_source_tree
+        or web_restamp_receipt["old_artifact_sha256"] != speculative_web_hash
+    ):
+        raise ContractError("web source-restamp receipt does not bind this release")
+    services = copy.deepcopy(manifest["services"])
+    for service in services.values():
+        service["build_disposition"] = "reused"
+    services["web"]["artifact_sha256"] = web_restamp_receipt[
+        "new_artifact_sha256"
+    ]
     return build_v3_manifest(
         release_source_revision,
         release_source_tree,
         build_run_id,
         build_run_attempt,
-        manifest["services"],
+        services,
     )
 
 
@@ -1138,23 +1161,222 @@ def verify_staging_receipt(
     }
 
 
-def web_dist_digest(root: Path) -> str:
-    if not root.is_dir():
-        raise ContractError("web dist root is missing")
-    files = sorted(path for path in root.rglob("*") if path.is_file())
-    if not files:
-        raise ContractError("web dist root contains no files")
+def _web_entries_digest(entries: dict[str, bytes]) -> str:
+    if not entries:
+        raise ContractError("web dist contains no files")
     digest = hashlib.sha256(b"leaf.web-dist.v1\0")
-    for path in files:
-        if path.is_symlink():
-            raise ContractError("web dist must not contain symbolic links")
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        content = path.read_bytes()
+    for name in sorted(entries):
+        if not name.startswith("dist/"):
+            raise ContractError("web artifact paths must be rooted at dist")
+        relative = name.removeprefix("dist/").encode("utf-8")
+        content = entries[name]
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
+
+
+def _web_dist_entries(root: Path) -> dict[str, bytes]:
+    if not root.is_dir():
+        raise ContractError("web dist root is missing")
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise ContractError("web dist root contains no files")
+    entries: dict[str, bytes] = {}
+    for path in files:
+        if path.is_symlink():
+            raise ContractError("web dist must not contain symbolic links")
+        relative = path.relative_to(root).as_posix()
+        if not relative or relative.startswith("/") or "\\" in relative:
+            raise ContractError("web dist path is invalid")
+        entries[f"dist/{relative}"] = path.read_bytes()
+    return entries
+
+
+def web_dist_digest(root: Path) -> str:
+    return _web_entries_digest(_web_dist_entries(root))
+
+
+def _zip_info(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_STORED
+    info.create_system = 3
+    info.external_attr = (stat.S_IFREG | 0o644) << 16
+    return info
+
+
+def _write_web_archive(path: Path, entries: dict[str, bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise ContractError("web artifact output already exists")
+    with zipfile.ZipFile(path, "x", compression=zipfile.ZIP_STORED) as archive:
+        for name in sorted(entries):
+            archive.writestr(_zip_info(name), entries[name])
+
+
+def build_web_archive(root: Path, output: Path) -> dict[str, str]:
+    entries = _web_dist_entries(root)
+    _write_web_archive(output, entries)
+    return {
+        "artifact_sha256": _web_entries_digest(entries),
+        "archive_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+    }
+
+
+def _read_web_archive(path: Path) -> dict[str, bytes]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if not names or names != sorted(names) or len(names) != len(set(names)):
+                raise ContractError("web artifact paths are missing, reordered, or duplicate")
+            entries: dict[str, bytes] = {}
+            for info in infos:
+                name = info.filename
+                pure = PurePosixPath(name)
+                mode = (info.external_attr >> 16) & 0o170000
+                if (
+                    info.is_dir()
+                    or pure.is_absolute()
+                    or ".." in pure.parts
+                    or "\\" in name
+                    or not name.startswith("dist/")
+                    or mode not in {0, stat.S_IFREG}
+                ):
+                    raise ContractError("web artifact contains an unsupported path")
+                entries[name] = archive.read(info)
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise ContractError("web artifact archive is malformed") from exc
+    return entries
+
+
+def _health_bytes(source_revision: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "ok": True,
+                "service": "leaf-platform-web",
+                "component": "frontend",
+                "source_sha": source_revision,
+            },
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def validate_web_restamp_receipt(receipt: dict[str, Any]) -> None:
+    _exact_keys(
+        receipt,
+        {
+            "schema",
+            "algorithm",
+            "old_artifact_sha256",
+            "new_artifact_sha256",
+            "old_archive_sha256",
+            "new_archive_sha256",
+            "old_source_revision",
+            "new_source_revision",
+            "common_tree",
+            "changed_path",
+            "changed_field",
+            "unchanged_path_count",
+            "receipt_sha256",
+        },
+        "web source-restamp receipt",
+    )
+    if receipt["schema"] != WEB_RESTAMP_SCHEMA or receipt["algorithm"] != WEB_RESTAMP_ALGORITHM:
+        raise ContractError("web source-restamp version is unsupported")
+    for field in ("old_artifact_sha256", "new_artifact_sha256", "old_archive_sha256", "new_archive_sha256", "receipt_sha256"):
+        value = receipt[field]
+        if not isinstance(value, str) or not _SOURCE_HASH.fullmatch(value):
+            raise ContractError(f"web source-restamp {field} is invalid")
+    for field in ("old_source_revision", "new_source_revision", "common_tree"):
+        value = receipt[field]
+        if not isinstance(value, str) or not _SHA.fullmatch(value):
+            raise ContractError(f"web source-restamp {field} is invalid")
+    if receipt["old_source_revision"] == receipt["new_source_revision"]:
+        raise ContractError("web source-restamp must change the source revision")
+    if receipt["changed_path"] != WEB_HEALTH_PATH or receipt["changed_field"] != "source_sha":
+        raise ContractError("web source-restamp changed an unsupported field")
+    if not isinstance(receipt["unchanged_path_count"], int) or receipt["unchanged_path_count"] < 0:
+        raise ContractError("web source-restamp path count is invalid")
+    body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    if receipt["receipt_sha256"] != _canonical_sha256(body):
+        raise ContractError("web source-restamp receipt digest is invalid")
+
+
+def restamp_web_archive(
+    input_archive: Path,
+    output_archive: Path,
+    output_root: Path,
+    *,
+    old_source_revision: str,
+    new_source_revision: str,
+    common_tree: str,
+    expected_old_artifact_sha256: str,
+) -> dict[str, Any]:
+    if not _SHA.fullmatch(old_source_revision) or not _SHA.fullmatch(new_source_revision):
+        raise ContractError("web source-restamp revisions must be full commit SHAs")
+    if not _TREE.fullmatch(common_tree):
+        raise ContractError("web source-restamp common tree is invalid")
+    if not _SOURCE_HASH.fullmatch(expected_old_artifact_sha256):
+        raise ContractError("web source-restamp expected artifact hash is invalid")
+    if old_source_revision == new_source_revision:
+        raise ContractError("web source-restamp revisions must differ")
+    entries = _read_web_archive(input_archive)
+    old_artifact_sha256 = _web_entries_digest(entries)
+    if old_artifact_sha256 != expected_old_artifact_sha256:
+        raise ContractError("web source-restamp input does not match producer evidence")
+    health = entries.get(WEB_HEALTH_PATH)
+    if health is None:
+        raise ContractError("web source-restamp health artifact is missing")
+    try:
+        parsed = json.loads(health.decode("utf-8"), object_pairs_hook=_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("web source-restamp health artifact is malformed") from exc
+    _exact_keys(parsed, {"ok", "service", "component", "source_sha"}, "web health artifact")
+    if health != _health_bytes(old_source_revision) or parsed != {
+        "ok": True,
+        "service": "leaf-platform-web",
+        "component": "frontend",
+        "source_sha": old_source_revision,
+    }:
+        raise ContractError("web source-restamp input identity is not canonical")
+    transformed = dict(entries)
+    transformed[WEB_HEALTH_PATH] = _health_bytes(new_source_revision)
+    if set(transformed) != set(entries) or any(
+        entries[name] != transformed[name] for name in entries if name != WEB_HEALTH_PATH
+    ):
+        raise ContractError("web source-restamp changed an unrelated path")
+    _write_web_archive(output_archive, transformed)
+    if _read_web_archive(output_archive) != transformed:
+        raise ContractError("web source-restamp output is not deterministic")
+    if output_root.exists() and any(output_root.iterdir()):
+        raise ContractError("web source-restamp output root is not empty")
+    for name, content in transformed.items():
+        destination = output_root.joinpath(*PurePosixPath(name).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+    receipt: dict[str, Any] = {
+        "schema": WEB_RESTAMP_SCHEMA,
+        "algorithm": WEB_RESTAMP_ALGORITHM,
+        "old_artifact_sha256": old_artifact_sha256,
+        "new_artifact_sha256": _web_entries_digest(transformed),
+        "old_archive_sha256": hashlib.sha256(input_archive.read_bytes()).hexdigest(),
+        "new_archive_sha256": hashlib.sha256(output_archive.read_bytes()).hexdigest(),
+        "old_source_revision": old_source_revision,
+        "new_source_revision": new_source_revision,
+        "common_tree": common_tree,
+        "changed_path": WEB_HEALTH_PATH,
+        "changed_field": "source_sha",
+        "unchanged_path_count": len(entries) - 1,
+    }
+    receipt["receipt_sha256"] = _canonical_sha256(receipt)
+    validate_web_restamp_receipt(receipt)
+    return receipt
 
 
 def _write_new(path: Path, value: dict[str, Any]) -> None:
@@ -1243,6 +1465,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     verify_artifact_command.add_argument("--output", type=Path, required=True)
     web_digest = commands.add_parser("digest-web-dist")
     web_digest.add_argument("--root", type=Path, required=True)
+    pack_web = commands.add_parser("pack-web-dist")
+    pack_web.add_argument("--root", type=Path, required=True)
+    pack_web.add_argument("--output", type=Path, required=True)
+    restamp_web = commands.add_parser("restamp-web-artifact")
+    restamp_web.add_argument("--input-archive", type=Path, required=True)
+    restamp_web.add_argument("--output-archive", type=Path, required=True)
+    restamp_web.add_argument("--output-root", type=Path, required=True)
+    restamp_web.add_argument("--old-source-revision", required=True)
+    restamp_web.add_argument("--new-source-revision", required=True)
+    restamp_web.add_argument("--common-tree", required=True)
+    restamp_web.add_argument("--expect-old-artifact-sha256", required=True)
+    restamp_web.add_argument("--receipt", type=Path, required=True)
     fingerprint = commands.add_parser("surface-fingerprint")
     fingerprint.add_argument("--repo-root", type=Path, required=True)
     fingerprint.add_argument("--source-revision", required=True)
@@ -1276,6 +1510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     generate_v3.add_argument("--output", type=Path, required=True)
     re_envelope_v3 = commands.add_parser("re-envelope-speculative-v3")
     re_envelope_v3.add_argument("--manifest", type=Path, required=True)
+    re_envelope_v3.add_argument("--web-restamp-receipt", type=Path, required=True)
     re_envelope_v3.add_argument("--speculative-run-id", required=True)
     re_envelope_v3.add_argument("--speculative-run-attempt", required=True)
     re_envelope_v3.add_argument("--expect-candidate-tree", required=True)
@@ -1289,6 +1524,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "digest-web-dist":
             print(web_dist_digest(args.root))
+            return 0
+        if args.command == "pack-web-dist":
+            value = build_web_archive(args.root, args.output)
+            print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+            return 0
+        if args.command == "restamp-web-artifact":
+            value = restamp_web_archive(
+                args.input_archive,
+                args.output_archive,
+                args.output_root,
+                old_source_revision=args.old_source_revision,
+                new_source_revision=args.new_source_revision,
+                common_tree=args.common_tree,
+                expected_old_artifact_sha256=args.expect_old_artifact_sha256,
+            )
+            _write_new(args.receipt, value)
             return 0
         if args.command == "surface-fingerprint":
             value = build_surface_fingerprint(
@@ -1327,6 +1578,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "re-envelope-speculative-v3":
             value = re_envelope_speculative_v3_manifest(
                 load_json(args.manifest),
+                web_restamp_receipt=load_json(args.web_restamp_receipt),
                 speculative_run_id=args.speculative_run_id,
                 speculative_run_attempt=args.speculative_run_attempt,
                 expected_candidate_tree=args.expect_candidate_tree,

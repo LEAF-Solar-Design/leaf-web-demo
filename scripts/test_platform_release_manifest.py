@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -11,15 +13,18 @@ from platform_release_manifest import (
     BUILD_WORKFLOW_PATH,
     ContractError,
     SERVICES,
+    build_web_archive,
     build_manifest,
     build_surface_fingerprint,
     build_surface_predicate,
     build_speculative_manifest,
     build_v3_manifest,
     re_envelope_speculative_v3_manifest,
+    restamp_web_archive,
     validate_manifest,
     validate_surface_predicate,
     validate_speculative_manifest,
+    validate_web_restamp_receipt,
     verify_artifact,
     verify_staging_receipt,
     verify_workflow_run,
@@ -203,6 +208,36 @@ def _speculative_v3_manifest() -> dict:
     )
 
 
+def _web_restamp_receipt() -> dict:
+    value = {
+        "schema": "leaf.web-source-restamp.v1",
+        "algorithm": "leaf.web-source-restamp.v1",
+        "old_artifact_sha256": WEB_HASH,
+        "new_artifact_sha256": "9" * 64,
+        "old_archive_sha256": "7" * 64,
+        "new_archive_sha256": "8" * 64,
+        "old_source_revision": "a" * 40,
+        "new_source_revision": "1" * 40,
+        "common_tree": "e" * 40,
+        "changed_path": "dist/health.json",
+        "changed_field": "source_sha",
+        "unchanged_path_count": 2,
+    }
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    value["receipt_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return value
+
+
+def _resign_receipt(value: dict) -> None:
+    body = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    encoded = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    value["receipt_sha256"] = hashlib.sha256(encoded).hexdigest()
+
+
 def test_cli_generates_exact_five_service_manifest_with_composite_provenance(
     tmp_path: Path,
 ):
@@ -254,6 +289,136 @@ def test_web_dist_digest_is_deterministic_and_content_addressed(tmp_path: Path):
     assert first == second
     assert len(first) == 64
     assert web_dist_digest(dist) != first
+
+
+def _write_web_dist(root: Path, source: str) -> None:
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_bytes(b"<main>Leaf</main>\n")
+    (root / "assets" / "app.js").write_bytes(b"console.log('leaf')\n")
+    (root / "health.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "service": "leaf-platform-web",
+                "component": "frontend",
+                "source_sha": source,
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def test_pr596_shaped_web_restamp_is_deterministic_and_changes_only_source(
+    tmp_path: Path,
+):
+    old_source = "52fcf2afbfcddf687dd9ded5b6db51c23584b800"
+    new_source = "7c53ace516f645838aa32513f8c3a30b68ef8e5d"
+    common_tree = "87e802a5fc1ec4b12bfeeb2f2be983f43fd665d6"
+    dist = tmp_path / "web" / "dist"
+    _write_web_dist(dist, old_source)
+    input_archive = tmp_path / "spec-web-dist.zip"
+    packed = build_web_archive(dist, input_archive)
+
+    first_output = tmp_path / "main-web-dist.zip"
+    first = restamp_web_archive(
+        input_archive,
+        first_output,
+        tmp_path / "first",
+        old_source_revision=old_source,
+        new_source_revision=new_source,
+        common_tree=common_tree,
+        expected_old_artifact_sha256=packed["artifact_sha256"],
+    )
+    second_input = tmp_path / "spec-web-dist-copy.zip"
+    second_input.write_bytes(input_archive.read_bytes())
+    second_output = tmp_path / "main-web-dist-copy.zip"
+    second = restamp_web_archive(
+        second_input,
+        second_output,
+        tmp_path / "second",
+        old_source_revision=old_source,
+        new_source_revision=new_source,
+        common_tree=common_tree,
+        expected_old_artifact_sha256=packed["artifact_sha256"],
+    )
+
+    validate_web_restamp_receipt(first)
+    assert first == second
+    assert first_output.read_bytes() == second_output.read_bytes()
+    assert first["old_artifact_sha256"] == packed["artifact_sha256"]
+    assert first["new_artifact_sha256"] == web_dist_digest(
+        tmp_path / "first" / "dist"
+    )
+    assert (
+        json.loads((tmp_path / "first" / "dist" / "health.json").read_text())[
+            "source_sha"
+        ]
+        == new_source
+    )
+    assert (tmp_path / "first" / "dist" / "index.html").read_bytes() == (
+        dist / "index.html"
+    ).read_bytes()
+    assert (tmp_path / "first" / "dist" / "assets" / "app.js").read_bytes() == (
+        dist / "assets" / "app.js"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize(
+    "health",
+    [
+        b'{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"wrong"}\n',
+        b'{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":true}\n',
+        b'{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n',
+    ],
+)
+def test_web_restamp_rejects_noncanonical_health_identity(tmp_path: Path, health: bytes):
+    archive = tmp_path / "bad.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as value:
+        value.writestr("dist/health.json", health)
+        value.writestr("dist/index.html", b"leaf")
+    with pytest.raises(ContractError):
+        restamp_web_archive(
+            archive,
+            tmp_path / "output.zip",
+            tmp_path / "output",
+            old_source_revision="a" * 40,
+            new_source_revision="b" * 40,
+            common_tree="c" * 40,
+            expected_old_artifact_sha256="d" * 64,
+        )
+
+
+def test_web_restamp_rejects_malformed_or_duplicate_archive(tmp_path: Path):
+    malformed = tmp_path / "malformed.zip"
+    malformed.write_bytes(b"not a zip")
+    with pytest.raises(ContractError):
+        restamp_web_archive(
+            malformed,
+            tmp_path / "output.zip",
+            tmp_path / "output",
+            old_source_revision="a" * 40,
+            new_source_revision="b" * 40,
+            common_tree="c" * 40,
+            expected_old_artifact_sha256="d" * 64,
+        )
+
+    duplicate = tmp_path / "duplicate.zip"
+    with zipfile.ZipFile(duplicate, "w", compression=zipfile.ZIP_STORED) as value:
+        value.writestr("dist/health.json", b"one")
+        value.writestr("dist/health.json", b"two")
+    with pytest.raises(ContractError):
+        restamp_web_archive(
+            duplicate,
+            tmp_path / "duplicate-output.zip",
+            tmp_path / "duplicate-output",
+            old_source_revision="a" * 40,
+            new_source_revision="b" * 40,
+            common_tree="c" * 40,
+            expected_old_artifact_sha256="d" * 64,
+        )
 
 
 @pytest.mark.parametrize(
@@ -705,9 +870,11 @@ def test_v3_manifest_preserves_mixed_component_producer_identity():
 
 def test_speculative_v3_re_envelope_preserves_producer_owned_entries():
     speculative = _speculative_v3_manifest()
+    receipt = _web_restamp_receipt()
 
     main = re_envelope_speculative_v3_manifest(
         speculative,
+        web_restamp_receipt=receipt,
         speculative_run_id="31415926535",
         speculative_run_attempt="1",
         expected_candidate_tree="e" * 40,
@@ -723,16 +890,32 @@ def test_speculative_v3_re_envelope_preserves_producer_owned_entries():
     assert main["release_source_tree"] == speculative["release_source_tree"]
     assert main["build_run_id"] == 27182818284
     assert main["build_run_attempt"] == 2
-    assert main["services"] == speculative["services"]
+    assert all(
+        service["build_disposition"] == "reused"
+        for service in main["services"].values()
+    )
+    assert main["services"]["web"]["artifact_sha256"] == receipt[
+        "new_artifact_sha256"
+    ]
+    for name in SERVICES:
+        expected = dict(speculative["services"][name])
+        expected["build_disposition"] = "reused"
+        if name == "web":
+            expected["artifact_sha256"] = receipt["new_artifact_sha256"]
+        assert main["services"][name] == expected
     assert main != speculative
 
 
 def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
     script = str(Path(__file__).with_name("platform_release_manifest.py"))
     speculative_path = tmp_path / "spec-v3-supply-set.json"
+    receipt_path = tmp_path / "web-restamp.json"
     output = tmp_path / "main-v3-supply-set.json"
     speculative_path.write_text(
         json.dumps(_speculative_v3_manifest()), encoding="utf-8", newline="\n"
+    )
+    receipt_path.write_text(
+        json.dumps(_web_restamp_receipt()), encoding="utf-8", newline="\n"
     )
 
     subprocess.run(
@@ -742,6 +925,8 @@ def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
             "re-envelope-speculative-v3",
             "--manifest",
             str(speculative_path),
+            "--web-restamp-receipt",
+            str(receipt_path),
             "--speculative-run-id",
             "31415926535",
             "--speculative-run-attempt",
@@ -768,7 +953,41 @@ def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
     assert value["schema"] == "leaf.staging-supply-set.v3"
     assert value["release_source_revision"] == "1" * 40
     assert value["build_run_id"] == 27182818284
-    assert value["services"] == _speculative_v3_manifest()["services"]
+    assert value["services"]["web"]["artifact_sha256"] == "9" * 64
+    assert all(
+        service["build_disposition"] == "reused"
+        for service in value["services"].values()
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("old_source_revision", "2" * 40),
+        ("new_source_revision", "3" * 40),
+        ("common_tree", "4" * 40),
+        ("old_artifact_sha256", "5" * 64),
+    ],
+)
+def test_speculative_v3_re_envelope_rejects_rebound_web_restamp(
+    field: str, replacement: str
+):
+    receipt = _web_restamp_receipt()
+    receipt[field] = replacement
+    _resign_receipt(receipt)
+    with pytest.raises(ContractError):
+        re_envelope_speculative_v3_manifest(
+            _speculative_v3_manifest(),
+            web_restamp_receipt=receipt,
+            speculative_run_id="31415926535",
+            speculative_run_attempt="1",
+            expected_candidate_tree="e" * 40,
+            expected_workflow_blob="f" * 40,
+            release_source_revision="1" * 40,
+            release_source_tree="e" * 40,
+            build_run_id="27182818284",
+            build_run_attempt="2",
+        )
 
 
 @pytest.mark.parametrize(
@@ -847,6 +1066,7 @@ def test_speculative_v3_re_envelope_rejects_rebound_lineage(
     speculative = _speculative_v3_manifest()
     mutate(speculative)
     arguments = {
+        "web_restamp_receipt": _web_restamp_receipt(),
         "speculative_run_id": "31415926535",
         "speculative_run_attempt": "1",
         "expected_candidate_tree": "e" * 40,
