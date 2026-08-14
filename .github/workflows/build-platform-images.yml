@@ -187,6 +187,7 @@ jobs:
       previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_mode: ${{ steps.source.outputs.mode }}
+      workflow_blob: ${{ steps.source.outputs.workflow_blob }}
       source_tree: ${{ steps.tag.outputs.tree }}
       solver_revision: ${{ steps.solver.outputs.revision }}
       solver_source_sha256: ${{ steps.solver.outputs.source_sha256 }}
@@ -305,6 +306,13 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/$1"
           }
+
+          WORKFLOW_BLOB="$(api_get "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-platform-images.yml?ref=$GITHUB_SHA" | jq -r '.sha // empty')"
+          [[ "$WORKFLOW_BLOB" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::The provider could not bind this run to one immutable workflow blob."
+            exit 1
+          }
+          echo "workflow_blob=$WORKFLOW_BLOB" >> "$GITHUB_OUTPUT"
 
           CURRENT_SHA=$(git rev-parse HEAD)
           SOURCE_MODE="main"
@@ -1539,11 +1547,6 @@ jobs:
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
 
       - name: Write the immutable five-service staging supply set
-        env:
-          ADOPTED: ${{ needs.adopt.outputs.adopted }}
-          ADOPTED_BUILT_FROM: ${{ needs.adopt.outputs.built_from }}
-          ADOPTED_PR_NUMBER: ${{ needs.adopt.outputs.pr_number }}
-          ADOPTED_SPEC_RUN_ID: ${{ needs.adopt.outputs.spec_run_id }}
         run: |
           set -euo pipefail
           declare -A entries
@@ -1673,6 +1676,52 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Describe the exact speculative surface
+        id: spec-surface
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
+          SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.image }}" in
+            app) bases=(python:3.12-slim) ;;
+            broker) bases=(node:20-slim python:3.12-slim) ;;
+            canonical-worker) bases=(python:3.12-slim) ;;
+            harness) bases=(node:22-bookworm node:22-slim) ;;
+            web) bases=(nginx:alpine node:22-slim) ;;
+            *) echo "::error::Unknown platform surface."; exit 1 ;;
+          esac
+          base_args=()
+          for base in "${bases[@]}"; do
+            digest="$(docker buildx imagetools inspect "$base" \
+              --format '{{json .Manifest}}' | jq -er '.digest')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Base image $base did not resolve to one immutable digest."
+              exit 1
+            }
+            base_args+=(--base-image "$base=$digest")
+          done
+          build_args=()
+          solver_args=()
+          if [ "${{ matrix.image }}" = "canonical-worker" ]; then
+            build_args+=(--build-arg "AUTOFILL_SOLVER_REVISION=$SOLVER_REVISION")
+            solver_args+=(--solver-revision "$SOLVER_REVISION")
+            solver_args+=(--solver-source-sha256 "$SOLVER_SOURCE_SHA256")
+          fi
+          python scripts/platform_release_manifest.py surface-fingerprint \
+            --repo-root . \
+            --source-revision "$SOURCE_SHA" \
+            --service "${{ matrix.image }}" \
+            "${base_args[@]}" \
+            "${build_args[@]}" \
+            --buildkit-version "$(docker buildx version | head -n 1)" \
+            --platform linux/amd64 \
+            "${solver_args[@]}" \
+            --output "$RUNNER_TEMP/spec-surface-fingerprint.json"
+          fingerprint="$(jq -er '.surface_fingerprint' "$RUNNER_TEMP/spec-surface-fingerprint.json")"
+          echo "lookup_tag=surface-v1-$fingerprint" >> "$GITHUB_OUTPUT"
+
       - name: Skip when this tree is already speculatively pushed
         id: exists
         run: |
@@ -1772,6 +1821,7 @@ jobs:
           echo "from=$cache_from" >> "$GITHUB_OUTPUT"
 
       - name: Build and push speculative ${{ matrix.image }}
+        id: spec-build-image
         if: steps.exists.outputs.present != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -1785,9 +1835,101 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: ${{ steps.cache.outputs.from }}
 
+      - name: Set up Node for speculative web evidence
+        if: matrix.image == 'web' && steps.exists.outputs.present != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Hash the speculative web deployment artifact
+        id: spec-web
+        if: matrix.image == 'web' && steps.exists.outputs.present != 'true'
+        working-directory: web
+        env:
+          VITE_API_BASE: ""
+          VITE_MOCK: "0"
+          VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
+          VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
+          VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
+            "$LEAF_SOURCE_SHA" > dist/health.json
+          artifact_sha256="$(python ../scripts/platform_release_manifest.py \
+            digest-web-dist --root dist)"
+          echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize one producer-owned speculative v3 service entry
+        if: steps.exists.outputs.present != 'true'
+        env:
+          IMAGE_DIGEST: ${{ steps.spec-build-image.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+          WORKFLOW_BLOB: ${{ needs.prepare.outputs.workflow_blob }}
+          LOOKUP_TAG: ${{ steps.spec-surface.outputs.lookup_tag }}
+          WEB_ARTIFACT_SHA256: ${{ steps.spec-web.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::The speculative build returned no immutable component digest."
+            exit 1
+          }
+          artifact_args=()
+          if [ "${{ matrix.image }}" = "web" ]; then
+            artifact_args+=(--artifact-sha256 "$WEB_ARTIFACT_SHA256")
+          fi
+          python scripts/platform_release_manifest.py surface-predicate \
+            --fingerprint "$RUNNER_TEMP/spec-surface-fingerprint.json" \
+            --repository "$IMAGE_NAME" \
+            --image-digest "$IMAGE_DIGEST" \
+            --source-tree "$SOURCE_TREE" \
+            --workflow-blob "$WORKFLOW_BLOB" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            "${artifact_args[@]}" \
+            --output "$RUNNER_TEMP/spec-surface-predicate.json"
+          predicate_hash="$(jq -cS . "$RUNNER_TEMP/spec-surface-predicate.json" | sha256sum | awk '{print $1}')"
+          jq --arg lookup_tag "$LOOKUP_TAG" \
+             --arg subject "$ECR_REGISTRY/$IMAGE_NAME" \
+             --arg provenance_digest "sha256:$predicate_hash" '
+            {
+              repository,
+              image_digest,
+              immutable_lookup_tag: $lookup_tag,
+              producer_source_revision,
+              producer_source_tree,
+              surface_fingerprint,
+              recipe_fingerprint,
+              producer_workflow_path,
+              producer_workflow_blob,
+              producer_run_id,
+              producer_run_attempt,
+              provenance_subject: $subject,
+              provenance_digest: $provenance_digest,
+              build_disposition: "built"
+            }
+            + (if .service == "canonical-worker" then {solver_provenance} else {} end)
+            + (if .service == "web" then {artifact_sha256} else {} end)
+          ' "$RUNNER_TEMP/spec-surface-predicate.json" > "$RUNNER_TEMP/spec-service-entry.json"
+
+      - name: Upload one producer-owned speculative v3 service entry
+        if: steps.exists.outputs.present != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/spec-service-entry.json
+          if-no-files-found: error
+          retention-days: 30
+
   # The speculative fan-in and the partial-push invariant, redefined over
-  # tree identity: a spec-supply-set-<tree> artifact exists ONLY when all
-  # five digests verify present under the tree's immutable tag. `adopt` on
+  # tree identity: a spec-v3-supply-set-<tree> artifact exists ONLY when all
+  # five digests and all five provider-owned entries agree on the exact
+  # preview run and tree. `adopt` on
   # the merge run refuses anything less, so a partial speculative push can
   # never become a deployable supply set. Runs even when a matrix leg lost
   # an immutable-tag race to a sibling run — the digests decide, not the
@@ -1826,6 +1968,13 @@ jobs:
             echo "::error::The merge preview moved to $checked_out since prepare resolved $PREPARED_SHA; a newer speculative dispatch owns this PR."
             exit 1
           fi
+
+      - name: Download exact speculative v3 service entries
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: spec-surface-result-*-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/spec-surface-results
 
       - uses: actions/setup-python@v5
         with:
@@ -1869,30 +2018,63 @@ jobs:
             echo "complete=true"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Mint the tree-bound speculative supply set
+      - name: Mint the provider-bound speculative v3 supply set
+        id: evidence
         if: steps.digests.outputs.complete == 'true'
         run: |
           set -euo pipefail
-          python scripts/platform_release_manifest.py generate-speculative \
-            --source-tree "$SOURCE_TREE" \
-            --built-from-revision "${{ needs.prepare.outputs.source_sha }}" \
-            --pr-number "${{ inputs.speculative_pr_number }}" \
-            --workflow-run-id "${{ github.run_id }}" \
-            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
-            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
-            --image "app=${{ steps.digests.outputs.app }}" \
-            --image "broker=${{ steps.digests.outputs.broker }}" \
-            --image "canonical-worker=${{ steps.digests.outputs.canonical_worker }}" \
-            --image "harness=${{ steps.digests.outputs.harness }}" \
-            --image "web=${{ steps.digests.outputs.web }}" \
-            --output "$RUNNER_TEMP/spec-supply-set.json"
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          declare -A entries digests
+          digests[app]="${{ steps.digests.outputs.app }}"
+          digests[broker]="${{ steps.digests.outputs.broker }}"
+          digests[canonical-worker]="${{ steps.digests.outputs.canonical_worker }}"
+          digests[harness]="${{ steps.digests.outputs.harness }}"
+          digests[web]="${{ steps.digests.outputs.web }}"
+          for image in app broker canonical-worker harness web; do
+            mapfile -t matches < <(find "$RUNNER_TEMP/spec-surface-results" -type f \
+              -path "*/spec-surface-result-$image-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}/spec-service-entry.json" \
+              -print 2>/dev/null || true)
+            if [ "${#matches[@]}" != "1" ]; then
+              echo "::notice::Speculative $image has ${#matches[@]} current-run v3 entries; no provider-bound supply artifact will be minted."
+              exit 0
+            fi
+            entries["$image"]="${matches[0]}"
+            jq -e \
+              --arg source "${{ needs.prepare.outputs.source_sha }}" \
+              --arg tree "$SOURCE_TREE" \
+              --arg digest "${digests[$image]}" \
+              --argjson run "$GITHUB_RUN_ID" \
+              --argjson attempt "$GITHUB_RUN_ATTEMPT" '
+                .producer_source_revision == $source
+                and .producer_source_tree == $tree
+                and .image_digest == $digest
+                and .producer_run_id == $run
+                and .producer_run_attempt == $attempt
+                and .build_disposition == "built"
+              ' "${entries[$image]}" >/dev/null || {
+                echo "::error::Speculative $image v3 entry is rebound from this provider run or live digest."
+                exit 1
+              }
+          done
+          python scripts/platform_release_manifest.py generate-v3 \
+            --release-source-revision "${{ needs.prepare.outputs.source_sha }}" \
+            --release-source-tree "$SOURCE_TREE" \
+            --build-run-id "$GITHUB_RUN_ID" \
+            --build-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --service-entry "app=${entries[app]}" \
+            --service-entry "broker=${entries[broker]}" \
+            --service-entry "canonical-worker=${entries[canonical-worker]}" \
+            --service-entry "harness=${entries[harness]}" \
+            --service-entry "web=${entries[web]}" \
+            --output "$RUNNER_TEMP/spec-v3-supply-set.json"
+          echo "complete=true" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the speculative supply set
-        if: steps.digests.outputs.complete == 'true'
+      - name: Upload the provider-bound speculative v3 supply set
+        if: steps.evidence.outputs.complete == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: spec-supply-set-${{ needs.prepare.outputs.source_tree }}
-          path: ${{ runner.temp }}/spec-supply-set.json
+          name: spec-v3-supply-set-${{ needs.prepare.outputs.source_tree }}
+          path: ${{ runner.temp }}/spec-v3-supply-set.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1915,10 +2097,10 @@ jobs:
   # the run's verify leg in place instead of handing it to the verify
   # job's fresh runner (~11s scheduling gap plus ~10s of duplicated
   # checkout/OIDC/node setup, measured on run 30992431627). The steps
-  # after decide are byte-identical copies of the verify job's — the
-  # contract test pins them identical, the same idiom that keeps warm's
-  # and build's cache steps aligned — and the verify JOB still owns the
-  # full-build path. Every such step is conditional on adopted=true and
+  # after decide perform the same terminal supply-set and web-artifact duties
+  # as the verify job, while consuming the main-run v3 envelope created by
+  # decide. The verify JOB still owns the full-build path. Every such step is
+  # conditional on adopted=true and
   # deliberately NOT absorbed: any failure there is post-commit by
   # construction (adopted=true means every alias re-verified), so it must
   # redden the run, and a RERUN resumes idempotently — decide re-confirms
@@ -1935,7 +2117,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-      # Read-only: lists and downloads spec-supply-set artifacts minted by
+      # Read-only: lists and downloads provider-bound speculative v3 artifacts minted by
       # speculative runs through the Actions API.
       actions: read
 
@@ -1943,7 +2125,6 @@ jobs:
       adopted: ${{ steps.decide.outputs.adopted }}
       spec_run_id: ${{ steps.decide.outputs.spec_run_id }}
       built_from: ${{ steps.decide.outputs.built_from }}
-      pr_number: ${{ steps.decide.outputs.pr_number }}
 
     env:
       AWS_REGION: us-east-1
@@ -1972,7 +2153,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
-      # verify-speculative is stdlib-only: no pip.
+      # The v3 verifier and re-envelope helper are stdlib-only: no pip.
       - uses: actions/setup-python@v5
         continue-on-error: true
         with:
@@ -2026,52 +2207,64 @@ jobs:
           [[ "$PROVEN_TREE" == "$tree" ]] || finish false "gate verdict binds tree ${PROVEN_TREE:-<none>}, not $tree"
           [[ "$PROD_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || finish false "refusing to alias non-release tag $PROD_TAG"
           repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null || true)"
-          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=spec-supply-set-$tree&per_page=30" 2>/dev/null || true)"
+          artifact_name="spec-v3-supply-set-$tree"
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=30" 2>/dev/null || true)"
           if [[ -z "$repo_id" || -z "$listing" ]]; then
             finish false "artifact listing unavailable"
           fi
-          # Newest first, un-expired, minted by a run of THIS repository: a
-          # fork's pull_request run can upload an artifact with ANY name and
-          # content, so same-repo origin is checked on the artifact's
-          # workflow_run metadata before the file is even opened.
+          # One exact provider artifact is required. Multiple valid candidates
+          # are ambiguous and cannot be resolved by newest-wins metadata.
           mapfile -t candidates < <(jq -r --argjson repo_id "$repo_id" '
-            .artifacts
-            | sort_by(.created_at) | reverse | .[]
-            | select(.expired | not)
-            | select(.workflow_run.head_repository_id == $repo_id)
-            | [.id, .workflow_run.id] | @tsv' <<<"$listing" 2>/dev/null || true)
-          verified=""
-          for row in "${candidates[@]:-}"; do
-            [[ -n "$row" ]] || continue
-            candidate_id="${row%%$'\t'*}"; candidate_run="${row##*$'\t'}"
-            # Only a main-ref dispatch of THIS workflow may mint a
-            # speculative supply set. `path`/`event`/`head_branch` come from
-            # the run record, not from anything inside the artifact; the
-            # @ref strip mirrors the gate-reuse probe's defensive posture.
-            run_record="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" 2>/dev/null || true)"
-            [[ -n "$run_record" ]] || continue
-            path="$(jq -r '.path // empty' <<<"$run_record")"
-            path="${path%%@*}"
-            [[ "$path" == ".github/workflows/build-platform-images.yml" ]] || continue
-            [[ "$(jq -r '.event // empty' <<<"$run_record")" == "workflow_dispatch" ]] || continue
-            [[ "$(jq -r '.head_branch // empty' <<<"$run_record")" == "main" ]] || continue
-            rm -rf spec-candidate && mkdir -p spec-candidate
-            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
-              > spec-candidate/spec.zip 2>/dev/null || continue
-            unzip -o -q spec-candidate/spec.zip -d spec-candidate || continue
-            [[ -f spec-candidate/spec-supply-set.json ]] || continue
-            python scripts/platform_release_manifest.py verify-speculative \
-              --manifest spec-candidate/spec-supply-set.json \
-              --expect-tree "$tree" \
-              --output spec-candidate/verified.json || continue
-            verified="spec-candidate/verified.json"
-            break
-          done
-          [[ -n "$verified" ]] || finish false "no verified speculative supply set binds tree $tree"
-          # The spec tag comes from the VERIFIED manifest (validated to
-          # derive from this tree plus the preview that baked the images),
-          # so digests, tag, and provenance always describe one build.
-          spec_tag="$(jq -r '.spec_tag' "$verified")"
+            [.artifacts[]
+             | select(.expired | not)
+             | select(.workflow_run.head_repository_id == $repo_id)]
+            | .[] | [.id, .workflow_run.id, .digest] | @tsv
+          ' <<<"$listing" 2>/dev/null || true)
+          [ "${#candidates[@]}" = "1" ] || finish false "expected one exact provider-bound speculative v3 artifact, found ${#candidates[@]}"
+          IFS=$'\t' read -r candidate_id candidate_run candidate_archive_digest <<<"${candidates[0]}"
+          [[ "$candidate_archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || finish false "provider artifact has no immutable archive digest"
+
+          # Only one completed main-ref dispatch of this immutable workflow
+          # may own the artifact. All facts below come from provider records.
+          run_record="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" 2>/dev/null || true)"
+          [[ -n "$run_record" ]] || finish false "speculative provider run is unavailable"
+          path="$(jq -r '.path // empty' <<<"$run_record")"
+          path="${path%%@*}"
+          [[ "$path" == ".github/workflows/build-platform-images.yml" ]] || finish false "speculative provider workflow is foreign"
+          [[ "$(jq -r '.event // empty' <<<"$run_record")" == "workflow_dispatch" ]] || finish false "speculative provider event is foreign"
+          [[ "$(jq -r '.head_branch // empty' <<<"$run_record")" == "main" ]] || finish false "speculative provider branch is foreign"
+          [[ "$(jq -r '.status // empty' <<<"$run_record")" == "completed" ]] || finish false "speculative provider run is not terminal"
+          [[ "$(jq -r '.conclusion // empty' <<<"$run_record")" == "success" ]] || finish false "speculative provider run did not succeed"
+          candidate_run_attempt="$(jq -r '.run_attempt // empty' <<<"$run_record")"
+          [[ "$candidate_run_attempt" =~ ^[1-9][0-9]*$ ]] || finish false "speculative provider attempt is invalid"
+          candidate_run_head="$(jq -r '.head_sha // empty' <<<"$run_record")"
+          [[ "$candidate_run_head" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative provider source is invalid"
+          candidate_workflow_blob="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-platform-images.yml?ref=$candidate_run_head" --jq .sha 2>/dev/null || true)"
+          [[ "$candidate_workflow_blob" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative provider workflow blob is unavailable"
+
+          rm -rf spec-candidate && mkdir -p spec-candidate
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
+            > spec-candidate/spec.zip 2>/dev/null || finish false "speculative artifact download failed"
+          actual_archive_digest="sha256:$(sha256sum spec-candidate/spec.zip | awk '{print $1}')"
+          [ "$actual_archive_digest" = "$candidate_archive_digest" ] || finish false "speculative provider archive digest changed"
+          mapfile -t archive_paths < <(unzip -Z1 spec-candidate/spec.zip 2>/dev/null || true)
+          [ "${#archive_paths[@]}" = "1" ] && [ "${archive_paths[0]}" = "spec-v3-supply-set.json" ] || finish false "speculative provider archive is not closed"
+          unzip -o -q spec-candidate/spec.zip -d spec-candidate || finish false "speculative provider archive is malformed"
+          python scripts/platform_release_manifest.py re-envelope-speculative-v3 \
+            --manifest spec-candidate/spec-v3-supply-set.json \
+            --speculative-run-id "$candidate_run" \
+            --speculative-run-attempt "$candidate_run_attempt" \
+            --expect-candidate-tree "$tree" \
+            --expect-workflow-blob "$candidate_workflow_blob" \
+            --release-source-revision "$SOURCE_SHA" \
+            --release-source-tree "$tree" \
+            --build-run-id "$GITHUB_RUN_ID" \
+            --build-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output spec-candidate/main-v3-supply-set.json \
+            || finish false "speculative v3 lineage cannot be re-enveloped for this main run"
+          verified="spec-candidate/main-v3-supply-set.json"
+          candidate_source="$(jq -r '.services.app.producer_source_revision' "$verified")"
+          spec_tag="spec-$tree-${candidate_source:0:12}"
           [[ "$spec_tag" =~ ^spec-[0-9a-f]{40}-[0-9a-f]{12}$ ]] || finish false "verified manifest carries a malformed spec tag"
           # The registry is the ground truth: every manifest digest must be
           # exactly what the immutable spec tag carries right now.
@@ -2213,25 +2406,23 @@ jobs:
           else
             echo "::warning::adopt: SOURCE_SHA is not one full commit; skipping the src- identity stamp"
           fi
-          spec_run_id="$(jq -r '.workflow_run_id' "$verified")"
-          built_from="$(jq -r '.built_from_revision' "$verified")"
-          pr_number="$(jq -r '.pr_number' "$verified")"
+          spec_run_id="$candidate_run"
+          built_from="$candidate_source"
           {
             echo "spec_run_id=$spec_run_id"
             echo "built_from=$built_from"
-            echo "pr_number=$pr_number"
           } >> "$GITHUB_OUTPUT"
           {
             echo "## Speculative supply set adopted"
             echo ""
-            echo "Tree: \`$tree\` (speculative run $spec_run_id, PR #$pr_number)"
+            echo "Tree: \`$tree\` (provider-bound speculative run $spec_run_id)"
             echo "All five images aliased to \`$PROD_TAG\` with zero rebuild."
           } >> "$GITHUB_STEP_SUMMARY"
           finish true "aliased $PROD_TAG onto the speculative digests of tree $tree"
 
-      # ----- Adopted-path verify half. Byte-identical to the verify
-      # job's steps (contract-test-pinned); see the job comment above
-      # for the fold rationale and failure semantics. -----
+      # ----- Adopted-path verify half. It preserves the verify job's terminal
+      # artifact duties but consumes the main-run provider-bound v3 envelope;
+      # see the job comment above for the fold rationale and failure semantics. -----
       - uses: actions/setup-node@v4
         if: steps.decide.outputs.adopted == 'true'
         with:
@@ -2262,11 +2453,6 @@ jobs:
 
       - name: Write the immutable five-service staging supply set
         if: steps.decide.outputs.adopted == 'true'
-        env:
-          ADOPTED: ${{ steps.decide.outputs.adopted }}
-          ADOPTED_BUILT_FROM: ${{ steps.decide.outputs.built_from }}
-          ADOPTED_PR_NUMBER: ${{ steps.decide.outputs.pr_number }}
-          ADOPTED_SPEC_RUN_ID: ${{ steps.decide.outputs.spec_run_id }}
         run: |
           set -euo pipefail
           if [[ ! "$TAG" =~ ^(prod-[0-9a-f]{7,40}|sha-[0-9a-f]{40})$ ]]; then
@@ -2286,40 +2472,38 @@ jobs:
               exit 1
             fi
             digests["$image"]="$digest"
+            claimed="$(jq -er --arg image "$image" '.services[$image].image_digest' spec-candidate/main-v3-supply-set.json)"
+            [ "$digest" = "$claimed" ] || {
+              echo "::error::$repository:$TAG changed after the provider-bound v3 envelope was verified."
+              exit 1
+            }
           done
-          # Adopted digests get the v2 schema: same deployable fields, plus
-          # the tree identity and the speculative run that built them. The
-          # generator fails closed on a partial provenance set.
-          SPECULATIVE_ARGS=()
-          if [ "$ADOPTED" = "true" ]; then
-            SPECULATIVE_ARGS+=(
-              --source-tree "$(git rev-parse 'HEAD^{tree}')"
-              --speculative-built-from "$ADOPTED_BUILT_FROM"
-              --speculative-pr-number "$ADOPTED_PR_NUMBER"
-              --speculative-run-id "$ADOPTED_SPEC_RUN_ID"
-            )
-          fi
-          python scripts/platform_release_manifest.py generate \
-            --source-revision "${{ needs.prepare.outputs.source_sha }}" \
-            --build-tag "$TAG" \
-            --solver-revision "${{ needs.prepare.outputs.solver_revision }}" \
-            --solver-source-sha256 "${{ needs.prepare.outputs.solver_source_sha256 }}" \
-            --web-artifact-sha256 "${{ steps.web-artifact.outputs.sha256 }}" \
-            --image "app=${digests[app]}" \
-            --image "broker=${digests[broker]}" \
-            --image "canonical-worker=${digests[canonical-worker]}" \
-            --image "harness=${digests[harness]}" \
-            --image "web=${digests[web]}" \
-            ${SPECULATIVE_ARGS[@]+"${SPECULATIVE_ARGS[@]}"} \
-            --output "$RUNNER_TEMP/staging-supply-set.json"
+          jq -e \
+            --arg source "${{ needs.prepare.outputs.source_sha }}" \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --argjson run "$GITHUB_RUN_ID" \
+            --argjson attempt "$GITHUB_RUN_ATTEMPT" '
+              .schema == "leaf.staging-supply-set.v3"
+              and .release_source_revision == $source
+              and .release_source_tree == $tree
+              and .build_run_id == $run
+              and .build_run_attempt == $attempt
+            ' spec-candidate/main-v3-supply-set.json >/dev/null || {
+              echo "::error::The adopted v3 envelope is not bound to this main provider run."
+              exit 1
+            }
+          claimed_web_artifact="$(jq -er '.services.web.artifact_sha256' spec-candidate/main-v3-supply-set.json)"
+          [ "$claimed_web_artifact" = "${{ steps.web-artifact.outputs.sha256 }}" ] || {
+            echo "::error::The rebuilt web artifact does not match the speculative producer evidence."
+            exit 1
+          }
+          cp spec-candidate/main-v3-supply-set.json "$RUNNER_TEMP/staging-supply-set.json"
           {
-            echo "## Five-service staging supply set verified"
+            echo "## Provider-bound adopted v3 supply set verified"
             echo ""
-            echo "Source: \`${{ needs.prepare.outputs.source_sha }}\`"
+            echo "Release source: \`${{ needs.prepare.outputs.source_sha }}\`"
             echo "Tag: \`$TAG\`"
-            if [ "$ADOPTED" = "true" ]; then
-              echo "Adopted from speculative run \`$ADOPTED_SPEC_RUN_ID\` (PR #$ADOPTED_PR_NUMBER) with zero rebuild."
-            fi
+            echo "Speculative producer run: \`${{ steps.decide.outputs.spec_run_id }}\`"
             for image in app broker canonical-worker harness web; do
               echo "- \`leaf-platform-$image@${digests[$image]}\`"
             done
