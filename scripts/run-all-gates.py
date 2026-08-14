@@ -1021,7 +1021,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
-                 f"{repo_name}/platform/tests/test_overlay_store_static.py"], 122,
+                 f"{repo_name}/platform/tests/test_overlay_store_static.py",
+                 f"{repo_name}/platform/tests/test_ios_ship_schema_static.py"], 137,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
