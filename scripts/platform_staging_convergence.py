@@ -166,7 +166,8 @@ class GitHubProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=45) as response:
+            opener = urllib.request.build_opener(_ArtifactRedirectHandler())
+            with opener.open(request, timeout=45) as response:
                 raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
                 if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
                     raise ContractError("PROVIDER_BODY_TOO_LARGE")
@@ -185,6 +186,16 @@ class GitHubProvider:
 
     def bytes(self, repository: str, endpoint: str) -> bytes:
         return self._request(repository, endpoint)
+
+
+class _ArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep GitHub credentials off provider artifact storage redirects."""
+
+    def redirect_request(self, request: Any, file_pointer: Any, code: int, message: str, headers: Any, new_url: str) -> Any:
+        redirected = super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        if redirected is not None and urllib.parse.urlparse(new_url).hostname != urllib.parse.urlparse(request.full_url).hostname:
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 def _load_json(raw: bytes) -> Any:
@@ -531,7 +542,12 @@ def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], ru
     raise ContractError("RELAY_RECEIPT_INVALID")
 
 
-def _relay_children(provider: Provider, relay: dict[str, Any]) -> tuple[dict[str, int], str]:
+def _relay_children(
+    provider: Provider,
+    relay: dict[str, Any],
+    *,
+    require_complete: bool,
+) -> tuple[dict[str, int], str]:
     raw = provider.bytes(APP_REPOSITORY, f"/actions/runs/{relay['run_id']}/logs")
     if len(raw) > MAX_PROVIDER_LOG_BYTES:
         raise ContractError("RELAY_LOGS_TOO_LARGE")
@@ -552,9 +568,55 @@ def _relay_children(provider: Provider, relay: dict[str, Any]) -> tuple[dict[str
         if service in children:
             raise ContractError("RELAY_CHILD_CARDINALITY")
         children[service] = int(run_id)
-    if set(children) != {"web", "app"} or len(set(children.values())) != 2:
+    valid_services = {"web", "app"}
+    if (
+        not children
+        or not set(children).issubset(valid_services)
+        or len(set(children.values())) != len(children)
+        or (require_complete and set(children) != valid_services)
+    ):
         raise ContractError("RELAY_CHILD_CARDINALITY")
     return children, _sha(raw)
+
+
+def _relay_failure_evidence(provider: Provider, relay: dict[str, Any]) -> dict[str, Any]:
+    raw = provider.json(
+        APP_REPOSITORY,
+        f"/actions/runs/{relay['run_id']}/attempts/{relay['run_attempt']}/jobs?per_page=100",
+    )
+    if not isinstance(raw, dict):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    jobs = raw.get("jobs")
+    if raw.get("total_count") != 1 or not isinstance(jobs, list) or len(jobs) != 1:
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    job = jobs[0]
+    if not isinstance(job, dict) or job.get("name") != "dispatch" or not isinstance(job.get("steps"), list):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    selected: dict[str, dict[str, Any]] = {}
+    expected = {
+        "Deploy each staging service in turn and prove each one landed": "failure",
+        "Publish the convergence receipt": "skipped",
+    }
+    for step in job["steps"]:
+        if not isinstance(step, dict) or step.get("name") not in expected:
+            continue
+        name = step["name"]
+        if name in selected or step.get("conclusion") != expected[name]:
+            raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+        selected[name] = {
+            "name": name,
+            "number": _positive(step.get("number"), "RELAY_FAILURE_EVIDENCE_INVALID"),
+            "conclusion": step["conclusion"],
+        }
+    if set(selected) != set(expected):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    return {
+        "status": "produced",
+        "value": {
+            "failed_stage": "service_dispatch",
+            "jobs_sha256": _sha(_canonical([selected[name] for name in sorted(selected)])),
+        },
+    }
 
 
 def _strict_slot(value: Any, reason: str) -> dict[str, Any]:
@@ -1157,7 +1219,15 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     )
     supply = _supply(manifest, build, build_tree)
 
-    relay_matches: list[tuple[dict[str, Any], dict[str, Any], Any]] = []
+    relay_matches: list[
+        tuple[
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, int],
+            str,
+        ]
+    ] = []
     relay_name = f"staging-converged-{build['head_sha']}-attempt-{build['run_attempt']}"
     relay_rows = _workflow_run_rows(
         provider,
@@ -1173,23 +1243,47 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     for raw in relay_rows:
         try:
             relay = _provider_run(raw, APP_REPOSITORY, RELAY_WORKFLOW, "workflow_run")
-            if relay["head_sha"] != build["head_sha"] or relay["conclusion"] != "success":
+            if relay["head_sha"] != build["head_sha"]:
                 continue
-            artifact, value = _one_artifact(
-                provider, APP_REPOSITORY, relay["run_id"], relay_name, "staging-converged.json"
-            )
-            _relay_receipt(value, build, supply, relay["run_id"])
-            relay_matches.append((relay, artifact, value))
+            if relay["conclusion"] == "success":
+                artifact, value = _one_artifact(
+                    provider, APP_REPOSITORY, relay["run_id"], relay_name, "staging-converged.json"
+                )
+                _relay_receipt(value, build, supply, relay["run_id"])
+                children, logs_sha = _relay_children(provider, relay, require_complete=True)
+                relay_matches.append(
+                    (
+                        relay,
+                        {"status": "produced", "value": artifact},
+                        {"status": "not_produced"},
+                        children,
+                        logs_sha,
+                    )
+                )
+            elif relay["conclusion"] == "failure":
+                if any(row.get("name") == relay_name for row in _artifact_rows(provider, APP_REPOSITORY, relay["run_id"])):
+                    raise ContractError("FAILED_RELAY_ARTIFACT_PRESENT")
+                failure = _relay_failure_evidence(provider, relay)
+                children, logs_sha = _relay_children(provider, relay, require_complete=False)
+                relay_matches.append(
+                    (
+                        relay,
+                        {"status": "not_produced"},
+                        failure,
+                        children,
+                        logs_sha,
+                    )
+                )
         except ContractError as exc:
             if exc.reason not in {"PROVIDER_ARTIFACT_CARDINALITY"}:
                 raise
     if len(relay_matches) != 1:
         raise ContractError("RELAY_RUN_CARDINALITY")
-    relay, relay_artifact, _ = relay_matches[0]
+    relay, relay_artifact, relay_failure, relay_children, relay_logs_sha = relay_matches[0]
     relay_tree, relay_blob = _workflow_blob(provider, APP_REPOSITORY, relay["head_sha"], RELAY_WORKFLOW)
     if relay_tree != build_tree:
         raise ContractError("RELAY_SOURCE_TREE_MISMATCH")
-    relay_children, relay_logs_sha = _relay_children(provider, relay)
+    resumed_after_failure = relay["conclusion"] == "failure"
 
     frontier: dict[str, Any] | None = None
     if current_frontier_run_id is not None:
@@ -1267,11 +1361,13 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         or current_frontier_run_id in set(relay_children.values())
     ):
         raise ContractError("UNCONFIGURED_FRONTIER_RECEIPT")
-    roles: dict[int, str] = {
-        relay_children["web"]: "relay_web",
-        relay_children["app"]: "relay_app",
-        current_frontier_run_id: "frontier_app_identity",
-    }
+    roles: dict[int, str] = {current_frontier_run_id: "frontier_app_identity"}
+    if resumed_after_failure:
+        for service, run_id in relay_children.items():
+            roles[run_id] = f"prior_failed_{service.replace('-', '_')}"
+    else:
+        roles[relay_children["web"]] = "relay_web"
+        roles[relay_children["app"]] = "relay_app"
     for service in SERVICE_ORDER:
         candidates = [
             (run["run_id"], receipt, outcome)
@@ -1288,25 +1384,23 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
             for run_id, _, outcome in candidates
             if outcome["deployment_outcome"] in {"failed_before_mutation", "failed_after_mutation_rolled_back"}
         ]
-        if service in {"broker", "harness", "canonical-worker"}:
+        if service != "app" and (resumed_after_failure or service in {"broker", "harness", "canonical-worker"}):
             if len(successes) != 1:
                 raise ContractError("SERVICE_TERMINAL_CARDINALITY")
             roles[successes[0]] = f"terminal_{service.replace('-', '_')}"
         elif successes:
             raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
-        if len(failures) > 1:
-            raise ContractError("SERVICE_FAILURE_CARDINALITY")
-        if failures:
-            roles[failures[0]] = f"prior_failed_{service.replace('-', '_')}"
+        for run_id in failures:
+            roles[run_id] = f"prior_failed_{service.replace('-', '_')}"
     if set(roles) != set(by_id):
         raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
 
-    children: dict[str, dict[str, Any]] = {}
+    normalized_by_id: dict[int, dict[str, Any]] = {}
     per_service: dict[str, list[dict[str, Any]]] = {service: [] for service in SERVICE_ORDER}
     for run_id, role in roles.items():
         run, artifact, raw_receipt, outcome = by_id[run_id]
         child = _normalize_child(provider, run, artifact, raw_receipt, role, outcome)
-        children[role] = child
+        normalized_by_id[run_id] = child
         per_service[child["service"]].append(child)
         if child["source_revision_evidence"] != {
             "status": "produced",
@@ -1329,7 +1423,22 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         }
         if child_supply != expected_supply:
             raise ContractError("SERVICE_SUPPLY_EVIDENCE_MISMATCH")
-    if children["relay_web"]["service"] != "web" or children["relay_app"]["service"] != "app" or children["frontier_app_identity"]["service"] != "app":
+    frontier_child = normalized_by_id[current_frontier_run_id]
+    if frontier_child["service"] != "app":
+        raise ContractError("CHILD_ROLE_SERVICE_MISMATCH")
+    if resumed_after_failure:
+        for service, run_id in relay_children.items():
+            child = normalized_by_id[run_id]
+            if (
+                child["service"] != service
+                or child["outcome"]["deployment_outcome"]
+                not in {"failed_before_mutation", "failed_after_mutation_rolled_back"}
+            ):
+                raise ContractError("FAILED_RELAY_CHILD_INVALID")
+    elif (
+        normalized_by_id[relay_children["web"]]["service"] != "web"
+        or normalized_by_id[relay_children["app"]]["service"] != "app"
+    ):
         raise ContractError("CHILD_ROLE_SERVICE_MISMATCH")
     for service, attempts in per_service.items():
         attempts.sort(key=lambda item: (item["provider"]["created_at"], item["provider"]["run_id"]))
@@ -1353,13 +1462,20 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
             ):
                 raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
 
-    selected = {
-        "app": children["frontier_app_identity"],
-        "web": children["relay_web"],
-        "broker": children["terminal_broker"],
-        "harness": children["terminal_harness"],
-        "canonical-worker": children["terminal_canonical_worker"],
+    selected_ids = {
+        "app": current_frontier_run_id,
+        "broker": next(run_id for run_id, role in roles.items() if role == "terminal_broker"),
+        "harness": next(run_id for run_id, role in roles.items() if role == "terminal_harness"),
+        "canonical-worker": next(
+            run_id for run_id, role in roles.items() if role == "terminal_canonical_worker"
+        ),
+        "web": (
+            next(run_id for run_id, role in roles.items() if role == "terminal_web")
+            if resumed_after_failure
+            else relay_children["web"]
+        ),
     }
+    selected = {service: normalized_by_id[run_id] for service, run_id in selected_ids.items()}
     for service, child in selected.items():
         if (
             child["outcome"]["deployment_outcome"] not in {"succeeded", "skipped_exact"}
@@ -1400,8 +1516,10 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         "supply": {**supply_artifact, **supply},
         "relay": {
             **{key: relay[key] for key in ("repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion")},
+            "mode": "resumed_after_failure" if resumed_after_failure else "converged_relay",
             "workflow_blob": relay_blob,
             "artifact": relay_artifact,
+            "failure_evidence": relay_failure,
             "logs_sha256": relay_logs_sha,
             "children": relay_children,
         },

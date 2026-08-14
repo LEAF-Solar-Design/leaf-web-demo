@@ -125,7 +125,7 @@
     "relay": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion", "workflow_blob", "artifact", "logs_sha256", "children"],
+      "required": ["repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion", "mode", "workflow_blob", "artifact", "failure_evidence", "logs_sha256", "children"],
       "properties": {
         "repository": {"const": "LEAF-Solar-Design/leaf-web-demo"},
         "workflow_path": {"const": ".github/workflows/dispatch-staging-deploys.yml"},
@@ -133,17 +133,48 @@
         "run_attempt": {"$ref": "#/$defs/runId"},
         "event": {"const": "workflow_run"},
         "head_sha": {"$ref": "#/$defs/sha40"},
-        "conclusion": {"const": "success"},
+        "conclusion": {"enum": ["success", "failure"]},
+        "mode": {"enum": ["converged_relay", "resumed_after_failure"]},
         "workflow_blob": {"$ref": "#/$defs/sha40"},
-        "artifact": {"$ref": "#/$defs/artifact"},
+        "artifact": {"$ref": "#/$defs/artifactSlot"},
+        "failure_evidence": {"$ref": "#/$defs/relayFailureSlot"},
         "logs_sha256": {"$ref": "#/$defs/sha256"},
         "children": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["web", "app"],
+          "minProperties": 1,
+          "maxProperties": 2,
           "properties": {"web": {"$ref": "#/$defs/runId"}, "app": {"$ref": "#/$defs/runId"}}
         }
       }
+    },
+    "artifactSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {"type": "object", "additionalProperties": false, "required": ["status", "value"], "properties": {"status": {"const": "produced"}, "value": {"$ref": "#/$defs/artifact"}}}
+      ]
+    },
+    "relayFailureSlot": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_produced"}}},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {"const": "produced"},
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["failed_stage", "jobs_sha256"],
+              "properties": {
+                "failed_stage": {"const": "service_dispatch"},
+                "jobs_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        }
+      ]
     },
     "stringSlot": {
       "oneOf": [
@@ -301,7 +332,7 @@
       "additionalProperties": false,
       "required": ["role", "provider", "artifact", "service", "source_revision", "source_revision_evidence", "source_tree", "image_tag", "app_deploy_intent", "path", "outcome", "supply_evidence", "predecessor_task_definition", "candidate", "terminal", "posture", "deployment_identity"],
       "properties": {
-        "role": {"enum": ["relay_web", "relay_app", "frontier_app_identity", "terminal_broker", "terminal_harness", "terminal_canonical_worker", "prior_failed_app", "prior_failed_broker", "prior_failed_canonical_worker", "prior_failed_harness", "prior_failed_web"]},
+        "role": {"enum": ["relay_web", "relay_app", "frontier_app_identity", "terminal_web", "terminal_broker", "terminal_harness", "terminal_canonical_worker", "prior_failed_app", "prior_failed_broker", "prior_failed_canonical_worker", "prior_failed_harness", "prior_failed_web"]},
         "provider": {"$ref": "#/$defs/providerChild"},
         "artifact": {"$ref": "#/$defs/artifact"},
         "service": {"enum": ["app", "broker", "canonical-worker", "harness", "web"]},
