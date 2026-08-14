@@ -48,6 +48,37 @@ test('reads the stored org and ignores a stale project list response', async () 
   expect(storage.writes).toEqual([['set', WORKSPACE_ORG_KEY, 'org-new']])
 })
 
+test('adopts the session org and invalidates stale workspace state', async () => {
+  const listing = deferred()
+  const workspace = deferred()
+  const storage = memoryStorage({ [WORKSPACE_ORG_KEY]: 'org-old' })
+  const controller = createWorkspaceController({
+    storage,
+    services: {
+      listProjects: () => listing.promise,
+      openProject: () => workspace.promise,
+    },
+  })
+
+  const loading = controller.loadProjects()
+  const opening = controller.openProject('project-old')
+  expect(controller.adoptOrgId('org-session')).toBe(true)
+  listing.resolve([{ project_id: 'project-old', name: 'Old project' }])
+  workspace.resolve({ project: { project_id: 'project-old', name: 'Old project' } })
+  await Promise.all([loading, opening])
+
+  expect(controller.getSnapshot()).toMatchObject({
+    orgId: 'org-session',
+    projects: [],
+    openProjectId: null,
+    workspace: null,
+  })
+  expect(storage.writes).toEqual([['set', WORKSPACE_ORG_KEY, 'org-session']])
+  expect(controller.adoptOrgId('org-session')).toBe(true)
+  expect(storage.writes).toHaveLength(1)
+  expect(controller.adoptOrgId('  ')).toBe(false)
+})
+
 test('latest open wins and close invalidates a pending hydration', async () => {
   const alpha = deferred()
   const beta = deferred()
@@ -104,6 +135,24 @@ test('create project appends before open and exposes canonical selection', async
     version_id: 'version-1',
     drawing_id: 'drawing-1',
   })
+})
+
+test('replaying an idempotent project response keeps one canonical project', async () => {
+  let replay = 0
+  const controller = createWorkspaceController({
+    storage: memoryStorage({ [WORKSPACE_ORG_KEY]: 'org-1' }),
+    services: {
+      createProject: async () => ({ project_id: 'project-1', name: replay++ ? 'SoundBeam' : 'Initial name' }),
+      openProject: async () => ({ project: { project_id: 'project-1', name: 'SoundBeam' } }),
+    },
+  })
+
+  await controller.createProject('SoundBeam')
+  await controller.createProject('SoundBeam')
+
+  expect(controller.getSnapshot().projects).toEqual([
+    { project_id: 'project-1', name: 'SoundBeam' },
+  ])
 })
 
 test('rehydration keeps the last good workspace when refresh fails', async () => {

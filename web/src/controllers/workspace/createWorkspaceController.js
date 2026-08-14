@@ -156,6 +156,27 @@ export function createWorkspaceController({
     invoke(callbacks.onWorkspaceClosed, { projectId })
   }
 
+  function adoptOrgId(givenOrgId) {
+    const orgId = String(givenOrgId || '').trim()
+    if (!orgId) return false
+    if (state.orgId === orgId) return true
+    invalidateAll()
+    writeStoredOrgId(orgId, storage)
+    publish({
+      orgId,
+      projects: [],
+      projectsError: null,
+      projectsLoading: false,
+      openProjectId: null,
+      workspace: null,
+      canonicalVersionId: null,
+      workspaceLoading: false,
+      orgBusy: false,
+      projectBusy: false,
+    })
+    return true
+  }
+
   async function createOrg(givenName) {
     if (givenName == null) return null
     const name = String(givenName).trim() || 'My workspace'
@@ -199,8 +220,11 @@ export function createWorkspaceController({
       const projectId = projectIdOf(project)
       if (!projectId) throw new Error('The workspace service returned a project without an id.')
       if (!isCurrent('project', request) || state.orgId !== orgId) return null
-      // Preserve App ordering: append the created project before hydrating it.
-      publish({ projects: [...state.projects, project] })
+      // The create endpoint is idempotent, so reconcile a replay by identity.
+      const nextProjects = state.projects.some((item) => projectIdOf(item) === projectId)
+        ? state.projects.map((item) => projectIdOf(item) === projectId ? project : item)
+        : [...state.projects, project]
+      publish({ projects: nextProjects })
       invoke(callbacks.onProjectCreated, project)
 
       const openRequest = nextGeneration('workspace')
@@ -271,6 +295,7 @@ export function createWorkspaceController({
     openProject,
     rehydrate,
     closeProject,
+    adoptOrgId,
     createOrg,
     createProject,
     selectCanonicalVersion,
