@@ -1,0 +1,56 @@
+name: Prove APS blank DWG source contract
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prove-aps-blank-dwg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install changed-path test dependencies
+        run: python -m pip install pytest fastapi httpx pydantic jsonschema
+      - name: Prove dormant broker source contract
+        env:
+          APS_LIVE: "0"
+          LEAF_BLANK_DWG_LIVE_EXECUTION: UNCONFIGURED
+        run: >-
+          python -m pytest -q
+          server/tests/test_broker_blank_dwg.py
+          scripts/test_aps_blank_dwg_workflow.py
+      - name: Record source-only eligibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${LEAF_BLANK_DWG_LIVE_EXECUTION:-UNCONFIGURED}" = UNCONFIGURED
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path("aps-blank-dwg-source-eligibility.json").write_text(
+              json.dumps({
+                  "contract": "leaf.aps-blank-dwg-source-eligibility.v1",
+                  "live_execution": "UNCONFIGURED",
+                  "source_sha": "${{ github.sha }}",
+                  "workflow_run_id": "${{ github.run_id }}",
+              }, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aps-blank-dwg-source-eligibility-${{ github.sha }}
+          path: aps-blank-dwg-source-eligibility.json
+          if-no-files-found: error
