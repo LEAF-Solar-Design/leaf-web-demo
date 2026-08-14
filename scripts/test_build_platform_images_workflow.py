@@ -6410,6 +6410,19 @@ def test_provider_consumer_contract_validator_accepts_real_shape() -> None:
     assert "consumer_contract_b64=" in github_output
     assert "terraform_head_sha=" + "a" * 40 in github_output
     assert "deploy_workflow_blob=" + "c" * 40 in github_output
+    encoded = next(
+        line.split("=", 1)[1]
+        for line in github_output.splitlines()
+        if line.startswith("consumer_contract_b64=")
+    )
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", encoded)
+    assert "=" not in encoded
+    envelope = json.loads(
+        base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    )
+    assert envelope["schema"] == (
+        "leaf.platform-staging-consumer-contract-dispatch.v1"
+    )
 
 
 def test_provider_consumer_contract_validator_fails_closed_on_rebinding() -> None:

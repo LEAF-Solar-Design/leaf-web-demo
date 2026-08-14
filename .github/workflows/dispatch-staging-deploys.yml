@@ -1132,7 +1132,7 @@ jobs:
               "schema": DISPATCH_SCHEMA,
           }
           dispatch["envelope_sha256"] = digest(dispatch)
-          encoded = base64.b64encode(canonical(dispatch)).decode("ascii")
+          encoded = base64.urlsafe_b64encode(canonical(dispatch)).rstrip(b"=").decode("ascii")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
               stream.write(f"consumer_contract_b64={encoded}\n")
               stream.write(f"terraform_head_sha={head}\n")
