@@ -8,6 +8,8 @@ dispatch, selector activation, or live mutation authority.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -311,22 +313,33 @@ def _oracle_decision(value: Any) -> dict[str, Any]:
     item = _exact(
         value,
         {
-            "raw_provider_bytes_sha256",
-            "recomputed_raw_sha256",
+            "raw_provider_bytes_b64",
+            "declared_raw_provider_bytes_sha256",
             "shared_predicate_sha256",
             "binding_recomputed_from_raw",
         },
         "provider_oracle_invalid",
     )
-    raw = _digest(item["raw_provider_bytes_sha256"], "provider_oracle_invalid")
-    recomputed = _digest(item["recomputed_raw_sha256"], "provider_oracle_invalid")
+    encoded = item["raw_provider_bytes_b64"]
+    if not isinstance(encoded, str) or not encoded:
+        raise ContractError("provider_raw_bytes_invalid")
+    try:
+        raw_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ContractError("provider_raw_bytes_invalid") from exc
+    if base64.b64encode(raw_bytes).decode("ascii") != encoded:
+        raise ContractError("provider_raw_bytes_noncanonical")
+    declared = _digest(
+        item["declared_raw_provider_bytes_sha256"], "provider_oracle_invalid"
+    )
+    recomputed = f"sha256:{hashlib.sha256(raw_bytes).hexdigest()}"
     shared = _digest(item["shared_predicate_sha256"], "provider_oracle_invalid")
     bound = _boolean(item["binding_recomputed_from_raw"], "provider_oracle_invalid")
-    exact = hmac.compare_digest(raw, recomputed) and bound
+    exact = hmac.compare_digest(declared, recomputed) and bound
     return {
         "decision": "accept" if exact else "reject",
         "code": "raw_provider_recomputed" if exact else "raw_provider_oracle_mismatch",
-        "shared_predicate_agreement": hmac.compare_digest(shared, recomputed),
+        "shared_predicate_agreement": hmac.compare_digest(shared, declared),
     }
 
 
@@ -341,7 +354,8 @@ def _marker_decision(value: Any) -> dict[str, Any]:
             "full_audit_open_count",
             "full_audit_open_set_sha256",
             "artifact_without_ledger_count",
-            "scheduled_full_audit_fresh",
+            "last_completed_full_audit_age_seconds",
+            "maximum_full_audit_age_seconds",
         },
         "marker_proof_invalid",
     )
@@ -397,8 +411,11 @@ def _marker_decision(value: Any) -> dict[str, Any]:
     artifact_gap = _integer(
         item["artifact_without_ledger_count"], "marker_proof_invalid"
     )
-    audit_fresh = _boolean(
-        item["scheduled_full_audit_fresh"], "marker_proof_invalid"
+    audit_age = _integer(
+        item["last_completed_full_audit_age_seconds"], "marker_proof_invalid"
+    )
+    maximum_audit_age = _integer(
+        item["maximum_full_audit_age_seconds"], "marker_proof_invalid", 1
     )
     failures: list[str] = []
     if delta_body["checkpoint_sha256"] != checkpoint:
@@ -413,7 +430,7 @@ def _marker_decision(value: Any) -> dict[str, Any]:
         failures.append("open_marker_present")
     if artifact_gap != 0:
         failures.append("artifact_without_ledger")
-    if not audit_fresh:
+    if audit_age > maximum_audit_age:
         failures.append("scheduled_full_audit_stale")
     return {
         "decision": "accept" if not failures else "reject",
