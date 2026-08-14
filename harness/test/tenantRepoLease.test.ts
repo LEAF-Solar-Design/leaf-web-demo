@@ -33,7 +33,6 @@ const PROJECT_LEASE_KEY = [
 const testUrl =
   process.env.PG_REPO_LEASE_TEST_URL ??
   process.env.PG_SESSION_STORE_TEST_URL;
-const describeWithPostgres = testUrl ? describe : describe.skip;
 
 describe("tenant repo lease production gate", () => {
   it("returns the exact witness and fence from one project lease acquisition", async () => {
@@ -249,11 +248,13 @@ describe("tenant repo lease production gate", () => {
   });
 });
 
-describeWithPostgres("PostgreSQL tenant repo lease", () => {
+if (testUrl) {
+  const postgresUrl = testUrl;
+  describe("PostgreSQL tenant repo lease", () => {
   const suffix = randomUUID().replaceAll("-", "");
   const tableName = `harness_repo_lease_${suffix}`;
   const table = `"${tableName}"`;
-  const pool = new Pool({ connectionString: testUrl, max: 8 });
+  const pool = new Pool({ connectionString: postgresUrl, max: 8 });
   const first = new PgTenantRepoLeaseCoordinator({
     pool,
     tableName,
@@ -333,7 +334,7 @@ describeWithPostgres("PostgreSQL tenant repo lease", () => {
         {
           env: {
             ...process.env,
-            TEST_DATABASE_URL: testUrl,
+            TEST_DATABASE_URL: postgresUrl,
             TEST_LEASE_TABLE: tableName,
             TEST_TENANT_ID: "tenant-hard-death",
             TEST_DIRTY_PATH: join(repoDir, "partial.txt"),
@@ -464,4 +465,5 @@ describeWithPostgres("PostgreSQL tenant repo lease", () => {
     });
     expect(mutationRuns).toBe(0);
   });
-});
+  });
+}
