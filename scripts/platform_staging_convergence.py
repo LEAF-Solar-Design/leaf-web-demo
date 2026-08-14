@@ -73,6 +73,8 @@ FAILED_STAGE_ALLOWLIST = {
     SERVICE_RECEIPT_SCHEMA: {
         ("Deploy", "Resolve inputs"): "input_resolution",
         ("deploy", "Resolve inputs"): "input_resolution",
+        ("Deploy", "Resolve reviewed live deployment identity"): "input_resolution",
+        ("deploy", "Resolve reviewed live deployment identity"): "input_resolution",
         ("Deploy", "Promote one ECS service and verify task health"): "service_promotion",
         ("deploy", "Promote one ECS service and verify task health"): "service_promotion",
     }
