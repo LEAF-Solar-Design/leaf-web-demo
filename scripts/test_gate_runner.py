@@ -43,10 +43,10 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     suites = {suite.id: suite for suite in g.build_suites()}
 
     inventory = suites["server-postgres-authority-inventory"]
-    # 8 since the session_annex selector dependency was added (was 7). Mirrors
+    # 9 after the annotation authority record was added (was 8). Mirrors
     # the floor in run-all-gates.py; BOTH must move together when the contract
     # file gains a test, and only alongside a re-measured run-all-gates.py floor.
-    assert inventory.expected == 8
+    assert inventory.expected == 9
     assert "tests/test_postgres_authority_inventory_contract.py" in inventory.argv
 
     annex = suites["server-session-annex-store"]
@@ -60,12 +60,12 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_session_annex_store.py" in annex.argv
 
     static = suites["platform-static"]
-    # 165 collected across the 9 *_static.py files minus the 2 DATABASE_URL-
-    # gated skips = 163 executed on a no-DB host (measured 2026-08-14). Mirrors
+    # 174 collected across the 10 *_static.py files minus the 2 DATABASE_URL-
+    # gated skips = 172 executed on a no-DB host (measured 2026-08-14). Mirrors
     # the floor in run-all-gates.py; BOTH must move together when a *_static.py
     # file gains a test (#432's 96->102 history), and only alongside a
     # re-measured run-all-gates.py floor.
-    assert static.expected == 163
+    assert static.expected == 172
     assert any(
         str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
         for arg in static.argv
