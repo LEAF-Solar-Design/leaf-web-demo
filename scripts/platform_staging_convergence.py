@@ -579,9 +579,10 @@ def _relay_children(
     pairs = re.findall(r"Watching (web|app) deploy run ([1-9][0-9]+)\.", text)
     children: dict[str, int] = {}
     for service, run_id in pairs:
-        if service in children:
+        child_run_id = int(run_id)
+        if service in children and children[service] != child_run_id:
             raise ContractError("RELAY_CHILD_CARDINALITY")
-        children[service] = int(run_id)
+        children[service] = child_run_id
     valid_services = {"web", "app"}
     if (
         not children
