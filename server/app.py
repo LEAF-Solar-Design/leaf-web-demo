@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 import dependency_health
 import deps
 import ios_ship_provider as ios_ship_provider_client
+import ios_ship_callback_listener
 import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
@@ -92,6 +93,7 @@ app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 
 _customization_worker_stop: threading.Event | None = None
 _customization_worker_thread: threading.Thread | None = None
+_ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = None
 
 
 @app.on_event("startup")
@@ -103,6 +105,27 @@ def initialize_ios_ship_provider() -> None:
     ios_ship.set_dispatch(adapter.dispatch if adapter is not None else None)
     ios_ship.set_provider_readiness(adapter.readiness if adapter is not None else None)
     ios_ship_provider_router.set_config(config)
+
+
+@app.on_event("startup")
+def start_ios_ship_callback_tls() -> None:
+    """Serve only provider callbacks on the private TLS listener when configured."""
+    config = ios_ship_callback_listener.CallbackTlsConfig.from_environment()
+    if config is None:
+        return
+    callback_app = FastAPI(title="Leaf iOS ship private callbacks")
+    callback_app.include_router(ios_ship_provider_router.router)
+    global _ios_callback_tls_server
+    _ios_callback_tls_server = ios_ship_callback_listener.CallbackTlsServer(callback_app, config)
+    _ios_callback_tls_server.start()
+
+
+@app.on_event("shutdown")
+def stop_ios_ship_callback_tls() -> None:
+    global _ios_callback_tls_server
+    if _ios_callback_tls_server is not None:
+        _ios_callback_tls_server.stop()
+    _ios_callback_tls_server = None
 
 
 @app.on_event("startup")
