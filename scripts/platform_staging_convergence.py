@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any, Protocol
 import unicodedata
 import urllib.error
@@ -111,6 +112,8 @@ MAX_RECEIPT_BYTES = 262144
 MAX_PROVIDER_JSON_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
+MAX_PROVIDER_READ_ATTEMPTS = 3
+MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -167,15 +170,25 @@ class GitHubProvider:
                 "User-Agent": "leaf-platform-convergence-finalizer/1.0",
             },
         )
-        try:
-            opener = urllib.request.build_opener(_ArtifactRedirectHandler())
-            with opener.open(request, timeout=45) as response:
-                raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
-                if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
-                    raise ContractError("PROVIDER_BODY_TOO_LARGE")
-                return raw
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ContractError("PROVIDER_READ_FAILED") from exc
+        opener = urllib.request.build_opener(_ArtifactRedirectHandler())
+        for attempt in range(1, MAX_PROVIDER_READ_ATTEMPTS + 1):
+            try:
+                with opener.open(request, timeout=45) as response:
+                    raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
+                    if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
+                        raise ContractError("PROVIDER_BODY_TOO_LARGE")
+                    return raw
+            except urllib.error.HTTPError as exc:
+                retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
+                transient = exc.code == 429 or 500 <= exc.code <= 599 or (exc.code == 403 and retry_after is not None)
+                if not transient or attempt == MAX_PROVIDER_READ_ATTEMPTS:
+                    raise ContractError("PROVIDER_READ_FAILED") from exc
+                time.sleep(retry_after if retry_after is not None else 2 ** (attempt - 1))
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt == MAX_PROVIDER_READ_ATTEMPTS:
+                    raise ContractError("PROVIDER_READ_FAILED") from exc
+                time.sleep(2 ** (attempt - 1))
+        raise AssertionError("provider retry loop must return or raise")
 
     def json(self, repository: str, endpoint: str) -> Any:
         try:
@@ -198,6 +211,12 @@ class _ArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
         if redirected is not None and urllib.parse.urlparse(new_url).hostname != urllib.parse.urlparse(request.full_url).hostname:
             redirected.remove_header("Authorization")
         return redirected
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if value is None or not value.isascii() or not value.isdecimal():
+        return None
+    return min(int(value), MAX_PROVIDER_RETRY_DELAY_SECONDS)
 
 
 def _load_json(raw: bytes) -> Any:

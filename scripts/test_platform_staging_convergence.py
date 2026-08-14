@@ -67,6 +67,69 @@ class ArtifactRedirectTests(unittest.TestCase):
         self.assertIsNone(redirected.get_header("Authorization"))
 
 
+class GitHubProviderRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.provider = subject.GitHubProvider("app-token", "terraform-token")
+        self.response = mock.MagicMock()
+        self.response.__enter__.return_value.read.return_value = b"{}"
+
+    @staticmethod
+    def http_error(code: int, retry_after: str | None = None) -> subject.urllib.error.HTTPError:
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return subject.urllib.error.HTTPError("https://provider.invalid", code, "provider failure", headers, None)
+
+    def request_with(self, *results: object) -> tuple[bytes, mock.Mock, mock.Mock]:
+        opener = mock.Mock()
+        opener.open.side_effect = list(results)
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+        ):
+            value = self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+        return value, opener, sleep
+
+    def test_transient_network_failure_retries_with_bounded_backoff(self) -> None:
+        value, opener, sleep = self.request_with(subject.urllib.error.URLError("temporary"), self.response)
+
+        self.assertEqual(value, b"{}")
+        self.assertEqual(opener.open.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_transient_failure_exhaustion_is_sanitized_and_fail_closed(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = [subject.urllib.error.URLError("temporary")] * subject.MAX_PROVIDER_READ_ATTEMPTS
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+            self.assertRaisesRegex(subject.ContractError, "^PROVIDER_READ_FAILED$"),
+        ):
+            self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+
+        self.assertEqual(opener.open.call_count, subject.MAX_PROVIDER_READ_ATTEMPTS)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_deterministic_http_error_does_not_retry(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = self.http_error(404)
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+            self.assertRaisesRegex(subject.ContractError, "^PROVIDER_READ_FAILED$"),
+        ):
+            self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+
+        self.assertEqual(opener.open.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retry_after_controls_throttle_delay_with_a_finite_cap(self) -> None:
+        for code, header, expected in ((429, "7", 7), (403, "999", subject.MAX_PROVIDER_RETRY_DELAY_SECONDS)):
+            with self.subTest(code=code, header=header):
+                value, opener, sleep = self.request_with(self.http_error(code, header), self.response)
+                self.assertEqual(value, b"{}")
+                self.assertEqual(opener.open.call_count, 2)
+                sleep.assert_called_once_with(expected)
+
+
 def canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
