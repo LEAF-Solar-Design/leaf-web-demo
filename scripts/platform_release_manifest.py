@@ -422,6 +422,66 @@ def build_v3_manifest(
     return manifest
 
 
+def re_envelope_speculative_v3_manifest(
+    manifest: dict[str, Any],
+    *,
+    speculative_run_id: str,
+    speculative_run_attempt: str,
+    expected_candidate_tree: str,
+    expected_workflow_blob: str,
+    release_source_revision: str,
+    release_source_tree: str,
+    build_run_id: str,
+    build_run_attempt: str,
+) -> dict[str, Any]:
+    """Bind one speculative v3 producer artifact to its merged main release.
+
+    The service entries stay producer-owned. Only the outer release and
+    provider-run identity changes, so an adopter cannot restamp an image as if
+    the main run built it.
+    """
+
+    validate_v3_manifest(manifest)
+    if not _RUN_ID.fullmatch(speculative_run_id) or not _RUN_ATTEMPT.fullmatch(
+        speculative_run_attempt
+    ):
+        raise ContractError("speculative v3 provider run identity is invalid")
+    if not _TREE.fullmatch(expected_candidate_tree):
+        raise ContractError("speculative v3 candidate tree is invalid")
+    if not _SHA.fullmatch(expected_workflow_blob):
+        raise ContractError("speculative v3 workflow blob is invalid")
+    if release_source_tree != expected_candidate_tree:
+        raise ContractError("speculative v3 candidate tree does not equal main tree")
+    if manifest["build_run_id"] != int(speculative_run_id) or manifest[
+        "build_run_attempt"
+    ] != int(speculative_run_attempt):
+        raise ContractError("speculative v3 manifest is not bound to its provider run")
+    candidate_source = manifest["release_source_revision"]
+    candidate_tree = manifest["release_source_tree"]
+    if candidate_tree != expected_candidate_tree:
+        raise ContractError("speculative v3 candidate tree does not match main")
+    for name in SERVICES:
+        service = manifest["services"][name]
+        if (
+            service["producer_source_revision"] != candidate_source
+            or service["producer_source_tree"] != candidate_tree
+            or service["producer_run_id"] != int(speculative_run_id)
+            or service["producer_run_attempt"] != int(speculative_run_attempt)
+            or service["producer_workflow_blob"] != expected_workflow_blob
+            or service["build_disposition"] != "built"
+        ):
+            raise ContractError(
+                f"{name} speculative v3 evidence is rebound or not producer-owned"
+            )
+    return build_v3_manifest(
+        release_source_revision,
+        release_source_tree,
+        build_run_id,
+        build_run_attempt,
+        manifest["services"],
+    )
+
+
 def validate_v3_manifest(manifest: dict[str, Any]) -> None:
     _exact_keys(
         manifest,
@@ -1214,6 +1274,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     generate_v3.add_argument("--build-run-attempt", required=True)
     generate_v3.add_argument("--service-entry", action="append", default=[])
     generate_v3.add_argument("--output", type=Path, required=True)
+    re_envelope_v3 = commands.add_parser("re-envelope-speculative-v3")
+    re_envelope_v3.add_argument("--manifest", type=Path, required=True)
+    re_envelope_v3.add_argument("--speculative-run-id", required=True)
+    re_envelope_v3.add_argument("--speculative-run-attempt", required=True)
+    re_envelope_v3.add_argument("--expect-candidate-tree", required=True)
+    re_envelope_v3.add_argument("--expect-workflow-blob", required=True)
+    re_envelope_v3.add_argument("--release-source-revision", required=True)
+    re_envelope_v3.add_argument("--release-source-tree", required=True)
+    re_envelope_v3.add_argument("--build-run-id", required=True)
+    re_envelope_v3.add_argument("--build-run-attempt", required=True)
+    re_envelope_v3.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "digest-web-dist":
@@ -1252,6 +1323,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.build_run_id,
                 args.build_run_attempt,
                 _service_entries(args.service_entry),
+            )
+        elif args.command == "re-envelope-speculative-v3":
+            value = re_envelope_speculative_v3_manifest(
+                load_json(args.manifest),
+                speculative_run_id=args.speculative_run_id,
+                speculative_run_attempt=args.speculative_run_attempt,
+                expected_candidate_tree=args.expect_candidate_tree,
+                expected_workflow_blob=args.expect_workflow_blob,
+                release_source_revision=args.release_source_revision,
+                release_source_tree=args.release_source_tree,
+                build_run_id=args.build_run_id,
+                build_run_attempt=args.build_run_attempt,
             )
         elif args.command == "verify-workflow-run":
             value = verify_workflow_run(

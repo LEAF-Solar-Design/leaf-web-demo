@@ -16,6 +16,7 @@ from platform_release_manifest import (
     build_surface_predicate,
     build_speculative_manifest,
     build_v3_manifest,
+    re_envelope_speculative_v3_manifest,
     validate_manifest,
     validate_surface_predicate,
     validate_speculative_manifest,
@@ -187,6 +188,19 @@ def _v3_entry(name: str) -> dict:
     if name == "web":
         entry["artifact_sha256"] = WEB_HASH
     return entry
+
+
+def _speculative_v3_manifest() -> dict:
+    services = {name: _v3_entry(name) for name in SERVICES}
+    for service in services.values():
+        service["build_disposition"] = "built"
+    return build_v3_manifest(
+        "a" * 40,
+        "e" * 40,
+        "31415926535",
+        "1",
+        services,
+    )
 
 
 def test_cli_generates_exact_five_service_manifest_with_composite_provenance(
@@ -687,6 +701,165 @@ def test_v3_manifest_preserves_mixed_component_producer_identity():
         "solver_source_revision": SOLVER_REVISION,
         "solver_source_sha256": SOLVER_HASH,
     }
+
+
+def test_speculative_v3_re_envelope_preserves_producer_owned_entries():
+    speculative = _speculative_v3_manifest()
+
+    main = re_envelope_speculative_v3_manifest(
+        speculative,
+        speculative_run_id="31415926535",
+        speculative_run_attempt="1",
+        expected_candidate_tree="e" * 40,
+        expected_workflow_blob="f" * 40,
+        release_source_revision="1" * 40,
+        release_source_tree="e" * 40,
+        build_run_id="27182818284",
+        build_run_attempt="2",
+    )
+
+    assert main is not speculative
+    assert main["release_source_revision"] == "1" * 40
+    assert main["release_source_tree"] == speculative["release_source_tree"]
+    assert main["build_run_id"] == 27182818284
+    assert main["build_run_attempt"] == 2
+    assert main["services"] == speculative["services"]
+    assert main != speculative
+
+
+def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
+    script = str(Path(__file__).with_name("platform_release_manifest.py"))
+    speculative_path = tmp_path / "spec-v3-supply-set.json"
+    output = tmp_path / "main-v3-supply-set.json"
+    speculative_path.write_text(
+        json.dumps(_speculative_v3_manifest()), encoding="utf-8", newline="\n"
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            script,
+            "re-envelope-speculative-v3",
+            "--manifest",
+            str(speculative_path),
+            "--speculative-run-id",
+            "31415926535",
+            "--speculative-run-attempt",
+            "1",
+            "--expect-candidate-tree",
+            "e" * 40,
+            "--expect-workflow-blob",
+            "f" * 40,
+            "--release-source-revision",
+            "1" * 40,
+            "--release-source-tree",
+            "e" * 40,
+            "--build-run-id",
+            "27182818284",
+            "--build-run-attempt",
+            "2",
+            "--output",
+            str(output),
+        ],
+        check=True,
+    )
+
+    value = json.loads(output.read_text(encoding="utf-8"))
+    assert value["schema"] == "leaf.staging-supply-set.v3"
+    assert value["release_source_revision"] == "1" * 40
+    assert value["build_run_id"] == 27182818284
+    assert value["services"] == _speculative_v3_manifest()["services"]
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate", "overrides"),
+    [
+        (
+            "speculative v2",
+            lambda value: value.update(schema="leaf.staging-supply-set.v2"),
+            {},
+        ),
+        (
+            "provider run",
+            lambda value: value.update(build_run_id=31415926536),
+            {},
+        ),
+        (
+            "provider attempt",
+            lambda value: value.update(build_run_attempt=2),
+            {},
+        ),
+        (
+            "service source",
+            lambda value: value["services"]["app"].update(
+                producer_source_revision="2" * 40
+            ),
+            {},
+        ),
+        (
+            "service tree",
+            lambda value: value["services"]["broker"].update(
+                producer_source_tree="2" * 40
+            ),
+            {},
+        ),
+        (
+            "service run",
+            lambda value: value["services"]["harness"].update(
+                producer_run_id=31415926536
+            ),
+            {},
+        ),
+        (
+            "service attempt",
+            lambda value: value["services"]["web"].update(
+                producer_run_attempt=2
+            ),
+            {},
+        ),
+        (
+            "service disposition",
+            lambda value: value["services"]["app"].update(
+                build_disposition="reused"
+            ),
+            {},
+        ),
+        (
+            "candidate tree",
+            lambda value: None,
+            {"expected_candidate_tree": "2" * 40},
+        ),
+        (
+            "workflow blob",
+            lambda value: None,
+            {"expected_workflow_blob": "2" * 40},
+        ),
+        (
+            "main tree",
+            lambda value: None,
+            {"release_source_tree": "2" * 40},
+        ),
+    ],
+)
+def test_speculative_v3_re_envelope_rejects_rebound_lineage(
+    label, mutate, overrides
+):
+    speculative = _speculative_v3_manifest()
+    mutate(speculative)
+    arguments = {
+        "speculative_run_id": "31415926535",
+        "speculative_run_attempt": "1",
+        "expected_candidate_tree": "e" * 40,
+        "expected_workflow_blob": "f" * 40,
+        "release_source_revision": "1" * 40,
+        "release_source_tree": "e" * 40,
+        "build_run_id": "27182818284",
+        "build_run_attempt": "2",
+    }
+    arguments.update(overrides)
+
+    with pytest.raises(ContractError):
+        re_envelope_speculative_v3_manifest(speculative, **arguments)
 
 
 @pytest.mark.parametrize(

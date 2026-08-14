@@ -1758,7 +1758,7 @@ def main() -> None:
     assert text.index("re-verification failed after aliasing") < adopt_stamp
     stamp_block = text[
         text.index('if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then'):
-        text.index('spec_run_id="$(jq -r')
+        text.index('spec_run_id="$candidate_run"')
     ]
     assert 'src_tag="src-$SOURCE_SHA"' in stamp_block
     assert "exit" not in stamp_block, (
@@ -2022,6 +2022,20 @@ def main() -> None:
         "the speculative lane must not export layer cache"
     )
     assert "cache-to" not in _keys_in(speculate_builds[0])
+    assert "Describe the exact speculative surface" in speculate_block
+    assert "platform_release_manifest.py surface-fingerprint" in speculate_block
+    assert 'echo "lookup_tag=surface-v1-$fingerprint"' in speculate_block
+    assert "Materialize one producer-owned speculative v3 service entry" in (
+        speculate_block
+    )
+    assert "platform_release_manifest.py surface-predicate" in speculate_block
+    assert 'WORKFLOW_BLOB: ${{ needs.prepare.outputs.workflow_blob }}' in (
+        speculate_block
+    )
+    assert 'build_disposition: "built"' in speculate_block
+    assert "Upload one producer-owned speculative v3 service entry" in (
+        speculate_block
+    )
     # The push step and the solver steps are conditional on the
     # existence-skip: a tree already pushed is adopted as-is and the solver
     # key is never fetched for it. Pinned by parsed value, as elsewhere.
@@ -2055,9 +2069,9 @@ def main() -> None:
     assert speculate_block.count("Require the same merge preview prepare resolved") == 1
     assert manifest_block.count("Require the same merge preview prepare resolved") == 1
 
-    # The partial-push invariant over tree identity: no artifact without all
-    # five digests, and the mint is gated on the SAME step output the upload
-    # is. if-no-files-found stays error so an empty upload cannot pass.
+    # The partial-push invariant over tree identity: no provider-bound v3
+    # artifact without all five live digests and all five current-run service
+    # entries. The mint and upload use separate, monotonic completion outputs.
     manifest_guard = (
         "    if: >-\n"
         "      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&\n"
@@ -2069,32 +2083,42 @@ def main() -> None:
     assert "the speculative set is incomplete and no manifest will be minted" in (
         manifest_block
     )
-    assert "generate-speculative" in manifest_block
+    assert "generate-v3" in manifest_block
+    assert "generate-speculative" not in manifest_block
+    assert "spec-surface-result-*" in manifest_block
+    assert ".producer_source_revision == $source" in manifest_block
+    assert ".producer_source_tree == $tree" in manifest_block
+    assert ".producer_run_id == $run" in manifest_block
+    assert ".producer_run_attempt == $attempt" in manifest_block
+    assert '.build_disposition == "built"' in manifest_block
     mint_or_upload = [
         s
         for s in re.split(r"\n      - ", manifest_block)
-        if s.startswith("name: Mint the tree-bound speculative supply set")
+        if s.startswith("name: Mint the provider-bound speculative v3 supply set")
         or "uses: actions/upload-artifact" in s
     ]
     assert len(mint_or_upload) == 2
-    for step in mint_or_upload:
-        assert [
-            _value_of(l) for l in step.splitlines() if _key_of(l) == "if"
-        ] == ["steps.digests.outputs.complete == 'true'"]
+    assert [
+        _value_of(l) for l in mint_or_upload[0].splitlines() if _key_of(l) == "if"
+    ] == ["steps.digests.outputs.complete == 'true'"]
+    assert [
+        _value_of(l) for l in mint_or_upload[1].splitlines() if _key_of(l) == "if"
+    ] == ["steps.evidence.outputs.complete == 'true'"]
     assert (
-        "name: spec-supply-set-${{ needs.prepare.outputs.source_tree }}"
+        "name: spec-v3-supply-set-${{ needs.prepare.outputs.source_tree }}"
         in manifest_block
     )
+    assert "path: ${{ runner.temp }}/spec-v3-supply-set.json" in manifest_block
     assert "if-no-files-found: error" in manifest_block
 
     # adopt: absorbed like the gate-reuse probe (a defect costs the
     # optimization, never the push run), reads artifacts with an explicit
     # read-only Actions grant, and follows the probe's provenance
     # discipline: same-repo origin from workflow_run metadata, this
-    # workflow's bare path, a main-ref workflow_dispatch run. Content
-    # verifies via verify-speculative BEFORE any tag is written, only the
-    # release prod- namespace may be aliased, and every alias re-verifies
-    # before adopted=true is declared.
+    # workflow's bare path, a main-ref workflow_dispatch run. The provider ZIP
+    # digest and closed archive are verified, then the speculative v3 is
+    # re-enveloped under this main run BEFORE any tag is written. Only the
+    # release prod- namespace may be aliased, and every alias re-verifies.
     adopt_guards = [
         _value_of(l)
         for l in adopt_block.splitlines()
@@ -2125,16 +2149,32 @@ def main() -> None:
     assert "PROVEN_TREE: ${{ needs.test.outputs.proven_tree }}" in adopt_block
     assert ".workflow_run.head_repository_id == $repo_id" in adopt_block
     assert 'path="${path%%@*}"' in adopt_block
-    assert '.github/workflows/build-platform-images.yml" ]] || continue' in adopt_block
-    assert '"workflow_dispatch" ]] || continue' in adopt_block
-    assert '"main" ]] || continue' in adopt_block
-    assert "verify-speculative" in adopt_block
-    assert "--expect-tree" in adopt_block
-    # The spec tag comes from the verified manifest (tree + baking preview,
-    # sol-critic round 1 finding 1), never re-derived from the tree alone.
-    assert "spec_tag=\"$(jq -r '.spec_tag' \"$verified\")\"" in adopt_block
+    assert (
+        '[[ "$path" == ".github/workflows/build-platform-images.yml" ]] '
+        '|| finish false "speculative provider workflow is foreign"'
+    ) in adopt_block
+    assert (
+        '[[ "$(jq -r \'.event // empty\' <<<"$run_record")" == '
+        '"workflow_dispatch" ]]'
+    ) in adopt_block
+    assert (
+        '[[ "$(jq -r \'.head_branch // empty\' <<<"$run_record")" == "main" ]]'
+    ) in adopt_block
+    assert "re-envelope-speculative-v3" in adopt_block
+    assert "verify-speculative" not in adopt_block
+    assert "--expect-candidate-tree \"$tree\"" in adopt_block
+    assert "--expect-workflow-blob \"$candidate_workflow_blob\"" in adopt_block
+    assert '--release-source-revision "$SOURCE_SHA"' in adopt_block
+    assert '--build-run-id "$GITHUB_RUN_ID"' in adopt_block
+    assert 'artifact_name="spec-v3-supply-set-$tree"' in adopt_block
+    assert 'actual_archive_digest="sha256:$(sha256sum' in adopt_block
+    assert '[ "${#archive_paths[@]}" = "1" ]' in adopt_block
+    assert 'candidate_source="$(jq -r' in adopt_block
+    # The spec tag binds tree plus the speculative producer source carried by
+    # the independently verified v3 service entries.
+    assert 'spec_tag="spec-$tree-${candidate_source:0:12}"' in adopt_block
     assert "spec-[0-9a-f]{40}-[0-9a-f]{12}" in adopt_block
-    assert adopt_block.index("verify-speculative") < adopt_block.index(
+    assert adopt_block.index("re-envelope-speculative-v3") < adopt_block.index(
         "aws ecr put-image"
     ), "no tag may be written before the manifest verifies"
     # Exactly two writers: the release-tag alias loop and the post-verify app
@@ -2410,7 +2450,8 @@ def main() -> None:
         assert "continue-on-error" not in step, step
 
     # The full-build verifier consumes matrix-owned v3 entries and the exact
-    # web artifact. The dormant speculative adoption path remains isolated.
+    # web artifact. The adopted path uses the main-run v3 envelope that the
+    # decide step re-materialized from the speculative producer evidence.
     verify_steps = wf_jobs["verify"]["steps"]
 
     def _sole_named(steps, name):
@@ -2426,21 +2467,17 @@ def main() -> None:
     assert adopt_web.get("id") == "web-artifact"
     adopt_write = _sole_named(adopt_steps, write_step_name)
     verify_write = _sole_named(verify_steps, write_step_name)
-    assert verify_write["env"] == {
-        "ADOPTED": "${{ needs.adopt.outputs.adopted }}",
-        "ADOPTED_BUILT_FROM": "${{ needs.adopt.outputs.built_from }}",
-        "ADOPTED_PR_NUMBER": "${{ needs.adopt.outputs.pr_number }}",
-        "ADOPTED_SPEC_RUN_ID": "${{ needs.adopt.outputs.spec_run_id }}",
-    }
-    assert adopt_write["env"] == {
-        "ADOPTED": "${{ steps.decide.outputs.adopted }}",
-        "ADOPTED_BUILT_FROM": "${{ steps.decide.outputs.built_from }}",
-        "ADOPTED_PR_NUMBER": "${{ steps.decide.outputs.pr_number }}",
-        "ADOPTED_SPEC_RUN_ID": "${{ steps.decide.outputs.spec_run_id }}",
-    }
+    assert verify_write.get("env") is None
+    assert adopt_write.get("env") is None
     assert "platform_release_manifest.py generate-v3" in verify_write["run"]
     assert "platform_release_manifest.py generate \\" not in verify_write["run"]
     assert "surface-results" in verify_write["run"]
+    assert "spec-candidate/main-v3-supply-set.json" in adopt_write["run"]
+    assert "platform_release_manifest.py generate-v3" not in adopt_write["run"]
+    assert ".services.web.artifact_sha256" in adopt_write["run"]
+    assert "${{ steps.web-artifact.outputs.sha256 }}" in adopt_write["run"]
+    assert "rebuilt web artifact does not match" in adopt_write["run"]
+    assert "cp spec-candidate/main-v3-supply-set.json" in adopt_write["run"]
     # Adopt keeps its legacy tag aliases while the full-build verifier binds
     # immutable digests from the five v3 service entries.
     assert wf_jobs["adopt"]["env"]["TAG"] == wf_jobs["verify"]["env"]["TAG"]
@@ -3590,7 +3627,7 @@ def check_adopt_src_stamp(decide_run: str) -> None:
     assert reverify_at < stamp_at, (
         "the stamp must follow the release-alias re-verify loop")
     start = text.index(guard)
-    end = text.index('spec_run_id="$(jq -r', start)
+    end = text.index('spec_run_id="$candidate_run"', start)
     assert start < stamp_at < end, "stamp block bounds"
     block = text[start:end]
     for banned in ("exit", "finish ", "COMMITTED="):
