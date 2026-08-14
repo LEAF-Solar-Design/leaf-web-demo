@@ -43,6 +43,30 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    # P7 drawing annotation authority (0041). Immutable Git objects hold the
+    # content; these rows own the exact effective head and its decision trail.
+    "annotation_targets": {
+        "tenant_id", "org_id", "project_id", "drawing_id", "version",
+        "repository_id", "commit_sha", "tree_sha", "source_receipt_digest",
+        "updated_by_binding_id",
+    },
+    "annotation_batches": {
+        "batch_id", "revision", "tenant_id", "org_id", "project_id",
+        "drawing_id", "session_id", "kind", "retry_of_batch_id",
+        "reverses_batch_id", "base_version", "base_commit", "base_tree",
+        "preview_commit", "preview_tree", "reverses_commit", "reverses_tree",
+        "repository_id", "source_receipt_digest", "payload_digest", "payload_count",
+        "request_key_digest", "request_fingerprint", "state",
+        "created_by_binding_id", "lease_expires_at", "decision_key_digest",
+        "applied_version", "superseded_at",
+    },
+    "annotation_audit": {
+        "audit_id", "batch_id", "batch_revision", "tenant_id", "org_id", "project_id",
+        "drawing_id", "from_state", "to_state", "actor_binding_id",
+        "decision_key_digest", "source_receipt_digest", "payload_digest", "payload_count",
+        "before_version", "after_version", "before_commit", "before_tree",
+        "after_commit", "after_tree",
+    },
     # T1 runtime overlay (0028). Colour/copy tokens applied per tenant without
     # a deploy. Declared here because the readiness proof globs the migrations
     # directory: a CREATE TABLE with no contract fails the gate, which is the
@@ -528,6 +552,55 @@ _REQUIRED_TRIGGERS = {
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "annotations": {
+        "annotation_targets_pkey": _catalog_contract(
+            "annotation_targets",
+            "PRIMARY KEY (tenant_id, org_id, project_id, drawing_id)"),
+        "annotation_targets_tenant_org_match": _catalog_contract(
+            "annotation_targets", "CHECK", "tenant_id = org_id"),
+        "annotation_targets_project_fk": _catalog_contract(
+            "annotation_targets", "FOREIGN KEY (org_id, project_id)",
+            "REFERENCES projects(org_id, project_id)", "ON DELETE CASCADE"),
+        "annotation_targets_drawing_fk": _catalog_contract(
+            "annotation_targets", "FOREIGN KEY (drawing_id, project_id, org_id)",
+            "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)",
+            "ON DELETE CASCADE"),
+        "annotation_batches_pkey": _catalog_contract(
+            "annotation_batches", "PRIMARY KEY (batch_id, revision)"),
+        "annotation_batches_tenant_org_match": _catalog_contract(
+            "annotation_batches", "CHECK", "tenant_id = org_id"),
+        "annotation_batches_kind_link_check": _catalog_contract(
+            "annotation_batches", "CHECK", "kind = 'apply'",
+            "reverses_batch_id IS NULL", "reverses_commit IS NULL",
+            "reverses_tree IS NULL", "kind = 'undo'",
+            "reverses_batch_id IS NOT NULL", "reverses_commit IS NOT NULL",
+            "reverses_tree IS NOT NULL"),
+        "annotation_batches_target_fk": _catalog_contract(
+            "annotation_batches",
+            "FOREIGN KEY (tenant_id, org_id, project_id, drawing_id)",
+            "REFERENCES annotation_targets(tenant_id, org_id, project_id, drawing_id)",
+            "ON DELETE CASCADE"),
+        "annotation_batches_session_id_fkey": _catalog_contract(
+            "annotation_batches", "FOREIGN KEY (session_id)",
+            "REFERENCES app_sessions(session_id)", "ON DELETE CASCADE"),
+        "annotation_batches_created_by_binding_id_fkey": _catalog_contract(
+            "annotation_batches", "FOREIGN KEY (created_by_binding_id)",
+            "REFERENCES identity_bindings(binding_id)"),
+        "annotation_audit_pkey": _catalog_contract(
+            "annotation_audit", "PRIMARY KEY (audit_id)"),
+        "annotation_audit_tenant_org_match": _catalog_contract(
+            "annotation_audit", "CHECK", "tenant_id = org_id"),
+        "annotation_audit_batch_revision_fk": _catalog_contract(
+            "annotation_audit", "FOREIGN KEY (batch_id, batch_revision)",
+            "REFERENCES annotation_batches(batch_id, revision)", "ON DELETE CASCADE"),
+        "annotation_audit_drawing_fk": _catalog_contract(
+            "annotation_audit", "FOREIGN KEY (drawing_id, project_id, org_id)",
+            "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)",
+            "ON DELETE CASCADE"),
+        "annotation_audit_actor_binding_id_fkey": _catalog_contract(
+            "annotation_audit", "FOREIGN KEY (actor_binding_id)",
+            "REFERENCES identity_bindings(binding_id)"),
+    },
     "jobs": {
         "async_jobs_pkey": _catalog_contract("async_jobs", "PRIMARY KEY (job_id)"),
         "async_job_terminal_conflicts_pkey": _catalog_contract(
@@ -892,6 +965,24 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
+    "annotations": {
+        "annotation_batches_request_key_uq": _catalog_contract(
+            "annotation_batches", "CREATE UNIQUE INDEX",
+            "(tenant_id, request_key_digest)", "WHERE", "revision = 0"),
+        "annotation_batches_one_pending_per_session_target": _catalog_contract(
+            "annotation_batches", "CREATE UNIQUE INDEX",
+            "(tenant_id, session_id, project_id, drawing_id)", "WHERE",
+            "state = 'pending'", "superseded_at IS NULL"),
+        "annotation_batches_pending_lease_idx": _catalog_contract(
+            "annotation_batches", "(lease_expires_at)", "WHERE",
+            "state = 'pending'", "superseded_at IS NULL"),
+        "annotation_batches_target_created_idx": _catalog_contract(
+            "annotation_batches",
+            "(tenant_id, project_id, drawing_id, created_at DESC)"),
+        "annotation_audit_target_at_idx": _catalog_contract(
+            "annotation_audit",
+            "(tenant_id, project_id, drawing_id, at DESC)"),
+    },
     "jobs": {
         "async_jobs_project_idempotency_uq": _catalog_contract(
             "async_jobs", "CREATE UNIQUE INDEX", "(tenant_id, project_id, idempotency_key)",
@@ -1081,8 +1172,14 @@ def required_catalog_for_selected_authorities(
     """Return runtime-critical constraints, indexes, and triggers by selector."""
     source = os.environ if environ is None else environ
     catalog: Dict[str, Dict[str, Dict[str, Any]]] = {
-        "constraints": dict(_REQUIRED_CONSTRAINTS),
-        "indexes": dict(_REQUIRED_INDEXES),
+        "constraints": {
+            **_REQUIRED_CONSTRAINTS,
+            **_AUTHORITY_REQUIRED_CONSTRAINTS["annotations"],
+        },
+        "indexes": {
+            **_REQUIRED_INDEXES,
+            **_AUTHORITY_REQUIRED_INDEXES["annotations"],
+        },
         "triggers": dict(_REQUIRED_TRIGGERS),
     }
     contracts = {
