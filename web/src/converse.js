@@ -72,25 +72,27 @@ function tagged(res, body, fallback) {
 }
 
 async function post(path, payload) {
+  const headers = { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() }
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers,
     body: JSON.stringify(payload),
   })
   const body = await res.json().catch(() => null)
   const code = String(body?.error?.error_code || '').toLowerCase()
   const grantRequired = res.status === 401 && (code === 'grant_required' || body?.grant_required === true)
-  if (!grantRequired) noteUnauthorized(res, path)
+  if (!grantRequired) noteUnauthorized(res, path, headers.Authorization)
   return { res, body }
 }
 
 async function get(path) {
+  const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'GET',
-    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers,
   })
   const body = await res.json().catch(() => null)
-  noteUnauthorized(res, path)
+  noteUnauthorized(res, path, headers.Authorization)
   return { res, body }
 }
 
@@ -192,10 +194,9 @@ export async function postMessage(sessionId, {
 // is not worth breaking the input over.
 export async function fetchRegistry() {
   try {
-    const res = await fetch(`${API_BASE}/api/converse/registry`, {
-      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
-    })
-    noteUnauthorized(res, '/api/converse/registry')
+    const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+    const res = await fetch(`${API_BASE}/api/converse/registry`, { headers })
+    noteUnauthorized(res, '/api/converse/registry', headers.Authorization)
     if (!res.ok) return { entries: [], counts: {} }
     const body = await res.json().catch(() => null)
     const entries = Array.isArray(body?.entries) ? body.entries : []
@@ -209,10 +210,9 @@ export async function fetchRegistry() {
 // It must never make the composer fail when an older deployment lacks it.
 export async function fetchSkills() {
   try {
-    const res = await fetch(`${API_BASE}/api/skills`, {
-      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
-    })
-    noteUnauthorized(res, '/api/skills')
+    const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+    const res = await fetch(`${API_BASE}/api/skills`, { headers })
+    noteUnauthorized(res, '/api/skills', headers.Authorization)
     if (!res.ok) return { skills: [] }
     const body = await res.json().catch(() => null)
     return { skills: Array.isArray(body?.skills) ? body.skills : [] }
@@ -364,10 +364,11 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
     try {
       for (;;) {
         if (closed) return
+        const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
         const res = noteUnauthorized(await fetch(
           `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/transcript?limit=${pollLimit}`,
-          { headers: { 'X-Tenant-Id': TENANT, ...authHeaders() } },
-        ), `/api/sessions/${sessionId}/transcript`)
+          { headers },
+        ), `/api/sessions/${sessionId}/transcript`, headers.Authorization)
         if (res.status === 401) {
           closed = true
           if (es) { try { es.close() } catch { /* noop */ } es = null }

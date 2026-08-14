@@ -83,8 +83,23 @@ export function subscribeUnauthorized(listener) {
   return () => unauthorizedListeners.delete(listener)
 }
 
-export function noteUnauthorized(response, source = 'api') {
+// A 401 proves the token is bad ONLY when the failing request actually carried
+// the currently-stored token. `sentAuth` is the Authorization header value the
+// request was sent with (undefined/absent = no bearer was sent). Guest-phase
+// requests and stragglers sent with an older token must never wipe a token
+// stored since: post-login, the pre-auth bootstrap 401s resolve in the window
+// between handleRedirectCallback storing leaf.jwt and the reload committing,
+// and the previous unconditional wipe here cleared the fresh token every time,
+// stranding every signed-in user back in the guest workspace (found by the
+// 2026-08-08 production synthetic walk).
+export function noteUnauthorized(response, source = 'api', sentAuth = undefined) {
   if (response?.status !== 401) return response
+  const sentToken = typeof sentAuth === 'string' && sentAuth.startsWith('Bearer ')
+    ? sentAuth.slice('Bearer '.length)
+    : null
+  let stored = null
+  try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  if (!sentToken || !stored || sentToken !== stored) return response
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
   for (const listener of unauthorizedListeners) {
     try { listener(source) } catch { /* observers cannot change transport behavior */ }
@@ -93,7 +108,9 @@ export function noteUnauthorized(response, source = 'api') {
 }
 
 async function apiFetch(input, init, source = 'api') {
-  return noteUnauthorized(await fetch(input, init), source)
+  // Every api.js call site passes plain-object headers, so the sent bearer is
+  // readable directly; a Headers instance would read as undefined -> no wipe.
+  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization)
 }
 
 // A tiny artificial delay so mock runs show loading states like the real thing.
@@ -104,7 +121,7 @@ async function http(path, opts, timeoutMs = null) {
   const request = timeoutMs == null
     ? fetch(`${API_BASE}${path}`, { ...opts, headers })
     : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
-  const res = noteUnauthorized(await request, path)
+  const res = noteUnauthorized(await request, path, headers.Authorization)
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching

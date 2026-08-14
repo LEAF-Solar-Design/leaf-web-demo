@@ -39,12 +39,13 @@ function tagged(res, body, fallback) {
 export async function fetchOverlay(sessionId) {
   const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
   try {
+    const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
     const res = await fetch(`${API_BASE}/api/overlay${qs}`, {
       method: 'GET',
-      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+      headers,
     })
     const body = await res.json().catch(() => null)
-    noteUnauthorized(res, '/api/overlay')
+    noteUnauthorized(res, '/api/overlay', headers.Authorization)
     if (!res.ok || !body) return { tokens: {}, documentVersion: 0, pendingProposalId: null }
     return {
       tokens: body.tokens || {},
@@ -69,14 +70,15 @@ export async function decideOverlay(proposalId, { approve, decisionKey, document
   if (!Number.isInteger(documentVersion)) {
     throw new Error('documentVersion is required to decide')
   }
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Tenant-Id': TENANT,
+    ...(actor ? { 'X-Actor': actor } : {}),
+    ...authHeaders(),
+  }
   const res = await fetch(`${API_BASE}/api/overlay/decisions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Tenant-Id': TENANT,
-      ...(actor ? { 'X-Actor': actor } : {}),
-      ...authHeaders(),
-    },
+    headers,
     body: JSON.stringify({
       proposal_id: proposalId,
       approve: !!approve,
@@ -85,7 +87,7 @@ export async function decideOverlay(proposalId, { approve, decisionKey, document
     }),
   })
   const body = await res.json().catch(() => null)
-  noteUnauthorized(res, '/api/overlay/decisions')
+  noteUnauthorized(res, '/api/overlay/decisions', headers.Authorization)
   if (!res.ok || !body || body.error) {
     throw tagged(res, body, `POST /api/overlay/decisions -> ${res.status}`)
   }
