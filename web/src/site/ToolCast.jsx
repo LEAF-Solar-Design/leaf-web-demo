@@ -63,6 +63,15 @@ import {
 } from '../runIntent.js'
 import { navigate } from './router.js'
 import { productSurfaceFromSearch, productSurfaceStates, searchForProductSurface } from './productSurfaces.js'
+import {
+  emptyIosShipReadiness,
+  fetchIosShipReadiness,
+  getIosShipExecution,
+  getIosShipReceipt,
+  iosShipLaunchAffordance,
+  makeIosShipLaunchKey,
+  requestIosShipLaunch,
+} from './iosShipReadiness.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
 import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
@@ -1167,12 +1176,100 @@ export default function ToolCast({
     if (event.key === 'Enter') runRequest()
   }
 
+  // Wave D one-shot iOS ship lane. The surface consumes REAL readiness: the
+  // projection module fails closed to `launchable === false` for missing,
+  // invalid, stale, cross-tenant, unhealthy, or secret-shaped records, so a
+  // launch affordance can never be derived from anything the browser invents.
+  // Only the signed-in project context asks for readiness; otherwise the lane
+  // resets to the frozen empty shape.
+  const [iosShip, setIosShip] = useState(() => emptyIosShipReadiness())
+  const [iosShipBusy, setIosShipBusy] = useState(false)
+  const [iosShipError, setIosShipError] = useState(null)
+  const [iosShipExecution, setIosShipExecution] = useState(null)
+  const [iosShipReceipt, setIosShipReceipt] = useState(null)
+  useEffect(() => {
+    const projectId = workspace.openProjectId
+    const revision = workspace.canonicalVersionId
+    const signedIn = platformSession.status === 'active'
+    setIosShip(emptyIosShipReadiness('loading', null, projectId || null))
+    setIosShipExecution(null)
+    setIosShipReceipt(null)
+    if (activeSurface !== 'ios' || !signedIn || !projectId || !revision) {
+      setIosShip(emptyIosShipReadiness('no_approved_project_revision', null, projectId || null))
+      return undefined
+    }
+    let live = true
+    setIosShipError(null)
+    fetchIosShipReadiness({ projectId, revision }).then((next) => {
+      if (!live) return
+      setIosShip(next)
+      if (!next.launchable) setIosShipError(next.setupAction || next.reason || null)
+    })
+    return () => { live = false }
+  }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
+  const launchIosShip = useCallback(async () => {
+    const projectId = workspace.openProjectId
+    const revision = workspace.canonicalVersionId
+    if (!iosShipLaunchAffordance(iosShip, {
+      projectId, revision, sessionActive: platformSession.status === 'active',
+    }) || iosShipBusy) return
+    setIosShipBusy(true)
+    setIosShipError(null)
+    try {
+      // One reviewed idempotent launch: identifiers only. The backend owns
+      // the approved-revision gate; this browser never fabricates an approval
+      // and never sends credential material.
+      const response = await requestIosShipLaunch({
+        projectId,
+        approvedLaunch: iosShip.approvedLaunch,
+        idempotencyKey: makeIosShipLaunchKey(projectId, iosShip.approvedLaunch),
+      })
+      setIosShipExecution(response.execution)
+      showToast({ text: 'iOS ship launch accepted. Track it in the lane.', action: { label: 'View', onClick: () => setRightView('execution') } })
+    } catch (cause) {
+      setIosShipError(cause?.envelope?.message || cause?.message || 'The iOS ship launch was refused.')
+    } finally {
+      setIosShipBusy(false)
+    }
+  }, [iosShip, iosShipBusy, platformSession.status, setRightView, showToast, workspace.canonicalVersionId, workspace.openProjectId])
+
+  useEffect(() => {
+    const projectId = workspace.openProjectId
+    const executionId = iosShipExecution?.execution_id
+    if (activeSurface !== 'ios' || !projectId || !executionId) return undefined
+    let live = true
+    let timer = null
+    const poll = async () => {
+      try {
+        const response = await getIosShipExecution({ projectId, executionId })
+        if (!live) return
+        const next = response.execution
+        setIosShipExecution(next)
+        if (next?.receipt_id) {
+          const receiptResponse = await getIosShipReceipt({ projectId, receiptId: next.receipt_id })
+          if (live) setIosShipReceipt(receiptResponse.receipt)
+          return
+        }
+        if (!['succeeded', 'failed'].includes(next?.status)) timer = setTimeout(poll, 2000)
+      } catch (cause) {
+        if (live) setIosShipError(cause?.message || 'The iOS ship status is unavailable.')
+      }
+    }
+    if (iosShipExecution.receipt_id) {
+      poll()
+    } else if (!['succeeded', 'failed'].includes(iosShipExecution.status)) {
+      timer = setTimeout(poll, 2000)
+    }
+    return () => { live = false; if (timer) clearTimeout(timer) }
+  }, [activeSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
+    iosShipExecution?.status, workspace.openProjectId])
+
   const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
   const productStates = productSurfaceStates({
     sessionActive: platformSession.status === 'active',
     hasDrawing,
     apsLive: platform.health?.aps_live,
-    iosReady: false,
+    iosReady: iosShip.launchable === true,
   })
   const selectProductSurface = useCallback((surfaceId) => {
     const search = searchForProductSurface(window.location.search, surfaceId)
@@ -1770,6 +1867,67 @@ export default function ToolCast({
           sceneActive={active}
         />
       )}
+      </>
+      ) : activeSurface === 'ios' ? (
+      <>
+      <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
+        {projectSlot}
+        <span className="tc-solve" data-testid="ios-ship-status">
+          <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
+          {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
+        </span>
+        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        <span className="key">Esc</span>
+      </div>
+      <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>
+        <div className="tc-rail-head">
+          <span className="tc-rail-title">iOS ship lane</span>
+          <span className="tc-rail-sub">readiness · launch · receipt</span>
+        </div>
+        <div className="tc-rail-body">
+          <p className="tc-rail-note">
+            Turn an approved project revision into a TestFlight build through the mounted Apple
+            ship lane. Apple passwords, two-factor codes, keys, certificates, and profiles never
+            enter this browser.
+          </p>
+          {!iosShip.launchable && (
+            <p className="tc-rail-note" data-testid="ios-ship-setup">
+              {iosShip.setupAction
+                ? `Setup action: ${iosShip.setupAction}`
+                : 'The ship lane is not ready. No launch control is available.'}
+            </p>
+          )}
+          {iosShipLaunchAffordance(iosShip, {
+            projectId: workspace.openProjectId,
+            revision: workspace.canonicalVersionId,
+            sessionActive: platformSession.status === 'active',
+          }) && (
+            <button
+              type="button"
+              className="tc-run"
+              data-testid="ios-ship-launch"
+              disabled={iosShipBusy}
+              onClick={launchIosShip}
+            >
+              {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
+            </button>
+          )}
+          {iosShipExecution && (
+            <p className="tc-rail-note" data-testid="ios-ship-execution">
+              Build {iosShipExecution.build_number} · {iosShipExecution.status}
+              {iosShipExecution.failed_stage ? ` at ${iosShipExecution.failed_stage}` : ''}
+            </p>
+          )}
+          {iosShipReceipt && (
+            <div className="tc-rail-note" data-testid="ios-ship-receipt">
+              <strong>TestFlight receipt</strong>
+              <div>{iosShipReceipt.bundle_identifier} · {iosShipReceipt.marketing_version} ({iosShipReceipt.build_number})</div>
+              <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
+            </div>
+          )}
+          {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
+        </div>
+      </aside>
       </>
       ) : (
         <ProductSurfaceFrame

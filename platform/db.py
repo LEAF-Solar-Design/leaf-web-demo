@@ -138,6 +138,32 @@ _REQUIRED_COLUMNS = {
         "source_sha", "target", "status", "previous_taskdef_revision",
         "staged_taskdef_revision",
     },
+    "ios_ship_grants": {
+        "grant_id", "org_id", "tenant_id", "status", "expires_at", "observed_at",
+    },
+    "ios_ship_readiness": {
+        "org_id", "project_id", "tenant_id", "record_kind", "healthy",
+        "dispatch_available", "setup_action", "reported_at", "observed_at",
+    },
+    "ios_ship_revision_approvals": {
+        "approval_id", "org_id", "project_id", "revision", "source_revision",
+        "source_sha256", "bundle_identifier", "marketing_version", "build_number",
+        "approved", "approved_by", "consumed_at", "consumed_execution_id",
+    },
+    "ios_ship_executions": {
+        "execution_id", "org_id", "project_id", "tenant_id", "principal_id",
+        "approval_id", "revision", "source_revision", "source_sha256",
+        "bundle_identifier", "marketing_version", "build_number", "status",
+        "failed_stage", "idempotency_key", "submission_fingerprint",
+        "dispatch_result", "receipt_id", "error", "created_at", "updated_at",
+    },
+    "ios_ship_receipts": {
+        "receipt_id", "execution_id", "org_id", "project_id", "tenant_id", "kind",
+        "revision", "source_revision", "source_sha256", "bundle_identifier",
+        "marketing_version", "build_number", "image_identity", "toolchain_identity",
+        "app_store_connect_result", "hash_algorithm", "hash_canonicalization",
+        "hash_domain", "hash_value", "created_at",
+    },
 }
 
 # Each selector adds the tables its PostgreSQL implementation reads or writes.
@@ -391,6 +417,23 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "ios_ship_readiness_pkey": _catalog_contract(
+        "ios_ship_readiness", "PRIMARY KEY (org_id, project_id, tenant_id)"),
+    "ios_ship_readiness_project_fk": _catalog_contract(
+        "ios_ship_readiness", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "ios_ship_revision_approvals_scope_unique": _catalog_contract(
+        "ios_ship_revision_approvals", "UNIQUE (org_id, project_id, revision)"),
+    "ios_ship_revision_approvals_consumed_execution_fk": _catalog_contract(
+        "ios_ship_revision_approvals", "FOREIGN KEY (consumed_execution_id)",
+        "REFERENCES ios_ship_executions(execution_id)"),
+    "ios_ship_executions_scope_idempotency_unique": _catalog_contract(
+        "ios_ship_executions", "UNIQUE (org_id, project_id, idempotency_key)"),
+    "ios_ship_executions_receipt_fk": _catalog_contract(
+        "ios_ship_executions", "FOREIGN KEY (receipt_id)",
+        "REFERENCES ios_ship_receipts(receipt_id)"),
+    "ios_ship_receipts_build_unique": _catalog_contract(
+        "ios_ship_receipts", "UNIQUE (org_id, bundle_identifier, build_number)"),
     "identity_bindings_tenant_binding_unique": _catalog_contract(
         "identity_bindings", "UNIQUE (platform_tenant_id, binding_id)"),
     "project_member_bindings_pkey": _catalog_contract(
@@ -454,6 +497,10 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "idx_ios_ship_executions_scope": _catalog_contract(
+        "ios_ship_executions", "(org_id, project_id, created_at DESC)"),
+    "idx_ios_ship_receipts_scope": _catalog_contract(
+        "ios_ship_receipts", "(org_id, project_id, created_at DESC)"),
     "project_member_bindings_one_active": _catalog_contract(
         "project_member_bindings", "CREATE UNIQUE INDEX",
         "(org_id, project_id, binding_id)", "WHERE", "status = 'active'"),
@@ -469,6 +516,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "ios_ship_receipts_immutable": _catalog_contract(
+        "ios_ship_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     "project_lifecycle_receipts_immutable": _catalog_contract(
         "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),

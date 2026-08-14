@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+import ios_ship_provider as ios_ship_provider_client
 import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
@@ -45,6 +46,8 @@ from routers import (
     deployment_identity,
     demand,
     drawings,
+    ios_ship,
+    ios_ship_provider as ios_ship_provider_router,
     jobs as jobs_router,
     mcp_gateway,
     mcp_status,
@@ -89,6 +92,17 @@ app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 
 _customization_worker_stop: threading.Event | None = None
 _customization_worker_thread: threading.Thread | None = None
+
+
+@app.on_event("startup")
+def initialize_ios_ship_provider() -> None:
+    """Mount one HTTP dispatch and its callback verifier, or fail closed."""
+    config = ios_ship_provider_client.ProviderConfig.from_environment()
+    adapter = (ios_ship_provider_client.HttpProviderDispatch(config)
+               if config is not None else None)
+    ios_ship.set_dispatch(adapter.dispatch if adapter is not None else None)
+    ios_ship.set_provider_readiness(adapter.readiness if adapter is not None else None)
+    ios_ship_provider_router.set_config(config)
 
 
 @app.on_event("startup")
@@ -183,6 +197,8 @@ app.include_router(site.router)  # public site-facing namespace for the leaf_web
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
+app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
+app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
 # at their STAMPED expiry. It starts by default even when

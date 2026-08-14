@@ -197,12 +197,12 @@ def test_project_lifecycle_migration_unconditionally_declares_runtime_schema():
         "idempotency_key", "input_digest", "result_json", "created_at",
     }
     assert expected_constraints <= set(db._REQUIRED_CONSTRAINTS)
-    assert expected_indexes == set(db._REQUIRED_INDEXES)
-    assert db._REQUIRED_TRIGGERS == {
-        "project_lifecycle_receipts_immutable": db._catalog_contract(
+    assert expected_indexes <= set(db._REQUIRED_INDEXES)
+    assert db._REQUIRED_TRIGGERS["project_lifecycle_receipts_immutable"] == (
+        db._catalog_contract(
             "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
-            "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
-    }
+            "EXECUTE FUNCTION leaf_reject_ledger_mutation()")
+    )
 
 
 def test_project_session_scope_migration_preserves_legacy_and_binds_projects():
