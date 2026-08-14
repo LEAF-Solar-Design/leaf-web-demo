@@ -323,6 +323,38 @@ def approved_launch(org_id: Any, project_id: Any, revision: str) -> Dict[str, st
     return result
 
 
+def get_approved_ios_ship_revision(
+        org_id: Any, project_id: Any, revision: str) -> Optional[Dict[str, str]]:
+    """Return an unconsumed approval tuple for an active project, or ``None``.
+
+    This lookup intentionally does not read readiness or grant state. The
+    browser router uses it to form the exact provider-readiness scope before it
+    refreshes either of those derived records.
+    """
+    org, project = _as_uuid(org_id, "org_id"), _as_uuid(project_id, "project_id")
+    if not isinstance(revision, str) or not revision:
+        return None
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM projects WHERE org_id=%(org)s AND project_id=%(project)s "
+            "AND deleted_at IS NULL AND status='active'",
+            {"org": org, "project": project})
+        if cur.fetchone() is None:
+            return None
+        approval = _approval_record(cur, org, project, revision)
+    if approval is None or approval["approved"] is not True or approval["consumed_at"] is not None:
+        return None
+    return {
+        "approval_id": str(approval["approval_id"]),
+        "revision": approval["revision"],
+        "source_revision": approval["source_revision"],
+        "source_sha256": approval["source_sha256"],
+        "bundle_identifier": approval["bundle_identifier"],
+        "marketing_version": approval["marketing_version"],
+        "build_number": approval["build_number"],
+    }
+
+
 def _approval_record(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
                      revision: str, *, for_update: bool = False) -> Optional[Dict[str, Any]]:
     cur.execute(

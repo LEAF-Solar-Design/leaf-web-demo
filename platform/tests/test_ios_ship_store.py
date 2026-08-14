@@ -100,6 +100,34 @@ def test_readiness_is_project_and_revision_scoped(make_org):
         ios_ship.get_readiness(org.org_id, tenant, project_a.project_id, "r2")
 
 
+def test_approved_revision_lookup_is_active_and_independent_of_readiness(make_org):
+    org = make_org()
+    project = store.create_project(org.org_id, "lookup project")
+    ios_ship.record_approval(
+        org.org_id, project.project_id, "r1", source_revision="83bbde1",
+        source_sha256=SOURCE_SHA, bundle_identifier="com.leaf.soundbeam",
+        marketing_version="1.2", build_number="19", approved_by="reviewer")
+
+    approved = ios_ship.get_approved_ios_ship_revision(org.org_id, project.project_id, "r1")
+
+    assert set(approved) == {
+        "approval_id", "revision", "source_revision", "source_sha256",
+        "bundle_identifier", "marketing_version", "build_number"}
+    assert approved["revision"] == "r1"
+    assert approved["source_sha256"] == SOURCE_SHA
+    assert ios_ship.get_approved_ios_ship_revision(org.org_id, project.project_id, "missing") is None
+
+    ios_ship.record_approval(
+        org.org_id, project.project_id, "r2", source_revision="83bbde2",
+        source_sha256=SOURCE_SHA, bundle_identifier="com.leaf.soundbeam",
+        marketing_version="1.2", build_number="20", approved_by="reviewer", approved=False)
+    assert ios_ship.get_approved_ios_ship_revision(org.org_id, project.project_id, "r2") is None
+
+    with ios_ship.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE projects SET status='archived' WHERE project_id=%s", (project.project_id,))
+    assert ios_ship.get_approved_ios_ship_revision(org.org_id, project.project_id, "r1") is None
+
+
 def test_launch_commits_canonical_job_before_one_dispatch_and_replays(make_org):
     org, project, tenant, principal, approval_id = _seed(make_org)
     calls = []
@@ -120,6 +148,7 @@ def test_launch_commits_canonical_job_before_one_dispatch_and_replays(make_org):
         _launch(org, project, tenant, principal, approval_id, dispatch,
                 idempotency_key="launch-2")
     assert exc.value.code == "approval_consumed"
+    assert ios_ship.get_approved_ios_ship_revision(org.org_id, project.project_id, "r1") is None
 
 
 def test_same_key_retries_the_same_intent_for_controller_owned_resume(make_org):

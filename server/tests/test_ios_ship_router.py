@@ -37,6 +37,7 @@ class FakeStore:
         self.grants = []
         self.readiness_records = []
         self.prior_readiness_missing = False
+        self.approved_revision = True
 
     def project_org(self, _project_id):
         return ORG if self.project_available else None
@@ -53,6 +54,13 @@ class FakeStore:
         return self.principal
 
     def readiness_projection(self, org_id, tenant_id, project_id, revision):
+        if not self.approved_revision:
+            return {"record_kind": "leaf.ios-ship-readiness.v1", "launchable": False,
+                    "healthy": False, "reported_at": None, "org_id": str(org_id),
+                    "project_id": project_id, "tenant_id": tenant_id,
+                    "grant_status": None, "dispatch_available": False,
+                    "reason": "unapproved_revision",
+                    "setup_action": "approve-ios-project-revision", "approved_launch": None}
         if self.prior_readiness_missing and not self.readiness_records:
             raise self.IosShipError("readiness_missing", "no readiness record")
         if self.readiness_records and not self.readiness_records[-1]["healthy"]:
@@ -73,7 +81,9 @@ class FakeStore:
                     "bundle_identifier": "com.leaf.soundbeam",
                     "marketing_version": "1.2", "build_number": "19"}}
 
-    def approved_launch(self, _org_id, _project_id, revision):
+    def get_approved_ios_ship_revision(self, _org_id, _project_id, revision):
+        if not self.approved_revision:
+            return None
         return {"approval_id": APPROVAL, "revision": revision,
                 "source_revision": "83bbde1", "source_sha256": SHA,
                 "bundle_identifier": "com.leaf.soundbeam",
@@ -218,6 +228,23 @@ def test_readiness_refresh_does_not_require_a_prior_readiness_record(monkeypatch
 
     assert response.json()["readiness"]["launchable"] is True
     assert len(store.readiness_records) == 1
+
+
+def test_readiness_does_not_call_provider_for_an_unapproved_lookup(monkeypatch):
+    store = FakeStore()
+    store.approved_revision = False
+    monkeypatch.setattr(router, "_store", lambda: store)
+    router.set_dispatch(lambda _: {"status": "dispatched"})
+    router.set_provider_readiness(lambda _: pytest.fail("provider must not be called"))
+
+    response = _client(VerifiedTenant(ORG, ORG, "auth0|user")).get(
+        "/api/ios-ship/readiness", params={"project_id": PROJECT, "revision": "r1"})
+
+    readiness = response.json()["readiness"]
+    assert readiness["launchable"] is False
+    assert readiness["reason"] == "unapproved_revision"
+    assert store.grants == []
+    assert store.readiness_records == []
 
 
 def test_provider_unavailable_and_unhealthy_refresh_hide_the_launch(monkeypatch):

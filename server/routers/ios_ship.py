@@ -113,15 +113,11 @@ def _launch_principal(store: Any, tenant: Any, org_id: Any,
 
 
 def _refresh_readiness(store: Any, org_id: Any, tenant_id: str, project_id: str,
-                       revision: str) -> Dict[str, Any]:
+                       revision: str, approved: Optional[Dict[str, str]]) -> Dict[str, Any]:
     if _PROVIDER_READINESS is None:
         return _closed_readiness(project_id, "provider_unavailable", _SETUP_ACTION)
-    try:
-        approved = store.approved_launch(org_id, project_id, revision)
-    except Exception as exc:
-        return _closed_readiness(
-            project_id, getattr(exc, "code", "unapproved_revision"),
-            getattr(exc, "setup_action", "approve-ios-project-revision"))
+    if approved is None:
+        return store.readiness_projection(org_id, tenant_id, project_id, revision)
     scope = {
         "tenant_id": tenant_id, "project_id": project_id,
         "source_revision": approved["source_revision"], "source_sha256": approved["source_sha256"],
@@ -157,13 +153,15 @@ def readiness(project_id: str, revision: str,
         if org_id is None:
             return JSONResponse(status_code=200, content={"ok": True, "readiness":
                 _closed_readiness(project_id, "project_unavailable", "open-owned-project")})
+        approved = store.get_approved_ios_ship_revision(org_id, project_id, revision)
         if _DISPATCH is None:
             return JSONResponse(status_code=200, content={"ok": True, "readiness":
                 _closed_readiness(project_id, "dispatch_unavailable", _SETUP_ACTION)})
         if _app_color() is None:
             return JSONResponse(status_code=200, content={"ok": True, "readiness":
                 _closed_readiness(project_id, "app_color_unavailable", _SETUP_ACTION)})
-        projection = _refresh_readiness(store, org_id, _tenant_id(tenant), project_id, revision)
+        projection = _refresh_readiness(
+            store, org_id, _tenant_id(tenant), project_id, revision, approved)
         return JSONResponse(status_code=200, content={"ok": True, "readiness": projection})
     except Exception:
         return JSONResponse(status_code=200, content={"ok": True, "readiness":
