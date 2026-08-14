@@ -461,7 +461,13 @@ def _zip_member(raw: bytes, filename: str) -> bytes:
         raise ContractError("PROVIDER_ARCHIVE_INVALID") from exc
 
 
-def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
+def _supply(
+    manifest: Any,
+    build: dict[str, Any],
+    tree: str,
+    *,
+    file_sha256: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ContractError("SUPPLY_MANIFEST_INVALID")
     try:
@@ -469,12 +475,14 @@ def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
     except Exception as exc:
         raise ContractError("SUPPLY_MANIFEST_INVALID") from exc
     if manifest["schema"] == SCHEMA_V3:
+        manifest_sha256 = _sha64(file_sha256, "SUPPLY_MANIFEST_INVALID")
         source = manifest["release_source_revision"]
         source_tree = manifest["release_source_tree"]
         build_tag = "v3-" + source[:12]
         if manifest["build_run_id"] != build["run_id"] or manifest["build_run_attempt"] != build["run_attempt"]:
             raise ContractError("SUPPLY_BUILD_IDENTITY_MISMATCH")
     else:
+        manifest_sha256 = _sha(_canonical(manifest))
         source = manifest["source_revision"]
         source_tree = manifest.get("source_tree", tree)
         build_tag = manifest["build_tag"]
@@ -485,14 +493,20 @@ def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
         "source_revision": source,
         "source_tree": source_tree,
         "build_tag": build_tag,
-        "manifest_sha256": _sha(_canonical(manifest)),
+        "manifest_sha256": manifest_sha256,
         "service_digests": {
             service: manifest["services"][service]["image_digest"] for service in SERVICE_ORDER
         },
     }
 
 
-def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], run_id: int) -> None:
+def _relay_receipt(
+    value: Any,
+    build: dict[str, Any],
+    supply: dict[str, Any],
+    run_id: int,
+    manifest: dict[str, Any],
+) -> None:
     if not isinstance(value, dict):
         raise ContractError("RELAY_RECEIPT_INVALID")
     if value.get("schema") == "leaf.staging-converged.v1":
@@ -525,7 +539,7 @@ def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], ru
             or value["build_run_attempt"] != build["run_attempt"]
             or value["relay_run_id"] != run_id
             or value["supply_set_sha256"] != supply["manifest_sha256"]
-            or _sha(_canonical(value["candidate_supply_set"])) != supply["manifest_sha256"]
+            or value["candidate_supply_set"] != manifest
             or value["automatic_surfaces"] != ["web", "app"]
             or not isinstance(value["surface_results"], dict)
             or set(value["surface_results"]) != {"web", "app"}
@@ -626,6 +640,19 @@ def _strict_slot(value: Any, reason: str) -> dict[str, Any]:
     return _exact(value, expected, reason)
 
 
+def _requested_evidence_slot(value: Any) -> dict[str, Any]:
+    reason = "SERVICE_RECEIPT_REQUEST_INVALID"
+    if value == {"status": "not_produced"}:
+        return value
+    slot = _exact(value, {"status", "sha256", "utf8_bytes"}, reason)
+    if slot["status"] != "produced":
+        raise ContractError(reason)
+    _sha64(slot["sha256"], reason)
+    if isinstance(slot["utf8_bytes"], bool) or not isinstance(slot["utf8_bytes"], int) or slot["utf8_bytes"] < 1:
+        raise ContractError(reason)
+    return slot
+
+
 def _reject_secrets(value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -668,17 +695,20 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     requested_keys = {
         "allow_non_forward_image", "app_deploy_intent", "configuration_delta",
         "configuration_task_definition", "convergence_id", "deploy_strategy",
-        "digest_aware_evidence", "digest_aware_reconcile", "expected_task_definition",
+        "consumer_contract", "digest_aware_evidence", "digest_aware_reconcile",
+        "expected_task_definition",
         "hold_seconds", "image_tag", "p4a_session_identity_cutover",
         "quarantine_recovery_snapshot_identifier", "required_broker_task_definition",
         "service", "snapshot_overflow_acknowledgement", "source_revision", "start_from_zero",
-        "start_from_zero_confirmation", "target_color",
+        "start_from_zero_confirmation", "supply_evidence", "target_color",
     }
     requested = _exact(receipt["requested"], requested_keys, "SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["service"] not in SERVICE_ORDER:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["app_deploy_intent"] not in {"forward", "configuration", "authority-bootstrap", "rollback"}:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
+    _requested_evidence_slot(requested["consumer_contract"])
+    _requested_evidence_slot(requested["supply_evidence"])
     _bounded_text(requested["image_tag"], "SERVICE_RECEIPT_REQUEST_INVALID", maximum=128)
     failed_stage = _strict_slot(receipt["failed_stage"], "SERVICE_RECEIPT_FAILED_STAGE_INVALID")
     if failed_stage["status"] == "produced":
@@ -1217,7 +1247,12 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     supply_artifact, manifest = _one_artifact(
         provider, APP_REPOSITORY, build["run_id"], supply_name, "staging-supply-set.json"
     )
-    supply = _supply(manifest, build, build_tree)
+    supply = _supply(
+        manifest,
+        build,
+        build_tree,
+        file_sha256=supply_artifact["file_sha256"],
+    )
 
     relay_matches: list[
         tuple[
@@ -1249,7 +1284,7 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
                 artifact, value = _one_artifact(
                     provider, APP_REPOSITORY, relay["run_id"], relay_name, "staging-converged.json"
                 )
-                _relay_receipt(value, build, supply, relay["run_id"])
+                _relay_receipt(value, build, supply, relay["run_id"], manifest)
                 children, logs_sha = _relay_children(provider, relay, require_complete=True)
                 relay_matches.append(
                     (
