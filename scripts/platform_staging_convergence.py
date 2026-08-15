@@ -1560,11 +1560,20 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         frontier = _provider_run(frontier_raw, TF_REPOSITORY, DEPLOY_WORKFLOW, "workflow_dispatch")
         if frontier["run_id"] != current_frontier_run_id:
             raise ContractError("FRONTIER_RUN_MISMATCH")
+    created_window = f">={relay['created_at']}"
+    if frontier is not None:
+        if frontier["updated_at"] < relay["created_at"]:
+            raise ContractError("CHILD_RUN_WINDOW_MISMATCH")
+        created_window = f"{relay['created_at']}..{frontier['updated_at']}"
     child_rows = _workflow_run_rows(
         provider,
         TF_REPOSITORY,
         "deploy-leaf-platform-staging.yml",
-        {"event": "workflow_dispatch", "per_page": 100},
+        {
+            "event": "workflow_dispatch",
+            "created": created_window,
+            "per_page": 100,
+        },
     )
     runs: dict[int, dict[str, Any]] = {}
     for raw in child_rows:
