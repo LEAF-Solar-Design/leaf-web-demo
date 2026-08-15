@@ -9,6 +9,7 @@ not dispatch workflows, call AWS, or accept a caller-built evidence bundle.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -36,6 +37,22 @@ TF_REPOSITORY = "LEAF-Solar-Design/leaf-automation-aws-terraform"
 BUILD_WORKFLOW = ".github/workflows/build-platform-images.yml"
 RELAY_WORKFLOW = ".github/workflows/dispatch-staging-deploys.yml"
 DEPLOY_WORKFLOW = ".github/workflows/deploy-leaf-platform-staging.yml"
+CONSUMER_CONTRACT_WORKFLOW = (
+    ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml"
+)
+CONSUMER_CONTRACT_SCHEMA_PATH = (
+    "contract/leaf-platform-staging-consumer-contract.v1.schema.json"
+)
+CONSUMER_CONTRACT_SCHEMA = "leaf.platform-staging-consumer-contract.v1"
+CONSUMER_DISPATCH_SCHEMA = "leaf.platform-staging-consumer-contract-dispatch.v1"
+CONSUMER_CONTRACT_FILE = "consumer-contract.json"
+CONSUMER_CONTRACT_ARTIFACT_PREFIX = (
+    "leaf-platform-staging-consumer-contract-run-"
+)
+CONSUMER_CONTRACT_VERSION = 1
+CONSUMER_DIGEST_MARKER = "leaf.staging-digest-aware-consumer.v1"
+CONSUMER_MUTATION_GROUP = "leaf-platform-staging-ecs-mutation"
+CONSUMER_DEPLOYMENT_ENVIRONMENT = "aws-apply"
 OUTPUT_SCHEMA = "leaf.platform-staging-convergence.v1"
 SERVICE_RECEIPT_SCHEMA = "leaf.platform-staging-service-run.v1"
 ENVIRONMENT = "staging"
@@ -466,6 +483,173 @@ def _one_artifact(
         return evidence, _load_json(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ContractError("PROVIDER_ARTIFACT_JSON_INVALID") from exc
+
+
+def _consumer_contract_for_head(provider: Provider, head_sha: str) -> dict[str, Any]:
+    """Resolve one provider-owned Terraform consumer contract using Actions only."""
+    rows = _workflow_run_rows(
+        provider,
+        TF_REPOSITORY,
+        "publish-leaf-platform-staging-consumer-contract.yml",
+        {"branch": "main", "event": "push", "status": "success", "per_page": 100},
+    )
+    matches: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get("head_sha") != head_sha:
+            continue
+        run = _provider_run(
+            raw,
+            TF_REPOSITORY,
+            CONSUMER_CONTRACT_WORKFLOW,
+            "push",
+        )
+        if run["head_branch"] != "main" or run["conclusion"] != "success":
+            raise ContractError("CONSUMER_CONTRACT_RUN_INVALID")
+        matches.append(run)
+    if len(matches) != 1:
+        raise ContractError("CONSUMER_CONTRACT_RUN_CARDINALITY")
+    run = matches[0]
+    name = (
+        f"{CONSUMER_CONTRACT_ARTIFACT_PREFIX}{run['run_id']}"
+        f"-attempt-{run['run_attempt']}"
+    )
+    artifacts = [
+        row
+        for row in _artifact_rows(provider, TF_REPOSITORY, run["run_id"])
+        if row.get("name") == name and row.get("expired") is False
+    ]
+    if len(artifacts) != 1:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_CARDINALITY")
+    artifact = artifacts[0]
+    workflow_run = artifact.get("workflow_run")
+    if (
+        not isinstance(workflow_run, dict)
+        or workflow_run.get("id") != run["run_id"]
+        or workflow_run.get("head_sha") != head_sha
+        or workflow_run.get("head_branch") != "main"
+    ):
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_ASSOCIATION")
+    artifact_id = _positive(
+        artifact.get("id"), "CONSUMER_CONTRACT_ARTIFACT_INVALID"
+    )
+    provider_digest = artifact.get("digest")
+    if (
+        not isinstance(provider_digest, str)
+        or not provider_digest.startswith("sha256:")
+    ):
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_DIGEST_INVALID")
+    provider_sha = _sha64(
+        provider_digest.removeprefix("sha256:"),
+        "CONSUMER_CONTRACT_ARTIFACT_DIGEST_INVALID",
+    )
+    zip_raw = provider.bytes(
+        TF_REPOSITORY, f"/actions/artifacts/{artifact_id}/zip"
+    )
+    archive_sha = _sha(zip_raw)
+    if archive_sha != provider_sha:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_HASH_MISMATCH")
+    raw_contract = _zip_member(zip_raw, CONSUMER_CONTRACT_FILE)
+    try:
+        contract = _load_json(raw_contract)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ContractError("CONSUMER_CONTRACT_JSON_INVALID") from exc
+    contract = _exact(
+        contract,
+        {"artifact", "consumer", "payload_sha256", "producer", "schema", "version"},
+        "CONSUMER_CONTRACT_INVALID",
+    )
+    if (
+        contract["schema"] != CONSUMER_CONTRACT_SCHEMA
+        or contract["version"] != CONSUMER_CONTRACT_VERSION
+    ):
+        raise ContractError("CONSUMER_CONTRACT_INVALID")
+    payload_sha = _sha64(
+        contract["payload_sha256"], "CONSUMER_CONTRACT_DIGEST_INVALID"
+    )
+    unsigned = dict(contract)
+    del unsigned["payload_sha256"]
+    if _sha(_canonical(unsigned)) != payload_sha:
+        raise ContractError("CONSUMER_CONTRACT_DIGEST_MISMATCH")
+    contract_artifact = _exact(
+        contract["artifact"], {"file", "name"}, "CONSUMER_CONTRACT_INVALID"
+    )
+    if contract_artifact != {"file": CONSUMER_CONTRACT_FILE, "name": name}:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_MISMATCH")
+    producer = _exact(
+        contract["producer"],
+        {
+            "repository", "workflow_path", "workflow_blob", "run_id",
+            "run_attempt", "event", "branch", "head_sha", "head_tree",
+        },
+        "CONSUMER_CONTRACT_PRODUCER_INVALID",
+    )
+    if (
+        producer["repository"] != TF_REPOSITORY
+        or producer["workflow_path"] != CONSUMER_CONTRACT_WORKFLOW
+        or producer["run_id"] != run["run_id"]
+        or producer["run_attempt"] != run["run_attempt"]
+        or producer["event"] != "push"
+        or producer["branch"] != "main"
+        or producer["head_sha"] != head_sha
+    ):
+        raise ContractError("CONSUMER_CONTRACT_PRODUCER_MISMATCH")
+    _sha40(producer["workflow_blob"], "CONSUMER_CONTRACT_PRODUCER_INVALID")
+    tree = _sha40(producer["head_tree"], "CONSUMER_CONTRACT_PRODUCER_INVALID")
+    consumer = _exact(
+        contract["consumer"],
+        {
+            "contract_schema_path", "contract_schema_blob", "contract_version",
+            "deploy_workflow_path", "deploy_workflow_blob", "pins",
+        },
+        "CONSUMER_CONTRACT_CONSUMER_INVALID",
+    )
+    if (
+        consumer["contract_schema_path"] != CONSUMER_CONTRACT_SCHEMA_PATH
+        or consumer["contract_version"] != CONSUMER_CONTRACT_VERSION
+        or consumer["deploy_workflow_path"] != DEPLOY_WORKFLOW
+    ):
+        raise ContractError("CONSUMER_CONTRACT_CONSUMER_MISMATCH")
+    _sha40(
+        consumer["contract_schema_blob"], "CONSUMER_CONTRACT_CONSUMER_INVALID"
+    )
+    workflow_blob = _sha40(
+        consumer["deploy_workflow_blob"], "CONSUMER_CONTRACT_CONSUMER_INVALID"
+    )
+    pins = _exact(
+        consumer["pins"],
+        {"deployment_environment", "digest_aware_marker", "mutation_group"},
+        "CONSUMER_CONTRACT_PINS_INVALID",
+    )
+    if pins != {
+        "deployment_environment": CONSUMER_DEPLOYMENT_ENVIRONMENT,
+        "digest_aware_marker": CONSUMER_DIGEST_MARKER,
+        "mutation_group": CONSUMER_MUTATION_GROUP,
+    }:
+        raise ContractError("CONSUMER_CONTRACT_PINS_MISMATCH")
+    dispatch: dict[str, Any] = {
+        "artifact": {
+            "id": artifact_id,
+            "name": name,
+            "producer_run_id": run["run_id"],
+            "producer_run_attempt": run["run_attempt"],
+            "provider_sha256": provider_sha,
+            "archive_sha256": archive_sha,
+            "file_sha256": _sha(raw_contract),
+        },
+        "contract": contract,
+        "schema": CONSUMER_DISPATCH_SCHEMA,
+    }
+    dispatch["envelope_sha256"] = _sha(_canonical(dispatch))
+    encoded = base64.urlsafe_b64encode(_canonical(dispatch)).rstrip(b"=")
+    return {
+        "source_tree": tree,
+        "workflow_blob": workflow_blob,
+        "request_slot": {
+            "status": "produced",
+            "sha256": _sha(encoded),
+            "utf8_bytes": len(encoded),
+        },
+    }
 
 
 def _zip_member(raw: bytes, filename: str) -> bytes:
@@ -1129,12 +1313,12 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
 
 
 def _normalize_child(
-    provider: Provider,
     run: dict[str, Any],
     artifact: dict[str, Any],
     receipt: dict[str, Any],
     role: str,
     outcome: dict[str, Any],
+    consumer_contract: dict[str, Any],
 ) -> dict[str, Any]:
     rp = receipt["provider"]
     if (
@@ -1145,9 +1329,12 @@ def _normalize_child(
         or run["event"] != "workflow_dispatch"
     ):
         raise ContractError("SERVICE_RECEIPT_RUN_MISMATCH")
-    tree, blob = _workflow_blob(provider, TF_REPOSITORY, run["head_sha"], DEPLOY_WORKFLOW)
+    tree = consumer_contract["source_tree"]
+    blob = consumer_contract["workflow_blob"]
     if rp["workflow_blob"] != blob:
         raise ContractError("SERVICE_RECEIPT_WORKFLOW_MISMATCH")
+    if receipt["requested"]["consumer_contract"] != consumer_contract["request_slot"]:
+        raise ContractError("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH")
     facts = receipt["facts"]
     if facts == {"status": "not_produced"}:
         raise ContractError("SERVICE_RECEIPT_FACTS_NOT_PRODUCED")
@@ -1478,10 +1665,22 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
 
     normalized_by_id: dict[int, dict[str, Any]] = {}
+    consumer_contracts: dict[str, dict[str, Any]] = {}
     per_service: dict[str, list[dict[str, Any]]] = {service: [] for service in SERVICE_ORDER}
     for run_id, role in roles.items():
         run, artifact, raw_receipt, outcome = by_id[run_id]
-        child = _normalize_child(provider, run, artifact, raw_receipt, role, outcome)
+        if run["head_sha"] not in consumer_contracts:
+            consumer_contracts[run["head_sha"]] = _consumer_contract_for_head(
+                provider, run["head_sha"]
+            )
+        child = _normalize_child(
+            run,
+            artifact,
+            raw_receipt,
+            role,
+            outcome,
+            consumer_contracts[run["head_sha"]],
+        )
         normalized_by_id[run_id] = child
         per_service[child["service"]].append(child)
         if child["source_revision_evidence"] != {

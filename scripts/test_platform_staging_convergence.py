@@ -36,6 +36,10 @@ RELAY_BLOB = "d" * 40
 TF_HEAD = "e" * 40
 TF_TREE = "f" * 40
 TF_BLOB = "1" * 40
+CONTRACT_WORKFLOW_BLOB = "7" * 40
+CONTRACT_SCHEMA_BLOB = "8" * 40
+CONTRACT_RUN = 250
+CONTRACT_ARTIFACT = 1250
 BUILD_RUN = 100
 RELAY_RUN = 200
 FRONTIER_RUN = 306
@@ -255,6 +259,66 @@ def produced(value: object) -> dict:
     return {"status": "produced", "value": value}
 
 
+def consumer_contract_evidence() -> tuple[dict, bytes, dict]:
+    name = f"leaf-platform-staging-consumer-contract-run-{CONTRACT_RUN}-attempt-1"
+    unsigned = {
+        "artifact": {"file": "consumer-contract.json", "name": name},
+        "consumer": {
+            "contract_schema_path": subject.CONSUMER_CONTRACT_SCHEMA_PATH,
+            "contract_schema_blob": CONTRACT_SCHEMA_BLOB,
+            "contract_version": 1,
+            "deploy_workflow_path": subject.DEPLOY_WORKFLOW,
+            "deploy_workflow_blob": TF_BLOB,
+            "pins": {
+                "deployment_environment": "aws-apply",
+                "digest_aware_marker": "leaf.staging-digest-aware-consumer.v1",
+                "mutation_group": "leaf-platform-staging-ecs-mutation",
+            },
+        },
+        "producer": {
+            "repository": subject.TF_REPOSITORY,
+            "workflow_path": subject.CONSUMER_CONTRACT_WORKFLOW,
+            "workflow_blob": CONTRACT_WORKFLOW_BLOB,
+            "run_id": CONTRACT_RUN,
+            "run_attempt": 1,
+            "event": "push",
+            "branch": "main",
+            "head_sha": TF_HEAD,
+            "head_tree": TF_TREE,
+        },
+        "schema": subject.CONSUMER_CONTRACT_SCHEMA,
+        "version": 1,
+    }
+    contract = copy.deepcopy(unsigned)
+    contract["payload_sha256"] = hashlib.sha256(canonical(unsigned)).hexdigest()
+    raw_contract = canonical(contract) + b"\n"
+    zip_raw = archive("consumer-contract.json", raw_contract)
+    archive_sha = hashlib.sha256(zip_raw).hexdigest()
+    dispatch = {
+        "artifact": {
+            "id": CONTRACT_ARTIFACT,
+            "name": name,
+            "producer_run_id": CONTRACT_RUN,
+            "producer_run_attempt": 1,
+            "provider_sha256": archive_sha,
+            "archive_sha256": archive_sha,
+            "file_sha256": hashlib.sha256(raw_contract).hexdigest(),
+        },
+        "contract": contract,
+        "schema": subject.CONSUMER_DISPATCH_SCHEMA,
+    }
+    dispatch["envelope_sha256"] = hashlib.sha256(canonical(dispatch)).hexdigest()
+    import base64
+
+    encoded = base64.urlsafe_b64encode(canonical(dispatch)).rstrip(b"=")
+    slot = {
+        "status": "produced",
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "utf8_bytes": len(encoded),
+    }
+    return contract, zip_raw, slot
+
+
 def identity() -> dict:
     body = {
         "schema": "leaf.deployment-identity.v1",
@@ -277,13 +341,14 @@ def service_receipt(
     terminal_td: str,
     with_identity: bool = False,
 ) -> dict:
+    _, _, contract_slot = consumer_contract_evidence()
     requested = {
         "allow_non_forward_image": missing(),
         "app_deploy_intent": "configuration" if with_identity else "forward",
         "configuration_delta": missing(),
         "configuration_task_definition": predecessor if with_identity else "not_produced",
         "convergence_id": "not_produced",
-        "consumer_contract": missing(),
+        "consumer_contract": contract_slot,
         "deploy_strategy": "direct",
         "digest_aware_evidence": missing(),
         "digest_aware_reconcile": False,
@@ -472,10 +537,31 @@ def fixture() -> FakeProvider:
         (306, "app", "leaf-platform-app:2", "leaf-platform-app:3", True),
     )
     child_runs = []
-    provider.json_values[(tf, f"/git/commits/{TF_HEAD}")] = {"tree": {"sha": TF_TREE}}
-    provider.json_values[(tf, f"/git/trees/{TF_TREE}?recursive=1")] = {
-        "tree": [{"path": subject.DEPLOY_WORKFLOW, "type": "blob", "sha": TF_BLOB}]
+    contract, contract_zip, _ = consumer_contract_evidence()
+    contract_run = run(
+        CONTRACT_RUN,
+        repository=tf,
+        workflow=subject.CONSUMER_CONTRACT_WORKFLOW,
+        event="push",
+        head_sha=TF_HEAD,
+        created="2026-08-13T00:55:00Z",
+    )
+    contract_query = "branch=main&event=push&status=success&per_page=100"
+    provider.json_values[(tf, f"/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/runs?{contract_query}")] = {
+        "total_count": 1,
+        "workflow_runs": [contract_run],
     }
+    contract_name = contract["artifact"]["name"]
+    contract_row = artifact(
+        CONTRACT_ARTIFACT, contract_name, CONTRACT_RUN, TF_HEAD
+    )
+    contract_row["digest"] = "sha256:" + hashlib.sha256(contract_zip).hexdigest()
+    contract_row["workflow_run"]["head_branch"] = "main"
+    provider.json_values[(tf, f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100")] = {
+        "total_count": 1,
+        "artifacts": [contract_row],
+    }
+    provider.byte_values[(tf, f"/actions/artifacts/{CONTRACT_ARTIFACT}/zip")] = contract_zip
     for index, (run_id, service, predecessor, terminal, has_identity) in enumerate(child_specs, 20):
         created = f"2026-08-13T01:{index:02d}:00Z"
         child = run(
@@ -530,6 +616,27 @@ def replace_receipt(provider: FakeProvider, run_id: int, mutate) -> None:
     receipt["receipt_sha256"] = ""
     receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
     provider.byte_values[key] = archive(subject.ARTIFACT_FILE, canonical(receipt))
+
+
+def replace_consumer_contract(provider: FakeProvider, mutate) -> None:
+    key = (
+        subject.TF_REPOSITORY,
+        f"/actions/artifacts/{CONTRACT_ARTIFACT}/zip",
+    )
+    with zipfile.ZipFile(io.BytesIO(provider.byte_values[key])) as value:
+        contract = json.loads(value.read(subject.CONSUMER_CONTRACT_FILE))
+    mutate(contract)
+    contract.pop("payload_sha256", None)
+    contract["payload_sha256"] = hashlib.sha256(canonical(contract)).hexdigest()
+    zip_raw = archive(subject.CONSUMER_CONTRACT_FILE, canonical(contract) + b"\n")
+    provider.byte_values[key] = zip_raw
+    rows = provider.json_values[
+        (
+            subject.TF_REPOSITORY,
+            f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100",
+        )
+    ]["artifacts"]
+    rows[0]["digest"] = "sha256:" + hashlib.sha256(zip_raw).hexdigest()
 
 
 def failed_relay_fixture() -> FakeProvider:
@@ -718,6 +825,78 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         copy_receipt["evidence_sha256"] = ""
         self.assertEqual(checksum, hashlib.sha256(canonical(copy_receipt)).hexdigest())
         self.assertTrue(all(call[0].startswith("GET_") for call in provider.calls))
+        self.assertFalse(
+            any(
+                repository == subject.TF_REPOSITORY and endpoint.startswith("/git/")
+                for _, repository, endpoint in provider.calls
+            )
+        )
+
+    def test_consumer_contract_provider_binding_fails_closed(self) -> None:
+        query_key = (
+            subject.TF_REPOSITORY,
+            "/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/"
+            "runs?branch=main&event=push&status=success&per_page=100",
+        )
+        artifact_key = (
+            subject.TF_REPOSITORY,
+            f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100",
+        )
+
+        provider = fixture()
+        duplicate = copy.deepcopy(provider.json_values[query_key]["workflow_runs"][0])
+        duplicate["id"] = CONTRACT_RUN + 1
+        provider.json_values[query_key]["workflow_runs"].append(duplicate)
+        provider.json_values[query_key]["total_count"] = 2
+        self.assert_reason("CONSUMER_CONTRACT_RUN_CARDINALITY", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"][0]["workflow_run"]["head_sha"] = "0" * 40
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_ASSOCIATION", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"].append(
+            copy.deepcopy(provider.json_values[artifact_key]["artifacts"][0])
+        )
+        provider.json_values[artifact_key]["total_count"] = 2
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_CARDINALITY", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"][0]["digest"] = "sha256:" + "0" * 64
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_HASH_MISMATCH", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value.__setitem__("extra", True),
+        )
+        self.assert_reason("CONSUMER_CONTRACT_INVALID", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value["producer"].__setitem__("head_sha", "0" * 40),
+        )
+        self.assert_reason("CONSUMER_CONTRACT_PRODUCER_MISMATCH", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value["consumer"].__setitem__(
+                "deploy_workflow_blob", "0" * 40
+            ),
+        )
+        self.assert_reason("SERVICE_RECEIPT_WORKFLOW_MISMATCH", provider)
+
+        provider = fixture()
+        replace_receipt(
+            provider,
+            303,
+            lambda value: value["requested"]["consumer_contract"].__setitem__(
+                "sha256", "0" * 64
+            ),
+        )
+        self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
 
     def test_failed_relay_and_provider_bound_resumes_produce_one_complete_receipt(self) -> None:
         provider = failed_relay_fixture()
