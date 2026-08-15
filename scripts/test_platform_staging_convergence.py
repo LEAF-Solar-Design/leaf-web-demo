@@ -49,6 +49,15 @@ DIGESTS = {
     service: f"sha256:{digit * 64}"
     for service, digit in zip(SERVICES, "23456", strict=True)
 }
+CHILD_WINDOW_EXACT_ENDPOINT = (
+    "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+    "event=workflow_dispatch&created=2026-08-13T01%3A10%3A00Z.."
+    "2026-08-13T01%3A25%3A00Z&per_page=100"
+)
+CHILD_WINDOW_OPEN_ENDPOINT = (
+    "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+    "event=workflow_dispatch&created=%3E%3D2026-08-13T01%3A10%3A00Z&per_page=100"
+)
 
 
 class ArtifactRedirectTests(unittest.TestCase):
@@ -607,10 +616,12 @@ def fixture() -> FakeProvider:
             ],
         }
     provider.json_values[(tf, f"/actions/runs/{FRONTIER_RUN}")] = copy.deepcopy(child_runs[-1])
-    provider.json_values[(tf, "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100")] = {
+    child_list = {
         "total_count": len(child_runs),
         "workflow_runs": child_runs,
     }
+    provider.json_values[(tf, CHILD_WINDOW_EXACT_ENDPOINT)] = child_list
+    provider.json_values[(tf, CHILD_WINDOW_OPEN_ENDPOINT)] = copy.deepcopy(child_list)
     return provider
 
 
@@ -685,7 +696,7 @@ def failed_relay_fixture() -> FakeProvider:
 
     runs_key = (
         tf,
-        "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+        CHILD_WINDOW_EXACT_ENDPOINT,
     )
     run_list = provider.json_values[runs_key]
     run_list["workflow_runs"] = [row for row in run_list["workflow_runs"] if row["id"] != 302]
@@ -950,6 +961,56 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             )
         )
 
+    def test_child_window_avoids_provider_thousand_run_cap(self) -> None:
+        provider = fixture()
+        base = (
+            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+            "event=workflow_dispatch&per_page=100"
+        )
+        for page in range(1, 11):
+            endpoint = base if page == 1 else f"{base}&page={page}"
+            provider.json_values[(subject.TF_REPOSITORY, endpoint)] = {
+                "total_count": 1012,
+                "workflow_runs": [
+                    {"id": page * 1000 + offset} for offset in range(100)
+                ],
+            }
+        provider.json_values[(subject.TF_REPOSITORY, f"{base}&page=11")] = {
+            "total_count": 0,
+            "workflow_runs": [],
+        }
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_DRIFT$"):
+            subject._workflow_run_rows(
+                provider,
+                subject.TF_REPOSITORY,
+                "deploy-leaf-platform-staging.yml",
+                {"event": "workflow_dispatch", "per_page": 100},
+            )
+
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        self.assertTrue(receipt["terminal_complete"])
+        child_list_calls = [
+            endpoint
+            for method, repository, endpoint in provider.calls
+            if method == "GET_JSON"
+            and repository == subject.TF_REPOSITORY
+            and endpoint.startswith(
+                "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+            )
+        ]
+        self.assertIn(CHILD_WINDOW_EXACT_ENDPOINT, child_list_calls)
+        self.assertEqual(child_list_calls[-1], CHILD_WINDOW_EXACT_ENDPOINT)
+
+    def test_required_child_outside_verified_window_fails_closed(self) -> None:
+        provider = fixture()
+        rows = provider.json_values[
+            (subject.TF_REPOSITORY, CHILD_WINDOW_EXACT_ENDPOINT)
+        ]["workflow_runs"]
+        child = next(row for row in rows if row["id"] == 301)
+        child["created_at"] = "2026-08-13T01:09:59Z"
+        child["updated_at"] = "2026-08-13T01:09:59Z"
+        self.assert_reason("CHILD_RUN_WINDOW_MISMATCH", provider)
+
     def test_consumer_contract_provider_binding_fails_closed(self) -> None:
         query_key = (
             subject.TF_REPOSITORY,
@@ -1095,7 +1156,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(failed_run)
         provider.json_values[list_key]["total_count"] += 1
@@ -1219,7 +1280,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(failed_run)
         provider.json_values[list_key]["total_count"] += 1
@@ -1496,7 +1557,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         provider = fixture()
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         active = run(
             399,
@@ -1673,7 +1734,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(raw)
         provider.json_values[list_key]["total_count"] += 1
