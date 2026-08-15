@@ -445,12 +445,18 @@ def service_receipt(
 class FakeProvider:
     def __init__(self) -> None:
         self.json_values: dict[tuple[str, str], object] = {}
+        self.json_sequences: dict[tuple[str, str], list[object]] = {}
         self.byte_values: dict[tuple[str, str], bytes] = {}
         self.calls: list[tuple[str, str, str]] = []
 
     def json(self, repository: str, endpoint: str) -> object:
         self.calls.append(("GET_JSON", repository, endpoint))
         key = (repository, endpoint)
+        if key in self.json_sequences:
+            values = self.json_sequences[key]
+            if not values:
+                raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
+            return copy.deepcopy(values.pop(0))
         if key not in self.json_values:
             raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
         return copy.deepcopy(self.json_values[key])
@@ -762,6 +768,118 @@ class ConvergenceFinalizerTests(unittest.TestCase):
     def assert_reason(self, reason: str, provider: FakeProvider) -> None:
         with self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
             subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+
+    @staticmethod
+    def run_rows(run_ids: list[int]) -> list[dict[str, object]]:
+        return [
+            run(
+                run_id,
+                repository=subject.TF_REPOSITORY,
+                workflow=subject.DEPLOY_WORKFLOW,
+                event="workflow_dispatch",
+                head_sha=TF_HEAD,
+                created="2026-08-14T01:00:00Z",
+            )
+            for run_id in run_ids
+        ]
+
+    def test_run_list_growth_between_pages_restarts_to_one_stable_snapshot(self) -> None:
+        provider = FakeProvider()
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        old_ids = list(range(201, 100, -1))
+        new_ids = [202, *old_ids]
+        provider.json_sequences[(subject.TF_REPOSITORY, base)] = [
+            {"total_count": len(old_ids), "workflow_runs": self.run_rows(old_ids[:100])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[:100])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[:100])},
+        ]
+        provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = [
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+        ]
+
+        rows = subject._workflow_run_rows(
+            provider,
+            subject.TF_REPOSITORY,
+            "deploy-leaf-platform-staging.yml",
+            {"event": "workflow_dispatch", "per_page": 100},
+        )
+
+        self.assertEqual([row["id"] for row in rows], new_ids)
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, base)), 3)
+
+    def test_run_list_snapshot_rejects_non_append_drift_and_malformed_pages(self) -> None:
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        cases = (
+            (
+                "deletion",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 1])}, {"total_count": 1, "workflow_runs": self.run_rows([2])}],
+                [],
+                "PROVIDER_RUN_LIST_DRIFT",
+            ),
+            (
+                "reordering",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 1])}, {"total_count": 2, "workflow_runs": self.run_rows([1, 2])}],
+                [],
+                "PROVIDER_RUN_LIST_DRIFT",
+            ),
+            (
+                "duplicate",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 2])}],
+                [],
+                "PROVIDER_RUN_DUPLICATE",
+            ),
+            (
+                "invalid",
+                [{"total_count": 1, "workflow_runs": [{"id": True}]}],
+                [],
+                "PROVIDER_RUN_LIST_INVALID",
+            ),
+            (
+                "gap",
+                [{"total_count": 101, "workflow_runs": self.run_rows(list(range(201, 101, -1)))}],
+                [{"total_count": 101, "workflow_runs": []}],
+                "PROVIDER_RUN_PAGINATION_UNPROVEN",
+            ),
+        )
+        for name, first_pages, second_pages, reason in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
+                provider = FakeProvider()
+                provider.json_sequences[(subject.TF_REPOSITORY, base)] = first_pages
+                if second_pages:
+                    provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = second_pages
+                subject._workflow_run_rows(
+                    provider,
+                    subject.TF_REPOSITORY,
+                    "deploy-leaf-platform-staging.yml",
+                    {"event": "workflow_dispatch", "per_page": 100},
+                )
+
+    def test_run_list_growth_exhaustion_fails_closed(self) -> None:
+        provider = FakeProvider()
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        provider.json_sequences[(subject.TF_REPOSITORY, base)] = [
+            {"total_count": total, "workflow_runs": self.run_rows(list(range(total + 100, total, -1)))}
+            for total in (101, 102, 103)
+        ]
+        provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = [
+            {"total_count": total, "workflow_runs": self.run_rows([1])}
+            for total in (102, 103, 104)
+        ]
+
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_DRIFT$"):
+            subject._workflow_run_rows(
+                provider,
+                subject.TF_REPOSITORY,
+                "deploy-leaf-platform-staging.yml",
+                {"event": "workflow_dispatch", "per_page": 100},
+            )
+
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, base)), 3)
 
     def test_v3_relay_binds_raw_supply_file_sha_and_exact_candidate(self) -> None:
         candidate = v3_manifest()
