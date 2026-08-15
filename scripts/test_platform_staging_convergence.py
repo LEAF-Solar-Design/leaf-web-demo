@@ -794,6 +794,83 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             for run_id in run_ids
         ]
 
+    @staticmethod
+    def comparison(source: str, files: list[dict[str, str]]) -> dict[str, object]:
+        return {
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "base_commit": {"sha": source},
+            "head_commit": {"sha": "39c17213f2573542c2b58743ace12ed5b682f2dc"},
+            "merge_base_commit": {"sha": source},
+            "files": files,
+        }
+
+    def test_frozen_build_accepts_exact_verifier_only_descendant_main(self) -> None:
+        provider = FakeProvider()
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "39c17213f2573542c2b58743ace12ed5b682f2dc"
+        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
+        provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = self.comparison(
+            source,
+            [
+                {"filename": "scripts/platform_staging_convergence.py", "status": "modified"},
+                {"filename": "scripts/test_platform_staging_convergence.py", "status": "modified"},
+            ],
+        )
+
+        subject._verify_arrival_source(provider, source)
+
+    def test_arrival_source_rejects_harmful_or_unproved_main_drift(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "39c17213f2573542c2b58743ace12ed5b682f2dc"
+        valid_files = [{"filename": "scripts/platform_staging_convergence.py", "status": "modified"}]
+
+        def diverged(value: dict[str, object]) -> None:
+            value["status"] = "diverged"
+
+        def wrong_merge_base(value: dict[str, object]) -> None:
+            value["merge_base_commit"] = {"sha": "0" * 40}
+
+        def wrong_head(value: dict[str, object]) -> None:
+            value["head_commit"] = {"sha": "0" * 40}
+
+        def malformed_count(value: dict[str, object]) -> None:
+            value["behind_by"] = False
+
+        def product_path(value: dict[str, object]) -> None:
+            value["files"] = [{"filename": "server/app.py", "status": "modified"}]
+
+        def removed_verifier(value: dict[str, object]) -> None:
+            value["files"] = [{"filename": valid_files[0]["filename"], "status": "removed"}]
+
+        def duplicate_path(value: dict[str, object]) -> None:
+            value["files"] = [*valid_files, *valid_files]
+
+        def empty_drift(value: dict[str, object]) -> None:
+            value["files"] = []
+
+        for mutate in (
+            diverged,
+            wrong_merge_base,
+            wrong_head,
+            malformed_count,
+            product_path,
+            removed_verifier,
+            duplicate_path,
+            empty_drift,
+        ):
+            with self.subTest(mutate=mutate.__name__), self.assertRaisesRegex(
+                subject.ContractError, "^ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN$"
+            ):
+                provider = FakeProvider()
+                provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
+                comparison = self.comparison(source, copy.deepcopy(valid_files))
+                mutate(comparison)
+                provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = comparison
+                subject._verify_arrival_source(provider, source)
+
     def test_run_list_growth_between_pages_restarts_to_one_stable_snapshot(self) -> None:
         provider = FakeProvider()
         base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
@@ -1551,7 +1628,12 @@ class ConvergenceFinalizerTests(unittest.TestCase):
 
     def test_newer_main_or_active_child_blocks_current_frontier(self) -> None:
         provider = fixture()
-        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")]["commit"]["sha"] = "0" * 40
+        current = "0" * 40
+        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")]["commit"]["sha"] = current
+        provider.json_values[(subject.APP_REPOSITORY, f"/compare/{SOURCE}...{current}")] = self.comparison(
+            SOURCE,
+            [{"filename": "server/app.py", "status": "modified"}],
+        )
         self.assert_reason("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN", provider)
 
         provider = fixture()

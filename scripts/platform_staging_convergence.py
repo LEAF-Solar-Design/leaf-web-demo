@@ -132,6 +132,12 @@ MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
 MAX_PROVIDER_READ_ATTEMPTS = 3
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
 MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
+VERIFIER_ONLY_MAIN_DRIFT_PATHS = frozenset(
+    {
+        "scripts/platform_staging_convergence.py",
+        "scripts/test_platform_staging_convergence.py",
+    }
+)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -392,6 +398,56 @@ def _workflow_blob(provider: Provider, repository: str, sha: str, path: str) -> 
     if len(matches) != 1:
         raise ContractError("PROVIDER_WORKFLOW_BLOB_INVALID")
     return tree_sha, _sha40(matches[0].get("sha"), "PROVIDER_WORKFLOW_BLOB_INVALID")
+
+
+def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
+    branch = provider.json(APP_REPOSITORY, "/branches/main")
+    if not isinstance(branch, dict) or not isinstance(branch.get("commit"), dict):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    current_sha = _sha40(branch["commit"].get("sha"), "ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    if current_sha == build_sha:
+        return
+    comparison = provider.json(APP_REPOSITORY, f"/compare/{build_sha}...{current_sha}")
+    if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    base = comparison.get("base_commit")
+    head = comparison.get("head_commit")
+    merge_base = comparison.get("merge_base_commit")
+    ahead_by = comparison.get("ahead_by")
+    behind_by = comparison.get("behind_by")
+    total_commits = comparison.get("total_commits")
+    if (
+        comparison.get("status") != "ahead"
+        or isinstance(ahead_by, bool)
+        or not isinstance(ahead_by, int)
+        or ahead_by < 1
+        or isinstance(behind_by, bool)
+        or behind_by != 0
+        or isinstance(total_commits, bool)
+        or total_commits != ahead_by
+        or not isinstance(base, dict)
+        or base.get("sha") != build_sha
+        or not isinstance(head, dict)
+        or head.get("sha") != current_sha
+        or not isinstance(merge_base, dict)
+        or merge_base.get("sha") != build_sha
+    ):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    changed_paths: set[str] = set()
+    for row in comparison["files"]:
+        if not isinstance(row, dict):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        path = row.get("filename")
+        if (
+            not isinstance(path, str)
+            or path not in VERIFIER_ONLY_MAIN_DRIFT_PATHS
+            or path in changed_paths
+            or row.get("status") != "modified"
+        ):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        changed_paths.add(path)
+    if not changed_paths:
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
 
 
 def _artifact_rows(provider: Provider, repository: str, run_id: int) -> list[dict[str, Any]]:
@@ -1508,13 +1564,7 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     if build["run_id"] != producer_build_run_id or build["head_branch"] != "main" or build["conclusion"] != "success":
         raise ContractError("BUILD_RUN_MISMATCH")
     build_tree, build_blob = _workflow_blob(provider, APP_REPOSITORY, build["head_sha"], BUILD_WORKFLOW)
-    branch = provider.json(APP_REPOSITORY, "/branches/main")
-    if (
-        not isinstance(branch, dict)
-        or not isinstance(branch.get("commit"), dict)
-        or branch["commit"].get("sha") != build["head_sha"]
-    ):
-        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    _verify_arrival_source(provider, build["head_sha"])
     supply_name = f"staging-supply-set-{build['head_sha']}-attempt-{build['run_attempt']}"
     supply_artifact, manifest = _one_artifact(
         provider, APP_REPOSITORY, build["run_id"], supply_name, "staging-supply-set.json"
