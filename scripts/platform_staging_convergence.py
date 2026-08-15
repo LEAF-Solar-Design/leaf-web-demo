@@ -131,6 +131,7 @@ MAX_PROVIDER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
 MAX_PROVIDER_READ_ATTEMPTS = 3
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
+MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -409,6 +410,38 @@ def _workflow_run_rows(
     parameters: dict[str, object],
 ) -> list[dict[str, Any]]:
     base = f"/actions/workflows/{workflow}/runs?" + urllib.parse.urlencode(parameters)
+    previous: tuple[list[dict[str, Any]], tuple[int, ...], int] | None = None
+    minimum_total = 0
+    for _scan in range(MAX_PROVIDER_RUN_SNAPSHOT_SCANS):
+        rows, total, growth = _workflow_run_snapshot(provider, repository, base, minimum_total)
+        if growth is not None:
+            minimum_total = growth
+            continue
+        run_ids = tuple(row["id"] for row in rows)
+        if previous is None:
+            previous = (rows, run_ids, total)
+            minimum_total = total
+            continue
+        _, previous_ids, previous_total = previous
+        if total < previous_total:
+            raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        if total == previous_total:
+            if run_ids != previous_ids:
+                raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+            return rows
+        added = total - previous_total
+        if run_ids[added:] != previous_ids:
+            raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        return rows
+    raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+
+
+def _workflow_run_snapshot(
+    provider: Provider,
+    repository: str,
+    base: str,
+    minimum_total: int,
+) -> tuple[list[dict[str, Any]], int, int | None]:
     page = 1
     output: list[dict[str, Any]] = []
     total: int | None = None
@@ -418,11 +451,16 @@ def _workflow_run_rows(
         raw = provider.json(repository, endpoint)
         if not isinstance(raw, dict) or not isinstance(raw.get("workflow_runs"), list):
             raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        current_total = raw.get("total_count")
+        if isinstance(current_total, bool) or not isinstance(current_total, int) or current_total < 0:
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
         if total is None:
-            total = raw.get("total_count")
-            if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-                raise ContractError("PROVIDER_RUN_LIST_INVALID")
-        elif raw.get("total_count") != total:
+            total = current_total
+            if total < minimum_total:
+                raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        elif current_total > total:
+            return [], total, current_total
+        elif current_total < total:
             raise ContractError("PROVIDER_RUN_LIST_DRIFT")
         rows = raw["workflow_runs"]
         if not rows and len(output) < total:
@@ -441,7 +479,7 @@ def _workflow_run_rows(
             raise ContractError("PROVIDER_RUN_PAGINATION_UNPROVEN")
     if len(output) != total:
         raise ContractError("PROVIDER_RUN_PAGINATION_UNPROVEN")
-    return output
+    return output, total, None
 
 
 def _one_artifact(
