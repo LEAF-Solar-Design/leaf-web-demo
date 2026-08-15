@@ -795,22 +795,37 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         ]
 
     @staticmethod
-    def comparison(source: str, files: list[dict[str, str]]) -> dict[str, object]:
+    def comparison(
+        source: str,
+        files: list[dict[str, str]],
+        *,
+        current: str = "39c17213f2573542c2b58743ace12ed5b682f2dc",
+        commits: list[str] | None = None,
+    ) -> dict[str, object]:
+        commit_shas = commits or ["1" * 40, current]
         return {
             "status": "ahead",
-            "ahead_by": 2,
+            "ahead_by": len(commit_shas),
             "behind_by": 0,
-            "total_commits": 2,
+            "total_commits": len(commit_shas),
             "base_commit": {"sha": source},
-            "head_commit": {"sha": "39c17213f2573542c2b58743ace12ed5b682f2dc"},
             "merge_base_commit": {"sha": source},
+            "commits": [{"sha": sha} for sha in commit_shas],
             "files": files,
         }
 
     def test_frozen_build_accepts_exact_verifier_only_descendant_main(self) -> None:
         provider = FakeProvider()
         source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
-        current = "39c17213f2573542c2b58743ace12ed5b682f2dc"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        commits = [
+            "baf4b255753354c52005be65799731df27087fe2",
+            "20d86fe5d308c849485346712754d449d3b7e8d5",
+            "39c17213f2573542c2b58743ace12ed5b682f2dc",
+            "2f36f335241264ecbca6a873796cf8ddc4972a6a",
+            "68e28c330fc80cdac32f178f8c657673769f04d1",
+            "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc",
+        ]
         provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
         provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = self.comparison(
             source,
@@ -818,6 +833,8 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 {"filename": "scripts/platform_staging_convergence.py", "status": "modified"},
                 {"filename": "scripts/test_platform_staging_convergence.py", "status": "modified"},
             ],
+            current=current,
+            commits=commits,
         )
 
         subject._verify_arrival_source(provider, source)
@@ -833,8 +850,26 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         def wrong_merge_base(value: dict[str, object]) -> None:
             value["merge_base_commit"] = {"sha": "0" * 40}
 
-        def wrong_head(value: dict[str, object]) -> None:
-            value["head_commit"] = {"sha": "0" * 40}
+        def missing_commits(value: dict[str, object]) -> None:
+            value.pop("commits")
+
+        def empty_commits(value: dict[str, object]) -> None:
+            value["commits"] = []
+
+        def truncated_commits(value: dict[str, object]) -> None:
+            value["commits"] = value["commits"][:-1]
+
+        def overlong_commits(value: dict[str, object]) -> None:
+            value["commits"] = [*value["commits"], {"sha": "2" * 40}]
+
+        def duplicate_commit(value: dict[str, object]) -> None:
+            value["commits"] = [value["commits"][0], value["commits"][0]]
+
+        def malformed_commit(value: dict[str, object]) -> None:
+            value["commits"] = [{"sha": "not-a-sha"}, value["commits"][-1]]
+
+        def wrong_terminal(value: dict[str, object]) -> None:
+            value["commits"][-1] = {"sha": "0" * 40}
 
         def malformed_count(value: dict[str, object]) -> None:
             value["behind_by"] = False
@@ -854,7 +889,13 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         for mutate in (
             diverged,
             wrong_merge_base,
-            wrong_head,
+            missing_commits,
+            empty_commits,
+            truncated_commits,
+            overlong_commits,
+            duplicate_commit,
+            malformed_commit,
+            wrong_terminal,
             malformed_count,
             product_path,
             removed_verifier,

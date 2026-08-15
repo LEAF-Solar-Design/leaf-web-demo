@@ -408,11 +408,15 @@ def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
     if current_sha == build_sha:
         return
     comparison = provider.json(APP_REPOSITORY, f"/compare/{build_sha}...{current_sha}")
-    if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
+    if (
+        not isinstance(comparison, dict)
+        or not isinstance(comparison.get("files"), list)
+        or not isinstance(comparison.get("commits"), list)
+    ):
         raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
     base = comparison.get("base_commit")
-    head = comparison.get("head_commit")
     merge_base = comparison.get("merge_base_commit")
+    commits = comparison["commits"]
     ahead_by = comparison.get("ahead_by")
     behind_by = comparison.get("behind_by")
     total_commits = comparison.get("total_commits")
@@ -425,13 +429,22 @@ def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
         or behind_by != 0
         or isinstance(total_commits, bool)
         or total_commits != ahead_by
+        or len(commits) != ahead_by
         or not isinstance(base, dict)
         or base.get("sha") != build_sha
-        or not isinstance(head, dict)
-        or head.get("sha") != current_sha
         or not isinstance(merge_base, dict)
         or merge_base.get("sha") != build_sha
     ):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    commit_shas: list[str] = []
+    for row in commits:
+        if not isinstance(row, dict):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        commit_sha = _sha40(row.get("sha"), "ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        if commit_sha in commit_shas:
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        commit_shas.append(commit_sha)
+    if commit_shas[-1] != current_sha:
         raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
     changed_paths: set[str] = set()
     for row in comparison["files"]:
