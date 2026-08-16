@@ -1,12 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createHarness } from "../src/server.js";
-import type { HarnessPorts, ProjectRepositoryAuthority } from "../src/ports/index.js";
+import type {
+  HarnessPorts,
+  ProjectRepositoryAuthority,
+  ProjectRepositorySourceVerificationRequest,
+} from "../src/ports/index.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
@@ -50,6 +54,21 @@ function body(base: string, candidate: string, baseTree: string, candidateTree: 
     candidate_commit: candidate,
     candidate_tree: candidateTree,
   };
+}
+
+function previewRequest(
+  base: string,
+  candidate: string,
+  baseTree: string,
+  candidateTree: string,
+): ProjectRepositorySourceVerificationRequest {
+  return Object.freeze({
+    relation: "preview",
+    baseCommit: base,
+    baseTree,
+    candidateCommit: candidate,
+    candidateTree,
+  });
 }
 
 describe("project repository source witness route", () => {
@@ -109,7 +128,8 @@ describe("project repository source witness route", () => {
   it("authenticates before parsing, then verifies an ancestor preview against the contained bare repository", async () => {
     const provider = (await import("../src/ports/impl/tenantRepoProvider.js"));
     const spy = vi.spyOn(provider.TenantRepoProviderImpl.prototype, "verifyProjectSource");
-    const request = JSON.stringify(body(source, candidate, sourceTree, candidateTree));
+    const sourceBody = body(source, candidate, sourceTree, candidateTree);
+    const request = JSON.stringify(sourceBody);
     const denied = await fetch(`${baseUrl}/internal/project-repository-source/verify`, {
       method: "POST", headers: { "content-type": "application/json" }, body: "not-json",
     });
@@ -122,10 +142,15 @@ describe("project repository source witness route", () => {
       body: request,
     });
     expect(accepted.status).toBe(200);
-    expect(await accepted.json()).toMatchObject({
+    const response = await accepted.json() as { contract: string; request_digest: string };
+    expect(response).toMatchObject({
       contract: "leaf.project-repository-source-witness.v1",
       request_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    const canonical = `{${Object.keys(sourceBody).sort().map((key) =>
+      `${JSON.stringify(key)}:${JSON.stringify(sourceBody[key])}`).join(",")}}`;
+    const expectedDigest = (await import("node:crypto")).createHash("sha256").update(canonical).digest("hex");
+    expect(response.request_digest).toBe(expectedDigest);
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
@@ -183,5 +208,29 @@ describe("project repository source witness route", () => {
       body: JSON.stringify(forged),
     });
     expect(rejected.status).toBe(409);
+  });
+
+  it("fails closed before Git verification for a missing base, non-bare repo, or symlink escape", async () => {
+    const request = previewRequest(source, candidate, sourceTree, candidateTree);
+    const options = (bareBase: string) => ({
+      locator: { async repoRef() { return join(root, "work"); } },
+      bareBase,
+      lease: projectLease(),
+      authoringMode: "disabled" as const,
+    });
+    const missing = new TenantRepoProviderImpl(options(join(root, "missing-base")));
+    await expect(missing.verifyProjectSource(AUTHORITY, request)).rejects.toThrow(/base is unavailable/);
+
+    const nonBareBase = join(root, "non-bare-base");
+    mkdirSync(nonBareBase);
+    execFileSync("git", ["init", "-q", join(nonBareBase, `${AUTHORITY.repoKey}.git`)]);
+    const nonBare = new TenantRepoProviderImpl(options(nonBareBase));
+    await expect(nonBare.verifyProjectSource(AUTHORITY, request)).rejects.toThrow(/not a bare repository/);
+
+    const escapeBase = join(root, "escape-base");
+    mkdirSync(escapeBase);
+    symlinkSync(join(root, "bare", `${AUTHORITY.repoKey}.git`), join(escapeBase, `${AUTHORITY.repoKey}.git`), "junction");
+    const escaped = new TenantRepoProviderImpl(options(escapeBase));
+    await expect(escaped.verifyProjectSource(AUTHORITY, request)).rejects.toThrow(/repository is unavailable/);
   });
 });

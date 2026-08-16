@@ -140,7 +140,18 @@ function projectSourceRequest(
     request = Object.freeze({ relation: "inverse", originalCommit: sha("original_commit"), originalTree: sha("original_tree"), targetCommit: sha("target_commit"), targetTree: sha("target_tree"), inverseCommit: sha("inverse_commit"), inverseTree: sha("inverse_tree") });
     canonical = { relation: "inverse", tenant_id: authority.tenantId, organization_id: authority.organizationId, project_id: authority.projectId, repo_key: authority.repoKey, original_commit: request.originalCommit, original_tree: request.originalTree, target_commit: request.targetCommit, target_tree: request.targetTree, inverse_commit: request.inverseCommit, inverse_tree: request.inverseTree };
   }
-  return { authority, request, digest: createHash("sha256").update(JSON.stringify(canonical)).digest("hex") };
+  return {
+    authority,
+    request,
+    digest: createHash("sha256").update(canonicalJson(canonical)).digest("hex"),
+  };
+}
+
+/** Flat, lexicographically sorted JSON keeps the digest reproducible by the
+ * later Python caller without relying on JavaScript object insertion order. */
+function canonicalJson(value: Record<string, string>): string {
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${JSON.stringify(value[key])}`).join(",")}}`;
 }
 
 function authorAuthorityForRequest(
