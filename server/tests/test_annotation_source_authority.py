@@ -19,10 +19,14 @@ TENANT = str(uuid.uuid4())
 PROJECT = str(uuid.uuid4())
 DRAWING = str(uuid.uuid4())
 REPO = str(uuid.uuid4())
+BATCH = str(uuid.uuid4())
 BASE = "1" * 40
 BASE_TREE = "2" * 40
 HEAD = "3" * 40
 HEAD_TREE = "4" * 40
+INVERSE = "7" * 40
+INVERSE_TREE = "8" * 40
+WRITER = str(uuid.uuid4())
 
 
 class MappingStore:
@@ -56,6 +60,26 @@ def configured(monkeypatch):
 
     def post(url, *, json, headers, timeout):
         calls.append((url, json, headers, timeout))
+        if url.endswith("/internal/project-repository-source/inverse"):
+            payload_digest = canonical_digest({
+                "kind": "annotation_inverse_v1",
+                "source_batch_id": json["source_batch_id"],
+                "original_commit": json["original_commit"],
+                "original_tree": json["original_tree"],
+                "target_commit": json["target_commit"],
+                "target_tree": json["target_tree"],
+                "inverse_commit": INVERSE,
+                "inverse_tree": INVERSE_TREE,
+            })
+            return Response(200, {
+                "contract": "leaf.project-repository-inverse-producer.v1",
+                "request_digest": canonical_digest(json),
+                "inverse_commit": INVERSE,
+                "inverse_tree": INVERSE_TREE,
+                "payload_digest": payload_digest,
+                "writer_lease_id": WRITER,
+                "writer_lease_generation": "7",
+            })
         return Response(200, {
             "contract": "leaf.project-repository-source-witness.v1",
             "request_digest": canonical_digest(json),
@@ -114,6 +138,75 @@ def test_inverse_maps_original_target_and_inverse_exactly(configured):
         "inverse_commit": HEAD, "inverse_tree": HEAD_TREE,
     }
     assert receipt.receipt_digest == canonical_digest(body)
+
+
+def test_prepare_inverse_uses_mapped_authority_and_validates_closed_witness(configured):
+    witness = authority.SOURCE_AUTHORITY.prepare_inverse(
+        tenant_id=TENANT, org_id=TENANT, project_id=PROJECT,
+        drawing_id=DRAWING, repository_id=REPO, source_batch_id=BATCH,
+        original_commit=HEAD, original_tree=HEAD_TREE,
+        target_commit=HEAD, target_tree=HEAD_TREE,
+    )
+    url, body, headers, timeout = configured[0]
+    assert url == "http://harness.internal:8150/internal/project-repository-source/inverse"
+    assert headers == {
+        "X-Harness-Secret": "private-harness-secret", "X-Tenant-Id": TENANT,
+    }
+    assert timeout == 10
+    assert body == {
+        "tenant_id": TENANT, "organization_id": TENANT,
+        "project_id": PROJECT, "repo_key": REPO,
+        "source_batch_id": BATCH,
+        "original_commit": HEAD, "original_tree": HEAD_TREE,
+        "target_commit": HEAD, "target_tree": HEAD_TREE,
+    }
+    assert witness == authority.PreparedInverseWitness(
+        inverse_commit=INVERSE, inverse_tree=INVERSE_TREE,
+        payload_digest=canonical_digest({
+            "kind": "annotation_inverse_v1", "source_batch_id": BATCH,
+            "original_commit": HEAD, "original_tree": HEAD_TREE,
+            "target_commit": HEAD, "target_tree": HEAD_TREE,
+            "inverse_commit": INVERSE, "inverse_tree": INVERSE_TREE,
+        }),
+        writer_lease_id=WRITER, writer_lease_generation="7",
+    )
+    assert not any(key in body for key in ("root", "path", "ref", "url", "drawing_id"))
+
+
+def test_prepare_inverse_rejects_stale_target_before_harness(monkeypatch):
+    monkeypatch.setattr(
+        authority.requests, "post", lambda *_a, **_k: pytest.fail("must not call harness"),
+    )
+    with pytest.raises(authority.SourceAuthorityUnavailable):
+        authority.SOURCE_AUTHORITY.prepare_inverse(
+            tenant_id=TENANT, org_id=TENANT, project_id=PROJECT,
+            drawing_id=DRAWING, repository_id=REPO, source_batch_id=BATCH,
+            original_commit=HEAD, original_tree=HEAD_TREE,
+            target_commit=BASE, target_tree=BASE_TREE,
+        )
+
+
+@pytest.mark.parametrize("defect", ["extra", "digest"])
+def test_prepare_inverse_rejects_unbound_or_open_response(monkeypatch, defect):
+    body = {
+        "contract": "leaf.project-repository-inverse-producer.v1",
+        "request_digest": "0" * 64,
+        "inverse_commit": INVERSE, "inverse_tree": INVERSE_TREE,
+        "payload_digest": "0" * 64,
+        "writer_lease_id": WRITER, "writer_lease_generation": "7",
+    }
+    if defect == "extra":
+        body["private_ref"] = "refs/forbidden"
+    monkeypatch.setattr(
+        authority.requests, "post", lambda *_a, **_k: Response(200, body),
+    )
+    with pytest.raises(authority.SourceAuthorityUnavailable):
+        authority.SOURCE_AUTHORITY.prepare_inverse(
+            tenant_id=TENANT, org_id=TENANT, project_id=PROJECT,
+            drawing_id=DRAWING, repository_id=REPO, source_batch_id=BATCH,
+            original_commit=HEAD, original_tree=HEAD_TREE,
+            target_commit=HEAD, target_tree=HEAD_TREE,
+        )
 
 
 @pytest.mark.parametrize("missing", ["url", "secret"])

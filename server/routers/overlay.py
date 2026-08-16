@@ -34,8 +34,6 @@ deciding.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from typing import Any, Dict, Optional
 
@@ -548,20 +546,6 @@ def reject_annotation(batch_id: str, body: AnnotationDecisionBody,
     return _decision(batch_id, body, tenant, accept=False)
 
 
-def _inverse_payload_digest(source: Dict[str, Any]) -> str:
-    payload = {
-        "kind": "annotation_inverse_v1",
-        "source_batch_id": str(source["batch_id"]),
-        "source_payload_digest": str(source["payload_digest"]),
-        "preview_commit": str(source["base_commit"]),
-        "preview_tree": str(source["base_tree"]),
-        "reverses_commit": str(source["preview_commit"]),
-        "reverses_tree": str(source["preview_tree"]),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
                     tenant: Any, *, undo: bool) -> Any:
     try:
@@ -573,11 +557,40 @@ def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
         )
         if target is None:
             raise LookupError("annotation unavailable")
+        if undo and source["state"] != "accepted":
+            raise LookupError("annotation unavailable")
+        if not undo and source["state"] not in {"rejected", "expired"}:
+            raise LookupError("annotation unavailable")
+        if undo and (
+            source["preview_commit"] != target["commit_sha"]
+            or source["preview_tree"] != target["tree_sha"]
+            or int(source["applied_version"]) != int(target["version"])
+        ):
+            raise LookupError("annotation unavailable")
         batch_id = str(uuid.uuid4())
-        preview_commit = source["base_commit"] if undo else source["preview_commit"]
-        preview_tree = source["base_tree"] if undo else source["preview_tree"]
+        prepared = None
+        if undo:
+            prepared = SOURCE_AUTHORITY.prepare_inverse(
+                tenant_id=scope["tenant_id"], org_id=scope["org_id"],
+                project_id=scope["project_id"], drawing_id=scope["drawing_id"],
+                repository_id=scope["repository_id"],
+                source_batch_id=str(source["batch_id"]),
+                original_commit=str(source["preview_commit"]),
+                original_tree=str(source["preview_tree"]),
+                target_commit=str(target["commit_sha"]),
+                target_tree=str(target["tree_sha"]),
+            )
+        preview_commit = (
+            prepared.inverse_commit if prepared is not None
+            else source["preview_commit"]
+        )
+        preview_tree = (
+            prepared.inverse_tree if prepared is not None
+            else source["preview_tree"]
+        )
         payload_digest = (
-            _inverse_payload_digest(source) if undo else source["payload_digest"]
+            prepared.payload_digest if prepared is not None
+            else source["payload_digest"]
         )
         relation = "inverse" if undo else "preview"
         receipt = _source_receipt(

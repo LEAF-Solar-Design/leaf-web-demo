@@ -37,7 +37,13 @@ function projectLease(): PgTenantRepoLeaseCoordinator {
       _authority: ProjectRepositoryAuthority,
       action: (witness: unknown, runFenced: <R>(operation: () => R | Promise<R>) => Promise<R>) => Promise<T>,
     ): Promise<T> {
-      return action(Object.freeze({}), async <R>(operation: () => R | Promise<R>) => operation());
+      return action(
+        Object.freeze({
+          writerLeaseId: "55555555-5555-4555-8555-555555555555",
+          writerLeaseGeneration: "7",
+        }),
+        async <R>(operation: () => R | Promise<R>) => operation(),
+      );
     },
   } as unknown as PgTenantRepoLeaseCoordinator;
 }
@@ -81,12 +87,13 @@ describe("project repository source witness route", () => {
   let candidateTree: string;
   let inverse: string;
   let inverseTree: string;
+  let bare: string;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "leaf-project-source-"));
     const work = join(root, "work");
     const bareBase = join(root, "bare");
-    const bare = join(bareBase, `${AUTHORITY.repoKey}.git`);
+    bare = join(bareBase, `${AUTHORITY.repoKey}.git`);
     execFileSync("git", ["init", "-q", "-b", "main", work]);
     writeFileSync(join(work, "a.txt"), "before\n", "utf8");
     git(work, ["add", "."]);
@@ -107,7 +114,7 @@ describe("project repository source witness route", () => {
       locator: { async repoRef() { return work; } },
       bareBase,
       lease: projectLease(),
-      authoringMode: "disabled",
+      authoringMode: "singleton",
     });
     const ports: HarnessPorts = {
       oauth: new FakeOAuthGrantProvider(),
@@ -208,6 +215,98 @@ describe("project repository source witness route", () => {
       body: JSON.stringify(forged),
     });
     expect(rejected.status).toBe(409);
+  });
+
+  it("creates one fenced private inverse commit and replays its immutable R0 witness", async () => {
+    const sourceBatchId = "66666666-6666-4666-8666-666666666666";
+    const requestBody = {
+      tenant_id: AUTHORITY.tenantId,
+      organization_id: AUTHORITY.organizationId,
+      project_id: AUTHORITY.projectId,
+      repo_key: AUTHORITY.repoKey,
+      source_batch_id: sourceBatchId,
+      original_commit: candidate,
+      original_tree: candidateTree,
+      target_commit: candidate,
+      target_tree: candidateTree,
+    };
+    const denied = await fetch(`${baseUrl}/internal/project-repository-source/inverse`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "not-json",
+    });
+    expect(denied.status).toBe(401);
+
+    const prepare = async () => fetch(`${baseUrl}/internal/project-repository-source/inverse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": AUTHORITY.tenantId },
+      body: JSON.stringify(requestBody),
+    });
+    const first = await prepare();
+    expect(first.status).toBe(200);
+    const produced = await first.json() as Record<string, string>;
+    expect(Object.keys(produced).sort()).toEqual([
+      "contract", "inverse_commit", "inverse_tree", "payload_digest", "request_digest",
+      "writer_lease_generation", "writer_lease_id",
+    ]);
+    expect(produced).toMatchObject({
+      contract: "leaf.project-repository-inverse-producer.v1",
+      inverse_tree: sourceTree,
+      writer_lease_id: "55555555-5555-4555-8555-555555555555",
+      writer_lease_generation: "7",
+    });
+    expect(produced.inverse_commit).toMatch(/^[a-f0-9]{40}$/);
+    expect(produced.payload_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(git(bare, ["rev-parse", `${produced.inverse_commit}^1`])).toBe(candidate);
+    expect(git(bare, ["rev-parse", `${produced.inverse_commit}^{tree}`])).toBe(sourceTree);
+    expect(git(bare, ["rev-parse", `refs/leaf/annotation-inverses/${sourceBatchId}`])).toBe(
+      produced.inverse_commit,
+    );
+
+    const replay = await prepare();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(produced);
+
+    const conflicting = await fetch(`${baseUrl}/internal/project-repository-source/inverse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": AUTHORITY.tenantId },
+      body: JSON.stringify({
+        ...requestBody,
+        original_commit: inverse,
+        original_tree: inverseTree,
+        target_commit: inverse,
+        target_tree: inverseTree,
+      }),
+    });
+    expect(conflicting.status).toBe(409);
+    expect(git(bare, ["rev-parse", `refs/leaf/annotation-inverses/${sourceBatchId}`])).toBe(
+      produced.inverse_commit,
+    );
+
+    const verification = await fetch(`${baseUrl}/internal/project-repository-source/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": AUTHORITY.tenantId },
+      body: JSON.stringify({
+        tenant_id: AUTHORITY.tenantId,
+        organization_id: AUTHORITY.organizationId,
+        project_id: AUTHORITY.projectId,
+        repo_key: AUTHORITY.repoKey,
+        relation: "inverse",
+        original_commit: candidate,
+        original_tree: candidateTree,
+        target_commit: candidate,
+        target_tree: candidateTree,
+        inverse_commit: produced.inverse_commit,
+        inverse_tree: produced.inverse_tree,
+      }),
+    });
+    expect(verification.status).toBe(200);
+
+    const extra = await fetch(`${baseUrl}/internal/project-repository-source/inverse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": AUTHORITY.tenantId },
+      body: JSON.stringify({ ...requestBody, root: "C:/forbidden" }),
+    });
+    expect(extra.status).toBe(409);
+    expect(await extra.text()).not.toContain("forbidden");
   });
 
   it("fails closed before Git verification for a missing base, non-bare repo, or symlink escape", async () => {

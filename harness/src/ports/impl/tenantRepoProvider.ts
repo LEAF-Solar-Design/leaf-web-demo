@@ -16,12 +16,15 @@ import type {
 } from "../../vendor/mushy-author/ports/impl/tenantRepoProvider.js";
 import type {
   ProjectRepositoryAuthority,
+  ProjectRepositoryInversePreparationRequest,
+  ProjectRepositoryInversePreparationResult,
   ProjectRepositorySourceVerificationRequest,
   TenantMutationFence,
   TenantRepoProvider,
   WriterLeaseWitness,
 } from "../index.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 
@@ -218,6 +221,73 @@ export class TenantRepoProviderImpl
     });
   }
 
+  async prepareProjectInverse(
+    authorityValue: ProjectRepositoryAuthority,
+    request: ProjectRepositoryInversePreparationRequest,
+  ): Promise<ProjectRepositoryInversePreparationResult> {
+    const authority = requireProjectRepositoryAuthority(authorityValue);
+    validateInversePreparationRequest(request);
+    if (!this.withProjectWriterLease) {
+      throw new Error("project repository writer lease is unavailable");
+    }
+    return this.withProjectWriterLease(authority, async (witness, runFenced) =>
+      runFenced(() => {
+        const repoDir = this.containedBareRepository(authority.repoKey);
+        const treeFor = (commit: string): string =>
+          readBareGit(repoDir, ["rev-parse", "--verify", `${commit}^{tree}`]);
+        if (
+          request.targetCommit !== request.originalCommit ||
+          treeFor(request.originalCommit) !== request.originalTree ||
+          treeFor(request.targetCommit) !== request.targetTree
+        ) {
+          throw new Error("project repository inverse source does not verify");
+        }
+        const inverseTree = readBareGit(
+          repoDir,
+          ["rev-parse", "--verify", `${request.originalCommit}^1^{tree}`],
+        );
+        const privateRef = `refs/leaf/annotation-inverses/${request.sourceBatchId}`;
+        let inverseCommit: string;
+        if (bareGitSucceeds(repoDir, ["show-ref", "--verify", "--quiet", privateRef])) {
+          inverseCommit = readBareGit(repoDir, ["rev-parse", "--verify", `${privateRef}^{commit}`]);
+        } else {
+          inverseCommit = writeBareGit(
+            repoDir,
+            ["commit-tree", inverseTree, "-p", request.targetCommit],
+            `Leaf annotation inverse ${request.sourceBatchId}\n`,
+          );
+          writeBareGit(
+            repoDir,
+            ["update-ref", privateRef, inverseCommit, "0000000000000000000000000000000000000000"],
+          );
+        }
+        if (
+          readBareGit(repoDir, ["rev-parse", "--verify", `${inverseCommit}^1`]) !== request.targetCommit ||
+          treeFor(inverseCommit) !== inverseTree
+        ) {
+          throw new Error("project repository inverse ref does not verify");
+        }
+        const payloadDigest = createHash("sha256").update(canonicalJson({
+          inverse_commit: inverseCommit,
+          inverse_tree: inverseTree,
+          kind: "annotation_inverse_v1",
+          original_commit: request.originalCommit,
+          original_tree: request.originalTree,
+          source_batch_id: request.sourceBatchId,
+          target_commit: request.targetCommit,
+          target_tree: request.targetTree,
+        })).digest("hex");
+        return Object.freeze({
+          inverseCommit,
+          inverseTree,
+          payloadDigest,
+          writerLeaseId: witness.writerLeaseId,
+          writerLeaseGeneration: witness.writerLeaseGeneration,
+        });
+      }),
+    );
+  }
+
   private containedBareRepository(repoKey: string): string {
     if (!this.projectBareBase || !existsSync(this.projectBareBase) || lstatSync(this.projectBareBase).isSymbolicLink()) {
       throw new Error("configured project repository base is unavailable");
@@ -239,6 +309,27 @@ export class TenantRepoProviderImpl
 }
 
 const SHA40 = /^[a-f0-9]{40}$/;
+
+function validateInversePreparationRequest(
+  request: ProjectRepositoryInversePreparationRequest,
+): void {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("project repository inverse request must be a closed object");
+  }
+  const expected = ["originalCommit", "originalTree", "sourceBatchId", "targetCommit", "targetTree"];
+  const actual = Object.keys(request).sort();
+  if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
+    throw new Error("project repository inverse request has missing or extra fields");
+  }
+  if (!CANONICAL_UUID.test(request.sourceBatchId)) {
+    throw new Error("project repository inverse source batch must be a canonical UUID");
+  }
+  for (const value of [request.originalCommit, request.originalTree, request.targetCommit, request.targetTree]) {
+    if (!SHA40.test(value)) {
+      throw new Error("project repository inverse source witness is invalid");
+    }
+  }
+}
 
 function validateSourceVerificationRequest(request: ProjectRepositorySourceVerificationRequest): void {
   if (!request || typeof request !== "object" || Array.isArray(request)) {
@@ -281,4 +372,30 @@ function bareGitSucceeds(repoDir: string, args: string[]): boolean {
   } catch {
     return false;
   }
+}
+
+function writeBareGit(repoDir: string, args: string[], input?: string): string {
+  try {
+    return execFileSync("git", ["--git-dir", repoDir, "--no-optional-locks", ...args], {
+      encoding: "utf8",
+      input,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Leaf Annotation Service",
+        GIT_AUTHOR_EMAIL: "annotations@leaf.invalid",
+        GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+        GIT_COMMITTER_NAME: "Leaf Annotation Service",
+        GIT_COMMITTER_EMAIL: "annotations@leaf.invalid",
+        GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+      },
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new Error("project repository Git mutation failed");
+  }
+}
+
+function canonicalJson(value: Record<string, string>): string {
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${JSON.stringify(value[key])}`).join(",")}}`;
 }

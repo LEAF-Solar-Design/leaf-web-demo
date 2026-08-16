@@ -13,6 +13,7 @@ import json
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -33,6 +34,8 @@ class SourceAuthorityUnavailable(RuntimeError):
 
 _CONTRACT = "leaf.project-repository-source-witness.v1"
 _PATH = "/internal/project-repository-source/verify"
+_INVERSE_CONTRACT = "leaf.project-repository-inverse-producer.v1"
+_INVERSE_PATH = "/internal/project-repository-source/inverse"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
@@ -70,20 +73,133 @@ def _closed_json(raw: bytes) -> dict[str, Any]:
     return value
 
 
+@dataclass(frozen=True)
+class PreparedInverseWitness:
+    inverse_commit: str
+    inverse_tree: str
+    payload_digest: str
+    writer_lease_id: str
+    writer_lease_generation: str
+
+
 class AnnotationSourceAuthority:
     """Recompute mapped authority and ask the private harness for a Git witness."""
 
     def _mapped_repository(self, request: SourceVerificationRequest) -> str:
+        return self._mapped_repository_values(
+            request.tenant_id, request.org_id, request.project_id,
+            request.repository_id,
+        )
+
+    def _mapped_repository_values(
+        self, tenant_id: str, org_id: str, project_id: str, repository_id: str,
+    ) -> str:
         try:
             mapping = platform_link.platform_store().resolve_project_repository_authority(
-                request.tenant_id, request.org_id, request.project_id,
+                tenant_id, org_id, project_id,
             )
         except Exception as exc:
             raise SourceAuthorityUnavailable("annotation source unavailable") from exc
         repository = str((mapping or {}).get("repo_key") or "")
-        if not repository or repository != request.repository_id:
+        if not repository or repository != repository_id:
             raise SourceAuthorityUnavailable("annotation source unavailable")
         return repository
+
+    def prepare_inverse(
+        self, *, tenant_id: str, org_id: str, project_id: str,
+        drawing_id: str, repository_id: str, source_batch_id: str,
+        original_commit: str, original_tree: str, target_commit: str,
+        target_tree: str,
+    ) -> PreparedInverseWitness:
+        values = (
+            tenant_id, org_id, project_id, drawing_id, repository_id,
+            source_batch_id,
+        )
+        if (
+            tenant_id != org_id
+            or not all(_canonical_uuid(value) for value in values)
+            or not all(_SHA.fullmatch(value or "") for value in (
+                original_commit, original_tree, target_commit, target_tree,
+            ))
+            or original_commit != target_commit
+            or original_tree != target_tree
+        ):
+            raise SourceAuthorityUnavailable("annotation source unavailable")
+        repository = self._mapped_repository_values(
+            tenant_id, org_id, project_id, repository_id,
+        )
+        body = {
+            "tenant_id": tenant_id,
+            "organization_id": org_id,
+            "project_id": project_id,
+            "repo_key": repository,
+            "source_batch_id": source_batch_id,
+            "original_commit": original_commit,
+            "original_tree": original_tree,
+            "target_commit": target_commit,
+            "target_tree": target_tree,
+        }
+        expected_request_digest = _digest(body)
+        base_url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/")
+        headers = broker_client.harness_headers()
+        if not base_url or "X-Harness-Secret" not in headers:
+            raise SourceAuthorityUnavailable("annotation source unavailable")
+        headers = {**headers, "X-Tenant-Id": tenant_id}
+        try:
+            response = requests.post(
+                f"{base_url}{_INVERSE_PATH}", json=body, headers=headers, timeout=10,
+            )
+            if response.status_code != 200:
+                raise SourceAuthorityUnavailable("annotation source unavailable")
+            payload = _closed_json(response.content)
+        except SourceAuthorityUnavailable:
+            raise
+        except (requests.RequestException, UnicodeError, ValueError, TypeError) as exc:
+            raise SourceAuthorityUnavailable("annotation source unavailable") from exc
+        expected_keys = {
+            "contract", "request_digest", "inverse_commit", "inverse_tree",
+            "payload_digest", "writer_lease_id", "writer_lease_generation",
+        }
+        generation = payload.get("writer_lease_generation")
+        if (
+            set(payload) != expected_keys
+            or payload.get("contract") != _INVERSE_CONTRACT
+            or not isinstance(payload.get("request_digest"), str)
+            or not hmac.compare_digest(
+                payload.get("request_digest", ""), expected_request_digest,
+            )
+            or not isinstance(payload.get("inverse_commit"), str)
+            or _SHA.fullmatch(payload["inverse_commit"]) is None
+            or not isinstance(payload.get("inverse_tree"), str)
+            or _SHA.fullmatch(payload["inverse_tree"]) is None
+            or not isinstance(payload.get("payload_digest"), str)
+            or _DIGEST.fullmatch(payload["payload_digest"]) is None
+            or not isinstance(payload.get("writer_lease_id"), str)
+            or not _canonical_uuid(payload["writer_lease_id"])
+            or not isinstance(generation, str)
+            or not generation.isdecimal()
+            or generation.startswith("0")
+        ):
+            raise SourceAuthorityUnavailable("annotation source unavailable")
+        expected_payload_digest = _digest({
+            "kind": "annotation_inverse_v1",
+            "source_batch_id": source_batch_id,
+            "original_commit": original_commit,
+            "original_tree": original_tree,
+            "target_commit": target_commit,
+            "target_tree": target_tree,
+            "inverse_commit": payload["inverse_commit"],
+            "inverse_tree": payload["inverse_tree"],
+        })
+        if not hmac.compare_digest(payload["payload_digest"], expected_payload_digest):
+            raise SourceAuthorityUnavailable("annotation source unavailable")
+        return PreparedInverseWitness(
+            inverse_commit=payload["inverse_commit"],
+            inverse_tree=payload["inverse_tree"],
+            payload_digest=payload["payload_digest"],
+            writer_lease_id=payload["writer_lease_id"],
+            writer_lease_generation=generation,
+        )
 
     def _wire_request(self, request: SourceVerificationRequest) -> dict[str, str]:
         if (

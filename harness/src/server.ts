@@ -48,10 +48,12 @@ import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oaut
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
+  PROJECT_REPOSITORY_INVERSE_PRODUCER_CONTRACT,
   PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT,
 } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
-  InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority, TenantRepoProvider,
+  InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority,
+  ProjectRepositoryInversePreparationRequest, TenantRepoProvider,
   ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
@@ -140,6 +142,67 @@ function projectSourceRequest(
     request = Object.freeze({ relation: "inverse", originalCommit: sha("original_commit"), originalTree: sha("original_tree"), targetCommit: sha("target_commit"), targetTree: sha("target_tree"), inverseCommit: sha("inverse_commit"), inverseTree: sha("inverse_tree") });
     canonical = { relation: "inverse", tenant_id: authority.tenantId, organization_id: authority.organizationId, project_id: authority.projectId, repo_key: authority.repoKey, original_commit: request.originalCommit, original_tree: request.originalTree, target_commit: request.targetCommit, target_tree: request.targetTree, inverse_commit: request.inverseCommit, inverse_tree: request.inverseTree };
   }
+  return {
+    authority,
+    request,
+    digest: createHash("sha256").update(canonicalJson(canonical)).digest("hex"),
+  };
+}
+
+function projectInversePreparationRequest(
+  req: IncomingMessage,
+  body: Record<string, unknown>,
+): { authority: ProjectRepositoryAuthority; request: ProjectRepositoryInversePreparationRequest; digest: string } {
+  const uuid = (name: string): string => {
+    const value = body[name];
+    if (typeof value !== "string" || !CANONICAL_UUID.test(value)) {
+      throw new Error("invalid project inverse request");
+    }
+    return value;
+  };
+  const sha = (name: string): string => {
+    const value = body[name];
+    if (typeof value !== "string" || !SHA40.test(value)) {
+      throw new Error("invalid project inverse request");
+    }
+    return value;
+  };
+  const expected = [
+    "organization_id", "original_commit", "original_tree", "project_id", "repo_key",
+    "source_batch_id", "target_commit", "target_tree", "tenant_id",
+  ];
+  const actual = Object.keys(body).sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error("invalid project inverse request");
+  }
+  const tenantId = uuid("tenant_id");
+  if (authorityHeader(req, "x-tenant-id") !== tenantId) {
+    throw new Error("invalid project inverse request");
+  }
+  const authority: ProjectRepositoryAuthority = Object.freeze({
+    tenantId,
+    organizationId: uuid("organization_id"),
+    projectId: uuid("project_id"),
+    repoKey: uuid("repo_key"),
+  });
+  const request: ProjectRepositoryInversePreparationRequest = Object.freeze({
+    sourceBatchId: uuid("source_batch_id"),
+    originalCommit: sha("original_commit"),
+    originalTree: sha("original_tree"),
+    targetCommit: sha("target_commit"),
+    targetTree: sha("target_tree"),
+  });
+  const canonical = {
+    tenant_id: authority.tenantId,
+    organization_id: authority.organizationId,
+    project_id: authority.projectId,
+    repo_key: authority.repoKey,
+    source_batch_id: request.sourceBatchId,
+    original_commit: request.originalCommit,
+    original_tree: request.originalTree,
+    target_commit: request.targetCommit,
+    target_tree: request.targetTree,
+  };
   return {
     authority,
     request,
@@ -744,6 +807,31 @@ export function createHarness(ports: HarnessPorts, opts?: {
           });
         } catch {
           return send(res, 409, { error: { code: "source_verification_failed", message: "source verification failed" } });
+        }
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/inverse") {
+        const projectSourceProvider = ports.tenantRepo as TenantRepoProvider;
+        if (!projectSourceProvider.prepareProjectInverse) {
+          return send(res, 501, { error: { code: "inverse_preparation_unavailable", message: "inverse preparation is unavailable" } });
+        }
+        try {
+          const parsed = projectInversePreparationRequest(req, await readJsonBody(req, 16 * 1024));
+          const inverse = await projectSourceProvider.prepareProjectInverse(
+            parsed.authority,
+            parsed.request,
+          );
+          return send(res, 200, {
+            contract: PROJECT_REPOSITORY_INVERSE_PRODUCER_CONTRACT,
+            request_digest: parsed.digest,
+            inverse_commit: inverse.inverseCommit,
+            inverse_tree: inverse.inverseTree,
+            payload_digest: inverse.payloadDigest,
+            writer_lease_id: inverse.writerLeaseId,
+            writer_lease_generation: inverse.writerLeaseGeneration,
+          });
+        } catch {
+          return send(res, 409, { error: { code: "inverse_preparation_failed", message: "inverse preparation failed" } });
         }
       }
 

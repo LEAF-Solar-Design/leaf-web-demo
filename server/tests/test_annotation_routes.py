@@ -119,6 +119,16 @@ def client(monkeypatch):
         overlay, "_source_receipt",
         lambda *args, **kwargs: verified.append(kwargs) or object(),
     )
+    monkeypatch.setattr(
+        overlay.SOURCE_AUTHORITY, "prepare_inverse",
+        lambda **kwargs: verified.append({"prepared": kwargs}) or SimpleNamespace(
+            inverse_commit="7" * 40,
+            inverse_tree="8" * 40,
+            payload_digest="9" * 64,
+            writer_lease_id=str(uuid.uuid4()),
+            writer_lease_generation="7",
+        ),
+    )
     events = []
     monkeypatch.setattr(
         overlay.session_store, "append_event",
@@ -228,6 +238,7 @@ def test_decisions_reverify_git_before_exact_store_mutation(client, action, stor
 
 def test_retry_uses_fresh_identity_and_link(client):
     c, store, _, _ = client
+    store.batch["state"] = "rejected"
     response = c.post(
         f"/api/overlay/annotations/{BATCH}/retry",
         json=linked_body(),
@@ -248,15 +259,25 @@ def test_undo_requires_inverse_and_links_accepted_batch(client):
     c, store, verified, _ = client
     store.batch["state"] = "accepted"
     store.batch["applied_version"] = 0
+    store.target_row["commit_sha"] = HEAD
+    store.target_row["tree_sha"] = HEAD_TREE
     response = c.post(
         f"/api/overlay/annotations/{BATCH}/undo", json=linked_body(),
     )
     assert response.status_code == 200
-    assert verified[0]["relation"] == "inverse"
+    assert verified[0]["prepared"] == {
+        "tenant_id": TENANT, "org_id": TENANT, "project_id": PROJECT,
+        "drawing_id": DRAWING, "repository_id": REPO,
+        "source_batch_id": BATCH,
+        "original_commit": HEAD, "original_tree": HEAD_TREE,
+        "target_commit": HEAD, "target_tree": HEAD_TREE,
+    }
+    assert verified[1]["relation"] == "inverse"
     values = store.calls[0][1]
     assert values["kind"] == "undo" and values["reverses_batch_id"] == BATCH
-    assert values["preview_commit"] == BASE and values["preview_tree"] == BASE_TREE
-    assert values["payload_digest"] != store.batch["payload_digest"]
+    assert values["preview_commit"] == "7" * 40
+    assert values["preview_tree"] == "8" * 40
+    assert values["payload_digest"] == "9" * 64
     body = response.json()
     assert body["kind"] == "undo" and body["reverses_batch_id"] == BATCH
     assert body["reverses_commit"] == HEAD and body["reverses_tree"] == HEAD_TREE
@@ -273,6 +294,34 @@ def test_linked_actions_reject_client_supplied_git_and_payload_authority(client)
         ),
     )
     assert response.status_code == 422 and store.calls == []
+
+
+def test_stale_retry_stays_closed_without_source_or_store_mutation(client):
+    c, store, verified, _ = client
+    store.batch["state"] = "stale"
+    response = c.post(
+        f"/api/overlay/annotations/{BATCH}/retry",
+        json=linked_body(),
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "annotation unavailable"}
+    assert verified == [] and store.calls == []
+
+
+def test_undo_cas_mismatch_never_reaches_inverse_producer(client):
+    c, store, verified, _ = client
+    store.batch["state"] = "accepted"
+    store.batch["applied_version"] = 0
+    store.target_row.update(
+        version=1, commit_sha=HEAD, tree_sha=HEAD_TREE,
+    )
+    response = c.post(
+        f"/api/overlay/annotations/{BATCH}/undo",
+        json=linked_body(),
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "annotation unavailable"}
+    assert verified == [] and store.calls == []
 
 
 @pytest.mark.parametrize("defect", ["foreign", "authority", "store"])
