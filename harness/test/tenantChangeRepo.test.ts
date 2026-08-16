@@ -123,4 +123,133 @@ describe("TenantChangeRepo", () => {
     changes.cleanupWorktree(first);
     changes.cleanupWorktree(second);
   });
+
+  it("binds the staged tree to the exact committed object after the private-ref swap", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const change = changes.create(CHANGE_A, base);
+    writeFileSync(join(change.dir, "tree.txt"), "one\n", "utf8");
+
+    const witness = changes.stageCommitWitness(change, "stage witness");
+
+    expect(witness.base_commit).toBe(base);
+    expect(witness.private_ref).toBe(`refs/leaf/changes/${CHANGE_A}`);
+    expect(witness.staged_head_commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(witness.staged_tree).toBe(git(repoDir, ["rev-parse", `${witness.staged_head_commit}^{tree}`]));
+    expect(changes.readRef(witness.private_ref)).toBe(witness.staged_head_commit);
+    expect(Object.isFrozen(witness)).toBe(true);
+
+    // The tree changes exactly when the committed bytes change.
+    writeFileSync(join(change.dir, "tree.txt"), "two\n", "utf8");
+    const second = changes.stageCommitWitness(change, "stage witness two");
+    expect(second.staged_head_commit).not.toBe(witness.staged_head_commit);
+    expect(second.staged_tree).not.toBe(witness.staged_tree);
+    expect(second.staged_tree).toBe(git(repoDir, ["rev-parse", `${second.staged_head_commit}^{tree}`]));
+
+    changes.cleanupWorktree(change);
+  });
+
+  it("refuses a stage witness when the private ref expected value drifted", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const change = changes.create(CHANGE_A, base);
+    writeFileSync(join(change.dir, "drift.txt"), "drift\n", "utf8");
+    // Simulate a caller-supplied stale staged value: the private-ref CAS must refuse.
+    change.stagedSha = "0".repeat(39) + "1";
+
+    expect(() => changes.stageCommitWitness(change, "stage drift")).toThrow(GitRefConflictError);
+    expect(changes.readRef(change.ref)).toBe(base);
+
+    changes.cleanupWorktree(change);
+  });
+
+  it("returns the full publish observation and refuses a stale main", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const first = changes.create(CHANGE_A, base);
+    const second = changes.create(CHANGE_B, base);
+    writeFileSync(join(first.dir, "first.txt"), "first\n", "utf8");
+    writeFileSync(join(second.dir, "second.txt"), "second\n", "utf8");
+    const firstWitness = changes.stageCommitWitness(first, "stage first");
+    changes.stageCommitWitness(second, "stage second");
+
+    const observation = changes.publishToMainObserved(first, base);
+    expect(observation).toEqual({
+      private_ref: firstWitness.private_ref,
+      private_ref_commit: firstWitness.staged_head_commit,
+      before_main_commit: base,
+      after_main_commit: firstWitness.staged_head_commit,
+      after_main_tree: firstWitness.staged_tree,
+      compare_and_swap: true,
+    });
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(firstWitness.staged_head_commit);
+
+    // A stale expected main is refused before any mutation.
+    let conflict: unknown;
+    try {
+      changes.publishToMainObserved(second, base);
+    } catch (error) {
+      conflict = error;
+    }
+    expect(conflict).toBeInstanceOf(GitRefConflictError);
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(firstWitness.staged_head_commit);
+
+    changes.cleanupWorktree(first);
+    changes.cleanupWorktree(second);
+  });
+
+  it("treats an exact already-published retry as read-only and rejects any drift", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const change = changes.create(CHANGE_A, base);
+    writeFileSync(join(change.dir, "published.txt"), "published\n", "utf8");
+    const witness = changes.stageCommitWitness(change, "stage");
+    const first = changes.publishToMainObserved(change, base);
+
+    const retry = changes.publishToMainObserved(change, base);
+    expect(retry.compare_and_swap).toBe(false);
+    expect(retry.before_main_commit).toBe(witness.staged_head_commit);
+    expect(retry.after_main_commit).toBe(witness.staged_head_commit);
+    expect(retry.after_main_tree).toBe(witness.staged_tree);
+    expect(retry.private_ref_commit).toBe(witness.staged_head_commit);
+    expect(retry.after_main_tree).toBe(first.after_main_tree);
+
+    // A moved private ref is never "already published": presence is not proof.
+    git(repoDir, ["update-ref", witness.private_ref, base]);
+    expect(() => changes.publishToMainObserved(change, base)).toThrow(GitRefConflictError);
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(witness.staged_head_commit);
+    git(repoDir, ["update-ref", witness.private_ref, witness.staged_head_commit]);
+
+    // A main that moved past the staged commit is a typed conflict, not a retry.
+    const other = changes.create(CHANGE_B, base);
+    writeFileSync(join(other.dir, "other.txt"), "other\n", "utf8");
+    const otherWitness = changes.stageCommitWitness(other, "stage other");
+    git(repoDir, ["update-ref", "refs/heads/main", otherWitness.staged_head_commit]);
+    expect(() => changes.publishToMainObserved(change, base)).toThrow(GitRefConflictError);
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(otherWitness.staged_head_commit);
+
+    changes.cleanupWorktree(change);
+    changes.cleanupWorktree(other);
+  });
+
+  it("observes the Git matrix without mutating any ref", () => {
+    const base = git(repoDir, ["rev-parse", "main"]);
+    const changes = new TenantChangeRepo({ repoDir, workBase, identity: IDENTITY });
+    const change = changes.create(CHANGE_A, base);
+    writeFileSync(join(change.dir, "observe.txt"), "observe\n", "utf8");
+    const witness = changes.stageCommitWitness(change, "stage");
+
+    const matrix = changes.observeGitMatrix(change);
+    expect(matrix).toEqual({
+      private_ref_commit: witness.staged_head_commit,
+      main_commit: base,
+      main_tree: git(repoDir, ["rev-parse", `${base}^{tree}`]),
+    });
+    expect(Object.isFrozen(matrix)).toBe(true);
+    expect(changes.readRef(witness.private_ref)).toBe(witness.staged_head_commit);
+    expect(git(repoDir, ["rev-parse", "main"])).toBe(base);
+
+    changes.cleanupWorktree(change);
+  });
 });
