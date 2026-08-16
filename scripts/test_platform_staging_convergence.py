@@ -1515,6 +1515,22 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         self.assert_reason("SERVICE_OUTCOME_CONFLICT", provider)
 
     def test_raw_failed_step_text_is_allowlisted_and_never_published(self) -> None:
+        actual_input_failure = produced(
+            {
+                "primary": {
+                    "job": "deploy",
+                    "step": "Resolve and validate deployment inputs",
+                    "number": 2,
+                },
+                "additional": [],
+                "unique": True,
+            }
+        )
+        self.assertEqual(
+            subject._normalized_failed_stage(actual_input_failure, actual_input_failure),
+            "input_resolution",
+        )
+
         for raw in (
             "unknown provider step",
             "https://example.invalid/error",
