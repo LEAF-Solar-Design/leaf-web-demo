@@ -43,6 +43,37 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    # P8 server-owned repository authority and durable edit state (0043-0044).
+    "project_repository_authorities": {
+        "tenant_id", "organization_id", "project_id", "repo_key", "created_at",
+    },
+    "project_repository_edits": {
+        "edit_id", "operation", "source_edit_id", "tenant_id",
+        "organization_id", "project_id", "repo_key", "actor_binding_id",
+        "writer_lease_id", "writer_lease_generation", "base_commit",
+        "staged_head_commit", "staged_tree", "expected_main_commit",
+        "receipt_json", "receipt_digest", "changed_paths_digest", "diff_digest",
+        "instruction_digest", "state", "version", "idempotency_key",
+        "confirmation_id", "observed_private_ref_commit", "observed_main_commit",
+        "observed_main_tree", "published_at", "recovery_reason_code",
+        "recovered_at", "created_at", "updated_at",
+    },
+    "project_repository_edit_confirmations": {
+        "confirmation_id", "receipt_digest", "approver_binding_id", "tenant_id",
+        "organization_id", "project_id", "repo_key", "edit_id",
+        "writer_lease_id", "writer_lease_generation", "staged_tree", "issued_at",
+        "expires_at", "idempotency_key", "consumed_at",
+        "consumed_by_idempotency_key", "consumed_edit_version",
+    },
+    "project_repository_edit_audit_events": {
+        "event_id", "edit_id", "tenant_id", "organization_id", "project_id",
+        "repo_key", "source_edit_id", "prior_state", "next_state",
+        "actor_binding_id", "approver_binding_id", "writer_lease_id",
+        "writer_lease_generation", "base_commit", "staged_head_commit",
+        "staged_tree", "expected_main_commit", "observed_private_ref_commit",
+        "observed_main_commit", "observed_main_tree", "changed_paths_digest",
+        "receipt_digest", "idempotency_key", "result", "reason_code", "event_time",
+    },
     # P7 drawing annotation authority (0042). Immutable Git objects hold the
     # content; these rows own the exact effective head and its decision trail.
     "annotation_targets": {
