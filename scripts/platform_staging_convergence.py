@@ -1255,7 +1255,9 @@ def _rollback_outcome(
     raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
 
 
-def _terminal_evidence(facts: dict[str, Any]) -> tuple[bool, str | None, str | None]:
+def _terminal_evidence(
+    facts: dict[str, Any], *, allow_unreported_primary: bool = False
+) -> tuple[bool, str | None, str | None]:
     terminal = facts["terminal"]
     if terminal["status"] == "not_produced":
         return False, None, None
@@ -1263,16 +1265,21 @@ def _terminal_evidence(facts: dict[str, Any]) -> tuple[bool, str | None, str | N
     image = value["image_digest"]
     digest = image.get("value") if image.get("status") == "produced" else None
     primary = value["primary_deployments"]
-    healthy = (
-        value["stable_1_1_0"] is True
-        and value["capacity"] == {"desired": 1, "running": 1, "pending": 0}
-        and isinstance(primary, list)
+    primary_is_exact = (
+        isinstance(primary, list)
         and len(primary) == 1
-        and primary[0] == {
+        and primary[0]
+        == {
             "task_definition": value["task_definition"],
             "rollout_state": "COMPLETED",
             "status": "PRIMARY",
         }
+    )
+    primary_is_unreported_skip = allow_unreported_primary and primary == {"status": "not_produced"}
+    healthy = (
+        value["stable_1_1_0"] is True
+        and value["capacity"] == {"desired": 1, "running": 1, "pending": 0}
+        and (primary_is_exact or primary_is_unreported_skip)
         and isinstance(digest, str)
         and DIGEST.fullmatch(digest) is not None
     )
@@ -1303,7 +1310,10 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
     candidate_digest_slot = candidate["image_digest"]
     candidate_td = candidate_td_slot.get("value") if candidate_td_slot.get("status") == "produced" else None
     candidate_digest = candidate_digest_slot.get("value") if candidate_digest_slot.get("status") == "produced" else None
-    terminal_healthy, terminal_td, terminal_digest = _terminal_evidence(facts)
+    path = receipt["path"]
+    terminal_healthy, terminal_td, terminal_digest = _terminal_evidence(
+        facts, allow_unreported_primary=path == "digest_aware_skip"
+    )
     rollback_outcome = _rollback_outcome(
         facts["rollback"],
         mutation_count=mutation_count,
@@ -1312,7 +1322,6 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
         terminal_td=terminal_td,
         predecessor_td=predecessor_td,
     )
-    path = receipt["path"]
     digest_aware = receipt["requested"]["digest_aware_reconcile"]
     if not isinstance(digest_aware, bool):
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
@@ -1421,6 +1430,43 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
     return outcome
 
 
+def _prior_relay_role(
+    *,
+    service: str,
+    relay_attempt: int,
+    run: dict[str, Any],
+    receipt: dict[str, Any],
+    selected_run: dict[str, Any],
+    selected_receipt: dict[str, Any],
+) -> str | None:
+    if service not in {"web", "app"} or relay_attempt <= 1:
+        return None
+    convergence_id = receipt["requested"]["convergence_id"]
+    selected_convergence_id = selected_receipt["requested"]["convergence_id"]
+    if (
+        not isinstance(convergence_id, str)
+        or convergence_id == "not_produced"
+        or convergence_id != selected_convergence_id
+        or run["created_at"] >= selected_run["created_at"]
+    ):
+        return None
+    return f"prior_relay_{service}"
+
+
+def _expected_predecessor(previous: dict[str, Any]) -> str | None:
+    prior_terminal = previous["terminal"]
+    if prior_terminal.get("status") == "produced":
+        return prior_terminal["value"].get("task_definition")
+    previous_predecessor = previous["predecessor_task_definition"]
+    if previous["outcome"]["mutation_count"] != 0:
+        raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
+    if previous_predecessor.get("status") == "produced":
+        return previous_predecessor["value"]
+    if previous["role"].startswith("prior_failed_"):
+        return None
+    raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
+
+
 def _normalize_child(
     run: dict[str, Any],
     artifact: dict[str, Any],
@@ -1515,7 +1561,11 @@ def _terminal_digest(child: dict[str, Any]) -> str:
     if capacity != {"desired": 1, "running": 1, "pending": 0} or value["stable_1_1_0"] is not True:
         raise ContractError("SERVICE_TERMINAL_UNHEALTHY")
     primary = value["primary_deployments"]
-    if (
+    primary_unreported_skip = (
+        primary == {"status": "not_produced"}
+        and child["outcome"]["deployment_outcome"] == "skipped_exact"
+    )
+    if not primary_unreported_skip and (
         not isinstance(primary, list)
         or len(primary) != 1
         or not isinstance(primary[0], dict)
@@ -1770,7 +1820,21 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
                 raise ContractError("SERVICE_TERMINAL_CARDINALITY")
             roles[successes[0]] = f"terminal_{service.replace('-', '_')}"
         elif successes:
-            raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
+            selected_id = relay_children[service]
+            selected_run, _, selected_receipt, _ = by_id[selected_id]
+            for run_id in successes:
+                run, _, receipt, _ = by_id[run_id]
+                role = _prior_relay_role(
+                    service=service,
+                    relay_attempt=relay["run_attempt"],
+                    run=run,
+                    receipt=receipt,
+                    selected_run=selected_run,
+                    selected_receipt=selected_receipt,
+                )
+                if role is None:
+                    raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
+                roles[run_id] = role
         for run_id in failures:
             roles[run_id] = f"prior_failed_{service.replace('-', '_')}"
     if set(roles) != set(by_id):
@@ -1836,20 +1900,12 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     for service, attempts in per_service.items():
         attempts.sort(key=lambda item: (item["provider"]["created_at"], item["provider"]["run_id"]))
         for previous, current in zip(attempts, attempts[1:]):
-            prior_terminal = previous["terminal"]
             predecessor = current["predecessor_task_definition"]
             if predecessor.get("status") != "produced":
                 raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
-            if prior_terminal.get("status") == "produced":
-                expected_predecessor = prior_terminal["value"].get("task_definition")
-            else:
-                previous_predecessor = previous["predecessor_task_definition"]
-                if (
-                    previous["outcome"]["mutation_count"] != 0
-                    or previous_predecessor.get("status") != "produced"
-                ):
-                    raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
-                expected_predecessor = previous_predecessor["value"]
+            expected_predecessor = _expected_predecessor(previous)
+            if expected_predecessor is None:
+                continue
             if (
                 predecessor.get("value") != expected_predecessor
             ):
