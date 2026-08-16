@@ -1188,12 +1188,16 @@ jobs:
           before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 
           require_contract_still_latest() {
-            local latest state
-            latest=$(GH_TOKEN="$GH_TOKEN" gh api \
+            local latest latest_head latest_json state compare
+            latest_json=$(GH_TOKEN="$GH_TOKEN" gh api \
               "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&per_page=100" \
-              --jq ".workflow_runs | map(select(.path == \"$CONSUMER_CONTRACT_WORKFLOW_PATH\")) | sort_by(-.id) | first | .id // empty")
-            [ -n "$latest" ] && [ "$latest" = "$TF_CONTRACT_RUN_ID" ] || {
-              echo "::error::The provider-associated Terraform consumer contract is no longer the latest protected-main run."
+              --jq ".workflow_runs | map(select(.path == \"$CONSUMER_CONTRACT_WORKFLOW_PATH\")) | sort_by(-.id) | first | {id, head_sha} // empty")
+            latest=$(jq -er '.id | tostring' <<<"$latest_json") || {
+              echo "::error::The latest provider-associated Terraform consumer contract is unavailable."
+              exit 1
+            }
+            latest_head=$(jq -er '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$latest_json") || {
+              echo "::error::The latest Terraform consumer-contract head is malformed."
               exit 1
             }
             state=$(GH_TOKEN="$GH_TOKEN" gh api \
@@ -1203,6 +1207,36 @@ jobs:
               echo "::error::The latest Terraform consumer-contract run is not terminal success."
               exit 1
             }
+            if [ "$latest" != "$TF_CONTRACT_RUN_ID" ]; then
+              compare=$(GH_TOKEN="$GH_TOKEN" gh api \
+                "repos/$INFRA_REPO/compare/$TF_CONTRACT_HEAD...$latest_head") || {
+                echo "::error::The newer Terraform consumer-contract lineage is unreadable."
+                exit 1
+              }
+              jq -e --arg base "$TF_CONTRACT_HEAD" --arg head "$latest_head" '
+                .status == "ahead" and
+                .ahead_by > 0 and .behind_by == 0 and
+                .base_commit.sha == $base and
+                .merge_base_commit.sha == $base and
+                (.total_commits as $total |
+                  $total > 0 and $total <= 250 and
+                  (.commits | type == "array" and length == $total and
+                    .[-1].sha == $head)) and
+                (.files | type == "array" and length < 300 and
+                  all(
+                    (.filename != ".github/workflows/deploy-leaf-platform-staging.yml") and
+                    (.filename != ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml") and
+                    (.filename != "contract/leaf-platform-staging-consumer-contract.v1.schema.json") and
+                    ((.previous_filename // "") != ".github/workflows/deploy-leaf-platform-staging.yml") and
+                    ((.previous_filename // "") != ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml") and
+                    ((.previous_filename // "") != "contract/leaf-platform-staging-consumer-contract.v1.schema.json")
+                  ))
+              ' <<<"$compare" >/dev/null || {
+                echo "::error::A newer Terraform contract run changed protected consumer semantics or is not a strict descendant."
+                exit 1
+              }
+              echo "Accepted newer protected contract run $latest after proving verifier-only disjoint lineage from $TF_CONTRACT_HEAD."
+            fi
           }
 
           # `gh workflow run` does not return the run it creates, so the run

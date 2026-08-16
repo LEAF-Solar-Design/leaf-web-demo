@@ -3242,7 +3242,12 @@ def check_docs_noop_filter(text: str) -> None:
         # adds only read-only Actions artifact discovery and one closed,
         # unpadded base64url input on the existing strict-v3 dispatch. It adds
         # no dispatch site, credential, selector, or v1/v2 behavior.
-        "2ca86f29c1ea09a60f40088bdcd18e5c35d4945e79f6b93b385caba873544462"
+        # Hash updated after two real relays completed both child receipts but
+        # lost the receipt stage to disjoint Terraform pushes. A newer contract
+        # is accepted only when it is terminal green, strictly descends from
+        # the bound head, and changes none of the three consumer semantics
+        # files. The guarded step gains one read-only compare and no new write.
+        "0dcfa861a6869c162efbb89959f607250a84e6077bbc854a0f11f81ea32f50ee"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -6251,6 +6256,18 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     ) == 1
     assert '-f "convergence_id=$CONVERGENCE_ID"' in code
     assert '-f "consumer_contract_b64=$CONSUMER_CONTRACT_B64"' in code
+    assert 'repos/$INFRA_REPO/compare/$TF_CONTRACT_HEAD...$latest_head' in code
+    assert '.status == "ahead"' in code
+    assert '.behind_by == 0' in code
+    assert '.merge_base_commit.sha == $base' in code
+    assert 'length < 300' in code
+    for protected_path in (
+        ".github/workflows/deploy-leaf-platform-staging.yml",
+        ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
+        "contract/leaf-platform-staging-consumer-contract.v1.schema.json",
+    ):
+        assert code.count(protected_path) == 2
+    assert "changed protected consumer semantics" in code
     for removed_field in (
         "expected_image_digest=",
         "component_producer_source_revision=",
@@ -6277,6 +6294,72 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert "candidate_supply_set: $supply[0]" in code
     assert 'full_fleet_identity_stamped: false' in code
     assert 'harness: "not_automatically_reconciled"' in code
+
+
+def test_relay_accepts_only_strict_disjoint_newer_consumer_contract_lineage() -> None:
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    code = _executable_bash(_relay_deploy_step(relay["jobs"]["dispatch"])["run"])
+    predicate = code.split(
+        "jq -e --arg base \"$TF_CONTRACT_HEAD\" --arg head \"$latest_head\" '",
+        1,
+    )[1].split("' <<<\"$compare\" >/dev/null", 1)[0]
+    jq = shutil.which("jq")
+    assert jq, "the consumer-contract lineage test requires jq"
+    base = "a" * 40
+    head = "b" * 40
+    candidate = {
+        "status": "ahead",
+        "ahead_by": 2,
+        "behind_by": 0,
+        "base_commit": {"sha": base},
+        "merge_base_commit": {"sha": base},
+        "total_commits": 2,
+        "commits": [{"sha": "c" * 40}, {"sha": head}],
+        "files": [
+            {
+                "filename": "terraform/environments/staging/us-east-1/leaf_ios_ship_lane.tf",
+                "status": "modified",
+            },
+            {
+                "filename": "tests/test_leaf_ios_ship_lane_contract.py",
+                "status": "modified",
+            },
+        ],
+    }
+
+    def accepted(value) -> bool:
+        return subprocess.run(
+            [jq, "-e", "--arg", "base", base, "--arg", "head", head, predicate],
+            input=json.dumps(value),
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+
+    assert accepted(candidate)
+    for mutate in (
+        lambda value: value.update(status="diverged"),
+        lambda value: value["files"].append(
+            {"filename": ".github/workflows/deploy-leaf-platform-staging.yml"}
+        ),
+        lambda value: value["files"].append(
+            {
+                "filename": "renamed.yml",
+                "previous_filename": "contract/leaf-platform-staging-consumer-contract.v1.schema.json",
+            }
+        ),
+        lambda value: value["commits"].pop(),
+        lambda value: value.update(
+            files=[{"filename": f"docs/{index}.md"} for index in range(300)]
+        ),
+    ):
+        rejected = json.loads(json.dumps(candidate))
+        mutate(rejected)
+        assert not accepted(rejected)
 
 
 def _consumer_contract_validator_python() -> str:
