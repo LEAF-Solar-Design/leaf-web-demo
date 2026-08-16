@@ -70,6 +70,7 @@ import {
   type SessionStoreHandle,
 } from "../src/ports/impl/sessionStoreFactory.js";
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import {
@@ -209,7 +210,22 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     autoProvisionFrom: TENANT_FIXTURE,
   });
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
-  return {
+  // OPTIONAL platform-improvement capture. Constructed only when
+  // UPSTREAM_SINK_URL and UPSTREAM_SINK_TOKEN are BOTH set (see
+  // upstreamSinkFromEnv); absent either, the port stays unwired and buildPorts
+  // returns exactly what it did before. Fire-and-forget by vendored contract,
+  // so a slow, down, or unconfigured queue is unobservable from authoring.
+  //
+  // THIS is the production composition root, not server.ts startReal():
+  // scripts/start-harness.sh runs `exec node dist/scripts/serve.js`. PR #583
+  // wired the sink only into startReal(), which the container never execs, so
+  // every deployed authoring request saw ports.upstreamSink === undefined and
+  // captured nothing -- while typecheck, unit tests and the gate all went green.
+  const upstreamSink = upstreamSinkFromEnv();
+  log(upstreamSink
+    ? "[harness] upstream capture: ON (authoring events pushed fire-and-forget to the operator queue)"
+    : "[harness] upstream capture: off (UPSTREAM_SINK_URL/UPSTREAM_SINK_TOKEN unset)");
+  const basePorts = {
     oauth,
     grantAdmin: grantStore,
     tenantRepo,
@@ -239,6 +255,20 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
         }
       : {}),
   };
+  // Branched, not spread: HarnessPorts is a discriminated union, so opting into
+  // the sink must supply it AND both posture flags together. Both stay FALSE --
+  // generated code and raw error text stay out of the queue, and a
+  // runner-supplied failure category is re-derived rather than trusted. A
+  // conditional spread would yield optional props that satisfy neither arm;
+  // this mirrors server.ts startReal() exactly.
+  return upstreamSink
+    ? {
+        ...basePorts,
+        upstreamSink,
+        dangerouslyExportModelOutput: false,
+        trustRunnerFailureCategories: false,
+      }
+    : basePorts;
 }
 
 async function validatePostgresStartup(): Promise<void> {
