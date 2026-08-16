@@ -46,9 +46,13 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { redactTokens } from "./redact.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
-import { DEFAULT_TENANT } from "./ports/index.js";
+import {
+  DEFAULT_TENANT,
+  PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT,
+} from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
-  InstantDrawingContext, InstantSessionAssignment } from "./ports/index.js";
+  InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority, TenantRepoProvider,
+  ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
@@ -88,6 +92,55 @@ function authorityHeader(req: IncomingMessage, name: string): string | undefined
   const raw = req.headers[name];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+const CANONICAL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA40 = /^[a-f0-9]{40}$/;
+
+function projectSourceRequest(
+  req: IncomingMessage,
+  body: Record<string, unknown>,
+): { authority: ProjectRepositoryAuthority; request: ProjectRepositorySourceVerificationRequest; digest: string } {
+  const requireUuid = (name: string): string => {
+    const value = body[name];
+    if (typeof value !== "string" || !CANONICAL_UUID.test(value)) throw new Error("invalid project source request");
+    return value;
+  };
+  const tenantId = requireUuid("tenant_id");
+  const headerTenant = authorityHeader(req, "x-tenant-id");
+  if (!headerTenant || headerTenant !== tenantId) throw new Error("invalid project source request");
+  const authority: ProjectRepositoryAuthority = Object.freeze({
+    tenantId,
+    organizationId: requireUuid("organization_id"),
+    projectId: requireUuid("project_id"),
+    repoKey: requireUuid("repo_key"),
+  });
+  const relation = body.relation;
+  const sha = (name: string): string => {
+    const value = body[name];
+    if (typeof value !== "string" || !SHA40.test(value)) throw new Error("invalid project source request");
+    return value;
+  };
+  const expected = relation === "preview"
+    ? ["base_commit", "base_tree", "candidate_commit", "candidate_tree", "organization_id", "project_id", "relation", "repo_key", "tenant_id"]
+    : relation === "inverse"
+      ? ["inverse_commit", "inverse_tree", "organization_id", "original_commit", "original_tree", "project_id", "relation", "repo_key", "target_commit", "target_tree", "tenant_id"]
+      : [];
+  const actual = Object.keys(body).sort();
+  if (!expected.length || actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error("invalid project source request");
+  }
+  let request: ProjectRepositorySourceVerificationRequest;
+  let canonical: Record<string, string>;
+  if (relation === "preview") {
+    request = Object.freeze({ relation: "preview", baseCommit: sha("base_commit"), baseTree: sha("base_tree"), candidateCommit: sha("candidate_commit"), candidateTree: sha("candidate_tree") });
+    canonical = { relation, tenant_id: authority.tenantId, organization_id: authority.organizationId, project_id: authority.projectId, repo_key: authority.repoKey, base_commit: request.baseCommit, base_tree: request.baseTree, candidate_commit: request.candidateCommit, candidate_tree: request.candidateTree };
+  } else {
+    request = Object.freeze({ relation: "inverse", originalCommit: sha("original_commit"), originalTree: sha("original_tree"), targetCommit: sha("target_commit"), targetTree: sha("target_tree"), inverseCommit: sha("inverse_commit"), inverseTree: sha("inverse_tree") });
+    canonical = { relation: "inverse", tenant_id: authority.tenantId, organization_id: authority.organizationId, project_id: authority.projectId, repo_key: authority.repoKey, original_commit: request.originalCommit, original_tree: request.originalTree, target_commit: request.targetCommit, target_tree: request.targetTree, inverse_commit: request.inverseCommit, inverse_tree: request.inverseTree };
+  }
+  return { authority, request, digest: createHash("sha256").update(JSON.stringify(canonical)).digest("hex") };
 }
 
 function authorAuthorityForRequest(
@@ -665,6 +718,23 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+      if (method === "POST" && path === "/internal/project-repository-source/verify") {
+        const projectSourceProvider = ports.tenantRepo as TenantRepoProvider;
+        if (!projectSourceProvider.verifyProjectSource) {
+          return send(res, 501, { error: { code: "source_verification_unavailable", message: "source verification is unavailable" } });
+        }
+        try {
+          const parsed = projectSourceRequest(req, await readJsonBody(req, 16 * 1024));
+          await projectSourceProvider.verifyProjectSource(parsed.authority, parsed.request);
+          return send(res, 200, {
+            contract: PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT,
+            request_digest: parsed.digest,
+          });
+        } catch {
+          return send(res, 409, { error: { code: "source_verification_failed", message: "source verification failed" } });
+        }
+      }
 
       // Per-tenant grant admin (wave 4 + §17): PUT/GET/DELETE /grants/{tenantId}. Backs
       // the app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at, kind}
