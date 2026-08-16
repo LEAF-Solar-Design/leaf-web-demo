@@ -34,6 +34,8 @@ deciding.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from typing import Any, Dict, Optional
 
@@ -275,11 +277,6 @@ class AnnotationDecisionBody(_ClosedBody):
 
 
 class AnnotationRetryBody(_ClosedBody):
-    batch_id: str
-    preview_commit: str
-    preview_tree: str
-    payload_digest: str
-    payload_count: int = Field(..., ge=1)
     request_key: str = Field(..., min_length=8)
     lease_s: int = Field(default=900, ge=1, le=3600)
 
@@ -413,6 +410,7 @@ def _annotation_projection(batch: Dict[str, Any],
         "revision": int(batch["revision"]),
         "state": str(batch["state"]),
         "kind": str(batch["kind"]),
+        "payload_digest": str(batch["payload_digest"]),
         "payload_count": int(batch["payload_count"]),
         "base_version": int(batch["base_version"]),
         "base_commit": str(batch["base_commit"]),
@@ -550,12 +548,24 @@ def reject_annotation(batch_id: str, body: AnnotationDecisionBody,
     return _decision(batch_id, body, tenant, accept=False)
 
 
+def _inverse_payload_digest(source: Dict[str, Any]) -> str:
+    payload = {
+        "kind": "annotation_inverse_v1",
+        "source_batch_id": str(source["batch_id"]),
+        "source_payload_digest": str(source["payload_digest"]),
+        "preview_commit": str(source["base_commit"]),
+        "preview_tree": str(source["base_tree"]),
+        "reverses_commit": str(source["preview_commit"]),
+        "reverses_tree": str(source["preview_tree"]),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
                     tenant: Any, *, undo: bool) -> Any:
     try:
         source, scope = _batch_scope(source_batch_id, tenant)
-        if str(uuid.UUID(body.batch_id)) == str(uuid.UUID(source_batch_id)):
-            raise LookupError("annotation unavailable")
         store = _annotation_store()
         target = store.target(
             scope["tenant_id"], scope["org_id"], scope["project_id"],
@@ -563,23 +573,29 @@ def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
         )
         if target is None:
             raise LookupError("annotation unavailable")
+        batch_id = str(uuid.uuid4())
+        preview_commit = source["base_commit"] if undo else source["preview_commit"]
+        preview_tree = source["base_tree"] if undo else source["preview_tree"]
+        payload_digest = (
+            _inverse_payload_digest(source) if undo else source["payload_digest"]
+        )
         relation = "inverse" if undo else "preview"
         receipt = _source_receipt(
-            scope, relation=relation, commit_sha=body.preview_commit,
-            tree_sha=body.preview_tree, base_commit=target["commit_sha"],
+            scope, relation=relation, commit_sha=preview_commit,
+            tree_sha=preview_tree, base_commit=target["commit_sha"],
             base_tree=target["tree_sha"],
             reverses_commit=source["preview_commit"] if undo else None,
             reverses_tree=source["preview_tree"] if undo else None,
         )
         batch = store.create_batch(
-            batch_id=body.batch_id, tenant_id=scope["tenant_id"],
+            batch_id=batch_id, tenant_id=scope["tenant_id"],
             org_id=scope["org_id"], project_id=scope["project_id"],
             drawing_id=scope["drawing_id"], session_id=scope["session_id"],
             kind="undo" if undo else "apply",
             base_version=int(target["version"]), base_commit=target["commit_sha"],
-            base_tree=target["tree_sha"], preview_commit=body.preview_commit,
-            preview_tree=body.preview_tree, payload_digest=body.payload_digest,
-            payload_count=body.payload_count, request_key=body.request_key,
+            base_tree=target["tree_sha"], preview_commit=preview_commit,
+            preview_tree=preview_tree, payload_digest=payload_digest,
+            payload_count=int(source["payload_count"]), request_key=body.request_key,
             created_by_binding_id=scope["actor_binding_id"],
             source_authority=SOURCE_AUTHORITY, source_receipt=receipt,
             lease_s=body.lease_s,

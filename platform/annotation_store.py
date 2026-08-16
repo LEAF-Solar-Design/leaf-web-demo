@@ -188,7 +188,7 @@ def current_annotation(*, tenant_id: str, org_id: str, project_id: str,
         cur.execute(
             "WITH latest_revisions AS ("
             " SELECT DISTINCT ON (batch_id) batch_id, revision, state, kind, "
-            " payload_count, base_version, base_commit, base_tree, "
+            " payload_digest, payload_count, base_version, base_commit, base_tree, "
             " preview_commit, preview_tree, retry_of_batch_id, reverses_batch_id, "
             " reverses_commit, reverses_tree, applied_version, tenant_id, org_id, "
             " project_id, drawing_id, session_id, repository_id, created_at "
@@ -198,7 +198,8 @@ def current_annotation(*, tenant_id: str, org_id: str, project_id: str,
             " AND session_id = %(session)s "
             " ORDER BY batch_id, revision DESC"
             ") "
-            "SELECT b.batch_id, b.revision, b.state, b.kind, b.payload_count, "
+            "SELECT b.batch_id, b.revision, b.state, b.kind, b.payload_digest, "
+            "b.payload_count, "
             "b.base_version, b.base_commit, b.base_tree, b.preview_commit, "
             "b.preview_tree, b.retry_of_batch_id, b.reverses_batch_id, "
             "b.reverses_commit, b.reverses_tree, b.applied_version, "

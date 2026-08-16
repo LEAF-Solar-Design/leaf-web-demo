@@ -72,7 +72,7 @@ class FakeStore:
         row = dict(self.batch)
         for key in (
             "batch_id", "kind", "base_version", "base_commit", "base_tree",
-            "preview_commit", "preview_tree", "payload_count",
+            "preview_commit", "preview_tree", "payload_digest", "payload_count",
             "retry_of_batch_id", "reverses_batch_id",
         ):
             if key in values:
@@ -93,7 +93,8 @@ class FakeStore:
 
 
 PROJECTION_KEYS = {
-    "decision_copy", "batch_id", "revision", "state", "kind", "payload_count",
+    "decision_copy", "batch_id", "revision", "state", "kind", "payload_digest",
+    "payload_count",
     "base_version", "base_commit", "base_tree", "preview_commit", "preview_tree",
     "retry_of_batch_id", "reverses_batch_id", "reverses_commit", "reverses_tree",
     "applied_version", "target_version", "target_commit", "target_tree",
@@ -143,9 +144,7 @@ def preview_body(**changes):
 
 def linked_body(**changes):
     body = {
-        "batch_id": str(uuid.uuid4()), "preview_commit": "7" * 40,
-        "preview_tree": "8" * 40, "payload_digest": "9" * 64,
-        "payload_count": 1, "request_key": "linked-key-1",
+        "request_key": "linked-key-1",
     }
     body.update(changes)
     return body
@@ -229,16 +228,19 @@ def test_decisions_reverify_git_before_exact_store_mutation(client, action, stor
 
 def test_retry_uses_fresh_identity_and_link(client):
     c, store, _, _ = client
-    fresh = str(uuid.uuid4())
     response = c.post(
         f"/api/overlay/annotations/{BATCH}/retry",
-        json=linked_body(batch_id=fresh),
+        json=linked_body(),
     )
     assert response.status_code == 200
     values = store.calls[0][1]
-    assert values["batch_id"] == fresh and values["retry_of_batch_id"] == BATCH
+    assert values["batch_id"] != BATCH
+    assert str(uuid.UUID(values["batch_id"])) == values["batch_id"]
+    assert values["retry_of_batch_id"] == BATCH
     assert values["reverses_batch_id"] is None
-    assert response.json()["batch_id"] == fresh
+    assert values["preview_commit"] == HEAD and values["preview_tree"] == HEAD_TREE
+    assert values["payload_digest"] == "6" * 64 and values["payload_count"] == 2
+    assert response.json()["batch_id"] == values["batch_id"]
     assert response.json()["retry_of_batch_id"] == BATCH
 
 
@@ -253,18 +255,24 @@ def test_undo_requires_inverse_and_links_accepted_batch(client):
     assert verified[0]["relation"] == "inverse"
     values = store.calls[0][1]
     assert values["kind"] == "undo" and values["reverses_batch_id"] == BATCH
+    assert values["preview_commit"] == BASE and values["preview_tree"] == BASE_TREE
+    assert values["payload_digest"] != store.batch["payload_digest"]
     body = response.json()
     assert body["kind"] == "undo" and body["reverses_batch_id"] == BATCH
     assert body["reverses_commit"] == HEAD and body["reverses_tree"] == HEAD_TREE
 
 
-def test_retry_cannot_reuse_prior_batch_identity(client):
+def test_linked_actions_reject_client_supplied_git_and_payload_authority(client):
     c, store, *_ = client
     response = c.post(
         f"/api/overlay/annotations/{BATCH}/retry",
-        json=linked_body(batch_id=BATCH),
+        json=linked_body(
+            batch_id=BATCH, preview_commit="7" * 40,
+            preview_tree="8" * 40, payload_digest="9" * 64,
+            payload_count=1,
+        ),
     )
-    assert response.status_code == 404 and store.calls == []
+    assert response.status_code == 422 and store.calls == []
 
 
 @pytest.mark.parametrize("defect", ["foreign", "authority", "store"])
