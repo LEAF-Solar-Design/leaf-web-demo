@@ -37,7 +37,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -380,6 +380,83 @@ def _annotation_error(exc: Exception) -> JSONResponse:
     return _annotation_unavailable()
 
 
+def _annotation_decision_copy(batch: Dict[str, Any]) -> str:
+    count = int(batch["payload_count"])
+    noun = "change" if count == 1 else "changes"
+    state = str(batch["state"])
+    kind = str(batch["kind"])
+    if state == "pending":
+        prefix = "Review undo for" if kind == "undo" else "Review"
+        return f"{prefix} {count} annotation {noun}."
+    if state == "accepted":
+        prefix = "Undid" if kind == "undo" else "Applied"
+        return f"{prefix} {count} annotation {noun}."
+    if state == "rejected":
+        return f"Rejected {count} annotation {noun}."
+    return "This annotation proposal is no longer current."
+
+
+def _annotation_projection(batch: Dict[str, Any],
+                           target: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Closed browser projection with server-authored copy and Git witnesses."""
+    if target is None:
+        target_version = batch["target_version"]
+        target_commit = batch["target_commit"]
+        target_tree = batch["target_tree"]
+    else:
+        target_version = target["version"]
+        target_commit = target["commit_sha"]
+        target_tree = target["tree_sha"]
+    return {
+        "decision_copy": _annotation_decision_copy(batch),
+        "batch_id": str(batch["batch_id"]),
+        "revision": int(batch["revision"]),
+        "state": str(batch["state"]),
+        "kind": str(batch["kind"]),
+        "payload_count": int(batch["payload_count"]),
+        "base_version": int(batch["base_version"]),
+        "base_commit": str(batch["base_commit"]),
+        "base_tree": str(batch["base_tree"]),
+        "preview_commit": str(batch["preview_commit"]),
+        "preview_tree": str(batch["preview_tree"]),
+        "retry_of_batch_id": (
+            str(batch["retry_of_batch_id"]) if batch.get("retry_of_batch_id") else None
+        ),
+        "reverses_batch_id": (
+            str(batch["reverses_batch_id"]) if batch.get("reverses_batch_id") else None
+        ),
+        "reverses_commit": (
+            str(batch["reverses_commit"]) if batch.get("reverses_commit") else None
+        ),
+        "reverses_tree": (
+            str(batch["reverses_tree"]) if batch.get("reverses_tree") else None
+        ),
+        "applied_version": (
+            int(batch["applied_version"]) if batch.get("applied_version") is not None else None
+        ),
+        "target_version": int(target_version),
+        "target_commit": str(target_commit),
+        "target_tree": str(target_tree),
+    }
+
+
+@router.get("/api/overlay/annotations/current")
+def read_current_annotation(session_id: str,
+                            tenant=Depends(deps.require_active_tenant)) -> Any:
+    try:
+        scope = _annotation_scope(session_id, tenant)
+        current = _annotation_store().current_annotation(
+            tenant_id=scope["tenant_id"], org_id=scope["org_id"],
+            project_id=scope["project_id"], drawing_id=scope["drawing_id"],
+            session_id=scope["session_id"], repository_id=scope["repository_id"],
+        )
+        if current is None:
+            return Response(status_code=204)
+        return _annotation_projection(current)
+    except Exception as exc:  # noqa: BLE001 - scope failures stay indistinguishable
+        return _annotation_error(exc)
+
+
 @router.post("/api/overlay/annotations/preview")
 def preview_annotation(body: AnnotationPreviewBody,
                        tenant=Depends(deps.require_active_tenant)) -> Any:
@@ -417,7 +494,7 @@ def preview_annotation(body: AnnotationPreviewBody,
             lease_s=body.lease_s,
         )
         _append_annotation_event(scope["session_id"], "annotation_previewed", batch)
-        return {"batch_id": str(batch["batch_id"]), "state": batch["state"]}
+        return _annotation_projection(batch, target)
     except Exception as exc:  # noqa: BLE001 - all authority failures are closed
         return _annotation_error(exc)
 
@@ -441,8 +518,6 @@ def _decision(batch_id: str, body: AnnotationDecisionBody,
                 decision_key=body.decision_key, source_authority=SOURCE_AUTHORITY,
                 source_receipt=receipt,
             )
-            result = {"batch_id": str(decided["batch_id"]),
-                      "state": decided["state"], "target_version": int(target["version"])}
             event = "annotation_accepted"
         else:
             decided = store.reject(
@@ -450,10 +525,15 @@ def _decision(batch_id: str, body: AnnotationDecisionBody,
                 actor_binding_id=scope["actor_binding_id"],
                 decision_key=body.decision_key,
             )
-            result = {"batch_id": str(decided["batch_id"]), "state": decided["state"]}
+            target = store.target(
+                scope["tenant_id"], scope["org_id"], scope["project_id"],
+                scope["drawing_id"],
+            )
+            if target is None:
+                raise LookupError("annotation unavailable")
             event = "annotation_rejected"
         _append_annotation_event(scope["session_id"], event, decided)
-        return result
+        return _annotation_projection(decided, target)
     except Exception as exc:  # noqa: BLE001
         return _annotation_error(exc)
 
@@ -510,7 +590,7 @@ def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
             scope["session_id"], "annotation_undo_previewed" if undo
             else "annotation_retry_previewed", batch,
         )
-        return {"batch_id": str(batch["batch_id"]), "state": batch["state"]}
+        return _annotation_projection(batch, target)
     except Exception as exc:  # noqa: BLE001
         return _annotation_error(exc)
 

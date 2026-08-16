@@ -580,3 +580,68 @@ def test_retry_is_fresh_and_undo_refuses_then_accepts_only_exact_head(seed):
     with pytest.raises(annotation_store.AnnotationStoreError) as caught:
         _accept(seed, undo, decision_key="undo-key-7")
     assert caught.value.code == "target_source_stale"
+
+
+def test_current_annotation_returns_only_closed_scope_projection_and_prefers_pending(seed):
+    original = _create(seed)
+    current = annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=seed["project"], drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id=seed["repository"],
+    )
+    assert current is not None
+    assert current["batch_id"] == original["batch_id"] and current["state"] == "pending"
+    assert set(current) == {
+        "batch_id", "revision", "state", "kind", "payload_count",
+        "base_version", "base_commit", "base_tree", "preview_commit", "preview_tree",
+        "retry_of_batch_id", "reverses_batch_id", "reverses_commit", "reverses_tree",
+        "applied_version", "target_version", "target_commit", "target_tree",
+    }
+
+    annotation_store.reject(
+        batch_id=original["batch_id"], tenant_id=seed["tenant"],
+        actor_binding_id=seed["binding"], decision_key="current-reject-key",
+    )
+    terminal = annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=seed["project"], drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id=seed["repository"],
+    )
+    assert terminal["batch_id"] == original["batch_id"]
+    assert terminal["revision"] == 1 and terminal["state"] == "rejected"
+
+    retry = _create(
+        seed, batch_id=str(uuid.uuid4()), request_key=str(uuid.uuid4()),
+        retry_of_batch_id=original["batch_id"],
+    )
+    pending = annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=seed["project"], drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id=seed["repository"],
+    )
+    assert pending["batch_id"] == retry["batch_id"] and pending["state"] == "pending"
+
+
+def test_current_annotation_foreign_inactive_and_wrong_repository_return_none(seed):
+    _create(seed)
+    foreign_project = str(uuid.uuid4())
+    assert annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=foreign_project, drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id=seed["repository"],
+    ) is None
+    assert annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=seed["project"], drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id="other-repository",
+    ) is None
+    with db.connection() as conn:
+        conn.execute(
+            "UPDATE app_sessions SET status='archived' WHERE session_id=%s",
+            (seed["session"],),
+        )
+    assert annotation_store.current_annotation(
+        tenant_id=seed["tenant"], org_id=seed["tenant"],
+        project_id=seed["project"], drawing_id=seed["drawing"],
+        session_id=seed["session"], repository_id=seed["repository"],
+    ) is None

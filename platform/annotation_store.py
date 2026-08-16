@@ -169,6 +169,62 @@ def latest_batch(batch_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
         return _row(cur.fetchone())
 
 
+def current_annotation(*, tenant_id: str, org_id: str, project_id: str,
+                       drawing_id: str, session_id: str,
+                       repository_id: str) -> Optional[Dict[str, Any]]:
+    """Return the current browser-safe batch and target witnesses for a session.
+
+    The caller supplies only server-derived authority. The query selects the
+    latest revision of each batch, prefers an active pending decision, and
+    otherwise returns the most recently created terminal decision. It exposes
+    no repository name, identity, key digest, audit receipt, or caller text.
+    """
+    scope = _scope(tenant_id, org_id, project_id, drawing_id)
+    session = str(session_id or "").strip()
+    repository = str(repository_id or "").strip()
+    if not session or not repository or len(repository) > 300:
+        return None
+    with db.cursor() as cur:
+        cur.execute(
+            "WITH latest_revisions AS ("
+            " SELECT DISTINCT ON (batch_id) batch_id, revision, state, kind, "
+            " payload_count, base_version, base_commit, base_tree, "
+            " preview_commit, preview_tree, retry_of_batch_id, reverses_batch_id, "
+            " reverses_commit, reverses_tree, applied_version, tenant_id, org_id, "
+            " project_id, drawing_id, session_id, repository_id, created_at "
+            " FROM annotation_batches "
+            " WHERE tenant_id = %(tenant)s AND org_id = %(org)s "
+            " AND project_id = %(project)s AND drawing_id = %(drawing)s "
+            " AND session_id = %(session)s "
+            " ORDER BY batch_id, revision DESC"
+            ") "
+            "SELECT b.batch_id, b.revision, b.state, b.kind, b.payload_count, "
+            "b.base_version, b.base_commit, b.base_tree, b.preview_commit, "
+            "b.preview_tree, b.retry_of_batch_id, b.reverses_batch_id, "
+            "b.reverses_commit, b.reverses_tree, b.applied_version, "
+            "t.version AS target_version, t.commit_sha AS target_commit, "
+            "t.tree_sha AS target_tree "
+            "FROM latest_revisions b "
+            "JOIN annotation_targets t ON t.tenant_id = b.tenant_id "
+            " AND t.org_id = b.org_id AND t.project_id = b.project_id "
+            " AND t.drawing_id = b.drawing_id AND t.repository_id = b.repository_id "
+            "JOIN app_sessions s ON s.session_id = b.session_id "
+            " AND s.tenant_id = b.tenant_id::text "
+            " AND s.drawing_id = b.drawing_id::text AND s.status = 'active' "
+            "JOIN drawing_artifacts d ON d.drawing_id = b.drawing_id "
+            " AND d.project_id = b.project_id AND d.org_id = b.org_id "
+            " AND d.status = 'active' "
+            "JOIN projects p ON p.project_id = b.project_id AND p.org_id = b.org_id "
+            " AND p.status = 'active' "
+            "JOIN orgs o ON o.org_id = b.org_id AND o.status = 'active' "
+            "WHERE t.repository_id = %(repository)s "
+            "ORDER BY CASE WHEN b.state = 'pending' THEN 0 ELSE 1 END, "
+            "b.created_at DESC, b.batch_id DESC LIMIT 1",
+            {**scope, "session": session, "repository": repository},
+        )
+        return _row(cur.fetchone())
+
+
 def register_target(*, tenant_id: str, org_id: str, project_id: str,
                     drawing_id: str, commit_sha: str, tree_sha: str,
                     actor_binding_id: str, source_authority: Any,
