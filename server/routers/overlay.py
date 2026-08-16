@@ -34,11 +34,12 @@ deciding.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import deps
 import overlay_propose
@@ -46,6 +47,7 @@ import overlay_registry
 import overlay_stream
 import platform_link
 import session_store
+from annotation_source_authority import SOURCE_AUTHORITY, source_request
 from envelopes import ErrorCode, error_obj
 
 router = APIRouter()
@@ -248,6 +250,281 @@ class RevokeBody(BaseModel):
     proposal_id: str
     decision_key: str = Field(..., min_length=8)
     document_version: int
+
+
+class _ClosedBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AnnotationPreviewBody(_ClosedBody):
+    session_id: str
+    batch_id: str
+    base_version: int = Field(..., ge=0)
+    base_commit: str
+    base_tree: str
+    preview_commit: str
+    preview_tree: str
+    payload_digest: str
+    payload_count: int = Field(..., ge=1)
+    request_key: str = Field(..., min_length=8)
+    lease_s: int = Field(default=900, ge=1, le=3600)
+
+
+class AnnotationDecisionBody(_ClosedBody):
+    decision_key: str = Field(..., min_length=8)
+
+
+class AnnotationRetryBody(_ClosedBody):
+    batch_id: str
+    preview_commit: str
+    preview_tree: str
+    payload_digest: str
+    payload_count: int = Field(..., ge=1)
+    request_key: str = Field(..., min_length=8)
+    lease_s: int = Field(default=900, ge=1, le=3600)
+
+
+class AnnotationUndoBody(AnnotationRetryBody):
+    pass
+
+
+def _annotation_store():
+    platform_link._ensure_platform_package()
+    from leaf_platform import annotation_store  # noqa: PLC0415
+    return annotation_store
+
+
+def _annotation_not_found() -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": "annotation unavailable"})
+
+
+def _annotation_unavailable() -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": "annotation unavailable"})
+
+
+def _annotation_scope(session_id: str, tenant: Any) -> Dict[str, str]:
+    session = _require_project_session(session_id, tenant, write=True)
+    if session is None:
+        raise LookupError("annotation unavailable")
+    org_id = str(session.get("org_id") or "")
+    project_id = str(session.get("project_id") or "")
+    drawing_id = str(session.get("drawing_id") or "")
+    subject = getattr(tenant, "subject", None)
+    if org_id != str(tenant) or not project_id or not drawing_id or not subject:
+        raise LookupError("annotation unavailable")
+    store = platform_link.platform_store()
+    binding = store.resolve_active_identity_binding("auth0", subject)
+    if binding is None or str(binding.platform_tenant_id) != str(tenant):
+        raise LookupError("annotation unavailable")
+    mapping = store.resolve_project_repository_authority(
+        str(tenant), org_id, project_id,
+    )
+    repository_id = str((mapping or {}).get("repo_key") or "")
+    if not repository_id:
+        raise LookupError("annotation unavailable")
+    return {
+        "tenant_id": str(tenant), "org_id": org_id, "project_id": project_id,
+        "drawing_id": drawing_id, "session_id": session_id,
+        "actor_binding_id": str(binding.binding_id),
+        "repository_id": repository_id,
+    }
+
+
+def _batch_scope(batch_id: str, tenant: Any) -> tuple[Dict[str, Any], Dict[str, str]]:
+    batch = _annotation_store().latest_batch(batch_id, str(tenant))
+    if batch is None:
+        raise LookupError("annotation unavailable")
+    scope = _annotation_scope(str(batch.get("session_id") or ""), tenant)
+    for field in ("tenant_id", "org_id", "project_id", "drawing_id"):
+        if str(batch.get(field)) != scope[field]:
+            raise LookupError("annotation unavailable")
+    if str(batch.get("repository_id")) != scope["repository_id"]:
+        raise LookupError("annotation unavailable")
+    return batch, scope
+
+
+def _source_receipt(scope: Dict[str, str], *, relation: str,
+                    commit_sha: str, tree_sha: str,
+                    base_commit: str, base_tree: str,
+                    reverses_commit: Optional[str] = None,
+                    reverses_tree: Optional[str] = None):
+    return SOURCE_AUTHORITY.verify(source_request(
+        tenant_id=scope["tenant_id"], org_id=scope["org_id"],
+        project_id=scope["project_id"], drawing_id=scope["drawing_id"],
+        repository_id=scope["repository_id"], relation=relation,
+        commit_sha=commit_sha, tree_sha=tree_sha,
+        base_commit=base_commit, base_tree=base_tree,
+        reverses_commit=reverses_commit, reverses_tree=reverses_tree,
+    ))
+
+
+def _append_annotation_event(session_id: str, event_type: str,
+                             batch: Dict[str, Any]) -> None:
+    session_store.append_event(session_id, None, event_type, {
+        "batch_id": str(batch["batch_id"]),
+        "revision": int(batch["revision"]),
+        "state": str(batch["state"]),
+        "source_receipt_digest": str(batch["source_receipt_digest"]),
+        "payload_digest": str(batch["payload_digest"]),
+        "preview_commit": str(batch["preview_commit"]),
+        "preview_tree": str(batch["preview_tree"]),
+    })
+
+
+def _annotation_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, (LookupError, ValueError, platform_link.ProjectSessionForbidden)):
+        return _annotation_not_found()
+    status = int(getattr(exc, "status_code", 503))
+    if status in {400, 403, 404, 409, 410, 422}:
+        return _annotation_not_found()
+    return _annotation_unavailable()
+
+
+@router.post("/api/overlay/annotations/preview")
+def preview_annotation(body: AnnotationPreviewBody,
+                       tenant=Depends(deps.require_active_tenant)) -> Any:
+    """Create one source-verified annotation preview for an owned session."""
+    try:
+        scope = _annotation_scope(body.session_id, tenant)
+        store = _annotation_store()
+        target = store.target(
+            scope["tenant_id"], scope["org_id"], scope["project_id"],
+            scope["drawing_id"],
+        )
+        if target is None or (
+            int(target["version"]) != body.base_version
+            or target["commit_sha"] != body.base_commit
+            or target["tree_sha"] != body.base_tree
+            or str(target["repository_id"]) != scope["repository_id"]
+        ):
+            raise LookupError("annotation unavailable")
+        receipt = _source_receipt(
+            scope, relation="preview", commit_sha=body.preview_commit,
+            tree_sha=body.preview_tree, base_commit=body.base_commit,
+            base_tree=body.base_tree,
+        )
+        batch = store.create_batch(
+            batch_id=body.batch_id, tenant_id=scope["tenant_id"],
+            org_id=scope["org_id"], project_id=scope["project_id"],
+            drawing_id=scope["drawing_id"], session_id=scope["session_id"],
+            kind="apply", base_version=body.base_version,
+            base_commit=body.base_commit, base_tree=body.base_tree,
+            preview_commit=body.preview_commit, preview_tree=body.preview_tree,
+            payload_digest=body.payload_digest, payload_count=body.payload_count,
+            request_key=body.request_key,
+            created_by_binding_id=scope["actor_binding_id"],
+            source_authority=SOURCE_AUTHORITY, source_receipt=receipt,
+            lease_s=body.lease_s,
+        )
+        _append_annotation_event(scope["session_id"], "annotation_previewed", batch)
+        return {"batch_id": str(batch["batch_id"]), "state": batch["state"]}
+    except Exception as exc:  # noqa: BLE001 - all authority failures are closed
+        return _annotation_error(exc)
+
+
+def _decision(batch_id: str, body: AnnotationDecisionBody,
+              tenant: Any, *, accept: bool) -> Any:
+    try:
+        batch, scope = _batch_scope(batch_id, tenant)
+        receipt = _source_receipt(
+            scope, relation="inverse" if batch["kind"] == "undo" else "preview",
+            commit_sha=batch["preview_commit"], tree_sha=batch["preview_tree"],
+            base_commit=batch["base_commit"], base_tree=batch["base_tree"],
+            reverses_commit=batch.get("reverses_commit"),
+            reverses_tree=batch.get("reverses_tree"),
+        )
+        store = _annotation_store()
+        if accept:
+            decided, target = store.accept(
+                batch_id=batch_id, tenant_id=scope["tenant_id"],
+                actor_binding_id=scope["actor_binding_id"],
+                decision_key=body.decision_key, source_authority=SOURCE_AUTHORITY,
+                source_receipt=receipt,
+            )
+            result = {"batch_id": str(decided["batch_id"]),
+                      "state": decided["state"], "target_version": int(target["version"])}
+            event = "annotation_accepted"
+        else:
+            decided = store.reject(
+                batch_id=batch_id, tenant_id=scope["tenant_id"],
+                actor_binding_id=scope["actor_binding_id"],
+                decision_key=body.decision_key,
+            )
+            result = {"batch_id": str(decided["batch_id"]), "state": decided["state"]}
+            event = "annotation_rejected"
+        _append_annotation_event(scope["session_id"], event, decided)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        return _annotation_error(exc)
+
+
+@router.post("/api/overlay/annotations/{batch_id}/accept")
+def accept_annotation(batch_id: str, body: AnnotationDecisionBody,
+                      tenant=Depends(deps.require_active_tenant)) -> Any:
+    return _decision(batch_id, body, tenant, accept=True)
+
+
+@router.post("/api/overlay/annotations/{batch_id}/reject")
+def reject_annotation(batch_id: str, body: AnnotationDecisionBody,
+                      tenant=Depends(deps.require_active_tenant)) -> Any:
+    return _decision(batch_id, body, tenant, accept=False)
+
+
+def _linked_preview(source_batch_id: str, body: AnnotationRetryBody,
+                    tenant: Any, *, undo: bool) -> Any:
+    try:
+        source, scope = _batch_scope(source_batch_id, tenant)
+        if str(uuid.UUID(body.batch_id)) == str(uuid.UUID(source_batch_id)):
+            raise LookupError("annotation unavailable")
+        store = _annotation_store()
+        target = store.target(
+            scope["tenant_id"], scope["org_id"], scope["project_id"],
+            scope["drawing_id"],
+        )
+        if target is None:
+            raise LookupError("annotation unavailable")
+        relation = "inverse" if undo else "preview"
+        receipt = _source_receipt(
+            scope, relation=relation, commit_sha=body.preview_commit,
+            tree_sha=body.preview_tree, base_commit=target["commit_sha"],
+            base_tree=target["tree_sha"],
+            reverses_commit=source["preview_commit"] if undo else None,
+            reverses_tree=source["preview_tree"] if undo else None,
+        )
+        batch = store.create_batch(
+            batch_id=body.batch_id, tenant_id=scope["tenant_id"],
+            org_id=scope["org_id"], project_id=scope["project_id"],
+            drawing_id=scope["drawing_id"], session_id=scope["session_id"],
+            kind="undo" if undo else "apply",
+            base_version=int(target["version"]), base_commit=target["commit_sha"],
+            base_tree=target["tree_sha"], preview_commit=body.preview_commit,
+            preview_tree=body.preview_tree, payload_digest=body.payload_digest,
+            payload_count=body.payload_count, request_key=body.request_key,
+            created_by_binding_id=scope["actor_binding_id"],
+            source_authority=SOURCE_AUTHORITY, source_receipt=receipt,
+            lease_s=body.lease_s,
+            retry_of_batch_id=None if undo else source_batch_id,
+            reverses_batch_id=source_batch_id if undo else None,
+        )
+        _append_annotation_event(
+            scope["session_id"], "annotation_undo_previewed" if undo
+            else "annotation_retry_previewed", batch,
+        )
+        return {"batch_id": str(batch["batch_id"]), "state": batch["state"]}
+    except Exception as exc:  # noqa: BLE001
+        return _annotation_error(exc)
+
+
+@router.post("/api/overlay/annotations/{batch_id}/retry")
+def retry_annotation(batch_id: str, body: AnnotationRetryBody,
+                     tenant=Depends(deps.require_active_tenant)) -> Any:
+    return _linked_preview(batch_id, body, tenant, undo=False)
+
+
+@router.post("/api/overlay/annotations/{batch_id}/undo")
+def undo_annotation(batch_id: str, body: AnnotationUndoBody,
+                    tenant=Depends(deps.require_active_tenant)) -> Any:
+    return _linked_preview(batch_id, body, tenant, undo=True)
 
 
 @router.post("/api/overlay/revocations")
