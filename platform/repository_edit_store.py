@@ -118,7 +118,9 @@ def _locked(cur: Any, edit_id: uuid.UUID) -> dict[str, Any]:
 
 def _audit(cur: Any, row: Mapping[str, Any], prior: str, next_state: str,
            key: str, result: str = "success", reason: Optional[str] = None,
-           approver: Optional[uuid.UUID] = None) -> None:
+           approver: Optional[uuid.UUID] = None,
+           writer_lease_id: Optional[uuid.UUID] = None,
+           writer_lease_generation: Optional[int] = None) -> None:
     cur.execute(
         "INSERT INTO project_repository_edit_audit_events "
         "(edit_id,tenant_id,organization_id,project_id,repo_key,source_edit_id,"
@@ -133,8 +135,28 @@ def _audit(cur: Any, row: Mapping[str, Any], prior: str, next_state: str,
         "%(observed_private_ref_commit)s,%(observed_main_commit)s,%(observed_main_tree)s,"
         "%(changed_paths_digest)s,%(receipt_digest)s,%(key)s,%(result)s,%(reason)s)",
         {**row, "prior": prior, "next": next_state, "approver": approver,
+         "writer_lease_id": writer_lease_id or row["writer_lease_id"],
+         "writer_lease_generation": (
+             writer_lease_generation
+             if writer_lease_generation is not None
+             else row["writer_lease_generation"]
+         ),
          "key": key, "result": result, "reason": reason},
     )
+
+
+def _publish_witness(cur: Any, edit_id: uuid.UUID) -> tuple[str, int]:
+    cur.execute(
+        "SELECT writer_lease_id,writer_lease_generation FROM "
+        "project_repository_edit_audit_events WHERE edit_id=%(edit)s "
+        "AND prior_state='awaiting_confirmation' AND next_state='publishing' "
+        "ORDER BY event_id DESC LIMIT 1",
+        {"edit": edit_id},
+    )
+    row = _mapping(cur.fetchone())
+    if row is None:
+        raise RepositoryEditStoreError("publish_witness_missing")
+    return str(row["writer_lease_id"]), int(row["writer_lease_generation"])
 
 
 def record_staged(receipt: Any, receipt_digest: object, *, expected_version: int,
@@ -290,15 +312,34 @@ def put_confirmation(confirmation: Any, *, expected_edit_version: int,
 
 
 def consume_for_publish(edit_id: object, confirmation_id: object, *,
-                        expected_version: int, transition_key: str) -> dict[str, Any]:
+                        expected_version: int, transition_key: str,
+                        publish_lease_id: object | None = None,
+                        publish_lease_generation: object | None = None,
+                        receipt_digest: object | None = None) -> dict[str, Any]:
     edit = _uuid(edit_id, "edit_id")
     confirmation = _uuid(confirmation_id, "confirmation_id")
     version = _positive(expected_version, "expected_version")
     key = _key(transition_key)
+    publish_lease = (
+        _uuid(publish_lease_id, "publish_lease_id")
+        if publish_lease_id is not None
+        else None
+    )
+    publish_generation = (
+        _positive(publish_lease_generation, "publish_lease_generation")
+        if publish_lease_generation is not None
+        else None
+    )
+    if (publish_lease is None) != (publish_generation is None):
+        raise RepositoryEditStoreError("publish_witness_incomplete")
+    expected_receipt = (_digest(receipt_digest, "receipt_digest")
+                        if receipt_digest is not None else None)
 
     def operation(conn):
         with conn.cursor() as cur:
             row = _locked(cur, edit)
+            if expected_receipt is not None and row["receipt_digest"] != expected_receipt:
+                raise RepositoryEditStoreError("receipt_digest_mismatch")
             cur.execute("SELECT * FROM project_repository_edit_confirmations "
                         "WHERE confirmation_id=%(confirmation)s FOR UPDATE",
                         {"confirmation": confirmation})
@@ -306,6 +347,11 @@ def consume_for_publish(edit_id: object, confirmation_id: object, *,
             if approval is None or approval["edit_id"] != str(edit):
                 raise RepositoryEditStoreError("confirmation_not_found")
             if row["state"] == "publishing" and approval["consumed_by_idempotency_key"] == key:
+                if publish_lease is not None:
+                    existing_lease, existing_generation = _publish_witness(cur, edit)
+                    if (existing_lease != str(publish_lease)
+                            or existing_generation != publish_generation):
+                        raise RepositoryEditStoreError("publish_witness_mismatch")
                 return row
             if (row["state"] != "awaiting_confirmation" or row["version"] != version
                     or approval["consumed_at"] is not None):
@@ -317,6 +363,9 @@ def consume_for_publish(edit_id: object, confirmation_id: object, *,
                           "receipt_digest"):
                 if approval[field] != row[field]:
                     raise RepositoryEditStoreError("confirmation_binding_mismatch")
+            if (publish_generation is not None
+                    and publish_generation <= int(row["writer_lease_generation"])):
+                raise RepositoryEditStoreError("publish_generation_not_strictly_greater")
             cur.execute(
                 "UPDATE project_repository_edit_confirmations SET consumed_at=NOW(),"
                 "consumed_by_idempotency_key=%(key)s,consumed_edit_version=%(next_version)s "
@@ -333,24 +382,57 @@ def consume_for_publish(edit_id: object, confirmation_id: object, *,
             if updated is None:
                 raise RepositoryEditStoreError("stale_transition")
             _audit(cur, updated, "awaiting_confirmation", "publishing", key,
-                   approver=uuid.UUID(approval["approver_binding_id"]))
+                   approver=uuid.UUID(approval["approver_binding_id"]),
+                   writer_lease_id=publish_lease,
+                   writer_lease_generation=publish_generation)
             return updated
     return db.run_transaction(operation, isolation="serializable")
 
 
 def settle_publish(edit_id: object, *, private_ref_commit: object, main_commit: object,
                    main_tree: object, expected_version: int, transition_key: str,
-                   recovery_reason_code: Optional[str] = None) -> dict[str, Any]:
+                   recovery_reason_code: Optional[str] = None,
+                   publish_lease_id: object | None = None,
+                   publish_lease_generation: object | None = None,
+                   recovery_lease_id: object | None = None,
+                   recovery_lease_generation: object | None = None) -> dict[str, Any]:
     edit = _uuid(edit_id, "edit_id")
     private = _sha(private_ref_commit, "private_ref_commit")
     main = _sha(main_commit, "main_commit")
     tree = _sha(main_tree, "main_tree")
     version = _positive(expected_version, "expected_version")
     key = _key(transition_key)
+    publish_lease = (_uuid(publish_lease_id, "publish_lease_id")
+                     if publish_lease_id is not None else None)
+    publish_generation = (_positive(publish_lease_generation, "publish_lease_generation")
+                          if publish_lease_generation is not None else None)
+    recovery_lease = (_uuid(recovery_lease_id, "recovery_lease_id")
+                      if recovery_lease_id is not None else None)
+    recovery_generation = (_positive(recovery_lease_generation, "recovery_lease_generation")
+                           if recovery_lease_generation is not None else None)
+    if (publish_lease is None) != (publish_generation is None):
+        raise RepositoryEditStoreError("publish_witness_incomplete")
+    if (recovery_lease is None) != (recovery_generation is None):
+        raise RepositoryEditStoreError("recovery_witness_incomplete")
+    if recovery_reason_code is None and recovery_lease is not None:
+        raise RepositoryEditStoreError("recovery_witness_unexpected")
 
     def operation(conn):
         with conn.cursor() as cur:
             row = _locked(cur, edit)
+            recorded_lease, recorded_generation = _publish_witness(cur, edit)
+            if publish_lease is not None and (
+                    recorded_lease != str(publish_lease)
+                    or recorded_generation != publish_generation):
+                raise RepositoryEditStoreError("publish_witness_mismatch")
+            if recovery_generation is not None and recovery_generation < recorded_generation:
+                raise RepositoryEditStoreError("recovery_generation_stale")
+            if row["state"] == "published" and recovery_reason_code is not None:
+                if (private != row["staged_head_commit"]
+                        or main != row["observed_main_commit"]
+                        or tree != row["observed_main_tree"]):
+                    raise RepositoryEditStoreError("recovery_observation_mismatch")
+                return row
             if row["state"] == "published" and row["observed_main_commit"] == main:
                 cur.execute(
                     "SELECT idempotency_key FROM project_repository_edit_audit_events "
@@ -380,7 +462,13 @@ def settle_publish(edit_id: object, *, private_ref_commit: object, main_commit: 
             if updated is None:
                 raise RepositoryEditStoreError("stale_transition")
             _audit(cur, updated, "publishing", next_state, key,
-                   result="success" if success else "conflict", reason=reason)
+                   result="success" if success else "conflict", reason=reason,
+                   writer_lease_id=recovery_lease or publish_lease,
+                   writer_lease_generation=(
+                       recovery_generation
+                       if recovery_generation is not None
+                       else publish_generation
+                   ))
             if success and row["operation"] == "rollback":
                 cur.execute(
                     "UPDATE project_repository_edits SET state='rolled_back',version=version+1,updated_at=NOW() "
@@ -396,11 +484,14 @@ def settle_publish(edit_id: object, *, private_ref_commit: object, main_commit: 
 
 def recover_publish(edit_id: object, *, private_ref_commit: object, main_commit: object,
                     main_tree: object, expected_version: int, transition_key: str,
-                    reason_code: str) -> dict[str, Any]:
+                    reason_code: str, recovery_lease_id: object | None = None,
+                    recovery_lease_generation: object | None = None) -> dict[str, Any]:
     if not isinstance(reason_code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", reason_code):
         raise RepositoryEditStoreError("invalid_recovery_reason")
     return settle_publish(
         edit_id, private_ref_commit=private_ref_commit, main_commit=main_commit,
         main_tree=main_tree, expected_version=expected_version,
         transition_key=transition_key, recovery_reason_code=reason_code,
+        recovery_lease_id=recovery_lease_id,
+        recovery_lease_generation=recovery_lease_generation,
     )

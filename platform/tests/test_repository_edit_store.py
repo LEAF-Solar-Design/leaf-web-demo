@@ -146,6 +146,101 @@ def test_confirmation_consumption_and_publish_settlement_are_exact(authority):
             transition_key="second-consume")
 
 
+def test_publish_and_recovery_lease_witnesses_are_separate_append_only_audit(authority):
+    org, project, ids = authority
+    receipt = _receipt(org, project, ids)
+    digest = staged_receipt_digest(receipt)
+    publish_lease = str(uuid.uuid4())
+    recovery_lease = str(uuid.uuid4())
+    repository_edit_store.record_staged(
+        receipt, digest, expected_version=0, transition_key="stage-one")
+    repository_edit_store.await_confirmation(
+        ids["edit"], expected_version=1, transition_key="wait-one")
+    repository_edit_store.put_confirmation(
+        _confirmation(receipt, ids), expected_edit_version=2,
+        transition_key="confirm-one")
+    publishing = repository_edit_store.consume_for_publish(
+        ids["edit"], ids["confirmation"], expected_version=2,
+        transition_key="publish-one", publish_lease_id=publish_lease,
+        publish_lease_generation=8)
+    assert publishing["writer_lease_id"] == ids["lease"]
+    assert publishing["writer_lease_generation"] == 7
+    with db.connection() as conn:
+        publish_event = conn.execute(
+            "SELECT writer_lease_id,writer_lease_generation FROM "
+            "project_repository_edit_audit_events WHERE edit_id=%s "
+            "AND next_state='publishing' ORDER BY event_id DESC LIMIT 1",
+            (ids["edit"],),
+        ).fetchone()
+    assert str(publish_event["writer_lease_id"]) == publish_lease
+    assert publish_event["writer_lease_generation"] == 8
+    recovered = repository_edit_store.recover_publish(
+        ids["edit"], private_ref_commit="2" * 40, main_commit="2" * 40,
+        main_tree="3" * 40, expected_version=3, transition_key="recover-one",
+        reason_code="response_lost", recovery_lease_id=recovery_lease,
+        recovery_lease_generation=9)
+    assert recovered["state"] == "published"
+    with db.connection() as conn:
+        events = conn.execute(
+            "SELECT next_state,writer_lease_id,writer_lease_generation FROM "
+            "project_repository_edit_audit_events WHERE edit_id=%s "
+            "AND next_state IN ('publishing','published') ORDER BY event_id",
+            (ids["edit"],),
+        ).fetchall()
+    assert [(row["next_state"], str(row["writer_lease_id"]),
+             row["writer_lease_generation"]) for row in events] == [
+        ("publishing", publish_lease, 8), ("published", recovery_lease, 9)]
+    observed = repository_edit_store.recover_publish(
+        ids["edit"], private_ref_commit="2" * 40, main_commit="2" * 40,
+        main_tree="3" * 40, expected_version=recovered["version"],
+        transition_key="recover-observe", reason_code="response_lost",
+        recovery_lease_id=str(uuid.uuid4()), recovery_lease_generation=10)
+    assert observed["version"] == recovered["version"]
+
+
+def test_publish_and_recovery_witnesses_fail_closed(authority):
+    org, project, ids = authority
+    receipt = _receipt(org, project, ids)
+    repository_edit_store.record_staged(
+        receipt, staged_receipt_digest(receipt), expected_version=0,
+        transition_key="stage-one")
+    repository_edit_store.await_confirmation(
+        ids["edit"], expected_version=1, transition_key="wait-one")
+    repository_edit_store.put_confirmation(
+        _confirmation(receipt, ids), expected_edit_version=2,
+        transition_key="confirm-one")
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError,
+                       match="receipt_digest_mismatch"):
+        repository_edit_store.consume_for_publish(
+            ids["edit"], ids["confirmation"], expected_version=2,
+            transition_key="publish-wrong-receipt", receipt_digest="f" * 64,
+            publish_lease_id=str(uuid.uuid4()), publish_lease_generation=8)
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError,
+                       match="publish_generation_not_strictly_greater"):
+        repository_edit_store.consume_for_publish(
+            ids["edit"], ids["confirmation"], expected_version=2,
+            transition_key="publish-stale", publish_lease_id=str(uuid.uuid4()),
+            publish_lease_generation=7)
+    publish_lease = str(uuid.uuid4())
+    repository_edit_store.consume_for_publish(
+        ids["edit"], ids["confirmation"], expected_version=2,
+        transition_key="publish-one", publish_lease_id=publish_lease,
+        publish_lease_generation=8)
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError,
+                       match="publish_witness_mismatch"):
+        repository_edit_store.settle_publish(
+            ids["edit"], private_ref_commit="2" * 40, main_commit="2" * 40,
+            main_tree="3" * 40, expected_version=3, transition_key="settle-wrong",
+            publish_lease_id=str(uuid.uuid4()), publish_lease_generation=8)
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError,
+                       match="recovery_generation_stale"):
+        repository_edit_store.recover_publish(
+            ids["edit"], private_ref_commit="2" * 40, main_commit="2" * 40,
+            main_tree="3" * 40, expected_version=3, transition_key="recover-stale",
+            reason_code="response_lost", recovery_lease_id=str(uuid.uuid4()),
+            recovery_lease_generation=7)
+
+
 def test_git_witness_drift_conflicts_without_inventing_success(authority):
     org, project, ids = authority
     receipt = _receipt(org, project, ids)
