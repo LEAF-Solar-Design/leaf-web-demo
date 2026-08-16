@@ -273,6 +273,12 @@ def _mount_platform_router() -> None:
 
 _mount_platform_router()
 
+# P8 uses the same non-colliding ``leaf_platform`` package alias established by
+# the platform mount. Import its private coordination router only afterwards.
+from routers import project_repository_edit as project_repository_edit_router  # noqa: E402
+
+app.include_router(project_repository_edit_router.router)
+
 
 # --- operator control plane (contract/OPERATOR.md; Wave 1, dark by default) --- #
 # Mounted ONLY when LEAF_OPERATOR_ENABLED=1: the release sequence merges the
