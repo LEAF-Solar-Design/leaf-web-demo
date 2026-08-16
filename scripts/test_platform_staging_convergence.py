@@ -1559,6 +1559,72 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 with self.assertRaises(subject.ContractError):
                     subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
 
+    def test_exact_skip_accepts_only_the_producer_unreported_primary_shape(self) -> None:
+        facts = service_receipt(
+            "web",
+            303,
+            predecessor="leaf-platform-web:1",
+            terminal_td="leaf-platform-web:1",
+        )["facts"]
+        facts["terminal"]["value"]["primary_deployments"] = {"status": "not_produced"}
+
+        healthy, terminal_td, terminal_digest = subject._terminal_evidence(
+            facts, allow_unreported_primary=True
+        )
+        self.assertTrue(healthy)
+        self.assertEqual(terminal_td, "leaf-platform-web:1")
+        self.assertEqual(terminal_digest, DIGESTS["web"])
+        self.assertFalse(subject._terminal_evidence(facts)[0])
+        child = {
+            "terminal": facts["terminal"],
+            "outcome": {"deployment_outcome": "skipped_exact"},
+        }
+        self.assertEqual(subject._terminal_digest(child), DIGESTS["web"])
+        child["outcome"]["deployment_outcome"] = "succeeded"
+        with self.assertRaises(subject.ContractError):
+            subject._terminal_digest(child)
+
+    def test_prior_relay_success_requires_the_same_convergence_and_earlier_run(self) -> None:
+        selected_receipt = service_receipt(
+            "web", 307, predecessor="leaf-platform-web:1", terminal_td="leaf-platform-web:1"
+        )
+        selected_receipt["requested"]["convergence_id"] = f"{SOURCE}-1-web"
+        prior_receipt = copy.deepcopy(selected_receipt)
+        self.assertEqual(
+            subject._prior_relay_role(
+                service="web",
+                relay_attempt=2,
+                run={"created_at": "2026-08-13T01:20:00Z"},
+                receipt=prior_receipt,
+                selected_run={"created_at": "2026-08-13T01:21:00Z"},
+                selected_receipt=selected_receipt,
+            ),
+            "prior_relay_web",
+        )
+        prior_receipt["requested"]["convergence_id"] = f"{SOURCE}-2-web"
+        self.assertIsNone(
+            subject._prior_relay_role(
+                service="web",
+                relay_attempt=2,
+                run={"created_at": "2026-08-13T01:20:00Z"},
+                receipt=prior_receipt,
+                selected_run={"created_at": "2026-08-13T01:21:00Z"},
+                selected_receipt=selected_receipt,
+            )
+        )
+
+    def test_pre_mutation_input_failure_needs_no_invented_predecessor(self) -> None:
+        previous = {
+            "role": "prior_failed_broker",
+            "terminal": missing(),
+            "predecessor_task_definition": missing(),
+            "outcome": {"mutation_count": 0},
+        }
+        self.assertIsNone(subject._expected_predecessor(previous))
+        previous["role"] = "terminal_broker"
+        with self.assertRaises(subject.ContractError):
+            subject._expected_predecessor(previous)
+
     def test_raw_rollback_text_is_closed_and_cannot_override_structured_facts(self) -> None:
         for key, raw in (
             ("bluegreen_step", "unknown"),
