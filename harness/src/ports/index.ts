@@ -38,6 +38,10 @@ export interface TenantRepoProvider extends VendoredTenantRepoProvider {
     authority: ProjectRepositoryAuthority,
     request: ProjectRepositorySourceVerificationRequest,
   ): Promise<void>;
+  prepareProjectInverse?(
+    authority: ProjectRepositoryAuthority,
+    request: ProjectRepositoryInversePreparationRequest,
+  ): Promise<ProjectRepositoryInversePreparationResult>;
 }
 
 export const PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT =
@@ -63,6 +67,27 @@ export type ProjectRepositorySourceVerificationRequest =
       inverseCommit: string;
       inverseTree: string;
     }>;
+
+export const PROJECT_REPOSITORY_INVERSE_PRODUCER_CONTRACT =
+  "leaf.project-repository-inverse-producer.v1";
+
+/** Server-issued operation identity plus immutable accepted Git witnesses. */
+export interface ProjectRepositoryInversePreparationRequest {
+  readonly sourceBatchId: string;
+  readonly originalCommit: string;
+  readonly originalTree: string;
+  readonly targetCommit: string;
+  readonly targetTree: string;
+}
+
+/** Closed producer result. The private ref and repository path never cross the port. */
+export interface ProjectRepositoryInversePreparationResult {
+  readonly inverseCommit: string;
+  readonly inverseTree: string;
+  readonly payloadDigest: string;
+  readonly writerLeaseId: string;
+  readonly writerLeaseGeneration: string;
+}
 
 /* ---------------------------------------------------------------------------
  * P8 Unit 4: project repository edit coordination. Closed, digest-only wire

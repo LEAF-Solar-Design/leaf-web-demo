@@ -592,7 +592,7 @@ def test_current_annotation_returns_only_closed_scope_projection_and_prefers_pen
     assert current is not None
     assert current["batch_id"] == original["batch_id"] and current["state"] == "pending"
     assert set(current) == {
-        "batch_id", "revision", "state", "kind", "payload_count",
+        "batch_id", "revision", "state", "kind", "payload_digest", "payload_count",
         "base_version", "base_commit", "base_tree", "preview_commit", "preview_tree",
         "retry_of_batch_id", "reverses_batch_id", "reverses_commit", "reverses_tree",
         "applied_version", "target_version", "target_commit", "target_tree",
