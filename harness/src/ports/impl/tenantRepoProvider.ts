@@ -16,10 +16,14 @@ import type {
 } from "../../vendor/mushy-author/ports/impl/tenantRepoProvider.js";
 import type {
   ProjectRepositoryAuthority,
+  ProjectRepositorySourceVerificationRequest,
   TenantMutationFence,
   TenantRepoProvider,
   WriterLeaseWitness,
 } from "../index.js";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 
 const PROJECT_AUTHORITY_KEYS = [
   "organizationId",
@@ -144,6 +148,7 @@ export class TenantRepoProviderImpl
 {
   private readonly projectLease?: PgTenantRepoLeaseCoordinator;
   private readonly projectAuthoringMode: "disabled" | "singleton" | "fleet";
+  private readonly projectBareBase?: string;
 
   constructor(opts: TenantRepoProviderOptions) {
     const projectLease = configuredProjectLease(opts);
@@ -153,6 +158,7 @@ export class TenantRepoProviderImpl
     });
     this.projectLease = projectLease;
     this.projectAuthoringMode = opts.authoringMode ?? resolveAuthoringMode();
+    this.projectBareBase = opts.bareBase;
   }
 
   async withProjectWriterLease<T>(
@@ -167,5 +173,112 @@ export class TenantRepoProviderImpl
       throw new Error("PostgreSQL project repository writer lease is required");
     }
     return this.projectLease.withProjectLease(authority, action);
+  }
+
+  private async withProjectReadLease<T>(
+    authority: ProjectRepositoryAuthority,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.projectLease) {
+      throw new Error("PostgreSQL project repository read lease is required");
+    }
+    return this.projectLease.withProjectLease(authority, async (_witness, runFenced) =>
+      runFenced(action),
+    );
+  }
+
+  async verifyProjectSource(
+    authorityValue: ProjectRepositoryAuthority,
+    request: ProjectRepositorySourceVerificationRequest,
+  ): Promise<void> {
+    const authority = requireProjectRepositoryAuthority(authorityValue);
+    validateSourceVerificationRequest(request);
+    return this.withProjectReadLease(authority, async () => {
+      const repoDir = this.containedBareRepository(authority.repoKey);
+      const treeFor = (commit: string): string =>
+        readBareGit(repoDir, ["rev-parse", "--verify", `${commit}^{tree}`]);
+      if (request.relation === "preview") {
+        if (treeFor(request.baseCommit) !== request.baseTree ||
+            treeFor(request.candidateCommit) !== request.candidateTree ||
+            !bareGitSucceeds(repoDir, ["merge-base", "--is-ancestor", request.baseCommit, request.candidateCommit])) {
+          throw new Error("project repository source witness does not verify");
+        }
+        return;
+      }
+      if (
+        treeFor(request.originalCommit) !== request.originalTree ||
+        treeFor(request.targetCommit) !== request.targetTree ||
+        treeFor(request.inverseCommit) !== request.inverseTree ||
+        request.targetCommit !== request.originalCommit ||
+        readBareGit(repoDir, ["rev-parse", "--verify", `${request.inverseCommit}^1`]) !== request.targetCommit ||
+        request.inverseTree !== readBareGit(repoDir, ["rev-parse", "--verify", `${request.originalCommit}^1^{tree}`])
+      ) {
+        throw new Error("project repository source witness does not verify");
+      }
+    });
+  }
+
+  private containedBareRepository(repoKey: string): string {
+    if (!this.projectBareBase || !existsSync(this.projectBareBase) || lstatSync(this.projectBareBase).isSymbolicLink()) {
+      throw new Error("configured project repository base is unavailable");
+    }
+    const base = realpathSync(this.projectBareBase);
+    const candidate = join(base, `${repoKey}.git`);
+    if (!existsSync(candidate) || lstatSync(candidate).isSymbolicLink()) {
+      throw new Error("project repository is unavailable");
+    }
+    const resolved = realpathSync(candidate);
+    if (dirname(resolved) !== base || relative(base, resolved).startsWith(`..${sep}`) || relative(base, resolved) === "") {
+      throw new Error("project repository containment failed");
+    }
+    if (!existsSync(join(resolved, "HEAD")) || readBareGit(resolved, ["rev-parse", "--is-bare-repository"]) !== "true") {
+      throw new Error("project repository is not a bare repository");
+    }
+    return resolved;
+  }
+}
+
+const SHA40 = /^[a-f0-9]{40}$/;
+
+function validateSourceVerificationRequest(request: ProjectRepositorySourceVerificationRequest): void {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("project repository source request must be a closed object");
+  }
+  const fields = request.relation === "preview"
+    ? ["baseCommit", "baseTree", "candidateCommit", "candidateTree", "relation"]
+    : ["inverseCommit", "inverseTree", "originalCommit", "originalTree", "relation", "targetCommit", "targetTree"];
+  const actual = Object.keys(request).sort();
+  if (actual.length !== fields.length || actual.some((field, index) => field !== fields[index])) {
+    throw new Error("project repository source request has missing or extra fields");
+  }
+  if (request.relation !== "preview" && request.relation !== "inverse") {
+    throw new Error("project repository source relation is invalid");
+  }
+  for (const [key, value] of Object.entries(request)) {
+    if (key !== "relation" && (typeof value !== "string" || !SHA40.test(value))) {
+      throw new Error("project repository source witness is invalid");
+    }
+  }
+}
+
+function readBareGit(repoDir: string, args: string[]): string {
+  try {
+    return execFileSync("git", ["--git-dir", repoDir, "--no-optional-locks", ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new Error("project repository Git verification failed");
+  }
+}
+
+function bareGitSucceeds(repoDir: string, args: string[]): boolean {
+  try {
+    execFileSync("git", ["--git-dir", repoDir, "--no-optional-locks", ...args], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
   }
 }

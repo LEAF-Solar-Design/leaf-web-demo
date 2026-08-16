@@ -32,7 +32,37 @@ export interface TenantRepoProvider extends VendoredTenantRepoProvider {
       runFenced: TenantMutationFence,
     ) => Promise<T>,
   ): Promise<T>;
+  /** Read-only project source witness. It serializes with the writer lease but
+   * deliberately exposes neither a writer witness nor a mutation fence. */
+  verifyProjectSource?(
+    authority: ProjectRepositoryAuthority,
+    request: ProjectRepositorySourceVerificationRequest,
+  ): Promise<void>;
 }
+
+export const PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT =
+  "leaf.project-repository-source-witness.v1";
+
+export type ProjectRepositorySourceRelation = "preview" | "inverse";
+
+/** Closed immutable Git proof. The server owns the authority tuple separately. */
+export type ProjectRepositorySourceVerificationRequest =
+  | Readonly<{
+      relation: "preview";
+      baseCommit: string;
+      baseTree: string;
+      candidateCommit: string;
+      candidateTree: string;
+    }>
+  | Readonly<{
+      relation: "inverse";
+      originalCommit: string;
+      originalTree: string;
+      targetCommit: string;
+      targetTree: string;
+      inverseCommit: string;
+      inverseTree: string;
+    }>;
 
 /* ---------------------------------------------------------------------------
  * P8 Unit 4: project repository edit coordination. Closed, digest-only wire
