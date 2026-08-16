@@ -115,8 +115,6 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS project_repository_edit_audit_no_update
-  ON project_repository_edit_audit_events;
-CREATE TRIGGER project_repository_edit_audit_no_update
+CREATE OR REPLACE TRIGGER project_repository_edit_audit_no_update
 BEFORE UPDATE OR DELETE ON project_repository_edit_audit_events
 FOR EACH ROW EXECUTE FUNCTION reject_project_repository_edit_audit_mutation();
