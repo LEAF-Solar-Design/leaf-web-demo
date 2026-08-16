@@ -49,6 +49,8 @@ class FakeStore:
             "preview_tree": HEAD_TREE, "reverses_commit": None,
             "reverses_tree": None, "source_receipt_digest": "5" * 64,
             "payload_digest": "6" * 64,
+            "payload_count": 2, "retry_of_batch_id": None,
+            "reverses_batch_id": None, "applied_version": None,
         }
 
     def target(self, *_):
@@ -57,20 +59,45 @@ class FakeStore:
     def latest_batch(self, *_):
         return dict(self.batch)
 
+    def current_annotation(self, **_):
+        return dict(
+            self.batch,
+            target_version=self.target_row["version"],
+            target_commit=self.target_row["commit_sha"],
+            target_tree=self.target_row["tree_sha"],
+        )
+
     def create_batch(self, **values):
         self.calls.append(("create", values))
         row = dict(self.batch)
-        row.update({"batch_id": values["batch_id"], "kind": values["kind"]})
+        for key in (
+            "batch_id", "kind", "base_version", "base_commit", "base_tree",
+            "preview_commit", "preview_tree", "payload_count",
+            "retry_of_batch_id", "reverses_batch_id",
+        ):
+            if key in values:
+                row[key] = values[key]
+        if row["kind"] == "undo":
+            row["reverses_commit"] = self.batch["preview_commit"]
+            row["reverses_tree"] = self.batch["preview_tree"]
         return row
 
     def accept(self, **values):
         self.calls.append(("accept", values))
-        row = dict(self.batch, state="accepted", revision=1)
+        row = dict(self.batch, state="accepted", revision=1, applied_version=1)
         return row, dict(self.target_row, version=1, commit_sha=HEAD, tree_sha=HEAD_TREE)
 
     def reject(self, **values):
         self.calls.append(("reject", values))
         return dict(self.batch, state="rejected", revision=1)
+
+
+PROJECTION_KEYS = {
+    "decision_copy", "batch_id", "revision", "state", "kind", "payload_count",
+    "base_version", "base_commit", "base_tree", "preview_commit", "preview_tree",
+    "retry_of_batch_id", "reverses_batch_id", "reverses_commit", "reverses_tree",
+    "applied_version", "target_version", "target_commit", "target_tree",
+}
 
 
 @pytest.fixture()
@@ -126,9 +153,45 @@ def linked_body(**changes):
 
 def test_all_five_annotation_actions_are_registered(client):
     paths = {route.path for route in overlay.router.routes}
+    assert "/api/overlay/annotations/current" in paths
     for suffix in ("preview", "{batch_id}/accept", "{batch_id}/reject",
                    "{batch_id}/retry", "{batch_id}/undo"):
         assert f"/api/overlay/annotations/{suffix}" in paths
+
+
+def test_current_annotation_is_closed_server_owned_projection(client):
+    c, *_ = client
+    response = c.get("/api/overlay/annotations/current", params={"session_id": SESSION})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == PROJECTION_KEYS
+    assert body["decision_copy"] == "Review 2 annotation changes."
+    assert body["batch_id"] == BATCH and body["revision"] == 0
+    assert body["target_version"] == 0
+    forbidden = {
+        "tenant_id", "org_id", "project_id", "drawing_id", "repository_id",
+        "actor_binding_id", "request_key", "decision_key", "url", "path", "ref",
+        "html", "style",
+    }
+    assert forbidden.isdisjoint(body)
+
+
+def test_current_annotation_empty_scope_is_204(client, monkeypatch):
+    c, store, *_ = client
+    monkeypatch.setattr(store, "current_annotation", lambda **_: None)
+    response = c.get("/api/overlay/annotations/current", params={"session_id": SESSION})
+    assert response.status_code == 204 and response.content == b""
+
+
+@pytest.mark.parametrize("failure", [LookupError(), overlay.platform_link.ProjectSessionForbidden()])
+def test_current_annotation_unknown_and_foreign_are_indistinguishable(client, monkeypatch, failure):
+    c, *_ = client
+    monkeypatch.setattr(
+        overlay, "_annotation_scope", lambda *_: (_ for _ in ()).throw(failure),
+    )
+    response = c.get("/api/overlay/annotations/current", params={"session_id": SESSION})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "annotation unavailable"}
 
 
 def test_preview_verifies_source_before_store_and_appends_hash_only_event(client):
@@ -142,6 +205,8 @@ def test_preview_verifies_source_before_store_and_appends_hash_only_event(client
         "batch_id", "revision", "state", "source_receipt_digest",
         "payload_digest", "preview_commit", "preview_tree",
     }
+    assert set(response.json()) == PROJECTION_KEYS
+    assert response.json()["state"] == "pending"
 
 
 @pytest.mark.parametrize("action,store_call", [("accept", "accept"), ("reject", "reject")])
@@ -156,6 +221,10 @@ def test_decisions_reverify_git_before_exact_store_mutation(client, action, stor
     values = store.calls[0][1]
     assert values["tenant_id"] == TENANT
     assert values["actor_binding_id"] == BINDING
+    assert set(response.json()) == PROJECTION_KEYS
+    assert response.json()["state"] in {"accepted", "rejected"}
+    if action == "accept":
+        assert response.json()["target_version"] == 1
 
 
 def test_retry_uses_fresh_identity_and_link(client):
@@ -169,6 +238,8 @@ def test_retry_uses_fresh_identity_and_link(client):
     values = store.calls[0][1]
     assert values["batch_id"] == fresh and values["retry_of_batch_id"] == BATCH
     assert values["reverses_batch_id"] is None
+    assert response.json()["batch_id"] == fresh
+    assert response.json()["retry_of_batch_id"] == BATCH
 
 
 def test_undo_requires_inverse_and_links_accepted_batch(client):
@@ -182,6 +253,9 @@ def test_undo_requires_inverse_and_links_accepted_batch(client):
     assert verified[0]["relation"] == "inverse"
     values = store.calls[0][1]
     assert values["kind"] == "undo" and values["reverses_batch_id"] == BATCH
+    body = response.json()
+    assert body["kind"] == "undo" and body["reverses_batch_id"] == BATCH
+    assert body["reverses_commit"] == HEAD and body["reverses_tree"] == HEAD_TREE
 
 
 def test_retry_cannot_reuse_prior_batch_identity(client):
