@@ -136,6 +136,7 @@ MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
 MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
 VERIFIER_ONLY_MAIN_DRIFT_PATHS = frozenset(
     {
+        "contract/platform-staging-convergence.v1.schema.json",
         "scripts/platform_staging_convergence.py",
         "scripts/test_platform_staging_convergence.py",
     }

@@ -830,6 +830,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = self.comparison(
             source,
             [
+                {"filename": "contract/platform-staging-convergence.v1.schema.json", "status": "modified"},
                 {"filename": "scripts/platform_staging_convergence.py", "status": "modified"},
                 {"filename": "scripts/test_platform_staging_convergence.py", "status": "modified"},
             ],
