@@ -1188,7 +1188,8 @@ jobs:
           before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 
           require_contract_still_latest() {
-            local latest latest_head latest_json state compare
+            local latest latest_head latest_json run_json state attempt name
+            local artifacts artifact_json artifact_id provider_digest archive_sha
             latest_json=$(GH_TOKEN="$GH_TOKEN" gh api \
               "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&per_page=100" \
               --jq ".workflow_runs | map(select(.path == \"$CONSUMER_CONTRACT_WORKFLOW_PATH\")) | sort_by(-.id) | first | {id, head_sha} // empty")
@@ -1200,42 +1201,135 @@ jobs:
               echo "::error::The latest Terraform consumer-contract head is malformed."
               exit 1
             }
-            state=$(GH_TOKEN="$GH_TOKEN" gh api \
-              "repos/$INFRA_REPO/actions/runs/$latest" \
-              --jq '(.status + " " + (.conclusion // ""))')
+            run_json=$(GH_TOKEN="$GH_TOKEN" gh api \
+              "repos/$INFRA_REPO/actions/runs/$latest")
+            state=$(jq -er '(.status + " " + (.conclusion // ""))' <<<"$run_json")
             [ "$state" = "completed success" ] || {
               echo "::error::The latest Terraform consumer-contract run is not terminal success."
               exit 1
             }
             if [ "$latest" != "$TF_CONTRACT_RUN_ID" ]; then
-              compare=$(GH_TOKEN="$GH_TOKEN" gh api \
-                "repos/$INFRA_REPO/compare/$TF_CONTRACT_HEAD...$latest_head") || {
-                echo "::error::The newer Terraform consumer-contract lineage is unreadable."
+              attempt=$(jq -er --argjson run "$latest" --arg head "$latest_head" \
+                --arg path "$CONSUMER_CONTRACT_WORKFLOW_PATH" '
+                  select(
+                    .id == $run and .head_sha == $head and
+                    .path == $path and .event == "push" and
+                    .head_branch == "main" and .run_attempt > 0
+                  ) | .run_attempt
+                ' <<<"$run_json") || {
+                echo "::error::The newer Terraform contract run is not bound to protected main."
                 exit 1
               }
-              jq -e --arg base "$TF_CONTRACT_HEAD" --arg head "$latest_head" '
-                .status == "ahead" and
-                .ahead_by > 0 and .behind_by == 0 and
-                .base_commit.sha == $base and
-                .merge_base_commit.sha == $base and
-                (.total_commits as $total |
-                  $total > 0 and $total <= 250 and
-                  (.commits | type == "array" and length == $total and
-                    .[-1].sha == $head)) and
-                (.files | type == "array" and length < 300 and
-                  all(
-                    (.filename != ".github/workflows/deploy-leaf-platform-staging.yml") and
-                    (.filename != ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml") and
-                    (.filename != "contract/leaf-platform-staging-consumer-contract.v1.schema.json") and
-                    ((.previous_filename // "") != ".github/workflows/deploy-leaf-platform-staging.yml") and
-                    ((.previous_filename // "") != ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml") and
-                    ((.previous_filename // "") != "contract/leaf-platform-staging-consumer-contract.v1.schema.json")
+              name="leaf-platform-staging-consumer-contract-run-$latest-attempt-$attempt"
+              artifacts=$(GH_TOKEN="$GH_TOKEN" gh api \
+                "repos/$INFRA_REPO/actions/runs/$latest/artifacts?per_page=100")
+              artifact_json=$(jq -cer --arg name "$name" --argjson run "$latest" --arg head "$latest_head" '
+                select(
+                  (.artifacts | type == "array") and
+                  (.total_count | type == "number") and
+                  .total_count <= (.artifacts | length)
+                )
+                | [.artifacts[] | select(.name == $name)]
+                | select(length == 1) | .[0]
+                | select(
+                    .expired == false and
+                    .workflow_run.id == $run and
+                    .workflow_run.head_sha == $head and
+                    .workflow_run.head_branch == "main"
+                  )
+              ' <<<"$artifacts") || {
+                echo "::error::The newer Terraform contract artifact is missing, ambiguous, or foreign."
+                exit 1
+              }
+              artifact_id=$(jq -er '.id' <<<"$artifact_json")
+              provider_digest=$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$artifact_json")
+              rm -f newer-consumer-contract.zip newer-consumer-contract.json
+              GH_TOKEN="$GH_TOKEN" gh api \
+                "repos/$INFRA_REPO/actions/artifacts/$artifact_id/zip" \
+                > newer-consumer-contract.zip
+              archive_sha=$(sha256sum newer-consumer-contract.zip | awk '{print $1}')
+              [ "$archive_sha" = "${provider_digest#sha256:}" ] || {
+                echo "::error::The newer Terraform contract archive does not match its provider digest."
+                exit 1
+              }
+              [ "$(unzip -Z1 newer-consumer-contract.zip)" = "consumer-contract.json" ] || {
+                echo "::error::The newer Terraform contract archive has an invalid member set."
+                exit 1
+              }
+              unzip -p newer-consumer-contract.zip consumer-contract.json \
+                > newer-consumer-contract.json
+              export LATEST_CONTRACT_RUN_ID="$latest"
+              export LATEST_CONTRACT_RUN_ATTEMPT="$attempt"
+              export LATEST_CONTRACT_HEAD="$latest_head"
+              python3 - <<'CONTRACT_SUCCESSOR_PY'
+          if True:
+              import base64
+              import hashlib
+              import json
+              import os
+              import re
+              from pathlib import Path
+
+              SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+              def refuse(reason):
+                  raise SystemExit(f"newer Terraform consumer contract refused: {reason}")
+
+              def strict(raw):
+                  def pairs(items):
+                      value = {}
+                      for key, item in items:
+                          if key in value:
+                              refuse("duplicate JSON key")
+                          value[key] = item
+                      return value
+                  try:
+                      return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+                  except (UnicodeDecodeError, json.JSONDecodeError):
+                      refuse("malformed JSON")
+
+              encoded = os.environ["CONSUMER_CONTRACT_B64"]
+              try:
+                  bound = strict(base64.urlsafe_b64decode(
+                      encoded + "=" * ((4 - len(encoded) % 4) % 4)
                   ))
-              ' <<<"$compare" >/dev/null || {
-                echo "::error::A newer Terraform contract run changed protected consumer semantics or is not a strict descendant."
-                exit 1
+              except Exception:
+                  refuse("bound envelope encoding")
+              current = strict(Path("newer-consumer-contract.json").read_bytes())
+              if not isinstance(bound, dict) or not isinstance(bound.get("contract"), dict):
+                  refuse("bound envelope shape")
+              prior = bound["contract"]
+              if current.get("consumer") != prior.get("consumer"):
+                  refuse("consumer semantics changed")
+              producer = current.get("producer")
+              old_producer = prior.get("producer")
+              if not isinstance(producer, dict) or not isinstance(old_producer, dict):
+                  refuse("producer shape")
+              expected = {
+                  "repository": "LEAF-Solar-Design/leaf-automation-aws-terraform",
+                  "workflow_path": ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
+                  "run_id": int(os.environ["LATEST_CONTRACT_RUN_ID"]),
+                  "run_attempt": int(os.environ["LATEST_CONTRACT_RUN_ATTEMPT"]),
+                  "event": "push",
+                  "branch": "main",
+                  "head_sha": os.environ["LATEST_CONTRACT_HEAD"],
               }
-              echo "Accepted newer protected contract run $latest after proving verifier-only disjoint lineage from $TF_CONTRACT_HEAD."
+              if any(producer.get(key) != value for key, value in expected.items()):
+                  refuse("producer binding")
+              if producer.get("workflow_blob") != old_producer.get("workflow_blob"):
+                  refuse("producer workflow changed")
+              if not SHA40.fullmatch(str(producer.get("head_tree", ""))):
+                  refuse("producer tree")
+              payload = current.get("payload_sha256")
+              unsigned = dict(current)
+              unsigned.pop("payload_sha256", None)
+              canonical = json.dumps(
+                  unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+              ).encode("ascii")
+              if payload != hashlib.sha256(canonical).hexdigest():
+                  refuse("payload digest")
+              print("Accepted one newer byte-equivalent protected consumer contract.")
+          CONTRACT_SUCCESSOR_PY
             fi
           }
 
