@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 42)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 43)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -529,6 +529,57 @@ def test_contract_requires_postgres_annex_authority_for_postgres_sessions() -> N
     # Called, not merely defined. An unreferenced validator passes every
     # definition check and gates nothing.
     assert enforcement.count("validate_session_annex_authority()") >= 2
+
+
+# One row per place where a record points at a rule stated in another record
+# instead of restating it. Each row pins the pair, so the cited text cannot be
+# deleted while a live citation still points at it.
+CROSS_RECORD_CITATIONS = [
+    {
+        "citing": ("session_annex", "rollback_mode"),
+        "citation_marker": "the ordering rule recorded for LEAF_SESSIONS_STORE",
+        "cited": ("app_sessions_and_approvals", "rollback_mode"),
+        "cited_must_contain": (
+            "SESSIONS_DB",
+            "rollback off postgres on staging must set SESSIONS_DB to durable "
+            "storage in the same transaction",
+            "before or with the selector change, never after",
+        ),
+        "removal_note": (
+            "If dropping the annex citation is deliberate, delete this row from "
+            "CROSS_RECORD_CITATIONS in the same change."
+        ),
+    },
+]
+
+
+def _authority_field(inventory: dict, authority_id: str, field: str) -> str:
+    authority = next(
+        item for item in inventory["authorities"] if item["id"] == authority_id
+    )
+    return authority[field]
+
+
+def test_cited_rules_survive_at_the_record_that_states_them() -> None:
+    inventory = _load_inventory()
+
+    for citation in CROSS_RECORD_CITATIONS:
+        citing_id, citing_field = citation["citing"]
+        cited_id, cited_field = citation["cited"]
+        citing_text = _authority_field(inventory, citing_id, citing_field)
+        cited_text = _authority_field(inventory, cited_id, cited_field)
+        where = f"{citing_id}.{citing_field} -> {cited_id}.{cited_field}"
+
+        assert citation["citation_marker"] in citing_text, (
+            f"{where}: the citation is gone, so this row now guards nothing. "
+            f"{citation['removal_note']}"
+        )
+        for required in citation["cited_must_contain"]:
+            assert required in cited_text, (
+                f"{where}: dangling citation; the cited record lacks {required!r}. "
+                f"Restore the rule at its single home or remove the citation and "
+                f"this row together. {citation['removal_note']}"
+            )
 
 
 def test_contract_rejects_missing_or_weakened_dependencies() -> None:
