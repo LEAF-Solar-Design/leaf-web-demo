@@ -267,6 +267,35 @@ def test_nonce_replay_survives_a_fresh_replay_store_instance(tmp_path):
         "ok": False, "reason": "replay"}
 
 
+def test_explicit_db_path_cannot_downgrade_the_postgres_replay_authority(monkeypatch, tmp_path):
+    """The selector is authority: an explicit db_path fails closed, never silently SQLite.
+
+    Regression for the one fail-open seam in this module. Before the fix,
+    ``CallbackReplayStore(db_path)`` engaged Postgres only when db_path was
+    None, so a caller passing a path under ``LEAF_CALLBACK_REPLAY_STORE=postgres``
+    consumed nonces in a per-process SQLite file the Postgres authority never
+    sees — replay protection silently scoped to one process. No Postgres is
+    reached here: the refusal happens before any backend is constructed.
+    """
+    callbacks = broker._get_callbacks()
+    assert callbacks is not None
+    monkeypatch.setenv("LEAF_CALLBACK_REPLAY_STORE", "postgres")
+    with pytest.raises(RuntimeError, match="cannot override"):
+        callbacks.CallbackReplayStore(tmp_path / "downgraded.db")
+
+
+def test_legacy_replay_authority_still_honours_an_explicit_db_path(monkeypatch, tmp_path):
+    """The SQLite test affordance survives: only the postgres selector refuses it."""
+    callbacks = broker._get_callbacks()
+    assert callbacks is not None
+    monkeypatch.setenv("LEAF_CALLBACK_REPLAY_STORE", "legacy")
+    db_path = tmp_path / "explicit.db"
+    store = callbacks.CallbackReplayStore(db_path)
+    assert store.db_path == db_path
+    assert store.consume("job-legacy", "nonce-legacy", 2000.0, 1000.0) is True
+    assert store.consume("job-legacy", "nonce-legacy", 2000.0, 1000.0) is False
+
+
 def test_callback_completes_the_durable_job_and_poll_duplicate_is_a_noop(monkeypatch, tmp_path):
     import jobs
 
