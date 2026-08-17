@@ -7,9 +7,19 @@ that envelope. ``LEAF_CALLBACK_PRIMARY=1`` is therefore reserved and fails
 closed until an APS-to-Leaf callback translation adapter exists. Polling stays
 the only active completion mode.
 
-The signature covers the timestamp, nonce, and body. Consumed nonces live in
-the durable jobs SQLite database for the timestamp window, so a process restart
-or another broker worker cannot accept a captured callback again.
+The signature covers the timestamp, nonce, and body. Consumed nonces live for
+the timestamp window in the store ``LEAF_CALLBACK_REPLAY_STORE`` names.
+
+REPLAY SCOPE, STATED HONESTLY. Only the ``postgres`` authority spans broker
+tasks. Under ``legacy`` the nonces land in the SQLite file ``JOBS_DB`` points
+at, and the deployed broker task definition does not set ``JOBS_DB`` — so the
+legacy table is the broker container's own ``server/jobs.db``, which survives a
+worker restart inside one task but is invisible to every other task. Flip the
+selector to ``postgres`` before provisioning ``LEAF_CALLBACK_SECRET``: while
+that secret is unset ``consume_callback`` refuses every request as
+``not_configured``, so no nonce is ever consumed and the gap is latent, but the
+moment a signed envelope can be accepted the legacy authority does not protect
+a multi-task broker.
 """
 from __future__ import annotations
 
@@ -54,15 +64,28 @@ def validate_replay_store_startup() -> None:
 
 
 class CallbackReplayStore:
-    """Durably consume callback nonces in the same SQLite database as jobs."""
+    """Durably consume callback nonces in the store the selector names.
+
+    ``LEAF_CALLBACK_REPLAY_STORE`` is the ONLY authority over which backend is
+    used, and it fails closed like every sibling selector. An explicit
+    ``db_path`` is a SQLite-only test affordance: passing one while the
+    selector says ``postgres`` is a misconfiguration, not a fallback, so it
+    raises instead of silently consuming nonces in a per-process SQLite file
+    that the Postgres authority cannot see.
+    """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
+        mode = callback_replay_store_mode()
         self._postgres = None
-        if db_path is None and callback_replay_store_mode() == "postgres":
+        if mode == "postgres":
+            if db_path is not None:
+                raise RuntimeError(
+                    "LEAF_CALLBACK_REPLAY_STORE=postgres selects the Postgres "
+                    "replay authority; an explicit db_path cannot override it")
             from job_pg_store import PostgresCallbackReplayStore
             self._postgres = PostgresCallbackReplayStore()
             self._postgres.ensure_ready()
+        self.db_path = db_path or Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
 
     def consume(self, job_id: str, nonce: str, expires_at: float, now: float) -> bool:
         if self._postgres is not None:
