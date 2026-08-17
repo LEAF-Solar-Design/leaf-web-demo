@@ -1,6 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { subscribeUnauthorized } from '../../api.js'
-import { logout } from '../../auth.js'
+import { logout, subscribeTokenStored } from '../../auth.js'
 import { createSessionController } from './createSessionController.js'
 
 export default function useSessionController({ storage, endSession = logout } = {}) {
@@ -9,6 +9,7 @@ export default function useSessionController({ storage, endSession = logout } = 
     controllerRef.current = createSessionController({
       storage: storage || globalThis.localStorage,
       subscribeUnauthorized,
+      subscribeTokenStored,
       endSession,
     })
   }
