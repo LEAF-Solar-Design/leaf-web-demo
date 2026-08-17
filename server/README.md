@@ -149,3 +149,5 @@ filtering, envelope schema, and legacy-shape regression.
 - The app process must NEVER import `da.*` — all APS-capable execution goes
   through `broker_client` → the broker HTTP boundary (enforced by tests).
 - No live APS calls at `APS_LIVE=0`; live runs are a broker-only concern.
+
+<!-- zstd pull-time measurement probe 2026-08-17; safe to delete -->
