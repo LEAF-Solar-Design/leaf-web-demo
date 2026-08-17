@@ -1,0 +1,437 @@
+name: Prewarm staging cutover
+
+# ---------------------------------------------------------------------------
+# W2 of the tf repo's docs/staging-prewarmed-cutover-design.md: the relay that
+# STAGES an eligible PR's speculative candidate onto the idle blue/green colour
+# before the merge exists, so the merge deploy can skip the ~130s warm.
+#
+# It owns no traffic authority and holds no AWS credential. All it does is
+# dispatch `deploy-leaf-platform-staging.yml` in the terraform repo with
+# `deploy_mode=prewarm`, which warms the idle colour at listener weight 0 and
+# STOPS before the flip. Every gate that decides whether a staged task ever
+# takes traffic lives in that workflow and is unchanged.
+#
+# ELIGIBILITY (design §3, operator decision D-P1: approval-gated newest-wins).
+# A PR is stage-eligible when it is a same-repo, non-fork, non-draft PR onto
+# main AND either
+#   * some reviewer's LATEST review is APPROVED and nobody's latest review is
+#     CHANGES_REQUESTED, or
+#   * it carries the `stage-cutover` label (the cheap explicit override).
+# The approval gate is not politeness: §5 accepts unmerged code running with
+# the real staging task role for up to the TTL precisely BECAUSE only reviewed
+# code is ever staged. Plain newest-wins was rejected as the default.
+#
+# MIGRATION SURFACE (design §4). The deploy workflow hard-skips every
+# migration leg under prewarm, so a migration-carrying candidate could at worst
+# fail its own boot gate — but proving it never gets staged is cheaper and
+# clearer, and this relay is the only place with git. Unlike the docs-noop
+# filter, which fails OPEN to dispatching, this check fails CLOSED: an
+# unreadable diff refuses to stage, because the dangerous direction here is
+# staging something we could not read.
+#
+# WHAT WE DISPATCH ONTO. The image tag is `spec-<tree40>-<preview12>`, both
+# halves taken from the MERGE PREVIEW commit (build-platform-images.yml derives
+# it exactly this way), and the deploy workflow admits that tag shape only
+# under deploy_mode=prewarm. The trigger evidence is the
+# `spec-v3-supply-set-<tree>` artifact, which the speculative build mints ONLY
+# after all five image digests verify and bind to that producer run — not the
+# build's conclusion, which can be green for a run that pushed nothing.
+#
+# RUN RESOLUTION (design §2.3). `gh workflow run` does not return the run it
+# creates, so a dispatch is bound to a run id by taking the ids ABOVE a
+# pre-dispatch mark and requiring EXACTLY ONE whose run-name matches this
+# service and tag. Zero matches keeps polling; two or more is reported
+# UNRESOLVED rather than guessed, because binding the wrong run is how a relay
+# reports someone else's success as its own.
+#
+# ORDERING: the tf TTL reaper must exist before this relay does. Relay traffic
+# multiplies staged tasks, and §5's exposure is only bounded by that cap.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [synchronize, labeled, closed]
+    branches: [main]
+
+permissions:
+  contents: read
+  # Listing this repository's speculative supply-set artifacts.
+  actions: read
+  pull-requests: read
+
+concurrency:
+  # Newest-wins per PR for staging (a superseded stage is pointless work), but
+  # a close/descale must never be cancelled by anything.
+  group: prewarm-staging-cutover-${{ github.event.pull_request.number }}-${{ github.event.action == 'closed' && 'descale' || 'stage' }}
+  cancel-in-progress: ${{ github.event.action != 'closed' }}
+
+env:
+  INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
+  DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
+  REAPER_WORKFLOW: reap-leaf-platform-staging-prewarm-stages.yml
+  STAGE_LABEL: stage-cutover
+  # Paths whose change makes a candidate unstageable (design §4).
+  MIGRATION_SURFACE: "platform/migrations/ platform/db.py"
+  # Bounded wait for the speculative supply set: 20 polls x 30s.
+  SUPPLY_SET_POLLS: "20"
+  SUPPLY_SET_INTERVAL: "30"
+
+jobs:
+  stage:
+    name: Stage the idle colour with this PR's speculative candidate
+    if: >-
+      github.event.action != 'closed'
+      && github.event.pull_request.draft == false
+      && github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.repo.fork == false
+      && (github.event_name != 'pull_request_review' || github.event.review.state == 'approved')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Decide stage eligibility
+        id: eligible
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || {
+            echo "::error::PR number is invalid."
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > pull-request.json
+          # Name what we actually read. A tooling failure here reads as an
+          # empty state and still refuses to stage, which is the safe
+          # direction, but it must not be reported as "the PR closed".
+          PR_STATE=$(jq -r '.state // ""' pull-request.json || true)
+          if [ "$PR_STATE" != "open" ]; then
+            echo "::notice::PR #$PR_NUMBER state reads '"'"'$PR_STATE'"'"' (not open); nothing to stage."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Latest review PER REVIEWER, ignoring COMMENTED and DISMISSED, which
+          # carry no verdict. Eligible needs at least one standing APPROVED and
+          # no standing CHANGES_REQUESTED — an approval that a later
+          # changes-requested overrode must not still buy a stage.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" \
+            | jq -s 'add // []' > reviews.json
+          VERDICTS=$(jq -c '
+            [.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
+            | group_by(.user.login)
+            | map(sort_by(.submitted_at) | last | .state)' reviews.json)
+          APPROVED=$(printf '%s' "$VERDICTS" | jq 'any(. == "APPROVED")')
+          BLOCKED=$(printf '%s' "$VERDICTS" | jq 'any(. == "CHANGES_REQUESTED")')
+          # `label` is a jq KEYWORD (label $out | ...), so `--arg label` makes
+          # `$label` a syntax error on jq 1.6 -- which is what the CI runner
+          # image carries, while a 1.7 workstation accepts it. Name the binding
+          # something that is not reserved, and keep the iteration free of a
+          # suffix after `?` for the same portability reason.
+          LABELLED=$(jq --arg wanted "$STAGE_LABEL" '[.labels[]? | .name] | any(. == $wanted)' pull-request.json)
+          ELIGIBLE=false
+          REASON="no standing approval and no $STAGE_LABEL label"
+          if [ "$BLOCKED" = "true" ]; then
+            REASON="a reviewer's standing verdict is CHANGES_REQUESTED"
+          elif [ "$APPROVED" = "true" ]; then
+            ELIGIBLE=true; REASON="standing approval"
+          elif [ "$LABELLED" = "true" ]; then
+            ELIGIBLE=true; REASON="$STAGE_LABEL label"
+          fi
+          echo "eligible=$ELIGIBLE" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "PR #$PR_NUMBER stage-eligible=$ELIGIBLE ($REASON)."
+
+      # The preview checkout feeds the migration-surface decision and the tag.
+      # It is absorbed so a conflicted or still-computing preview cannot redden
+      # the PR; the next step then refuses to stage (fail closed).
+      - uses: actions/checkout@v4
+        if: steps.eligible.outputs.eligible == 'true'
+        continue-on-error: true
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Refuse a candidate that touches the migration surface
+        id: candidate
+        if: steps.eligible.outputs.eligible == 'true'
+        run: |
+          set -euo pipefail
+          echo "stageable=false" >> "$GITHUB_OUTPUT"
+          # FAIL CLOSED, the opposite posture to the docs-noop filter: an
+          # unreadable preview or diff means we do not know what we would be
+          # staging, and the safe answer is not to stage it.
+          if ! git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1; then
+            echo "::notice::No merge preview to read (conflicted or still computing); not staging."
+            exit 0
+          fi
+          if ! FILES=$(git diff --no-renames --name-only 'HEAD^1' HEAD 2>/dev/null); then
+            echo "::notice::Could not read the merge delta; not staging."
+            exit 0
+          fi
+          TOUCHED=""
+          for PREFIX in $MIGRATION_SURFACE; do
+            MATCHES=$(printf '%s\n' "$FILES" | grep -F -- "$PREFIX" || true)
+            [ -n "$MATCHES" ] && TOUCHED="${TOUCHED:+$TOUCHED }$MATCHES"
+          done
+          if [ -n "$TOUCHED" ]; then
+            echo "::notice::Candidate changes the migration surface ($TOUCHED); refusing to stage it. The merge deploy runs migrations the normal way."
+            {
+              echo "## Prewarm relay: migration-surface refusal"
+              echo "This PR's merge preview changes: $TOUCHED"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "migration_refusal=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PREVIEW_SHA=$(git rev-parse HEAD)
+          TREE=$(git rev-parse 'HEAD^{tree}')
+          [[ "$PREVIEW_SHA" =~ ^[0-9a-f]{40}$ && "$TREE" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Preview identity is not two exact object names."
+            exit 1
+          }
+          IMAGE_TAG="spec-$TREE-$(printf '%s' "$PREVIEW_SHA" | cut -c1-12)"
+          {
+            echo "stageable=true"
+            echo "migration_refusal=false"
+            echo "preview_sha=$PREVIEW_SHA"
+            echo "tree=$TREE"
+            echo "image_tag=$IMAGE_TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Candidate $IMAGE_TAG is stageable."
+
+      - name: Wait for the speculative supply set to exist
+        id: supply
+        if: steps.candidate.outputs.stageable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TREE: ${{ steps.candidate.outputs.tree }}
+        run: |
+          set -euo pipefail
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          # The build's CONCLUSION is not the evidence: a green run can have
+          # pushed nothing. The artifact is minted only after all five digests
+          # verify and bind to the producer run, so its existence is the proof
+          # that a complete, adoptable image set exists for this exact tree.
+          NAME="spec-v3-supply-set-$TREE"
+          ATTEMPT=0
+          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=100" > artifacts.json 2>/dev/null; then
+              if jq -e '[.artifacts[]? | select(.expired == false)] | length > 0' artifacts.json >/dev/null; then
+                echo "present=true" >> "$GITHUB_OUTPUT"
+                echo "Speculative supply set $NAME is present after $ATTEMPT poll(s)."
+                exit 0
+              fi
+            fi
+            sleep "$SUPPLY_SET_INTERVAL"
+          done
+          echo "::notice::No unexpired $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
+
+      - name: Dispatch the prewarm for each coloured service
+        id: dispatch
+        if: steps.supply.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          IMAGE_TAG: ${{ steps.candidate.outputs.image_tag }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo '[]' > dispatched.json
+
+          latest_run_id() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId \
+              | jq -r '[.[].databaseId] | max // 0'
+          }
+
+          # Ids ABOVE the mark whose run-name is EXACTLY this service and tag.
+          # Exactly one is an identity; two is an ambiguity we refuse to
+          # resolve rather than guess (design §2.3).
+          resolve_run() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId,displayTitle \
+              | jq -r --argjson mark "$1" --arg want "$2" \
+                  '[.[] | select(.databaseId > $mark and .displayTitle == $want)]
+                   | if length == 1 then .[0].databaseId else empty end'
+          }
+
+          for SERVICE in web app; do
+            WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+            MARK=$(latest_run_id)
+            # Soft-fail per service: staging is an optimization, and a refused
+            # or failed dispatch must never redden a PR. The merge deploy takes
+            # the measured fallback warm.
+            if ! DISPATCH_OUTPUT=$(gh workflow run "$DEPLOY_WORKFLOW" \
+                --repo "$INFRA_REPO" \
+                --ref main \
+                -f "service=$SERVICE" \
+                -f "expected_task_definition=auto-live" \
+                -f "image_tag=$IMAGE_TAG" \
+                -f "deploy_strategy=bluegreen" \
+                -f "deploy_mode=prewarm" 2>&1); then
+              printf '%s' "$DISPATCH_OUTPUT"
+              echo "::warning::Prewarm dispatch for $SERVICE failed; the merge deploy will warm normally."
+              jq --arg service "$SERVICE" '. + [{service: $service, run_id: null, disposition: "dispatch-failed"}]' \
+                dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
+              continue
+            fi
+            printf '%s' "$DISPATCH_OUTPUT"
+            # PREFER THE ID GITHUB GIVES US. gh >= 2.88 prints the created run
+            # URL "if available", and that is the run's own identity rather
+            # than an inference from a listing. It is VERIFIED before it is
+            # trusted -- the id must belong to this workflow path and carry the
+            # run-name we asked for -- so a mangled parse, a redirect, or an
+            # older gh that prints something else can never bind us to a
+            # stranger's run. The mark scan below remains the fallback for
+            # every gh that prints nothing.
+            RUN_ID=$(printf '%s' "$DISPATCH_OUTPUT" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)
+            if [ -n "$RUN_ID" ]; then
+              if gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" \
+                  --jq 'select(.path == (".github/workflows/" + env.DEPLOY_WORKFLOW)) | .display_title' 2>/dev/null \
+                  | grep -qxF "$WANT"; then
+                echo "Dispatch reported run $RUN_ID and it verified as ours."
+              else
+                echo "::warning::Reported run $RUN_ID did not verify as this dispatch; falling back to the mark scan."
+                RUN_ID=""
+              fi
+            fi
+            if [ -z "$RUN_ID" ]; then
+              for _ in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 6
+                RUN_ID=$(resolve_run "$MARK" "$WANT" || true)
+                [ -n "$RUN_ID" ] && break
+              done
+            fi
+            if [ -n "$RUN_ID" ]; then
+              echo "Prewarm for $SERVICE is run $RUN_ID."
+              jq --arg service "$SERVICE" --argjson run_id "$RUN_ID" \
+                '. + [{service: $service, run_id: $run_id, disposition: "dispatched"}]' \
+                dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
+            else
+              echo "::warning::Dispatched $SERVICE but could not bind exactly one run id; not claiming one."
+              jq --arg service "$SERVICE" '. + [{service: $service, run_id: null, disposition: "unresolved"}]' \
+                dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
+            fi
+          done
+          jq . dispatched.json
+
+      - name: Emit the relay receipt
+        id: receipt
+        if: always() && steps.eligible.outputs.eligible == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ELIGIBILITY: ${{ steps.eligible.outputs.reason }}
+          IMAGE_TAG: ${{ steps.candidate.outputs.image_tag }}
+          PREVIEW_SHA: ${{ steps.candidate.outputs.preview_sha }}
+          TREE: ${{ steps.candidate.outputs.tree }}
+          MIGRATION_REFUSAL: ${{ steps.candidate.outputs.migration_refusal }}
+          SUPPLY_PRESENT: ${{ steps.supply.outputs.present }}
+        run: |
+          set -euo pipefail
+          [ -f dispatched.json ] || echo '[]' > dispatched.json
+          jq -n \
+            --arg schema "leaf.staging-prewarm-relay.v1" \
+            --argjson pr "$PR_NUMBER" \
+            --arg eligibility "$ELIGIBILITY" \
+            --arg image_tag "${IMAGE_TAG:-}" \
+            --arg preview_sha "${PREVIEW_SHA:-}" \
+            --arg tree "${TREE:-}" \
+            --arg migration_refusal "${MIGRATION_REFUSAL:-false}" \
+            --arg supply_set_present "${SUPPLY_PRESENT:-false}" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --slurpfile dispatched dispatched.json \
+            '{schema: $schema, pr: $pr, eligibility: $eligibility,
+              image_tag: $image_tag, preview_sha: $preview_sha, tree: $tree,
+              migration_refusal: ($migration_refusal == "true"),
+              supply_set_present: ($supply_set_present == "true"),
+              relay_run_id: $run_id, dispatched: $dispatched[0]}' > prewarm-relay-receipt.json
+          jq . prewarm-relay-receipt.json
+
+      - name: Upload the relay receipt
+        if: always() && steps.receipt.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          # STABLE name, deliberately without the run id: the descale arm looks
+          # this up by exact name months later, and a name it has to pattern
+          # match is a name it can miss behind a busy repo's artifact page.
+          # Repeat uploads across runs are separate artifacts sharing the name;
+          # the descale takes the newest unexpired one.
+          name: prewarm-relay-receipt-pr-${{ github.event.pull_request.number }}
+          path: prewarm-relay-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  descale:
+    name: Descale the stage a closed PR left behind
+    # Only an UNMERGED close needs this. A merged PR's stage is consumed by the
+    # merge deploy (adopted on a document match, overwritten otherwise), so
+    # descaling it would remove capacity the deploy is about to use.
+    if: >-
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == false
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Find this PR's last relayed candidate
+        id: staged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "witness=" >> "$GITHUB_OUTPUT"
+          # The relay receipt is the only record of WHICH candidate this PR
+          # staged. No receipt means this PR never staged anything, or its
+          # receipt aged out — either way the TTL reaper is the backstop and
+          # there is nothing precise to ask for here.
+          NAME="prewarm-relay-receipt-pr-$PR_NUMBER"
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=100" > artifacts.json 2>/dev/null; then
+            echo "::warning::Could not list artifacts; leaving the stage to the TTL reaper."
+            exit 0
+          fi
+          NEWEST=$(jq -r '
+            [.artifacts[]? | select(.expired == false)]
+            | sort_by(.created_at) | last | .id // empty' artifacts.json)
+          if [ -z "$NEWEST" ]; then
+            echo "::notice::No unexpired relay receipt for PR #$PR_NUMBER; nothing precise to descale."
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$NEWEST/zip" > receipt.zip 2>/dev/null || {
+            echo "::warning::Could not download the relay receipt; leaving the stage to the TTL reaper."
+            exit 0
+          }
+          unzip -o -q receipt.zip -d receipt || {
+            echo "::warning::Relay receipt archive is unreadable; leaving the stage to the TTL reaper."
+            exit 0
+          }
+          WITNESS=$(jq -r '.image_tag // empty' receipt/prewarm-relay-receipt.json)
+          if [[ ! "$WITNESS" =~ ^spec-[0-9a-f]{40}-[0-9a-f]{12}$ ]]; then
+            echo "::notice::Relay receipt carries no usable spec witness; leaving the stage to the TTL reaper."
+            exit 0
+          fi
+          echo "witness=$WITNESS" >> "$GITHUB_OUTPUT"
+          echo "PR #$PR_NUMBER last staged $WITNESS."
+
+      - name: Ask the reaper to remove exactly that stage
+        if: steps.staged.outputs.witness != ''
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          WITNESS: ${{ steps.staged.outputs.witness }}
+        run: |
+          set -euo pipefail
+          # The reaper owns every safety property (weight-0 refusal,
+          # TD-equality ownership, readback); witness_tag only tells it WHICH
+          # stage to consider without waiting out the TTL. A failed dispatch is
+          # a warning, never a failure: the TTL sweep reaps it within the hour.
+          if gh workflow run "$REAPER_WORKFLOW" \
+              --repo "$INFRA_REPO" \
+              --ref main \
+              -f "mode=reap" \
+              -f "witness_tag=$WITNESS"; then
+            echo "Asked the reaper to descale $WITNESS."
+          else
+            echo "::warning::Targeted descale dispatch failed; the TTL sweep remains the backstop."
+          fi

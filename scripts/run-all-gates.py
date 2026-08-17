@@ -1065,6 +1065,22 @@ def build_suites() -> List[Suite]:
         # prove-the-checker-can-fail case.
         Suite("vendor-pin-verify", "scripts test_vendor_pin.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
+        # Prewarm staging relay (tf design W2). 20 = 13 EXECUTED cases (the
+        # eligibility matrix run against the real step body with a fake gh,
+        # plus the migration-surface refusal and its fail-closed preview case
+        # run against real git repos) + 7 read assertions. The executed half
+        # is the point: this relay stages UNMERGED code onto a task holding
+        # the real staging role, so "an approval a later CHANGES_REQUESTED
+        # overrode does not still buy a stage" has to be a run, not a grep.
+        Suite("prewarm-staging-cutover-workflow",
+              "scripts test_prewarm_staging_cutover_workflow.py", "pytest",
+              SCRIPTS_DIR,
+              # 20 -> 22: CI (jq 1.6) rejected `--arg label`, a jq KEYWORD, that
+              # a jq 1.8 workstation accepts. Two static guards now scan for the
+              # class -- a binding that shadows a jq keyword, and a field
+              # suffixed onto an optional iterator -- rather than for that one
+              # instance.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 22),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
