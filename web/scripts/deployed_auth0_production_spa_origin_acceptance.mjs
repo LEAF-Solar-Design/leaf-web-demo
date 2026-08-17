@@ -13,6 +13,18 @@ export const TARGET_ORIGIN = 'https://platform.leafdesign.ai'
 export const ISSUER = 'https://leafautomation.us.auth0.com/'
 export const AUDIENCE = 'https://api.leafdesign.ai'
 export const CLIENT_ID = 'zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O'
+// Universal Login serves its own SDK bundle from Auth0's first-party CDN, so a real
+// interactive run observes it (live-verified 2026-08-17 19:47Z: performance entries on
+// the ULP are exactly cdn.auth0.com + the issuer). Enumerated, never inferred, and it
+// MUST stay identical to ORIGIN_SHAPES in the server-side verifier
+// (scripts/verify_leaf_platform_auth0_spa_origin_receipt.py, leaf-automation-aws-terraform
+// #831). A collector that disagrees with the verifier is only discoverable by spending an
+// interactive operator login round, which is how staging lost four prepare windows.
+export const AUTH0_CDN_ORIGIN = 'https://cdn.auth0.com'
+export const ORIGIN_SHAPES = [
+  [TARGET_ORIGIN, new URL(ISSUER).origin].sort(),
+  [TARGET_ORIGIN, new URL(ISSUER).origin, AUTH0_CDN_ORIGIN].sort(),
+]
 export const COLLECTOR_REPOSITORY = 'LEAF-Solar-Design/leaf-web-demo'
 export const COLLECTOR_PATH = 'web/scripts/deployed_auth0_production_spa_origin_acceptance.mjs'
 
@@ -195,8 +207,10 @@ export function validateInteractiveProof(proof, config) {
     fail('re-login reused the first access token')
   }
   if (proof.route_interceptions !== 0) fail('browser request interception is forbidden')
-  const expectedOrigins = [TARGET_ORIGIN, new URL(ISSUER).origin].sort()
-  if (!Array.isArray(proof.observed_origins) || JSON.stringify([...proof.observed_origins].sort()) !== JSON.stringify(expectedOrigins)) {
+  // Closed world: membership in an enumerated set, never a subset test. Dropping the
+  // target, dropping the issuer, or adding a fourth origin all still fail closed.
+  const observedOrigins = Array.isArray(proof.observed_origins) ? [...proof.observed_origins].sort() : null
+  if (!observedOrigins || !ORIGIN_SHAPES.some((shape) => JSON.stringify(shape) === JSON.stringify(observedOrigins))) {
     fail('browser contacted an unexpected origin')
   }
   if (proof.operator_interactive !== true) fail('operator interaction was not recorded')

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   AUDIENCE,
+  AUTH0_CDN_ORIGIN,
   CLIENT_ID,
   ISSUER,
   SCHEMA,
@@ -123,6 +124,28 @@ for (const mutate of [
 ]) {
   const value = proof()
   mutate(value)
+  assert.throws(() => validateInteractiveProof(value, config))
+}
+
+// Universal Login serves its SDK from cdn.auth0.com, so a real run observes three
+// origins. Enumerated, not widened: dropping the target, dropping the issuer, adding a
+// fourth origin, or repeating one must all still fail closed. Must match the verifier's
+// ORIGIN_SHAPES, because a disagreement is only discoverable by spending an operator login.
+const threeOriginProof = proof()
+threeOriginProof.observed_origins = [TARGET_ORIGIN, new URL(ISSUER).origin, AUTH0_CDN_ORIGIN].sort()
+assert.doesNotThrow(() => validateInteractiveProof(threeOriginProof, config))
+
+for (const badOrigins of [
+  [TARGET_ORIGIN, AUTH0_CDN_ORIGIN].sort(),
+  [new URL(ISSUER).origin, AUTH0_CDN_ORIGIN].sort(),
+  [TARGET_ORIGIN, new URL(ISSUER).origin, AUTH0_CDN_ORIGIN, 'https://evil.example'].sort(),
+  [AUTH0_CDN_ORIGIN],
+  [],
+  [TARGET_ORIGIN, TARGET_ORIGIN, new URL(ISSUER).origin].sort(),
+  'https://cdn.auth0.com',
+]) {
+  const value = proof()
+  value.observed_origins = badOrigins
   assert.throws(() => validateInteractiveProof(value, config))
 }
 
