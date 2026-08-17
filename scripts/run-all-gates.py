@@ -1688,48 +1688,67 @@ def describe_selection(patterns: List[str]) -> str:
 # against a different tree, or run with a hand-typed --only cannot verify.
 # --------------------------------------------------------------------------- #
 
-# Measured wall seconds per suite (CI ubuntu-latest, runs 30922601347 /
-# 30924090296, 2026-08-04) — scheduling weights for the partition, nothing
-# more. Only suites >= ~3s are listed; the long tail defaults. A stale or
-# missing weight only unbalances shard makespans, never correctness, but keep
-# the heavy entries roughly honest or one shard quietly becomes the critical
-# path. gate-runner-selftest pins every key here to a registered suite id so a
+# Measured wall seconds per suite -- scheduling weights for the partition,
+# nothing more. Only suites >= ~3s are listed; the long tail defaults.
+#
+# REFRESHED 2026-08-17 from the shard-result JSONs of runs 32051458666 and
+# 32047410329 (CodeBuild, post-#649), taking the max of the two. The previous
+# table was measured on ubuntu-latest on 2026-08-04/08-06 and had drifted far
+# enough to defeat the packer: `web-async-author-stage` (45.8s) and
+# `build-platform-images-workflow` (43.8s) were absent entirely and so
+# defaulted to 2.0, while `harness-vitest` (36 -> 10.4) and
+# `web-version-restore-proof` (100 -> 61.1) were weighted roughly triple and
+# double their real cost. The packer therefore believed every shard carried
+# 88-100s while real loads ran 58-122s, and gate-shard-1 was the critical path
+# in 5 of the 5 runs sampled -- exactly the failure this comment has always
+# warned about. Repacking against real durations: makespan 122s -> 84s on run
+# A and 121s -> 83s on run B, a 38-39s (31%) cut against a 77s ideal.
+#
+# The two runs agree to a median of 0.00s and a 90th percentile of 0.20s per
+# suite, so these are near-deterministic, not noisy samples. Re-measure the
+# same way after any runner or cache change: a stale weight costs makespan,
+# never correctness, but one shard quietly becomes the critical path.
+# gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
-    "web-version-restore-proof": 100.0,
-    "server-checkout-crossproc": 60.0,
-    "server-backbone": 50.0,
-    "harness-vitest": 36.0,
-    "server-sessions-router": 29.0,
-    "web-author-quota-gate": 20.0,
-    "server-turn-runner": 16.0,
-    "server-write-loop": 12.0,
-    "server-sessions-e2e": 12.0,
-    # CI ubuntu-latest, runs 31058651157 / 31058750214 / 31059319371 /
-    # 31060256894 / 31060963722, 2026-08-06 — five shard-7 samples spanning
-    # 9.7-10.5s; the max is taken. Replaces the local (Windows) 15.0 measured
-    # at registration (PR #467): booting warm-pool servers costs a third less
-    # on a CI runner than it does locally. Still far above the default 2.0.
-    "executor": 10.5,
+    "web-version-restore-proof": 61.1,
+    "server-checkout-crossproc": 60.3,
+    "server-backbone": 45.8,
+    "web-async-author-stage": 45.8,
+    "build-platform-images-workflow": 43.8,
+    "server-sessions-router": 27.9,
+    "executor": 20.9,
+    "server-turn-runner": 15.8,
+    "server-task-local-state-authority": 14.0,
+    "web-author-quota-gate": 14.0,
+    "server-sessions-e2e": 11.2,
+    "harness-vitest": 10.4,
+    "server-write-loop": 8.9,
     "server-sessions-routes": 7.0,
-    "server-wave5": 7.0,
-    "server-hardening-3b": 6.6,
-    "harness-tsc-noemit": 5.8,
-    "server-wave3": 5.2,
-    "server-platform-customize": 4.7,
-    "server-guest-uploads": 4.6,
-    "harness-tsc-build": 4.6,
-    "server-microvm": 4.5,
-    "server-dynamic-loader": 4.3,
-    "web-demo-gate": 4.1,
-    "web-build": 3.8,
-    "server-wave2": 3.7,
-    "server-guest-purge": 3.7,
-    "server-customization-adversarial": 3.4,
-    "server-ui-wave": 3.3,
-    "server-wave4": 3.2,
-    "server-agent-e2e": 3.2,
-    "server-jobs-connection-ownership": 3.1,
+    "server-wave5": 6.9,
+    "server-wave3": 5.9,
+    "server-hardening-3b": 5.8,
+    "web-vitest": 5.4,
+    "server-mcp-gateway-authority": 5.1,
+    "server-platform-customize": 4.9,
+    "server-wave4": 4.9,
+    "harness-tsc-noemit": 4.8,
+    "server-microvm": 4.7,
+    "server-agent-e2e": 4.0,
+    "server-jobs-connection-ownership": 4.0,
+    "server-dynamic-loader": 3.9,
+    "server-guest-purge": 3.9,
+    "web-demo-gate": 3.9,
+    "server-guest-uploads": 3.8,
+    "harness-tsc-build": 3.7,
+    "server-ui-wave": 3.7,
+    "server-wave2": 3.6,
+    "server-dependency-health": 3.2,
+    "server-dwg-local-extract": 3.1,
+    "server-submit-latency-metric": 3.1,
+    "web-build": 3.1,
+    "server-customization-adversarial": 3.0,
+    "server-job-lanes": 3.0,
 }
 _DEFAULT_EST_S = 2.0
 
