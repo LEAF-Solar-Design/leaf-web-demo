@@ -273,8 +273,8 @@ jobs:
       # SINGLE-WRITER DEPENDENCY CACHES (2026-08-17)
       #
       # All three caches below are `restore` in every shard and `save` in
-      # exactly ONE (shard 7 — see the writer steps at the end of this job).
-      # The built-in `cache: pip` /
+      # exactly one shard each, and in three different ones (see the writer
+      # steps at the end of this job). The built-in `cache: pip` /
       # `cache: npm` options of setup-python and setup-node are deliberately
       # NOT used, because they have no restore-only mode: they always register
       # a post-job save, and 8 concurrent shards saving one key is 8 archives
@@ -486,18 +486,26 @@ jobs:
           overwrite: true
 
       # ---------------------------------------------------------------- #
-      # THE SINGLE WRITER. Only shard 7 saves, and only what it missed.
+      # ONE WRITER PER CACHE, and only for what that shard missed.
       #
-      # Why shard 7 and not shard 0: partition_suites() weights the shards
-      # 100/84/84/83.7/83.6/85.5/83.5/83.5, so 0 is the heaviest slice and 7
-      # is (jointly) the lightest, and both CodeBuild runs bear that out —
-      # shard 7 finished first (176s job wall in run 32030441705) against a
-      # critical path of 238s on shard 1. The ~62s of archiving these three
-      # steps cost on a miss (32s + 26s + 5s, measured) already sat inside
-      # that 176s, because shard 7 is the shard that happened to win the
-      # reservation both runs. So the writer's cost is absorbed by existing
-      # slack rather than added to the run wall — that is measured, not
-      # modelled.
+      # Each cache is saved by exactly one shard, and the three are spread
+      # over three DIFFERENT shards rather than piled on one. Piling them on
+      # one was measured and was wrong: in run 32033018651 shard 7 carried
+      # all three (6s pip + 25s npm + 33s playwright = 64s) and that made IT
+      # the critical path at 187s, against shard 1's 176s. Its slack was 58s
+      # and the archiving wanted 64s, so the writer overshot by 11s and the
+      # run wall paid it.
+      #
+      # partition_suites() weights the shards 100/84/84/83.7/83.6/85.5/
+      # 83.5/83.5, so shard 0 is the heaviest slice and 7, 6, 4 are the three
+      # lightest. The biggest archive goes to the lightest shard:
+      #
+      #   playwright (33s) -> shard 7      npm (25s) -> shard 6
+      #   pip         (6s) -> shard 4
+      #
+      # No shard then carries more than 33s, comfortably inside the slack
+      # each has against the critical path, and this cost is paid only on a
+      # miss. On a hit no shard saves anything.
       #
       # Why after the artifact upload: the fan-in's completeness proof needs
       # every shard's result JSON. Cache archiving must never be able to
@@ -513,23 +521,33 @@ jobs:
       # a hit the key already holds these exact bytes, so re-saving would
       # rebuild an archive to store what is already there (actions/cache/save
       # warns "Cache already exists" and the work is thrown away).
+      #
+      # `continue-on-error` on all three, for the same reason the proof
+      # upload above warns instead of failing: this job's verdict gates
+      # merges, and a cache defect must cost the optimization, never the
+      # signal. Nothing downstream reads these entries for correctness — a
+      # miss reinstalls from source — so there is no failure here worth
+      # reddening a gate over.
       # ---------------------------------------------------------------- #
-      - name: Save pip cache (single writer)
-        if: ${{ !cancelled() && matrix.shard == 7 && steps.pip-cache.outputs.cache-hit != 'true' }}
+      - name: Save pip cache (sole writer for this cache)
+        if: ${{ !cancelled() && matrix.shard == 4 && steps.pip-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ${{ steps.cache-dirs.outputs.pip }}
           key: ${{ steps.pip-cache.outputs.cache-primary-key }}
 
-      - name: Save npm cache (single writer)
-        if: ${{ !cancelled() && matrix.shard == 7 && steps.npm-cache.outputs.cache-hit != 'true' }}
+      - name: Save npm cache (sole writer for this cache)
+        if: ${{ !cancelled() && matrix.shard == 6 && steps.npm-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ${{ steps.cache-dirs.outputs.npm }}
           key: ${{ steps.npm-cache.outputs.cache-primary-key }}
 
-      - name: Save Playwright browser cache (single writer)
+      - name: Save Playwright browser cache (sole writer for this cache)
         if: ${{ !cancelled() && matrix.shard == 7 && steps.playwright-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ms-playwright
