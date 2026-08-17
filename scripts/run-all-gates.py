@@ -524,7 +524,11 @@ def build_suites() -> List[Suite]:
         Suite("server-hardening-1f", "server test_hardening_1f.py", "pytest", SERVER,
               _py_pytest("test_hardening_1f.py"), 8),
         Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_2b.py"), 17),
+              # 17 -> 19 on 2026-08-17: the sandbox child's loader path is now
+              # DERIVED from this interpreter (it died rc=127 in ld.so on the
+              # CodeBuild image), so an inherited LD_LIBRARY_PATH being scrubbed
+              # AND the child still booting are each their own named test.
+              _py_pytest("tests/test_hardening_2b.py"), 19),
         # (test_hardening_2c_microvm.py is registered above as "server-microvm";
         # it was listed twice, running the same 14 tests for no added coverage.)
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
@@ -1085,7 +1089,10 @@ def build_suites() -> List[Suite]:
         # network or platform gate, so this floor IS the count in every
         # environment, not a lowest-common-denominator across them.
         Suite("gate-runner-selftest", "scripts test_gate_runner.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 59),
+              # 59 -> 60 on 2026-08-17: the catalog fingerprint now normalizes
+              # each cwd against REPO, so a runner that hands every job its own
+              # checkout root is its own named test.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 60),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1764,19 +1771,47 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
     return [head] + [str(a) for a in argv[1:]]
 
 
+def _fingerprint_cwd(cwd: Path) -> str:
+    """Every catalog cwd is built from REPO (server/, da/, the repo root, the
+    repo PARENT for the platform suites), so what identifies a suite is its
+    position RELATIVE to the repo — the absolute prefix in front of it is a
+    property of the checkout, not of the catalog.
+
+    Hashing that prefix raw bound the fingerprint to one checkout layout, and
+    a per-build checkout root breaks it: CodeBuild-hosted runners check out
+    under `/codebuild/output/src<random>/src/...`, a fresh directory PER JOB,
+    so on run 32018150977 no two of the eight shards agreed with each other or
+    with the fan-in and all eight were refused as "catalog fingerprint
+    mismatch" while every suite in them passed. Same class as the argv[0]
+    problem `_fingerprint_argv` already solves.
+
+    Separators are normalized to "/" so the token does not depend on the OS
+    that computed it, and the result stays fully sensitive: two suites with
+    different cwds still hash differently, and a suite that MOVES between
+    directories still changes the fingerprint."""
+    try:
+        rel = os.path.relpath(str(cwd), str(REPO))
+    except ValueError:
+        # No relative form exists (Windows: a different drive from the repo).
+        # Unreachable for a catalog whose every cwd derives from REPO; keep the
+        # raw path rather than collapsing two distinct roots onto one token.
+        return str(cwd)
+    return rel.replace("\\", "/")
+
+
 def catalog_fingerprint(suites: List[Suite]) -> str:
     """SHA-256 over every field of every suite, so two runs agree on this
     value only when they partitioned the same catalog with the same floors,
     allowlists, and commands.
 
-    cwd paths are hashed RAW, which binds the fingerprint to one checkout
-    layout: an intra-run integrity token compared between the shard jobs and
-    the fan-in of a single CI run (identical layout), or between local runs
-    in one worktree — never across machines. Toolchain paths inside argv are
-    canonicalized (see _fingerprint_argv) because they vary per JOB, not per
-    catalog."""
+    It is an intra-run integrity token: compared between the shard jobs and
+    the fan-in of a single CI run, or between local runs of one worktree. The
+    per-JOB parts of a command are canonicalized out — toolchain LOCATION
+    inside argv (see _fingerprint_argv) and the checkout root in front of each
+    cwd (see _fingerprint_cwd) — so the value tracks the CATALOG and survives
+    a runner that hands every job its own checkout directory."""
     entries = [{
-        "id": s.id, "label": s.label, "kind": s.kind, "cwd": str(s.cwd),
+        "id": s.id, "label": s.label, "kind": s.kind, "cwd": _fingerprint_cwd(s.cwd),
         "argv": _fingerprint_argv(s.argv), "expected": s.expected,
         "allowed_skip_reasons": list(s.allowed_skip_reasons),
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
@@ -1886,12 +1921,15 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     schema-1 tree-bound gate proof whose tree equals `expect_tree` AND whose
     catalog fingerprint equals the one THIS checkout derives. Runs nothing.
 
-    The fingerprint check looks redundant with tree equality (the catalog is
-    a pure function of the tree) but is not: the fingerprint hashes checkout
-    cwd paths raw, so it additionally refuses a proof minted from a
-    differently-rooted checkout — where the equal-tree argument holds but was
-    never load-tested. Refusal is always safe: the caller falls back to
-    running the full gate."""
+    The fingerprint check is not redundant with tree equality even though the
+    catalog is a pure function of the tree: it is what makes that dependence
+    CHECKED rather than assumed, so a proof whose recorded catalog does not
+    match the one this checkout derives is refused instead of trusted on the
+    strength of an equal tree hash. It deliberately does NOT refuse a proof
+    minted from a differently-rooted checkout — cwds are hashed relative to
+    the repo (see _fingerprint_cwd), because runners that give every job its
+    own checkout directory would otherwise refuse every honest proof. Refusal
+    is always safe: the caller falls back to running the full gate."""
     expect = (expect_tree or "").strip().lower()
     if not _HEX40.fullmatch(expect):
         print(f"NOT VERIFIED: --expect-tree must be a 40-hex git tree id, "

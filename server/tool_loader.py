@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 from functools import lru_cache
@@ -181,6 +182,13 @@ def _sandbox_timeout_s() -> float:
 # Env keys the sandbox subprocess MAY inherit. Everything else — every APS/LEAF/AWS/E2B/
 # token/secret/key/credential variable — is dropped, so the broker's credential env can NEVER
 # ride into the tenant tool body. Default-DENY allowlist (not a denylist to be forgotten).
+#
+# LD_LIBRARY_PATH is deliberately NOT here and never will be: an INBOUND value is
+# reachable by whoever set up the broker's environment, and the loader honors it before
+# any Python code runs, so inheriting it would hand the sandbox child a pre-load hook that
+# every guard in `_SANDBOX_RUNNER` is powerless against. The child still needs a loader
+# path when the interpreter is shared-linked; `_sandbox_lib_path()` DERIVES one from this
+# interpreter instead (see below), so the inbound value stays dropped.
 _SANDBOX_ENV_ALLOW = (
     "SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "TEMP", "TMP", "TMPDIR",
     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
@@ -188,11 +196,54 @@ _SANDBOX_ENV_ALLOW = (
 )
 
 
+@lru_cache(maxsize=1)
+def _sandbox_lib_path() -> str:
+    """LD_LIBRARY_PATH for the sandbox child, derived from THIS interpreter — never
+    inherited. Empty string means "set no such variable at all".
+
+    A shared-linked CPython (`libpython3.x.so.1.0` outside the default loader search
+    path — the `aws/codebuild/standard:7.0` image's setup-python build is one) cannot
+    start without that directory on the loader path. The child then dies inside ld.so
+    with rc=127 before executing a single byte of `_SANDBOX_RUNNER`, which the caller
+    can only report as "sandbox produced no output (rc=127)": every tool execution
+    fails closed, on every tenant. Statically linked interpreters (ubuntu-latest,
+    most distro pythons) need nothing, and get nothing.
+
+    Both candidate directories are properties of the running interpreter — the
+    build-time LIBDIR, and the runtime-resolved `sys.base_prefix/lib` that a relocated
+    tarball install actually sits in — and each is admitted only after the interpreter's
+    own shared library is confirmed present in it, so a stale or wrong directory is never
+    added. Both library NAMES are accepted: `LDLIBRARY` is the development symlink
+    (`libpython3.12.so`) and is absent from installs that ship only the runtime
+    `INSTSONAME` (`libpython3.12.so.1.0`) — matching on just one of them would silently
+    derive nothing and leave the child dying in ld.so exactly as before. Cached: the
+    answer cannot change within a process, and the sandbox launch path must not pay a
+    stat for it per tool run.
+    """
+    if os.name != "posix":
+        return ""
+    names = [n for n in (sysconfig.get_config_var("LDLIBRARY"),
+                         sysconfig.get_config_var("INSTSONAME"))
+             if n and ".so" in n]
+    if not names:                   # static interpreter: no shared libpython to find
+        return ""
+    dirs: List[str] = []
+    for candidate in (sysconfig.get_config_var("LIBDIR"),
+                      os.path.join(sys.base_prefix, "lib")):
+        if candidate and candidate not in dirs \
+                and any(os.path.isfile(os.path.join(candidate, n)) for n in names):
+            dirs.append(candidate)
+    return os.pathsep.join(dirs)
+
+
 def _sandbox_env() -> Dict[str, str]:
     env = {k: os.environ[k] for k in _SANDBOX_ENV_ALLOW if k in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = ""
+    lib_path = _sandbox_lib_path()
+    if lib_path:
+        env["LD_LIBRARY_PATH"] = lib_path
     return env
 
 
