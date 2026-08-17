@@ -13,6 +13,7 @@ import PromptBox from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
 import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
+import OperatorEntry from './components/operator/OperatorEntry.jsx'
 import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import OverlayDecisionCard from './components/OverlayDecisionCard.jsx'
@@ -2890,6 +2891,11 @@ export default function App() {
           busy={running || routing}
         />
       )}
+      {/* Lane E operator console entry: renders nothing unless a single
+          probe of GET /api/operator/sessions says the operator surface is
+          mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
+          Tenant deployments never see it and never re-probe. */}
+      <OperatorEntry />
     </div>
   )
 }
