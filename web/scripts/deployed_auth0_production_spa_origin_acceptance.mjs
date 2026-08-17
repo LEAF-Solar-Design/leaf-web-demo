@@ -315,11 +315,45 @@ export async function collectInteractiveProof(config, dependencies = {}) {
     const before = await signedOutStatus(page)
     const firstCycle = await waitForInteractiveLogin(page, authorizationRequests, callbacks, 1, notify)
     const first = await protectedSession(page)
-    await page.getByRole('button', { name: 'Sign out', exact: true }).first().click()
+    // Sign out via the app's own logout mechanics (auth.js:156), driven directly:
+    // clear the local token and navigate the RP-initiated Auth0 /v2/logout with
+    // returnTo the exact origin. The UI drawer path (Trust -> Account details ->
+    // Sign out) is NOT used, and must not be reintroduced: any authed 401 wipes
+    // leaf.jwt and latches the session controller (api.js noteUnauthorized
+    // :94-107), so the drawer is a stochastic race. The /v2/logout request
+    // observer still records the real roundtrip, so every logout assertion in
+    // the proof (round trip, exact return origin, token absent, 401 after) is
+    // produced identically.
+    try {
+      await page.evaluate(({ issuerOrigin, clientId, returnTo }) => {
+        try {
+          window.localStorage.removeItem('leaf.jwt')
+          window.localStorage.removeItem('leaf.inflightAuthor.v1')
+        } catch { /* storage unavailable */ }
+        const target = new URL('/v2/logout', issuerOrigin)
+        target.searchParams.set('client_id', clientId)
+        target.searchParams.set('returnTo', returnTo)
+        window.location.assign(target.toString())
+      }, { issuerOrigin: new URL(ISSUER).origin, clientId: CLIENT_ID, returnTo: TARGET_ORIGIN })
+    } catch (signOutError) {
+      // Never fail blind: record where we were and what was actually clickable.
+      const url = page.url()
+      let controls = []
+      try {
+        controls = await page.evaluate(() => [...document.querySelectorAll('button, [role=button], [role=tab], a')]
+          .map((el) => (el.getAttribute('aria-label') || el.textContent || '').trim())
+          .filter(Boolean).slice(0, 60))
+      } catch { /* page unavailable */ }
+      fail(`interactive sign-out failed at ${url}; visible controls: ${JSON.stringify(controls)}; original: ${signOutError.message}`)
+    }
     await page.waitForURL((url) => url.origin === TARGET_ORIGIN, { timeout: 60_000 })
     await page.waitForFunction(() => !window.localStorage.getItem('leaf.jwt'), null, { timeout: 60_000 })
     const logoutReturnOriginExact = new URL(page.url()).origin === TARGET_ORIGIN
     const logoutTokenAbsent = await page.evaluate(() => !window.localStorage.getItem('leaf.jwt'))
+    // returnTo lands on the bare origin, which carries NO 'Sign in' button, so
+    // cycle 2 has to be driven from the /try surface. Same origin, so
+    // observed_origins is unchanged.
+    await page.goto(`${TARGET_ORIGIN}/try`, { waitUntil: 'networkidle', timeout: 60_000 })
     const afterLogout = await signedOutStatus(page)
     const secondCycle = await waitForInteractiveLogin(page, authorizationRequests, callbacks, 2, notify)
     const second = await protectedSession(page)
