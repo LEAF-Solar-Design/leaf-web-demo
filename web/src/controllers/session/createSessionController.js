@@ -4,11 +4,35 @@ const initialState = Object.freeze({
   sources: [],
   generation: 0,
   session: null,
+  recoveries: 0,
 })
 
-export function createSessionController({ storage, subscribeUnauthorized, endSession } = {}) {
+// A 401 latches `required` and nothing re-runs getSession, which is correct for
+// a real expiry and WRONG for the post-callback window: the SPA's mount burst
+// can beat the token write, so eleven 401s strand a page that holds a valid
+// token behind a signed-out-looking surface until a manual reload (the
+// 2026-08-17 D1a defect #6 ALB timeline: burst 18:49:56.29Z, token 700ms later,
+// /api/session 200 in 0.4s, tabs disabled for the full 120s).
+//
+// Recovery is bounded and edge-triggered, never a poll: only a token that is
+// PRESENT and DIFFERENT from the one the refusal latched on re-opens `checking`,
+// at most MAX_TOKEN_RECOVERIES times for the life of the controller. A wrong
+// token that keeps 401ing therefore costs a fixed, small number of round trips
+// and then stays latched, and an explicit sign-out is never re-opened at all.
+export const MAX_TOKEN_RECOVERIES = 3
+
+export function createSessionController({
+  storage,
+  subscribeUnauthorized,
+  subscribeTokenStored,
+  endSession,
+} = {}) {
   let state = initialState
   let unsubscribeUnauthorized = null
+  let unsubscribeTokenStored = null
+  // The token in play when the latest refusal landed. Null when the refusal
+  // arrived with no token stored at all, which is exactly the race window.
+  let latchedToken = null
   const listeners = new Set()
 
   const publish = (next) => {
@@ -17,12 +41,34 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
     for (const listener of listeners) listener()
   }
 
+  const readToken = () => {
+    try { return storage?.getItem('leaf.jwt') || null } catch { return null }
+  }
+
   const clearToken = () => {
     try { storage?.removeItem('leaf.jwt') } catch { /* storage unavailable */ }
   }
 
-  const requireAuth = (source = 'unknown') => {
-    clearToken()
+  // WHO MAY DELETE THE TOKEN. `tokenInvalidated` says whether this refusal
+  // PROVES the stored token is bad, and only two channels can prove it:
+  // api.js's noteUnauthorized (a 401 whose request carried the currently-stored
+  // token -- it wipes, then notifies, so the subscription below is always
+  // post-wipe) and an explicit sign-out. Every other caller is reporting render
+  // state, not a verdict on the token, and defaults to false.
+  //
+  // The default used to be an unconditional removeItem, which re-opened the
+  // exact hole api.js:86-108 closed on 2026-08-08: a straggler 401 from the
+  // pre-token window resolves AFTER the callback stored a fresh token, the
+  // transport correctly declines to wipe it and stays silent, but the surface's
+  // own `.catch(401 -> requireAuth)` then destroyed the token anyway. One owner
+  // per reason; a refusal that indicts nothing deletes nothing.
+  const requireAuth = (source = 'unknown', { tokenInvalidated = false } = {}) => {
+    if (tokenInvalidated) {
+      // Read BEFORE clearing: this is the token the refusal indicted, and
+      // recovery must never spend an attempt retrying it.
+      latchedToken = readToken()
+      clearToken()
+    }
     const sources = state.sources.includes(source) ? state.sources : [...state.sources, source]
     if (state.status === 'required' && sources === state.sources) return state
     publish({
@@ -32,6 +78,13 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
       sources,
       session: null,
     })
+    // A refusal that indicted nothing, taken while a never-indicted token sits
+    // in storage, IS the straggler case. Spend one bounded recovery so the
+    // surface re-checks with that token instead of dying holding it. It
+    // converges in a single extra round trip: if the token really is bad, that
+    // retry carries it, so api.js wipes it and comes back through the
+    // invalidating channel, which latches for good.
+    if (!tokenInvalidated) recoverWithStoredToken()
     return state
   }
 
@@ -41,6 +94,26 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
     return state
   }
 
+  // The ONE deliberate exception to `checking()`'s refusal to leave `required`.
+  // Returns true when it re-opened the gate, so the caller re-runs getSession.
+  const recoverWithStoredToken = () => {
+    if (state.status !== 'required') return false
+    if (state.reason === 'signed_out') return false
+    if (state.recoveries >= MAX_TOKEN_RECOVERIES) return false
+    const token = readToken()
+    if (!token || token === latchedToken) return false
+    latchedToken = token
+    publish({
+      ...state,
+      status: 'checking',
+      reason: null,
+      sources: [],
+      session: null,
+      recoveries: state.recoveries + 1,
+    })
+    return true
+  }
+
   const activate = (session) => {
     publish({
       status: 'active',
@@ -48,24 +121,36 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
       sources: [],
       generation: state.generation + 1,
       session: session || null,
+      recoveries: state.recoveries,
     })
     return state
   }
 
   const signOut = async () => {
     try { storage?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
-    requireAuth('signout')
+    // An explicit sign-out is the second channel that may delete the token.
+    requireAuth('signout', { tokenInvalidated: true })
     await endSession?.()
   }
 
   const start = () => {
-    if (unsubscribeUnauthorized || !subscribeUnauthorized) return
-    unsubscribeUnauthorized = subscribeUnauthorized((source) => requireAuth(source || 'api:401'))
+    if (!unsubscribeUnauthorized && subscribeUnauthorized) {
+      // api.js fires this ONLY after it has itself removed the stored token,
+      // so this channel is the transport's verdict: the token is proven bad.
+      unsubscribeUnauthorized = subscribeUnauthorized(
+        (source) => requireAuth(source || 'api:401', { tokenInvalidated: true }),
+      )
+    }
+    if (!unsubscribeTokenStored && subscribeTokenStored) {
+      unsubscribeTokenStored = subscribeTokenStored(() => { recoverWithStoredToken() })
+    }
   }
 
   const destroy = () => {
     unsubscribeUnauthorized?.()
     unsubscribeUnauthorized = null
+    unsubscribeTokenStored?.()
+    unsubscribeTokenStored = null
   }
 
   return {
@@ -76,7 +161,7 @@ export function createSessionController({ storage, subscribeUnauthorized, endSes
     },
     start,
     destroy,
-    actions: { checking, activate, requireAuth, signOut },
+    actions: { checking, activate, requireAuth, signOut, recoverWithStoredToken },
   }
 }
 

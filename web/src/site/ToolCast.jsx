@@ -427,7 +427,19 @@ export default function ToolCast({
       // probe is authority-only: it seats no intake and leaves phase 'empty'.
       let probeLive = true
       getSession(false, 'rooftop_demo')
-        .then(() => { if (probeLive) setWorkspaceBootstrapRequired(false) })
+        .then((data) => {
+          if (!probeLive) return
+          setWorkspaceBootstrapRequired(false)
+          // A 200 here IS the platform session: the probe proves the verified
+          // subject owns a tenant workspace. Without activating, a signed-in
+          // visitor who has not uploaded a drawing yet sat at status 'checking'
+          // forever, so sessionReady stayed false and the Trust/Jobs tabs
+          // rendered permanently disabled against a working API.
+          accountSessionObservedRef.current = true
+          setSessionTier(data?.tier || null)
+          setSessionOrg(data?.org || null)
+          platformSession.actions.activate(data)
+        })
         .catch((cause) => {
           if (!probeLive) return
           if (cause?.status === 401) { requireAuth('/api/session'); return }
@@ -474,7 +486,12 @@ export default function ToolCast({
         setPhase('failed')
       })
     return () => { live = false }
-  }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, requireAuth, seatIntake, sessionRetry])
+    // `platformSession.recoveries` is the bounded re-entry: the controller
+    // re-opens `checking` at most MAX_TOKEN_RECOVERIES times, and only when a
+    // token appears that is not the one the refusal latched on. That bump is
+    // what re-runs getSession after a post-callback 401 — nothing else in this
+    // dep list changes when localStorage gains a token.
+  }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, platformSession.recoveries, requireAuth, seatIntake, sessionRetry])
 
   const showToast = useCallback((next) => {
     toastSeqRef.current += 1

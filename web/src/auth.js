@@ -53,6 +53,27 @@ function trackAuthCompleted(ok) {
 // True only when all three public SPA config values are baked into the build.
 export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
 
+// Token-arrival seam. The `storage` event only fires in OTHER tabs, so a
+// same-tab write (the post-callback code exchange below) is invisible to every
+// listener that already mounted. Publishing it explicitly lets the session
+// controller recover from a 401 that landed in the pre-token window instead of
+// stranding the page in `required` until a manual reload (2026-08-17 defect #6).
+// Edge-triggered: one notification per stored token, no polling, no timer.
+const tokenStoredListeners = new Set()
+
+export function subscribeTokenStored(listener) {
+  tokenStoredListeners.add(listener)
+  return () => tokenStoredListeners.delete(listener)
+}
+
+function storeToken(token) {
+  try { localStorage.setItem(JWT_KEY, token) } catch { return false }
+  for (const listener of tokenStoredListeners) {
+    try { listener(token) } catch { /* observers cannot change the auth result */ }
+  }
+  return true
+}
+
 let _clientP = null
 async function client() {
   if (!authConfigured) return null
@@ -120,7 +141,7 @@ export async function handleRedirectCallback() {
     const result = await c.handleRedirectCallback()
     returnTo = result?.appState?.returnTo || returnTo
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
-    if (token) localStorage.setItem(JWT_KEY, token)
+    if (token) storeToken(token)
     if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)

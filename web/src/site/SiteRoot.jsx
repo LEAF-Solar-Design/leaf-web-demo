@@ -14,7 +14,8 @@ import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
-import { handleRedirectCallback, isAuthRedirectCallback, isSignedIn } from '../auth.js'
+import { handleRedirectCallback, isSignedIn } from '../auth.js'
+import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 import { liveDrawingId, rememberLiveDrawingId } from './workbenchId.js'
 import {
   getDrawingIntake,
@@ -27,19 +28,6 @@ import './landing.css'
 const App = React.lazy(() => import('../App.jsx'))
 // Built by a sibling agent (src/site/sheets/** is theirs) — referenced only.
 const SheetsPage = React.lazy(() => import('./sheets/SheetsPage.jsx'))
-
-const APP_BOOT_PARAMS = ['fixture', 'dev', 'drawing']
-
-function bootWantsApp(search, path = window.location.pathname) {
-  try {
-    const q = new URLSearchParams(search)
-    if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
-    if (q.has('demo') && path !== '/try') return true
-    if (q.has('ops') && path !== '/try') return true
-    if (isAuthRedirectCallback(search) && path !== '/try') return true
-  } catch { /* malformed search — fall through to path routing */ }
-  return false
-}
 
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
@@ -68,8 +56,9 @@ const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingI
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
   const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
-  const [authCallbackPending, setAuthCallbackPending] = useState(() =>
-    window.location.pathname === '/try' && isAuthRedirectCallback())
+  // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
+  // the bare origin, so /try is the one landing this never sees. See authBoot.js.
+  const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
@@ -144,6 +133,12 @@ export default function SiteRoot() {
     })
   }, [scene])
 
+  // BEFORE every scene, including 'app'. Mounting anything that talks to /api
+  // while the code exchange is still in flight is the whole defect: the burst
+  // 401s, the session controller latches `required`, and the token that lands
+  // 700ms later can no longer be used by this page load.
+  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
+
   if (scene === 'app') {
     // The console ALONE — no stage mounted; App owns its own Viewer.
     return (
@@ -154,8 +149,6 @@ export default function SiteRoot() {
       </WorkspaceControllerProvider>
     )
   }
-
-  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
 
   if (scene === 'sheets') {
     return (
