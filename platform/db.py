@@ -5,6 +5,13 @@ client). Reads DATABASE_URL from the environment, falling back to
 platform/.env.local (gitignored). Prepared statements are disabled
 (prepare_threshold=None) so the store works over a pgbouncer/Neon pooled endpoint
 as well as a direct one.
+
+This file is on the prewarm relay's MIGRATION SURFACE, together with
+platform/migrations/. A PR that changes either one is refused staging by
+.github/workflows/prewarm-staging-cutover.yml, so its merge takes the ordinary
+warm path and runs migrations the normal way. That is deliberate and costs the
+PR only a speed optimisation, but it is not obvious from here, so: if you touch
+this file you will not get a pre-warmed cutover.
 """
 from __future__ import annotations
 
