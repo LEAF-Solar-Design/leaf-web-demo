@@ -216,6 +216,10 @@ function fakePlaywright() {
   let currentUrl = `${TARGET_ORIGIN}/try`
   let evaluateCount = 0
   let authorizationCount = 0
+  // Sign in leaves the browser sitting at the issuer with the callback still
+  // pending, exactly as a real Universal Login does while the operator types.
+  let preSignInUrl = null
+  let pendingCallback = null
   const tokens = [token('signature-one'), token('signature-two')]
   const emitRequest = (url) => handlers.get('request')?.({ url: () => url })
   const page = {
@@ -245,9 +249,11 @@ function fakePlaywright() {
               client_id: CLIENT_ID, state: `state-${authorizationCount}`,
               code_challenge: `challenge-${authorizationCount}`, code_challenge_method: 'S256',
             })
-            emitRequest(`${new URL(ISSUER).origin}/authorize?${query}`)
-            currentUrl = `${TARGET_ORIGIN}/?code=code-${authorizationCount}&state=state-${authorizationCount}`
-            emitRequest(currentUrl)
+            const authorizeUrl = `${new URL(ISSUER).origin}/authorize?${query}`
+            emitRequest(authorizeUrl)
+            preSignInUrl = currentUrl
+            currentUrl = authorizeUrl
+            pendingCallback = `${TARGET_ORIGIN}/?code=code-${authorizationCount}&state=state-${authorizationCount}`
           } else {
             emitRequest(`${new URL(ISSUER).origin}/v2/logout`)
             currentUrl = `${TARGET_ORIGIN}/`
@@ -256,10 +262,27 @@ function fakePlaywright() {
       }
     },
     async waitForURL(predicate) {
-      if (!predicate(new URL(currentUrl))) {
-        currentUrl = `${TARGET_ORIGIN}/try`
-        assert.equal(predicate(new URL(currentUrl)), true)
+      if (preSignInUrl !== null) {
+        // The first wait after Sign in is the departure gate and must REJECT
+        // the pre-navigation URL. A predicate that already accepts it resolves
+        // instantly and hands the following token wait a race against the
+        // operator's typing - the defect that failed two live D1a runs on
+        // 2026-08-17.
+        assert.equal(
+          predicate(new URL(preSignInUrl)), false,
+          'the first wait after Sign in must not accept the pre-navigation URL',
+        )
+        preSignInUrl = null
       }
+      if (predicate(new URL(currentUrl))) return
+      if (pendingCallback !== null) {
+        // The operator finished Universal Login: the issuer bounces through
+        // the callback and the app settles on a clean URL.
+        emitRequest(pendingCallback)
+        pendingCallback = null
+      }
+      currentUrl = `${TARGET_ORIGIN}/try`
+      assert.equal(predicate(new URL(currentUrl)), true)
     },
     async waitForFunction() {},
     url() { return currentUrl },

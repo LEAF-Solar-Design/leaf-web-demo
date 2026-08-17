@@ -211,6 +211,11 @@ async function signedOutStatus(page) {
 async function waitForInteractiveLogin(page, cycles, callbacks, sequence, notify) {
   await page.getByRole('button', { name: 'Sign in', exact: true }).first().click()
   notify(`Complete Universal Login and MFA in the visible browser for cycle ${sequence}.\n`)
+  // Gate on the departure to the issuer BEFORE waiting for the return: the
+  // return predicate below also matches the pre-navigation URL, so without
+  // this it resolves instantly and the 60s token wait races the operator's
+  // Universal Login typing instead of starting when they come back.
+  await page.waitForURL((url) => url.origin === new URL(ISSUER).origin, { timeout: 2 * 60_000 })
   await page.waitForURL((url) => url.origin === TARGET_ORIGIN && !url.searchParams.has('code') && !url.searchParams.has('state'), {
     timeout: 10 * 60_000,
   })
