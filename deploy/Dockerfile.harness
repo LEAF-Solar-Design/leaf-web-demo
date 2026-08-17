@@ -133,3 +133,6 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
 # pin on its own while the real instruction said something else.
 
 CMD ["/app/scripts/start-harness.sh"]
+
+# canary marker 2026-08-17: throwaway draft-PR tree used to exercise the full
+# CodeBuild warm+build matrices after the third runner flip (#666); safe to drop.
