@@ -1626,7 +1626,10 @@ def main() -> None:
         "expected the build and speculate surface-resolve steps", resolve_steps)
 
     if codebuild_runners:
-        assert 'imagetools inspect "$base"' not in text, (
+        # Both spellings, because #654's own line wrapped the target onto a
+        # continuation line: a plain substring ban would have missed it.
+        assert not re.search(
+            r'imagetools inspect\s*\\?\s*"\$base"', text), (
             "a CodeBuild runner is named while base digests are still resolved "
             "from an unqualified Docker Hub reference: this is exactly the "
             "regression #658 reverted (run 32046935487, 429 on "
