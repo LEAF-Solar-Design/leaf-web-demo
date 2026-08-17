@@ -241,10 +241,7 @@ jobs:
     # run, and every probe failure mode falls through to reuse != 'true' —
     # the full gate. Only a verified tree-bound proof skips the suites.
     if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' }}
-    # 8-vCPU ephemeral CodeBuild runner in the Leaf AWS account (tf: shared/
-    # github-iam/codebuild_runners.tf, project leaf-gha-runner-web-demo);
-    # Linux/Large concurrency is 60, so all 8 shards run at once.
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       # A cancelled shard destroys the fan-in's completeness proof while
