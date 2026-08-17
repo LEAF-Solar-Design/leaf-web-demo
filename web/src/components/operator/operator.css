@@ -1,0 +1,75 @@
+/* ============================================================================
+   Operator console (Lane E) — dark, probe-gated surface. NEW classes only,
+   named operator-*; reuses the styles.css token vocabulary (--primary,
+   --muted, --muted-2, --status-warning, --accent-tint, --font-mono). The
+   console is a modal-style panel; no tenant-facing class is redefined here.
+   ========================================================================== */
+
+.operator-entry-button {
+  border: 1px solid var(--accent-tint); background: transparent;
+  color: var(--primary); font: inherit; font-size: 12px;
+  padding: 3px 10px; border-radius: 4px; cursor: pointer;
+}
+.operator-entry-button:hover { background: var(--accent-tint); }
+.operator-entry-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.operator-console {
+  position: fixed; inset: 6vh 8vw; z-index: 60; display: flex; flex-direction: column;
+  background: var(--panel-bg, #101418); color: inherit;
+  border: 1px solid var(--accent-tint); border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .45); overflow: hidden;
+}
+.operator-console-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid var(--accent-tint); font-size: 13px;
+}
+.operator-console-body { display: flex; gap: 14px; padding: 12px 14px; overflow: auto; flex: 1; }
+
+.operator-profile-badge {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  border: 1px solid var(--accent-tint); border-radius: 4px; padding: 2px 6px;
+}
+
+.operator-panel { min-width: 220px; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.operator-panel-error { color: var(--status-warning); font-size: 12px; }
+.operator-signed-out { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+
+.operator-session-panel, .operator-runbooks-panel, .operator-audit-panel,
+.operator-worker-panel { display: flex; flex-direction: column; gap: 8px; }
+.operator-session-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.operator-session-item { font-family: var(--font-mono); font-size: 12px; }
+.operator-transcript {
+  font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap;
+  border: 1px solid var(--accent-tint); border-radius: 4px; padding: 8px;
+  max-height: 40vh; overflow: auto;
+}
+
+.operator-readout { font-size: 12px; }
+.operator-readout-list { margin: 0; padding: 0; list-style: none; }
+.operator-field-row { display: flex; gap: 8px; font-size: 12px; }
+.operator-field-row dt { color: var(--muted); min-width: 110px; }
+.operator-field-row dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+
+.operator-approval-card {
+  border: 1px solid var(--accent-tint); border-radius: 6px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.operator-approval-head { font-size: 13px; font-weight: 600; }
+.operator-approval-fields { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.operator-approval-field { display: flex; gap: 8px; font-size: 12px; }
+.operator-approval-missing, .operator-approval-blocked { color: var(--status-warning); font-size: 12px; }
+.operator-approval-error { color: var(--status-warning); font-size: 12px; font-family: var(--font-mono); }
+.operator-approval-confirm { display: flex; flex-direction: column; gap: 6px; }
+.operator-approval-confirm-actions { display: flex; gap: 8px; }
+.operator-approval-action { align-self: flex-start; }
+
+.operator-audit-table { border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
+.operator-audit-table th, .operator-audit-table td {
+  border-bottom: 1px solid var(--accent-tint); padding: 3px 8px; text-align: left;
+}
+
+.operator-job-receipt {
+  font-family: var(--font-mono); font-size: 11px; border: 1px dashed var(--accent-tint);
+  border-radius: 4px; padding: 6px 8px; overflow-wrap: anywhere;
+}
+.operator-cancel[disabled] { opacity: .45; cursor: default; }
