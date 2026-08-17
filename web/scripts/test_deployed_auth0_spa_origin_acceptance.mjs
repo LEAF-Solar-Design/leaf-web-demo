@@ -158,6 +158,16 @@ function fakePlaywright() {
     on(name, callback) { handlers.set(name, callback) },
     async goto(url) { currentUrl = url; emitRequest(url) },
     async evaluate(_callback, argument) {
+      // The RP-initiated logout evaluate is identified by its ARGUMENT SHAPE, not
+      // by call position, so adding it never renumbers the positional cases below.
+      if (argument !== null && typeof argument === 'object' && 'issuerOrigin' in argument) {
+        assert.equal(argument.issuerOrigin, new URL(ISSUER).origin)
+        assert.equal(argument.clientId, CLIENT_ID)
+        assert.equal(argument.returnTo, TARGET_ORIGIN, 'logout must return to the exact target origin')
+        emitRequest(`${new URL(ISSUER).origin}/v2/logout`)
+        currentUrl = `${TARGET_ORIGIN}/`
+        return undefined
+      }
       evaluateCount += 1
       if (evaluateCount === 1) return { status: 200, body: { source_sha: config.sourceSha } }
       if (evaluateCount === 2) {
@@ -187,8 +197,11 @@ function fakePlaywright() {
             currentUrl = authorizeUrl
             pendingCallback = `${TARGET_ORIGIN}/?code=code-${authorizationCount}&state=state-${authorizationCount}`
           } else {
-            emitRequest(`${new URL(ISSUER).origin}/v2/logout`)
-            currentUrl = `${TARGET_ORIGIN}/`
+            // 'Sign in' is the ONLY control the collector may click. The UI
+            // sign-out drawer is a stochastic race for this principal and was
+            // replaced by the RP-initiated /v2/logout above; clicking any other
+            // control is a regression, so fail loudly instead of emulating it.
+            assert.fail(`the collector must not click '${options.name}'; sign-out is driven via /v2/logout`)
           }
         },
       }
