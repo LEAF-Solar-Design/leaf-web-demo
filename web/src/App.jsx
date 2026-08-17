@@ -477,6 +477,7 @@ export default function App() {
     workspaceLoading: wsLoading,
     orgBusy,
     projectBusy,
+    adoptOrgId,
     openProject: onOpenProject,
     createOrg: createWorkspaceOrg,
     createProject: createWorkspaceProject,
@@ -717,6 +718,10 @@ export default function App() {
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
+        // Live auth resolves workspace identity from the verified subject.
+        // Persist that server-owned org id so an already-bound account never
+        // sees the create-org affordance or attempts a duplicate bootstrap.
+        if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
         if (!alive) return

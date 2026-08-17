@@ -80,6 +80,85 @@ class IdentityBindingPairConflict(ValueError):
 class IdentityBindingPairPrincipalDrift(ValueError):
     """The verified operator principal changed before the transaction locked it."""
 
+
+class ProjectRepositoryAuthorityConflict(ValueError):
+    """A project mapping conflicts with the immutable server-owned authority."""
+
+
+def _canonical_authority_uuid(value: object, field: str) -> uuid.UUID:
+    if not isinstance(value, (str, uuid.UUID)):
+        raise ValueError(f"{field} must be a canonical UUID")
+    raw = str(value)
+    try:
+        parsed = uuid.UUID(raw)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a canonical UUID") from exc
+    if str(parsed) != raw:
+        raise ValueError(f"{field} must be a canonical UUID")
+    return parsed
+
+
+def register_project_repository_authority(
+    tenant_id: object, organization_id: object, project_id: object, repo_key: object,
+) -> Dict[str, str]:
+    """Create or replay one immutable server-owned project repository mapping."""
+    tenant = _canonical_authority_uuid(tenant_id, "tenant_id")
+    organization = _canonical_authority_uuid(organization_id, "organization_id")
+    project = _canonical_authority_uuid(project_id, "project_id")
+    repository = _canonical_authority_uuid(repo_key, "repo_key")
+    if tenant != organization:
+        raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT project_id FROM projects WHERE org_id = %(organization)s "
+            "AND project_id = %(project)s AND status = 'active' FOR UPDATE",
+            {"organization": organization, "project": project},
+        )
+        if cur.fetchone() is None:
+            raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+        cur.execute(
+            "INSERT INTO project_repository_authorities "
+            "(tenant_id, organization_id, project_id, repo_key) VALUES "
+            "(%(tenant)s, %(organization)s, %(project)s, %(repo)s) "
+            "ON CONFLICT (tenant_id, organization_id, project_id) DO NOTHING",
+            {"tenant": tenant, "organization": organization, "project": project,
+             "repo": repository},
+        )
+        cur.execute(
+            "SELECT tenant_id, organization_id, project_id, repo_key "
+            "FROM project_repository_authorities WHERE tenant_id = %(tenant)s "
+            "AND organization_id = %(organization)s AND project_id = %(project)s FOR UPDATE",
+            {"tenant": tenant, "organization": organization, "project": project},
+        )
+        row = cur.fetchone()
+        if row is None or row["repo_key"] != repository:
+            raise ProjectRepositoryAuthorityConflict("project repository authority conflicts")
+    return {key: str(row[key]) for key in
+            ("tenant_id", "organization_id", "project_id", "repo_key")}
+
+
+def resolve_project_repository_authority(
+    tenant_id: object, organization_id: object, project_id: object,
+) -> Optional[Dict[str, str]]:
+    """Resolve by the complete authority tuple without accepting repository hints."""
+    tenant = _canonical_authority_uuid(tenant_id, "tenant_id")
+    organization = _canonical_authority_uuid(organization_id, "organization_id")
+    project = _canonical_authority_uuid(project_id, "project_id")
+    if tenant != organization:
+        return None
+    with cursor() as cur:
+        cur.execute(
+            "SELECT tenant_id, organization_id, project_id, repo_key "
+            "FROM project_repository_authorities WHERE tenant_id = %(tenant)s "
+            "AND organization_id = %(organization)s AND project_id = %(project)s",
+            {"tenant": tenant, "organization": organization, "project": project},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {key: str(row[key]) for key in
+            ("tenant_id", "organization_id", "project_id", "repo_key")}
+
 # --------------------------------------------------------------------------- #
 # writes
 # --------------------------------------------------------------------------- #
@@ -146,6 +225,41 @@ def create_org_with_identity(name: str, external_authority: str, external_subjec
         raise ValueError("verified external subject already has a platform identity binding") from exc
 
 
+def ensure_org_with_identity(
+    name: str,
+    external_authority: str,
+    external_subject: str,
+    *,
+    tier: str = "hosted_starter",
+) -> tuple[Org, bool]:
+    """Resolve one identity-owned org, or atomically create it.
+
+    Org names are display data, not global tenant lookup keys. An existing
+    identity binding is reusable only when its active org has the requested
+    normalized name. This makes a retry after a lost response safe without a
+    cross-tenant name lookup.
+    """
+    requested = name.strip().casefold()
+    existing = resolve_active_identity_binding(external_authority, external_subject)
+    if existing is not None:
+        org = get_org(existing.platform_tenant_id)
+        if org is None or org.status != "active" or org.name.strip().casefold() != requested:
+            raise ValueError("verified subject is bound to a different workspace organization")
+        return org, False
+    try:
+        return create_org_with_identity(
+            name, external_authority, external_subject, tier=tier,
+        ), True
+    except ValueError:
+        existing = resolve_active_identity_binding(external_authority, external_subject)
+        if existing is None:
+            raise
+        org = get_org(existing.platform_tenant_id)
+        if org is None or org.status != "active" or org.name.strip().casefold() != requested:
+            raise ValueError("verified subject is bound to a different workspace organization")
+        return org, False
+
+
 def create_project(
     org_id: uuid.UUID,
     name: str,
@@ -176,6 +290,65 @@ def create_project(
                 },
             )
         return project
+
+
+def get_or_create_project(
+    org_id: uuid.UUID,
+    name: str,
+    *,
+    authority_mode: Optional[str] = None,
+) -> tuple[Project, bool]:
+    """Create one active normalized project name per org, or replay its UUID."""
+    if authority_mode is not None and authority_mode not in AUTHORITY_MODES:
+        raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
+    project_id = new_uuid()
+    columns = (
+        "project_id, org_id, name, status, created_at, updated_at, "
+        "deleted_at, purge_requested_at, purge_completed_at"
+    )
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO projects (project_id, org_id, name) "
+                f"VALUES (%(project_id)s, %(org_id)s, %(name)s) "
+                f"ON CONFLICT (org_id, (lower(btrim(name)))) "
+                f"WHERE status = 'active' AND deleted_at IS NULL DO NOTHING "
+                f"RETURNING {columns}",
+                {"project_id": project_id, "org_id": org_id, "name": name},
+            )
+            row = cur.fetchone()
+            created = row is not None
+            if row is None:
+                cur.execute(
+                    f"SELECT {columns} FROM projects "
+                    "WHERE org_id = %(org_id)s AND status = 'active' "
+                    "AND deleted_at IS NULL AND lower(btrim(name)) = lower(btrim(%(name)s))",
+                    {"org_id": org_id, "name": name},
+                )
+                row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("project bootstrap did not resolve an active project")
+            project = Project.from_row(row)
+            if created and authority_mode is not None:
+                cur.execute(
+                    "INSERT INTO project_authority_modes "
+                    "(org_id, project_id, authority_mode, selected_by) "
+                    "VALUES (%(org_id)s, %(project_id)s, %(authority_mode)s, 'server')",
+                    {"org_id": org_id, "project_id": project.project_id,
+                     "authority_mode": authority_mode},
+                )
+            elif authority_mode is not None:
+                cur.execute(
+                    "SELECT COALESCE("
+                    "(SELECT authority_mode FROM project_authority_modes "
+                    " WHERE org_id = %(org_id)s AND project_id = %(project_id)s), "
+                    "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = %(org_id)s), "
+                    "'legacy_sqlite') AS authority_mode",
+                    {"org_id": org_id, "project_id": project.project_id},
+                )
+                if cur.fetchone()["authority_mode"] != authority_mode:
+                    raise ValueError("existing project authority mode does not match bootstrap policy")
+            return project, created
 
 
 # --------------------------------------------------------------------------- #

@@ -33,6 +33,32 @@ export interface TenantChangeSet {
   stagedSha: string | null;
 }
 
+/** Exact immutable stage witness: commit-to-tree binding plus the deterministic private ref. */
+export interface TenantStageWitness {
+  readonly base_commit: string;
+  readonly staged_head_commit: string;
+  readonly staged_tree: string;
+  readonly private_ref: string;
+}
+
+/** Exact observations around the one main compare-and-swap (or an exact read-only retry). */
+export interface TenantPublishObservation {
+  readonly private_ref: string;
+  readonly private_ref_commit: string;
+  readonly before_main_commit: string;
+  readonly after_main_commit: string;
+  readonly after_main_tree: string;
+  /** False only for an exact already-published retry, which performs no mutation. */
+  readonly compare_and_swap: boolean;
+}
+
+/** Observation-only Git matrix used by recovery. Nothing here mutates any ref. */
+export interface TenantGitMatrix {
+  readonly private_ref_commit: string | null;
+  readonly main_commit: string | null;
+  readonly main_tree: string | null;
+}
+
 /** A failed Git compare-and-swap. Callers can use the SHAs to mark a change conflicted. */
 export class GitRefConflictError extends Error {
   override readonly name = "GitRefConflictError";
@@ -201,5 +227,95 @@ export class TenantChangeRepo {
   /** Remove the isolated worktree. Its immutable change ref remains for recovery. */
   cleanupWorktree(change: TenantChangeSet): void {
     this.git(["worktree", "remove", "--force", change.dir]);
+  }
+
+  /** Resolve the exact tree of one committed object. Callers can never supply it. */
+  resolveCommitTree(commitSha: string): string {
+    assertSha(commitSha, "commit SHA");
+    const tree = this.git(["rev-parse", `${commitSha}^{tree}`]).trim();
+    if (!/^[0-9a-f]{40}$/.test(tree)) {
+      throw withFailureCategory(new Error("resolved tree is not a lowercase Git SHA"), "validation_failed");
+    }
+    return tree;
+  }
+
+  /**
+   * Commit the isolated worktree, advance only the private change ref, and then
+   * resolve the staged tree from the committed object. The private ref is
+   * re-read after its compare-and-swap and must name the exact staged commit.
+   */
+  stageCommitWitness(change: TenantChangeSet, message: string): TenantStageWitness {
+    const commit = this.stageCommit(change, message);
+    const stagedTree = this.resolveCommitTree(commit);
+    const observed = this.readRef(change.ref);
+    if (observed !== commit) {
+      throw new GitRefConflictError(change.ref, commit, observed);
+    }
+    return Object.freeze({
+      base_commit: change.expectedBaseSha,
+      staged_head_commit: commit,
+      staged_tree: stagedTree,
+      private_ref: change.ref,
+    });
+  }
+
+  /**
+   * Atomically select this exact staged commit as main and return the full
+   * observation matrix. `git update-ref refs/heads/main <staged> <expected>`
+   * remains the only mutation. An exact already-published retry (private ref
+   * and main both name the staged commit) is read-only; every other relation
+   * is a typed conflict. Presence alone never proves publication.
+   */
+  publishToMainObserved(change: TenantChangeSet, expectedMainSha: string): TenantPublishObservation {
+    assertSha(expectedMainSha, "expected main SHA");
+    if (!change.stagedSha) {
+      throw withFailureCategory(new Error("change set has no staged commit"), "validation_failed");
+    }
+    const refSha = this.readRef(change.ref);
+    if (refSha !== change.stagedSha) {
+      throw new GitRefConflictError(change.ref, change.stagedSha, refSha);
+    }
+    const beforeMain = this.readRef("refs/heads/main");
+    if (beforeMain === change.stagedSha) {
+      const retryTree = this.resolveCommitTree(beforeMain);
+      if (retryTree !== this.resolveCommitTree(change.stagedSha)) {
+        throw new GitRefConflictError("refs/heads/main", change.stagedSha, beforeMain);
+      }
+      return Object.freeze({
+        private_ref: change.ref,
+        private_ref_commit: refSha,
+        before_main_commit: beforeMain,
+        after_main_commit: beforeMain,
+        after_main_tree: retryTree,
+        compare_and_swap: false,
+      });
+    }
+    if (beforeMain !== expectedMainSha) {
+      throw new GitRefConflictError("refs/heads/main", expectedMainSha, beforeMain);
+    }
+    this.updateRef("refs/heads/main", change.stagedSha, expectedMainSha);
+    const afterMain = this.readRef("refs/heads/main");
+    if (afterMain !== change.stagedSha) {
+      throw new GitRefConflictError("refs/heads/main", change.stagedSha, afterMain);
+    }
+    return Object.freeze({
+      private_ref: change.ref,
+      private_ref_commit: refSha,
+      before_main_commit: beforeMain,
+      after_main_commit: afterMain,
+      after_main_tree: this.resolveCommitTree(afterMain),
+      compare_and_swap: true,
+    });
+  }
+
+  /** Read the private ref, main commit, and main tree without any mutation. */
+  observeGitMatrix(change: TenantChangeSet): TenantGitMatrix {
+    const refSha = this.readRef(change.ref);
+    const main = this.readRef("refs/heads/main");
+    return Object.freeze({
+      private_ref_commit: refSha,
+      main_commit: main,
+      main_tree: main === null ? null : this.resolveCommitTree(main),
+    });
   }
 }

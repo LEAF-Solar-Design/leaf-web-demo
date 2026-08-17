@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contracts/solar-cad-template-manifest.v1.schema.json",
+  "title": "Leaf Solar CAD immutable template manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "template_version",
+    "source_drawing_sha256",
+    "catalog_sha256",
+    "standards_snapshot_sha256",
+    "compiled_tool_bundle_sha256",
+    "license_record_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "leaf.solar-cad-template-manifest.v1"},
+    "template_version": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "source_drawing_sha256": {"$ref": "#/$defs/sha256"},
+    "catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "standards_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "compiled_tool_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "license_record_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

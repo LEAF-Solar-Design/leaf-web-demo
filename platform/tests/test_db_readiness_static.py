@@ -62,6 +62,20 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
     )
 
 
+def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
+    manifest_names = [item["name"] for item in db.migration_manifest()]
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert "0042_annotation_batches.sql" in manifest_names
+    assert manifest_names[-1] == "0044_project_repository_edit_state.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0044"
+    assert "annotation_targets" in db._REQUIRED_COLUMNS
+    assert "annotation_batches" in db._REQUIRED_COLUMNS
+    assert "annotation_audit" in db._REQUIRED_COLUMNS
+    catalog = db.required_catalog_for_selected_authorities({})
+    assert "annotation_batches_target_fk" in catalog["constraints"]
+    assert "annotation_batches_request_key_uq" in catalog["indexes"]
+
+
 @pytest.mark.parametrize(
     ("manifest_names", "migration_ids"),
     [

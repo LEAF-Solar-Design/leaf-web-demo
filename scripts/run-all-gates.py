@@ -827,7 +827,7 @@ def build_suites() -> List[Suite]:
         # in lockstep with the assertion in scripts/test_gate_runner.py.
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
-              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 8),
+              SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 9),
         # The annex authority the sessions flip strands without. Fully
         # offline: the PostgreSQL halves run against a fake in place of
         # platform.db, so nothing here skips on a no-DB host and the floor
@@ -850,7 +850,7 @@ def build_suites() -> List[Suite]:
         Suite("da-extract-dxf-activity", "da test_extract_dxf_activity.py", "pytest", DA,
               _py_pytest("test_extract_dxf_activity.py"), 5),
         Suite("da-mutation-apply", "da test_mutation_apply.py", "pytest", DA,
-              _py_pytest("test_mutation_apply.py"), 22),
+              _py_pytest("test_mutation_apply.py"), 24),
         # Windows operator hosts run the non-billable AutoCAD engine canary.
         # Linux CI must still collect the suite and may skip only when the named
         # local AutoCAD runtime or tracked demo DWG is unavailable.
@@ -1003,8 +1003,10 @@ def build_suites() -> List[Suite]:
         # assertions ungated.
         # Explicit file targets, not the dir, so the COLLECTED count stays
         # invariant to DB presence. The floor below is the EXECUTED count on a
-        # host with no DATABASE_URL: 124 collected minus the 2 DB-gated skips
-        # named in allowed_skip_reasons = 122, measured on this tree
+        # host with no DATABASE_URL. The A1 migration/readiness change executes
+        # 164 of 166 collected tests. Registering annotation_store_static adds
+        # 8 dependency-free tests, so this tree executes 172 of 174 collected;
+        # the 2 DB-gated skips remain the ones named in allowed_skip_reasons.
         # 2026-08-04. History of the floor: 96 (2026-07-28, 98 collected);
         # #256 and #401 then added 6 tests that only surfaced as a drift
         # note (#432 moved the floor to 102 for those);
@@ -1022,7 +1024,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
-                 f"{repo_name}/platform/tests/test_ios_ship_schema_static.py"], 163,
+                 f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
+                 f"{repo_name}/platform/tests/test_annotation_store_static.py"], 172,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -1051,7 +1054,7 @@ def build_suites() -> List[Suite]:
               # executes the extracted manifest script against a fake gh and
               # asserts the tag a docs-only merge resolves, then feeds it to the
               # real dispatch script and asserts BOTH services deploy onto it.
-              _py_pytest("test_build_platform_images_workflow.py"), 4),
+              _py_pytest("test_build_platform_images_workflow.py"), 17),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
@@ -1060,10 +1063,10 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 21),
+              SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 9),
+              SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 10),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 57: the 29 measured 2026-07-28, plus the 18 sharding tests
         # (partition determinism, catalog fingerprint incl. toolchain-path
@@ -1135,7 +1138,7 @@ def build_suites() -> List[Suite]:
         # flush/pagehide orderings, dedup_key sharing, same-signature
         # suppression) are gone with it. Measured on this tree 2026-08-08.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 74),
+              [_npm(), "run", "test:unit"], 86),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

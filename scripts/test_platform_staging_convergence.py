@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import sysconfig
 import unittest
+from unittest import mock
 import zipfile
 
 import yaml
@@ -35,6 +36,10 @@ RELAY_BLOB = "d" * 40
 TF_HEAD = "e" * 40
 TF_TREE = "f" * 40
 TF_BLOB = "1" * 40
+CONTRACT_WORKFLOW_BLOB = "7" * 40
+CONTRACT_SCHEMA_BLOB = "8" * 40
+CONTRACT_RUN = 250
+CONTRACT_ARTIFACT = 1250
 BUILD_RUN = 100
 RELAY_RUN = 200
 FRONTIER_RUN = 306
@@ -44,6 +49,98 @@ DIGESTS = {
     service: f"sha256:{digit * 64}"
     for service, digit in zip(SERVICES, "23456", strict=True)
 }
+CHILD_WINDOW_EXACT_ENDPOINT = (
+    "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+    "event=workflow_dispatch&created=2026-08-13T01%3A10%3A00Z.."
+    "2026-08-13T01%3A25%3A00Z&per_page=100"
+)
+CHILD_WINDOW_OPEN_ENDPOINT = (
+    "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+    "event=workflow_dispatch&created=%3E%3D2026-08-13T01%3A10%3A00Z&per_page=100"
+)
+
+
+class ArtifactRedirectTests(unittest.TestCase):
+    def test_cross_host_artifact_redirect_strips_authorization(self) -> None:
+        handler = subject._ArtifactRedirectHandler()
+        request = subject.urllib.request.Request(
+            "https://api.github.com/repos/o/r/actions/artifacts/1/zip",
+            headers={"Authorization": "Bearer private"},
+        )
+        with mock.patch.object(subject.urllib.request.HTTPRedirectHandler, "redirect_request", return_value=request):
+            redirected = handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://example.blob.core.windows.net/result?sig=redacted",
+            )
+        self.assertIsNotNone(redirected)
+        self.assertIsNone(redirected.get_header("Authorization"))
+
+
+class GitHubProviderRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.provider = subject.GitHubProvider("app-token", "terraform-token")
+        self.response = mock.MagicMock()
+        self.response.__enter__.return_value.read.return_value = b"{}"
+
+    @staticmethod
+    def http_error(code: int, retry_after: str | None = None) -> subject.urllib.error.HTTPError:
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return subject.urllib.error.HTTPError("https://provider.invalid", code, "provider failure", headers, None)
+
+    def request_with(self, *results: object) -> tuple[bytes, mock.Mock, mock.Mock]:
+        opener = mock.Mock()
+        opener.open.side_effect = list(results)
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+        ):
+            value = self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+        return value, opener, sleep
+
+    def test_transient_network_failure_retries_with_bounded_backoff(self) -> None:
+        value, opener, sleep = self.request_with(subject.urllib.error.URLError("temporary"), self.response)
+
+        self.assertEqual(value, b"{}")
+        self.assertEqual(opener.open.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_transient_failure_exhaustion_is_sanitized_and_fail_closed(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = [subject.urllib.error.URLError("temporary")] * subject.MAX_PROVIDER_READ_ATTEMPTS
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+            self.assertRaisesRegex(subject.ContractError, "^PROVIDER_READ_FAILED$"),
+        ):
+            self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+
+        self.assertEqual(opener.open.call_count, subject.MAX_PROVIDER_READ_ATTEMPTS)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_deterministic_http_error_does_not_retry(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = self.http_error(404)
+        with (
+            mock.patch.object(subject.urllib.request, "build_opener", return_value=opener),
+            mock.patch.object(subject.time, "sleep") as sleep,
+            self.assertRaisesRegex(subject.ContractError, "^PROVIDER_READ_FAILED$"),
+        ):
+            self.provider.bytes(subject.APP_REPOSITORY, "/actions/runs/1")
+
+        self.assertEqual(opener.open.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retry_after_controls_throttle_delay_with_a_finite_cap(self) -> None:
+        for code, header, expected in ((429, "7", 7), (403, "999", subject.MAX_PROVIDER_RETRY_DELAY_SECONDS)):
+            with self.subTest(code=code, header=header):
+                value, opener, sleep = self.request_with(self.http_error(code, header), self.response)
+                self.assertEqual(value, b"{}")
+                self.assertEqual(opener.open.call_count, 2)
+                sleep.assert_called_once_with(expected)
 
 
 def canonical(value: object) -> bytes:
@@ -54,6 +151,14 @@ def archive(filename: str, payload: bytes) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as value:
         value.writestr(filename, payload)
+    return buffer.getvalue()
+
+
+def archive_members(entries: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as value:
+        for filename, payload in entries.items():
+            value.writestr(filename, payload)
     return buffer.getvalue()
 
 
@@ -114,12 +219,113 @@ def manifest() -> dict:
     }
 
 
+def v3_manifest() -> dict:
+    entries = {}
+    for index, service in enumerate(SERVICES, 1):
+        fingerprint = format(index, "064x")
+        entry = {
+            "repository": f"leaf-platform-{service}",
+            "image_digest": DIGESTS[service],
+            "immutable_lookup_tag": f"surface-v1-{fingerprint}",
+            "producer_source_revision": SOURCE,
+            "producer_source_tree": APP_TREE,
+            "surface_fingerprint": fingerprint,
+            "recipe_fingerprint": format(index + 10, "064x"),
+            "producer_workflow_path": subject.BUILD_WORKFLOW,
+            "producer_workflow_blob": BUILD_BLOB,
+            "producer_run_id": 31415926535,
+            "producer_run_attempt": 1,
+            "provenance_subject": (
+                "807034087062.dkr.ecr.us-east-1.amazonaws.com/"
+                f"leaf-platform-{service}"
+            ),
+            "provenance_digest": "sha256:" + format(index + 20, "064x"),
+            "build_disposition": "reused",
+        }
+        if service == "canonical-worker":
+            entry["solver_provenance"] = {
+                "solver_source_revision": "7" * 40,
+                "solver_source_sha256": "8" * 64,
+            }
+        if service == "web":
+            entry["artifact_sha256"] = "9" * 64
+        entries[service] = entry
+    return {
+        "schema": "leaf.staging-supply-set.v3",
+        "release_source_revision": SOURCE,
+        "release_source_tree": APP_TREE,
+        "build_run_id": 31415926535,
+        "build_run_attempt": 1,
+        "services": entries,
+    }
+
+
 def missing() -> dict:
     return {"status": "not_produced"}
 
 
 def produced(value: object) -> dict:
     return {"status": "produced", "value": value}
+
+
+def consumer_contract_evidence() -> tuple[dict, bytes, dict]:
+    name = f"leaf-platform-staging-consumer-contract-run-{CONTRACT_RUN}-attempt-1"
+    unsigned = {
+        "artifact": {"file": "consumer-contract.json", "name": name},
+        "consumer": {
+            "contract_schema_path": subject.CONSUMER_CONTRACT_SCHEMA_PATH,
+            "contract_schema_blob": CONTRACT_SCHEMA_BLOB,
+            "contract_version": 1,
+            "deploy_workflow_path": subject.DEPLOY_WORKFLOW,
+            "deploy_workflow_blob": TF_BLOB,
+            "pins": {
+                "deployment_environment": "aws-apply",
+                "digest_aware_marker": "leaf.staging-digest-aware-consumer.v1",
+                "mutation_group": "leaf-platform-staging-ecs-mutation",
+            },
+        },
+        "producer": {
+            "repository": subject.TF_REPOSITORY,
+            "workflow_path": subject.CONSUMER_CONTRACT_WORKFLOW,
+            "workflow_blob": CONTRACT_WORKFLOW_BLOB,
+            "run_id": CONTRACT_RUN,
+            "run_attempt": 1,
+            "event": "push",
+            "branch": "main",
+            "head_sha": TF_HEAD,
+            "head_tree": TF_TREE,
+        },
+        "schema": subject.CONSUMER_CONTRACT_SCHEMA,
+        "version": 1,
+    }
+    contract = copy.deepcopy(unsigned)
+    contract["payload_sha256"] = hashlib.sha256(canonical(unsigned)).hexdigest()
+    raw_contract = canonical(contract) + b"\n"
+    zip_raw = archive("consumer-contract.json", raw_contract)
+    archive_sha = hashlib.sha256(zip_raw).hexdigest()
+    dispatch = {
+        "artifact": {
+            "id": CONTRACT_ARTIFACT,
+            "name": name,
+            "producer_run_id": CONTRACT_RUN,
+            "producer_run_attempt": 1,
+            "provider_sha256": archive_sha,
+            "archive_sha256": archive_sha,
+            "file_sha256": hashlib.sha256(raw_contract).hexdigest(),
+        },
+        "contract": contract,
+        "schema": subject.CONSUMER_DISPATCH_SCHEMA,
+    }
+    dispatch["envelope_sha256"] = hashlib.sha256(canonical(dispatch)).hexdigest()
+    import base64
+
+    encoded = base64.urlsafe_b64encode(canonical(dispatch)).rstrip(b"=")
+    slot = {
+        "status": "produced",
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "utf8_bytes": len(encoded),
+    }
+    return contract, zip_raw, slot
 
 
 def identity() -> dict:
@@ -144,12 +350,14 @@ def service_receipt(
     terminal_td: str,
     with_identity: bool = False,
 ) -> dict:
+    _, _, contract_slot = consumer_contract_evidence()
     requested = {
         "allow_non_forward_image": missing(),
         "app_deploy_intent": "configuration" if with_identity else "forward",
         "configuration_delta": missing(),
         "configuration_task_definition": predecessor if with_identity else "not_produced",
         "convergence_id": "not_produced",
+        "consumer_contract": contract_slot,
         "deploy_strategy": "direct",
         "digest_aware_evidence": missing(),
         "digest_aware_reconcile": False,
@@ -164,6 +372,7 @@ def service_receipt(
         "source_revision": SOURCE,
         "start_from_zero": False,
         "start_from_zero_confirmation": missing(),
+        "supply_evidence": missing(),
         "target_color": "live",
     }
     facts = {
@@ -245,12 +454,18 @@ def service_receipt(
 class FakeProvider:
     def __init__(self) -> None:
         self.json_values: dict[tuple[str, str], object] = {}
+        self.json_sequences: dict[tuple[str, str], list[object]] = {}
         self.byte_values: dict[tuple[str, str], bytes] = {}
         self.calls: list[tuple[str, str, str]] = []
 
     def json(self, repository: str, endpoint: str) -> object:
         self.calls.append(("GET_JSON", repository, endpoint))
         key = (repository, endpoint)
+        if key in self.json_sequences:
+            values = self.json_sequences[key]
+            if not values:
+                raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
+            return copy.deepcopy(values.pop(0))
         if key not in self.json_values:
             raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
         return copy.deepcopy(self.json_values[key])
@@ -337,10 +552,31 @@ def fixture() -> FakeProvider:
         (306, "app", "leaf-platform-app:2", "leaf-platform-app:3", True),
     )
     child_runs = []
-    provider.json_values[(tf, f"/git/commits/{TF_HEAD}")] = {"tree": {"sha": TF_TREE}}
-    provider.json_values[(tf, f"/git/trees/{TF_TREE}?recursive=1")] = {
-        "tree": [{"path": subject.DEPLOY_WORKFLOW, "type": "blob", "sha": TF_BLOB}]
+    contract, contract_zip, _ = consumer_contract_evidence()
+    contract_run = run(
+        CONTRACT_RUN,
+        repository=tf,
+        workflow=subject.CONSUMER_CONTRACT_WORKFLOW,
+        event="push",
+        head_sha=TF_HEAD,
+        created="2026-08-13T00:55:00Z",
+    )
+    contract_query = "branch=main&event=push&status=success&per_page=100"
+    provider.json_values[(tf, f"/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/runs?{contract_query}")] = {
+        "total_count": 1,
+        "workflow_runs": [contract_run],
     }
+    contract_name = contract["artifact"]["name"]
+    contract_row = artifact(
+        CONTRACT_ARTIFACT, contract_name, CONTRACT_RUN, TF_HEAD
+    )
+    contract_row["digest"] = "sha256:" + hashlib.sha256(contract_zip).hexdigest()
+    contract_row["workflow_run"]["head_branch"] = "main"
+    provider.json_values[(tf, f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100")] = {
+        "total_count": 1,
+        "artifacts": [contract_row],
+    }
+    provider.byte_values[(tf, f"/actions/artifacts/{CONTRACT_ARTIFACT}/zip")] = contract_zip
     for index, (run_id, service, predecessor, terminal, has_identity) in enumerate(child_specs, 20):
         created = f"2026-08-13T01:{index:02d}:00Z"
         child = run(
@@ -380,10 +616,12 @@ def fixture() -> FakeProvider:
             ],
         }
     provider.json_values[(tf, f"/actions/runs/{FRONTIER_RUN}")] = copy.deepcopy(child_runs[-1])
-    provider.json_values[(tf, "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100")] = {
+    child_list = {
         "total_count": len(child_runs),
         "workflow_runs": child_runs,
     }
+    provider.json_values[(tf, CHILD_WINDOW_EXACT_ENDPOINT)] = child_list
+    provider.json_values[(tf, CHILD_WINDOW_OPEN_ENDPOINT)] = copy.deepcopy(child_list)
     return provider
 
 
@@ -395,6 +633,139 @@ def replace_receipt(provider: FakeProvider, run_id: int, mutate) -> None:
     receipt["receipt_sha256"] = ""
     receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
     provider.byte_values[key] = archive(subject.ARTIFACT_FILE, canonical(receipt))
+
+
+def replace_consumer_contract(provider: FakeProvider, mutate) -> None:
+    key = (
+        subject.TF_REPOSITORY,
+        f"/actions/artifacts/{CONTRACT_ARTIFACT}/zip",
+    )
+    with zipfile.ZipFile(io.BytesIO(provider.byte_values[key])) as value:
+        contract = json.loads(value.read(subject.CONSUMER_CONTRACT_FILE))
+    mutate(contract)
+    contract.pop("payload_sha256", None)
+    contract["payload_sha256"] = hashlib.sha256(canonical(contract)).hexdigest()
+    zip_raw = archive(subject.CONSUMER_CONTRACT_FILE, canonical(contract) + b"\n")
+    provider.byte_values[key] = zip_raw
+    rows = provider.json_values[
+        (
+            subject.TF_REPOSITORY,
+            f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100",
+        )
+    ]["artifacts"]
+    rows[0]["digest"] = "sha256:" + hashlib.sha256(zip_raw).hexdigest()
+
+
+def failed_relay_fixture() -> FakeProvider:
+    provider = fixture()
+    app = subject.APP_REPOSITORY
+    tf = subject.TF_REPOSITORY
+    relay_query = "event=workflow_run&status=completed&head_sha=" + SOURCE + "&per_page=100"
+    relay_list = provider.json_values[
+        (app, f"/actions/workflows/dispatch-staging-deploys.yml/runs?{relay_query}")
+    ]
+    relay_list["workflow_runs"][0]["conclusion"] = "failure"
+    provider.json_values[(app, f"/actions/runs/{RELAY_RUN}/artifacts?per_page=100")] = {
+        "total_count": 0,
+        "artifacts": [],
+    }
+    provider.byte_values[(app, f"/actions/runs/{RELAY_RUN}/logs")] = archive(
+        "0_dispatch.txt",
+        b"Watching web deploy run 301.\n",
+    )
+    provider.json_values[(app, f"/actions/runs/{RELAY_RUN}/attempts/1/jobs?per_page=100")] = {
+        "total_count": 1,
+        "jobs": [
+            {
+                "name": "dispatch",
+                "steps": [
+                    {
+                        "name": "Deploy each staging service in turn and prove each one landed",
+                        "number": 5,
+                        "conclusion": "failure",
+                    },
+                    {
+                        "name": "Publish the convergence receipt",
+                        "number": 6,
+                        "conclusion": "skipped",
+                    },
+                ],
+            }
+        ],
+    }
+
+    runs_key = (
+        tf,
+        CHILD_WINDOW_EXACT_ENDPOINT,
+    )
+    run_list = provider.json_values[runs_key]
+    run_list["workflow_runs"] = [row for row in run_list["workflow_runs"] if row["id"] != 302]
+    run_list["workflow_runs"][0]["conclusion"] = "failure"
+
+    def fail_web(value: dict) -> None:
+        value["deploy_result"] = "failure"
+        value["terminal_result"] = "failure"
+        value["failed_stage"] = produced(
+            {
+                "primary": {"job": "Deploy", "step": "Resolve inputs", "number": 1},
+                "additional": [],
+                "unique": True,
+            }
+        )
+        value["facts"]["candidate"] = {
+            "task_definition": missing(),
+            "image_digest": missing(),
+        }
+        value["facts"]["terminal"] = missing()
+        value["facts"]["mutation_count"] = produced(0)
+        value["facts"]["prior_job_status"] = produced("failure")
+
+    replace_receipt(provider, 301, fail_web)
+    provider.json_values[(tf, "/actions/runs/301/attempts/1/jobs?per_page=100")] = {
+        "total_count": 1,
+        "jobs": [
+            {
+                "name": "Deploy",
+                "steps": [{"name": "Resolve inputs", "number": 1, "conclusion": "failure"}],
+            }
+        ],
+    }
+
+    resumed_web = run(
+        307,
+        repository=tf,
+        workflow=subject.DEPLOY_WORKFLOW,
+        event="workflow_dispatch",
+        head_sha=TF_HEAD,
+        created="2026-08-13T01:20:30Z",
+    )
+    run_list["workflow_runs"].append(resumed_web)
+    run_list["total_count"] = len(run_list["workflow_runs"])
+    provider.json_values[(tf, "/actions/runs/307/artifacts?per_page=100")] = {
+        "total_count": 1,
+        "artifacts": [artifact(1307, "leaf-platform-staging-service-run-307-attempt-1", 307, TF_HEAD)],
+    }
+    provider.byte_values[(tf, "/actions/artifacts/1307/zip")] = archive(
+        subject.ARTIFACT_FILE,
+        canonical(
+            service_receipt(
+                "web",
+                307,
+                predecessor="leaf-platform-web:1",
+                terminal_td="leaf-platform-web:2",
+            )
+        ),
+    )
+    provider.json_values[(tf, "/actions/runs/307/attempts/1/jobs?per_page=100")] = {
+        "total_count": 1,
+        "jobs": [
+            {
+                "name": "Deploy",
+                "steps": [{"name": "Done", "number": 1, "conclusion": "success"}],
+            }
+        ],
+    }
+    return provider
 
 
 class ConvergenceFinalizerTests(unittest.TestCase):
@@ -409,11 +780,289 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         with self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
             subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
 
+    @staticmethod
+    def run_rows(run_ids: list[int]) -> list[dict[str, object]]:
+        return [
+            run(
+                run_id,
+                repository=subject.TF_REPOSITORY,
+                workflow=subject.DEPLOY_WORKFLOW,
+                event="workflow_dispatch",
+                head_sha=TF_HEAD,
+                created="2026-08-14T01:00:00Z",
+            )
+            for run_id in run_ids
+        ]
+
+    @staticmethod
+    def comparison(
+        source: str,
+        files: list[dict[str, str]],
+        *,
+        current: str = "39c17213f2573542c2b58743ace12ed5b682f2dc",
+        commits: list[str] | None = None,
+    ) -> dict[str, object]:
+        commit_shas = commits or ["1" * 40, current]
+        return {
+            "status": "ahead",
+            "ahead_by": len(commit_shas),
+            "behind_by": 0,
+            "total_commits": len(commit_shas),
+            "base_commit": {"sha": source},
+            "merge_base_commit": {"sha": source},
+            "commits": [{"sha": sha} for sha in commit_shas],
+            "files": files,
+        }
+
+    def test_frozen_build_accepts_exact_verifier_only_descendant_main(self) -> None:
+        provider = FakeProvider()
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        commits = [
+            "baf4b255753354c52005be65799731df27087fe2",
+            "20d86fe5d308c849485346712754d449d3b7e8d5",
+            "39c17213f2573542c2b58743ace12ed5b682f2dc",
+            "2f36f335241264ecbca6a873796cf8ddc4972a6a",
+            "68e28c330fc80cdac32f178f8c657673769f04d1",
+            "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc",
+        ]
+        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
+        provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = self.comparison(
+            source,
+            [
+                {"filename": "contract/platform-staging-convergence.v1.schema.json", "status": "modified"},
+                {"filename": "scripts/platform_staging_convergence.py", "status": "modified"},
+                {"filename": "scripts/test_platform_staging_convergence.py", "status": "modified"},
+            ],
+            current=current,
+            commits=commits,
+        )
+
+        subject._verify_arrival_source(provider, source)
+
+    def test_arrival_source_rejects_harmful_or_unproved_main_drift(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "39c17213f2573542c2b58743ace12ed5b682f2dc"
+        valid_files = [{"filename": "scripts/platform_staging_convergence.py", "status": "modified"}]
+
+        def diverged(value: dict[str, object]) -> None:
+            value["status"] = "diverged"
+
+        def wrong_merge_base(value: dict[str, object]) -> None:
+            value["merge_base_commit"] = {"sha": "0" * 40}
+
+        def missing_commits(value: dict[str, object]) -> None:
+            value.pop("commits")
+
+        def empty_commits(value: dict[str, object]) -> None:
+            value["commits"] = []
+
+        def truncated_commits(value: dict[str, object]) -> None:
+            value["commits"] = value["commits"][:-1]
+
+        def overlong_commits(value: dict[str, object]) -> None:
+            value["commits"] = [*value["commits"], {"sha": "2" * 40}]
+
+        def duplicate_commit(value: dict[str, object]) -> None:
+            value["commits"] = [value["commits"][0], value["commits"][0]]
+
+        def malformed_commit(value: dict[str, object]) -> None:
+            value["commits"] = [{"sha": "not-a-sha"}, value["commits"][-1]]
+
+        def wrong_terminal(value: dict[str, object]) -> None:
+            value["commits"][-1] = {"sha": "0" * 40}
+
+        def malformed_count(value: dict[str, object]) -> None:
+            value["behind_by"] = False
+
+        def product_path(value: dict[str, object]) -> None:
+            value["files"] = [{"filename": "server/app.py", "status": "modified"}]
+
+        def removed_verifier(value: dict[str, object]) -> None:
+            value["files"] = [{"filename": valid_files[0]["filename"], "status": "removed"}]
+
+        def duplicate_path(value: dict[str, object]) -> None:
+            value["files"] = [*valid_files, *valid_files]
+
+        def empty_drift(value: dict[str, object]) -> None:
+            value["files"] = []
+
+        for mutate in (
+            diverged,
+            wrong_merge_base,
+            missing_commits,
+            empty_commits,
+            truncated_commits,
+            overlong_commits,
+            duplicate_commit,
+            malformed_commit,
+            wrong_terminal,
+            malformed_count,
+            product_path,
+            removed_verifier,
+            duplicate_path,
+            empty_drift,
+        ):
+            with self.subTest(mutate=mutate.__name__), self.assertRaisesRegex(
+                subject.ContractError, "^ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN$"
+            ):
+                provider = FakeProvider()
+                provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
+                comparison = self.comparison(source, copy.deepcopy(valid_files))
+                mutate(comparison)
+                provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = comparison
+                subject._verify_arrival_source(provider, source)
+
+    def test_run_list_growth_between_pages_restarts_to_one_stable_snapshot(self) -> None:
+        provider = FakeProvider()
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        old_ids = list(range(201, 100, -1))
+        new_ids = [202, *old_ids]
+        provider.json_sequences[(subject.TF_REPOSITORY, base)] = [
+            {"total_count": len(old_ids), "workflow_runs": self.run_rows(old_ids[:100])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[:100])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[:100])},
+        ]
+        provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = [
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+            {"total_count": len(new_ids), "workflow_runs": self.run_rows(new_ids[100:])},
+        ]
+
+        rows = subject._workflow_run_rows(
+            provider,
+            subject.TF_REPOSITORY,
+            "deploy-leaf-platform-staging.yml",
+            {"event": "workflow_dispatch", "per_page": 100},
+        )
+
+        self.assertEqual([row["id"] for row in rows], new_ids)
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, base)), 3)
+
+    def test_run_list_snapshot_rejects_non_append_drift_and_malformed_pages(self) -> None:
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        cases = (
+            (
+                "deletion",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 1])}, {"total_count": 1, "workflow_runs": self.run_rows([2])}],
+                [],
+                "PROVIDER_RUN_LIST_DRIFT",
+            ),
+            (
+                "reordering",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 1])}, {"total_count": 2, "workflow_runs": self.run_rows([1, 2])}],
+                [],
+                "PROVIDER_RUN_LIST_DRIFT",
+            ),
+            (
+                "duplicate",
+                [{"total_count": 2, "workflow_runs": self.run_rows([2, 2])}],
+                [],
+                "PROVIDER_RUN_DUPLICATE",
+            ),
+            (
+                "invalid",
+                [{"total_count": 1, "workflow_runs": [{"id": True}]}],
+                [],
+                "PROVIDER_RUN_LIST_INVALID",
+            ),
+            (
+                "gap",
+                [{"total_count": 101, "workflow_runs": self.run_rows(list(range(201, 101, -1)))}],
+                [{"total_count": 101, "workflow_runs": []}],
+                "PROVIDER_RUN_PAGINATION_UNPROVEN",
+            ),
+        )
+        for name, first_pages, second_pages, reason in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
+                provider = FakeProvider()
+                provider.json_sequences[(subject.TF_REPOSITORY, base)] = first_pages
+                if second_pages:
+                    provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = second_pages
+                subject._workflow_run_rows(
+                    provider,
+                    subject.TF_REPOSITORY,
+                    "deploy-leaf-platform-staging.yml",
+                    {"event": "workflow_dispatch", "per_page": 100},
+                )
+
+    def test_run_list_growth_exhaustion_fails_closed(self) -> None:
+        provider = FakeProvider()
+        base = "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100"
+        page_two = base + "&page=2"
+        provider.json_sequences[(subject.TF_REPOSITORY, base)] = [
+            {"total_count": total, "workflow_runs": self.run_rows(list(range(total + 100, total, -1)))}
+            for total in (101, 102, 103)
+        ]
+        provider.json_sequences[(subject.TF_REPOSITORY, page_two)] = [
+            {"total_count": total, "workflow_runs": self.run_rows([1])}
+            for total in (102, 103, 104)
+        ]
+
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_DRIFT$"):
+            subject._workflow_run_rows(
+                provider,
+                subject.TF_REPOSITORY,
+                "deploy-leaf-platform-staging.yml",
+                {"event": "workflow_dispatch", "per_page": 100},
+            )
+
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, base)), 3)
+
+    def test_v3_relay_binds_raw_supply_file_sha_and_exact_candidate(self) -> None:
+        candidate = v3_manifest()
+        raw = (json.dumps(candidate, indent=2, sort_keys=True) + "\n").encode()
+        raw_sha = hashlib.sha256(raw).hexdigest()
+        canonical_sha = hashlib.sha256(canonical(candidate)).hexdigest()
+        self.assertNotEqual(raw_sha, canonical_sha)
+        build = {"run_id": 31415926535, "run_attempt": 1, "head_sha": SOURCE}
+        supply = subject._supply(
+            candidate,
+            build,
+            APP_TREE,
+            file_sha256=raw_sha,
+        )
+        self.assertEqual(supply["manifest_sha256"], raw_sha)
+        receipt = {
+            "schema": "leaf.staging-converged.v2",
+            "release_source_revision": SOURCE,
+            "build_run_attempt": 1,
+            "relay_run_id": RELAY_RUN,
+            "supply_set_sha256": raw_sha,
+            "candidate_supply_set": copy.deepcopy(candidate),
+            "automatic_surfaces": ["web", "app"],
+            "surface_results": {"web": {}, "app": {}},
+            "non_relay_services": {
+                "broker": "not_automatically_reconciled",
+                "harness": "not_automatically_reconciled",
+                "canonical-worker": "not_automatically_reconciled",
+            },
+            "full_fleet_identity_stamped": False,
+        }
+        subject._relay_receipt(receipt, build, supply, RELAY_RUN, candidate)
+
+        wrong_hash = copy.deepcopy(receipt)
+        wrong_hash["supply_set_sha256"] = canonical_sha
+        with self.assertRaisesRegex(subject.ContractError, "^RELAY_RECEIPT_LINEAGE_MISMATCH$"):
+            subject._relay_receipt(wrong_hash, build, supply, RELAY_RUN, candidate)
+
+        changed_candidate = copy.deepcopy(receipt)
+        changed_candidate["candidate_supply_set"]["services"]["app"]["image_digest"] = (
+            "sha256:" + "f" * 64
+        )
+        with self.assertRaisesRegex(subject.ContractError, "^RELAY_RECEIPT_LINEAGE_MISMATCH$"):
+            subject._relay_receipt(changed_candidate, build, supply, RELAY_RUN, candidate)
+
     def test_future_provider_shape_produces_one_complete_strict_receipt(self) -> None:
         provider = fixture()
         receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
         jsonschema.Draft202012Validator(self.schema).validate(receipt)
         self.assertTrue(receipt["terminal_complete"])
+        self.assertEqual(receipt["relay"]["mode"], "converged_relay")
+        self.assertEqual(receipt["relay"]["artifact"]["status"], "produced")
+        self.assertEqual(receipt["relay"]["failure_evidence"], missing())
         self.assertEqual(receipt["relay"]["children"], {"web": 301, "app": 302})
         self.assertEqual(receipt["services"]["app"]["selected_run_id"], FRONTIER_RUN)
         self.assertEqual(len(receipt["services"]["app"]["attempts"]), 2)
@@ -424,6 +1073,178 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         copy_receipt["evidence_sha256"] = ""
         self.assertEqual(checksum, hashlib.sha256(canonical(copy_receipt)).hexdigest())
         self.assertTrue(all(call[0].startswith("GET_") for call in provider.calls))
+        self.assertFalse(
+            any(
+                repository == subject.TF_REPOSITORY and endpoint.startswith("/git/")
+                for _, repository, endpoint in provider.calls
+            )
+        )
+
+    def test_child_window_avoids_provider_thousand_run_cap(self) -> None:
+        provider = fixture()
+        base = (
+            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+            "event=workflow_dispatch&per_page=100"
+        )
+        for page in range(1, 11):
+            endpoint = base if page == 1 else f"{base}&page={page}"
+            provider.json_values[(subject.TF_REPOSITORY, endpoint)] = {
+                "total_count": 1012,
+                "workflow_runs": [
+                    {"id": page * 1000 + offset} for offset in range(100)
+                ],
+            }
+        provider.json_values[(subject.TF_REPOSITORY, f"{base}&page=11")] = {
+            "total_count": 0,
+            "workflow_runs": [],
+        }
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_DRIFT$"):
+            subject._workflow_run_rows(
+                provider,
+                subject.TF_REPOSITORY,
+                "deploy-leaf-platform-staging.yml",
+                {"event": "workflow_dispatch", "per_page": 100},
+            )
+
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        self.assertTrue(receipt["terminal_complete"])
+        child_list_calls = [
+            endpoint
+            for method, repository, endpoint in provider.calls
+            if method == "GET_JSON"
+            and repository == subject.TF_REPOSITORY
+            and endpoint.startswith(
+                "/actions/workflows/deploy-leaf-platform-staging.yml/runs?"
+            )
+        ]
+        self.assertIn(CHILD_WINDOW_EXACT_ENDPOINT, child_list_calls)
+        self.assertEqual(child_list_calls[-1], CHILD_WINDOW_EXACT_ENDPOINT)
+
+    def test_required_child_outside_verified_window_fails_closed(self) -> None:
+        provider = fixture()
+        rows = provider.json_values[
+            (subject.TF_REPOSITORY, CHILD_WINDOW_EXACT_ENDPOINT)
+        ]["workflow_runs"]
+        child = next(row for row in rows if row["id"] == 301)
+        child["created_at"] = "2026-08-13T01:09:59Z"
+        child["updated_at"] = "2026-08-13T01:09:59Z"
+        self.assert_reason("CHILD_RUN_WINDOW_MISMATCH", provider)
+
+    def test_consumer_contract_provider_binding_fails_closed(self) -> None:
+        query_key = (
+            subject.TF_REPOSITORY,
+            "/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/"
+            "runs?branch=main&event=push&status=success&per_page=100",
+        )
+        artifact_key = (
+            subject.TF_REPOSITORY,
+            f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100",
+        )
+
+        provider = fixture()
+        duplicate = copy.deepcopy(provider.json_values[query_key]["workflow_runs"][0])
+        duplicate["id"] = CONTRACT_RUN + 1
+        provider.json_values[query_key]["workflow_runs"].append(duplicate)
+        provider.json_values[query_key]["total_count"] = 2
+        self.assert_reason("CONSUMER_CONTRACT_RUN_CARDINALITY", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"][0]["workflow_run"]["head_sha"] = "0" * 40
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_ASSOCIATION", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"].append(
+            copy.deepcopy(provider.json_values[artifact_key]["artifacts"][0])
+        )
+        provider.json_values[artifact_key]["total_count"] = 2
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_CARDINALITY", provider)
+
+        provider = fixture()
+        provider.json_values[artifact_key]["artifacts"][0]["digest"] = "sha256:" + "0" * 64
+        self.assert_reason("CONSUMER_CONTRACT_ARTIFACT_HASH_MISMATCH", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value.__setitem__("extra", True),
+        )
+        self.assert_reason("CONSUMER_CONTRACT_INVALID", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value["producer"].__setitem__("head_sha", "0" * 40),
+        )
+        self.assert_reason("CONSUMER_CONTRACT_PRODUCER_MISMATCH", provider)
+
+        provider = fixture()
+        replace_consumer_contract(
+            provider,
+            lambda value: value["consumer"].__setitem__(
+                "deploy_workflow_blob", "0" * 40
+            ),
+        )
+        self.assert_reason("SERVICE_RECEIPT_WORKFLOW_MISMATCH", provider)
+
+        provider = fixture()
+        replace_receipt(
+            provider,
+            303,
+            lambda value: value["requested"]["consumer_contract"].__setitem__(
+                "sha256", "0" * 64
+            ),
+        )
+        self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
+
+    def test_failed_relay_and_provider_bound_resumes_produce_one_complete_receipt(self) -> None:
+        provider = failed_relay_fixture()
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        jsonschema.Draft202012Validator(self.schema).validate(receipt)
+
+        self.assertTrue(receipt["terminal_complete"])
+        self.assertEqual(receipt["relay"]["conclusion"], "failure")
+        self.assertEqual(receipt["relay"]["mode"], "resumed_after_failure")
+        self.assertEqual(receipt["relay"]["artifact"], missing())
+        self.assertEqual(receipt["relay"]["children"], {"web": 301})
+        self.assertEqual(
+            receipt["relay"]["failure_evidence"]["value"]["failed_stage"],
+            "service_dispatch",
+        )
+        web = receipt["services"]["web"]
+        self.assertEqual(web["selected_run_id"], 307)
+        self.assertEqual(
+            [attempt["role"] for attempt in web["attempts"]],
+            ["prior_failed_web", "terminal_web"],
+        )
+        self.assertEqual(receipt["services"]["app"]["selected_run_id"], FRONTIER_RUN)
+
+    def test_failed_relay_rejects_convergence_artifact_or_conflicting_job_evidence(self) -> None:
+        provider = failed_relay_fixture()
+        relay_name = f"staging-converged-{SOURCE}-attempt-1"
+        provider.json_values[(subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/artifacts?per_page=100")] = {
+            "total_count": 1,
+            "artifacts": [artifact(999, relay_name, RELAY_RUN, SOURCE)],
+        }
+        self.assert_reason("FAILED_RELAY_ARTIFACT_PRESENT", provider)
+
+        provider = failed_relay_fixture()
+        jobs = provider.json_values[
+            (subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/attempts/1/jobs?per_page=100")
+        ]
+        jobs["jobs"][0]["steps"][1]["conclusion"] = "success"
+        self.assert_reason("RELAY_FAILURE_EVIDENCE_INVALID", provider)
+
+    def test_failed_relay_child_must_be_the_bound_failed_service_attempt(self) -> None:
+        provider = failed_relay_fixture()
+        replace_receipt(
+            provider,
+            301,
+            lambda value: (
+                value["requested"].__setitem__("service", "broker"),
+                value["facts"]["service"].__setitem__("value", "broker"),
+            ),
+        )
+        self.assert_reason("FAILED_RELAY_CHILD_INVALID", provider)
 
     def test_successful_bluegreen_cleanup_is_not_classified_as_rollback(self) -> None:
         provider = fixture()
@@ -454,7 +1275,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(failed_run)
         provider.json_values[list_key]["total_count"] += 1
@@ -464,27 +1285,34 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             "artifacts": [artifact(1307, name, failed_run_id, TF_HEAD)],
         }
         receipt = service_receipt(
-            "broker",
+            "app",
             failed_run_id,
-            predecessor="leaf-platform-broker:1",
-            terminal_td="leaf-platform-broker:1",
+            predecessor="leaf-platform-app:2",
+            terminal_td="leaf-platform-app:2",
         )
         receipt["deploy_result"] = "failure"
         receipt["terminal_result"] = "failure"
+        receipt["requested"]["app_deploy_intent"] = "configuration"
+        receipt["requested"]["hold_seconds"] = "180"
+        receipt["requested"]["source_revision"] = "not_produced"
         receipt["failed_stage"] = produced(
             {
-                "primary": {"job": "Deploy", "step": "Resolve inputs", "number": 1},
+                "primary": {
+                    "job": "deploy",
+                    "step": "Resolve reviewed live deployment identity",
+                    "number": 33,
+                },
                 "additional": [],
                 "unique": True,
             }
         )
         receipt["facts"]["candidate"] = {
             "task_definition": missing(),
-            "image_digest": missing(),
+            "image_digest": produced(DIGESTS["app"]),
         }
-        receipt["facts"]["terminal"] = missing()
         receipt["facts"]["mutation_count"] = produced(0)
         receipt["facts"]["prior_job_status"] = produced("failure")
+        receipt["facts"]["rollback"]["value"]["direct_failure_step"] = "success"
         receipt["receipt_sha256"] = ""
         receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
         provider.byte_values[(subject.TF_REPOSITORY, "/actions/artifacts/1307/zip")] = archive(
@@ -494,17 +1322,25 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             "total_count": 1,
             "jobs": [
                 {
-                    "name": "Deploy",
-                    "steps": [{"name": "Resolve inputs", "number": 1, "conclusion": "failure"}],
+                    "name": "deploy",
+                    "steps": [
+                        {
+                            "name": "Resolve reviewed live deployment identity",
+                            "number": 33,
+                            "conclusion": "failure",
+                        }
+                    ],
                 }
             ],
         }
         result = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
-        broker = result["services"]["broker"]
-        self.assertEqual(len(broker["attempts"]), 2)
-        self.assertEqual(broker["attempts"][0]["role"], "prior_failed_broker")
+        app = result["services"]["app"]
+        self.assertEqual(len(app["attempts"]), 3)
+        failed_attempt = next(
+            attempt for attempt in app["attempts"] if attempt["role"] == "prior_failed_app"
+        )
         self.assertEqual(
-            broker["attempts"][0]["outcome"],
+            failed_attempt["outcome"],
             {
                 "preflight_state": "not_required",
                 "mutation_state": "not_started",
@@ -514,11 +1350,40 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 "receipt_outcome": "verified",
                 "failed_stage": "input_resolution",
                 "terminal_reason_code": "pre_mutation_failure",
-                "terminal_healthy": False,
+                "terminal_healthy": True,
             },
         )
-        self.assertEqual(broker["selected_run_id"], 303)
+        self.assertEqual(app["selected_run_id"], FRONTIER_RUN)
         jsonschema.Draft202012Validator(self.schema).validate(result)
+
+        def terminal_differs(value: dict) -> None:
+            terminal = value["facts"]["terminal"]["value"]
+            terminal["task_definition"] = "leaf-platform-app:99"
+            terminal["primary_deployments"][0]["task_definition"] = "leaf-platform-app:99"
+
+        def mutation_started(value: dict) -> None:
+            value["facts"]["mutation_count"] = produced(1)
+
+        def rollback_absent(value: dict) -> None:
+            value["facts"]["rollback"] = missing()
+
+        def rollback_failed(value: dict) -> None:
+            value["facts"]["rollback"]["value"]["direct_failure_step"] = "failure"
+
+        def terminal_unhealthy(value: dict) -> None:
+            value["facts"]["terminal"]["value"]["stable_1_1_0"] = False
+
+        for mutate, reason in (
+            (terminal_differs, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (mutation_started, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (rollback_absent, "SERVICE_ROLLBACK_EVIDENCE_INVALID"),
+            (rollback_failed, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+            (terminal_unhealthy, "SERVICE_ROLLBACK_EVIDENCE_CONFLICT"),
+        ):
+            with self.subTest(reason=reason, mutate=mutate.__name__):
+                invalid = copy.deepcopy(provider)
+                replace_receipt(invalid, failed_run_id, mutate)
+                self.assert_reason(reason, invalid)
 
     def test_post_mutation_failure_is_normalized_only_after_exact_predecessor_restore(self) -> None:
         provider = fixture()
@@ -534,7 +1399,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(failed_run)
         provider.json_values[list_key]["total_count"] += 1
@@ -651,6 +1516,22 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         self.assert_reason("SERVICE_OUTCOME_CONFLICT", provider)
 
     def test_raw_failed_step_text_is_allowlisted_and_never_published(self) -> None:
+        actual_input_failure = produced(
+            {
+                "primary": {
+                    "job": "deploy",
+                    "step": "Resolve and validate deployment inputs",
+                    "number": 2,
+                },
+                "additional": [],
+                "unique": True,
+            }
+        )
+        self.assertEqual(
+            subject._normalized_failed_stage(actual_input_failure, actual_input_failure),
+            "input_resolution",
+        )
+
         for raw in (
             "unknown provider step",
             "https://example.invalid/error",
@@ -678,6 +1559,72 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 replace_receipt(provider, 303, alter)
                 with self.assertRaises(subject.ContractError):
                     subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+
+    def test_exact_skip_accepts_only_the_producer_unreported_primary_shape(self) -> None:
+        facts = service_receipt(
+            "web",
+            303,
+            predecessor="leaf-platform-web:1",
+            terminal_td="leaf-platform-web:1",
+        )["facts"]
+        facts["terminal"]["value"]["primary_deployments"] = {"status": "not_produced"}
+
+        healthy, terminal_td, terminal_digest = subject._terminal_evidence(
+            facts, allow_unreported_primary=True
+        )
+        self.assertTrue(healthy)
+        self.assertEqual(terminal_td, "leaf-platform-web:1")
+        self.assertEqual(terminal_digest, DIGESTS["web"])
+        self.assertFalse(subject._terminal_evidence(facts)[0])
+        child = {
+            "terminal": facts["terminal"],
+            "outcome": {"deployment_outcome": "skipped_exact"},
+        }
+        self.assertEqual(subject._terminal_digest(child), DIGESTS["web"])
+        child["outcome"]["deployment_outcome"] = "succeeded"
+        with self.assertRaises(subject.ContractError):
+            subject._terminal_digest(child)
+
+    def test_prior_relay_success_requires_the_same_convergence_and_earlier_run(self) -> None:
+        selected_receipt = service_receipt(
+            "web", 307, predecessor="leaf-platform-web:1", terminal_td="leaf-platform-web:1"
+        )
+        selected_receipt["requested"]["convergence_id"] = f"{SOURCE}-1-web"
+        prior_receipt = copy.deepcopy(selected_receipt)
+        self.assertEqual(
+            subject._prior_relay_role(
+                service="web",
+                relay_attempt=2,
+                run={"created_at": "2026-08-13T01:20:00Z"},
+                receipt=prior_receipt,
+                selected_run={"created_at": "2026-08-13T01:21:00Z"},
+                selected_receipt=selected_receipt,
+            ),
+            "prior_relay_web",
+        )
+        prior_receipt["requested"]["convergence_id"] = f"{SOURCE}-2-web"
+        self.assertIsNone(
+            subject._prior_relay_role(
+                service="web",
+                relay_attempt=2,
+                run={"created_at": "2026-08-13T01:20:00Z"},
+                receipt=prior_receipt,
+                selected_run={"created_at": "2026-08-13T01:21:00Z"},
+                selected_receipt=selected_receipt,
+            )
+        )
+
+    def test_pre_mutation_input_failure_needs_no_invented_predecessor(self) -> None:
+        previous = {
+            "role": "prior_failed_broker",
+            "terminal": missing(),
+            "predecessor_task_definition": missing(),
+            "outcome": {"mutation_count": 0},
+        }
+        self.assertIsNone(subject._expected_predecessor(previous))
+        previous["role"] = "terminal_broker"
+        with self.assertRaises(subject.ContractError):
+            subject._expected_predecessor(previous)
 
     def test_raw_rollback_text_is_closed_and_cannot_override_structured_facts(self) -> None:
         for key, raw in (
@@ -805,13 +1752,18 @@ class ConvergenceFinalizerTests(unittest.TestCase):
 
     def test_newer_main_or_active_child_blocks_current_frontier(self) -> None:
         provider = fixture()
-        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")]["commit"]["sha"] = "0" * 40
+        current = "0" * 40
+        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")]["commit"]["sha"] = current
+        provider.json_values[(subject.APP_REPOSITORY, f"/compare/{SOURCE}...{current}")] = self.comparison(
+            SOURCE,
+            [{"filename": "server/app.py", "status": "modified"}],
+        )
         self.assert_reason("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN", provider)
 
         provider = fixture()
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         active = run(
             399,
@@ -838,6 +1790,18 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 provider.byte_values[(subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/logs")] = archive("logs.txt", log)
                 self.assert_reason("RELAY_CHILD_CARDINALITY", provider)
 
+    def test_relay_log_summary_and_step_may_repeat_the_same_exact_children(self) -> None:
+        provider = fixture()
+        children = b"Watching web deploy run 301.\nWatching app deploy run 302.\n"
+        provider.byte_values[(subject.APP_REPOSITORY, f"/actions/runs/{RELAY_RUN}/logs")] = archive_members(
+            {
+                "0_dispatch.txt": children,
+                "dispatch/5_Deploy each staging service in turn and prove each one landed.txt": children,
+            }
+        )
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        self.assertEqual(receipt["relay"]["children"], {"web": 301, "app": 302})
+
     def test_service_receipt_extra_field_and_bad_checksum_fail(self) -> None:
         provider = fixture()
         replace_receipt(provider, 303, lambda value: value.__setitem__("extra", True))
@@ -849,6 +1813,43 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         receipt["receipt_sha256"] = "0" * 64
         provider.byte_values[key] = archive(subject.ARTIFACT_FILE, canonical(receipt))
         self.assert_reason("SERVICE_RECEIPT_CHECKSUM_INVALID", provider)
+
+    def test_service_receipt_accepts_closed_requested_evidence_summaries(self) -> None:
+        receipt = service_receipt(
+            "app",
+            306,
+            predecessor="leaf-platform-app:2",
+            terminal_td="leaf-platform-app:3",
+            with_identity=True,
+        )
+        requested = receipt["requested"]
+        requested["consumer_contract"] = {
+            "status": "produced",
+            "sha256": "1" * 64,
+            "utf8_bytes": 2312,
+        }
+        requested["supply_evidence"] = {
+            "status": "produced",
+            "sha256": "2" * 64,
+            "utf8_bytes": 11982,
+        }
+        receipt["receipt_sha256"] = ""
+        receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
+        self.assertEqual(subject._service_receipt(receipt), receipt)
+
+        for key, value in (
+            ("consumer_contract", {"status": "produced", "sha256": "1" * 64, "utf8_bytes": 0}),
+            ("supply_evidence", {"status": "produced", "sha256": "2" * 64, "utf8_bytes": True}),
+            ("supply_evidence", {"status": "produced", "sha256": "bad", "utf8_bytes": 1}),
+            ("consumer_contract", {"status": "not_produced", "extra": True}),
+        ):
+            with self.subTest(key=key, value=value):
+                invalid = copy.deepcopy(receipt)
+                invalid["requested"][key] = value
+                invalid["receipt_sha256"] = ""
+                invalid["receipt_sha256"] = hashlib.sha256(canonical(invalid)).hexdigest()
+                with self.assertRaisesRegex(subject.ContractError, "SERVICE_RECEIPT_REQUEST_INVALID"):
+                    subject._service_receipt(invalid)
 
     def test_failed_step_must_match_jobs_api(self) -> None:
         provider = fixture()
@@ -939,7 +1940,7 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         list_key = (
             subject.TF_REPOSITORY,
-            "/actions/workflows/deploy-leaf-platform-staging.yml/runs?event=workflow_dispatch&per_page=100",
+            CHILD_WINDOW_EXACT_ENDPOINT,
         )
         provider.json_values[list_key]["workflow_runs"].append(raw)
         provider.json_values[list_key]["total_count"] += 1

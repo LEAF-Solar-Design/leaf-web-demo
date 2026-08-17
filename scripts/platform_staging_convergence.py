@@ -9,6 +9,7 @@ not dispatch workflows, call AWS, or accept a caller-built evidence bundle.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any, Protocol
 import unicodedata
 import urllib.error
@@ -35,6 +37,22 @@ TF_REPOSITORY = "LEAF-Solar-Design/leaf-automation-aws-terraform"
 BUILD_WORKFLOW = ".github/workflows/build-platform-images.yml"
 RELAY_WORKFLOW = ".github/workflows/dispatch-staging-deploys.yml"
 DEPLOY_WORKFLOW = ".github/workflows/deploy-leaf-platform-staging.yml"
+CONSUMER_CONTRACT_WORKFLOW = (
+    ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml"
+)
+CONSUMER_CONTRACT_SCHEMA_PATH = (
+    "contract/leaf-platform-staging-consumer-contract.v1.schema.json"
+)
+CONSUMER_CONTRACT_SCHEMA = "leaf.platform-staging-consumer-contract.v1"
+CONSUMER_DISPATCH_SCHEMA = "leaf.platform-staging-consumer-contract-dispatch.v1"
+CONSUMER_CONTRACT_FILE = "consumer-contract.json"
+CONSUMER_CONTRACT_ARTIFACT_PREFIX = (
+    "leaf-platform-staging-consumer-contract-run-"
+)
+CONSUMER_CONTRACT_VERSION = 1
+CONSUMER_DIGEST_MARKER = "leaf.staging-digest-aware-consumer.v1"
+CONSUMER_MUTATION_GROUP = "leaf-platform-staging-ecs-mutation"
+CONSUMER_DEPLOYMENT_ENVIRONMENT = "aws-apply"
 OUTPUT_SCHEMA = "leaf.platform-staging-convergence.v1"
 SERVICE_RECEIPT_SCHEMA = "leaf.platform-staging-service-run.v1"
 ENVIRONMENT = "staging"
@@ -73,6 +91,10 @@ FAILED_STAGE_ALLOWLIST = {
     SERVICE_RECEIPT_SCHEMA: {
         ("Deploy", "Resolve inputs"): "input_resolution",
         ("deploy", "Resolve inputs"): "input_resolution",
+        ("Deploy", "Resolve and validate deployment inputs"): "input_resolution",
+        ("deploy", "Resolve and validate deployment inputs"): "input_resolution",
+        ("Deploy", "Resolve reviewed live deployment identity"): "input_resolution",
+        ("deploy", "Resolve reviewed live deployment identity"): "input_resolution",
         ("Deploy", "Promote one ECS service and verify task health"): "service_promotion",
         ("deploy", "Promote one ECS service and verify task health"): "service_promotion",
     }
@@ -109,6 +131,16 @@ MAX_RECEIPT_BYTES = 262144
 MAX_PROVIDER_JSON_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
+MAX_PROVIDER_READ_ATTEMPTS = 3
+MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
+MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
+VERIFIER_ONLY_MAIN_DRIFT_PATHS = frozenset(
+    {
+        "contract/platform-staging-convergence.v1.schema.json",
+        "scripts/platform_staging_convergence.py",
+        "scripts/test_platform_staging_convergence.py",
+    }
+)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -165,14 +197,25 @@ class GitHubProvider:
                 "User-Agent": "leaf-platform-convergence-finalizer/1.0",
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
-                if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
-                    raise ContractError("PROVIDER_BODY_TOO_LARGE")
-                return raw
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ContractError("PROVIDER_READ_FAILED") from exc
+        opener = urllib.request.build_opener(_ArtifactRedirectHandler())
+        for attempt in range(1, MAX_PROVIDER_READ_ATTEMPTS + 1):
+            try:
+                with opener.open(request, timeout=45) as response:
+                    raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
+                    if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
+                        raise ContractError("PROVIDER_BODY_TOO_LARGE")
+                    return raw
+            except urllib.error.HTTPError as exc:
+                retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
+                transient = exc.code == 429 or 500 <= exc.code <= 599 or (exc.code == 403 and retry_after is not None)
+                if not transient or attempt == MAX_PROVIDER_READ_ATTEMPTS:
+                    raise ContractError("PROVIDER_READ_FAILED") from exc
+                time.sleep(retry_after if retry_after is not None else 2 ** (attempt - 1))
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt == MAX_PROVIDER_READ_ATTEMPTS:
+                    raise ContractError("PROVIDER_READ_FAILED") from exc
+                time.sleep(2 ** (attempt - 1))
+        raise AssertionError("provider retry loop must return or raise")
 
     def json(self, repository: str, endpoint: str) -> Any:
         try:
@@ -185,6 +228,22 @@ class GitHubProvider:
 
     def bytes(self, repository: str, endpoint: str) -> bytes:
         return self._request(repository, endpoint)
+
+
+class _ArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep GitHub credentials off provider artifact storage redirects."""
+
+    def redirect_request(self, request: Any, file_pointer: Any, code: int, message: str, headers: Any, new_url: str) -> Any:
+        redirected = super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        if redirected is not None and urllib.parse.urlparse(new_url).hostname != urllib.parse.urlparse(request.full_url).hostname:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if value is None or not value.isascii() or not value.isdecimal():
+        return None
+    return min(int(value), MAX_PROVIDER_RETRY_DELAY_SECONDS)
 
 
 def _load_json(raw: bytes) -> Any:
@@ -344,6 +403,69 @@ def _workflow_blob(provider: Provider, repository: str, sha: str, path: str) -> 
     return tree_sha, _sha40(matches[0].get("sha"), "PROVIDER_WORKFLOW_BLOB_INVALID")
 
 
+def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
+    branch = provider.json(APP_REPOSITORY, "/branches/main")
+    if not isinstance(branch, dict) or not isinstance(branch.get("commit"), dict):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    current_sha = _sha40(branch["commit"].get("sha"), "ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    if current_sha == build_sha:
+        return
+    comparison = provider.json(APP_REPOSITORY, f"/compare/{build_sha}...{current_sha}")
+    if (
+        not isinstance(comparison, dict)
+        or not isinstance(comparison.get("files"), list)
+        or not isinstance(comparison.get("commits"), list)
+    ):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    base = comparison.get("base_commit")
+    merge_base = comparison.get("merge_base_commit")
+    commits = comparison["commits"]
+    ahead_by = comparison.get("ahead_by")
+    behind_by = comparison.get("behind_by")
+    total_commits = comparison.get("total_commits")
+    if (
+        comparison.get("status") != "ahead"
+        or isinstance(ahead_by, bool)
+        or not isinstance(ahead_by, int)
+        or ahead_by < 1
+        or isinstance(behind_by, bool)
+        or behind_by != 0
+        or isinstance(total_commits, bool)
+        or total_commits != ahead_by
+        or len(commits) != ahead_by
+        or not isinstance(base, dict)
+        or base.get("sha") != build_sha
+        or not isinstance(merge_base, dict)
+        or merge_base.get("sha") != build_sha
+    ):
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    commit_shas: list[str] = []
+    for row in commits:
+        if not isinstance(row, dict):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        commit_sha = _sha40(row.get("sha"), "ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        if commit_sha in commit_shas:
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        commit_shas.append(commit_sha)
+    if commit_shas[-1] != current_sha:
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    changed_paths: set[str] = set()
+    for row in comparison["files"]:
+        if not isinstance(row, dict):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        path = row.get("filename")
+        if (
+            not isinstance(path, str)
+            or path not in VERIFIER_ONLY_MAIN_DRIFT_PATHS
+            or path in changed_paths
+            or row.get("status") != "modified"
+        ):
+            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+        changed_paths.add(path)
+    if not changed_paths:
+        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+
+
 def _artifact_rows(provider: Provider, repository: str, run_id: int) -> list[dict[str, Any]]:
     raw = provider.json(repository, f"/actions/runs/{run_id}/artifacts?per_page=100")
     if not isinstance(raw, dict) or not isinstance(raw.get("artifacts"), list):
@@ -360,6 +482,38 @@ def _workflow_run_rows(
     parameters: dict[str, object],
 ) -> list[dict[str, Any]]:
     base = f"/actions/workflows/{workflow}/runs?" + urllib.parse.urlencode(parameters)
+    previous: tuple[list[dict[str, Any]], tuple[int, ...], int] | None = None
+    minimum_total = 0
+    for _scan in range(MAX_PROVIDER_RUN_SNAPSHOT_SCANS):
+        rows, total, growth = _workflow_run_snapshot(provider, repository, base, minimum_total)
+        if growth is not None:
+            minimum_total = growth
+            continue
+        run_ids = tuple(row["id"] for row in rows)
+        if previous is None:
+            previous = (rows, run_ids, total)
+            minimum_total = total
+            continue
+        _, previous_ids, previous_total = previous
+        if total < previous_total:
+            raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        if total == previous_total:
+            if run_ids != previous_ids:
+                raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+            return rows
+        added = total - previous_total
+        if run_ids[added:] != previous_ids:
+            raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        return rows
+    raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+
+
+def _workflow_run_snapshot(
+    provider: Provider,
+    repository: str,
+    base: str,
+    minimum_total: int,
+) -> tuple[list[dict[str, Any]], int, int | None]:
     page = 1
     output: list[dict[str, Any]] = []
     total: int | None = None
@@ -369,11 +523,16 @@ def _workflow_run_rows(
         raw = provider.json(repository, endpoint)
         if not isinstance(raw, dict) or not isinstance(raw.get("workflow_runs"), list):
             raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        current_total = raw.get("total_count")
+        if isinstance(current_total, bool) or not isinstance(current_total, int) or current_total < 0:
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
         if total is None:
-            total = raw.get("total_count")
-            if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-                raise ContractError("PROVIDER_RUN_LIST_INVALID")
-        elif raw.get("total_count") != total:
+            total = current_total
+            if total < minimum_total:
+                raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+        elif current_total > total:
+            return [], total, current_total
+        elif current_total < total:
             raise ContractError("PROVIDER_RUN_LIST_DRIFT")
         rows = raw["workflow_runs"]
         if not rows and len(output) < total:
@@ -392,7 +551,7 @@ def _workflow_run_rows(
             raise ContractError("PROVIDER_RUN_PAGINATION_UNPROVEN")
     if len(output) != total:
         raise ContractError("PROVIDER_RUN_PAGINATION_UNPROVEN")
-    return output
+    return output, total, None
 
 
 def _one_artifact(
@@ -436,6 +595,173 @@ def _one_artifact(
         raise ContractError("PROVIDER_ARTIFACT_JSON_INVALID") from exc
 
 
+def _consumer_contract_for_head(provider: Provider, head_sha: str) -> dict[str, Any]:
+    """Resolve one provider-owned Terraform consumer contract using Actions only."""
+    rows = _workflow_run_rows(
+        provider,
+        TF_REPOSITORY,
+        "publish-leaf-platform-staging-consumer-contract.yml",
+        {"branch": "main", "event": "push", "status": "success", "per_page": 100},
+    )
+    matches: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get("head_sha") != head_sha:
+            continue
+        run = _provider_run(
+            raw,
+            TF_REPOSITORY,
+            CONSUMER_CONTRACT_WORKFLOW,
+            "push",
+        )
+        if run["head_branch"] != "main" or run["conclusion"] != "success":
+            raise ContractError("CONSUMER_CONTRACT_RUN_INVALID")
+        matches.append(run)
+    if len(matches) != 1:
+        raise ContractError("CONSUMER_CONTRACT_RUN_CARDINALITY")
+    run = matches[0]
+    name = (
+        f"{CONSUMER_CONTRACT_ARTIFACT_PREFIX}{run['run_id']}"
+        f"-attempt-{run['run_attempt']}"
+    )
+    artifacts = [
+        row
+        for row in _artifact_rows(provider, TF_REPOSITORY, run["run_id"])
+        if row.get("name") == name and row.get("expired") is False
+    ]
+    if len(artifacts) != 1:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_CARDINALITY")
+    artifact = artifacts[0]
+    workflow_run = artifact.get("workflow_run")
+    if (
+        not isinstance(workflow_run, dict)
+        or workflow_run.get("id") != run["run_id"]
+        or workflow_run.get("head_sha") != head_sha
+        or workflow_run.get("head_branch") != "main"
+    ):
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_ASSOCIATION")
+    artifact_id = _positive(
+        artifact.get("id"), "CONSUMER_CONTRACT_ARTIFACT_INVALID"
+    )
+    provider_digest = artifact.get("digest")
+    if (
+        not isinstance(provider_digest, str)
+        or not provider_digest.startswith("sha256:")
+    ):
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_DIGEST_INVALID")
+    provider_sha = _sha64(
+        provider_digest.removeprefix("sha256:"),
+        "CONSUMER_CONTRACT_ARTIFACT_DIGEST_INVALID",
+    )
+    zip_raw = provider.bytes(
+        TF_REPOSITORY, f"/actions/artifacts/{artifact_id}/zip"
+    )
+    archive_sha = _sha(zip_raw)
+    if archive_sha != provider_sha:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_HASH_MISMATCH")
+    raw_contract = _zip_member(zip_raw, CONSUMER_CONTRACT_FILE)
+    try:
+        contract = _load_json(raw_contract)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ContractError("CONSUMER_CONTRACT_JSON_INVALID") from exc
+    contract = _exact(
+        contract,
+        {"artifact", "consumer", "payload_sha256", "producer", "schema", "version"},
+        "CONSUMER_CONTRACT_INVALID",
+    )
+    if (
+        contract["schema"] != CONSUMER_CONTRACT_SCHEMA
+        or contract["version"] != CONSUMER_CONTRACT_VERSION
+    ):
+        raise ContractError("CONSUMER_CONTRACT_INVALID")
+    payload_sha = _sha64(
+        contract["payload_sha256"], "CONSUMER_CONTRACT_DIGEST_INVALID"
+    )
+    unsigned = dict(contract)
+    del unsigned["payload_sha256"]
+    if _sha(_canonical(unsigned)) != payload_sha:
+        raise ContractError("CONSUMER_CONTRACT_DIGEST_MISMATCH")
+    contract_artifact = _exact(
+        contract["artifact"], {"file", "name"}, "CONSUMER_CONTRACT_INVALID"
+    )
+    if contract_artifact != {"file": CONSUMER_CONTRACT_FILE, "name": name}:
+        raise ContractError("CONSUMER_CONTRACT_ARTIFACT_MISMATCH")
+    producer = _exact(
+        contract["producer"],
+        {
+            "repository", "workflow_path", "workflow_blob", "run_id",
+            "run_attempt", "event", "branch", "head_sha", "head_tree",
+        },
+        "CONSUMER_CONTRACT_PRODUCER_INVALID",
+    )
+    if (
+        producer["repository"] != TF_REPOSITORY
+        or producer["workflow_path"] != CONSUMER_CONTRACT_WORKFLOW
+        or producer["run_id"] != run["run_id"]
+        or producer["run_attempt"] != run["run_attempt"]
+        or producer["event"] != "push"
+        or producer["branch"] != "main"
+        or producer["head_sha"] != head_sha
+    ):
+        raise ContractError("CONSUMER_CONTRACT_PRODUCER_MISMATCH")
+    _sha40(producer["workflow_blob"], "CONSUMER_CONTRACT_PRODUCER_INVALID")
+    tree = _sha40(producer["head_tree"], "CONSUMER_CONTRACT_PRODUCER_INVALID")
+    consumer = _exact(
+        contract["consumer"],
+        {
+            "contract_schema_path", "contract_schema_blob", "contract_version",
+            "deploy_workflow_path", "deploy_workflow_blob", "pins",
+        },
+        "CONSUMER_CONTRACT_CONSUMER_INVALID",
+    )
+    if (
+        consumer["contract_schema_path"] != CONSUMER_CONTRACT_SCHEMA_PATH
+        or consumer["contract_version"] != CONSUMER_CONTRACT_VERSION
+        or consumer["deploy_workflow_path"] != DEPLOY_WORKFLOW
+    ):
+        raise ContractError("CONSUMER_CONTRACT_CONSUMER_MISMATCH")
+    _sha40(
+        consumer["contract_schema_blob"], "CONSUMER_CONTRACT_CONSUMER_INVALID"
+    )
+    workflow_blob = _sha40(
+        consumer["deploy_workflow_blob"], "CONSUMER_CONTRACT_CONSUMER_INVALID"
+    )
+    pins = _exact(
+        consumer["pins"],
+        {"deployment_environment", "digest_aware_marker", "mutation_group"},
+        "CONSUMER_CONTRACT_PINS_INVALID",
+    )
+    if pins != {
+        "deployment_environment": CONSUMER_DEPLOYMENT_ENVIRONMENT,
+        "digest_aware_marker": CONSUMER_DIGEST_MARKER,
+        "mutation_group": CONSUMER_MUTATION_GROUP,
+    }:
+        raise ContractError("CONSUMER_CONTRACT_PINS_MISMATCH")
+    dispatch: dict[str, Any] = {
+        "artifact": {
+            "id": artifact_id,
+            "name": name,
+            "producer_run_id": run["run_id"],
+            "producer_run_attempt": run["run_attempt"],
+            "provider_sha256": provider_sha,
+            "archive_sha256": archive_sha,
+            "file_sha256": _sha(raw_contract),
+        },
+        "contract": contract,
+        "schema": CONSUMER_DISPATCH_SCHEMA,
+    }
+    dispatch["envelope_sha256"] = _sha(_canonical(dispatch))
+    encoded = base64.urlsafe_b64encode(_canonical(dispatch)).rstrip(b"=")
+    return {
+        "source_tree": tree,
+        "workflow_blob": workflow_blob,
+        "request_slot": {
+            "status": "produced",
+            "sha256": _sha(encoded),
+            "utf8_bytes": len(encoded),
+        },
+    }
+
+
 def _zip_member(raw: bytes, filename: str) -> bytes:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
@@ -450,7 +776,13 @@ def _zip_member(raw: bytes, filename: str) -> bytes:
         raise ContractError("PROVIDER_ARCHIVE_INVALID") from exc
 
 
-def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
+def _supply(
+    manifest: Any,
+    build: dict[str, Any],
+    tree: str,
+    *,
+    file_sha256: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ContractError("SUPPLY_MANIFEST_INVALID")
     try:
@@ -458,12 +790,14 @@ def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
     except Exception as exc:
         raise ContractError("SUPPLY_MANIFEST_INVALID") from exc
     if manifest["schema"] == SCHEMA_V3:
+        manifest_sha256 = _sha64(file_sha256, "SUPPLY_MANIFEST_INVALID")
         source = manifest["release_source_revision"]
         source_tree = manifest["release_source_tree"]
         build_tag = "v3-" + source[:12]
         if manifest["build_run_id"] != build["run_id"] or manifest["build_run_attempt"] != build["run_attempt"]:
             raise ContractError("SUPPLY_BUILD_IDENTITY_MISMATCH")
     else:
+        manifest_sha256 = _sha(_canonical(manifest))
         source = manifest["source_revision"]
         source_tree = manifest.get("source_tree", tree)
         build_tag = manifest["build_tag"]
@@ -474,14 +808,20 @@ def _supply(manifest: Any, build: dict[str, Any], tree: str) -> dict[str, Any]:
         "source_revision": source,
         "source_tree": source_tree,
         "build_tag": build_tag,
-        "manifest_sha256": _sha(_canonical(manifest)),
+        "manifest_sha256": manifest_sha256,
         "service_digests": {
             service: manifest["services"][service]["image_digest"] for service in SERVICE_ORDER
         },
     }
 
 
-def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], run_id: int) -> None:
+def _relay_receipt(
+    value: Any,
+    build: dict[str, Any],
+    supply: dict[str, Any],
+    run_id: int,
+    manifest: dict[str, Any],
+) -> None:
     if not isinstance(value, dict):
         raise ContractError("RELAY_RECEIPT_INVALID")
     if value.get("schema") == "leaf.staging-converged.v1":
@@ -514,7 +854,7 @@ def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], ru
             or value["build_run_attempt"] != build["run_attempt"]
             or value["relay_run_id"] != run_id
             or value["supply_set_sha256"] != supply["manifest_sha256"]
-            or _sha(_canonical(value["candidate_supply_set"])) != supply["manifest_sha256"]
+            or value["candidate_supply_set"] != manifest
             or value["automatic_surfaces"] != ["web", "app"]
             or not isinstance(value["surface_results"], dict)
             or set(value["surface_results"]) != {"web", "app"}
@@ -531,7 +871,12 @@ def _relay_receipt(value: Any, build: dict[str, Any], supply: dict[str, Any], ru
     raise ContractError("RELAY_RECEIPT_INVALID")
 
 
-def _relay_children(provider: Provider, relay: dict[str, Any]) -> tuple[dict[str, int], str]:
+def _relay_children(
+    provider: Provider,
+    relay: dict[str, Any],
+    *,
+    require_complete: bool,
+) -> tuple[dict[str, int], str]:
     raw = provider.bytes(APP_REPOSITORY, f"/actions/runs/{relay['run_id']}/logs")
     if len(raw) > MAX_PROVIDER_LOG_BYTES:
         raise ContractError("RELAY_LOGS_TOO_LARGE")
@@ -549,12 +894,59 @@ def _relay_children(provider: Provider, relay: dict[str, Any]) -> tuple[dict[str
     pairs = re.findall(r"Watching (web|app) deploy run ([1-9][0-9]+)\.", text)
     children: dict[str, int] = {}
     for service, run_id in pairs:
-        if service in children:
+        child_run_id = int(run_id)
+        if service in children and children[service] != child_run_id:
             raise ContractError("RELAY_CHILD_CARDINALITY")
-        children[service] = int(run_id)
-    if set(children) != {"web", "app"} or len(set(children.values())) != 2:
+        children[service] = child_run_id
+    valid_services = {"web", "app"}
+    if (
+        not children
+        or not set(children).issubset(valid_services)
+        or len(set(children.values())) != len(children)
+        or (require_complete and set(children) != valid_services)
+    ):
         raise ContractError("RELAY_CHILD_CARDINALITY")
     return children, _sha(raw)
+
+
+def _relay_failure_evidence(provider: Provider, relay: dict[str, Any]) -> dict[str, Any]:
+    raw = provider.json(
+        APP_REPOSITORY,
+        f"/actions/runs/{relay['run_id']}/attempts/{relay['run_attempt']}/jobs?per_page=100",
+    )
+    if not isinstance(raw, dict):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    jobs = raw.get("jobs")
+    if raw.get("total_count") != 1 or not isinstance(jobs, list) or len(jobs) != 1:
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    job = jobs[0]
+    if not isinstance(job, dict) or job.get("name") != "dispatch" or not isinstance(job.get("steps"), list):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    selected: dict[str, dict[str, Any]] = {}
+    expected = {
+        "Deploy each staging service in turn and prove each one landed": "failure",
+        "Publish the convergence receipt": "skipped",
+    }
+    for step in job["steps"]:
+        if not isinstance(step, dict) or step.get("name") not in expected:
+            continue
+        name = step["name"]
+        if name in selected or step.get("conclusion") != expected[name]:
+            raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+        selected[name] = {
+            "name": name,
+            "number": _positive(step.get("number"), "RELAY_FAILURE_EVIDENCE_INVALID"),
+            "conclusion": step["conclusion"],
+        }
+    if set(selected) != set(expected):
+        raise ContractError("RELAY_FAILURE_EVIDENCE_INVALID")
+    return {
+        "status": "produced",
+        "value": {
+            "failed_stage": "service_dispatch",
+            "jobs_sha256": _sha(_canonical([selected[name] for name in sorted(selected)])),
+        },
+    }
 
 
 def _strict_slot(value: Any, reason: str) -> dict[str, Any]:
@@ -562,6 +954,19 @@ def _strict_slot(value: Any, reason: str) -> dict[str, Any]:
         raise ContractError(reason)
     expected = {"status", "value"} if value["status"] == "produced" else {"status"}
     return _exact(value, expected, reason)
+
+
+def _requested_evidence_slot(value: Any) -> dict[str, Any]:
+    reason = "SERVICE_RECEIPT_REQUEST_INVALID"
+    if value == {"status": "not_produced"}:
+        return value
+    slot = _exact(value, {"status", "sha256", "utf8_bytes"}, reason)
+    if slot["status"] != "produced":
+        raise ContractError(reason)
+    _sha64(slot["sha256"], reason)
+    if isinstance(slot["utf8_bytes"], bool) or not isinstance(slot["utf8_bytes"], int) or slot["utf8_bytes"] < 1:
+        raise ContractError(reason)
+    return slot
 
 
 def _reject_secrets(value: Any) -> None:
@@ -606,17 +1011,20 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     requested_keys = {
         "allow_non_forward_image", "app_deploy_intent", "configuration_delta",
         "configuration_task_definition", "convergence_id", "deploy_strategy",
-        "digest_aware_evidence", "digest_aware_reconcile", "expected_task_definition",
+        "consumer_contract", "digest_aware_evidence", "digest_aware_reconcile",
+        "expected_task_definition",
         "hold_seconds", "image_tag", "p4a_session_identity_cutover",
         "quarantine_recovery_snapshot_identifier", "required_broker_task_definition",
         "service", "snapshot_overflow_acknowledgement", "source_revision", "start_from_zero",
-        "start_from_zero_confirmation", "target_color",
+        "start_from_zero_confirmation", "supply_evidence", "target_color",
     }
     requested = _exact(receipt["requested"], requested_keys, "SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["service"] not in SERVICE_ORDER:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["app_deploy_intent"] not in {"forward", "configuration", "authority-bootstrap", "rollback"}:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
+    _requested_evidence_slot(requested["consumer_contract"])
+    _requested_evidence_slot(requested["supply_evidence"])
     _bounded_text(requested["image_tag"], "SERVICE_RECEIPT_REQUEST_INVALID", maximum=128)
     failed_stage = _strict_slot(receipt["failed_stage"], "SERVICE_RECEIPT_FAILED_STAGE_INVALID")
     if failed_stage["status"] == "produced":
@@ -791,7 +1199,15 @@ def _normalized_failed_stage(receipt_stage: dict[str, Any], provider_stage: dict
     return code
 
 
-def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_conclusion: str) -> str:
+def _rollback_outcome(
+    value: dict[str, Any],
+    *,
+    mutation_count: int,
+    provider_conclusion: str,
+    terminal_healthy: bool,
+    terminal_td: str | None,
+    predecessor_td: str | None,
+) -> str:
     if value["status"] != "produced" or not isinstance(value.get("value"), dict):
         raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
     raw = value["value"]
@@ -809,8 +1225,10 @@ def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_co
             raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
     if raw["bluegreen_detail"] not in ROLLBACK_DETAIL_CODES or raw["authority_result"] not in ROLLBACK_AUTHORITY_CODES:
         raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
+    rollback_steps = ("bluegreen_step", "direct_failure_step", "direct_cancel_step")
+    handler_succeeded = any(raw[key] == "success" for key in rollback_steps)
     restored = (
-        any(raw[key] == "success" for key in ("bluegreen_step", "direct_failure_step", "direct_cancel_step"))
+        handler_succeeded
         or raw["authority_result"] in {"restored", "restored-digest-pinned-revision"}
     )
     if provider_conclusion == "success" and mutation_count in {0, 1}:
@@ -821,14 +1239,26 @@ def _rollback_outcome(value: dict[str, Any], *, mutation_count: int, provider_co
         ):
             raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
         return "not_required"
+    if provider_conclusion == "failure" and mutation_count == 0:
+        if any(raw[key] == "failure" for key in rollback_steps):
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        if raw["authority_result"] in {"restored", "restored-digest-pinned-revision"}:
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        # A successful failure handler proves that the handler completed. It
+        # does not claim a rollback mutation when the receipt records zero.
+        if handler_succeeded and (
+            not terminal_healthy or predecessor_td is None or terminal_td != predecessor_td
+        ):
+            raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
+        return "not_required"
     if mutation_count == 2 and provider_conclusion == "failure" and restored:
         return "succeeded"
-    if provider_conclusion == "failure" and not restored and mutation_count == 0:
-        return "not_required"
     raise ContractError("SERVICE_ROLLBACK_EVIDENCE_CONFLICT")
 
 
-def _terminal_evidence(facts: dict[str, Any]) -> tuple[bool, str | None, str | None]:
+def _terminal_evidence(
+    facts: dict[str, Any], *, allow_unreported_primary: bool = False
+) -> tuple[bool, str | None, str | None]:
     terminal = facts["terminal"]
     if terminal["status"] == "not_produced":
         return False, None, None
@@ -836,16 +1266,21 @@ def _terminal_evidence(facts: dict[str, Any]) -> tuple[bool, str | None, str | N
     image = value["image_digest"]
     digest = image.get("value") if image.get("status") == "produced" else None
     primary = value["primary_deployments"]
-    healthy = (
-        value["stable_1_1_0"] is True
-        and value["capacity"] == {"desired": 1, "running": 1, "pending": 0}
-        and isinstance(primary, list)
+    primary_is_exact = (
+        isinstance(primary, list)
         and len(primary) == 1
-        and primary[0] == {
+        and primary[0]
+        == {
             "task_definition": value["task_definition"],
             "rollout_state": "COMPLETED",
             "status": "PRIMARY",
         }
+    )
+    primary_is_unreported_skip = allow_unreported_primary and primary == {"status": "not_produced"}
+    healthy = (
+        value["stable_1_1_0"] is True
+        and value["capacity"] == {"desired": 1, "running": 1, "pending": 0}
+        and (primary_is_exact or primary_is_unreported_skip)
         and isinstance(digest, str)
         and DIGEST.fullmatch(digest) is not None
     )
@@ -876,11 +1311,18 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
     candidate_digest_slot = candidate["image_digest"]
     candidate_td = candidate_td_slot.get("value") if candidate_td_slot.get("status") == "produced" else None
     candidate_digest = candidate_digest_slot.get("value") if candidate_digest_slot.get("status") == "produced" else None
-    terminal_healthy, terminal_td, terminal_digest = _terminal_evidence(facts)
-    rollback_outcome = _rollback_outcome(
-        facts["rollback"], mutation_count=mutation_count, provider_conclusion=run["conclusion"]
-    )
     path = receipt["path"]
+    terminal_healthy, terminal_td, terminal_digest = _terminal_evidence(
+        facts, allow_unreported_primary=path == "digest_aware_skip"
+    )
+    rollback_outcome = _rollback_outcome(
+        facts["rollback"],
+        mutation_count=mutation_count,
+        provider_conclusion=run["conclusion"],
+        terminal_healthy=terminal_healthy,
+        terminal_td=terminal_td,
+        predecessor_td=predecessor_td,
+    )
     digest_aware = receipt["requested"]["digest_aware_reconcile"]
     if not isinstance(digest_aware, bool):
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
@@ -989,13 +1431,50 @@ def _normalized_outcome(provider: Provider, run: dict[str, Any], receipt: dict[s
     return outcome
 
 
+def _prior_relay_role(
+    *,
+    service: str,
+    relay_attempt: int,
+    run: dict[str, Any],
+    receipt: dict[str, Any],
+    selected_run: dict[str, Any],
+    selected_receipt: dict[str, Any],
+) -> str | None:
+    if service not in {"web", "app"} or relay_attempt <= 1:
+        return None
+    convergence_id = receipt["requested"]["convergence_id"]
+    selected_convergence_id = selected_receipt["requested"]["convergence_id"]
+    if (
+        not isinstance(convergence_id, str)
+        or convergence_id == "not_produced"
+        or convergence_id != selected_convergence_id
+        or run["created_at"] >= selected_run["created_at"]
+    ):
+        return None
+    return f"prior_relay_{service}"
+
+
+def _expected_predecessor(previous: dict[str, Any]) -> str | None:
+    prior_terminal = previous["terminal"]
+    if prior_terminal.get("status") == "produced":
+        return prior_terminal["value"].get("task_definition")
+    previous_predecessor = previous["predecessor_task_definition"]
+    if previous["outcome"]["mutation_count"] != 0:
+        raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
+    if previous_predecessor.get("status") == "produced":
+        return previous_predecessor["value"]
+    if previous["role"].startswith("prior_failed_"):
+        return None
+    raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
+
+
 def _normalize_child(
-    provider: Provider,
     run: dict[str, Any],
     artifact: dict[str, Any],
     receipt: dict[str, Any],
     role: str,
     outcome: dict[str, Any],
+    consumer_contract: dict[str, Any],
 ) -> dict[str, Any]:
     rp = receipt["provider"]
     if (
@@ -1006,9 +1485,12 @@ def _normalize_child(
         or run["event"] != "workflow_dispatch"
     ):
         raise ContractError("SERVICE_RECEIPT_RUN_MISMATCH")
-    tree, blob = _workflow_blob(provider, TF_REPOSITORY, run["head_sha"], DEPLOY_WORKFLOW)
+    tree = consumer_contract["source_tree"]
+    blob = consumer_contract["workflow_blob"]
     if rp["workflow_blob"] != blob:
         raise ContractError("SERVICE_RECEIPT_WORKFLOW_MISMATCH")
+    if receipt["requested"]["consumer_contract"] != consumer_contract["request_slot"]:
+        raise ContractError("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH")
     facts = receipt["facts"]
     if facts == {"status": "not_produced"}:
         raise ContractError("SERVICE_RECEIPT_FACTS_NOT_PRODUCED")
@@ -1080,7 +1562,11 @@ def _terminal_digest(child: dict[str, Any]) -> str:
     if capacity != {"desired": 1, "running": 1, "pending": 0} or value["stable_1_1_0"] is not True:
         raise ContractError("SERVICE_TERMINAL_UNHEALTHY")
     primary = value["primary_deployments"]
-    if (
+    primary_unreported_skip = (
+        primary == {"status": "not_produced"}
+        and child["outcome"]["deployment_outcome"] == "skipped_exact"
+    )
+    if not primary_unreported_skip and (
         not isinstance(primary, list)
         or len(primary) != 1
         or not isinstance(primary[0], dict)
@@ -1144,20 +1630,27 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     if build["run_id"] != producer_build_run_id or build["head_branch"] != "main" or build["conclusion"] != "success":
         raise ContractError("BUILD_RUN_MISMATCH")
     build_tree, build_blob = _workflow_blob(provider, APP_REPOSITORY, build["head_sha"], BUILD_WORKFLOW)
-    branch = provider.json(APP_REPOSITORY, "/branches/main")
-    if (
-        not isinstance(branch, dict)
-        or not isinstance(branch.get("commit"), dict)
-        or branch["commit"].get("sha") != build["head_sha"]
-    ):
-        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+    _verify_arrival_source(provider, build["head_sha"])
     supply_name = f"staging-supply-set-{build['head_sha']}-attempt-{build['run_attempt']}"
     supply_artifact, manifest = _one_artifact(
         provider, APP_REPOSITORY, build["run_id"], supply_name, "staging-supply-set.json"
     )
-    supply = _supply(manifest, build, build_tree)
+    supply = _supply(
+        manifest,
+        build,
+        build_tree,
+        file_sha256=supply_artifact["file_sha256"],
+    )
 
-    relay_matches: list[tuple[dict[str, Any], dict[str, Any], Any]] = []
+    relay_matches: list[
+        tuple[
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, int],
+            str,
+        ]
+    ] = []
     relay_name = f"staging-converged-{build['head_sha']}-attempt-{build['run_attempt']}"
     relay_rows = _workflow_run_rows(
         provider,
@@ -1173,23 +1666,47 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
     for raw in relay_rows:
         try:
             relay = _provider_run(raw, APP_REPOSITORY, RELAY_WORKFLOW, "workflow_run")
-            if relay["head_sha"] != build["head_sha"] or relay["conclusion"] != "success":
+            if relay["head_sha"] != build["head_sha"]:
                 continue
-            artifact, value = _one_artifact(
-                provider, APP_REPOSITORY, relay["run_id"], relay_name, "staging-converged.json"
-            )
-            _relay_receipt(value, build, supply, relay["run_id"])
-            relay_matches.append((relay, artifact, value))
+            if relay["conclusion"] == "success":
+                artifact, value = _one_artifact(
+                    provider, APP_REPOSITORY, relay["run_id"], relay_name, "staging-converged.json"
+                )
+                _relay_receipt(value, build, supply, relay["run_id"], manifest)
+                children, logs_sha = _relay_children(provider, relay, require_complete=True)
+                relay_matches.append(
+                    (
+                        relay,
+                        {"status": "produced", "value": artifact},
+                        {"status": "not_produced"},
+                        children,
+                        logs_sha,
+                    )
+                )
+            elif relay["conclusion"] == "failure":
+                if any(row.get("name") == relay_name for row in _artifact_rows(provider, APP_REPOSITORY, relay["run_id"])):
+                    raise ContractError("FAILED_RELAY_ARTIFACT_PRESENT")
+                failure = _relay_failure_evidence(provider, relay)
+                children, logs_sha = _relay_children(provider, relay, require_complete=False)
+                relay_matches.append(
+                    (
+                        relay,
+                        {"status": "not_produced"},
+                        failure,
+                        children,
+                        logs_sha,
+                    )
+                )
         except ContractError as exc:
             if exc.reason not in {"PROVIDER_ARTIFACT_CARDINALITY"}:
                 raise
     if len(relay_matches) != 1:
         raise ContractError("RELAY_RUN_CARDINALITY")
-    relay, relay_artifact, _ = relay_matches[0]
+    relay, relay_artifact, relay_failure, relay_children, relay_logs_sha = relay_matches[0]
     relay_tree, relay_blob = _workflow_blob(provider, APP_REPOSITORY, relay["head_sha"], RELAY_WORKFLOW)
     if relay_tree != build_tree:
         raise ContractError("RELAY_SOURCE_TREE_MISMATCH")
-    relay_children, relay_logs_sha = _relay_children(provider, relay)
+    resumed_after_failure = relay["conclusion"] == "failure"
 
     frontier: dict[str, Any] | None = None
     if current_frontier_run_id is not None:
@@ -1197,11 +1714,20 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         frontier = _provider_run(frontier_raw, TF_REPOSITORY, DEPLOY_WORKFLOW, "workflow_dispatch")
         if frontier["run_id"] != current_frontier_run_id:
             raise ContractError("FRONTIER_RUN_MISMATCH")
+    created_window = f">={relay['created_at']}"
+    if frontier is not None:
+        if frontier["updated_at"] < relay["created_at"]:
+            raise ContractError("CHILD_RUN_WINDOW_MISMATCH")
+        created_window = f"{relay['created_at']}..{frontier['updated_at']}"
     child_rows = _workflow_run_rows(
         provider,
         TF_REPOSITORY,
         "deploy-leaf-platform-staging.yml",
-        {"event": "workflow_dispatch", "per_page": 100},
+        {
+            "event": "workflow_dispatch",
+            "created": created_window,
+            "per_page": 100,
+        },
     )
     runs: dict[int, dict[str, Any]] = {}
     for raw in child_rows:
@@ -1267,11 +1793,13 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         or current_frontier_run_id in set(relay_children.values())
     ):
         raise ContractError("UNCONFIGURED_FRONTIER_RECEIPT")
-    roles: dict[int, str] = {
-        relay_children["web"]: "relay_web",
-        relay_children["app"]: "relay_app",
-        current_frontier_run_id: "frontier_app_identity",
-    }
+    roles: dict[int, str] = {current_frontier_run_id: "frontier_app_identity"}
+    if resumed_after_failure:
+        for service, run_id in relay_children.items():
+            roles[run_id] = f"prior_failed_{service.replace('-', '_')}"
+    else:
+        roles[relay_children["web"]] = "relay_web"
+        roles[relay_children["app"]] = "relay_app"
     for service in SERVICE_ORDER:
         candidates = [
             (run["run_id"], receipt, outcome)
@@ -1288,25 +1816,49 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
             for run_id, _, outcome in candidates
             if outcome["deployment_outcome"] in {"failed_before_mutation", "failed_after_mutation_rolled_back"}
         ]
-        if service in {"broker", "harness", "canonical-worker"}:
+        if service != "app" and (resumed_after_failure or service in {"broker", "harness", "canonical-worker"}):
             if len(successes) != 1:
                 raise ContractError("SERVICE_TERMINAL_CARDINALITY")
             roles[successes[0]] = f"terminal_{service.replace('-', '_')}"
         elif successes:
-            raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
-        if len(failures) > 1:
-            raise ContractError("SERVICE_FAILURE_CARDINALITY")
-        if failures:
-            roles[failures[0]] = f"prior_failed_{service.replace('-', '_')}"
+            selected_id = relay_children[service]
+            selected_run, _, selected_receipt, _ = by_id[selected_id]
+            for run_id in successes:
+                run, _, receipt, _ = by_id[run_id]
+                role = _prior_relay_role(
+                    service=service,
+                    relay_attempt=relay["run_attempt"],
+                    run=run,
+                    receipt=receipt,
+                    selected_run=selected_run,
+                    selected_receipt=selected_receipt,
+                )
+                if role is None:
+                    raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
+                roles[run_id] = role
+        for run_id in failures:
+            roles[run_id] = f"prior_failed_{service.replace('-', '_')}"
     if set(roles) != set(by_id):
         raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
 
-    children: dict[str, dict[str, Any]] = {}
+    normalized_by_id: dict[int, dict[str, Any]] = {}
+    consumer_contracts: dict[str, dict[str, Any]] = {}
     per_service: dict[str, list[dict[str, Any]]] = {service: [] for service in SERVICE_ORDER}
     for run_id, role in roles.items():
         run, artifact, raw_receipt, outcome = by_id[run_id]
-        child = _normalize_child(provider, run, artifact, raw_receipt, role, outcome)
-        children[role] = child
+        if run["head_sha"] not in consumer_contracts:
+            consumer_contracts[run["head_sha"]] = _consumer_contract_for_head(
+                provider, run["head_sha"]
+            )
+        child = _normalize_child(
+            run,
+            artifact,
+            raw_receipt,
+            role,
+            outcome,
+            consumer_contracts[run["head_sha"]],
+        )
+        normalized_by_id[run_id] = child
         per_service[child["service"]].append(child)
         if child["source_revision_evidence"] != {
             "status": "produced",
@@ -1329,37 +1881,51 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         }
         if child_supply != expected_supply:
             raise ContractError("SERVICE_SUPPLY_EVIDENCE_MISMATCH")
-    if children["relay_web"]["service"] != "web" or children["relay_app"]["service"] != "app" or children["frontier_app_identity"]["service"] != "app":
+    frontier_child = normalized_by_id[current_frontier_run_id]
+    if frontier_child["service"] != "app":
+        raise ContractError("CHILD_ROLE_SERVICE_MISMATCH")
+    if resumed_after_failure:
+        for service, run_id in relay_children.items():
+            child = normalized_by_id[run_id]
+            if (
+                child["service"] != service
+                or child["outcome"]["deployment_outcome"]
+                not in {"failed_before_mutation", "failed_after_mutation_rolled_back"}
+            ):
+                raise ContractError("FAILED_RELAY_CHILD_INVALID")
+    elif (
+        normalized_by_id[relay_children["web"]]["service"] != "web"
+        or normalized_by_id[relay_children["app"]]["service"] != "app"
+    ):
         raise ContractError("CHILD_ROLE_SERVICE_MISMATCH")
     for service, attempts in per_service.items():
         attempts.sort(key=lambda item: (item["provider"]["created_at"], item["provider"]["run_id"]))
         for previous, current in zip(attempts, attempts[1:]):
-            prior_terminal = previous["terminal"]
             predecessor = current["predecessor_task_definition"]
             if predecessor.get("status") != "produced":
                 raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
-            if prior_terminal.get("status") == "produced":
-                expected_predecessor = prior_terminal["value"].get("task_definition")
-            else:
-                previous_predecessor = previous["predecessor_task_definition"]
-                if (
-                    previous["outcome"]["mutation_count"] != 0
-                    or previous_predecessor.get("status") != "produced"
-                ):
-                    raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
-                expected_predecessor = previous_predecessor["value"]
+            expected_predecessor = _expected_predecessor(previous)
+            if expected_predecessor is None:
+                continue
             if (
                 predecessor.get("value") != expected_predecessor
             ):
                 raise ContractError("SERVICE_PREDECESSOR_CHAIN_MISMATCH")
 
-    selected = {
-        "app": children["frontier_app_identity"],
-        "web": children["relay_web"],
-        "broker": children["terminal_broker"],
-        "harness": children["terminal_harness"],
-        "canonical-worker": children["terminal_canonical_worker"],
+    selected_ids = {
+        "app": current_frontier_run_id,
+        "broker": next(run_id for run_id, role in roles.items() if role == "terminal_broker"),
+        "harness": next(run_id for run_id, role in roles.items() if role == "terminal_harness"),
+        "canonical-worker": next(
+            run_id for run_id, role in roles.items() if role == "terminal_canonical_worker"
+        ),
+        "web": (
+            next(run_id for run_id, role in roles.items() if role == "terminal_web")
+            if resumed_after_failure
+            else relay_children["web"]
+        ),
     }
+    selected = {service: normalized_by_id[run_id] for service, run_id in selected_ids.items()}
     for service, child in selected.items():
         if (
             child["outcome"]["deployment_outcome"] not in {"succeeded", "skipped_exact"}
@@ -1400,8 +1966,10 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
         "supply": {**supply_artifact, **supply},
         "relay": {
             **{key: relay[key] for key in ("repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion")},
+            "mode": "resumed_after_failure" if resumed_after_failure else "converged_relay",
             "workflow_blob": relay_blob,
             "artifact": relay_artifact,
+            "failure_evidence": relay_failure,
             "logs_sha256": relay_logs_sha,
             "children": relay_children,
         },

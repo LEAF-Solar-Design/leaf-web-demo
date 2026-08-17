@@ -118,6 +118,7 @@ async function iosFetch(path, init, fetchImpl) {
   return noteUnauthorized(
     await fetchImpl(`${config.apiBase}${path}`, { ...(init || {}), headers }),
     path,
+    headers.Authorization,
   )
 }
 

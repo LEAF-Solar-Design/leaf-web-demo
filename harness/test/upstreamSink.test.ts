@@ -84,19 +84,36 @@ describe("upstream sink wiring", () => {
     expect(seen[0].init.body).toBe(body);
   });
 
-  it("wires the sink into the real server boot", () => {
-    // Cheap structural guard: the sink is only reachable in production if
-    // startReal actually constructs it and spreads it into HarnessPorts.
-    // A vendor sync that renamed the export would leave this red.
+  // EVERY composition root, not just one. The sink is reachable in production
+  // only if the root the CONTAINER runs constructs it and spreads it into
+  // HarnessPorts. PR #583 wired only server.ts startReal(), which the
+  // deployment never execs -- scripts/start-harness.sh runs
+  // `node dist/scripts/serve.js` -- so every deployed authoring saw
+  // ports.upstreamSink === undefined while this suite, typecheck and the gate
+  // all stayed green. Enumerate all roots here so a wiring that misses one, or
+  // a newly added root, goes red. A vendor sync that renamed the export also
+  // leaves these red.
+  const COMPOSITION_ROOTS = ["../scripts/serve.ts", "../src/server.ts"];
+  it.each(COMPOSITION_ROOTS)("wires the sink into composition root %s", (root) => {
     const source = readFileSync(
-      fileURLToPath(new URL("../src/server.ts", import.meta.url)),
+      fileURLToPath(new URL(root, import.meta.url)),
       "utf8",
     );
     expect(source).toContain("upstreamSinkFromEnv");
     // The branch, not a spread: HarnessPorts is a discriminated union, so
     // opting in must supply the sink AND both posture flags together.
-    expect(source).toContain("const ports: HarnessPorts = upstreamSink");
+    expect(source).toContain("upstreamSink,");
     expect(source).toContain("dangerouslyExportModelOutput: false");
     expect(source).toContain("trustRunnerFailureCategories: false");
+  });
+
+  it("execs serve.js as the container entrypoint, so COMPOSITION_ROOTS cannot silently go stale", () => {
+    // If the deployment stops running serve.js, the root list above is
+    // measuring the wrong file and this assertion, not a silent gap, catches it.
+    const entrypoint = readFileSync(
+      fileURLToPath(new URL("../scripts/start-harness.sh", import.meta.url)),
+      "utf8",
+    );
+    expect(entrypoint).toContain("dist/scripts/serve.js");
   });
 });

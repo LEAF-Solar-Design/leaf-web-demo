@@ -125,10 +125,9 @@ export default function PromptBox({
     let live = true
     const loadMcp = async () => {
       try {
-        const response = await fetch(`${config.apiBase}/api/converse/mcp`, {
-          headers: { 'X-Tenant-Id': config.tenant, ...authHeaders() },
-        })
-        noteUnauthorized(response, '/api/converse/mcp')
+        const headers = { 'X-Tenant-Id': config.tenant, ...authHeaders() }
+        const response = await fetch(`${config.apiBase}/api/converse/mcp`, { headers })
+        noteUnauthorized(response, '/api/converse/mcp', headers.Authorization)
         const body = response.ok ? await response.json().catch(() => null) : null
         if (live) setMcpServers(Array.isArray(body?.servers) ? body.servers : [])
       } catch {
