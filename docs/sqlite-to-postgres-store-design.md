@@ -1,7 +1,15 @@
 # SQLite-to-Postgres store migration design (jobs, callback ledger, sessions)
 
-**Status: FROZEN DESIGN — rev 2, 2026-08-17. Design-only chip; no store code ships
-from this document. Implementation starts only on operator authorization.**
+**Status: FROZEN DESIGN — rev 3, 2026-08-17. Implementation starts only on
+operator authorization; P1's code precondition is authorized and shipped (#645).**
+
+> **Rev 3 supersedes P2 and §9.1. Read Appendix B before acting on §3, §5.2,
+> §9.1, or §10-P2.** A source verification of rev 2's two remaining items found
+> that `PostgresCustomizationStore` already exists and that `customization.db`
+> is not a live dual-writer. P2 is a selector flip (S), not net-new store code
+> (M), and the §9-class exposure set on staging is **already empty**. Rev 2's
+> body is preserved verbatim below as the frozen record; Appendix B carries the
+> corrections and the current routing.
 
 **Rev 2 adversarial round, disclosed:** rev 1 went through a refute-first
 adversarial pass (opus-critic lane; Codex usage-capped until Aug 19, so this
@@ -302,3 +310,113 @@ session against leaf-web-demo origin/main 79a3e16 and tf main before folding.
   0001–0044 not 0019; broker legacy replay DB is container-local (not EFS)
   because the broker never sets `JOBS_DB`; both rev-1 checkouts were stale,
   which is itself the reproduced cause of the premise blocker.
+
+## Appendix B — rev 3 source-verification round (rev 2 → rev 3)
+
+Rev 2 closed by naming two remaining items and handing them forward. Both were
+verified at source before any implementation began, against leaf-web-demo
+`origin/main` (56921bb) and leaf-automation-aws-terraform `main`. Both premises
+moved. Rev 2's body above is unedited; this appendix is the correction of
+record.
+
+### B1. Callback replay — mechanism CONFIRMED, "live exposure" REFUTED
+
+Rev 2's claim, restated: "the broker never sets `JOBS_DB`, so its nonce table is
+container-local and replay protection doesn't span broker tasks."
+
+**Confirmed.** `terraform/environments/staging/us-east-1/leaf_platform.tf` sets
+`JOBS_DB=/data/state/jobs.db` on the app colors only (`:1342` app, `:1580`
+app_alt). The broker module (`:1679`–`:1764`) sets neither `JOBS_DB` nor
+`LEAF_CALLBACK_REPLAY_STORE`, so under the legacy authority the nonce table is
+the broker container's own `server/jobs.db` — not the EFS state mount the broker
+does have. Two broker tasks keep two independent nonce tables.
+
+**Refuted as a live exposure — it is latent.** `consume_callback` returns
+`not_configured` before it constructs the replay store when
+`LEAF_CALLBACK_SECRET` is unset. That variable appears nowhere under
+`leaf-automation-aws-terraform/terraform/` and is absent from
+`deploy/required-config.broker.json`'s secrets list (which carries only
+`APS_CREDENTIALS_JSON`, `DATABASE_URL`, `LEAF_BROKER_SECRET`). No signed
+envelope can be accepted, so **no nonce is ever written and there is nothing to
+replay**. The only component that could mint a valid envelope,
+`server/da/aps_callback_adapter.py`, has no production importer — `broker.py`
+never loads it, only its own test does — and `LEAF_CALLBACK_PRIMARY` is unset
+and explicitly fails closed.
+
+Consequence for phasing: P1 is not incident response. It is a **sequencing
+constraint** — `LEAF_CALLBACK_REPLAY_STORE=postgres` must land on the broker
+before `LEAF_CALLBACK_SECRET` is ever provisioned, i.e. as part of the L3.1
+callback-primary activation, not ahead of it.
+
+**Shipped:** the fail-open `db_path` seam named in §2 and §10-P1 is fixed
+(leaf-web-demo #645). `CallbackReplayStore` now treats the selector as sole
+authority and raises when an explicit `db_path` contradicts `postgres`, instead
+of silently downgrading to SQLite. The module docstring's claim that legacy
+nonces are durable against "another broker worker" — the text that seeded rev
+1's framing — is corrected in the same change.
+
+**Remaining P1 work:** the selector flip itself, deliberately not bundled. It is
+a deploy-gated change spanning two repos and must be sequenced: the broker task
+definition gains `LEAF_CALLBACK_REPLAY_STORE=postgres` first, and
+`deploy/required-config.broker.json` requires it second. Reversing that order
+fails the deploy set-difference gate (§7). Trigger: before `LEAF_CALLBACK_SECRET`.
+
+### B2. Customization — BOTH rev 2 premises refuted
+
+**`PostgresCustomizationStore` already exists.** `server/customization_postgres_store.py`
+is a shipped adapter that supplies PostgreSQL connections to the
+storage-independent methods of `SQLiteCustomizationStore` and translates the
+small dialect surface, over eight tables. It is backed by migrations 0020, 0025,
+0026, 0031, 0036, 0037; wired into the authority-selector map at
+`platform/db.py:1177` (`"LEAF_CUSTOMIZATION_STORE": {"postgres": "customization"}`);
+constructed by `CustomizationService.configured()` at
+`server/customization_service.py:463`; and covered by
+`tests/test_customization_postgres_contract.py` and
+`tests/test_customization_postgres_integration.py`.
+
+So §3.2, §5.2 and §10-P2 are wrong to call this "the only net-new store code"
+and to size it **M**. **P2 is a selector flip, size S** — the same shape as P1,
+with no new store code and no new migration.
+
+**`customization.db` is not a dual-writer and carries no §9-class exposure.**
+`CustomizationService.configured()` raises `customization_shared_sqlite_unsupported`
+(503) for any SQLite path under `/data/state` (`_shared_sqlite_path`,
+`server/customization_service.py:109`), and every write path reaches the store
+through `configured()`. Staging sets exactly that path
+(`LEAF_CUSTOMIZATION_DB=/data/state/customization.db`, tf `:1397`/`:1614`), so
+the file **is never opened on staging**. With `LEAF_CUSTOMIZATION_R5_MODE` and
+`R6_MODE` both `off`, the read paths return the base catalog rather than
+raising. The posture is fail-closed *unavailable*, not *exposed*.
+
+Two further corrections to rev 2's §1 table: the third writer it lists as "the
+worker (tf `:1725`)" is the **broker** module — staging has no worker service —
+and the broker sets no `LEAF_CUSTOMIZATION_DB`, so it falls back to
+`DEFAULT_DB` (`server/customization.db`), a container-local file that never
+trips the shared-path guard and shares nothing.
+
+**Therefore §9.1 is wrong.** It states that exposure-class deletion "completes
+when the LAST shared-EFS SQLite writer (customization) moves — not before." The
+class is **already empty on staging**: jobs, sessions and annex are Postgres,
+the callback ledger writes nothing, and customization refuses the shared path.
+No store flip is owed before the exposure claim can be retired.
+
+**Handoff correction (supersedes the message sent to coordinator 84be1c56):**
+the pre-warmed-cutover lane was told its exposure accounting "now keys on
+`customization.db`, not `jobs.db`." It keys on **neither**. That lane can drop
+its storage-exposure bookkeeping now, gated on nothing.
+
+### B3. Rev 3 routing
+
+| Item | Rev 2 said | Verified | Route |
+|---|---|---|---|
+| `CallbackReplayStore` fail-open seam | P1 precondition | real bug, fixed | **DONE** — #645 |
+| `LEAF_CALLBACK_REPLAY_STORE=postgres` | P1, ships alone | latent, not live | tf-then-manifest PR pair; **trigger: before `LEAF_CALLBACK_SECRET`**, not urgent alone |
+| `PostgresCustomizationStore` | build it (M) | already shipped | **no code owed** |
+| `customization.db` exposure | last §9-class dual-writer | never opened on staging | **not an exposure**; retire the claim |
+| `LEAF_CUSTOMIZATION_STORE=postgres` on staging | P2 migration | selector flip (S) | **operator decision, not a fix** — it turns a fail-closed feature on, and R5/R6 stay `off` regardless, so it buys availability, not safety |
+| §9.1 exposure-class payoff | completes at P2 | already complete | **retire the §9 exposure text now**; P3 no longer waits on P2 |
+| P4 production | the main unrealized payoff | unchanged | **unchanged, and now the only phase carrying real payoff** |
+
+The program's honest remaining value is concentrated in P4 (production stop-first
+→ rolling, the recorded 9m49s outage class). P1's flip is a sequencing
+obligation, P2 is an availability decision, and P3 can proceed immediately.
