@@ -642,6 +642,13 @@ jobs:
   warm:
     needs: prepare
     if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
+    # REVERTED to ubuntu-latest 2026-08-17 (run 32032185875). The CodeBuild
+    # flip is blocked on Docker Hub, not on the runner: every base-image pull
+    # from the CodeBuild fleet egresses via shared AWS NAT addresses and hits
+    # the ANONYMOUS pull limit, so `node:22-bookworm` / `node:20-slim` HEADs
+    # return 429 and buildx fails to solve. GitHub-hosted runners do not see
+    # this. Re-flip only once base images are pulled authenticated or mirrored
+    # into ECR -- moving more vCPU at it changes nothing.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -872,6 +879,8 @@ jobs:
           needs.test.result == 'success' &&
           (needs.adopt.result == 'skipped' ||
            (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
+    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
+    # fleet's shared egress; see the `warm` job's comment.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # The ecr-release GitHub environment (main-only deployment branch
@@ -1353,7 +1362,17 @@ jobs:
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
-          push: true
+          # zstd prototype, app leg only: Fargate pays a full image pull on
+          # every task launch (four per staging deploy), and zstd layers
+          # decompress markedly faster than gzip. The `outputs` line replaces
+          # `push: true` for the app leg because buildx refuses --push
+          # alongside an explicit image output; both forms push. The digest
+          # downstream steps sign and record (steps.build-image.outputs.digest)
+          # IS the zstd manifest's digest — provenance, the supply set, and
+          # speculative adoption all mint from this one build, never a
+          # re-push, so compression cannot fork the identity chain.
+          push: ${{ matrix.image != 'app' }}
+          outputs: ${{ matrix.image == 'app' && 'type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true' || '' }}
           # Every full-build image carries sha-<full-commit>, the baked
           # identity witness required by blue/green deployment. The app image
           # of a release (prod-*) build additionally carries
@@ -1629,6 +1648,8 @@ jobs:
   speculate:
     needs: prepare
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
+    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
+    # fleet's shared egress; see the `warm` job's comment.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ecr-release
@@ -1836,7 +1857,12 @@ jobs:
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
-          push: true
+          # zstd, app leg only: mirrors the full-build leg above. Adoption
+          # aliases the speculative digest onto the immutable sha-* tags, so
+          # without this the spec-built app image would keep every merge on
+          # gzip and the full-build zstd leg would never be reached.
+          push: ${{ matrix.image != 'app' }}
+          outputs: ${{ matrix.image == 'app' && 'type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true' || '' }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: ${{ steps.cache.outputs.from }}
 

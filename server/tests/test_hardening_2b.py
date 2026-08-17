@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -348,6 +349,58 @@ def test_sandbox_scrubs_broker_credential_env(tenant_repo, monkeypatch):
 
     in_proc = _run(tool, {"keys": keys}, sandbox=False, monkeypatch=monkeypatch)
     assert in_proc["result"]["seen"]["LEAF_BROKER_SECRET"] == "secret-LEAF_BROKER_SECRET"
+
+
+def test_sandbox_never_inherits_ld_library_path_and_still_boots(tenant_repo, monkeypatch):
+    """LD_LIBRARY_PATH is the one dropped variable the child cannot survive
+    without on a shared-linked interpreter, and the one it must never inherit.
+
+    Inherit it and the loader honors an attacker-chosen preload directory
+    BEFORE `_SANDBOX_RUNNER` (and every guard in it) exists. Drop it with
+    nothing in its place and the child dies inside ld.so with rc=127 on such
+    an interpreter, which the caller can only report as "sandbox produced no
+    output" — CodeBuild run 32018150977, where every sandbox-using suite went
+    red on an image whose python is shared-linked. Both halves are asserted
+    together on purpose: widening `_SANDBOX_ENV_ALLOW` would satisfy the boot
+    half and break the scrub half."""
+    hostile = os.path.join(os.sep, "attacker", "preload")
+    monkeypatch.setenv("LD_LIBRARY_PATH", hostile)
+    tool = tenant_repo("ld-probe", READ_ENV_SRC)
+
+    env = _run(tool, {"keys": ["LD_LIBRARY_PATH"]}, sandbox=True, monkeypatch=monkeypatch)
+    assert env["ok"] is True, env       # the child BOOTED — this is the rc=127 regression
+    seen = env["result"]["seen"]["LD_LIBRARY_PATH"]
+    assert hostile not in (seen or "")  # nor smuggled in as one entry of a longer list
+    assert seen in (None, tool_loader._sandbox_lib_path())
+
+    # and the env builder itself, independent of what the child reported
+    assert hostile not in tool_loader._sandbox_env().get("LD_LIBRARY_PATH", "")
+    # structural, so the "just widen the allowlist" fix cannot pass this file
+    assert "LD_LIBRARY_PATH" not in tool_loader._SANDBOX_ENV_ALLOW
+
+
+def test_sandbox_lib_path_is_derived_from_this_interpreter(monkeypatch):
+    """Every directory the sandbox puts on the loader path is one that really
+    holds THIS interpreter's shared library — never a value read out of the
+    environment, never a guess at a plausible lib dir. A statically linked
+    interpreter needs nothing and gets no variable at all."""
+    tool_loader._sandbox_lib_path.cache_clear()
+    try:
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker/preload")
+        derived = tool_loader._sandbox_lib_path()
+        assert "/attacker/preload" not in derived
+        ldlibrary = sysconfig.get_config_var("LDLIBRARY") or ""
+        for d in filter(None, derived.split(os.pathsep)):
+            assert os.path.isfile(os.path.join(d, ldlibrary))
+
+        monkeypatch.setattr(
+            tool_loader.sysconfig, "get_config_var",
+            lambda name: "libpython3.12.a" if name == "LDLIBRARY" else None)
+        tool_loader._sandbox_lib_path.cache_clear()
+        assert tool_loader._sandbox_lib_path() == ""
+        assert "LD_LIBRARY_PATH" not in tool_loader._sandbox_env()
+    finally:
+        tool_loader._sandbox_lib_path.cache_clear()
 
 
 def test_sandbox_denies_subprocess_escape(tenant_repo, fake_cred, monkeypatch):

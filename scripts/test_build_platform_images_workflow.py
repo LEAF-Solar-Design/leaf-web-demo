@@ -2008,7 +2008,15 @@ def main() -> None:
         assert _with_input(speculate_with, key) == _with_input(build_with, key), (
             "speculate and build must carry a byte-identical %s input" % key
         )
-    assert re.search(r"^          push: true$", speculate_with, re.M)
+    # The speculative app leg must mint the same zstd compression as the
+    # gated build leg: adoption aliases the speculative digest onto the
+    # immutable sha-* tags, so a gzip spec image would keep every merge on
+    # gzip no matter what the full-build leg does.
+    assert re.search(r"^          push: \$\{\{ matrix\.image != 'app' \}\}$",
+                     speculate_with, re.M)
+    assert _with_input(speculate_with, "outputs:") == _with_input(
+        build_with, "outputs:"
+    ), "speculate and build must carry a byte-identical outputs: input"
     assert (
         "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
         in speculate_with
@@ -2927,6 +2935,11 @@ def check_docs_noop_filter(text: str) -> None:
         "SUPPLY_EVIDENCE_B64": (
             "${{ steps.manifest.outputs.supply_evidence_b64 }}"
         ),
+        # The ENVELOPE'S release identity, not the tip's. On the docs-only
+        # reconcile these name the candidate build whose images are deployed,
+        # and the convergence id is composed from them.
+        "RELEASE_SOURCE": "${{ steps.manifest.outputs.release_source }}",
+        "RELEASE_ATTEMPT": "${{ steps.manifest.outputs.release_attempt }}",
         "CONSUMER_CONTRACT_B64": (
             "${{ steps.consumer_contract.outputs.consumer_contract_b64 }}"
         ),
@@ -3247,7 +3260,18 @@ def check_docs_noop_filter(text: str) -> None:
         # is accepted only when it is terminal green, strictly descends from
         # the bound head, and changes none of the three consumer semantics
         # files. The guarded step gains one read-only compare and no new write.
-        "ce5165c4d09bdcd2c192fa86217b066972312201bc9ac25f7aa765e738cda8dd"
+        # Hash updated 2026-08-17 for the docs-only convergence-identity
+        # deadlock. REVIEWED FOR DISPATCH CAPABILITY: no new dispatch site,
+        # secret reference, endpoint class, credential, or gh call of any kind.
+        # The manifest step writes two additional OUTPUTS (release_source,
+        # release_attempt) from values fetch_supply_set had already fetched and
+        # verified against the producer run record. The guarded deploy step
+        # reads them from step env, validates them against the supply artifact
+        # name it already carried, and substitutes them into the convergence id
+        # and the surface-result release check that previously used the build
+        # head. The single `gh workflow run` site and its input set are
+        # unchanged.
+        "1cc3faaf4a12ea68be43add0bc091ef591176c57f6d12c81592cebe341390303"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5285,7 +5309,12 @@ case "${args[0]}" in
         rest="${url#*/actions/runs/}"
         run_id="${rest%%/*}"
         rm -f .pending_supply_set.json .pending_supply_set.zip
-        if [ "$run_id" = "$BUILD_RUN_ID" ]; then
+        # The build run answers the docs-noop marker UNLESS the scenario gave
+        # it a supply set of its own, which is the ORDINARY (non-docs-only)
+        # path. Every scenario that predates this branch names build-run
+        # artifacts nowhere in FAKE_SUPPLY_SETS, so their answer is unchanged.
+        if [ "$run_id" = "$BUILD_RUN_ID" ] \
+          && ! printf '%s' "$FAKE_SUPPLY_SETS" | jq -e --arg id "$run_id" 'has($id)' >/dev/null; then
           printf '%s\n' '{"total_count":1,"artifacts":[{"name":"docs-noop-'"$BUILD_HEAD_SHA"'-attempt-'"$BUILD_RUN_ATTEMPT"'","id":1,"expired":false}]}'
         else
           entry=$(printf '%s' "$FAKE_SUPPLY_SETS" | jq -c --arg id "$run_id" '.[$id] // empty')
@@ -5613,6 +5642,194 @@ def test_staging_relay_reconciles_a_docs_only_build() -> None:
     assert outputs7.get("image_tag") != "prod-abc1234", (
         "a failed compare must not fall back to the older ancestor tag",
         outputs7)
+
+
+def _rehearse_relay_v3_identity_gate(*, release_source, release_attempt,
+                                     artifact_name):
+    """Run the REAL dispatch step's v3 gate and return (returncode, output).
+
+    Everything the gate needs before the convergence-identity binding is
+    supplied; nothing else is faked, so the script either refuses at that
+    binding or gets past it. `gh` is a hard failure here on purpose: reaching
+    a gh call at all means the gate ACCEPTED the identity, which the caller
+    distinguishes by the message, never by the exit code alone.
+    """
+    bash = shutil.which("bash")
+    assert bash, "the v3 identity gate rehearsal needs bash on PATH"
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        script = tmp / "dispatch.sh"
+        script.write_text(
+            _relay_deploy_step(relay["jobs"]["dispatch"])["run"],
+            encoding="utf-8", newline="\n")
+        # A refusing `gh` keeps this rehearsal OFFLINE. The gate under test runs
+        # before any gh call, so the stub only bounds what happens after it.
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(
+            "#!/usr/bin/env bash\necho 'fake gh: not reachable in this "
+            "rehearsal' >&2\nexit 9\n", encoding="utf-8", newline="\n")
+        (bindir / "gh").chmod(0o755)
+        env = dict(os.environ)
+        env.update(
+            PATH=f"{bindir}{os.pathsep}{env['PATH']}",
+            INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
+            DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
+            GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
+            GITHUB_RUN_ID="424242",
+            GITHUB_OUTPUT=str(tmp / "github_output"),
+            BUILD_HEAD_SHA="d" * 40,
+            BUILD_RUN_ATTEMPT="1",
+            IMAGE_TAG="surface-v1-" + "e" * 64,
+            GH_TOKEN="fake-pat",
+            HOME_TOKEN="fake-token",
+            SUPPLY_SCHEMA="leaf.staging-supply-set.v3",
+            SUPPLY_SHA256="f" * 64,
+            SUPPLY_ARTIFACT_ID="7",
+            SUPPLY_ARTIFACT_NAME=artifact_name,
+            SUPPLY_EVIDENCE_B64="ZXZpZGVuY2U",
+            RELEASE_SOURCE=release_source,
+            RELEASE_ATTEMPT=release_attempt,
+            DIGEST_AWARE_CONVERGENCE_ENABLED="true",
+            CONSUMER_CONTRACT_B64="Y29udHJhY3Q",
+            TF_CONTRACT_HEAD="a" * 40,
+            TF_CONSUMER_BLOB="b" * 40,
+            TF_CONTRACT_RUN_ID="99",
+        )
+        proc = subprocess.run(
+            [bash, str(script)], env=env, text=True, capture_output=True,
+            cwd=str(tmp))
+        return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_relay_convergence_identity_names_the_images_not_the_docs_only_tip() -> None:
+    """The convergence id must name the ENVELOPE's release, not the tip.
+
+    THE DEADLOCK THIS PINS (observed 2026-08-17, leaf-automation runs
+    32019452787 and 32026370399, step "Verify one closed supply envelope
+    before provider credentials": "closed supply evidence refused: v3 routed
+    convergence identity"). A docs-only main commit builds no images, so its
+    build publishes a docs-noop marker and NO supply set, and the relay
+    deliberately reconciles onto the newest ancestor's supply set. The relay
+    nonetheless stamped CONVERGENCE_ID from its OWN docs-only head, while the
+    consumer binds the id to the ENVELOPE's producer source. Those two can
+    never agree on that path, so every docs-only merge refused three
+    dispatches and then failed "Staging is NOT converged".
+
+    The fix is relay-side and the consumer's guard is untouched: the deploy
+    workflow still accepts exactly one id per envelope,
+    `<envelope producer source>-<attempt>-<service>`, so the previous commit's
+    image still cannot land under a new identity. What changed is only which
+    identity this relay computes -- the one belonging to the images it is
+    actually deploying.
+    """
+    docs_head = hashlib.sha1(b"docshead").hexdigest()
+
+    # DOCS-ONLY RECONCILE. Tip is run 100 (marker only); the images come from
+    # run 98, attempt 3. The release identity must follow run 98.
+    rc, out, outputs = _rehearse_relay_manifest(
+        rows=["100 docshead 1", "98 ancestor 3"],
+        supply_sets={"98": {"sha": "ancestor", "attempt": "3",
+                            "tag": "prod-abc1234"}},
+        relations={"ancestor": "ahead"})
+    assert rc == 0, out
+    assert outputs.get("deploy") == "true", (out, outputs)
+    release_source = outputs.get("release_source", "")
+    release_attempt = outputs.get("release_attempt", "")
+    assert re.fullmatch(r"[0-9a-f]{40}", release_source), (out, outputs)
+    assert release_attempt == "3", (
+        "the release attempt must be the CANDIDATE build's, not the tip's",
+        out, outputs)
+    assert release_source != docs_head, (
+        "naming the docs-only tip here is the deadlock itself", out, outputs)
+    assert release_source.startswith("abc1234"), (
+        "the release source must be the commit behind the deployed tag "
+        "prod-abc1234", out, outputs)
+    # THE CONSUMER'S RELATION, RESTATED. The deploy workflow requires the
+    # supply artifact name to be staging-supply-set-<source>-attempt-<attempt>
+    # for the same source and attempt it requires in the convergence id, so a
+    # relay whose release identity satisfies this cannot produce an id the
+    # consumer refuses.
+    assert outputs.get("artifact_name") == (
+        f"staging-supply-set-{release_source}-attempt-{release_attempt}"
+    ), (out, outputs)
+
+    # ORDINARY PATH IS UNCHANGED. When the build publishes its own supply set,
+    # the release identity IS the build head and attempt, so the id this relay
+    # now computes is byte-identical to the one it computed before.
+    # Spelled as a literal SHA-40 (the harness passes 40-hex through its label
+    # mapping untouched) so "the release source IS the build head" is asserted
+    # against one value, not against the harness's label arithmetic.
+    own_head = "abc1234" + "0" * 33
+    rc_ord, out_ord, outputs_ord = _rehearse_relay_manifest(
+        rows=[f"100 {own_head} 1"],
+        supply_sets={"100": {"sha": own_head, "attempt": "1",
+                             "tag": "prod-abc1234"}},
+        relations={},
+        build_run_id="100",
+        build_head_sha=own_head)
+    assert rc_ord == 0, out_ord
+    assert outputs_ord.get("deploy") == "true", (out_ord, outputs_ord)
+    assert outputs_ord.get("release_source") == own_head, (
+        "the ordinary path's release identity is the build head",
+        out_ord, outputs_ord)
+    assert outputs_ord.get("release_attempt") == "1", (out_ord, outputs_ord)
+
+    # THE DISPATCH SIDE COMPOSES THE ID FROM THAT IDENTITY, and the surface
+    # result it demands back is checked against the same revision. Both were
+    # keyed on $BUILD_HEAD_SHA, which is two independent refusals of the same
+    # legitimate deploy; neither spelling may come back.
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(
+            encoding="utf-8"))
+    code = _executable_bash(_relay_deploy_step(relay["jobs"]["dispatch"])["run"])
+    assert 'CONVERGENCE_ID="$RELEASE_SOURCE-$RELEASE_ATTEMPT-$SERVICE"' in code
+    assert 'CONVERGENCE_ID="$BUILD_HEAD_SHA-$BUILD_RUN_ATTEMPT-$SERVICE"' not in code
+    assert 'jq -e --arg release "$RELEASE_SOURCE"' in code
+    assert 'jq -e --arg release "$BUILD_HEAD_SHA"' not in code
+    assert (
+        '[ "$SUPPLY_ARTIFACT_NAME" = '
+        '"staging-supply-set-$RELEASE_SOURCE-attempt-$RELEASE_ATTEMPT" ]'
+    ) in code
+    # The convergence RECEIPT stays keyed on the TIP: a superseded relay waits
+    # on staging-converged-<tip sha>-attempt-<tip attempt>, which is computed
+    # from the build record, not from the release identity.
+    assert '--arg sha "$BUILD_HEAD_SHA"' in code
+
+    # NEGATIVE, EXECUTED: a release identity that does NOT name the supply
+    # artifact this relay carries must refuse BEFORE any dispatch. This is the
+    # genuine mismatch case -- an unrelated or merely descendant sha -- and it
+    # is exactly what the consumer's guard exists to stop, so the relay must
+    # not be able to emit it either.
+    good_name = f"staging-supply-set-{'1' * 40}-attempt-2"
+    for label, source, attempt in (
+        ("an unrelated sha", "2" * 40, "2"),
+        ("the right sha at the wrong attempt", "1" * 40, "9"),
+        ("a truncated sha", "1" * 12, "2"),
+        ("a non-numeric attempt", "1" * 40, "one"),
+        ("an empty release source", "", "2"),
+    ):
+        rc_bad, out_bad = _rehearse_relay_v3_identity_gate(
+            release_source=source, release_attempt=attempt,
+            artifact_name=good_name)
+        assert rc_bad != 0, (label, out_bad)
+        assert "::error::V3 relay" in out_bad, (label, out_bad)
+        assert "convergence id" in out_bad, (label, out_bad)
+        assert "Dispatched" not in out_bad, (
+            "the relay must refuse BEFORE dispatching anything", label, out_bad)
+
+    # POSITIVE, EXECUTED: the matching identity gets PAST the gate. Proven by
+    # the docs-only notice, which is printed after the binding and before any
+    # dispatch; the run then dies on the unfaked gh, which is expected.
+    rc_ok, out_ok = _rehearse_relay_v3_identity_gate(
+        release_source="1" * 40, release_attempt="2", artifact_name=good_name)
+    assert "::error::V3 relay" not in out_ok, out_ok
+    assert "Docs-only reconcile" in out_ok, (
+        "a release identity that differs from the tip must be announced, "
+        "not refused", out_ok)
 
 
 def test_build_platform_images_workflow_invariants() -> None:

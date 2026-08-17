@@ -17,6 +17,8 @@ import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate
 import QuotaCard from './components/QuotaCard.jsx'
 import OverlayDecisionCard from './components/OverlayDecisionCard.jsx'
 import { useOverlay } from './useOverlay.js'
+import AnnotationDecisionCard from './components/AnnotationDecisionCard.jsx'
+import { useAnnotations } from './useAnnotations.js'
 import VersionHistory from './components/VersionHistory.jsx'
 import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
@@ -485,6 +487,10 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const annotationEnabled = Boolean(
+    !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
+  )
+  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
   const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
@@ -2671,6 +2677,20 @@ export default function App() {
                         tokens: themeOverlay.tokens }}
             documentVersion={themeOverlay.documentVersion}
             onDecide={(proposalId, opts) => themeOverlay.decide(proposalId, opts)}
+          />
+        )}
+
+        {annotationEnabled && annotations.annotation && (
+          <AnnotationDecisionCard
+            annotation={annotations.annotation}
+            busy={annotations.busy}
+            error={annotations.error}
+            confirmation={annotations.confirmation}
+            onPreview={annotations.preview}
+            onAccept={annotations.accept}
+            onReject={annotations.reject}
+            onRetry={annotations.retry}
+            onUndo={annotations.undo}
           />
         )}
 

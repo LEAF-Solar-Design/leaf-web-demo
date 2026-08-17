@@ -799,6 +799,10 @@ def test_catalog_fingerprint_is_stable_and_sensitive():
     argv_moved[0] = dataclasses.replace(suites[0], argv=list(suites[0].argv) + ["-k", "x"])
     assert g.catalog_fingerprint(argv_moved) != base
 
+    cwd_moved = list(suites)
+    cwd_moved[0] = dataclasses.replace(suites[0], cwd=suites[0].cwd / "elsewhere")
+    assert g.catalog_fingerprint(cwd_moved) != base
+
 
 def test_every_platform_static_file_is_registered_in_platform_static():
     """The hole this closes shipped twice for real: db_primitives/db_readiness
@@ -1132,6 +1136,40 @@ def test_fingerprint_ignores_toolchain_paths_but_not_targets():
     assert other_target != linux_npm
     npx_instead = g.catalog_fingerprint(stub(["/usr/local/bin/npx", "test"]))
     assert npx_instead != linux_npm
+
+
+def test_fingerprint_ignores_the_checkout_root_but_not_the_suite_directory(monkeypatch):
+    """Run 32018150977 flipped the eight shards onto CodeBuild-hosted runners,
+    which hand every job its OWN checkout root
+    (/codebuild/output/src<random>/src/actions-runner/_work/...). Hashing cwd
+    raw meant no two shards agreed with each other or with the ubuntu-latest
+    fan-in, so all eight were refused as "catalog fingerprint mismatch" while
+    every suite inside them had passed. Same class as the argv[0] problem
+    above: the suite's position RELATIVE to the repo is the catalog fact, the
+    root in front of it belongs to the job."""
+    g = _load_runner()
+
+    def fp(root: str, *cwds: str) -> str:
+        monkeypatch.setattr(g, "REPO", Path(root))
+        return g.catalog_fingerprint([
+            g.Suite(f"s{i}", "s", "pytest", Path(c), ["<PYTHON>", "-m", "pytest"], 1)
+            for i, c in enumerate(cwds)])
+
+    hosted = "/home/runner/work/leaf-web-demo/leaf-web-demo"
+    build_a = "/codebuild/output/src894000388/src/actions-runner/_work/leaf-web-demo/leaf-web-demo"
+    build_b = "/codebuild/output/src111222333/src/actions-runner/_work/leaf-web-demo/leaf-web-demo"
+
+    # Each layout carries an IN-repo cwd (server/) and the repo-PARENT cwd the
+    # platform suites run from, so the outside-the-repo case is covered too.
+    def layout(root: str) -> str:
+        return fp(root, f"{root}/server", str(Path(root).parent))
+
+    assert layout(hosted) == layout(build_a) == layout(build_b)
+
+    # ...and the value stays fully sensitive to the catalog itself: a suite
+    # that moves directory, inside the repo or out of it, still rehashes.
+    assert fp(hosted, f"{hosted}/da", str(Path(hosted).parent)) != layout(hosted)
+    assert fp(hosted, f"{hosted}/server", hosted) != layout(hosted)
 
 
 def test_verifier_refuses_a_status_it_does_not_recognize(tmp_path, monkeypatch, capsys):
