@@ -642,7 +642,9 @@ jobs:
   warm:
     needs: prepare
     if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
-    runs-on: ubuntu-latest
+    # In-AWS 8-vCPU CodeBuild runner: same-region ECR pushes remove the
+    # ~200s cross-network blob-upload flake class (run 30975460947).
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     continue-on-error: true
     permissions:
@@ -872,7 +874,7 @@ jobs:
           needs.test.result == 'success' &&
           (needs.adopt.result == 'skipped' ||
            (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 60
     # The ecr-release GitHub environment (main-only deployment branch
     # policy) is what qualifies this job's OIDC subject for the release
@@ -1639,7 +1641,7 @@ jobs:
   speculate:
     needs: prepare
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     environment: ecr-release
     permissions:
