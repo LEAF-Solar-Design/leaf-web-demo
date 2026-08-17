@@ -1353,7 +1353,17 @@ jobs:
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
-          push: true
+          # zstd prototype, app leg only: Fargate pays a full image pull on
+          # every task launch (four per staging deploy), and zstd layers
+          # decompress markedly faster than gzip. The `outputs` line replaces
+          # `push: true` for the app leg because buildx refuses --push
+          # alongside an explicit image output; both forms push. The digest
+          # downstream steps sign and record (steps.build-image.outputs.digest)
+          # IS the zstd manifest's digest — provenance, the supply set, and
+          # speculative adoption all mint from this one build, never a
+          # re-push, so compression cannot fork the identity chain.
+          push: ${{ matrix.image != 'app' }}
+          outputs: ${{ matrix.image == 'app' && 'type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true' || '' }}
           # Every full-build image carries sha-<full-commit>, the baked
           # identity witness required by blue/green deployment. The app image
           # of a release (prod-*) build additionally carries
