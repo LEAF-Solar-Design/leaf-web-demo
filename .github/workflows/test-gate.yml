@@ -269,18 +269,95 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # ---------------------------------------------------------------- #
+      # SINGLE-WRITER DEPENDENCY CACHES (2026-08-17)
+      #
+      # All three caches below are `restore` in every shard and `save` in
+      # exactly ONE (shard 7 — see the writer steps at the end of this job).
+      # The built-in `cache: pip` /
+      # `cache: npm` options of setup-python and setup-node are deliberately
+      # NOT used, because they have no restore-only mode: they always register
+      # a post-job save, and 8 concurrent shards saving one key is 8 archives
+      # built to store one entry.
+      #
+      # Measured on run 32030441705 (CodeBuild) against the byte-identical
+      # ubuntu-latest control 32030492530, mean seconds per shard:
+      #
+      #   step                              CodeBuild   control   delta
+      #   Post Restore Playwright cache          32.0       0.0   +32.0
+      #   Post Run actions/setup-node@v4         25.8       0.0   +25.8
+      #   Post Run actions/setup-python@v5        4.8       0.0    +4.8
+      #   Install Chromium for browser proofs     9.4       1.5    +7.9
+      #
+      # ~70s per shard, against a critical-path compute win of 74s (200s ->
+      # 126s of suite time). That is the entire CodeBuild speedup, spent on
+      # cache overhead, and it is why the flip measured -37% compute and 0%
+      # wall.
+      #
+      # The control paid none of it because it HIT: `zstd` appears 24x in its
+      # log and 0x in both CodeBuild logs, and actions/cache folds the
+      # compression method into the entry's internal `version`, so the same
+      # key resolves to a different entry. The CodeBuild shards are in a
+      # separate cache namespace and cannot read what the hosted runners
+      # wrote. (The pip key is additionally unshareable in both directions:
+      # setup-python stamps the OS release into it, `24.04-Ubuntu` hosted vs
+      # `22.04-Ubuntu` on aws/codebuild/standard:7.0.)
+      #
+      # Note what was NOT the cause. A save DOES win the reservation every
+      # run — gate-shard-7 logged `Cache saved with key: playwright-chromium-
+      # Linux-125d47d2...` at 12:36:16Z in run 32030441705 and again in run
+      # 32031032351. The other 7 shards' `Unable to reserve cache` lines are
+      # wasted work, not a populated-cache blocker. The follow-up run read
+      # `Cache not found` because of cache SCOPE, not the race: run
+      # 32030441705 was `pull_request` (writes refs/pull/N/merge) and run
+      # 32031032351 was `workflow_dispatch` on refs/heads/chip/..., which
+      # cannot see it. A gate run on a PR reads its own PR scope and main's;
+      # the entry that serves every PR is the one a push-to-main gate run
+      # writes, via build-platform-images.yml's workflow_call.
+      #
+      # So the fix here is not "make a save succeed" — one already does. It is
+      # to stop SEVEN shards building an archive they cannot store, and to let
+      # the eighth publish an entry the next run actually restores.
+      # ---------------------------------------------------------------- #
       - uses: actions/setup-python@v5
+        id: setup-python
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: |
-            server/requirements.txt
-            server/requirements-auth.txt
-            da/requirements.txt
-            platform/requirements.txt
-            scripts/requirements-ci.txt
-            executor/control_plane/requirements.txt
-            executor/runtime/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Resolved, not assumed: `~/.npm` and `~/.cache/pip` are only the Linux
+      # defaults. Asking the tools that own the directories keeps the cache
+      # pointed at the bytes they actually write, and `set -euo pipefail`
+      # makes a tool that cannot answer a red step rather than a step that
+      # silently caches an empty path.
+      - name: Resolve dependency cache directories
+        id: cache-dirs
+        run: |
+          set -euo pipefail
+          npm_dir="$(npm config get cache)"
+          pip_dir="$(python -m pip cache dir)"
+          [[ -n "$npm_dir" && "$npm_dir" != "null" && -n "$pip_dir" ]]
+          echo "npm=$npm_dir" >> "$GITHUB_OUTPUT"
+          echo "pip=$pip_dir" >> "$GITHUB_OUTPUT"
+
+      # The seven requirements files are the same set the single pip resolve
+      # below installs, so the key moves exactly when the resolve would.
+      - name: Restore pip cache
+        id: pip-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.cache-dirs.outputs.pip }}
+          key: >-
+            pip-${{ runner.os }}-${{ runner.arch }}-${{
+            steps.setup-python.outputs.python-version }}-${{
+            hashFiles('server/requirements.txt', 'server/requirements-auth.txt',
+            'da/requirements.txt', 'platform/requirements.txt',
+            'scripts/requirements-ci.txt',
+            'executor/control_plane/requirements.txt',
+            'executor/runtime/requirements.txt') }}
 
       # The two executor/ files cover the executor suite (cryptography 50,
       # gunicorn, psycopg, redis); one pip resolve across all seven keeps the
@@ -298,13 +375,14 @@ jobs:
             -r executor/control_plane/requirements.txt \
             -r executor/runtime/requirements.txt
 
-      - uses: actions/setup-node@v4
+      - name: Restore npm cache
+        id: npm-cache
+        uses: actions/cache/restore@v4
         with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: |
-            harness/package-lock.json
-            web/package-lock.json
+          path: ${{ steps.cache-dirs.outputs.npm }}
+          key: >-
+            npm-${{ runner.os }}-${{ runner.arch }}-${{
+            hashFiles('harness/package-lock.json', 'web/package-lock.json') }}
 
       - name: Install harness dependencies
         working-directory: harness
@@ -318,9 +396,14 @@ jobs:
       # (~28s per job, now ×8 jobs). The cache key follows web/package-lock.json
       # because that lockfile pins the playwright version whose browser build
       # gets downloaded.
+      #
+      # The key is unchanged from the `actions/cache@v4` form this replaced,
+      # deliberately: if zstd ever lands on the runner image the CodeBuild
+      # shards rejoin the hosted namespace and start hitting entries the
+      # ubuntu-latest jobs already wrote, with no further change here.
       - name: Restore Playwright browser cache
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
@@ -401,6 +484,56 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           overwrite: true
+
+      # ---------------------------------------------------------------- #
+      # THE SINGLE WRITER. Only shard 7 saves, and only what it missed.
+      #
+      # Why shard 7 and not shard 0: partition_suites() weights the shards
+      # 100/84/84/83.7/83.6/85.5/83.5/83.5, so 0 is the heaviest slice and 7
+      # is (jointly) the lightest, and both CodeBuild runs bear that out —
+      # shard 7 finished first (176s job wall in run 32030441705) against a
+      # critical path of 238s on shard 1. The ~62s of archiving these three
+      # steps cost on a miss (32s + 26s + 5s, measured) already sat inside
+      # that 176s, because shard 7 is the shard that happened to win the
+      # reservation both runs. So the writer's cost is absorbed by existing
+      # slack rather than added to the run wall — that is measured, not
+      # modelled.
+      #
+      # Why after the artifact upload: the fan-in's completeness proof needs
+      # every shard's result JSON. Cache archiving must never be able to
+      # stand between a finished shard and the artifact that proves it ran.
+      #
+      # Why `!cancelled()` rather than `success()`: a red gate does not make
+      # the dependencies it installed wrong, and a run that fails on suite
+      # signal should still leave the next run a warm cache. A CANCELLED job
+      # is different — its directories may be half-written, so it saves
+      # nothing.
+      #
+      # Each save is additionally gated on its own restore having MISSED. On
+      # a hit the key already holds these exact bytes, so re-saving would
+      # rebuild an archive to store what is already there (actions/cache/save
+      # warns "Cache already exists" and the work is thrown away).
+      # ---------------------------------------------------------------- #
+      - name: Save pip cache (single writer)
+        if: ${{ !cancelled() && matrix.shard == 7 && steps.pip-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.cache-dirs.outputs.pip }}
+          key: ${{ steps.pip-cache.outputs.cache-primary-key }}
+
+      - name: Save npm cache (single writer)
+        if: ${{ !cancelled() && matrix.shard == 7 && steps.npm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.cache-dirs.outputs.npm }}
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
+
+      - name: Save Playwright browser cache (single writer)
+        if: ${{ !cancelled() && matrix.shard == 7 && steps.playwright-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
 
   gate:
     name: run-all-gates
