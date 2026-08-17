@@ -80,7 +80,11 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "build-platform-images-workflow": 17,
         "platform-release-manifest": 88,
         "production-web-release": 10,
-        "web-vitest": 86,
+        # 86 -> 180 on 2026-08-17, alongside the re-measured run-all-gates.py
+        # floor (94-test drift: 89e0de06's bulk sweep set 86, never
+        # re-measured through #661 + the annotation projection feature +
+        # PR #670's post-callback token race fix, +20 cases).
+        "web-vitest": 180,
     }
     assert {
         suite_id: suites[suite_id].expected
