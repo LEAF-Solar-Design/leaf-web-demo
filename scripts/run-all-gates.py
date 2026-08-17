@@ -1165,6 +1165,25 @@ def build_suites() -> List[Suite]:
         Suite("web-deployed-acceptance-contract",
               "web deployed authored CAD acceptance contract", "script", WEB,
               [_npm(), "run", "check:deployed-acceptance-contract"], None),
+        # These four scripts/test_*.mjs files had no automated consumer at all
+        # (no npm script, no workflow) -- hand-run-only. That gap is why a real
+        # defect (waitForInteractiveLogin resolving on the pre-navigation URL,
+        # racing the operator's Universal Login typing) reached two live D1a
+        # staging runs on 2026-08-17 before anyone caught it. All four are pure
+        # fakes (mocked playwright/fetch, no network or browser launch), same
+        # shape as web-deployed-acceptance-contract above.
+        Suite("web-deployed-surface-synthetic-acceptance",
+              "web deployed surface synthetic acceptance contract", "script", WEB,
+              [_npm(), "run", "check:deployed-surface-synthetic-acceptance"], None),
+        Suite("web-deployed-auth0-spa-origin-acceptance",
+              "web D1a SPA-origin collector acceptance contract", "script", WEB,
+              [_npm(), "run", "check:deployed-auth0-spa-origin-acceptance"], None),
+        Suite("web-deployed-auth0-production-spa-origin-acceptance",
+              "web D1a production SPA-origin collector acceptance contract", "script", WEB,
+              [_npm(), "run", "check:deployed-auth0-production-spa-origin-acceptance"], None),
+        Suite("web-collect-staging-auth0-principal-b",
+              "web staging Auth0 synthetic principal B collector contract", "script", WEB,
+              [_npm(), "run", "check:collect-staging-auth0-principal-b"], None),
         Suite("web-proof-receipt-contract",
               "web proof receipt contract", "script", WEB,
               [_npm(), "run", "check:proof-receipt"], None),
