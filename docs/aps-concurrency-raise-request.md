@@ -20,6 +20,34 @@
 > while `main` told readers the opposite, which is the failure this stamp exists to
 > prevent.
 >
+> **Operator decision 2026-08-17: one app, and the raise is PARKED, not dropped.**
+> All Design Automation runs stay on the existing single APS app named below, "at
+> least for now with minimal demo traffic". Two consequences, and they point in
+> opposite directions, so do not collapse them:
+>
+> 1. Consolidating on one app does NOT raise the ceiling, so this request stays
+>    valid. Our own enforcement is a single global ceiling across every tenant
+>    (`APS_MAX_CONCURRENCY` in `da/queue.py`, default **1**), and it moves only when
+>    Autodesk grants a raise, never by buying anything. Nothing in this repo ties
+>    Flex token spend or a subscription tier to the ceiling.
+> 2. At demo-scale traffic a ceiling of 1 is tolerable, so this is no longer
+>    urgent. It is PARKED. Revisit when concurrent demand actually exceeds the
+>    ceiling, which is the trigger, not a date.
+>
+> **Ceiling scope is UNCONFIRMED on the Autodesk side, and this document and the
+> code word it differently.** `da/queue.py` calls it the "account Flex cap ... across
+> ALL tenants" while the request text below calls it the "default per-app WorkItem
+> concurrency limit". Nobody here has confirmed which Autodesk actually enforces.
+> It does not change what to do: if the cap is per-account, one app cannot lift it;
+> if it is per-app, funnelling every tenant through one app makes it bite harder.
+> Either way the raise is the only relief. Do not quote either wording as settled.
+>
+> **Before paying for ADN, use the free channel.** `docs/adn-purchase-walkthrough.md`
+> records a no-membership fallback: the "Ask the APS Expert" call, every other
+> Wednesday at 11 AM ET, where APS engineers can confirm whether a concurrency
+> change must go through ADN at all. That answers the one question the ADN purchase
+> is currently premised on, at zero cost. It cannot itself grant the raise.
+>
 > **History: submitted via APS onboarding fallback (2026-07-18).** Autodesk's
 > logged-in Assistant confirmed that direct API tickets require an active ADN
 > membership, which this account does not have. The complete concurrency request
