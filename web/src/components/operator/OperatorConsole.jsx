@@ -33,7 +33,12 @@ export default function OperatorConsole({ onClose }) {
     setContext(null)
   }, [])
 
-  useEffect(() => operatorClient.subscribeOperatorSignedOut(reset), [reset])
+  useEffect(() => {
+    // subscribe returns its unsubscribe closure; returning it makes React
+    // remove this listener on unmount (no duplicate listeners on remount).
+    const unsubscribe = operatorClient.subscribeOperatorSignedOut(reset)
+    return unsubscribe
+  }, [reset])
 
   useEffect(() => {
     let cancelled = false
