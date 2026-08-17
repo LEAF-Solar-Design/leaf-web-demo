@@ -1160,8 +1160,13 @@ def build_suites() -> List[Suite]:
         # that pinned the removed machinery (exactly-one-row across three
         # flush/pagehide orderings, dedup_key sharing, same-signature
         # suppression) are gone with it. Measured on this tree 2026-08-08.
+        # 86 -> 175: absorb the drifted residual floor (suites landed since
+        # 2026-08-08 without re-measuring) plus the post-callback token-race
+        # regression pack (SiteRoot callback gate + bounded 401 recovery,
+        # UPDATE 9). Measured on this tree 2026-08-17; no skips, no platform
+        # branches, so the count is environment-independent.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 86),
+              [_npm(), "run", "test:unit"], 175),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,

@@ -50,6 +50,7 @@ import useWorkspaceController from '../controllers/workspace/useWorkspaceControl
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
+import { createTokenRaceRecovery } from '../controllers/session/tokenRaceRecovery.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
@@ -72,7 +73,7 @@ import {
   makeIosShipLaunchKey,
   requestIosShipLaunch,
 } from './iosShipReadiness.js'
-import { authConfigured, isSignedIn, login } from '../auth.js'
+import { authConfigured, isAuthRedirectCallback, isSignedIn, login } from '../auth.js'
 import { classifyAgentError } from '../converse.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
@@ -258,6 +259,19 @@ export default function ToolCast({
     return () => window.removeEventListener('popstate', restoreSurface)
   }, [])
   const requireAuth = platformSession.actions.requireAuth
+  // Bounded recovery for the post-callback token race (UPDATE 9): a session
+  // probe that 401ed because it went out before leaf.jwt landed retries once
+  // the token appears instead of latching signed-out forever. Mount-scoped so
+  // its recovery cap spans effect re-runs; latch stays the fail-closed default.
+  const sessionRecoveryRef = useRef(null)
+  if (!sessionRecoveryRef.current) {
+    sessionRecoveryRef.current = createTokenRaceRecovery({
+      isSignedIn,
+      isCallbackInFlight: isAuthRedirectCallback,
+    })
+  }
+  const sessionRecovery = sessionRecoveryRef.current
+  useEffect(() => () => sessionRecovery.dispose(), [sessionRecovery])
   const [phase, setPhase] = useState('loading')
   const [error, setError] = useState(null)
   const [linkedJobId, setLinkedJobId] = useState(null)
@@ -427,7 +441,22 @@ export default function ToolCast({
       // probe is authority-only: it seats no intake and leaves phase 'empty'.
       let probeLive = true
       getSession(false, 'rooftop_demo')
-        .then(() => { if (probeLive) setWorkspaceBootstrapRequired(false) })
+        .then((data) => {
+          if (!probeLive) return
+          setWorkspaceBootstrapRequired(false)
+          // A 200 here IS an active platform session. Leaving the controller
+          // at 'checking' kept sessionReady false, so a signed-in user with
+          // no drawing yet saw the Trust/Jobs tabs disabled forever (the
+          // other half of the 2026-08-17 dead-tab defect, UPDATE 9). Seat the
+          // session exactly like the drawing path below: tier chip honest,
+          // expiry-cancel armed, tabs enabled. Still no intake, phase stays
+          // 'empty'.
+          setTenantId(data.tenant || 'try-surface')
+          setSessionTier(data.tier || null)
+          setSessionOrg(data.org || null)
+          accountSessionObservedRef.current = true
+          platformSession.actions.activate(data)
+        })
         .catch((cause) => {
           if (!probeLive) return
           if (cause?.status === 401) { requireAuth('/api/session'); return }
@@ -439,6 +468,10 @@ export default function ToolCast({
     platformSession.actions.checking()
     setWorkspaceBootstrapRequired(false)
     setPhase('loading')
+    // Read the bearer state at send: a 401 on a request that carried no token
+    // is not proof the user is signed out — the token may land milliseconds
+    // later (post-callback race, UPDATE 9: burst at T, token at T+700ms).
+    const hadTokenAtSend = isSignedIn()
     getSession(PUBLIC_DEMO, drawingSource)
       .then((data) => {
         if (!live) return
@@ -459,9 +492,21 @@ export default function ToolCast({
       .catch((cause) => {
         if (!live) return
         if (cause?.status === 401) {
-          requireAuth('/api/session')
-          setError(null)
-          setPhase('failed')
+          // Bounded race recovery: retry when a token appeared after this
+          // pre-token request went out (sessionRetry re-runs this effect,
+          // now with the bearer); latch signed-out only when recovery is not
+          // provably safe. No busy loop — the recovery caps its own retries
+          // and rechecks.
+          sessionRecovery.handle401({
+            hadTokenAtSend,
+            onRetry: () => { if (live) setSessionRetry((n) => n + 1) },
+            onLatch: () => {
+              if (!live) return
+              requireAuth('/api/session')
+              setError(null)
+              setPhase('failed')
+            },
+          })
           return
         }
         if (isWorkspaceBootstrapRequired(cause)) {
@@ -473,8 +518,8 @@ export default function ToolCast({
         setError('The drawing backend is unavailable. Start the proof API and reload this surface.')
         setPhase('failed')
       })
-    return () => { live = false }
-  }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, requireAuth, seatIntake, sessionRetry])
+    return () => { live = false; sessionRecovery.cancel() }
+  }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, requireAuth, seatIntake, sessionRecovery, sessionRetry])
 
   const showToast = useCallback((next) => {
     toastSeqRef.current += 1

@@ -6,6 +6,14 @@
 // or an Auth0 callback (?code= AND ?state=) boots straight into scene 'app'
 // regardless of path — every pre-existing deep link keeps working byte-for-
 // byte. Checked ONCE at boot; navigate() preserves the search string.
+//
+// One exception, deliberate: an Auth0 callback landing renders NOTHING authed
+// until handleRedirectCallback has persisted leaf.jwt (see the gate in the
+// render path). The token-before-first-authed-render ordering is the fix for
+// the 2026-08-17 post-callback race (UPDATE 9): the console's mount burst
+// fired eleven pre-token 401s and latched the session controller signed-out
+// until a manual reload. The success path reloads into the boot decision
+// below, so deep links still land exactly where they always did.
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRoute, navigate } from './router.js'
@@ -68,8 +76,11 @@ const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingI
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
   const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
-  const [authCallbackPending, setAuthCallbackPending] = useState(() =>
-    window.location.pathname === '/try' && isAuthRedirectCallback())
+  // EVERY callback landing gates, not just /try: redirect_uri is the bare
+  // origin, so a fresh login lands on '/' — the one path the old /try-only
+  // gate never covered, which let scene 'app' mount and fire its API burst
+  // before the token existed.
+  const [authCallbackPending, setAuthCallbackPending] = useState(() => isAuthRedirectCallback())
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   const stageRef = useRef(null)
@@ -144,6 +155,14 @@ export default function SiteRoot() {
     })
   }, [scene])
 
+  // TOKEN BEFORE FIRST AUTHED RENDER: this gate must precede every scene,
+  // scene 'app' included. While the code exchange is in flight nothing that
+  // can talk to the API mounts; the reload after the token is stored is the
+  // only committer of an authed mount, so its session burst always carries
+  // the bearer. Fails closed: a failed exchange lowers the gate into the
+  // ordinary signed-out render.
+  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
+
   if (scene === 'app') {
     // The console ALONE — no stage mounted; App owns its own Viewer.
     return (
@@ -154,8 +173,6 @@ export default function SiteRoot() {
       </WorkspaceControllerProvider>
     )
   }
-
-  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
 
   if (scene === 'sheets') {
     return (
