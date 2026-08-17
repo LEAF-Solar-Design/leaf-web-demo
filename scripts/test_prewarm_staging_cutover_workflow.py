@@ -345,7 +345,7 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "deploy_mode=prewarm" in body
     assert "expected_task_definition=auto-live" in body
     assert "deploy_strategy=bluegreen" in body
-    assert "for SERVICE in web app" in body
+    assert "for SERVICE in $STAGE_SERVICES" in body
     # Staging is an optimisation: a refused or failed dispatch degrades to the
     # measured fallback warm and must never redden the PR.
     assert "::warning::Prewarm dispatch for $SERVICE failed" in body
@@ -356,6 +356,28 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "actions/runs/[0-9]+" in body
     assert "did not verify as this dispatch" in body
     assert "if length == 1 then .[0].databaseId else empty end" in body
+
+
+def test_app_is_not_staged_while_its_deploy_job_is_self_hosted():
+    """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
+
+    deploy-leaf-platform-staging.yml (terraform repo) runs its deploy job on
+    ubuntu-latest for `web` and on the single self-hosted runner for every other
+    service. A run holds the shared staging mutex from the moment it ENTERS the
+    group -- including while its job waits for a runner -- so an `app` prewarm
+    queued behind that busy runner blocks every staging deploy. Measured
+    2026-08-17: two relayed prewarms sat pending 25 and 44 minutes behind an
+    unrelated iOS capture job and were cancelled off the mutex.
+
+    Restoring `app` is a deliberate edit that has to come back through this test,
+    which is the point: whoever does it should first confirm that deploy job runs
+    somewhere always available.
+    """
+    services = workflow_document()["env"]["STAGE_SERVICES"].split()
+    assert services == ["web"], (
+        "STAGE_SERVICES is %s; `app` may only be staged once its deploy job "
+        "runs on an always-available runner" % services
+    )
 
 
 def test_the_relay_never_deploys_normally_or_flips():
