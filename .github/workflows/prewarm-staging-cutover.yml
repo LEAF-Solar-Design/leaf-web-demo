@@ -124,7 +124,12 @@ jobs:
             | map(sort_by(.submitted_at) | last | .state)' reviews.json)
           APPROVED=$(printf '%s' "$VERDICTS" | jq 'any(. == "APPROVED")')
           BLOCKED=$(printf '%s' "$VERDICTS" | jq 'any(. == "CHANGES_REQUESTED")')
-          LABELLED=$(jq --arg label "$STAGE_LABEL" 'any(.labels[]?.name; . == $label)' pull-request.json)
+          # `label` is a jq KEYWORD (label $out | ...), so `--arg label` makes
+          # `$label` a syntax error on jq 1.6 -- which is what the CI runner
+          # image carries, while a 1.7 workstation accepts it. Name the binding
+          # something that is not reserved, and keep the iteration free of a
+          # suffix after `?` for the same portability reason.
+          LABELLED=$(jq --arg wanted "$STAGE_LABEL" '[.labels[]? | .name] | any(. == $wanted)' pull-request.json)
           ELIGIBLE=false
           REASON="no standing approval and no $STAGE_LABEL label"
           if [ "$BLOCKED" = "true" ]; then

@@ -343,6 +343,55 @@ def test_only_an_unmerged_close_descales():
     assert "::warning::Targeted descale dispatch failed" in body
 
 
+def _uncommented_workflow() -> str:
+    """The workflow with comment lines dropped.
+
+    A comment is allowed to DISCUSS a trap -- the note explaining why `--arg
+    label` breaks jq 1.6 must not itself trip the scan that enforces it.
+    """
+    return "".join(
+        line + chr(10)
+        for line in workflow_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
+JQ_KEYWORDS = {
+    "def", "as", "label", "import", "include", "if", "then", "else", "elif",
+    "end", "and", "or", "reduce", "foreach", "try", "catch", "__loc__",
+}
+
+
+def test_no_jq_binding_shadows_a_jq_keyword():
+    """`--arg label` is a syntax error on jq 1.6, and fine on 1.7+.
+
+    That difference is invisible on a modern workstation and fatal on the CI
+    image, which is exactly how it shipped once: `any(.labels[]?.name; . ==
+    $label)` passed locally on jq 1.8 and failed the gate with "unexpected
+    label". Scan for the class, not that one instance.
+    """
+    import re
+
+    offenders = [
+        name
+        for name in re.findall(r"--arg(?:json)?[ \t]+([A-Za-z_][A-Za-z0-9_]*)", _uncommented_workflow())
+        if name in JQ_KEYWORDS
+    ]
+    assert offenders == [], (
+        "these jq bindings shadow a jq keyword and break on jq 1.6: %s" % offenders
+    )
+
+
+def test_no_jq_filter_suffixes_a_field_onto_an_optional_iterator():
+    """`.a[]?.b` is rejected by older jq; `.a[]? | .b` is portable."""
+    import re
+
+    assert not re.search(r"\[\]\?\.", _uncommented_workflow()), (
+        "use `.x[]? | .y` rather than `.x[]?.y`; the suffixed form does not "
+        "parse on the jq the CI image carries"
+    )
+
+
 def test_the_cross_repo_token_is_scoped_to_the_dispatch_steps():
     document = workflow_document()
     for job_name, job in document["jobs"].items():
