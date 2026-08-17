@@ -1080,7 +1080,10 @@ def build_suites() -> List[Suite]:
               # class -- a binding that shadows a jq keyword, and a field
               # suffixed onto an optional iterator -- rather than for that one
               # instance.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 22),
+              # 22 -> 24: the trigger set is a secret-handling decision, so it
+              # is pinned, and so is the rule that the merge preview is READ and
+              # never executed while the cross-repo token is in scope.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 24),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
