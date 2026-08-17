@@ -222,6 +222,9 @@ def _sandbox_lib_path() -> str:
     """
     if os.name != "posix":
         return ""
+    # ".so" is ALSO the macOS guard: a framework/dylib build reports
+    # `libpython3.x.dylib`, which must derive nothing — DYLD ignores
+    # LD_LIBRARY_PATH, so a value would be dead weight. Keep the filter.
     names = [n for n in (sysconfig.get_config_var("LDLIBRARY"),
                          sysconfig.get_config_var("INSTSONAME"))
              if n and ".so" in n]
