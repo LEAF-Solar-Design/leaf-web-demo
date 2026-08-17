@@ -258,25 +258,47 @@ jobs:
             # Soft-fail per service: staging is an optimization, and a refused
             # or failed dispatch must never redden a PR. The merge deploy takes
             # the measured fallback warm.
-            if ! gh workflow run "$DEPLOY_WORKFLOW" \
+            if ! DISPATCH_OUTPUT=$(gh workflow run "$DEPLOY_WORKFLOW" \
                 --repo "$INFRA_REPO" \
                 --ref main \
                 -f "service=$SERVICE" \
                 -f "expected_task_definition=auto-live" \
                 -f "image_tag=$IMAGE_TAG" \
                 -f "deploy_strategy=bluegreen" \
-                -f "deploy_mode=prewarm"; then
+                -f "deploy_mode=prewarm" 2>&1); then
+              printf '%s' "$DISPATCH_OUTPUT"
               echo "::warning::Prewarm dispatch for $SERVICE failed; the merge deploy will warm normally."
               jq --arg service "$SERVICE" '. + [{service: $service, run_id: null, disposition: "dispatch-failed"}]' \
                 dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
               continue
             fi
-            RUN_ID=""
-            for _ in 1 2 3 4 5 6 7 8 9 10; do
-              sleep 6
-              RUN_ID=$(resolve_run "$MARK" "$WANT" || true)
-              [ -n "$RUN_ID" ] && break
-            done
+            printf '%s' "$DISPATCH_OUTPUT"
+            # PREFER THE ID GITHUB GIVES US. gh >= 2.88 prints the created run
+            # URL "if available", and that is the run's own identity rather
+            # than an inference from a listing. It is VERIFIED before it is
+            # trusted -- the id must belong to this workflow path and carry the
+            # run-name we asked for -- so a mangled parse, a redirect, or an
+            # older gh that prints something else can never bind us to a
+            # stranger's run. The mark scan below remains the fallback for
+            # every gh that prints nothing.
+            RUN_ID=$(printf '%s' "$DISPATCH_OUTPUT" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)
+            if [ -n "$RUN_ID" ]; then
+              if gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" \
+                  --jq 'select(.path == (".github/workflows/" + env.DEPLOY_WORKFLOW)) | .display_title' 2>/dev/null \
+                  | grep -qxF "$WANT"; then
+                echo "Dispatch reported run $RUN_ID and it verified as ours."
+              else
+                echo "::warning::Reported run $RUN_ID did not verify as this dispatch; falling back to the mark scan."
+                RUN_ID=""
+              fi
+            fi
+            if [ -z "$RUN_ID" ]; then
+              for _ in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 6
+                RUN_ID=$(resolve_run "$MARK" "$WANT" || true)
+                [ -n "$RUN_ID" ] && break
+              done
+            fi
             if [ -n "$RUN_ID" ]; then
               echo "Prewarm for $SERVICE is run $RUN_ID."
               jq --arg service "$SERVICE" --argjson run_id "$RUN_ID" \

@@ -317,7 +317,12 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     # Staging is an optimisation: a refused or failed dispatch degrades to the
     # measured fallback warm and must never redden the PR.
     assert "::warning::Prewarm dispatch for $SERVICE failed" in body
-    # Identity, never inference: exactly one matching run above the mark.
+    # Identity, never inference. First choice is the run id GitHub itself
+    # reports, and it is verified against the workflow path and run-name before
+    # it is trusted; the mark scan is the fallback for a gh that reports
+    # nothing, and it too requires exactly one match.
+    assert "actions/runs/[0-9]+" in body
+    assert "did not verify as this dispatch" in body
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
