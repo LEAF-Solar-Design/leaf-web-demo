@@ -440,3 +440,56 @@ def test_pg_dark_no_stager_fails_closed(pg):
         cur.execute("SELECT count(*) AS n FROM operator_release_candidates"
                     " WHERE source_sha=%s", (sha,))
         assert cur.fetchone()["n"] == 0  # no candidate claimed
+
+
+@needs_pg
+def test_pg_candidate_identity_is_db_immutable(pg):
+    # O4 behavioral (contract/OPERATOR.md section 7): against the FULLY MIGRATED
+    # schema (including the 0035 identity-immutability trigger), an UPDATE that
+    # rewrites a reviewed candidate's identity (source_sha or target) is REJECTED
+    # by the database, while a legitimate receipt-field update succeeds. Identity
+    # immutability does not depend on application-code discipline: a quoted
+    # identifier, dynamic SQL, or a future handler is rejected the same way,
+    # because the trigger acts on the column value, not the SQL text.
+    import psycopg
+    from operator_principals import _db
+    db = _db()
+    sha = uuid.uuid4().hex[:12]
+
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_release_candidates (source_sha, target, status)"
+            " VALUES (%s, 'staging', 'staging')", (sha,))
+
+    # Rewriting source_sha -> rejected by the trigger.
+    with pytest.raises(psycopg.Error):
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE operator_release_candidates SET source_sha=%s"
+                " WHERE source_sha=%s AND target='staging'",
+                (uuid.uuid4().hex[:12], sha))
+
+    # Rewriting target -> rejected even via a QUOTED identifier (the trigger acts
+    # on the column, so the quoted-identifier source bypass is irrelevant here).
+    with pytest.raises(psycopg.Error):
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                'UPDATE operator_release_candidates SET "target"=%s'
+                " WHERE source_sha=%s AND target='staging'",
+                ("development", sha))
+
+    # A legitimate receipt-field update succeeds.
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE operator_release_candidates SET status='staged',"
+            " staged_taskdef_revision='10' WHERE source_sha=%s AND target='staging'",
+            (sha,))
+
+    # Identity unchanged; receipt applied.
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_sha, target, status, staged_taskdef_revision FROM"
+            " operator_release_candidates WHERE source_sha=%s", (sha,))
+        row = cur.fetchone()
+        assert row["source_sha"] == sha and row["target"] == "staging"
+        assert row["status"] == "staged" and row["staged_taskdef_revision"] == "10"

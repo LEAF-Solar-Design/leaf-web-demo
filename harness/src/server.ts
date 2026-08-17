@@ -63,6 +63,12 @@ import {
   type HumanApprovalHostInput,
   type LeafStandardServicesHumanApprovalHost,
 } from "./ports/impl/leafStandardServicesResolver.js";
+import {
+  dispatchOperatorWorkerJob,
+  OperatorWorkerDispatchError,
+  type OperatorWorkerDispatchRequest,
+} from "./operatorWorker/operatorWorkerDispatch.js";
+import type { OperatorWorkerManager } from "./operatorWorker/workerManager.js";
 
 export { DEFAULT_TENANT };
 
@@ -706,6 +712,10 @@ export function createHarness(ports: HarnessPorts, opts?: {
     dispatchSecret: string;
     host: LeafStandardServicesHumanApprovalHost;
   };
+  /** Lane D (O2/O3): the isolated operator worker. Absent -> the dispatch route
+   * ships dark (501). The manager itself still fails closed on a non-isolating
+   * substrate, so wiring this grants no broad-execution capability by itself. */
+  operatorWorker?: { manager: OperatorWorkerManager };
 }): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
@@ -792,6 +802,51 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+
+      // Operator worker dispatch (contract/OPERATOR.md Lane D, O2/O3 wiring): the
+      // app's capability-only handler forwards a BOUNDED job over this same
+      // secret-gated hop; the job runs ONLY in the isolated disposable worker.
+      // Ships dark: 501 until a manager (with a real isolating substrate) is wired.
+      if (method === "POST" && path === "/operator/worker/dispatch") {
+        if (!opts?.operatorWorker) {
+          return send(res, 501, {
+            error: { message: "operator worker not configured", code: "not_implemented" },
+          });
+        }
+        const body = await readJsonBody(req);
+        const request: OperatorWorkerDispatchRequest = {
+          commands: Array.isArray(body.commands)
+            ? (body.commands as unknown[]).filter((c): c is string => typeof c === "string")
+            : [],
+          repo: typeof body.repo === "string" ? body.repo : undefined,
+          idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : "",
+          principalSubject: typeof body.principalSubject === "string" ? body.principalSubject : "",
+          sessionId: typeof body.sessionId === "string" ? body.sessionId : "",
+          timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+        };
+        try {
+          const receipt = await dispatchOperatorWorkerJob(opts.operatorWorker.manager, request);
+          return send(res, 200, receipt);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          if (reason === "substrate_not_isolating") {
+            // Isolation refusal is a service posture, not a caller error: the
+            // worker exists but will not run broad work un-jailed.
+            return send(res, 503, {
+              error: { code: reason, message: "operator worker refused: substrate not isolating" },
+            });
+          }
+          if (err instanceof OperatorWorkerDispatchError
+            || reason === "workspace_invalid" || reason === "commands_invalid"
+            || reason === "idempotency_key_required" || reason === "principal_required") {
+            return send(res, 400, {
+              error: { code: reason, message: "operator worker dispatch rejected" },
+            });
+          }
+          throw err;
+        }
+      }
 
       if (method === "POST" && path === "/internal/project-repository-source/verify") {
         const projectSourceProvider = ports.tenantRepo as TenantRepoProvider;

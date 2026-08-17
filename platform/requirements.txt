@@ -1,6 +1,6 @@
 # Platform (canonical Project/Job entity) — runtime + test deps.
 # All already present in the demo's environment; pinned loosely for a fresh venv.
-fastapi>=0.110
+fastapi>=0.109.1
 pydantic>=2.6
 psycopg[binary]>=3.1
 psycopg-pool>=3.2

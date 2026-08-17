@@ -92,9 +92,11 @@ def test_store_unavailable_maps_to_503(monkeypatch):
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as err:
-        operator_deps.require_operator(
+        # require_operator is a yield-dependency (it arms the egress boundary);
+        # driving it with next() runs the body, which raises before the yield.
+        next(operator_deps.require_operator(
             tenant="demo-tenant", x_operator_subject="auth0|nobody",
-            x_operator_profile=None)
+            x_operator_profile=None))
     assert err.value.status_code == 503
 
 
@@ -111,10 +113,10 @@ def test_dev_header_names_lookup_only(monkeypatch):
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as err:
-        operator_deps.require_operator(
+        next(operator_deps.require_operator(
             tenant="demo-tenant",
             x_operator_subject=f"auth0|ungrant-{uuid.uuid4().hex[:8]}",
-            x_operator_profile=None)
+            x_operator_profile=None))
     assert err.value.status_code == 404
 
 

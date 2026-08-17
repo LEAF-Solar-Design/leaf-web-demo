@@ -1,4 +1,10 @@
-fastapi
+# Pinned to the pre-drift versions: fastapi 0.110+/starlette 1.x removed
+# Router.startup() and reshaped app.routes (adds _IncludedRouter without .path),
+# which breaks the operator route-surface enumeration and the O2/O3 gate. These
+# are the latest versions that keep the pre-drift API. Bump only with a matching
+# migration of the app's startup-mounted operator surface and the affected tests.
+fastapi==0.109.1
+starlette==0.35.1
 uvicorn
 pydantic
 requests
@@ -8,3 +14,6 @@ python-multipart  # multipart parsing for POST /api/drawings/upload (§19); was 
 # tests
 jsonschema
 pytest
+# httpx>=0.28 removed the TestClient app= shortcut that starlette 0.35's TestClient
+# uses; pinned with fastapi/starlette above to keep the pre-drift test stack.
+httpx<0.28

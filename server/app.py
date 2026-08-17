@@ -296,6 +296,7 @@ def _mount_operator_router() -> None:
     from routers import operator_credential as operator_credential_router
     from routers import operator_external as operator_external_router
     from routers import operator_release as operator_release_router
+    from routers import operator_worker as operator_worker_router
 
     app.include_router(operator_sessions_router.router)
     # Lane F reversible runbooks. Write actions are always-confirm and gated by
@@ -315,6 +316,11 @@ def _mount_operator_router() -> None:
     # Staging release runbook (O6): always-confirm, STAGING ONLY, immutable
     # candidate per source SHA; DARK (no stager registered). Never reaches prod.
     app.include_router(operator_release_router.router)
+    # Operator worker dispatch (Lane D, O2/O3): capability-only handler that
+    # forwards a BOUNDED job over the secret-gated app->harness hop to the
+    # isolated disposable worker. It never executes commands in this process,
+    # and the harness side ships dark (501 until an isolating substrate is wired).
+    app.include_router(operator_worker_router.router)
     print("[leaf-demo] operator control plane mounted (/api/operator/*)")
 
 
