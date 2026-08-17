@@ -415,8 +415,25 @@ export default function ToolCast({
       setWorkspaceBootstrapRequired(false)
       setError(null)
       setPhase('empty')
-      if (!isSignedIn()) requireAuth('/api/session')
-      return undefined
+      if (!isSignedIn()) {
+        requireAuth('/api/session')
+        return undefined
+      }
+      // A signed-in user with no drawing yet still needs to learn whether they
+      // own a tenant workspace: without this probe the bootstrap-required 403
+      // (only surfaced by /api/session) never fires on the empty landing, the
+      // "Create your Leaf workspace" gate never renders, and their first upload
+      // 403s with no path forward (found by the 2026-08-17 staging walk). The
+      // probe is authority-only: it seats no intake and leaves phase 'empty'.
+      let probeLive = true
+      getSession(false, 'rooftop_demo')
+        .then(() => { if (probeLive) setWorkspaceBootstrapRequired(false) })
+        .catch((cause) => {
+          if (!probeLive) return
+          if (cause?.status === 401) { requireAuth('/api/session'); return }
+          if (isWorkspaceBootstrapRequired(cause)) setWorkspaceBootstrapRequired(true)
+        })
+      return () => { probeLive = false }
     }
     let live = true
     platformSession.actions.checking()
