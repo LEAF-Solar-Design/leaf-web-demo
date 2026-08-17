@@ -289,8 +289,40 @@ def test_it_fires_on_approval_pushes_labels_and_closes():
     document = workflow_document()
     triggers = document["on"]
     assert triggers["pull_request_review"]["types"] == ["submitted"]
-    assert set(triggers["pull_request"]["types"]) == {"synchronize", "labeled", "closed"}
-    assert triggers["pull_request"]["branches"] == ["main"]
+    assert set(triggers["pull_request_target"]["types"]) == {"synchronize", "labeled", "closed"}
+    assert triggers["pull_request_target"]["branches"] == ["main"]
+
+
+def test_no_trigger_runs_pr_authored_workflow_text_next_to_the_token():
+    """The trigger set is a secret-handling decision.
+
+    A `pull_request` run executes the PR's OWN copy of this file while
+    TERRAFORM_REPO_TOKEN is in scope, so any same-repo branch could rewrite the
+    workflow and take the token. `pull_request_target` and `pull_request_review`
+    both run the DEFAULT BRANCH's copy. This is the boundary
+    speculate-platform-images holds by dispatching on the main ref.
+    """
+    triggers = workflow_document()["on"]
+    assert "pull_request" not in triggers, (
+        "this workflow holds a cross-repository token; use pull_request_target "
+        "so the text that runs is always reviewed"
+    )
+
+
+def test_the_preview_checkout_is_never_executed():
+    """The other half of the boundary: read the preview, never run it.
+
+    With pull_request_target the token is in scope, so a step that executed
+    anything out of the merge preview would hand it to the PR author. Only git
+    plumbing may touch that checkout.
+    """
+    body = step_body("stage", "Refuse a candidate that touches")
+    for command in ("git rev-parse", "git diff"):
+        assert command in body
+    for forbidden in ("python", "bash ", "sh ", "npm", "make", "./"):
+        assert forbidden not in body, (
+            "the merge preview is read, never executed: %r appears in the step" % forbidden
+        )
 
 
 def test_a_close_is_never_cancelled_by_a_newer_stage():

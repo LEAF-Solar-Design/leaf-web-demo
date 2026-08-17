@@ -48,10 +48,22 @@ name: Prewarm staging cutover
 # multiplies staged tasks, and §5's exposure is only bounded by that cap.
 # ---------------------------------------------------------------------------
 
+# TRIGGER CHOICE IS A SECRET-HANDLING DECISION, not a convenience.
+# A `pull_request` run executes the PR's OWN copy of this file while the
+# TERRAFORM_REPO_TOKEN is in scope, so any same-repo branch could rewrite this
+# workflow and walk off with the token. `pull_request_target` and
+# `pull_request_review` both run the file from the DEFAULT BRANCH, so what runs
+# is always reviewed text. This is the same boundary speculate-platform-images
+# holds by dispatching on the main ref, for the same reason.
+#
+# The other half of that boundary: this workflow checks out the PR merge
+# preview but NEVER EXECUTES anything from it. It runs `git rev-parse` and
+# `git diff` over the tree and nothing else -- no script, no build, no hook --
+# so preview-authored code never runs next to the token.
 on:
   pull_request_review:
     types: [submitted]
-  pull_request:
+  pull_request_target:
     types: [synchronize, labeled, closed]
     branches: [main]
 
