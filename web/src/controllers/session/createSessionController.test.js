@@ -9,8 +9,9 @@
 // behind a signed-out-looking surface, Trust/Jobs tabs disabled, until the user
 // manually reloaded.
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { noteUnauthorized, subscribeUnauthorized } from '../../api.js'
 import { MAX_TOKEN_RECOVERIES, createSessionController } from './createSessionController.js'
 
 function fakeStorage(initial = {}) {
@@ -153,5 +154,101 @@ describe('post-callback token race', () => {
     controller.destroy()
     storeToken('fresh-token')
     expect(controller.getSnapshot()).toMatchObject({ status: 'required', recoveries: 0 })
+  })
+})
+
+// Only two channels may delete leaf.jwt: api.js's noteUnauthorized (a 401 whose
+// request carried the currently-stored token) and an explicit sign-out. Every
+// other requireAuth caller reports render state, not a verdict on the token.
+//
+// The default used to be an unconditional removeItem, which re-opened the exact
+// hole api.js:86-108 closed on 2026-08-08: the transport correctly declines to
+// wipe a token a straggler 401 never carried AND stays silent, but the surface's
+// own `.catch(401 -> requireAuth)` fires anyway and destroyed the fresh token.
+describe('token deletion authority', () => {
+  it('a straggler refusal keeps the token and self-heals instead of dying holding it', () => {
+    const storage = fakeStorage()
+    const { controller } = harness({ storage })
+    // The callback stored the fresh token; a pre-token request 401s afterwards.
+    // api.js kept the token and did NOT notify, so only the surface's catch runs.
+    storage.setItem('leaf.jwt', 'fresh-token')
+    controller.actions.requireAuth('/api/session')
+
+    expect(storage.getItem('leaf.jwt')).toBe('fresh-token')
+    expect(controller.getSnapshot()).toMatchObject({ status: 'checking', recoveries: 1 })
+  })
+
+  it('converges in one round trip when the kept token really was bad', () => {
+    const storage = fakeStorage()
+    const { controller, unauthorized } = harness({ storage })
+    storage.setItem('leaf.jwt', 'stale-token')
+    controller.actions.requireAuth('/api/session')
+    expect(controller.getSnapshot().status).toBe('checking') // spends one retry
+
+    // That retry carries the token, so this time the transport indicts it.
+    storage.removeItem('leaf.jwt') // what noteUnauthorized does before notifying
+    unauthorized('/api/session')
+
+    expect(storage.getItem('leaf.jwt')).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ status: 'required', recoveries: 1 })
+    expect(controller.actions.recoverWithStoredToken()).toBe(false)
+  })
+
+  it('a guest-phase refusal with no token stored latches quietly', () => {
+    const storage = fakeStorage()
+    const { controller } = harness({ storage })
+    controller.actions.requireAuth('/api/session')
+    expect(controller.getSnapshot()).toMatchObject({ status: 'required', recoveries: 0 })
+  })
+
+  it('sign-out still deletes the token', async () => {
+    const storage = fakeStorage({ 'leaf.jwt': 'live-token', 'leaf.inflightAuthor.v1': 'draft' })
+    const { controller } = harness({ storage })
+    await controller.actions.signOut()
+    expect(storage.getItem('leaf.jwt')).toBeNull()
+    expect(storage.getItem('leaf.inflightAuthor.v1')).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'signed_out' })
+  })
+})
+
+// The two layers wired together against the REAL transport guard, because the
+// defect lived in the seam between them, not in either one alone.
+describe('transport and controller together', () => {
+  let controller
+
+  beforeEach(() => {
+    localStorage.clear()
+    controller = createSessionController({
+      storage: localStorage,
+      subscribeUnauthorized,
+    })
+    controller.start()
+  })
+
+  afterEach(() => {
+    controller.destroy()
+    localStorage.clear()
+  })
+
+  it('never destroys a token the transport deliberately kept', () => {
+    localStorage.setItem('leaf.jwt', 'fresh-token')
+    // The straggler: sent with no bearer, resolves after the token landed.
+    noteUnauthorized({ status: 401 }, '/api/session', undefined)
+    // The surface sees the same 401 through its own catch and reports it.
+    controller.actions.requireAuth('/api/session')
+
+    expect(localStorage.getItem('leaf.jwt')).toBe('fresh-token')
+    expect(controller.getSnapshot().status).toBe('checking')
+  })
+
+  it('honours the transport when the 401 really did carry the stored token', () => {
+    localStorage.setItem('leaf.jwt', 'live-token')
+    controller.actions.activate({ tenant: 'tenant-a' })
+
+    noteUnauthorized({ status: 401 }, '/api/jobs', 'Bearer live-token')
+    controller.actions.requireAuth('/api/jobs') // the surface's catch, after
+
+    expect(localStorage.getItem('leaf.jwt')).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'expired' })
   })
 })

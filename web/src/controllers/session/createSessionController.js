@@ -49,9 +49,26 @@ export function createSessionController({
     try { storage?.removeItem('leaf.jwt') } catch { /* storage unavailable */ }
   }
 
-  const requireAuth = (source = 'unknown') => {
-    latchedToken = readToken()
-    clearToken()
+  // WHO MAY DELETE THE TOKEN. `tokenInvalidated` says whether this refusal
+  // PROVES the stored token is bad, and only two channels can prove it:
+  // api.js's noteUnauthorized (a 401 whose request carried the currently-stored
+  // token -- it wipes, then notifies, so the subscription below is always
+  // post-wipe) and an explicit sign-out. Every other caller is reporting render
+  // state, not a verdict on the token, and defaults to false.
+  //
+  // The default used to be an unconditional removeItem, which re-opened the
+  // exact hole api.js:86-108 closed on 2026-08-08: a straggler 401 from the
+  // pre-token window resolves AFTER the callback stored a fresh token, the
+  // transport correctly declines to wipe it and stays silent, but the surface's
+  // own `.catch(401 -> requireAuth)` then destroyed the token anyway. One owner
+  // per reason; a refusal that indicts nothing deletes nothing.
+  const requireAuth = (source = 'unknown', { tokenInvalidated = false } = {}) => {
+    if (tokenInvalidated) {
+      // Read BEFORE clearing: this is the token the refusal indicted, and
+      // recovery must never spend an attempt retrying it.
+      latchedToken = readToken()
+      clearToken()
+    }
     const sources = state.sources.includes(source) ? state.sources : [...state.sources, source]
     if (state.status === 'required' && sources === state.sources) return state
     publish({
@@ -61,6 +78,13 @@ export function createSessionController({
       sources,
       session: null,
     })
+    // A refusal that indicted nothing, taken while a never-indicted token sits
+    // in storage, IS the straggler case. Spend one bounded recovery so the
+    // surface re-checks with that token instead of dying holding it. It
+    // converges in a single extra round trip: if the token really is bad, that
+    // retry carries it, so api.js wipes it and comes back through the
+    // invalidating channel, which latches for good.
+    if (!tokenInvalidated) recoverWithStoredToken()
     return state
   }
 
@@ -104,13 +128,18 @@ export function createSessionController({
 
   const signOut = async () => {
     try { storage?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
-    requireAuth('signout')
+    // An explicit sign-out is the second channel that may delete the token.
+    requireAuth('signout', { tokenInvalidated: true })
     await endSession?.()
   }
 
   const start = () => {
     if (!unsubscribeUnauthorized && subscribeUnauthorized) {
-      unsubscribeUnauthorized = subscribeUnauthorized((source) => requireAuth(source || 'api:401'))
+      // api.js fires this ONLY after it has itself removed the stored token,
+      // so this channel is the transport's verdict: the token is proven bad.
+      unsubscribeUnauthorized = subscribeUnauthorized(
+        (source) => requireAuth(source || 'api:401', { tokenInvalidated: true }),
+      )
     }
     if (!unsubscribeTokenStored && subscribeTokenStored) {
       unsubscribeTokenStored = subscribeTokenStored(() => { recoverWithStoredToken() })
