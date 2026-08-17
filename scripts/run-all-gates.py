@@ -1163,8 +1163,25 @@ def build_suites() -> List[Suite]:
         # that pinned the removed machinery (exactly-one-row across three
         # flush/pagehide orderings, dedup_key sharing, same-signature
         # suppression) are gone with it. Measured on this tree 2026-08-08.
+        # 74 -> 86: bulk repo-wide floor sweep (89e0de06, "test(gates): absorb
+        # measured residual floors", 2026-08-14). That commit folded 38
+        # drifted floors into one mechanical pass with no per-suite rationale
+        # recorded; this step's provenance beyond the commit itself is
+        # unrecovered.
+        # 86 -> 180: the floor was never re-measured through two more
+        # test-adding PRs (#661 operator console, and the annotation decision
+        # projection feature) that took the real count to 160, then PR #670
+        # (squash 09112cdd, the post-callback token race fix) added 20 more
+        # cases -- 7 in the new authBoot.test.js, 13 in the new
+        # createSessionController.test.js -- and its own commit message
+        # states "Web unit suite 180/180". This suite remains the easy case:
+        # every case is literal and unconditional, no skips, no parametrize,
+        # no platform branch, and a collection/import failure makes vitest
+        # FAIL rather than report a lower count, so this floor IS the exact
+        # measured count, not a cross-environment minimum. Measured on this
+        # tree 2026-08-17: 24 files, 180 tests, `npm run test:unit` in web/.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 86),
+              [_npm(), "run", "test:unit"], 180),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
