@@ -642,14 +642,24 @@ jobs:
   warm:
     needs: prepare
     if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
-    # REVERTED to ubuntu-latest 2026-08-17 (run 32032185875). The CodeBuild
-    # flip is blocked on Docker Hub, not on the runner: every base-image pull
-    # from the CodeBuild fleet egresses via shared AWS NAT addresses and hits
-    # the ANONYMOUS pull limit, so `node:22-bookworm` / `node:20-slim` HEADs
-    # return 429 and buildx fails to solve. GitHub-hosted runners do not see
-    # this. Re-flip only once base images are pulled authenticated or mirrored
-    # into ECR -- moving more vCPU at it changes nothing.
-    runs-on: ubuntu-latest
+    # In-AWS 8-vCPU CodeBuild runner: same-region ECR pushes remove the ~200s
+    # cross-network blob-upload flake class (run 30975460947).
+    #
+    # This is the SECOND flip. The first (PR #643) was reverted the same day by
+    # PR #648 because the CodeBuild fleet egresses through shared AWS NAT
+    # addresses, so every anonymous base-image pull counted against Docker Hub's
+    # per-IP limit and run 32032185875 died with 429 on every leg before it
+    # built anything. What makes the re-flip safe is NOT the runner: it is
+    # BASE_IMAGE_PREFIX below, which moves every base-image pull onto this
+    # account's ECR pull-through cache so Docker Hub leaves the build path
+    # entirely. Do not flip this line back on without that build-arg, and do not
+    # remove that build-arg while this line names a CodeBuild runner.
+    #
+    # ROLLBACK is still this one line: `runs-on: ubuntu-latest`. The cache path
+    # keeps working from a GitHub-hosted runner (the job authenticates to the
+    # same registry it pushes to), so reverting the runner never requires
+    # reverting the Dockerfiles.
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     continue-on-error: true
     permissions:
@@ -854,7 +864,30 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
-          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
+          # Every upstream base resolves through this account's ECR pull-through
+          # cache instead of Docker Hub. buildx named contexts override an image
+          # reference WITHOUT editing the Dockerfile, which matters here: the
+          # release-provenance contract
+          # (scripts/platform_release_manifest.py::_dockerfile_contract) parses
+          # the literal FROM tokens and asserts they equal the resolved
+          # base-image set, so a templated `FROM ${...}python:3.12-slim` would
+          # make the manifest record a name nothing can resolve. This keeps the
+          # Dockerfiles, the manifest keys and the recorded digests unchanged
+          # (the two registries serve byte-identical manifests) and changes only
+          # where the bytes come from.
+          #
+          # All five are listed for every image so this block stays byte-identical
+          # across warm/build/speculate, which the workflow validator requires;
+          # named contexts an image does not reference are simply never resolved.
+          # `node:20-slim` also covers Dockerfile.broker's `COPY --from=node:20-slim`,
+          # which is a base-image pull that no FROM-only survey catches.
+          build-contexts: |
+            nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
+            node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
+            node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
+            python:3.12-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/python:3.12-slim
+            ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           push: false
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
@@ -879,9 +912,9 @@ jobs:
           needs.test.result == 'success' &&
           (needs.adopt.result == 'skipped' ||
            (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
-    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
-    # fleet's shared egress; see the `warm` job's comment.
-    runs-on: ubuntu-latest
+    # Re-flipped 2026-08-17 behind the ECR pull-through cache; see the `warm`
+    # job's comment for why the first flip failed and what changed.
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 60
     # The ecr-release GitHub environment (main-only deployment branch
     # policy) is what qualifies this job's OIDC subject for the release
@@ -969,10 +1002,19 @@ jobs:
           esac
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            # Resolved through this account's ECR pull-through cache, never
+            # registry-1.docker.io: this step runs on the CodeBuild fleet's
+            # shared NAT egress, where anonymous Docker Hub requests 429
+            # (#658 cause 1 -- this exact line was the one code path #654's
+            # build-contexts fix never covered). The cache serves the
+            # byte-identical manifest, so the recorded digest and the
+            # `--base-image name=digest` manifest key are unchanged; only
+            # where the bytes come from moves.
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
@@ -1361,7 +1403,30 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
-          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
+          # Every upstream base resolves through this account's ECR pull-through
+          # cache instead of Docker Hub. buildx named contexts override an image
+          # reference WITHOUT editing the Dockerfile, which matters here: the
+          # release-provenance contract
+          # (scripts/platform_release_manifest.py::_dockerfile_contract) parses
+          # the literal FROM tokens and asserts they equal the resolved
+          # base-image set, so a templated `FROM ${...}python:3.12-slim` would
+          # make the manifest record a name nothing can resolve. This keeps the
+          # Dockerfiles, the manifest keys and the recorded digests unchanged
+          # (the two registries serve byte-identical manifests) and changes only
+          # where the bytes come from.
+          #
+          # All five are listed for every image so this block stays byte-identical
+          # across warm/build/speculate, which the workflow validator requires;
+          # named contexts an image does not reference are simply never resolved.
+          # `node:20-slim` also covers Dockerfile.broker's `COPY --from=node:20-slim`,
+          # which is a base-image pull that no FROM-only survey catches.
+          build-contexts: |
+            nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
+            node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
+            node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
+            python:3.12-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/python:3.12-slim
+            ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           # zstd prototype, app leg only: Fargate pays a full image pull on
           # every task launch (four per staging deploy), and zstd layers
           # decompress markedly faster than gzip. The `outputs` line replaces
@@ -1648,9 +1713,9 @@ jobs:
   speculate:
     needs: prepare
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
-    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
-    # fleet's shared egress; see the `warm` job's comment.
-    runs-on: ubuntu-latest
+    # Re-flipped 2026-08-17 behind the ECR pull-through cache; see the `warm`
+    # job's comment for why the first flip failed and what changed.
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     environment: ecr-release
     permissions:
@@ -1720,10 +1785,19 @@ jobs:
           esac
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            # Resolved through this account's ECR pull-through cache, never
+            # registry-1.docker.io: this step runs on the CodeBuild fleet's
+            # shared NAT egress, where anonymous Docker Hub requests 429
+            # (#658 cause 1 -- this exact line was the one code path #654's
+            # build-contexts fix never covered). The cache serves the
+            # byte-identical manifest, so the recorded digest and the
+            # `--base-image name=digest` manifest key are unchanged; only
+            # where the bytes come from moves.
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
@@ -1856,7 +1930,30 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
-          build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
+          # Every upstream base resolves through this account's ECR pull-through
+          # cache instead of Docker Hub. buildx named contexts override an image
+          # reference WITHOUT editing the Dockerfile, which matters here: the
+          # release-provenance contract
+          # (scripts/platform_release_manifest.py::_dockerfile_contract) parses
+          # the literal FROM tokens and asserts they equal the resolved
+          # base-image set, so a templated `FROM ${...}python:3.12-slim` would
+          # make the manifest record a name nothing can resolve. This keeps the
+          # Dockerfiles, the manifest keys and the recorded digests unchanged
+          # (the two registries serve byte-identical manifests) and changes only
+          # where the bytes come from.
+          #
+          # All five are listed for every image so this block stays byte-identical
+          # across warm/build/speculate, which the workflow validator requires;
+          # named contexts an image does not reference are simply never resolved.
+          # `node:20-slim` also covers Dockerfile.broker's `COPY --from=node:20-slim`,
+          # which is a base-image pull that no FROM-only survey catches.
+          build-contexts: |
+            nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
+            node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
+            node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
+            python:3.12-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/python:3.12-slim
+            ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
           # zstd, app leg only: mirrors the full-build leg above. Adoption
           # aliases the speculative digest onto the immutable sha-* tags, so
           # without this the spec-built app image would keep every merge on
