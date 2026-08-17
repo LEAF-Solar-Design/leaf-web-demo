@@ -642,9 +642,14 @@ jobs:
   warm:
     needs: prepare
     if: ${{ !inputs.promote && !inputs.speculative && needs.prepare.outputs.build == 'true' }}
-    # In-AWS 8-vCPU CodeBuild runner: same-region ECR pushes remove the
-    # ~200s cross-network blob-upload flake class (run 30975460947).
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    # REVERTED to ubuntu-latest 2026-08-17 (run 32032185875). The CodeBuild
+    # flip is blocked on Docker Hub, not on the runner: every base-image pull
+    # from the CodeBuild fleet egresses via shared AWS NAT addresses and hits
+    # the ANONYMOUS pull limit, so `node:22-bookworm` / `node:20-slim` HEADs
+    # return 429 and buildx fails to solve. GitHub-hosted runners do not see
+    # this. Re-flip only once base images are pulled authenticated or mirrored
+    # into ECR -- moving more vCPU at it changes nothing.
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
     permissions:
@@ -874,7 +879,9 @@ jobs:
           needs.test.result == 'success' &&
           (needs.adopt.result == 'skipped' ||
            (needs.adopt.result == 'success' && needs.adopt.outputs.adopted != 'true')) }}
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
+    # fleet's shared egress; see the `warm` job's comment.
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     # The ecr-release GitHub environment (main-only deployment branch
     # policy) is what qualifies this job's OIDC subject for the release
@@ -1641,7 +1648,9 @@ jobs:
   speculate:
     needs: prepare
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    # REVERTED to ubuntu-latest 2026-08-17 — Docker Hub 429 on the CodeBuild
+    # fleet's shared egress; see the `warm` job's comment.
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ecr-release
     permissions:
