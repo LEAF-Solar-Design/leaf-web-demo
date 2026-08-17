@@ -2008,7 +2008,15 @@ def main() -> None:
         assert _with_input(speculate_with, key) == _with_input(build_with, key), (
             "speculate and build must carry a byte-identical %s input" % key
         )
-    assert re.search(r"^          push: true$", speculate_with, re.M)
+    # The speculative app leg must mint the same zstd compression as the
+    # gated build leg: adoption aliases the speculative digest onto the
+    # immutable sha-* tags, so a gzip spec image would keep every merge on
+    # gzip no matter what the full-build leg does.
+    assert re.search(r"^          push: \$\{\{ matrix\.image != 'app' \}\}$",
+                     speculate_with, re.M)
+    assert _with_input(speculate_with, "outputs:") == _with_input(
+        build_with, "outputs:"
+    ), "speculate and build must carry a byte-identical outputs: input"
     assert (
         "tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
         in speculate_with

@@ -1846,7 +1846,12 @@ jobs:
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
           build-contexts: ${{ matrix.image == 'canonical-worker' && 'autofill_solver=./autofill-solver' || '' }}
-          push: true
+          # zstd, app leg only: mirrors the full-build leg above. Adoption
+          # aliases the speculative digest onto the immutable sha-* tags, so
+          # without this the spec-built app image would keep every merge on
+          # gzip and the full-build zstd leg would never be reached.
+          push: ${{ matrix.image != 'app' }}
+          outputs: ${{ matrix.image == 'app' && 'type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true' || '' }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: ${{ steps.cache.outputs.from }}
 
