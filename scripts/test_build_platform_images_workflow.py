@@ -1590,6 +1590,59 @@ def main() -> None:
             "warm and build must carry a byte-identical %s input, or the "
             "warmed cache never matches the gated build" % key)
 
+    # THE THIRD-FLIP PIN. A CodeBuild runner may never coexist with a Docker Hub
+    # base-image lookup. The fleet egresses through shared AWS NAT, so every
+    # anonymous pull counts against Docker Hub's per-IP limit: #643 was reverted
+    # by #648 on that, and #654 was reverted by #658 because pinning only the
+    # BUILD's pulls is not enough -- the "Resolve one signed reusable surface"
+    # step still resolved digests from `$base` and canary run 32046935487 took
+    # the same 429 on the canonical-worker and harness legs. Both halves are
+    # pinned here, and only in the dangerous direction: reverting `runs-on` to
+    # ubuntu-latest must stay a one-line rollback, so every assertion below is
+    # conditional on a CodeBuild runner actually being named.
+    cache_prefix = "public-ecr/docker/library"
+    codebuild_runners = text.count(
+        "runs-on: codebuild-leaf-gha-runner-web-demo-"
+        "${{ github.run_id }}-${{ github.run_attempt }}")
+
+    base_case_arms = re.findall(
+        r"^ +[\w-]+\) bases=\(([^)]*)\) ;;$", text, re.M)
+    assert base_case_arms, (
+        "the surface-resolve step's base-image case block vanished; this pin "
+        "cannot see what it is meant to guard")
+    declared_bases = {
+        base for arm in base_case_arms for base in arm.split()}
+    assert declared_bases == {
+        "nginx:alpine",
+        "node:20-slim",
+        "node:22-bookworm",
+        "node:22-slim",
+        "python:3.12-slim",
+    }, sorted(declared_bases)
+
+    # One surface-resolve step per job that resolves base digests at all.
+    resolve_steps = text.count("base_args=()")
+    assert resolve_steps == 2, (
+        "expected the build and speculate surface-resolve steps", resolve_steps)
+
+    if codebuild_runners:
+        assert 'imagetools inspect "$base"' not in text, (
+            "a CodeBuild runner is named while base digests are still resolved "
+            "from an unqualified Docker Hub reference: this is exactly the "
+            "regression #658 reverted (run 32046935487, 429 on "
+            "python:3.12-slim / node:22-bookworm)")
+        assert text.count(
+            f'"$ECR_REGISTRY/{cache_prefix}/$base"') == resolve_steps, (
+            "every surface-resolve step must look base digests up through the "
+            "pull-through cache while a CodeBuild runner is named")
+        for image in sorted(declared_bases):
+            assert (
+                f"{image}=docker-image://${{{{ env.ECR_REGISTRY }}}}"
+                f"/{cache_prefix}/{image}"
+            ) in text, (
+                "build-contexts must redirect %s through the pull-through "
+                "cache while a CodeBuild runner is named" % image)
+
     # Warm may only use these actions. Adding one is a conscious act in a
     # job that holds the solver deploy key, so it should cost a test edit.
     allowed_uses = {

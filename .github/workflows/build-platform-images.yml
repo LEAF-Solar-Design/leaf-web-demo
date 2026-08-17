@@ -645,15 +645,35 @@ jobs:
     # In-AWS 8-vCPU CodeBuild runner: same-region ECR pushes remove the ~200s
     # cross-network blob-upload flake class (run 30975460947).
     #
-    # This is the SECOND flip. The first (PR #643) was reverted the same day by
-    # PR #648 because the CodeBuild fleet egresses through shared AWS NAT
-    # addresses, so every anonymous base-image pull counted against Docker Hub's
-    # per-IP limit and run 32032185875 died with 429 on every leg before it
-    # built anything. What makes the re-flip safe is NOT the runner: it is
-    # BASE_IMAGE_PREFIX below, which moves every base-image pull onto this
-    # account's ECR pull-through cache so Docker Hub leaves the build path
-    # entirely. Do not flip this line back on without that build-arg, and do not
-    # remove that build-arg while this line names a CodeBuild runner.
+    # This is the THIRD flip, and both earlier ones were reverted the same day.
+    # #643 -> reverted by #648: the CodeBuild fleet egresses through shared AWS
+    # NAT addresses, so every anonymous base-image pull counted against Docker
+    # Hub's per-IP limit and run 32032185875 died with 429 on every leg before it
+    # built anything. #654 -> reverted by #658: it moved the BUILD's pulls onto
+    # the `build-contexts` block below but missed the "Resolve one signed
+    # reusable surface" step, which still looked base digests up on Docker Hub,
+    # so canary run 32046935487 took the same 429 on two legs -- and the other
+    # three legs took a 403, because tf#791's `public-ecr/*` pull grant for
+    # `leaf-github-web-demo-ecr-push-role` was merged but its PRODUCTION apply
+    # had not been fired.
+    #
+    # So what makes this flip safe is NOT the runner and NOT one mechanism. All
+    # three must hold together:
+    #   1. `build-contexts` below, so the BUILD resolves every base through this
+    #      account's pull-through cache;
+    #   2. the surface-resolve step looking digests up at the same cache address
+    #      (that step hard-fails on 429 and this job is the only one that
+    #      tolerates failure, so the gated `build` job carries the real risk);
+    #   3. the production-root grant actually APPLIED, not merely merged.
+    # Do not flip this line on with any of the three missing, and do not remove
+    # any of them while this line names a CodeBuild runner.
+    #
+    # Residual, deliberately accepted: `docker/setup-buildx-action@v3` runs the
+    # default docker-container driver, so it pulls `moby/buildkit` from Docker
+    # Hub, and in `build`/`speculate` that happens before the ECR login, so it
+    # cannot simply be pointed at the cache without reordering steps. Run
+    # 32032185875 proves it is not the binding constraint: buildx set up fine in
+    # the very run whose `library/*` HEADs all 429'd.
     #
     # ROLLBACK is still this one line: `runs-on: ubuntu-latest`. The cache path
     # keeps working from a GitHub-hosted runner (the job authenticates to the
@@ -1000,12 +1020,30 @@ jobs:
             web) bases=(nginx:alpine node:22-slim) ;;
             *) echo "::error::Unknown platform surface."; exit 1 ;;
           esac
+          # Base digests resolve through this account's pull-through cache, never
+          # Docker Hub. #654 moved the BUILD's pulls onto named contexts but left
+          # THIS step pointing at registry-1.docker.io, and canary run
+          # 32046935487 died exactly here: 429 on python:3.12-slim and
+          # node:22-bookworm from the CodeBuild fleet's shared NAT, the same
+          # class #648 reverted. `set -euo pipefail` plus `jq -er` means a 429
+          # here HARD-FAILS the leg, and this job is not continue-on-error, so
+          # this lookup -- not only the build -- is what keeps Docker Hub off the
+          # release path. Do not respell it as a bare `$base`.
+          #
+          # The recorded KEY stays the literal Dockerfile name. The release
+          # contract (platform_release_manifest.py::_dockerfile_contract) parses
+          # the literal FROM tokens and refuses unless the --base-image key set
+          # equals them exactly, so only the lookup ADDRESS changes: manifest
+          # keys and the surface fingerprint are untouched. It is also strictly
+          # more honest than before -- the digest now comes from the same
+          # registry the build actually pulls from.
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
@@ -1774,12 +1812,30 @@ jobs:
             web) bases=(nginx:alpine node:22-slim) ;;
             *) echo "::error::Unknown platform surface."; exit 1 ;;
           esac
+          # Base digests resolve through this account's pull-through cache, never
+          # Docker Hub. #654 moved the BUILD's pulls onto named contexts but left
+          # THIS step pointing at registry-1.docker.io, and canary run
+          # 32046935487 died exactly here: 429 on python:3.12-slim and
+          # node:22-bookworm from the CodeBuild fleet's shared NAT, the same
+          # class #648 reverted. `set -euo pipefail` plus `jq -er` means a 429
+          # here HARD-FAILS the leg, and this job is not continue-on-error, so
+          # this lookup -- not only the build -- is what keeps Docker Hub off the
+          # release path. Do not respell it as a bare `$base`.
+          #
+          # The recorded KEY stays the literal Dockerfile name. The release
+          # contract (platform_release_manifest.py::_dockerfile_contract) parses
+          # the literal FROM tokens and refuses unless the --base-image key set
+          # equals them exactly, so only the lookup ADDRESS changes: manifest
+          # keys and the surface fingerprint are untouched. It is also strictly
+          # more honest than before -- the digest now comes from the same
+          # registry the build actually pulls from.
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
