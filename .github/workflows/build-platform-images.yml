@@ -1002,10 +1002,19 @@ jobs:
           esac
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            # Resolved through this account's ECR pull-through cache, never
+            # registry-1.docker.io: this step runs on the CodeBuild fleet's
+            # shared NAT egress, where anonymous Docker Hub requests 429
+            # (#658 cause 1 -- this exact line was the one code path #654's
+            # build-contexts fix never covered). The cache serves the
+            # byte-identical manifest, so the recorded digest and the
+            # `--base-image name=digest` manifest key are unchanged; only
+            # where the bytes come from moves.
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
@@ -1776,10 +1785,19 @@ jobs:
           esac
           base_args=()
           for base in "${bases[@]}"; do
-            digest="$(docker buildx imagetools inspect "$base" \
+            # Resolved through this account's ECR pull-through cache, never
+            # registry-1.docker.io: this step runs on the CodeBuild fleet's
+            # shared NAT egress, where anonymous Docker Hub requests 429
+            # (#658 cause 1 -- this exact line was the one code path #654's
+            # build-contexts fix never covered). The cache serves the
+            # byte-identical manifest, so the recorded digest and the
+            # `--base-image name=digest` manifest key are unchanged; only
+            # where the bytes come from moves.
+            digest="$(docker buildx imagetools inspect \
+              "$ECR_REGISTRY/public-ecr/docker/library/$base" \
               --format '{{json .Manifest}}' | jq -er '.digest')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Base image $base did not resolve to one immutable digest."
+              echo "::error::Base image $base did not resolve to one immutable digest through the pull-through cache."
               exit 1
             }
             base_args+=(--base-image "$base=$digest")
