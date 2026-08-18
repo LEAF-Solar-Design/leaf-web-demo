@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import sysconfig
 import unittest
+from unittest import mock
 import zipfile
 
 import yaml
@@ -44,6 +45,26 @@ DIGESTS = {
     service: f"sha256:{digit * 64}"
     for service, digit in zip(SERVICES, "23456", strict=True)
 }
+
+
+class ArtifactRedirectTests(unittest.TestCase):
+    def test_cross_host_artifact_redirect_strips_authorization(self) -> None:
+        handler = subject._ArtifactRedirectHandler()
+        request = subject.urllib.request.Request(
+            "https://api.github.com/repos/o/r/actions/artifacts/1/zip",
+            headers={"Authorization": "Bearer private"},
+        )
+        with mock.patch.object(subject.urllib.request.HTTPRedirectHandler, "redirect_request", return_value=request):
+            redirected = handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://example.blob.core.windows.net/result?sig=redacted",
+            )
+        self.assertIsNotNone(redirected)
+        self.assertIsNone(redirected.get_header("Authorization"))
 
 
 def canonical(value: object) -> bytes:

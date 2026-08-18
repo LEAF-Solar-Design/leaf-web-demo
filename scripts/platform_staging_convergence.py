@@ -166,7 +166,8 @@ class GitHubProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=45) as response:
+            opener = urllib.request.build_opener(_ArtifactRedirectHandler())
+            with opener.open(request, timeout=45) as response:
                 raw = response.read(MAX_PROVIDER_ARCHIVE_BYTES + 1)
                 if len(raw) > MAX_PROVIDER_ARCHIVE_BYTES:
                     raise ContractError("PROVIDER_BODY_TOO_LARGE")
@@ -185,6 +186,16 @@ class GitHubProvider:
 
     def bytes(self, repository: str, endpoint: str) -> bytes:
         return self._request(repository, endpoint)
+
+
+class _ArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep GitHub credentials off provider artifact storage redirects."""
+
+    def redirect_request(self, request: Any, file_pointer: Any, code: int, message: str, headers: Any, new_url: str) -> Any:
+        redirected = super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        if redirected is not None and urllib.parse.urlparse(new_url).hostname != urllib.parse.urlparse(request.full_url).hostname:
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 def _load_json(raw: bytes) -> Any:
