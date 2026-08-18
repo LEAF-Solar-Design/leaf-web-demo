@@ -174,6 +174,9 @@ def test_detail_never_reaches_the_response_body():
     body = json.loads(response.body.decode("utf-8"))
     assert response.status_code == 503
     assert body["reason_code"] == "tenant_repository_unavailable"
+    # Prove the KEY is absent, not just the value: a body carrying "detail": "-"
+    # would still pass the substring checks below.
+    assert "detail" not in body
     assert secret_ish not in response.body.decode("utf-8")
     assert "head_missing" not in response.body.decode("utf-8")
 
@@ -541,41 +544,85 @@ def test_every_authority_conversion_site_is_marked():
     formatted differently and went unmarked, so a `confirmation_tampered` denial on
     /api/author/publication-requests warned once per request. This walks the module's
     AST so a new conversion site cannot be added unmarked.
+
+    A call is a conversion site if `exc.reason_code` appears anywhere in its
+    argument list, positional or keyword, not just as a literal first positional
+    arg: `CustomizationServiceError(code=exc.reason_code, status_code=403)` and
+    `err = CustomizationServiceError(exc.reason_code, 403); _customization_error(err)`
+    must both be caught, so the object is resolved through one level of local
+    variable assignment before it's checked.
+
+    The expected count is derived from the number of `isinstance(exc, AuthorityError)`
+    handlers in the module rather than a hardcoded floor: a floor stops detecting
+    deletion once more sites exist than the floor, while a derived count tracks the
+    real handler total and still catches a conversion dropped out from under an
+    unchanged handler.
     """
     import ast
     import inspect
 
     tree = ast.parse(inspect.getsource(author_router))
-    conversions = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not (isinstance(func, ast.Name) and func.id == "_customization_error"):
-            continue
-        if not node.args:
-            continue
-        first = node.args[0]
-        # Only the AuthorityError conversions, identified by their reason_code arg.
-        built_from_reason_code = (
-            isinstance(first, ast.Call)
-            and any(
-                isinstance(a, ast.Attribute) and a.attr == "reason_code"
-                for a in first.args
-            )
-        )
-        if not built_from_reason_code:
-            continue
-        marked = any(
-            kw.arg == "from_authority"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is True
-            for kw in node.keywords
-        )
-        conversions.append((node.lineno, marked))
 
-    assert len(conversions) >= 10, (
-        f"expected at least ten authority conversions, found {len(conversions)}"
+    def _has_reason_code(node):
+        return any(
+            isinstance(sub, ast.Attribute) and sub.attr == "reason_code"
+            for sub in ast.walk(node)
+        )
+
+    conversions = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+
+        # One level of local assignment resolution, scoped to this function: a
+        # conversion built via a temporary (`err = CustomizationServiceError(...)`)
+        # must still be recognised at its later `_customization_error(err)` call.
+        assigned = {
+            node.targets[0].id: node.value
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Name) and node.func.id == "_customization_error"):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Name) and first.id in assigned:
+                first = assigned[first.id]
+            # Only the AuthorityError conversions, identified by their reason_code
+            # arg appearing anywhere in the built error's arguments.
+            if not (isinstance(first, ast.Call) and _has_reason_code(first)):
+                continue
+            marked = any(
+                kw.arg == "from_authority"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            conversions.append((node.lineno, marked))
+
+    expected = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "isinstance"
+        and len(node.args) == 2
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "AuthorityError"
+    )
+    assert expected >= 10, (
+        f"expected at least ten AuthorityError handlers, found {expected}"
+    )
+    assert len(conversions) == expected, (
+        f"found {len(conversions)} authority conversions but {expected} "
+        f"AuthorityError handlers; every handler must build and mark exactly one"
     )
     unmarked = [line for line, marked in conversions if not marked]
     assert not unmarked, (
