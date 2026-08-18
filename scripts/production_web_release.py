@@ -21,6 +21,9 @@ HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 PREPARED_SCHEMA = "leaf.production-web-prepared.v1"
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
 APPROVAL_SCHEMA = "leaf.production-web-approval.v1"
+# The two approval modes the production deploy workflow can record. Closed set:
+# an unrecognized mode is refused rather than treated as independent.
+_APPROVAL_MODES = frozenset({"independent", "administrator-self-authorization"})
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -360,6 +363,7 @@ def deployment_receipt(
         "validated_at",
         "approval_payload_sha256",
         "exact_body_verified",
+        "approval_mode",
         "author_separated",
         "timely_at_promotion",
     }
@@ -393,7 +397,19 @@ def deployment_receipt(
         or not isinstance(approval["approval_payload_sha256"], str)
         or not _SHA256.fullmatch(approval["approval_payload_sha256"])
         or approval["exact_body_verified"] is not True
-        or approval["author_separated"] is not True
+        or approval["approval_mode"] not in _APPROVAL_MODES
+        # author_separated is no longer an invariant, it is a FACT ABOUT the mode,
+        # so it must agree with the mode rather than being asserted true. A proof
+        # claiming independence while naming the self-authorization mode (or the
+        # reverse) is contradictory evidence and fails closed here.
+        or approval["author_separated"] is not (approval["approval_mode"] == "independent")
+        # Defence in depth: the workflow already requires live admin to
+        # self-authorize, and the verifier re-asserts it against the recorded
+        # permission so a forged or replayed proof cannot self-authorize on write.
+        or (
+            approval["approval_mode"] == "administrator-self-authorization"
+            and approval["permission"] != "admin"
+        )
         or approval["timely_at_promotion"] is not True
     ):
         raise ReleaseError("production approval proof is invalid or unbound")
