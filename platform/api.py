@@ -24,6 +24,7 @@ from .db import cursor
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
 from .models import JOB_KINDS, TIERS, Org
+from .mutation_fence import drawing_mutation_commit_guard
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
 router = APIRouter(prefix="/api", tags=["platform"])
@@ -189,27 +190,30 @@ def import_drawing_version(
     actor_binding_id: uuid.UUID = Depends(get_write_binding_id),
 ):
     """Adopt a ready same-org account upload using server-derived refs and provenance."""
-    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
-        raise HTTPException(
-            status_code=503,
-            detail="drawing mutations are temporarily disabled for a storage cutover",
-        )
-    try:
-        version, replayed = store.import_ready_account_upload(
-            org_id,
-            project_id,
-            source_drawing_id=body.source.drawing_id,
-            source_version=body.source.version,
-            name=body.name,
-            idempotency_key=idempotency_key,
-            actor_binding_id=actor_binding_id,
-        )
-    except store.DrawingImportUnavailable as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-    except store.DrawingImportForbidden as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from None
-    except store.DrawingImportConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "drawing mutations are temporarily disabled for a storage cutover"
+                ),
+            )
+        try:
+            version, replayed = store.import_ready_account_upload(
+                org_id,
+                project_id,
+                source_drawing_id=body.source.drawing_id,
+                source_version=body.source.version,
+                name=body.name,
+                idempotency_key=idempotency_key,
+                actor_binding_id=actor_binding_id,
+            )
+        except store.DrawingImportUnavailable as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except store.DrawingImportForbidden as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except store.DrawingImportConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"drawing_version": version.to_dict(), "replayed": replayed}
 
 

@@ -100,13 +100,30 @@ def upload_drawing(
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
 ) -> Any:
-    if not write_loop.drawing_mutations_enabled():
-        return error_response(
-            ErrorCode.INTERNAL,
-            "drawing mutations are temporarily disabled for a storage cutover",
-            retryable=True,
-            status_code=503,
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        return _upload_drawing(
+            request,
+            file,
+            x_tenant_id,
+            authorization,
+            x_guest_session,
         )
+
+
+def _upload_drawing(
+    request: Request,
+    file: UploadFile,
+    x_tenant_id: Optional[str],
+    authorization: Optional[str],
+    x_guest_session: Optional[str],
+) -> Any:
     if not guest_uploads.enabled():
         return error_response(ErrorCode.INTERNAL,
                               "drawing uploads are disabled on this deployment",

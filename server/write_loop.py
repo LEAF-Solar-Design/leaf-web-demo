@@ -24,12 +24,15 @@ process allowed to hold it), mirroring server/tool_loader.py.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import logging
 import os
 import secrets
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -39,6 +42,7 @@ from tenant_id_validator import validate_tenant_id
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
 CACHED_INTAKE_PATH = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
+LOGGER = logging.getLogger(__name__)
 
 # Make da/store.py importable. APPEND (never front-insert) so a stdlib module is
 # never shadowed by a da/ sibling (e.g. da/queue.py); `store` is da-only and still
@@ -88,8 +92,84 @@ def blob_store_mode() -> str:
 
 
 def drawing_mutations_enabled() -> bool:
-    """Global cutover drain for every drawing-authority mutation surface."""
-    return os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") == "1"
+    """Global cutover drain for every drawing-authority mutation surface.
+
+    The environment flag is the deployment default.  A configured shared EFS
+    fence is the live authority, so already-running app and broker tasks observe
+    a drain without waiting for an ECS rollout.  Missing, unreadable, or
+    malformed fence state fails closed.
+    """
+    if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
+        return False
+    fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
+    if not fence:
+        return True
+    try:
+        return Path(fence).read_text(encoding="utf-8").strip() == "1"
+    except (OSError, UnicodeError):
+        return False
+
+
+@contextmanager
+def drawing_mutation_commit_guard():
+    """Hold the shared cutover fence across one durable drawing commit.
+
+    Linux tasks take a shared flock.  The protected cutover control takes the
+    matching exclusive lock before changing the fence, so it waits for every
+    admitted commit and prevents a late old-task write from crossing the drain.
+    """
+    fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
+    if not fence:
+        yield drawing_mutations_enabled()
+        return
+    lock_path = f"{fence}.lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        try:
+            import fcntl  # Linux deployment; unavailable on Windows unit hosts.
+        except ImportError:
+            yield False
+            return
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        try:
+            yield drawing_mutations_enabled()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
+    """Best-effort immediate cleanup with nonsecret failure telemetry."""
+    if not scratch_keys:
+        return
+    delete = (
+        getattr(da, "delete_scratch_object", None)
+        or getattr(da, "delete_object", None)
+    )
+    if delete is None:
+        for key in scratch_keys:
+            LOGGER.warning(
+                "APS scratch cleanup unavailable",
+                extra={
+                    "scratch_key_sha256": hashlib.sha256(
+                        str(key).encode("utf-8")
+                    ).hexdigest(),
+                    "error_type": "DeleteMethodUnavailable",
+                },
+            )
+        return
+    for key in scratch_keys:
+        try:
+            delete(key)
+        except Exception as exc:  # noqa: BLE001 - cleanup stays best effort
+            LOGGER.warning(
+                "APS scratch cleanup failed",
+                extra={
+                    "scratch_key_sha256": hashlib.sha256(
+                        str(key).encode("utf-8")
+                    ).hexdigest(),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 def default_backend(*, aps_live: bool = False, da: Any = None):
@@ -267,19 +347,25 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
             f"refusing the demo-intake bootstrap")
-    data = CACHED_INTAKE_PATH.read_bytes()
-    fd, tmp = tempfile.mkstemp(suffix=".intake.json")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
-    except ValueError:
-        pass  # race: another request bootstrapped it first
-    finally:
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        if backend.exists(store.manifest_key(tenant_id, drawing_id)):
+            return
+        data = CACHED_INTAKE_PATH.read_bytes()
+        fd, tmp = tempfile.mkstemp(suffix=".intake.json")
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            store.ingest_drawing(backend, tenant_id, tmp, drawing_id=drawing_id)
+        except ValueError:
+            pass  # race: another request bootstrapped it first
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +384,11 @@ def undo_view(tenant_id: str, drawing_id: str, *, backend=None) -> Dict[str, Any
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.undo(backend, tenant_id, drawing_id)
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        new_head = store.undo(backend, tenant_id, drawing_id)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
@@ -308,7 +398,11 @@ def redo_view(tenant_id: str, drawing_id: str, *, backend=None) -> Dict[str, Any
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    new_head = store.redo(backend, tenant_id, drawing_id)
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            raise ValueError(
+                "drawing mutations are temporarily disabled for a storage cutover")
+        new_head = store.redo(backend, tenant_id, drawing_id)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
     m = store.load_manifest(backend, tenant_id, drawing_id)
     return {"version": new_head, "head": int(m["head"]), "latest": int(m["latest"]), "intake": intake}
@@ -350,11 +444,18 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     mutations = result.get("mutations") or {}
     try:
         new_intake = apply_mutations(cur_intake, mutations)
-        new_v = _put_bytes_version(
-            backend, tenant_id, drawing_id,
-            json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
-            parent_version=head_v,
-            meta={"tool": name, "note": "mock write (intake payload)"})
+        with drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return (err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations were drained before write commit",
+                    retryable=True, tool=name, version=tool_version,
+                ), 503)
+            new_v = _put_bytes_version(
+                backend, tenant_id, drawing_id,
+                json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
+                parent_version=head_v,
+                meta={"tool": name, "note": "mock write (intake payload)"})
     except Exception as exc:  # noqa: BLE001
         return (err_envelope(ErrorCode.INTERNAL, f"write persist failed: {type(exc).__name__}: {exc}",
                              retryable=False, tool=name, version=tool_version),
@@ -494,12 +595,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                                  retryable=True, tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
 
-        wi_id = status.get("id")
-        new_v = _put_bytes_version(backend, tenant_id, drawing_id, out_bytes,
-                                   parent_version=head_v,
-                                   meta={"tool": name, "workitem_id": wi_id,
-                                         "note": "live write (output.dwg)"})
-
         # re-extract the new version's DWG for the intake cache
         fd, tmp = tempfile.mkstemp(suffix=".dwg")
         try:
@@ -511,8 +606,23 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 os.remove(tmp)
             except OSError:
                 pass
-        backend.put(intake_cache_key(tenant_id, drawing_id, new_v),
-                    json.dumps(intake, separators=(",", ":")).encode("utf-8"))
+        wi_id = status.get("id")
+        with drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return (err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations were drained before write commit",
+                    retryable=True, tool=name, version=tool_version,
+                ), 503)
+            new_v = _put_bytes_version(
+                backend, tenant_id, drawing_id, out_bytes,
+                parent_version=head_v,
+                meta={"tool": name, "workitem_id": wi_id,
+                      "note": "live write (output.dwg)"})
+            backend.put(
+                intake_cache_key(tenant_id, drawing_id, new_v),
+                json.dumps(intake, separators=(",", ":")).encode("utf-8"),
+            )
 
         eng_s = da._engine_seconds(status)
         cost = None if eng_s is None else {
@@ -553,17 +663,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                              retryable=True, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
     finally:
-        if scratch_keys:
-            delete_scratch = getattr(da, "delete_scratch_object", None)
-            delete_fallback = getattr(da, "delete_object", None)
-            delete = delete_scratch or delete_fallback
-        else:
-            delete = None
-        if delete is not None:
-            for key in scratch_keys:
-                try:
-                    delete(key)
-                except Exception:
-                    # Best effort only. The dedicated transient bucket still
-                    # expires the copy if an immediate delete is interrupted.
-                    pass
+        # Best effort only. The dedicated transient bucket still expires a copy
+        # if an immediate delete is interrupted.
+        _cleanup_scratch_objects(da, scratch_keys)

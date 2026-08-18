@@ -42,14 +42,25 @@ class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
 
-def extract_event_key(tenant_id: str, dwg: str, *, upload: bool = False) -> str:
+def extract_event_key(
+    tenant_id: str,
+    dwg: str,
+    *,
+    upload: bool = False,
+    attempt: Optional[str] = None,
+) -> str:
     """Stable identity for retries of one immutable drawing extraction."""
+    if upload and not str(attempt or "").strip():
+        raise ValueError("upload extraction event keys require an attempt")
+    identity = {
+        "tenant_id": str(tenant_id),
+        "dwg": str(dwg),
+        "upload": bool(upload),
+    }
+    if upload:
+        identity["attempt"] = str(attempt)
     canonical = json.dumps(
-        {
-            "tenant_id": str(tenant_id),
-            "dwg": str(dwg),
-            "upload": bool(upload),
-        },
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )

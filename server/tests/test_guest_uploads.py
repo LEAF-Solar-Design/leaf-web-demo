@@ -453,7 +453,7 @@ def test_live_upload_never_loads_broker_only_aps_credentials(client, monkeypatch
     monkeypatch.setattr(
         guest_uploads,
         "_extract_via_broker",
-        lambda tenant_id, drawing_id: {
+        lambda tenant_id, drawing_id, attempt: {
             "dwg": drawing_id,
             "layers": ["BrokerExtracted"],
             "polylines": [],
@@ -514,7 +514,7 @@ def test_dxf_extract_mode_aps_routes_dxf_through_the_broker(client, monkeypatch)
                                  "xdata": None, "handle": "FF"}]}
     calls = {"n": 0}
 
-    def _fake_broker(tenant_id, drawing_id):
+    def _fake_broker(tenant_id, drawing_id, attempt):
         calls["n"] += 1
         return aps_intake
 
@@ -567,7 +567,7 @@ def test_store_representation_dwg_raw_bytes_v1(client, monkeypatch):
                                   "xdata": None, "handle": "AA"}]}
     monkeypatch.setattr(deps, "APS_LIVE", True)
     monkeypatch.setattr(guest_uploads, "_extract_via_broker",
-                        lambda tenant_id, drawing_id: fake_intake)
+                            lambda tenant_id, drawing_id, attempt: fake_intake)
     r = _upload(client, data=dwg_bytes, name="real.dwg")
     assert r.status_code == 202
     tenant, did = r.json()["tenant_id"], r.json()["drawing_id"]

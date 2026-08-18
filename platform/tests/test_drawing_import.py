@@ -6,11 +6,13 @@ import io
 from pathlib import Path
 import sys
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 from psycopg.types.json import Jsonb
 
 import leaf_platform.store as store
+import leaf_platform.api as platform_api
 from leaf_platform.db import cursor
 
 
@@ -89,6 +91,29 @@ def _canonical_project(make_org, name="Drawing import org"):
     store.set_project_authority_mode(
         org.org_id, project.project_id, "postgres_canonical")
     return org, project
+
+
+def test_import_commit_fails_closed_when_shared_fence_is_drained(
+    client, make_org, monkeypatch
+):
+    org, project = _canonical_project(make_org)
+    binding = _binding(org.org_id)
+
+    @contextmanager
+    def drained_commit():
+        yield False
+
+    monkeypatch.setattr(
+        platform_api, "drawing_mutation_commit_guard", drained_commit
+    )
+    response = client.post(
+        f"/api/projects/{project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, "drained-import"),
+        json=_body(uuid.uuid4()),
+    )
+
+    assert response.status_code == 503
+    assert store.list_drawing_versions(org.org_id, project.project_id) == []
 
 
 def test_ready_account_upload_import_and_exact_api_replay(client, make_org):

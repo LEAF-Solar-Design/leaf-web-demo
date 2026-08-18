@@ -87,6 +87,40 @@ def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
     assert env["error"]["retryable"] is True
 
 
+def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    drawing = tmp_path / "drawing.dwg"
+    drawing.write_bytes(b"DWG")
+    checks = iter((True, False))
+    calls = []
+
+    class _Da:
+        def extract(self, path):
+            calls.append(path)
+            return {"layers": [], "polylines": []}
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(
+        broker.write_loop, "drawing_mutations_enabled", lambda: next(checks))
+
+    @contextmanager
+    def admitted_commit():
+        yield True
+
+    monkeypatch.setattr(
+        broker.write_loop, "drawing_mutation_commit_guard", admitted_commit)
+    monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: drawing)
+    monkeypatch.setattr(broker, "_get_da", lambda: _Da())
+
+    response = broker.broker_extract(
+        broker.BrokerExtractRequest(tenant_id="tenant-a", dwg="drawing"))
+
+    assert response.status_code == 503
+    assert calls == [str(drawing)]
+
+
 def test_mock_session_default_dwg_serves_cached_intake_and_never_calls_broker(monkeypatch):
     """APS_LIVE=0 + the default drawing -> the unchanged cached-intake path.
 

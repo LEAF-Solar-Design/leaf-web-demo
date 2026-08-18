@@ -16,6 +16,13 @@ def _safe_production(monkeypatch):
     monkeypatch.setenv("LEAF_BROKER_SECRET", "test-broker-secret")
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     monkeypatch.setenv("LEAF_QA_HOOKS", "0")
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "postgres")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "postgres")
+    monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://safe.example/test")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", "/data/state/drawing-mutations")
 
 
 def _package(path, name: str) -> dict:

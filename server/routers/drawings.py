@@ -278,7 +278,16 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     holder = (req.holder if req else None) or str(tenant_id)
     ttl_s = (req.ttl_s if req and req.ttl_s is not None else None) or DEFAULT_CHECKOUT_TTL_S
 
-    acquired = store.acquire_checkout(backend, str(tenant_id), drawing_id, holder, ttl_s)
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return _mutation_gate() or error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        acquired = store.acquire_checkout(
+            backend, str(tenant_id), drawing_id, holder, ttl_s)
     m = store.load_manifest(backend, str(tenant_id), drawing_id)
     co = m.get("checkout")
 
@@ -332,7 +341,16 @@ def release_checkout_route(drawing_id: str, holder: Optional[str] = None,
 
     co = m.get("checkout")
     who = holder or str(tenant_id)
-    released = store.release_checkout(backend, str(tenant_id), drawing_id, holder=who)
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return _mutation_gate() or error_response(
+                ErrorCode.INTERNAL,
+                "drawing mutations are temporarily disabled for a storage cutover",
+                retryable=True,
+                status_code=503,
+            )
+        released = store.release_checkout(
+            backend, str(tenant_id), drawing_id, holder=who)
 
     if not released and co:
         # release_checkout returns False-with-a-lock-present ONLY when that lock is
