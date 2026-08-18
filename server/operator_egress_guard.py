@@ -71,6 +71,21 @@ class OperatorEgressDenied(RuntimeError):
 _DEPLOY_HOST_EXACT = frozenset({
     "api.leafdesign.ai", "leafdesign.ai", "www.leafdesign.ai",  # production surface
     "api.vercel.com", "vercel.com",   # Vercel deploy API
+})
+
+# Cloud metadata / task-credential endpoints. NOT in the process-wide layer:
+# on ECS the app's OWN AWS SDK fetches its task-role credentials from
+# 169.254.170.2 (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI), so a process-wide
+# denial makes the app undeployable (observed live: every /api/health GET at
+# 45f0c24c raised OperatorEgressDenied inside boto3's provider chain and the
+# blue/green promote timed out). Denying these only under an ARMED operator
+# context loses nothing real: code running in this process already holds the
+# task credentials through the SDK's in-memory cache, so the endpoint denial
+# only ever stopped operator-directed SSRF-style fetches -- which are exactly
+# the armed-context paths. Listed here explicitly so arming denies them even
+# when an env allowlist (LEAF_OPERATOR_EGRESS_ALLOW, DATABASE_URL host) names
+# them: the operator-context denial is ABSOLUTE, not allowlist-overridable.
+_METADATA_HOSTS = frozenset({
     "169.254.169.254",                # cloud metadata (IMDS)
     "metadata.google.internal", "169.254.170.2",  # GCE / ECS task metadata
 })
@@ -231,9 +246,14 @@ def _audit_hook(event: str, args: tuple) -> None:
     if _is_deploy_control_plane(host):
         raise OperatorEgressDenied(host, f"deploy-route/{kind}")
     # Layer 2: while an operator handler runs, deny-by-default (closes aliased /
-    # env-provided targets on the innocent same-context path).
-    if armed and not _host_allowed(host):
-        raise OperatorEgressDenied(host, kind)
+    # env-provided targets on the innocent same-context path). Metadata hosts
+    # are denied here ABSOLUTELY -- before and regardless of the allowlist.
+    if armed:
+        h = (host or "").strip().lower().rstrip(".")
+        if h in _METADATA_HOSTS:
+            raise OperatorEgressDenied(host, f"metadata-endpoint/{kind}")
+        if not _host_allowed(host):
+            raise OperatorEgressDenied(host, kind)
 
 
 def install_operator_egress_guard() -> None:

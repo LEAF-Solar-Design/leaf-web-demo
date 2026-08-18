@@ -32,7 +32,7 @@ def _resolve(host, port=443):
 
 @pytest.mark.parametrize("host", [
     "api.vercel.com", "myapp.vercel.app", "api.leafdesign.ai",
-    "ecs.us-east-1.amazonaws.com", "169.254.169.254",
+    "ecs.us-east-1.amazonaws.com",
     # FIPS, dual-stack, and partition ECS endpoints an executor AWS SDK call
     # could otherwise reach (round-4 review completeness gap).
     "ecs-fips.us-east-1.amazonaws.com", "ecs.us-east-1.api.aws",
@@ -42,6 +42,43 @@ def test_deploy_control_plane_denied_without_arming(host):
     assert not guard.is_armed()
     with pytest.raises(OperatorEgressDenied):
         _resolve(host)
+
+
+# === Metadata / task-credential endpoints: armed-context ABSOLUTE denial ======
+# Moved out of the process-wide layer: on ECS the app's own AWS SDK must reach
+# 169.254.170.2 for its task-role credentials, and the process-wide denial made
+# the app undeployable (every /api/health GET at 45f0c24c raised inside boto3;
+# the blue/green promote timed out 12 minutes and rolled back).
+
+@pytest.mark.parametrize("host", [
+    "169.254.169.254", "169.254.170.2", "metadata.google.internal",
+])
+def test_metadata_endpoints_denied_while_armed_even_when_allowlisted(host, monkeypatch):
+    # The armed denial is ABSOLUTE: an env allowlist naming the host must not
+    # override it.
+    monkeypatch.setenv("LEAF_OPERATOR_EGRESS_ALLOW", host)
+    with operator_execution():
+        with pytest.raises(OperatorEgressDenied) as e:
+            _resolve(host)
+    assert "metadata-endpoint" in str(e.value)
+
+
+@pytest.mark.parametrize("host", [
+    "169.254.169.254", "169.254.170.2", "metadata.google.internal",
+])
+def test_metadata_endpoints_not_guard_denied_without_arming(host):
+    # THE REGRESSION PIN: outside an operator context the guard must not deny
+    # the credential fetch -- the app's own SDK depends on it. Name resolution
+    # may still fail at the OS level on a dev box (link-local, no route);
+    # only OperatorEgressDenied constitutes the regression.
+    assert not guard.is_armed()
+    try:
+        _resolve(host)
+    except OperatorEgressDenied:  # pragma: no cover - the defect under test
+        pytest.fail(f"guard denied {host} without arming; the app's own "
+                    "credential fetch would break on ECS")
+    except OSError:
+        pass
 
 
 def test_neutral_ship_helper_to_vercel_is_denied():
