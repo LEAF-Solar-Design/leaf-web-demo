@@ -343,7 +343,9 @@ def build_suites() -> List[Suite]:
         # drawing-authority tests had been running only when someone ran them by hand.
         Suite("server-drawing-authority-postgres",
               "server tests/test_drawing_upload_authority_postgres.py", "pytest",
-              SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 20),
+              SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 20,
+              allowed_skip_reasons=(
+                  r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
@@ -475,10 +477,6 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"DATABASE_URL is not configured",)),
         Suite("server-broker-usage-postgres", "server tests/test_broker_usage_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_usage_postgres.py"), 4),
-        Suite("server-drawing-upload-authority-postgres",
-              "server tests/test_drawing_upload_authority_postgres.py", "pytest", SERVER,
-              _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 4,
-              allowed_skip_reasons=(r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-guest-caps-postgres", "server tests/test_guest_caps_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_guest_caps_postgres.py"), 11,
               allowed_skip_reasons=(
