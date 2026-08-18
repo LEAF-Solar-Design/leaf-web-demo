@@ -79,7 +79,11 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "da-mutation-apply": 24,
         "build-platform-images-workflow": 17,
         "platform-release-manifest": 88,
-        "production-web-release": 10,
+        # 10 -> 17 on 2026-08-18 with the production deploy's second approval
+        # mode (administrator self-authorization): 1 acceptance case plus 6
+        # parametrized rejection cases for contradictory or under-privileged
+        # modes. Mirrors the floor in run-all-gates.py; BOTH must move together.
+        "production-web-release": 17,
         # 86 -> 180 on 2026-08-17, alongside the re-measured run-all-gates.py
         # floor (94-test drift: 89e0de06's bulk sweep set 86, never
         # re-measured through #661 + the annotation projection feature +

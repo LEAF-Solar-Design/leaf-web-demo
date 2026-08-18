@@ -105,7 +105,7 @@ jobs:
               "$RUN_DIR/operator-$OPERATOR.json" >/dev/null
           done
           EXPECTED_APPROVAL="approve-vercel-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
-          echo "::notice title=Independent production approval required::$EXPECTED_APPROVAL"
+          echo "::notice title=Production approval required (independent approver, or a repository administrator self-authorizing)::$EXPECTED_APPROVAL"
           gh api "repos/$GITHUB_REPOSITORY/issues/$APPROVAL_ISSUE_NUMBER" \
             > "$RUN_DIR/approval-issue.json"
           jq -e '.state == "open" and .pull_request == null' \
@@ -137,12 +137,33 @@ jobs:
             and (.user.login | type == "string" and test("^[A-Za-z0-9-]{1,39}$"))
           ' "$RUN_DIR/approval-comment.json" >/dev/null
           APPROVER=$(jq -er '.user.login' "$RUN_DIR/approval-comment.json")
-          [ "$APPROVER" != "$ACTOR" ]
-          [ "$APPROVER" != "$TRIGGERING_ACTOR" ]
           gh api "repos/$GITHUB_REPOSITORY/collaborators/$APPROVER/permission" \
             > "$RUN_DIR/approver-permission.json"
-          jq -e '.permission == "admin" or .permission == "maintain" or .permission == "write"' \
-            "$RUN_DIR/approver-permission.json" >/dev/null
+          APPROVER_PERMISSION=$(jq -er '.permission' "$RUN_DIR/approver-permission.json")
+          # Two accepted approval modes, mirroring the infra repo's proven gate in
+          # accept-leaf-platform-staging-authored-cad.yml. An independent approver
+          # still only needs write. A lone operator approving their own dispatch is
+          # allowed ONLY as a repository administrator, and only when the dispatcher
+          # and the rerun actor are that same administrator, so a rerun cannot borrow
+          # someone else's dispatch to launder a self-approval. The mode is recorded
+          # in the evidence rather than inferred, so an audit can tell the two apart.
+          if [ "${APPROVER,,}" = "${ACTOR,,}" ] || [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ]; then
+            [ "${APPROVER,,}" = "${ACTOR,,}" ] && [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ] || {
+              echo "::error::Self-authorization requires the dispatcher and rerun actor to be the same administrator."
+              exit 1
+            }
+            [ "$APPROVER_PERMISSION" = "admin" ] || {
+              echo "::error::Self-authorization requires live repository admin permission."
+              exit 1
+            }
+            APPROVAL_MODE="administrator-self-authorization"
+          else
+            case "$APPROVER_PERMISSION" in
+              write|maintain|admin) ;;
+              *) echo "::error::The independent approver lacks repository write access."; exit 1 ;;
+            esac
+            APPROVAL_MODE="independent"
+          fi
           python - "$RUN_DIR/approval-comment.json" <<'PY'
           import datetime as dt
           import json
@@ -158,7 +179,10 @@ jobs:
           {
             echo "APPROVAL_COMMENT_ID=$APPROVAL_COMMENT_ID"
             echo "APPROVER=$APPROVER"
+            echo "APPROVAL_MODE=$APPROVAL_MODE"
+            echo "APPROVER_PERMISSION=$APPROVER_PERMISSION"
           } >> "$GITHUB_ENV"
+          echo "::notice title=Production approval mode::$APPROVAL_MODE by $APPROVER ($APPROVER_PERMISSION)"
 
       - name: Check out the protected workflow commit
         uses: actions/checkout@v4
@@ -354,12 +378,31 @@ jobs:
             .body == $body and (.issue_url | endswith($issue))
             and .created_at == .updated_at and .user.login == $approver
           ' "$RUN_DIR/approval-comment-final.json" >/dev/null
-          [ "$APPROVER" != "$ACTOR" ]
-          [ "$APPROVER" != "$TRIGGERING_ACTOR" ]
           gh api "repos/$GITHUB_REPOSITORY/collaborators/$APPROVER/permission" \
             > "$RUN_DIR/approver-permission-final.json"
+          # Re-assert the SAME two modes at promotion time, against freshly fetched
+          # permission: an approver demoted between admission and promotion must not
+          # promote. APPROVAL_MODE is re-derived here rather than trusted from the
+          # environment, and the two derivations must agree.
           PERMISSION=$(jq -er '.permission | select(. == "admin" or . == "maintain" or . == "write")' \
             "$RUN_DIR/approver-permission-final.json")
+          if [ "${APPROVER,,}" = "${ACTOR,,}" ] || [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ]; then
+            [ "${APPROVER,,}" = "${ACTOR,,}" ] && [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ] || {
+              echo "::error::Self-authorization requires the dispatcher and rerun actor to be the same administrator."
+              exit 1
+            }
+            [ "$PERMISSION" = "admin" ] || {
+              echo "::error::Self-authorization requires live repository admin permission at promotion."
+              exit 1
+            }
+            FINAL_APPROVAL_MODE="administrator-self-authorization"
+          else
+            FINAL_APPROVAL_MODE="independent"
+          fi
+          [ "$FINAL_APPROVAL_MODE" = "$APPROVAL_MODE" ] || {
+            echo "::error::Approval mode changed between admission ($APPROVAL_MODE) and promotion ($FINAL_APPROVAL_MODE)."
+            exit 1
+          }
           python - "$RUN_DIR/approval-comment-final.json" <<'PY'
           import datetime as dt
           import json
@@ -381,6 +424,7 @@ jobs:
             --arg workflow_run "$GITHUB_RUN_ID" --arg workflow_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg issue "$APPROVAL_ISSUE_NUMBER" --arg comment "$APPROVAL_COMMENT_ID" \
             --arg approver "$APPROVER" --arg permission "$PERMISSION" \
+            --arg approval_mode "$FINAL_APPROVAL_MODE" \
             --arg created_at "$(jq -er .created_at "$RUN_DIR/approval-comment-final.json")" \
             --arg validated_at "$VALIDATED_AT" --arg payload_sha "$APPROVAL_PAYLOAD_SHA256" \
             --arg approver_id "$(jq -er '.user.id | tostring' "$RUN_DIR/approval-comment-final.json")" '
@@ -396,7 +440,9 @@ jobs:
              approver_login:$approver,approver_id:($approver_id|tonumber),
              permission:$permission,created_at:$created_at,validated_at:$validated_at,
              approval_payload_sha256:$payload_sha,exact_body_verified:true,
-             author_separated:true,timely_at_promotion:true}
+             approval_mode:$approval_mode,
+             author_separated:($approval_mode == "independent"),
+             timely_at_promotion:true}
           ' > "$RUN_DIR/approval-proof-final.json"
 
       - name: Promote the verified immutable deployment

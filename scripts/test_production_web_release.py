@@ -85,9 +85,23 @@ def _approval(digest: str) -> dict:
         "validated_at": "2026-07-28T12:05:00Z",
         "approval_payload_sha256": "e" * 64,
         "exact_body_verified": True,
+        "approval_mode": "independent",
         "author_separated": True,
         "timely_at_promotion": True,
     }
+
+
+def _self_authorized(digest: str) -> dict:
+    """The single-administrator approval the deploy workflow records.
+
+    Same proof shape, but the approver IS the dispatcher, so separation is
+    honestly false and the recorded permission must be admin.
+    """
+    approval = _approval(digest)
+    approval["approval_mode"] = "administrator-self-authorization"
+    approval["author_separated"] = False
+    approval["permission"] = "admin"
+    return approval
 
 
 def _handoff(web_hash: str) -> dict:
@@ -316,6 +330,96 @@ def test_receipt_rejects_replayed_or_unbound_approval(tmp_path: Path):
             )
 
 
+def test_receipt_accepts_an_administrator_self_authorized_approval(tmp_path: Path):
+    """Single-approver releases must succeed end to end.
+
+    `author_separated` was once hardcoded true and asserted true, so an honest
+    self-authorized proof could not pass the verifier at all. It is now a fact
+    about the mode, not an invariant.
+    """
+    dist, digest = _dist(tmp_path)
+    prepared = prepare(
+        _handoff(digest),
+        dist,
+        tmp_path / "output",
+        source=SOURCE,
+        release_run_id=RELEASE_RUN_ID,
+        release_attempt=RELEASE_ATTEMPT,
+        expected_web_sha256=digest,
+    )
+    baseline = _inspect("dpl_" + "A" * 24, "leaf-old.vercel.app")
+    deployed = _inspect("dpl_" + "B" * 24, "leaf-new.vercel.app")
+    receipt = deployment_receipt(
+        prepared,
+        baseline,
+        deployed,
+        deployed,
+        _self_authorized(digest),
+        handoff_run_id="654322",
+        handoff_attempt="4",
+        workflow_run_id="765432",
+        workflow_attempt="5",
+        workflow_head_sha="f" * 40,
+    )
+    assert receipt
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # A mode outside the closed set is refused, never read as independent.
+        {"approval_mode": "single-approver"},
+        {"approval_mode": ""},
+        # Contradictory evidence: claims separation while naming self-auth.
+        {"approval_mode": "administrator-self-authorization", "author_separated": True},
+        # ...and the reverse.
+        {"approval_mode": "independent", "author_separated": False},
+        # Self-authorization on anything less than live admin stays refused,
+        # re-asserted here so a forged proof cannot self-authorize on write.
+        {
+            "approval_mode": "administrator-self-authorization",
+            "author_separated": False,
+            "permission": "write",
+        },
+        {
+            "approval_mode": "administrator-self-authorization",
+            "author_separated": False,
+            "permission": "maintain",
+        },
+    ],
+)
+def test_receipt_rejects_contradictory_or_underprivileged_approval_modes(
+    tmp_path: Path, mutate: dict
+):
+    dist, digest = _dist(tmp_path)
+    prepared = prepare(
+        _handoff(digest),
+        dist,
+        tmp_path / "output",
+        source=SOURCE,
+        release_run_id=RELEASE_RUN_ID,
+        release_attempt=RELEASE_ATTEMPT,
+        expected_web_sha256=digest,
+    )
+    baseline = _inspect("dpl_" + "A" * 24, "leaf-old.vercel.app")
+    deployed = _inspect("dpl_" + "B" * 24, "leaf-new.vercel.app")
+    approval = _approval(digest)
+    approval.update(mutate)
+    with pytest.raises(ReleaseError):
+        deployment_receipt(
+            prepared,
+            baseline,
+            deployed,
+            deployed,
+            approval,
+            handoff_run_id="654322",
+            handoff_attempt="4",
+            workflow_run_id="765432",
+            workflow_attempt="5",
+            workflow_head_sha="f" * 40,
+        )
+
+
 def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
     workflow = (
         ROOT / ".github" / "workflows" / "deploy-platform-web-production.yml"
@@ -327,9 +431,16 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         "collaborators/$OPERATOR/permission",
         "collaborators/$APPROVER/permission",
         "approve-vercel-production:",
-        "Independent production approval required",
-        '[ "$APPROVER" != "$ACTOR" ]',
-        '[ "$APPROVER" != "$TRIGGERING_ACTOR" ]',
+        "Production approval required (independent approver, or a repository administrator self-authorizing)",
+        # The two-person rule is now two named modes. These pins keep the
+        # administrator requirement and the anti-laundering check in the
+        # workflow: dropping either would silently let a non-admin, or a rerun
+        # by a different actor, self-authorize a production deploy.
+        "administrator-self-authorization",
+        "Self-authorization requires live repository admin permission.",
+        "Self-authorization requires the dispatcher and rerun actor to be the same administrator.",
+        "Self-authorization requires live repository admin permission at promotion.",
+        "Approval mode changed between admission",
         "age > 86400",
         "VERCEL_AUTOMATION_BYPASS_SECRET",
         "x-vercel-protection-bypass:",
