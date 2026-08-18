@@ -86,6 +86,19 @@ env:
   STAGE_LABEL: stage-cutover
   # Paths whose change makes a candidate unstageable (design §4).
   MIGRATION_SURFACE: "platform/migrations/ platform/db.py"
+  # WHICH SERVICES MAY BE STAGED, and why this is not `web app`.
+  # deploy-leaf-platform-staging.yml runs its deploy job on ubuntu-latest for
+  # `web` and on the [self-hosted, linux, x64] runner for every other service.
+  # A run holds the shared leaf-platform-staging-ecs-mutation group from the
+  # moment it ENTERS the group, including while its job waits for a runner, so
+  # an `app` prewarm queued behind that single busy runner blocks every staging
+  # deploy for as long as the runner is busy with unrelated work. Measured
+  # 2026-08-17: the first relayed app prewarm (32065440036) and its web sibling
+  # (32065421731) sat pending 25 and 44 minutes behind an unrelated iOS capture
+  # job and were cancelled rather than left on the mutex.
+  # Restore `app` here the moment that deploy job runs on a runner that is
+  # always available; nothing else about the relay needs to change.
+  STAGE_SERVICES: "web"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
@@ -269,7 +282,7 @@ jobs:
                    | if length == 1 then .[0].databaseId else empty end'
           }
 
-          for SERVICE in web app; do
+          for SERVICE in $STAGE_SERVICES; do
             WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
             MARK=$(latest_run_id)
             # Soft-fail per service: staging is an optimization, and a refused
