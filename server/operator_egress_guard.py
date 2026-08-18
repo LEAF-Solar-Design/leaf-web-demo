@@ -72,7 +72,19 @@ _DEPLOY_HOST_EXACT = frozenset({
     "api.leafdesign.ai", "leafdesign.ai", "www.leafdesign.ai",  # production surface
     "api.vercel.com", "vercel.com",   # Vercel deploy API
     "169.254.169.254",                # cloud metadata (IMDS)
-    "metadata.google.internal", "169.254.170.2",  # GCE / ECS task metadata
+    "metadata.google.internal",       # GCE metadata
+    # 169.254.170.2 (the ECS task metadata/credentials endpoint) is deliberately
+    # NOT here. On ECS it is the task's OWN link-local endpoint — the only way
+    # the process reads its container metadata (health's task_definition_arn
+    # field, server/app.py:_ecs_task_definition_arn) and its task-role
+    # credentials. It is not a production deploy control plane: it hands out
+    # the STAGING task's identity, and reaching production still requires a
+    # route Layer 1 denies (ecs.*.amazonaws.com, api.leafdesign.ai, ...).
+    # Denying it process-wide made every /api/health raise OperatorEgressDenied
+    # on ECS, so no task at or after cb653b01 could pass ELB health checks and
+    # every staging app forward deploy timed out at promote (runs 32173719414,
+    # 32174277786 on 2026-08-18). Layer 2 still denies it while an operator
+    # handler is armed, which is the contract's actual obligation.
 })
 _DEPLOY_HOST_PATTERNS = (
     re.compile(r"(^|\.)vercel\.(com|app)$", re.I),

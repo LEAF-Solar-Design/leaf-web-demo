@@ -179,6 +179,32 @@ def test_layer1_denies_production_but_not_staging():
     assert not guard.is_deploy_control_plane("staging-api.leafdesign.ai")
 
 
+def test_layer1_does_not_deny_the_ecs_task_metadata_endpoint():
+    # 169.254.170.2 is the ECS task's OWN metadata/credentials endpoint, the
+    # only way a task reads its container metadata (/api/health's
+    # task_definition_arn field) and its task-role credentials. It is not a
+    # production deploy control plane. When it sat in _DEPLOY_HOST_EXACT, every
+    # /api/health on ECS raised OperatorEgressDenied at name-resolution, no
+    # task could pass ELB health checks, and every staging app forward deploy
+    # timed out at promote (2026-08-18, runs 32173719414 / 32174277786). The
+    # incident shape was "deploy-route/name-resolution", so pin getaddrinfo.
+    assert not guard.is_deploy_control_plane("169.254.170.2")
+    assert not guard.is_armed()
+    socket.getaddrinfo("169.254.170.2", 80)  # must not raise
+    # IMDS stays a Layer 1 deny: exposing it would hand an EC2-hosted process
+    # instance-role credentials; the parametrized Layer 1 test pins it too.
+    assert guard.is_deploy_control_plane("169.254.169.254")
+
+
+def test_operator_context_still_denies_the_ecs_task_metadata_endpoint():
+    # The contract's actual obligation is unchanged: while an operator handler
+    # is armed, Layer 2's deny-by-default still blocks the task metadata
+    # endpoint (it is neither loopback, the platform DB, nor a declared extra).
+    with operator_execution():
+        with pytest.raises(OperatorEgressDenied):
+            socket.getaddrinfo("169.254.170.2", 80)
+
+
 # === The boundary is WIRED into the real request path =========================
 
 def test_require_operator_arms_the_egress_boundary(monkeypatch):
