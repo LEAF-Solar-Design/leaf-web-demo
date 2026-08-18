@@ -366,6 +366,39 @@ insert, ~$0.60/GB-month storage). Client-side session caps do not constrain
 an internet caller, and IP rotation multiplies it. Accepted as pre-existing,
 recorded here so the next change to that allowlist starts from the number
 rather than rediscovering it.
+## Reading the data: identity is stamped at FLUSH time
+
+A client event's identity is resolved when its BATCH reaches the ingest
+door, not when the event happened. The tracker buffers 20 events / 5 s and
+reads its auth header at flush; a sign-in inside that window therefore
+back-stamps earlier events with the identity the browser acquired
+afterwards.
+
+This is not a bug and it is not fixable at the door (the door can only see
+the credential it is given), but it MISREADS in exactly one direction, so
+read every client row with it in mind:
+
+- Signed-out errors can arrive as `tenant_kind=account`. Observed live
+  2026-08-17: 112 of 200 events were `error.shown` 401 UNAUTHENTICATED
+  across 8 endpoints x 11 sessions, all stamped `account`, which reads as
+  "authenticated users are being rejected". They were not. Per session the
+  8 rows are the signed-out boot fan-out (`/api/session`, `/api/tools`,
+  `/api/capabilities`, `/api/drawings`, `/api/jobs`, `/api/tenant`,
+  `/api/entitlements`, `/api/usage`), and `auth.completed` lands AFTER the
+  last of them; 16-error sessions are two such boots.
+- The discriminator is ordering, not the identity column: compare an
+  error's timestamp against the session's `auth.completed`. Errors before
+  it are the expected signed-out posture under `LEAF_AUTH_LIVE=1`; errors
+  after it are real.
+- Server-side emits are unaffected: they stamp identity in-process at the
+  choke point, with no buffer between the fact and the stamp.
+
+A second reading, independent of identity: a signed-out boot spends 8
+user-visible errors before the user does anything, which is why one
+afternoon's dominant event was `error.shown`. That is a product question
+(should the boot fan-out defer without a token?), not a telemetry defect,
+and the layer surfacing it is the layer working.
+
 Labels are additive within schema_version 1, so early rows stay queryable.
 Fields named by the design but not yet stamped (e.g. `user_email`,
 `aps_live`, `wrote_version`) arrive additively with later waves.
