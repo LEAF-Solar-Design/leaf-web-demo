@@ -4,7 +4,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from leaf_platform.db import MIGRATION_GLOB, _AUTHORITY_REQUIRED_CONSTRAINTS
+from leaf_platform.db import (MIGRATION_GLOB, _AUTHORITY_REQUIRED_CONSTRAINTS,
+                              required_catalog_for_selected_authorities)
 
 PLATFORM = Path(__file__).resolve().parent.parent
 MIGRATION = PLATFORM / "migrations" / "0036_annotation_batches.sql"
@@ -89,3 +90,20 @@ def test_strict_schema_readiness_owns_annotation_constraints():
     assert "annotation_targets_drawing_fk" in contracts
     assert "annotation_batches_target_fk" in contracts
     assert "annotation_batches_kind_link_check" in contracts
+    kind_fragments = set(
+        contracts["annotation_batches_kind_link_check"]["definition_fragments"]
+    )
+    assert {
+        "reverses_batch_id IS NULL",
+        "reverses_commit IS NULL",
+        "reverses_tree IS NULL",
+        "reverses_batch_id IS NOT NULL",
+        "reverses_commit IS NOT NULL",
+        "reverses_tree IS NOT NULL",
+    } <= kind_fragments
+
+
+def test_annotation_catalog_is_unconditional_without_a_selector():
+    catalog = required_catalog_for_selected_authorities({})
+    assert "annotation_batches_target_fk" in catalog["constraints"]
+    assert "annotation_batches_request_key_uq" in catalog["indexes"]

@@ -47,21 +47,23 @@ _REQUIRED_COLUMNS = {
     # content; these rows own the exact effective head and its decision trail.
     "annotation_targets": {
         "tenant_id", "org_id", "project_id", "drawing_id", "version",
-        "commit_sha", "tree_sha", "updated_by_binding_id",
+        "repository_id", "commit_sha", "tree_sha", "source_receipt_digest",
+        "updated_by_binding_id",
     },
     "annotation_batches": {
         "batch_id", "revision", "tenant_id", "org_id", "project_id",
         "drawing_id", "session_id", "kind", "retry_of_batch_id",
         "reverses_batch_id", "base_version", "base_commit", "base_tree",
-        "preview_commit", "preview_tree", "payload_digest", "payload_count",
-        "request_key", "request_fingerprint", "state",
-        "created_by_binding_id", "lease_expires_at", "decision_key",
+        "preview_commit", "preview_tree", "reverses_commit", "reverses_tree",
+        "repository_id", "source_receipt_digest", "payload_digest", "payload_count",
+        "request_key_digest", "request_fingerprint", "state",
+        "created_by_binding_id", "lease_expires_at", "decision_key_digest",
         "applied_version", "superseded_at",
     },
     "annotation_audit": {
-        "audit_id", "batch_id", "tenant_id", "org_id", "project_id",
+        "audit_id", "batch_id", "batch_revision", "tenant_id", "org_id", "project_id",
         "drawing_id", "from_state", "to_state", "actor_binding_id",
-        "decision_key", "payload_digest", "payload_count", "before_version",
+        "decision_key_digest", "source_receipt_digest", "payload_digest", "payload_count", "before_version",
         "after_version", "before_commit", "before_tree", "after_commit",
         "after_tree",
     },
@@ -403,8 +405,10 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "annotation_batches", "CHECK", "tenant_id = org_id"),
         "annotation_batches_kind_link_check": _catalog_contract(
             "annotation_batches", "CHECK", "kind = 'apply'",
-            "reverses_batch_id IS NULL", "kind = 'undo'",
-            "reverses_batch_id IS NOT NULL"),
+            "reverses_batch_id IS NULL", "reverses_commit IS NULL",
+            "reverses_tree IS NULL", "kind = 'undo'",
+            "reverses_batch_id IS NOT NULL", "reverses_commit IS NOT NULL",
+            "reverses_tree IS NOT NULL"),
         "annotation_batches_target_fk": _catalog_contract(
             "annotation_batches",
             "FOREIGN KEY (tenant_id, org_id, project_id, drawing_id)",
@@ -420,6 +424,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "annotation_audit", "PRIMARY KEY (audit_id)"),
         "annotation_audit_tenant_org_match": _catalog_contract(
             "annotation_audit", "CHECK", "tenant_id = org_id"),
+        "annotation_audit_batch_revision_fk": _catalog_contract(
+            "annotation_audit", "FOREIGN KEY (batch_id, batch_revision)",
+            "REFERENCES annotation_batches(batch_id, revision)", "ON DELETE CASCADE"),
         "annotation_audit_drawing_fk": _catalog_contract(
             "annotation_audit", "FOREIGN KEY (drawing_id, project_id, org_id)",
             "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)",
@@ -731,7 +738,7 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "annotations": {
         "annotation_batches_request_key_uq": _catalog_contract(
             "annotation_batches", "CREATE UNIQUE INDEX",
-            "(tenant_id, request_key)", "WHERE", "revision = 0"),
+            "(tenant_id, request_key_digest)", "WHERE", "revision = 0"),
         "annotation_batches_one_pending_per_session_target": _catalog_contract(
             "annotation_batches", "CREATE UNIQUE INDEX",
             "(tenant_id, session_id, project_id, drawing_id)", "WHERE",
@@ -917,7 +924,9 @@ def required_catalog_for_selected_authorities(
     """Return runtime-critical constraints, indexes, and triggers by selector."""
     source = os.environ if environ is None else environ
     catalog: Dict[str, Dict[str, Dict[str, Any]]] = {
-        "constraints": {}, "indexes": {}, "triggers": {},
+        "constraints": dict(_AUTHORITY_REQUIRED_CONSTRAINTS["annotations"]),
+        "indexes": dict(_AUTHORITY_REQUIRED_INDEXES["annotations"]),
+        "triggers": dict(_AUTHORITY_REQUIRED_TRIGGERS.get("annotations", {})),
     }
     contracts = {
         "constraints": _AUTHORITY_REQUIRED_CONSTRAINTS,
