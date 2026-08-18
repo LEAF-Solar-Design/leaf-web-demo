@@ -250,7 +250,12 @@ jobs:
                 exit 0
               fi
             fi
-            sleep "$SUPPLY_SET_INTERVAL"
+            # Do not pay the interval after the LAST look: the loop has already
+            # decided, and sleeping here just holds a runner for another
+            # interval to announce a miss it already knows about.
+            if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
+              sleep "$SUPPLY_SET_INTERVAL"
+            fi
           done
           echo "::notice::No unexpired $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
 
