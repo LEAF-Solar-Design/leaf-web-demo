@@ -1,6 +1,14 @@
 # APS Design Automation — Flex concurrency-limit raise request
 
-> **Status: SUBMITTED VIA APS ONBOARDING FALLBACK (2026-07-18).** Autodesk's
+> **Status: NOT YET DELIVERED TO THE APS TECHNICAL TEAM (corrected 2026-07-26).**
+> The 2026-07-23 onboarding call connected us with Autodesk **sales** by accident.
+> We have never met the APS technical team, so this request has not been made to
+> anyone who can act on it. Do not record this as "awaiting Autodesk": the next
+> step is ours, which is to reach the APS Design Automation technical team through
+> a channel that can grant a concurrency raise. The submission history below is
+> kept for the record.
+>
+> **History: submitted via APS onboarding fallback (2026-07-18).** Autodesk's
 > logged-in Assistant confirmed that direct API tickets require an active ADN
 > membership, which this account does not have. The complete concurrency request
 > below was therefore submitted in the special-request field for an official APS
@@ -15,7 +23,8 @@
 > `ehaug@leafautomation.ai` to
 > `AutodeskPlatformServicesAPSSupport@autodesk.com`, requesting 25 concurrent
 > WorkItems (10 then 25 acceptable) for the new app and asking Autodesk to attach
-> it to the July 23 onboarding call. Awaiting reply/reference number.
+> it to the July 23 onboarding call. No reply and no reference number ever came
+> back, and the call itself reached sales, not the technical team.
 >
 > Send via: APS support ticket at https://aps.autodesk.com/en/support/get-help
 > (category: Design Automation API), or your Autodesk account/partner contact.
