@@ -256,14 +256,38 @@ function callbackObservation(url) {
   }
 }
 
+// Post-login the SPA is still exchanging the authorization code, so a navigation can
+// tear down the evaluation context mid-call and kill an otherwise healthy roundtrip.
+// This is the THIRD race in that same window (PR #652 gated the departure to the
+// issuer, PR #673 replaced the sign-out drawer), and each one cost a real operator
+// login cycle. Retry ONLY the navigation teardown, bounded by a wall-clock deadline:
+// any other error, and the deadline itself, rethrows unchanged, so the collector
+// still fails closed on a genuinely broken session. Never widen this pattern to
+// swallow an assertion -- every fail() below stays outside the retry.
+const NAVIGATION_TEARDOWN = /Execution context was destroyed|Target closed|navigation/i
+const NAVIGATION_RETRY_MS = 60_000
+
+async function retryThroughNavigation(page, attempt) {
+  const deadline = Date.now() + NAVIGATION_RETRY_MS
+  for (;;) {
+    try {
+      return await attempt(Math.max(1_000, deadline - Date.now()))
+    } catch (error) {
+      if (Date.now() >= deadline) throw error
+      if (!NAVIGATION_TEARDOWN.test(error?.message ?? '')) throw error
+      await page.waitForLoadState('domcontentloaded').catch(() => {})
+    }
+  }
+}
+
 async function protectedSession(page) {
-  const result = await page.evaluate(async () => {
+  const result = await retryThroughNavigation(page, () => page.evaluate(async () => {
     const token = window.localStorage.getItem('leaf.jwt') || ''
     const response = await fetch('/api/session?dwg=rooftop_demo', {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
     return { status: response.status, token }
-  })
+  }))
   if (result.status !== 200) fail('authenticated protected session did not return 200')
   return { api_status: result.status, ...parseJwt(result.token) }
 }
@@ -283,7 +307,11 @@ async function waitForInteractiveLogin(page, cycles, callbacks, sequence, notify
   await page.waitForURL((url) => url.origin === TARGET_ORIGIN && !url.searchParams.has('code') && !url.searchParams.has('state'), {
     timeout: 10 * 60_000,
   })
-  await page.waitForFunction(() => !!window.localStorage.getItem('leaf.jwt'), null, { timeout: 60_000 })
+  // Same teardown race as protectedSession: the token wait keeps its original 60s
+  // total budget, spent across retries rather than lost to the first navigation.
+  await retryThroughNavigation(page, (remainingMs) => page.waitForFunction(
+    () => !!window.localStorage.getItem('leaf.jwt'), null, { timeout: remainingMs },
+  ))
   if (cycles.length !== sequence || callbacks.length !== sequence) {
     fail(`authorization request and callback ${sequence} were not observed exactly once`)
   }

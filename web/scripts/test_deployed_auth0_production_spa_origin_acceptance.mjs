@@ -234,7 +234,35 @@ function token(signature) {
   return `${header}.${payload}.${signature}`
 }
 
-function fakePlaywright() {
+// Test doubles are selected by the ARGUMENT SHAPE of a call -- the source text of
+// the callback it was handed -- never by call index. The fake's evaluate() keeps a
+// POSITIONAL counter, so anything matched by position silently renumbers when a
+// call is inserted; that trap ate time on the PR #673 port and must not be re-armed.
+const PROTECTED_SESSION_EVALUATE = /leaf\.jwt[\s\S]*api\/session/
+const TOKEN_PRESENT_WAIT = /!!window\.localStorage/
+
+function injections(specs) {
+  return specs.map((spec) => ({ remaining: spec.times ?? 1, ...spec }))
+}
+
+function takeInjection(entries, source) {
+  const hit = entries.find((entry) => entry.remaining > 0 && entry.source.test(source))
+  if (!hit) return null
+  hit.remaining -= 1
+  return hit
+}
+
+// The exact string Playwright raises when a post-login navigation tears the
+// evaluation context down under the collector (observed on two real operator
+// logins, 2026-08-18).
+function destroyedContext() {
+  return new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation.')
+}
+
+function fakePlaywright(options = {}) {
+  const evaluateInjections = options.evaluate || []
+  const waitInjections = options.waitForFunction || []
+  let loadStateWaits = 0
   const handlers = new Map()
   let currentUrl = `${TARGET_ORIGIN}/try`
   let evaluateCount = 0
@@ -249,6 +277,12 @@ function fakePlaywright() {
     on(name, callback) { handlers.set(name, callback) },
     async goto(url) { currentUrl = url; emitRequest(url) },
     async evaluate(_callback, argument) {
+      // Injected faults and results are matched on the callback SOURCE and consumed
+      // BEFORE the positional counter advances, so a retried call keeps its own
+      // number and a retry never renumbers the positional cases below.
+      const injected = takeInjection(evaluateInjections, String(_callback))
+      if (injected?.error) throw injected.error
+      if (injected && 'result' in injected) return injected.result
       // The RP-initiated logout evaluate is identified by its ARGUMENT SHAPE, not
       // by call position, so adding it never renumbers the positional cases below.
       if (argument !== null && typeof argument === 'object' && 'issuerOrigin' in argument) {
@@ -320,10 +354,25 @@ function fakePlaywright() {
       currentUrl = `${TARGET_ORIGIN}/try`
       assert.equal(predicate(new URL(currentUrl)), true)
     },
-    async waitForFunction() {},
+    async waitForFunction(predicate, _argument, waitOptions) {
+      // A retry must spend what is LEFT of the original 60s budget, never restart a
+      // fresh 60s window per attempt. This is the assertion that keeps the hardening
+      // from quietly becoming an unbounded wait.
+      assert.ok(
+        typeof waitOptions?.timeout === 'number' && waitOptions.timeout > 0 && waitOptions.timeout <= 60_000,
+        `token wait must stay inside the original 60s budget, got ${JSON.stringify(waitOptions)}`,
+      )
+      const injected = takeInjection(waitInjections, String(predicate))
+      if (injected?.error) throw injected.error
+    },
+    async waitForLoadState(state) {
+      assert.equal(state, 'domcontentloaded', 'the retry must settle the page before re-probing')
+      loadStateWaits += 1
+    },
     url() { return currentUrl },
   }
   return {
+    get loadStateWaits() { return loadStateWaits },
     chromium: {
       async launch(options) {
         assert.deepEqual(options, { headless: false })
@@ -341,5 +390,80 @@ assert.equal(collected.authorization_cycles.length, 2)
 assert.equal(collected.sessions.after_logout_refusal_status, 401)
 assert.equal(collected.logout.auth0_round_trip, true)
 assert.notEqual(collected.sessions.first.access_token_sha256, collected.sessions.second.access_token_sha256)
+
+
+// --- Regression: the post-login navigation teardown race (third of its kind in this
+// --- window, after PR #652's departure gate and PR #673's sign-out drawer).
+
+// The protected-session probe fires while the SPA is still exchanging the auth code.
+// Two teardowns in a row must be ridden out, not fatal, and the page must be settled
+// between attempts.
+{
+  const fake = fakePlaywright({
+    evaluate: injections([{ source: PROTECTED_SESSION_EVALUATE, times: 2, error: destroyedContext() }]),
+  })
+  const survived = await collectInteractiveProof(config, { playwright: fake, notify: () => {} })
+  assert.equal(survived.sessions.first.api_status, 200)
+  assert.equal(survived.authorization_cycles.length, 2)
+  assert.ok(fake.loadStateWaits >= 2, `expected a settle between retries, saw ${fake.loadStateWaits}`)
+}
+
+// The token wait races the same navigation. 'Target closed' is the other teardown
+// wording Playwright uses for it.
+{
+  const fake = fakePlaywright({
+    waitForFunction: injections([
+      { source: TOKEN_PRESENT_WAIT, error: destroyedContext() },
+      { source: TOKEN_PRESENT_WAIT, error: new Error('page.waitForFunction: Target closed') },
+    ]),
+  })
+  const survived = await collectInteractiveProof(config, { playwright: fake, notify: () => {} })
+  assert.equal(survived.sessions.first.api_status, 200)
+}
+
+// FAIL CLOSED, 1/3: a non-navigation error is never swallowed by the retry.
+await assert.rejects(
+  collectInteractiveProof(config, {
+    playwright: fakePlaywright({
+      evaluate: injections([{ source: PROTECTED_SESSION_EVALUATE, times: 99, error: new Error('unrelated backend failure') }]),
+    }),
+    notify: () => {},
+  }),
+  /unrelated backend failure/,
+  'a non-navigation error must propagate, not be retried away',
+)
+
+// FAIL CLOSED, 2/3: a token that never lands still times out. Playwright's real
+// timeout wording carries no teardown phrase, so it must rethrow on the first hit
+// rather than burn the whole retry budget.
+await assert.rejects(
+  collectInteractiveProof(config, {
+    playwright: fakePlaywright({
+      waitForFunction: injections([
+        { source: TOKEN_PRESENT_WAIT, times: 99, error: new Error('page.waitForFunction: Timeout 60000ms exceeded.') },
+      ]),
+    }),
+    notify: () => {},
+  }),
+  /Timeout 60000ms exceeded/,
+  'a genuine token-wait timeout must still fail the collector',
+)
+
+// FAIL CLOSED, 3/3: the load-bearing security assertion. This script is an
+// attestation artifact -- a protected session that does not return 200 must fail
+// the run even when the retry path is exercised on the very same call.
+await assert.rejects(
+  collectInteractiveProof(config, {
+    playwright: fakePlaywright({
+      evaluate: injections([
+        { source: PROTECTED_SESSION_EVALUATE, error: destroyedContext() },
+        { source: PROTECTED_SESSION_EVALUATE, result: { status: 500, token: token('signature-one') } },
+      ]),
+    }),
+    notify: () => {},
+  }),
+  /authenticated protected session did not return 200/,
+  'the retry must never turn a non-200 protected session into a pass',
+)
 
 console.log('PRODUCTION_D1A_AUTH0_SPA_ORIGIN_COLLECTOR_TESTS_OK')
