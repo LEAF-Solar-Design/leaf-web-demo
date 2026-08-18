@@ -97,6 +97,18 @@ describe('deployed authored CAD acceptance configuration', () => {
         LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai',
         LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai,staging-api.leaf.test',
       },
+      {
+        LEAF_ACCEPTANCE_WEB_URL: 'https://platform.leafdesign.ai.',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'platform.leafdesign.ai.,staging-api.leaf.test',
+      },
+      {
+        LEAF_ACCEPTANCE_API_URL: 'https://api.leafdesign.ai.',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'staging.leaf.test,api.leafdesign.ai.',
+      },
+      {
+        LEAF_ACCEPTANCE_WEB_URL: 'https://staging.leaf.test.',
+        LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'staging.leaf.test.,staging-api.leaf.test',
+      },
       { LEAF_ACCEPTANCE_ALLOWED_HOSTS: 'other.test,staging-api.leaf.test' },
     ]) {
       assert.throws(() => validateConfig(environment(overrides)), AcceptanceError)

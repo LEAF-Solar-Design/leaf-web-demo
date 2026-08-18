@@ -48,6 +48,21 @@ function required(env, name) {
   return value
 }
 
+function canonicalHostname(value, name) {
+  const hostname = String(value || '').trim().toLowerCase()
+  const canonical = hostname.replace(/\.+$/, '')
+  if (!canonical || canonical !== hostname) {
+    const check = PRODUCTION_HOSTS.has(canonical)
+      ? 'production_target'
+      : 'configuration'
+    throw new AcceptanceError(
+      check,
+      `${name} must be a canonical hostname without a trailing dot`,
+    )
+  }
+  return canonical
+}
+
 function exactUrl(value, name) {
   let parsed
   try {
@@ -67,6 +82,7 @@ function exactUrl(value, name) {
   if (parsed.pathname !== '' && parsed.pathname !== '/') {
     throw new AcceptanceError('configuration', `${name} must be an origin without a path`)
   }
+  canonicalHostname(parsed.hostname, name)
   parsed.pathname = ''
   return parsed
 }
@@ -74,8 +90,9 @@ function exactUrl(value, name) {
 function parseAllowedHosts(env) {
   const hosts = required(env, 'LEAF_ACCEPTANCE_ALLOWED_HOSTS')
     .split(',')
-    .map((value) => value.trim().toLowerCase())
+    .map((value) => value.trim())
     .filter(Boolean)
+    .map((value) => canonicalHostname(value, 'LEAF_ACCEPTANCE_ALLOWED_HOSTS'))
   if (hosts.length === 0 || new Set(hosts).size !== hosts.length) {
     throw new AcceptanceError(
       'configuration',

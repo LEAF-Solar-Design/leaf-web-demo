@@ -70,8 +70,9 @@ LEAF_ACCEPTANCE_TENANT_B_REQUEST=<different novel request that contains the run 
 ```
 
 The exact web and API hosts must appear in
-`LEAF_ACCEPTANCE_ALLOWED_HOSTS`. The driver always rejects known production
-hosts. The publication approval secret is required only with `--execute`. It
+`LEAF_ACCEPTANCE_ALLOWED_HOSTS`. Each host must use its canonical spelling
+without a trailing DNS dot. The driver always rejects known production hosts.
+The publication approval secret is required only with `--execute`. It
 must equal the staging app's `LEAF_CUSTOMIZATION_APPROVAL_SECRET`. Store it as a
 masked CI secret. The driver sends it only to the internal approval endpoint.
 It never places it in the browser, application JWT headers, logs, or receipt.
