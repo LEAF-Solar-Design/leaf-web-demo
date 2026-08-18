@@ -9,7 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
+import logging
+import os
 import re
+import traceback
 from typing import Mapping, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -18,6 +21,26 @@ from platform_release_policy import (
     PlatformReleasePolicyError,
     validate_workspace_reference,
 )
+
+_LOG = logging.getLogger(__name__)
+
+
+def _log_reconcile_exception(reason_code: str, exc: BaseException) -> None:
+    """Record why a reconcile dependency raised. This module has no router
+    funnel to catch it otherwise, so a repository, compatibility, or branch
+    adapter failure here would leave zero trace without this call.
+
+    Location only: file, line and function, never `exc_info` and never
+    `str(exc)` -- the message can carry a DSN or a row value.
+    """
+    frames = " | ".join(
+        f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}"
+        for f in traceback.extract_tb(exc.__traceback__)
+    )
+    _LOG.error(
+        "customization_reconcile_failed: code=%s cause=%s at %s",
+        reason_code, type(exc).__name__, frames or "<no frames>",
+    )
 
 
 class ReconcileStatus(str, Enum):
@@ -174,7 +197,8 @@ class PlatformReleaseReconciler:
             return ReconcileResult(ReconcileStatus.FAILED, None, None, "invalid_input")
         try:
             effective = self._repository.get_effective_release(tenant_id=tenant_id)
-        except Exception:  # Repository errors must never infer an effective pin.
+        except Exception as exc:  # Repository errors must never infer an effective pin.
+            _log_reconcile_exception("effective_read_failed", exc)
             return ReconcileResult(
                 ReconcileStatus.FAILED, desired.desired_release, None, "effective_read_failed"
             )
@@ -194,7 +218,8 @@ class PlatformReleaseReconciler:
                 workspace_contract=desired.workspace_contract,
                 workspace_contract_digest=desired.workspace_contract_digest,
             )
-        except Exception:
+        except Exception as exc:
+            _log_reconcile_exception("compatibility_check_failed", exc)
             return ReconcileResult(
                 ReconcileStatus.FAILED,
                 desired.desired_release,
@@ -226,7 +251,8 @@ class PlatformReleaseReconciler:
                     workspace_contract_digest=desired.workspace_contract_digest,
                     audit=audit,
                 )
-            except Exception:
+            except Exception as exc:
+                _log_reconcile_exception("effective_update_failed", exc)
                 return ReconcileResult(
                     ReconcileStatus.FAILED, desired.desired_release, effective.release, "effective_update_failed"
                 )
@@ -250,7 +276,8 @@ class PlatformReleaseReconciler:
                 desired_release=desired.desired_release,
                 workspace_contract_digest=desired.workspace_contract_digest,
             )
-        except Exception:
+        except Exception as exc:
+            _log_reconcile_exception("migration_reservation_failed", exc)
             return ReconcileResult(
                 ReconcileStatus.FAILED, desired.desired_release, effective.release, "migration_reservation_failed"
             )
