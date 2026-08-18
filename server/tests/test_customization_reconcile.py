@@ -25,9 +25,12 @@ class FakeRepository:
     effective: EffectiveRelease
     cas_result: bool = True
     cas_error: Exception | None = None
+    get_error: Exception | None = None
     cas_calls: list[dict[str, object]] = field(default_factory=list)
 
     def get_effective_release(self, *, tenant_id: str) -> EffectiveRelease:
+        if self.get_error:
+            raise self.get_error
         return self.effective
 
     def compare_and_swap_effective_release(self, **kwargs: object) -> bool:
@@ -200,3 +203,81 @@ def test_workspace_reference_validation_is_the_source_of_the_desired_release():
     assert result.status is ReconcileStatus.UPDATED
     assert repo.effective.release == RELEASE
     assert branches.calls == []
+
+
+def test_effective_read_failure_is_logged(caplog: pytest.LogCaptureFixture):
+    secret = "dsn=postgres://user:hunter2@db/leaf"
+    repo = FakeRepository(EffectiveRelease(RELEASE, 3), get_error=RuntimeError(secret))
+    branches = FakeBranches()
+
+    with caplog.at_level("ERROR", logger="customization_reconcile"):
+        result = reconciler(repo, True, branches).reconcile(tenant_id="tenant-a", desired=DESIRED)
+
+    assert result.status is ReconcileStatus.FAILED
+    assert result.reason_code == "effective_read_failed"
+    records = [r for r in caplog.records if r.name == "customization_reconcile"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "effective_read_failed" in message
+    assert "RuntimeError" in message
+    assert secret not in message
+
+
+def test_compatibility_check_failure_is_logged(caplog: pytest.LogCaptureFixture):
+    secret = "row_value=super-secret-tenant-row"
+    repo = FakeRepository(EffectiveRelease("leaf-platform-2026.07.01", 7))
+    compatibility = FakeCompatibility(True, error=ValueError(secret))
+    branches = FakeBranches()
+
+    with caplog.at_level("ERROR", logger="customization_reconcile"):
+        result = PlatformReleaseReconciler(repo, compatibility, branches).reconcile(
+            tenant_id="tenant-a", desired=DESIRED,
+        )
+
+    assert result.status is ReconcileStatus.FAILED
+    assert result.reason_code == "compatibility_check_failed"
+    records = [r for r in caplog.records if r.name == "customization_reconcile"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "compatibility_check_failed" in message
+    assert "ValueError" in message
+    assert secret not in message
+
+
+def test_effective_update_failure_is_logged(caplog: pytest.LogCaptureFixture):
+    secret = "conflict_row=tenant-a/leaf-platform-2026.07.01"
+    repo = FakeRepository(
+        EffectiveRelease("leaf-platform-2026.07.01", 7), cas_error=RuntimeError(secret),
+    )
+    branches = FakeBranches()
+
+    with caplog.at_level("ERROR", logger="customization_reconcile"):
+        result = reconciler(repo, True, branches).reconcile(tenant_id="tenant-a", desired=DESIRED)
+
+    assert result.status is ReconcileStatus.FAILED
+    assert result.reason_code == "effective_update_failed"
+    records = [r for r in caplog.records if r.name == "customization_reconcile"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "effective_update_failed" in message
+    assert "RuntimeError" in message
+    assert secret not in message
+
+
+def test_migration_reservation_failure_is_logged(caplog: pytest.LogCaptureFixture):
+    secret = "git stderr: remote rejected refs/leaf/changes/abc with token xyz"
+    repo = FakeRepository(EffectiveRelease("leaf-platform-2026.07.01", 7))
+    branches = FakeBranches(error=RuntimeError(secret))
+    service = reconciler(repo, False, branches)
+
+    with caplog.at_level("ERROR", logger="customization_reconcile"):
+        result = service.reconcile(tenant_id="tenant-a", desired=DESIRED)
+
+    assert result.status is ReconcileStatus.FAILED
+    assert result.reason_code == "migration_reservation_failed"
+    records = [r for r in caplog.records if r.name == "customization_reconcile"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "migration_reservation_failed" in message
+    assert "RuntimeError" in message
+    assert secret not in message
