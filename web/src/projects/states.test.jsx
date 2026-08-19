@@ -116,8 +116,16 @@ const COMPONENT_REGISTRY = [
 ]
 
 describe('projects-surface component registry: loading/empty/error coverage sweep', () => {
-  it('enumerates exactly the projects-surface components', () => {
-    expect(COMPONENT_REGISTRY.map((c) => c.name)).toEqual(['ProjectList', 'Membership', 'ExportDialog'])
+  it('covers every actual component file in the directory (discovered, not hand-listed)', () => {
+    // Real enumeration: glob the directory so a new component added without
+    // registry coverage FAILS this test instead of silently going untested.
+    const actualFiles = Object.keys(
+      import.meta.glob('./*.jsx', { eager: false })
+    )
+      .map((p) => p.replace('./', '').replace('.jsx', ''))
+      .filter((n) => !n.endsWith('.test') && n !== 'states')
+    const covered = COMPONENT_REGISTRY.map((c) => c.name).sort()
+    expect(actualFiles.sort()).toEqual(covered)
   })
 
   for (const entry of COMPONENT_REGISTRY) {
