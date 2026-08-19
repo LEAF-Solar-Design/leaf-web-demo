@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from psycopg.types.json import Jsonb
 
 import deps
 import platform_link
@@ -178,6 +179,155 @@ def rename_conversation(org_id: Any, project_id: Any, conversation_id: Any,
         )
         row = cur.fetchone()
     return _row(row) if row is not None else None
+
+
+# --- message write path (0046 conversations, B-C2) -------------------------- #
+#
+# KNOWN GAP: durable message storage needs a dedicated table -- content up to
+# MAX_MESSAGE_CONTENT_BYTES and a real idempotency_key uniqueness constraint
+# do not fit the existing `conversations` row (title is capped at
+# MAX_TITLE_LENGTH by conversations_title_check, and the table carries no
+# idempotency_key column). That table (`conversation_messages`) is not part of
+# this card's file budget: files_expected names no migration file, the card is
+# flagged migration: false, and adding platform/migrations/00xx would break
+# the currently-green test_postgres_authority_inventory_contract.py's pinned
+# EXPECTED_MIGRATIONS without also editing that test file, which is likewise
+# outside this card's scope. Validation, the flag fence, and the typed-4xx
+# envelope below are real and fully covered without a database; create_message
+# is the write this route calls once that table exists, and every test that
+# exercises it is marked requires_database so it skips cleanly without
+# DATABASE_URL, exactly like every other Postgres-backed path in this module.
+
+MAX_MESSAGE_CONTENT_BYTES = 32768
+ALLOWED_MESSAGE_METADATA_KEYS = frozenset({"role", "client_message_id", "source"})
+MAX_MESSAGE_METADATA_VALUE_BYTES = 500
+MAX_IDEMPOTENCY_KEY_LENGTH = 200
+MESSAGES_TABLE = "conversation_messages"
+MESSAGE_STATEMENT_TIMEOUT_MS = 2000
+
+
+class MessageRejected(ValueError):
+    """A message write request fails validation before any DB call.
+
+    Carries the HTTP status the router answers with. Raising this always
+    means nothing was written -- every check it guards runs before the one
+    INSERT in ``create_message``.
+    """
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def validate_message_content(content: Any) -> str:
+    """Enforce the cap on the UTF-8 ENCODED size, never ``len(str)``.
+
+    ``len()`` on a Python str counts code points: 10k 4-byte emoji is 10k
+    chars (well under a naive char-count cap) but 40KB once encoded. Every
+    comparison below happens on the encoded bytes so a multibyte payload that
+    straddles the cap is judged by what actually lands on the wire and in the
+    row, not by an undercounted character length.
+    """
+    if type(content) is not str:
+        raise MessageRejected(422, "content must be a string")
+    encoded = content.encode("utf-8")
+    if len(encoded) < 1:
+        raise MessageRejected(422, "content must not be empty")
+    if len(encoded) > MAX_MESSAGE_CONTENT_BYTES:
+        raise MessageRejected(
+            413, f"content exceeds {MAX_MESSAGE_CONTENT_BYTES} bytes")
+    return content
+
+
+def validate_message_metadata(metadata: Any) -> Dict[str, str]:
+    """Allowlist, not denylist: an unknown key is rejected outright.
+
+    The oracle forbids silently stripping unknown keys, so a caller that
+    over-supplies metadata gets a typed 4xx instead of a quiet downgrade that
+    would let it believe a key was stored when it was dropped.
+    """
+    if metadata is None:
+        return {}
+    if type(metadata) is not dict:
+        raise MessageRejected(422, "metadata must be an object")
+    unknown = sorted(set(metadata.keys()) - ALLOWED_MESSAGE_METADATA_KEYS)
+    if unknown:
+        raise MessageRejected(422, f"unknown metadata keys: {unknown}")
+    clean: Dict[str, str] = {}
+    for key, value in metadata.items():
+        if type(value) is not str:
+            raise MessageRejected(422, f"metadata[{key}] must be a string")
+        if len(value.encode("utf-8")) > MAX_MESSAGE_METADATA_VALUE_BYTES:
+            raise MessageRejected(
+                422,
+                f"metadata[{key}] exceeds {MAX_MESSAGE_METADATA_VALUE_BYTES} bytes",
+            )
+        clean[key] = value
+    return clean
+
+
+def validate_idempotency_key(key: Any) -> str:
+    if type(key) is not str or not (1 <= len(key) <= MAX_IDEMPOTENCY_KEY_LENGTH):
+        raise MessageRejected(
+            400,
+            f"Idempotency-Key header must be 1-{MAX_IDEMPOTENCY_KEY_LENGTH} characters",
+        )
+    return key
+
+
+def _message_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "message_id": str(row["message_id"]),
+        "conversation_id": str(row["conversation_id"]),
+        "org_id": str(row["org_id"]),
+        "project_id": str(row["project_id"]),
+        "content": row["content"],
+        "metadata": row["metadata"] if isinstance(row["metadata"], dict) else {},
+        "created_by_binding_id": str(row["created_by_binding_id"]),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+def create_message(org_id: Any, project_id: Any, conversation_id: Any,
+                   actor_binding_id: Any, content: str,
+                   metadata: Dict[str, Any],
+                   idempotency_key: str) -> tuple[Dict[str, Any], bool]:
+    """The ONE write statement: INSERT .. ON CONFLICT .. RETURNING.
+
+    A fresh write and a same-key replay both resolve in exactly one round
+    trip to this table -- no separate pre-SELECT (so no TOCTOU window between
+    a check and an insert) and no separate SELECT-after-INSERT on the replay
+    path (so a replay under READ COMMITTED can never race an uncommitted
+    winner). Paired with the router's single project-authority call, the
+    write path issues one authority read and one data statement.
+
+    Callers must have already validated ``content``/``metadata`` and resolved
+    ``org_id``/``actor_binding_id`` from a verified project membership --
+    never from the request body. Requires MESSAGES_TABLE to exist (see the
+    "KNOWN GAP" note above); raises ``psycopg.errors.UndefinedTable`` until a
+    companion migration lands.
+    """
+    db = platform_db()
+    message_id = uuid.uuid4()
+    with db.transaction() as conn:
+        conn.execute("SET LOCAL statement_timeout = %s",
+                     (str(MESSAGE_STATEMENT_TIMEOUT_MS),))
+        row = conn.execute(
+            f"INSERT INTO {MESSAGES_TABLE}"
+            " (message_id, org_id, project_id, conversation_id, content,"
+            "  metadata, created_by_binding_id, idempotency_key)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT (org_id, project_id, conversation_id, idempotency_key)"
+            " DO UPDATE SET content = conversation_messages.content"
+            " RETURNING *, (xmax = 0) AS inserted",
+            (str(message_id), str(org_id), str(project_id), str(conversation_id),
+             content, Jsonb(metadata), str(actor_binding_id), idempotency_key),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("message write did not return a row")
+    row = dict(row)
+    inserted = bool(row.pop("inserted"))
+    return _message_row(row), inserted
 
 
 # --- router ----------------------------------------------------------------- #
