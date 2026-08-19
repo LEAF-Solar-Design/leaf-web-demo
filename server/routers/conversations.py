@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 import conversations
@@ -172,3 +172,58 @@ async def api_post_message(
         return _write_timeout(
             f"conversation message write did not complete within "
             f"{ROUTE_TIME_BUDGET_SECONDS}s")
+
+
+# --- recovery-on-reconnect (card B-C3) -------------------------------------- #
+#
+# GET /api/projects/{project_id}/conversations/recovery/tail returns a
+# bounded, cursor-paginated, poison-fenced page of the project's most recent
+# conversation's message tail, so a reconnecting client can walk forward page
+# by page and reconstruct EXACTLY the state a never-disconnected client would
+# have (quarantined rows surface as gap entries, never as items, matching
+# recover_conversation_messages' whole-tail semantics).
+#
+# Route path note (trap: router-order shadowing): this path has more segments
+# after /conversations than conversations.py's GET /conversations/{id} and
+# POST /conversations/recover, so no path-template regex here can ever
+# capture, or be captured by, either of those routes.
+#
+# Registered for both GET and POST: GET is the real recovery read; POST
+# answers the identical flag-off 404 (and, flag-on, the identical read)
+# rather than a bare framework 405, so the platform's flag-off envelope
+# negative control never trips on verb mismatch.
+
+RECOVERY_PATH = "/api/projects/{project_id}/conversations/recovery/tail"
+
+
+def _invalid_cursor():
+    return error_response(
+        ErrorCode.BAD_PARAMS, "recovery cursor is malformed", retryable=False,
+        status_code=400,
+    )
+
+
+@router.api_route(RECOVERY_PATH, methods=["GET", "POST"])
+def api_recover_conversation_tail(
+    project_id: str,
+    cursor: Optional[str] = Query(default=None),
+    limit: int = Query(
+        default=conversations.RECOVERY_DEFAULT_LIMIT,
+        ge=1, le=conversations.RECOVERY_MAX_LIMIT,
+    ),
+    tenant=Depends(deps.require_active_tenant),
+):
+    if not conversations.conv_durable_enabled():
+        return conversations._flag_off()
+    try:
+        org_id = conversations._require_project(tenant, project_id, write=False)
+    except platform_link.ProjectSessionForbidden:
+        return conversations._forbidden()
+    if org_id is None:
+        return conversations._not_found()
+    try:
+        page = conversations.recover_conversation_tail(
+            org_id, project_id, cursor=cursor, limit=limit)
+    except conversations.InvalidRecoveryCursor:
+        return _invalid_cursor()
+    return deps.tenant_echo(with_envelope_fields(page), tenant)
