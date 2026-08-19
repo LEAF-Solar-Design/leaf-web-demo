@@ -496,6 +496,61 @@ def test_vitest_floor_counts_executed_tests_not_skipped_ones(tmp_path):
     assert "executed-count regression: expected >= 4, got 2" in result.note
 
 
+def test_real_pytest_failure_names_the_real_refusal_as_primary_note(tmp_path):
+    """A genuine test failure must be readable from the note alone. Leaving it
+    blank forces a reader back onto the bare EXP/GOT numbers to explain a red
+    row -- but the floor is a skip-adjusted minimum, not an equality, so the
+    numbers alone cannot name the real refusal."""
+    g = _load_runner()
+    output = "1 failed, 1 passed in 0.01s\n"
+    suite = g.Suite(
+        "pytest-real-fail", "pytest real fail", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r}); raise SystemExit(1)"], None,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert result.note.startswith("suite FAILED: 1 failed, 0 errors")
+
+
+def test_real_vitest_failure_names_the_real_refusal_as_primary_note(tmp_path):
+    g = _load_runner()
+    output = "Tests 1 passed | 1 failed\n"
+    suite = g.Suite(
+        "vitest-real-fail", "vitest real fail", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r}); raise SystemExit(1)"], None,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert result.note.startswith("suite FAILED: 1 failed")
+
+
+def test_scoreboard_floor_column_renders_as_a_minimum_not_an_equality(
+        capsys, tmp_path):
+    """EXP must read '>=N', and GOT must be the same skip-adjusted executed
+    count the floor is actually checked against. Printing the raw got (5) next
+    to the floor (4) would misread as floor-satisfied (5 >= 4) even though the
+    suite FAILED the floor on its executed count of 2 -- the exact
+    executed-count-as-EXP/GOT-equality bug this card exists to close."""
+    g = _load_runner()
+    suite = g.Suite("vitest-short-floor", "vitest short floor", "vitest",
+                    SCRIPTS, [sys.executable, "-c", "pass"], 4)
+    counts = {"passed": 2, "failed": 0, "skipped": 3, "got": 5}
+    result = g.Result(suite, "FAIL", "5", 1.0,
+                      note="executed-count regression: expected >= 4, got 2",
+                      counts=counts)
+
+    g.print_scoreboard([result], tmp_path, 1.0)
+
+    out = capsys.readouterr().out
+    line = [ln for ln in out.splitlines() if "vitest short floor" in ln][0]
+    normalized = " ".join(line.split())
+    assert ">=4 2 FAIL" in normalized
+
+
 # --------------------------------------------------------------------------- #
 # --only selection
 #
