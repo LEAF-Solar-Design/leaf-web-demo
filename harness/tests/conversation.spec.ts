@@ -29,7 +29,11 @@ import { PgSessionStore } from "../src/ports/impl/pgSessionStore.js";
 import type { ConverseEventType, StoredEvent } from "../src/ports/index.js";
 
 const testUrl = process.env.PG_SESSION_STORE_TEST_URL ?? process.env.DATABASE_URL;
-const describeWithPostgres = testUrl ? describe : describe.skip;
+// skipIf, not a bare describe.skip alias: the gate enumerates skips BY NAME
+// (skip details incomplete fails the shard), and describe.skip collapses the
+// block into one unnamed skip while skipIf registers each test as a named,
+// reason-attributable skip.
+const describeWithPostgres = describe.skipIf(!testUrl);
 
 /** No-op success shape for the intercepted BEGIN/COMMIT/ROLLBACK calls below. */
 const ABSORBED = "SELECT 1";
