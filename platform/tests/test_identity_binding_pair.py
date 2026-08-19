@@ -16,8 +16,10 @@ def _operator(environment: str = "staging") -> str:
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_principals "
-            "(subject, role, role_revision, status, profiles, environment) "
-            "VALUES (%s, 'operator', 1, 'active', ARRAY['default'], %s)",
+            "(subject, role, role_revision, status, profiles, environment,"
+            " granted_by) "
+            "VALUES (%s, 'operator', 1, 'active', ARRAY['default'], %s,"
+            " 'pair-test-harness')",
             (subject, environment),
         )
     return subject
