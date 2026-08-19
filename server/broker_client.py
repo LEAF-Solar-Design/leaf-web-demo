@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -60,7 +60,8 @@ def extract_event_key(tenant_id: str, dwg: str, *, upload: bool = False) -> str:
 def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    dwg: str, aps_live: bool, timeout_s: Optional[float] = None,
                    dwg_version: Optional[int] = None,
-                   ledger_event_key: Optional[str] = None) -> Dict[str, Any]:
+                   ledger_event_key: Optional[str] = None,
+                   job_id: Optional[str] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
@@ -68,15 +69,41 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     an older broker (that ignores unknown fields) stays compatible.
     ``ledger_event_key`` is the durable job-execution identity used by a
     PostgreSQL broker to prevent duplicate paid execution across task retries.
+    ``job_id`` (ADDITIVE; None keeps the old body byte-identical modulo the null
+    field) lets the broker register the live WorkItem id against this job so a
+    tab-close POST /broker/reap can cancel it.
     """
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
             json={"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
-                  "ledger_event_key": ledger_event_key},
+                  "ledger_event_key": ledger_event_key, "job_id": job_id},
             headers=broker_headers(),
             timeout=timeout_s or 600,
+        )
+        return resp.json()
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
+    except ValueError as exc:  # non-JSON body
+        raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
+
+
+def reap_via_broker(records: List[Dict[str, Any]],
+                    live: Optional[bool] = None,
+                    timeout_s: float = 30.0) -> Dict[str, Any]:
+    """POST /broker/reap -> {ok, reaped, count, live}.
+
+    ``records`` are orphan-signal rows (jobs.orphan_lease_records shape:
+    job_id + tenant_id + status + session_closed); only the broker can
+    correlate them to APS WorkItem ids and cancel. ``live`` None defers the
+    live/stub decision to the broker (APS_LIVE + BROKER_REAP_LIVE)."""
+    try:
+        resp = requests.post(
+            f"{broker_url()}/broker/reap",
+            json={"records": records, "live": live},
+            headers=broker_headers(),
+            timeout=timeout_s,
         )
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:

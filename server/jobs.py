@@ -856,6 +856,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # accepts work, a later attempt must observe the existing
                 # executing admission, never buy the same run again.
                 ledger_event_key=f"{job_id}:broker-run",
+                # Lets the broker register the live WorkItem id so a tab-close
+                # /broker/reap can cancel this job's paid compute.
+                job_id=job_id,
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1003,6 +1006,16 @@ def _reap_orphans_once() -> int:
             "(updated_at < ? OR progress = ? OR "
             "(lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
             (stale_before, CLOSED_PROGRESS, time.time()))
+    # Hand the orphan SIGNAL to the broker BEFORE closing rows out locally:
+    # only the broker can correlate job_id -> APS WorkItem id and cancel the
+    # paid compute, and a closed row leaves this query's result set on the next
+    # pass. Best-effort: a broker outage must never block redispatch/close.
+    try:
+        orphans = orphan_lease_records()
+        if orphans:
+            broker_client.reap_via_broker(orphans)
+    except Exception:  # noqa: BLE001 — reap is advisory; redispatch/close proceed
+        pass
     handled = 0
     for row in rows:
         if row["progress"] == CLOSED_PROGRESS:

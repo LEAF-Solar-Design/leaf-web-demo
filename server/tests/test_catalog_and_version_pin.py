@@ -268,9 +268,10 @@ def test_submit_job_threads_dwg_version_to_broker_client(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run_via_broker(tenant_id, tool, params, dwg, aps_live, timeout_s=None,
-                            dwg_version=None, ledger_event_key=None):
+                            dwg_version=None, ledger_event_key=None, job_id=None):
         captured["dwg_version"] = dwg_version
         captured["ledger_event_key"] = ledger_event_key
+        captured["job_id"] = job_id
         return {"ok": True, "tool": tool["name"], "version": "1.0.0", "result": {},
                 "overlay": None, "timing_ms": 1, "cost": None, "error": None,
                 "degraded_mode": False}

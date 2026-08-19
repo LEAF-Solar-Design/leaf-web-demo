@@ -378,7 +378,8 @@ def _redact(obj):
 # --------------------------------------------------------------------------- #
 def submit_workitem(activity_id: str, arguments: dict,
                     dry_run: bool = False, poll: bool = True,
-                    tenant_id: str | None = None) -> dict:
+                    tenant_id: str | None = None,
+                    on_submitted=None) -> dict:
     """Submit a WorkItem for `activity_id` with `arguments`.
 
     dry_run=True  -> return the exact POST body WITHOUT calling APS.
@@ -390,6 +391,11 @@ def submit_workitem(activity_id: str, arguments: dict,
     process. With poll=True the slot is held for the WorkItem's whole lifetime
     (submit -> terminal), which is exactly what the ceiling should count. dry_run
     returns BEFORE the gate, so APS_LIVE=0 / dry-run paths are unaffected.
+
+    `on_submitted(workitem_id)` (ADDITIVE; default None keeps the frozen call
+    shape) fires the moment APS accepts the WorkItem, BEFORE the blocking poll —
+    the broker registers the id for tab-close reaping. A callback failure is
+    swallowed: registration must never break a paid run already in flight.
     """
     body = {"activityId": activity_id, "arguments": arguments}
     if dry_run:
@@ -402,6 +408,11 @@ def submit_workitem(activity_id: str, arguments: dict,
                           data=json.dumps(body), timeout=_HTTP_TIMEOUT)
         r.raise_for_status()
         wi = r.json()
+        if on_submitted is not None and wi.get("id"):
+            try:
+                on_submitted(wi["id"])
+            except Exception:  # noqa: BLE001 — never fail the run for bookkeeping
+                pass
         if not poll:
             return wi
         return _poll_workitem(wi["id"])
@@ -585,7 +596,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
 def run_tool(dwg_local_path: str, tool: dict, params: dict,
              dry_run: bool = False, *,
              tenant_id: str | None = None, drawing_id: str | None = None,
-             version="head", backend=None) -> dict:
+             version="head", backend=None, on_submitted=None) -> dict:
     """Run a tool (§2 package) on APS and return a Result envelope (§3).
 
     FROZEN §5: run_tool(dwg_local_path, tool, params) is unchanged. The
@@ -594,6 +605,9 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
     versioned store object instead of re-uploading a throwaway `in/<ts>_` object.
     The Result output stays ephemeral (`out/<ts>_...result.json`) for read tools;
     only the write path (out of scope) turns a result into a new store version.
+
+    `on_submitted` (ADDITIVE, default None) is forwarded to submit_workitem so
+    the WorkItem id is registered for tab-close reaping before the poll blocks.
 
     Convention: each tool has a DA Activity named {TOOL_ACTIVITY_PREFIX}{engine_op}.
     """
@@ -647,7 +661,7 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
         "Result": {"url": out_url, "verb": "put"},
     }
     status = submit_workitem(activity_id, arguments, dry_run=False, poll=True,
-                             tenant_id=tenant_id)
+                             tenant_id=tenant_id, on_submitted=on_submitted)
     timing_ms = int((time.time() - t0) * 1000)
     if status.get("status") != "success":
         return {

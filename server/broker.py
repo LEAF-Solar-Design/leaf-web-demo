@@ -37,6 +37,7 @@ import platform as _stdlib_platform  # noqa: F401  (cache stdlib before the
 
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import os
@@ -49,7 +50,7 @@ import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -530,7 +531,24 @@ def _require_supported_live_completion_mode() -> None:
         )
 
 
-def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+def _accepts_on_submitted(fn: Any) -> bool:
+    """Whether `fn` can take an `on_submitted` kwarg.
+
+    The live client is resolved at runtime and is a test double in most suites,
+    so the kwarg is offered only to implementations that declare it (explicitly
+    or via **kwargs). An older/stubbed run_tool keeps its exact call signature.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_submitted" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, Any],
+                   on_submitted=None) -> Dict[str, Any]:
     """Select the configured completion mechanism for one live run.
 
     The polling call is deliberately byte-for-byte compatible by default.
@@ -538,8 +556,13 @@ def _run_live_tool(da: Any, local: str, tool: Dict[str, Any], params: Dict[str, 
     APS completion metadata into the signed Leaf receipt envelope. Selecting
     the flag fails closed without submitting or silently polling. The existing
     reaper remains available for abandoned polling work.
+
+    `on_submitted` (set only when the caller supplied a job_id) is forwarded so
+    the WorkItem id is registered before the poll blocks.
     """
     _require_supported_live_completion_mode()
+    if on_submitted is not None and _accepts_on_submitted(da.run_tool):
+        return da.run_tool(local, tool, params, on_submitted=on_submitted)
     return da.run_tool(local, tool, params)
 
 
@@ -822,6 +845,90 @@ def _tenant_tier(tenant_id: str) -> str:
     return entitlements.resolve_tier(_TenantTier(provisioned))
 
 
+# --------------------------------------------------------------------------- #
+# (tenant_id, job_id) -> live WorkItem correlation (tab-close reaping)
+# --------------------------------------------------------------------------- #
+# The app/jobs side knows a job_id; only THIS process ever sees the APS WorkItem
+# id, and only for the duration of the blocking poll inside da/client. Without a
+# mapping between the two, POST /broker/reap arrives with `workitem_id: None` and
+# there is nothing to cancel -- a closed tab leaves paid compute running to
+# completion. This registry is that mapping. Invariants (each one is a fixed
+# review finding):
+#   * Keys are (tenant_id, job_id): one tenant's job_id can never resolve or
+#     evict another tenant's WorkItem.
+#   * Every entry carries the registering request's OWNER token; only the owner
+#     (or a confirmed live cancel) removes it, so a redelivered request's early
+#     return can never evict the original run's live entry.
+#   * A job_id maps to a LIST of entries: a redelivery that slips admission and
+#     submits a second WorkItem never orphans the first one.
+#   * Entries are removed on confirmed terminal success or a CONFIRMED live
+#     cancel -- never merely because a reap record mentioned them (a stubbed or
+#     failed cancel keeps the correlation for retry). Runs that end with the
+#     WorkItem state unknown (poll timeout, transport error) stay registered so
+#     a later reap can still cancel them; the TTL prune bounds the registry.
+#   * SINGLE-PROCESS BY DEPLOYMENT CONTRACT (docker-compose.yml: one replica /
+#     one uvicorn worker). A restart loses the map; durable correlation in the
+#     admission ledger is the named follow-up, not silently assumed.
+_ACTIVE_WORKITEM_TTL_S = 4 * 3600.0  # > max WorkItem lifetime; bounds growth
+
+_active_workitems: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+_active_workitems_lock = threading.Lock()
+
+
+def _prune_active_workitems_locked(now: float) -> None:
+    """Drop expired entries. Caller holds _active_workitems_lock."""
+    cutoff = now - _ACTIVE_WORKITEM_TTL_S
+    for key in [k for k, entries in _active_workitems.items()
+                if all(e["ts"] < cutoff for e in entries)]:
+        del _active_workitems[key]
+    for entries in _active_workitems.values():
+        entries[:] = [e for e in entries if e["ts"] >= cutoff]
+
+
+def _record_active_workitem(tenant_id: str, job_id: str,
+                            workitem_id: Optional[str], owner: str) -> None:
+    if not tenant_id or not job_id or not workitem_id:
+        return
+    now = time.time()
+    with _active_workitems_lock:
+        _prune_active_workitems_locked(now)
+        entries = _active_workitems.setdefault((str(tenant_id), str(job_id)), [])
+        entries.append({"wid": str(workitem_id), "owner": owner, "ts": now})
+
+
+def _drop_active_workitem(tenant_id: Optional[str], job_id: Optional[str], *,
+                          owner: Optional[str] = None,
+                          workitem_id: Optional[str] = None) -> List[str]:
+    """Remove entries for (tenant_id, job_id) matching `owner` and/or
+    `workitem_id` (None -> matches any). Returns the removed WorkItem ids."""
+    if not tenant_id or not job_id:
+        return []
+    key = (str(tenant_id), str(job_id))
+    with _active_workitems_lock:
+        entries = _active_workitems.get(key)
+        if not entries:
+            return []
+        removed = [e["wid"] for e in entries
+                   if (owner is None or e["owner"] == owner)
+                   and (workitem_id is None or e["wid"] == str(workitem_id))]
+        entries[:] = [e for e in entries if e["wid"] not in removed]
+        if not entries:
+            del _active_workitems[key]
+        return removed
+
+
+def active_workitems_for(tenant_id: Optional[str],
+                         job_id: Optional[str]) -> List[str]:
+    """Read (tenant_id, job_id)'s in-flight WorkItem ids WITHOUT evicting them."""
+    if not tenant_id or not job_id:
+        return []
+    now = time.time()
+    with _active_workitems_lock:
+        _prune_active_workitems_locked(now)
+        entries = _active_workitems.get((str(tenant_id), str(job_id))) or []
+        return [e["wid"] for e in entries]
+
+
 class BrokerRunRequest(BaseModel):
     tenant_id: str
     tool: Dict[str, Any]
@@ -832,6 +939,13 @@ class BrokerRunRequest(BaseModel):
     dwg_version: Optional[int] = None
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
     ledger_event_key: Optional[str] = None
+    # Optional durable job identity. When present, this run's live WorkItem id is
+    # registered against it so /broker/reap can cancel it on tab close. Omitting
+    # it leaves behaviour and the response shape byte-for-byte unchanged. It is
+    # deliberately NOT part of _broker_request_fingerprint: the fingerprint
+    # identifies the WORK, and adding a per-job field would make an existing
+    # ledger row's fingerprint unrecognisable on replay.
+    job_id: Optional[str] = None
 
 
 def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
@@ -1265,6 +1379,35 @@ class BrokerReapRequest(BaseModel):
     live: Optional[bool] = None  # None -> reaper decides (APS_LIVE + BROKER_REAP_LIVE)
 
 
+def _resolve_reap_workitems(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fill in each record's missing `workitem_id` from the live-run registry.
+
+    The app/jobs side supplies the orphan SIGNAL (job_id + session_closed) but
+    never learns the WorkItem id -- only this process does. A record that arrives
+    with no workitem_id is therefore not un-reapable, it is un-CORRELATED: look
+    the ids up by (tenant_id, job_id). The read is NON-DESTRUCTIVE: entries
+    leave the registry only after the sweep CONFIRMS a live cancel (see
+    broker_reap) -- a record the sweep skips as non-orphan, a stubbed cancel, or
+    a failed DELETE must not burn the only copy of the correlation. A job with
+    several registered WorkItems (redelivery overlap) fans out to one record per
+    id so every one of them is cancelled. Records that already carry a
+    workitem_id, or that name no known job, pass through untouched.
+    """
+    out: List[Dict[str, Any]] = []
+    for rec in records:
+        rec = dict(rec)
+        if not rec.get("workitem_id"):
+            wids = active_workitems_for(rec.get("tenant_id"), rec.get("job_id"))
+            if wids:
+                rec["workitem_id"] = wids[0]
+                for extra in wids[1:]:
+                    fan = dict(rec)
+                    fan["workitem_id"] = extra
+                    out.append(fan)
+        out.append(rec)
+    return out
+
+
 @app.post("/broker/reap", dependencies=[Depends(require_broker_auth)])
 def broker_reap(req: BrokerReapRequest) -> JSONResponse:
     """Cancel orphaned WorkItems (closed tab / expired lease). Only the
@@ -1279,7 +1422,17 @@ def broker_reap(req: BrokerReapRequest) -> JSONResponse:
                                                  "reaper module unavailable", retryable=False))
     use_live = reaper.reap_live_enabled() if req.live is None else bool(req.live)
     cc = reaper.cancel_client_for(live=use_live, da_client=_get_da() if use_live else None)
-    reaped = reaper.sweep(req.records, cancel_client=cc)
+    records = _resolve_reap_workitems(req.records)
+    reaped = reaper.sweep(records, cancel_client=cc)
+    if use_live:
+        # Registry entries are consumed ONLY here: a LIVE cancel the sweep
+        # confirmed. Stub-mode reaps and failed cancels keep the correlation so
+        # a later (or live-enabled) retry can still cancel; TTL bounds the rest.
+        for rec in reaped:
+            outcome = rec.get("reap_outcome") or {}
+            if isinstance(outcome, dict) and outcome.get("cancelled"):
+                _drop_active_workitem(rec.get("tenant_id"), rec.get("job_id"),
+                                      workitem_id=rec.get("workitem_id"))
     return JSONResponse(status_code=200, content=with_envelope_fields({
         "ok": True,
         "reaped": [r.get("workitem_id") for r in reaped],
@@ -1724,6 +1877,13 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
     finally:
+        # Registry eviction deliberately does NOT happen here. This finally runs
+        # on early returns that never registered anything (a redelivered job_id
+        # would evict the original still-running attempt's entry) and on
+        # poll-timeout/transport-error exits where the WorkItem is still
+        # executing on APS -- exactly the orphans /broker/reap exists to cancel.
+        # Owned entries are dropped in _execute on confirmed terminal success;
+        # confirmed live cancels and the TTL prune bound everything else.
         if (
             postgres_mode and admission is not None
             and admission.get("lease_token") and not admission.get("capacity_wait")
@@ -1877,9 +2037,32 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             if da is not None and hasattr(da, "run_tool"):
                 backend = write_loop.default_backend(aps_live=True, da=da)
                 _start_admitted_execution(req, admission, aps_submission=True)
-                return write_loop.run_write_live(tool, params, req.tenant_id,
-                                                 backend=backend, da=da, t0=t0,
-                                                 ledger_entry=entry, version=base_version)
+                # Write WorkItems are the longest-lived live runs; register them
+                # for tab-close reaping exactly like the read path.
+                write_on_submitted = None
+                write_owner = None
+                if req.job_id:
+                    write_owner = uuid.uuid4().hex
+
+                    def write_on_submitted(workitem_id, _tenant=req.tenant_id,
+                                           _job_id=req.job_id,
+                                           _owner=write_owner):
+                        _record_active_workitem(_tenant, _job_id, workitem_id,
+                                                _owner)
+                write_result = write_loop.run_write_live(
+                    tool, params, req.tenant_id, backend=backend, da=da, t0=t0,
+                    ledger_entry=entry, version=base_version,
+                    on_submitted=write_on_submitted)
+                if write_owner is not None:
+                    write_env = (write_result[0]
+                                 if isinstance(write_result, tuple)
+                                 else write_result)
+                    if isinstance(write_env, dict) and write_env.get("ok"):
+                        # Confirmed terminal success only; failures keep the
+                        # entry reapable (state unknown), TTL bounds the rest.
+                        _drop_active_workitem(req.tenant_id, req.job_id,
+                                              owner=write_owner)
+                return write_result
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
             _start_admitted_execution(req, admission, aps_submission=False)
@@ -1941,7 +2124,22 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                     da.ensure_tool_activity(tool)
                 else:
                     _start_admitted_execution(req, admission, aps_submission=True)
-                env = dict(_run_live_tool(da, local, tool, params) or {})
+                # Register this run's WorkItem id against the caller's
+                # (tenant_id, job_id) the instant APS accepts it, so a tab
+                # closed mid-poll has something to cancel. The owner token
+                # scopes eviction to entries THIS request wrote. No job_id ->
+                # no callback -> unchanged call.
+                on_submitted = None
+                run_owner = None
+                if req.job_id:
+                    run_owner = uuid.uuid4().hex
+
+                    def on_submitted(workitem_id, _tenant=req.tenant_id,
+                                     _job_id=req.job_id, _owner=run_owner):
+                        _record_active_workitem(_tenant, _job_id, workitem_id,
+                                                _owner)
+                env = dict(_run_live_tool(da, local, tool, params,
+                                          on_submitted=on_submitted) or {})
                 env.setdefault("ok", True)
                 env.setdefault("tool", tool.get("name"))
                 env.setdefault("version", tool.get("version", "1.0.0"))
@@ -1956,10 +2154,19 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                     entry["engine_seconds"] = cost.get("engine_seconds")
                     entry["usd_est"] = cost.get("usd_est")
                 if not env.get("ok"):
+                    # WorkItem state is UNKNOWN here (failed, timed-out poll, or
+                    # still running on APS): keep any registry entry so a reap
+                    # can still cancel it; the TTL prune bounds the registry.
                     env["error"] = env.get("error") or {
                         "error_code": ErrorCode.WORKITEM_FAILED,
                         "message": "WorkItem did not succeed", "retryable": True}
                     return env, DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED]
+                if run_owner is not None:
+                    # Confirmed terminal success: this request's own entries are
+                    # no longer reapable. Owner-scoped, so a concurrent run
+                    # sharing the job_id keeps its live entry.
+                    _drop_active_workitem(req.tenant_id, req.job_id,
+                                          owner=run_owner)
                 return env, 200
             except EgressBlocked as exc:
                 return (err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False,

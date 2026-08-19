@@ -24,6 +24,7 @@ process allowed to hold it), mirroring server/tool_loader.py.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import sys
@@ -333,14 +334,34 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     return env, 200
 
 
+def _submit_accepts_on_submitted(fn: Any) -> bool:
+    """Whether this da client's submit_workitem takes `on_submitted`. Mirrors
+    broker._accepts_on_submitted (broker imports this module, so the check lives
+    here to stay import-cycle-free); test doubles with exact legacy signatures
+    keep their exact call shape."""
+    try:
+        sig_params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_submitted" in sig_params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in sig_params.values())
+
+
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float,
                    ledger_entry: Optional[Dict[str, Any]] = None,
-                   version="head") -> Tuple[Dict[str, Any], int]:
+                   version="head", on_submitted=None) -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=1 write: run the proven LeafWriteProbe Activity on the BASE
     version's DWG (``version``; default "head", unchanged), store output.dwg as a
     new version whose parent is that base, re-extract for the intake cache, stamp
-    result.new_version. `da` is the credential-holding client."""
+    result.new_version. `da` is the credential-holding client.
+
+    `on_submitted` (ADDITIVE, default None) is forwarded to da.submit_workitem —
+    when the client supports it — so the write WorkItem's id is registered for
+    tab-close reaping before the poll blocks (write runs are the longest-lived
+    and most expensive live WorkItems; they must not be unreapable)."""
     import store
     name = tool.get("name")
     tool_version = tool.get("version", "1.0.0")
@@ -395,8 +416,12 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         activity_id = da.activity_qualified(WRITE_ACTIVITY)
         w_args = {"HostDwg": {"url": in_url, "verb": "get"},
                   "Result": {"url": out_url, "verb": "put"}}
-        status = da.submit_workitem(activity_id, w_args, dry_run=False, poll=True,
-                                    tenant_id=tenant_id)
+        if on_submitted is not None and _submit_accepts_on_submitted(da.submit_workitem):
+            status = da.submit_workitem(activity_id, w_args, dry_run=False, poll=True,
+                                        tenant_id=tenant_id, on_submitted=on_submitted)
+        else:
+            status = da.submit_workitem(activity_id, w_args, dry_run=False, poll=True,
+                                        tenant_id=tenant_id)
         if status.get("status") != "success":
             return (err_envelope(ErrorCode.WORKITEM_FAILED,
                                  f"write WorkItem {status.get('id')} status={status.get('status')} "

@@ -86,6 +86,13 @@ def sweep(records: Iterable[Dict[str, Any]], cancel_client=None,
     Mutates each orphan row IN PLACE: status -> "reaped", reaped=True, and records
     reaped_at + cancel outcome. Non-orphan rows are not touched. `cancel_client`
     defaults to a StubCancelClient (no APS) so an accidental call is inert.
+
+    FAILS CLOSED on false success: a row is marked reaped ONLY when a cancel was
+    actually issued for a known workitem_id and did not report failure. An
+    orphan with no workitem_id (`reap_unresolved`) or whose cancel failed /
+    raised (`reap_outcome.cancelled=False`) stays un-reaped so a retry can still
+    act on it — previously such rows were marked reaped while the WorkItem kept
+    billing. One record's cancel error never aborts the rest of the batch.
     """
     now = time.time() if now is None else now
     client = cancel_client or StubCancelClient()
@@ -94,9 +101,18 @@ def sweep(records: Iterable[Dict[str, Any]], cancel_client=None,
         if not is_orphan(rec, now):
             continue
         wid = rec.get("workitem_id")
-        outcome: Any = None
-        if wid:
-            outcome = client.cancel(wid)
+        if not wid:
+            rec["reap_unresolved"] = True
+            continue
+        try:
+            outcome: Any = client.cancel(wid)
+        except Exception as exc:  # noqa: BLE001 — one bad cancel must not kill the batch
+            rec["reap_outcome"] = {"workitem_id": wid, "cancelled": False,
+                                   "error": f"{type(exc).__name__}: {exc}"}
+            continue
+        if isinstance(outcome, dict) and outcome.get("cancelled") is False:
+            rec["reap_outcome"] = outcome
+            continue
         rec["status"] = REAPED
         rec["reaped"] = True
         rec["reaped_at"] = now
