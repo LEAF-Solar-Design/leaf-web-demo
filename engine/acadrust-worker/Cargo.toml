@@ -1,0 +1,48 @@
+[package]
+name = "acadrust-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MPL-2.0"
+# This crate wraps acadrust (MPL-2.0, https://github.com/hakanaktt/acadrust)
+# for the browser. It never ships acadrust source itself; it links it as a
+# dependency, which keeps this repo's own SPDX license clean (MPL-2.0 is
+# file-scoped copyleft, not viral to the linking crate) while still keeping
+# the whole worker isolated in engine/acadrust-worker/ per the day-1 spike's
+# isolation goal.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+# Pinned to the same shape day 1 verified compiles clean for
+# wasm32-unknown-unknown (see ../../.claude/drumline/leaf-plan/postmortems/spike-kimi-day1.md,
+# kept out of this repo — this comment is the carried summary). No rev is
+# pinned yet: day 1 did not record the exact commit SHA it tested against.
+# OPEN QUESTION (carried, see docs/ACADRUST-SPIKE-DAY2.md OQ-1): pin an exact
+# rev once a toolchain in THIS workdir can resolve and lock it.
+acadrust = { git = "https://github.com/hakanaktt/acadrust.git" }
+# Day 1's exact fix for acadrust's transitive getrandom wall on
+# wasm32-unknown-unknown (ahash pulls in getrandom 0.3 at runtime-rng init;
+# the default backend refuses to compile for wasm32 without an explicit
+# backend choice). Carried forward verbatim: feature here + the matching
+# RUSTFLAGS in the build command below.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# The entities getter marshals {kind,start,end} objects to JS in the same
+# shape bindings.mjs's plain-array stand-in exposes.
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "z"   # size, not speed: this ships to a browser Worker over the wire
+lto = true
+panic = "abort"   # smaller unwind tables; a wasm panic already can't unwind into JS
+
+# Reference build command (day-1's exact RUSTFLAGS, carried forward):
+#   RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack build --release --target web
+# No Rust/wasm-pack toolchain is present in this workdir (checked: no
+# rustc/cargo/wasm-pack on PATH) — day 1 worked around the same absence with a
+# workdir-contained rustup install that lived outside this repo checkout and
+# is not reachable from here. Building this crate for real, and recording the
+# resulting .wasm size, is OPEN QUESTION OQ-2 in docs/ACADRUST-SPIKE-DAY2.md.
