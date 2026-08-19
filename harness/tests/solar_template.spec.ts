@@ -2,6 +2,13 @@
  * Harness E2E for card C2-9: solar_template_beta clone -> one write -> undo
  * -> role checks, disposable-task shape.
  *
+ * The "one write" drives C2-4's CAS PATCH (`update_project_clone_content`,
+ * `/api/templates/clones/{clone_id}`), never the legacy POST
+ * `/api/project-clones/{clone_id}/writes` -- see `run_flow`'s docstring in
+ * `DRIVER_SOURCE` below for why "undo" of a CAS write is itself a second CAS
+ * write, and how the flow proves the undo's own CAS bump (a stale PATCH
+ * reusing the write-time version must 409 after the undo lands).
+ *
  * `server/app.py` does not mount `routers.templates` yet (out of this
  * card's file budget: `files_expected` is frozen to this file + the fence
  * test), so there is no live HTTP surface to drive over `fetch`. Instead
@@ -75,7 +82,23 @@ def _resp_json(resp):
 
 
 def run_flow():
-    """clone -> one write -> undo -> idempotent re-undo, as the owner."""
+    """clone -> one write (C2-4's CAS PATCH) -> undo -> a stale PATCH after
+    undo, as the owner.
+
+    The oracle's "one write" is C2-4's PATCH /api/templates/clones/{clone_id}
+    (\`update_project_clone_content\`, expected_content_version CAS) -- NOT the
+    legacy POST /api/project-clones/{clone_id}/writes (C2-7). C2-5's dedicated
+    undo route (POST .../undo) acts on the LEGACY write log
+    (\`write_project_clone_content\` populates it); the PATCH route never
+    appends to that log, so a PATCH write has no write_id for that route to
+    undo. "Undo" of a CAS write is therefore itself a CAS write: a second
+    PATCH restoring the pre-write content, submitted with the just-bumped
+    \`content_version\` as \`expected_content_version\` -- exercising the SAME
+    CAS surface the write did, per C2-4's merged contract that undo bumps
+    (never resets) the content_version lineage. A THIRD PATCH reusing the
+    now-superseded write-time version proves the undo actually landed: it
+    must 409, not silently apply.
+    """
     clone_status, clone_body = _resp_json(templates_router.clone_template_into_project(
         TEMPLATE_ID,
         templates_router.ProjectCloneRequest(project_id=PROJECT),
@@ -83,47 +106,61 @@ def run_flow():
     ))
     clone_id = clone_body["clone_id"]
     pre_write_content = clone_body["content"]
+    pre_write_version = templates.get_project_clone(clone_id).content_version
 
-    write_status, write_body = _resp_json(templates_router.write_project_clone(
+    write_status, write_body = _resp_json(templates_router.update_project_clone_content(
         clone_id,
-        templates_router.ProjectCloneWriteRequest(
+        templates_router.UpdateProjectCloneContentRequest(
             content={**pre_write_content, "setback_ft": 999},
+            expected_content_version=pre_write_version,
         ),
         tenant=_ctx("owner"),
     ))
-    write_id = write_body["write_id"]
+    write_version = write_body["content_version"]
     content_after_write = templates.get_project_clone(clone_id).content
 
-    undo_status, undo_body = _resp_json(templates_router.undo_project_clone_write(
+    undo_status, undo_body = _resp_json(templates_router.update_project_clone_content(
         clone_id,
-        templates_router.ProjectCloneUndoRequest(write_id=write_id),
+        templates_router.UpdateProjectCloneContentRequest(
+            content=pre_write_content,
+            expected_content_version=write_version,
+        ),
         tenant=_ctx("owner"),
     ))
+    undo_version = undo_body["content_version"]
     content_after_undo = templates.get_project_clone(clone_id).content
 
-    redo_status, redo_body = _resp_json(templates_router.undo_project_clone_write(
+    # stale: reuses the write's (now-superseded) version, so this must 409
+    # and land nothing -- proves the undo's CAS bump is really enforced.
+    stale_status, stale_body = _resp_json(templates_router.update_project_clone_content(
         clone_id,
-        templates_router.ProjectCloneUndoRequest(write_id=write_id),
+        templates_router.UpdateProjectCloneContentRequest(
+            content={**pre_write_content, "setback_ft": 111},
+            expected_content_version=write_version,
+        ),
         tenant=_ctx("owner"),
     ))
+    content_after_stale_attempt = templates.get_project_clone(clone_id).content
 
     return {
-        "clone": {"status": clone_status, "clone_id": clone_id, "content": pre_write_content},
+        "clone": {
+            "status": clone_status, "clone_id": clone_id,
+            "content": pre_write_content, "content_version": pre_write_version,
+        },
         "write": {
             "status": write_status,
-            "write_id": write_id,
+            "content_version": write_version,
             "content_after_write": content_after_write,
         },
         "undo": {
             "status": undo_status,
-            "undone": undo_body["undone"],
-            "already_undone": undo_body["already_undone"],
+            "content_version": undo_version,
             "content_after_undo": content_after_undo,
         },
-        "redo_of_same_write": {
-            "status": redo_status,
-            "undone": redo_body["undone"],
-            "already_undone": redo_body["already_undone"],
+        "stale_patch_after_undo": {
+            "status": stale_status,
+            "body": stale_body,
+            "content_after_attempt": content_after_stale_attempt,
         },
         "content_after_undo_matches_pre_write": content_after_undo == pre_write_content,
     }
@@ -180,10 +217,14 @@ if __name__ == "__main__":
 `;
 
 interface FlowResult {
-  clone: { status: number; clone_id: string; content: Record<string, unknown> };
-  write: { status: number; write_id: string; content_after_write: Record<string, unknown> };
-  undo: { status: number; undone: boolean; already_undone: boolean; content_after_undo: Record<string, unknown> };
-  redo_of_same_write: { status: number; undone: boolean; already_undone: boolean };
+  clone: { status: number; clone_id: string; content: Record<string, unknown>; content_version: number };
+  write: { status: number; content_version: number; content_after_write: Record<string, unknown> };
+  undo: { status: number; content_version: number; content_after_undo: Record<string, unknown> };
+  stale_patch_after_undo: {
+    status: number;
+    body: { error?: { error_code: string; message: string } };
+    content_after_attempt: Record<string, unknown>;
+  };
   content_after_undo_matches_pre_write: boolean;
 }
 
@@ -242,28 +283,28 @@ describe("solar template E2E: clone -> one write -> undo -> role checks (disposa
     expect(result.clone.content).toBeTruthy();
   });
 
-  it("writes exactly once and the clone reflects that one write", () => {
+  it("writes exactly once via C2-4's CAS PATCH and the clone reflects that one write", () => {
     const result = runFlow();
     expect(result.write.status).toBe(200);
-    expect(result.write.write_id).toBeTruthy();
+    expect(result.write.content_version).toBe(result.clone.content_version + 1);
     expect(result.write.content_after_write.setback_ft).toBe(999);
     expect(result.write.content_after_write.setback_ft).not.toBe(result.clone.content.setback_ft);
   });
 
-  it("undoes the single write back to the exact pre-write content", () => {
+  it("undoes the single write back to the exact pre-write content and bumps the CAS lineage", () => {
     const result = runFlow();
     expect(result.undo.status).toBe(200);
-    expect(result.undo.undone).toBe(true);
-    expect(result.undo.already_undone).toBe(false);
+    expect(result.undo.content_version).toBe(result.write.content_version + 1);
     expect(result.content_after_undo_matches_pre_write).toBe(true);
     expect(result.undo.content_after_undo).toEqual(result.clone.content);
   });
 
-  it("undo is idempotent: a second undo of the same write is a truthful no-op", () => {
+  it("a stale PATCH reusing the write-time version 409s after the undo landed", () => {
     const result = runFlow();
-    expect(result.redo_of_same_write.status).toBe(200);
-    expect(result.redo_of_same_write.undone).toBe(true);
-    expect(result.redo_of_same_write.already_undone).toBe(true);
+    expect(result.stale_patch_after_undo.status).toBe(409);
+    expect(result.stale_patch_after_undo.body.error?.error_code).toBe("BAD_PARAMS");
+    // the rejected attempt never landed -- content stays exactly what the undo left
+    expect(result.stale_patch_after_undo.content_after_attempt).toEqual(result.clone.content);
   });
 
   it("each disposable task starts from a clean slate -- two flows never collide on clone id", () => {
