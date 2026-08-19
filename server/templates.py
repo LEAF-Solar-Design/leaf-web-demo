@@ -369,3 +369,149 @@ def list_project_clones(tenant_id: str, project_id: str) -> List[ProjectTemplate
         clone for clone in _PROJECT_CLONES.values()
         if clone.tenant_id == tenant_id and clone.project_id == project_id
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Single-step, receipted undo (card C2-5)
+#
+# The full validated, transactional write path onto a project clone is card
+# C2-4's deliverable (``server/routers/templates.py``). ``write_project_clone_
+# content`` below is the MINIMAL internal primitive undo needs to have a real
+# write to act on: it snapshots the clone's content EXACTLY as it stood
+# immediately before the write, so undo restores that stored snapshot
+# verbatim rather than recomputing an inverse delta from whatever the current
+# state happens to be.
+#
+# ``undo_last_write`` binds to the EXACT write named by ``write_id`` -- it
+# never re-resolves "the last write" against the clone's current head at
+# request time. A ``write_id`` that is no longer the head (a newer write has
+# since landed) is refused as stale, not silently reinterpreted as "undo
+# whatever is on top now". A ``write_id`` that has already been undone
+# returns the SAME undo receipt again with ``already_undone=True`` -- a
+# truthful no-op, never a fresh receipt (no redo, no double revert) -- and a
+# single lock serializes the read-check-act-record sequence so two
+# concurrent undo calls for the same write_id can never both perform the
+# revert.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ProjectCloneWrite:
+    write_id: str
+    clone_id: str
+    prior_content: Dict[str, Any]  # exact snapshot of clone.content BEFORE this write
+    receipt: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class UndoResult:
+    undone: bool
+    already_undone: bool
+    receipt: Dict[str, Any]
+
+
+class ProjectCloneWriteNotFoundError(LookupError):
+    """``write_id`` was never recorded as a write on this clone."""
+
+
+class StaleUndoReceiptError(RuntimeError):
+    """``write_id`` names a write that is no longer this clone's head write."""
+
+
+# clone_id -> writes in application order (oldest first, last element = head)
+_CLONE_WRITE_LOG: Dict[str, List[ProjectCloneWrite]] = {}
+# write_id -> the undo receipt produced the first (and only) time it was undone
+_CLONE_UNDO_LOG: Dict[str, Dict[str, Any]] = {}
+
+
+def write_project_clone_content(
+    clone_id: str, content: Dict[str, Any], *, binding: TenantBinding,
+) -> ProjectCloneWrite:
+    """Overwrite a project clone's content, snapshotting the prior content.
+
+    Fails closed (raises, writes nothing) when ``solar_template_beta`` is
+    off, the clone is unknown, or ``binding`` does not authorize an
+    owner/editor of the clone's own tenant.
+    """
+    if not solar_template_beta_enabled():
+        raise TemplateBetaDisabledError("solar_template_beta is not enabled")
+    with _PROJECT_CLONES_LOCK:
+        clone = _PROJECT_CLONES.get(clone_id)
+        if clone is None:
+            raise ProjectTemplateCloneNotFoundError(clone_id)
+        _authorize_project_clone(binding, clone.tenant_id)
+
+        prior_content = copy.deepcopy(clone.content)
+        write_id = str(uuid.uuid4())
+        receipt = {
+            "clone_id": clone_id,
+            "write_id": write_id,
+            "action": "write",
+            "tenant_id": clone.tenant_id,
+            "project_id": clone.project_id,
+        }
+        write = ProjectCloneWrite(
+            write_id=write_id, clone_id=clone_id,
+            prior_content=prior_content, receipt=receipt,
+        )
+        _PROJECT_CLONES[clone_id] = ProjectTemplateClone(
+            clone_id=clone.clone_id, tenant_id=clone.tenant_id,
+            project_id=clone.project_id, template_id=clone.template_id,
+            version=clone.version, content=copy.deepcopy(content),
+            receipt=clone.receipt,
+        )
+        _CLONE_WRITE_LOG.setdefault(clone_id, []).append(write)
+    return write
+
+
+def undo_last_write(
+    clone_id: str, write_id: str, *, binding: TenantBinding,
+) -> UndoResult:
+    """Revert ``clone_id`` to exactly the content stored before ``write_id``.
+
+    Fails closed when ``solar_template_beta`` is off, the clone is unknown,
+    or ``binding`` does not authorize an owner/editor of the clone's own
+    tenant -- checked before any lookup of the write history. A ``write_id``
+    that is not this clone's current head write raises
+    :class:`StaleUndoReceiptError` and reverts nothing. A ``write_id`` that
+    was never recorded for this clone (including a clone with no writes at
+    all) raises :class:`ProjectCloneWriteNotFoundError` rather than reverting
+    an unrelated write.
+    """
+    if not solar_template_beta_enabled():
+        raise TemplateBetaDisabledError("solar_template_beta is not enabled")
+    with _PROJECT_CLONES_LOCK:
+        clone = _PROJECT_CLONES.get(clone_id)
+        if clone is None:
+            raise ProjectTemplateCloneNotFoundError(clone_id)
+        _authorize_project_clone(binding, clone.tenant_id)
+
+        already = _CLONE_UNDO_LOG.get(write_id)
+        if already is not None:
+            return UndoResult(undone=True, already_undone=True, receipt=already)
+
+        history = _CLONE_WRITE_LOG.get(clone_id, [])
+        if not history or history[-1].write_id != write_id:
+            if any(w.write_id == write_id for w in history):
+                raise StaleUndoReceiptError(
+                    f"{write_id!r} is not the current head write for clone "
+                    f"{clone_id!r}"
+                )
+            raise ProjectCloneWriteNotFoundError(write_id)
+
+        head = history.pop()
+        _PROJECT_CLONES[clone_id] = ProjectTemplateClone(
+            clone_id=clone.clone_id, tenant_id=clone.tenant_id,
+            project_id=clone.project_id, template_id=clone.template_id,
+            version=clone.version, content=copy.deepcopy(head.prior_content),
+            receipt=clone.receipt,
+        )
+        undo_receipt = {
+            "clone_id": clone_id,
+            "undo_id": str(uuid.uuid4()),
+            "action": "undo",
+            "reverted_write_id": write_id,
+            "reverted_write_receipt": head.receipt,
+            "tenant_id": clone.tenant_id,
+            "project_id": clone.project_id,
+        }
+        _CLONE_UNDO_LOG[write_id] = undo_receipt
+    return UndoResult(undone=True, already_undone=False, receipt=undo_receipt)
