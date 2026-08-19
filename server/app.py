@@ -44,6 +44,7 @@ from routers import (
     author,
     capabilities,
     checkpoints,
+    conversations as conversations_router,
     deployment_identity,
     demand,
     drawings,
@@ -199,6 +200,7 @@ install_error_handlers(app)
 app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
 app.include_router(checkpoints.router)  # session checkpoint metadata
+app.include_router(conversations_router.router)  # B-C2: conversation message write path (POST .../messages)
 app.include_router(skills.router)
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
 app.include_router(tools.router)

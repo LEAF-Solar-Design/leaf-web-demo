@@ -47,6 +47,12 @@ MESSAGES_IDEMPOTENCY_CONSTRAINT = "conversation_messages_idempotency_unique"
 MAX_IDEMPOTENCY_KEY_LENGTH = 200
 MAX_MESSAGE_CONTENT_BYTES = 32768
 MAX_MESSAGE_METADATA_BYTES = 8192
+# Router-facing rail (B-C2): allowlisted metadata keys with per-value caps,
+# stricter than the size-only backstop above; the route rejects before any
+# DB call, the module-level validators stay as the fail-closed backstop.
+ALLOWED_MESSAGE_METADATA_KEYS = frozenset({"role", "client_message_id", "source"})
+MAX_MESSAGE_METADATA_VALUE_BYTES = 500
+MESSAGE_STATEMENT_TIMEOUT_MS = 2000
 
 # The structured-payload extension: a client MAY carry a richer, JSON-encoded
 # block inside metadata[_STRUCTURED_METADATA_KEY]. It is intentionally NOT
@@ -154,15 +160,24 @@ def list_conversations(org_id: Any, project_id: Any) -> List[Dict[str, Any]]:
 
 def get_conversation(org_id: Any, project_id: Any,
                      conversation_id: Any) -> Optional[Dict[str, Any]]:
-    """Return one conversation only when org, project, AND id all match."""
+    """Return one conversation only when org, project, AND id all match.
+
+    Statement-timeout bounded: this is one of the three DB round trips the
+    B-C2 message write route makes (authority read, this lookup, the INSERT),
+    and it is also on the read routes' path, so the same
+    MESSAGE_STATEMENT_TIMEOUT_MS budget the write itself uses applies here
+    too -- SET LOCAL, so it never leaks past this one statement to the next
+    pooled borrower.
+    """
     db = platform_db()
-    with db.cursor() as cur:
-        cur.execute(
+    with db.transaction() as conn:
+        conn.execute("SET LOCAL statement_timeout = %s",
+                     (str(MESSAGE_STATEMENT_TIMEOUT_MS),))
+        row = conn.execute(
             f"SELECT * FROM {TABLE}"
             " WHERE conversation_id = %s AND org_id = %s AND project_id = %s",
             (str(conversation_id), str(org_id), str(project_id)),
-        )
-        row = cur.fetchone()
+        ).fetchone()
     return _row(row) if row is not None else None
 
 
@@ -198,6 +213,79 @@ def rename_conversation(org_id: Any, project_id: Any, conversation_id: Any,
         )
         row = cur.fetchone()
     return _row(row) if row is not None else None
+
+
+# --- router-facing validation rail (B-C2): typed 4xx before any DB call --- #
+
+
+class MessageRejected(ValueError):
+    """A message write request fails validation before any DB call.
+
+    Carries the HTTP status the router answers with. Raising this always
+    means nothing was written -- every check it guards runs before the one
+    INSERT in ``create_message``.
+    """
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def validate_message_content(content: Any) -> str:
+    """Enforce the cap on the UTF-8 ENCODED size, never ``len(str)``.
+
+    ``len()`` on a Python str counts code points: 10k 4-byte emoji is 10k
+    chars (well under a naive char-count cap) but 40KB once encoded. Every
+    comparison below happens on the encoded bytes so a multibyte payload that
+    straddles the cap is judged by what actually lands on the wire and in the
+    row, not by an undercounted character length.
+    """
+    if type(content) is not str:
+        raise MessageRejected(422, "content must be a string")
+    encoded = content.encode("utf-8")
+    if len(encoded) < 1:
+        raise MessageRejected(422, "content must not be empty")
+    if len(encoded) > MAX_MESSAGE_CONTENT_BYTES:
+        raise MessageRejected(
+            413, f"content exceeds {MAX_MESSAGE_CONTENT_BYTES} bytes")
+    return content
+
+
+def validate_message_metadata(metadata: Any) -> Dict[str, str]:
+    """Allowlist, not denylist: an unknown key is rejected outright.
+
+    The oracle forbids silently stripping unknown keys, so a caller that
+    over-supplies metadata gets a typed 4xx instead of a quiet downgrade that
+    would let it believe a key was stored when it was dropped.
+    """
+    if metadata is None:
+        return {}
+    if type(metadata) is not dict:
+        raise MessageRejected(422, "metadata must be an object")
+    unknown = sorted(set(metadata.keys()) - ALLOWED_MESSAGE_METADATA_KEYS)
+    if unknown:
+        raise MessageRejected(422, f"unknown metadata keys: {unknown}")
+    clean: Dict[str, str] = {}
+    for key, value in metadata.items():
+        if type(value) is not str:
+            raise MessageRejected(422, f"metadata[{key}] must be a string")
+        if len(value.encode("utf-8")) > MAX_MESSAGE_METADATA_VALUE_BYTES:
+            raise MessageRejected(
+                422,
+                f"metadata[{key}] exceeds {MAX_MESSAGE_METADATA_VALUE_BYTES} bytes",
+            )
+        clean[key] = value
+    return clean
+
+
+def validate_idempotency_key(key: Any) -> str:
+    if type(key) is not str or not (1 <= len(key) <= MAX_IDEMPOTENCY_KEY_LENGTH):
+        raise MessageRejected(
+            400,
+            f"Idempotency-Key header must be 1-{MAX_IDEMPOTENCY_KEY_LENGTH} characters",
+        )
+    return key
+
 
 
 # --- durable messages: idempotent write + poison quarantine + recovery ----- #
