@@ -51,6 +51,12 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
     # Wave B durable conversation store (0046).
+    # Wave B durable conversation messages (0048).
+    "conversation_messages": {
+        "message_id", "org_id", "project_id", "conversation_id",
+        "content", "metadata", "created_by_binding_id",
+        "idempotency_key", "created_at",
+    },
     "conversations": {
         "conversation_id", "org_id", "project_id", "title",
         "created_by_binding_id", "created_at", "updated_at",
