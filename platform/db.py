@@ -50,6 +50,13 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    # Immutable versioned template store (card C2-1R / migration 0049). The
+    # table, not server/templates.py's in-process catalog, is authoritative
+    # for any (template_id, version) it has published.
+    "template_versions": {
+        "version_id", "template_id", "version", "content", "content_sha256",
+        "published_by", "provenance_source", "created_at",
+    },
     # Wave B durable conversation store (0046).
     # Wave B durable conversation messages (0048).
     "conversation_messages": {
