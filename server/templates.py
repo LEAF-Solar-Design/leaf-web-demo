@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import threading
 import uuid
@@ -58,6 +59,22 @@ class TemplateBetaDisabledError(RuntimeError):
 
 class ProjectTemplateCloneNotFoundError(LookupError):
     """Unknown ``clone_id`` (or one that does not belong to the caller's scope)."""
+
+
+class ProjectTemplateCloneWriteValidationError(ValueError):
+    """A content-update payload violates the shape/size caps. No write lands."""
+
+
+class ProjectTemplateCloneConflictError(RuntimeError):
+    """``expected_content_version`` is stale: another write already landed. No write lands."""
+
+
+class ProjectTemplateCloneWriteTimeoutError(RuntimeError):
+    """The write could not enter its atomic section within the statement timeout.
+
+    This bounds only THIS call's attempt to acquire the instance's write
+    section -- never a process-wide/session-level setting -- so it fires even
+    when nothing else is ever slow, and never leaks into unrelated calls."""
 
 
 def content_digest(content: Dict[str, Any]) -> str:
@@ -274,6 +291,10 @@ class ProjectTemplateClone:
     version: str
     content: Dict[str, Any]
     receipt: Dict[str, Any]
+    # CAS counter for `update_project_clone_content` (card C2-4). Starts at 1
+    # on landing; every accepted write bumps it by exactly one. Never the
+    # SOURCE template version above -- this counts edits to the CLONE.
+    content_version: int = 1
 
 
 _PROJECT_CLONES: Dict[str, ProjectTemplateClone] = {}
@@ -515,3 +536,217 @@ def undo_last_write(
         }
         _CLONE_UNDO_LOG[write_id] = undo_receipt
     return UndoResult(undone=True, already_undone=False, receipt=undo_receipt)
+
+
+# --------------------------------------------------------------------------- #
+# The ONE write path: bounded, validated, fails closed (card C2-4)
+#
+# ``update_project_clone_content`` is the ONLY function that mutates an
+# already-landed :class:`ProjectTemplateClone`'s content. It never touches the
+# template registry (that store is read-only; see the module docstring and
+# card C2-1/C2-3) -- only ``_PROJECT_CLONES``.
+#
+# Bounded: payload shape/size caps in ``_validate_clone_content_patch`` run
+# BEFORE the write's atomic section is ever entered, so a malformed payload
+# never blocks on, or is serialized behind, another writer.
+#
+# Transactional with a statement timeout: the lookup, the CAS check, and the
+# replace happen inside ONE critical section guarded by
+# ``_PROJECT_CLONES_LOCK`` (the same lock ``clone_template_for_project`` uses
+# to land a clone, so creation and update can never interleave a torn read).
+# Entering that section is bounded by ``lock_timeout_seconds`` -- a per-call
+# bound, not a global setting -- so a stuck writer fails the NEXT caller
+# closed (:class:`ProjectTemplateCloneWriteTimeoutError`) instead of hanging
+# it indefinitely or letting it silently wait past a real deadline.
+#
+# No lost update: ``expected_content_version`` is compared to the STORED
+# ``content_version`` INSIDE the lock, atomically with the replace. A second
+# writer racing the first with the version it read before either of them
+# entered the section always loses honestly
+# (:class:`ProjectTemplateCloneConflictError`) rather than silently
+# overwriting the first writer's content -- this is the CAS the trap sheet
+# calls out as "WHERE version = :expected", done in-process because
+# ``migration: false`` on this card means there is no table to add it to.
+#
+# Authority (closes PR #704 finding 7): this is a mutation, so it requires
+# the SAME ``binding``/``_authorize_project_clone`` gate ``clone_template_for_
+# project``/``write_project_clone_content``/``undo_last_write`` already
+# enforce -- an owner/editor binding for the clone's OWN tenant, verified
+# INSIDE the critical section, after the tenant-scoped lookup and before the
+# CAS check, so a viewer/reviewer/unverified/revoked binding is denied with
+# the SAME :class:`AuthorityError` shape those other mutations use, never a
+# write. ``binding`` is keyword-only with NO default -- a caller can never
+# forget it and silently land an unauthorized write.
+# --------------------------------------------------------------------------- #
+_CLONE_WRITE_LOCK_TIMEOUT_SECONDS = 2.0
+
+# Caps deliberately TIGHTER than anything a real column would allow, never
+# wider -- a schema-valid payload must never be able to blow up a future
+# storage layer (trap sheet #7).
+_CONTENT_MAX_BYTES = 16_384
+_CONTENT_MAX_DEPTH = 6
+_CONTENT_MAX_KEYS_PER_OBJECT = 64
+_CONTENT_MAX_ITEMS_PER_ARRAY = 256
+_CONTENT_MAX_STRING_LEN = 4_000
+
+
+def _validate_json_shape(value: Any, *, depth: int = 0) -> None:
+    if depth > _CONTENT_MAX_DEPTH:
+        raise ProjectTemplateCloneWriteValidationError(
+            f"content nesting exceeds the allowed depth of {_CONTENT_MAX_DEPTH}")
+    if isinstance(value, dict):
+        if len(value) > _CONTENT_MAX_KEYS_PER_OBJECT:
+            raise ProjectTemplateCloneWriteValidationError(
+                f"a content object has more than {_CONTENT_MAX_KEYS_PER_OBJECT} keys")
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 200:
+                raise ProjectTemplateCloneWriteValidationError(
+                    f"invalid content key {key!r}")
+            _validate_json_shape(item, depth=depth + 1)
+    elif isinstance(value, list):
+        if len(value) > _CONTENT_MAX_ITEMS_PER_ARRAY:
+            raise ProjectTemplateCloneWriteValidationError(
+                f"a content array has more than {_CONTENT_MAX_ITEMS_PER_ARRAY} items")
+        for item in value:
+            _validate_json_shape(item, depth=depth + 1)
+    elif isinstance(value, bool):
+        pass
+    elif isinstance(value, str):
+        if len(value) > _CONTENT_MAX_STRING_LEN:
+            raise ProjectTemplateCloneWriteValidationError(
+                f"a content string exceeds {_CONTENT_MAX_STRING_LEN} characters")
+    elif isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            raise ProjectTemplateCloneWriteValidationError(
+                "content numbers must be finite (no NaN/Infinity)")
+    elif value is None:
+        pass
+    else:
+        raise ProjectTemplateCloneWriteValidationError(
+            f"content contains an unsupported type {type(value).__name__!r}")
+
+
+def _validate_clone_content_patch(content: Any) -> Dict[str, Any]:
+    """Schema-validate a caller-submitted clone content payload, with caps.
+
+    Runs to completion (never partially) before any lock is taken or any
+    store state is touched -- a malformed payload always fails closed with
+    ZERO side effects, whatever the failure reason."""
+    if not isinstance(content, dict):
+        raise ProjectTemplateCloneWriteValidationError("content must be a JSON object")
+    if not content:
+        raise ProjectTemplateCloneWriteValidationError("content must not be empty")
+    _validate_json_shape(content)
+    try:
+        encoded = json.dumps(
+            content, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ProjectTemplateCloneWriteValidationError(
+            "content is not JSON-serializable") from exc
+    if len(encoded.encode("utf-8")) > _CONTENT_MAX_BYTES:
+        raise ProjectTemplateCloneWriteValidationError(
+            f"content exceeds {_CONTENT_MAX_BYTES} encoded bytes")
+    return content
+
+
+def _validate_expected_content_version(expected_content_version: Any) -> int:
+    if isinstance(expected_content_version, bool) or not isinstance(
+        expected_content_version, int
+    ):
+        raise ProjectTemplateCloneWriteValidationError(
+            "expected_content_version must be an integer")
+    if expected_content_version < 1:
+        raise ProjectTemplateCloneWriteValidationError(
+            "expected_content_version must be >= 1")
+    return expected_content_version
+
+
+def update_project_clone_content(
+    clone_id: str,
+    tenant_id: str,
+    content: Dict[str, Any],
+    expected_content_version: int,
+    *,
+    binding: TenantBinding,
+    lock_timeout_seconds: float = _CLONE_WRITE_LOCK_TIMEOUT_SECONDS,
+) -> ProjectTemplateClone:
+    """The ONE mutation path for an already-landed project template clone.
+
+    Fails closed, with NO write landed, on: the beta flag being off, a
+    malformed ``content``/``expected_content_version`` payload (validated
+    before the lock is ever taken), a ``clone_id`` that does not exist OR
+    does not belong to ``tenant_id`` (the SAME
+    :class:`ProjectTemplateCloneNotFoundError`, so a foreign tenant's clone
+    id is indistinguishable from one that was never issued -- trap sheet
+    #9-#11), ``binding`` not authorizing an owner/editor of the clone's own
+    tenant (:class:`~customization_authority.AuthorityError`, the SAME gate
+    :func:`clone_template_for_project`/:func:`write_project_clone_content`/
+    :func:`undo_last_write` enforce -- a viewer/reviewer/unverified/revoked
+    binding is denied, checked AFTER the tenant-scoped lookup so it never
+    leaks whether a foreign clone_id exists), a stale
+    ``expected_content_version`` (:class:`ProjectTemplateCloneConflictError`),
+    or a write that could not enter its atomic section within
+    ``lock_timeout_seconds`` (:class:`ProjectTemplateCloneWriteTimeoutError`).
+
+    On success, the STORED clone is replaced atomically with a new isolated
+    (deep-copied) content and ``content_version`` incremented by exactly one.
+    """
+    if not solar_template_beta_enabled():
+        raise TemplateBetaDisabledError("solar_template_beta is not enabled")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id is required to write a project clone")
+    if not isinstance(clone_id, str) or not clone_id.strip():
+        raise ProjectTemplateCloneNotFoundError(clone_id)
+
+    # Validation is COMPLETE before any lock/store access: a malformed
+    # payload can never block on, or be serialized behind, another writer.
+    validated_content = _validate_clone_content_patch(content)
+    validated_expected_version = _validate_expected_content_version(
+        expected_content_version)
+
+    acquired = _PROJECT_CLONES_LOCK.acquire(timeout=lock_timeout_seconds)
+    if not acquired:
+        raise ProjectTemplateCloneWriteTimeoutError(
+            f"write did not enter its atomic section within "
+            f"{lock_timeout_seconds}s")
+    try:
+        existing = _PROJECT_CLONES.get(clone_id)
+        if existing is None or existing.tenant_id != tenant_id:
+            # Same shape whether the id is unknown or belongs to another
+            # tenant -- a caller can never use this to learn a foreign
+            # clone_id exists.
+            raise ProjectTemplateCloneNotFoundError(clone_id)
+        # Role gate (closes PR #704 finding 7): a verified owner/editor
+        # binding for the clone's OWN tenant only -- same machinery, same
+        # AuthorityError shape as clone/write/undo. Checked AFTER the
+        # tenant-scoped lookup (so it never turns into a 404-vs-403
+        # enumeration signal) and BEFORE the CAS check (a denied caller
+        # never learns whether their stale version would otherwise conflict).
+        _authorize_project_clone(binding, existing.tenant_id)
+        if existing.content_version != validated_expected_version:
+            raise ProjectTemplateCloneConflictError(
+                f"clone {clone_id!r} is at content_version "
+                f"{existing.content_version}, not {validated_expected_version}")
+
+        next_version = existing.content_version + 1
+        receipt = {
+            **existing.receipt,
+            "action": "update",
+            "content_version": next_version,
+        }
+        updated = ProjectTemplateClone(
+            clone_id=existing.clone_id,
+            tenant_id=existing.tenant_id,
+            project_id=existing.project_id,
+            template_id=existing.template_id,
+            version=existing.version,
+            content=copy.deepcopy(validated_content),
+            receipt=receipt,
+            content_version=next_version,
+        )
+        _PROJECT_CLONES[clone_id] = updated
+        return updated
+    finally:
+        _PROJECT_CLONES_LOCK.release()
