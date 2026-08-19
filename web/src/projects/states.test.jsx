@@ -22,6 +22,9 @@ import { listProjects } from './api.js'
 import ProjectList from './ProjectList.jsx'
 import Membership from './Membership.jsx'
 import ExportDialog from './ExportDialog.jsx'
+import CloneDialog from './CloneDialog.jsx'
+import DangerZone from './DangerZone.jsx'
+import ReceiptPanel from './ReceiptPanel.jsx'
 
 afterEach(cleanup)
 
@@ -110,6 +113,95 @@ const COMPONENT_REGISTRY = [
       const utils = render(<ExportDialog onExport={onExport} />)
       fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
       await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+      return utils
+    },
+  },
+  {
+    name: 'CloneDialog',
+    async loading() {
+      const project = { project_id: 'proj-1', name: 'Rooftop Array' }
+      const onClone = vi.fn(() => new Promise(() => {})) // never settles — the cloning-in-flight state itself
+      const utils = render(<CloneDialog open project={project} onClone={onClone} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByRole('button', { name: /^clone project$/i }))
+      await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/cloning/i))
+      return utils
+    },
+    async empty() {
+      const project = { project_id: 'proj-1', name: 'Rooftop Array' }
+      const utils = render(<CloneDialog open project={project} onClone={vi.fn()} onClose={vi.fn()} />)
+      expect(screen.queryByText(/receipt:/i)).toBeNull()
+      return utils
+    },
+    async error() {
+      const project = { project_id: 'proj-1', name: 'Rooftop Array' }
+      const onClone = vi.fn().mockRejectedValue({ body: { detail: 'Clone quota exceeded.' } })
+      const utils = render(<CloneDialog open project={project} onClone={onClone} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByRole('button', { name: /^clone project$/i }))
+      await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+      return utils
+    },
+  },
+  {
+    name: 'DangerZone',
+    async loading() {
+      const onReset = vi.fn(() => new Promise(() => {})) // in-flight forever — the loading state itself
+      const utils = render(<DangerZone projectName="Solar Canopy A" onReset={onReset} onDelete={vi.fn()} />)
+      fireEvent.click(screen.getByRole('button', { name: /^reset$/i }))
+      fireEvent.change(screen.getByLabelText(/type the project name to confirm reset/i), {
+        target: { value: 'Solar Canopy A' },
+      })
+      const confirmButtons = screen.getAllByRole('button', { name: /^reset$/i })
+      fireEvent.click(confirmButtons[confirmButtons.length - 1])
+      await waitFor(() => expect(confirmButtons[confirmButtons.length - 1]).toBeDisabled())
+      return utils
+    },
+    async empty() {
+      // No confirmed project identity yet — DangerZone's own rendering guard
+      // (danger.test.jsx acceptance): renders nothing rather than a guessed name.
+      const utils = render(<DangerZone projectName={null} onReset={vi.fn()} onDelete={vi.fn()} />)
+      expect(utils.container).toBeEmptyDOMElement()
+      return utils
+    },
+    async error() {
+      const onDelete = vi.fn().mockRejectedValue({ message: 'Workspace is locked.' })
+      const utils = render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+      fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+      fireEvent.change(screen.getByLabelText(/type the project name to confirm delete/i), {
+        target: { value: 'Solar Canopy A' },
+      })
+      const confirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+      fireEvent.click(confirmButtons[confirmButtons.length - 1])
+      await waitFor(() => expect(screen.getByText(/workspace is locked/i)).toBeTruthy())
+      return utils
+    },
+  },
+  {
+    name: 'ReceiptPanel',
+    async loading() {
+      // ReceiptPanel is purely props-driven with no fetch of its own (like
+      // Membership's authority={null} above): before the parent's fetch of
+      // the timeline resolves, it renders with receipts unset.
+      const utils = render(<ReceiptPanel receipts={undefined} />)
+      return utils
+    },
+    async empty() {
+      const utils = render(<ReceiptPanel receipts={[]} />)
+      await waitFor(() => expect(screen.getByText(/no receipts yet/i)).toBeTruthy())
+      return utils
+    },
+    async error() {
+      // ReceiptPanel has no fetch/try-catch of its own, so its edge-case
+      // state is dirty data reaching it despite the server contract
+      // (receipts.test.jsx acceptance): a credential-shaped field redacted
+      // on sight rather than rendered raw.
+      const dirty = [{
+        receipt_id: 'rcpt-3',
+        kind: 'invite',
+        time: '2026-08-03T00:00:00.000Z',
+        fields: { access_token: 'super-secret-value', role: 'editor' },
+      }]
+      const utils = render(<ReceiptPanel receipts={dirty} />)
+      await waitFor(() => expect(screen.getByText('[redacted]')).toBeTruthy())
       return utils
     },
   },
