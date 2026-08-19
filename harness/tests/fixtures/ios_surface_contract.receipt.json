@@ -1,0 +1,12 @@
+{
+  "build_stage": "RECEIPT",
+  "project_id": "proj-1",
+  "readiness": {
+    "healthy": true,
+    "launchable": true
+  },
+  "receipt_id": "receipt-ship-1",
+  "reported_at": "2026-08-19T12:00:00+00:00",
+  "revision": "r1",
+  "schema": "leaf.ios-ship-surface.v1"
+}
