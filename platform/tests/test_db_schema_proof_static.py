@@ -3,11 +3,38 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from hashlib import sha256
+import inspect
 import re
 
 import pytest
 
 from leaf_platform import db
+
+# Named so a failure message below can point a reviewer straight at the pin,
+# regardless of the cwd pytest happened to run from (the platform suite runs
+# from REPO_PARENT, not this directory).
+_THIS_FILE = "platform/tests/test_db_schema_proof_static.py"
+
+
+def _assert_closed_world_subset(created, proven, remediation):
+    """Fail a "every shipped table is proven" closed-world check by name.
+
+    ``proven`` (db._REQUIRED_COLUMNS plus every db._AUTHORITY_REQUIRED_COLUMNS
+    entry) is a closed-world registry: a migration can ``CREATE TABLE`` a new
+    table without anyone registering its columns there, and nothing else in
+    the codebase would notice. A bare ``assert created <= proven`` leaves a
+    reviewer to diff two sets and guess which table is new and where its
+    columns belong; naming the file, the exact line holding the check, the
+    missing table(s), and the remediation turns that guess into a checklist.
+    """
+    caller = inspect.stack()[1]
+    location = f"{_THIS_FILE}:{caller.lineno}"
+    missing = created - proven
+    assert not missing, (
+        f"{location} requires every CREATE TABLE in the migrations to be in "
+        f"the proven readiness set, but {sorted(missing)} is/are not. "
+        f"{remediation}"
+    )
 
 
 class _Result:
@@ -129,7 +156,13 @@ def test_every_shipped_table_has_a_readiness_contract():
     for tables in db._AUTHORITY_REQUIRED_COLUMNS.values():
         proven.update(tables)
 
-    assert created <= proven
+    _assert_closed_world_subset(
+        created, proven,
+        "Register the new table(s) in the proven set: add each to "
+        "db._REQUIRED_COLUMNS (unconditional) or to the right authority's "
+        "entry in db._AUTHORITY_REQUIRED_COLUMNS (selector-gated), naming "
+        "its real required columns.",
+    )
 
 
 def test_harness_approval_journal_has_exact_readiness_authority():
@@ -719,3 +752,24 @@ def test_assert_schema_current_fails_explicitly_without_exposing_database_url(
     assert value[0] in str(exc_info.value)
     assert secret not in str(exc_info.value)
     assert "do-not-log-this" not in str(exc_info.value)
+
+
+def test_unregistered_shipped_table_names_the_pin_line_and_remediation():
+    """The proven-schema subset check (test_db_schema_proof_static.py:132
+    class): a migration ships a new table and nobody registered it in the
+    proven set. The failure must name this file, the exact line holding the
+    check, the missing table, and say to register it in the proven set --
+    never a bare ``AssertionError`` a reviewer has to reverse-engineer.
+    """
+    with pytest.raises(AssertionError) as exc_info:
+        _assert_closed_world_subset(
+            {"a_new_shipped_table"}, set(),
+            "Register the new table(s) in the proven set: add each to "
+            "db._REQUIRED_COLUMNS (unconditional) or to the right "
+            "authority's entry in db._AUTHORITY_REQUIRED_COLUMNS "
+            "(selector-gated), naming its real required columns.",
+        )
+    message = str(exc_info.value)
+    assert re.search(rf"{re.escape(_THIS_FILE)}:\d+", message), message
+    assert "a_new_shipped_table" in message
+    assert "Register the new table(s) in the proven set" in message
