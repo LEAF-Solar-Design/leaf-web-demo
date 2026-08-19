@@ -2,3 +2,8 @@
 # The broker image stays SDK-free by contract (emf_metrics.py docstring);
 # telemetry_sink guards this import and reports disabled where absent.
 google-cloud-bigquery
+
+# TEL-6 (GCP deprecation): LEAF_TELEMETRY_BACKEND=firehose|dual PutRecordBatch
+# into leaf-telemetry-events-<env>. boto3 is ALREADY a hard server/
+# dependency (requirements.txt, mcp_authority.py KMS signing), so no new pin
+# is added here — this note only documents that the firehose path rides it.
