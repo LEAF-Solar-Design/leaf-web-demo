@@ -82,16 +82,67 @@ def _hold_write_lock():
 
 
 # --------------------------------------------------------------------------- #
-# ORACLE: exactly one mutation endpoint on the cloned instance
+# ORACLE: one WRITE CORE for the cloned instance. The review (#704 r2) proved
+# a URL-prefix count is circular: it missed the legacy /api/project-clones
+# writes route one namespace over. The oracle's intent is behavioral - every
+# route that mutates clone content shares the validated, version-advancing
+# core - so that is what these tests pin, across ALL namespaces.
 # --------------------------------------------------------------------------- #
-def test_exactly_one_mutation_endpoint_on_the_cloned_instance():
-    clone_routes = [
-        route for route in templates_router.router.routes
-        if getattr(route, "path", "").startswith("/api/templates/clones")
-    ]
-    assert len(clone_routes) == 1
+def test_every_clone_content_mutation_route_is_known_and_enumerated():
     mutating = {"POST", "PUT", "PATCH", "DELETE"}
-    assert clone_routes[0].methods & mutating == {"PATCH"}
+    clone_mutators = sorted(
+        f"{sorted(route.methods & mutating)[0]} {route.path}"
+        for route in templates_router.router.routes
+        if (route.methods & mutating)
+        and ("clone" in route.path)
+        and "{template_id}/clone" not in route.path
+        and "{template_id}/project-clones" not in route.path  # clone-landing, not content
+    )
+    # A NEW mutation route on clone content fails this list on sight.
+    assert clone_mutators == [
+        "PATCH /api/templates/clones/{clone_id}",
+        "POST /api/project-clones/{clone_id}/undo",
+        "POST /api/project-clones/{clone_id}/writes",
+    ]
+
+
+def test_legacy_write_route_shares_the_validated_core():
+    """A payload over the 16KB cap is rejected by the legacy write path too."""
+    binding = _owner_binding()
+    clone = _seed_clone()
+    huge = {"blob": "x" * 1_000_000}
+    with pytest.raises(templates.ProjectTemplateCloneWriteValidationError):
+        templates.write_project_clone_content(
+            clone.clone_id, huge, binding=binding)
+    assert templates.get_project_clone(clone.clone_id).content == clone.content
+
+
+def test_legacy_write_advances_the_cas_lineage_no_lost_update():
+    """Legacy write bumps content_version, so a stale PATCH conflicts instead
+    of silently overwriting the newer lineage (the #704 r2 lost-update)."""
+    binding = _owner_binding()
+    clone = _seed_clone()
+    v1 = templates.get_project_clone(clone.clone_id).content_version
+    templates.write_project_clone_content(
+        clone.clone_id, {"a": 1}, binding=binding)
+    after = templates.get_project_clone(clone.clone_id).content_version
+    assert after == v1 + 1
+    with pytest.raises(templates.ProjectTemplateCloneConflictError):
+        templates.update_project_clone_content(
+            clone.clone_id, binding.tenant_id, {"b": 2},
+            expected_content_version=v1, binding=binding)
+
+
+def test_undo_advances_the_cas_lineage():
+    binding = _owner_binding()
+    clone = _seed_clone()
+    write = templates.write_project_clone_content(
+        clone.clone_id, {"a": 1}, binding=binding)
+    before = templates.get_project_clone(clone.clone_id).content_version
+    templates.undo_last_write(
+        clone.clone_id, write.write_id, binding=binding)
+    after = templates.get_project_clone(clone.clone_id).content_version
+    assert after == before + 1
 
 
 def test_the_template_registry_preview_route_is_not_a_cloned_instance_mutation():

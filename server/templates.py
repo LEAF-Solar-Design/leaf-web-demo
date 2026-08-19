@@ -454,6 +454,10 @@ def write_project_clone_content(
     """
     if not solar_template_beta_enabled():
         raise TemplateBetaDisabledError("solar_template_beta is not enabled")
+    # Same caps as the PATCH path (kimi #704 r2 f2): every route that mutates
+    # clone content validates through the ONE core, or a 1 MB payload walks in
+    # a namespace over.
+    validated = _validate_clone_content_patch(content)
     with _PROJECT_CLONES_LOCK:
         clone = _PROJECT_CLONES.get(clone_id)
         if clone is None:
@@ -476,8 +480,11 @@ def write_project_clone_content(
         _PROJECT_CLONES[clone_id] = ProjectTemplateClone(
             clone_id=clone.clone_id, tenant_id=clone.tenant_id,
             project_id=clone.project_id, template_id=clone.template_id,
-            version=clone.version, content=copy.deepcopy(content),
+            version=clone.version, content=copy.deepcopy(validated),
             receipt=clone.receipt,
+            # Version lineage NEVER resets (kimi #704 r2 f3): a legacy write
+            # advances the same CAS counter the PATCH path compares against.
+            content_version=clone.content_version + 1,
         )
         _CLONE_WRITE_LOG.setdefault(clone_id, []).append(write)
     return write
@@ -524,6 +531,9 @@ def undo_last_write(
             project_id=clone.project_id, template_id=clone.template_id,
             version=clone.version, content=copy.deepcopy(head.prior_content),
             receipt=clone.receipt,
+            # Undo is itself a mutation: the CAS lineage advances, never resets
+            # (kimi #704 r2 f3 - resetting to 1 enabled a silent lost update).
+            content_version=clone.content_version + 1,
         )
         undo_receipt = {
             "clone_id": clone_id,
