@@ -4,6 +4,12 @@
  *   in-progress, unavailable, never-configured) has a distinct truthful
  *   view; no state fabricates progress. With ios_surface off: dormant
  *   placeholder.
+ *
+ * The contract is D-1's leaf.ios-ship-surface.v1 (server-validated in
+ * server/routers/ios_surface.py): readiness = { healthy, launchable }
+ * booleans, build_stage from the published 14-word vocabulary or null,
+ * receipt_id, reported_at. The four views are derivations of those fields —
+ * no invented state/detail/progress fields exist anywhere in this suite.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
@@ -12,94 +18,122 @@ import IosSurface from './IosSurface.jsx'
 
 afterEach(cleanup)
 
+function contractWith(readiness, buildStage = null) {
+  return {
+    schema: 'leaf.ios-ship-surface.v1',
+    project_id: 'proj-1',
+    revision: 'rev-1',
+    reported_at: '2026-08-19T18:00:00+00:00',
+    readiness,
+    build_stage: buildStage,
+    receipt_id: null,
+  }
+}
+
 describe('ios_surface flag off: dormant placeholder', () => {
   it('renders a neutral placeholder and no readiness detail, even when a contract is supplied', () => {
-    render(<IosSurface enabled={false} readiness={{ state: 'ready', detail: 'build 42 signed' }} />)
+    render(<IosSurface enabled={false} contract={contractWith({ healthy: true, launchable: true })} />)
     expect(screen.getByLabelText('iOS readiness')).toHaveAttribute('data-state', 'dormant')
-    expect(screen.queryByText(/build 42 signed/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/ready/i)).not.toBeInTheDocument()
   })
 
-  it('stays dormant with no readiness prop at all', () => {
+  it('stays dormant with no contract prop at all', () => {
     render(<IosSurface enabled={false} />)
     expect(screen.getByLabelText('iOS readiness')).toHaveAttribute('data-state', 'dormant')
   })
 })
 
-describe('each contract state has a distinct truthful view', () => {
-  it('ready: shows the ready label and the server detail verbatim', () => {
-    render(<IosSurface enabled readiness={{ state: 'ready', detail: 'build 42 signed and installed' }} />)
+describe('each derived state has a distinct truthful view', () => {
+  it('ready: healthy && launchable', () => {
+    render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: true }, 'RECEIPT')} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'ready')
     expect(screen.getByText('Ready')).toBeInTheDocument()
-    expect(screen.getByText('build 42 signed and installed')).toBeInTheDocument()
   })
 
-  it('in-progress: shows the setting-up label and the server detail verbatim', () => {
-    render(<IosSurface enabled readiness={{ state: 'in-progress', detail: 'provisioning signing certificate' }} />)
+  it('in-progress: healthy && !launchable, signal is the contract build_stage word', () => {
+    render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'in-progress')
-    expect(screen.getByText('provisioning signing certificate')).toBeInTheDocument()
+    expect(screen.getByText(/Setting up — Mac allocated/)).toBeInTheDocument()
   })
 
-  it('unavailable: shows the unavailable label and the server-given reason', () => {
-    render(<IosSurface enabled readiness={{ state: 'unavailable', detail: 'build pipeline offline' }} />)
+  it('in-progress with a null build_stage: plain label, no invented stage text', () => {
+    render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: false }, null)} />)
+    expect(screen.getByLabelText('iOS readiness')).toHaveAttribute('data-state', 'in-progress')
+    expect(screen.getByText('Setting up')).toBeInTheDocument()
+    expect(screen.queryByText(/—/)).not.toBeInTheDocument()
+  })
+
+  it('unavailable: healthy === false wins regardless of launchable', () => {
+    render(<IosSurface enabled contract={contractWith({ healthy: false, launchable: true }, 'BUILT')} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'unavailable')
+    expect(el).toHaveAttribute('role', 'alert')
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
-    expect(screen.getByText('build pipeline offline')).toBeInTheDocument()
   })
 
-  it('never-configured: shows the not-yet-configured label with no fabricated detail', () => {
-    render(<IosSurface enabled readiness={{ state: 'never-configured' }} />)
+  it('never-configured: no contract published (null)', () => {
+    render(<IosSurface enabled contract={null} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'never-configured')
     expect(screen.getByText('Not yet configured')).toBeInTheDocument()
   })
 
-  it('the four known states render four different data-state markers (no shared/ambiguous view)', () => {
-    const states = ['ready', 'in-progress', 'unavailable', 'never-configured']
-    const rendered = states.map((state) => {
-      const { container } = render(<IosSurface enabled readiness={{ state }} />)
-      const marker = container.querySelector('[data-state]').getAttribute('data-state')
-      cleanup()
-      return marker
-    })
-    expect(new Set(rendered).size).toBe(states.length)
+  it('all four states render distinctly', () => {
+    const seen = new Set()
+    for (const [readiness, stage] of [
+      [{ healthy: true, launchable: true }, null],
+      [{ healthy: true, launchable: false }, 'BUILT'],
+      [{ healthy: false, launchable: false }, null],
+    ]) {
+      const { unmount } = render(<IosSurface enabled contract={contractWith(readiness, stage)} />)
+      seen.add(screen.getByLabelText('iOS readiness').getAttribute('data-state'))
+      unmount()
+    }
+    const { unmount } = render(<IosSurface enabled contract={null} />)
+    seen.add(screen.getByLabelText('iOS readiness').getAttribute('data-state'))
+    unmount()
+    expect(seen).toEqual(new Set(['ready', 'in-progress', 'unavailable', 'never-configured']))
   })
 })
 
-describe('no state fabricates progress', () => {
-  it('in-progress with no progress field shows the plain label and no percentage or progress bar', () => {
-    render(<IosSurface enabled readiness={{ state: 'in-progress' }} />)
-    expect(screen.getByText('Setting up')).toBeInTheDocument()
-    expect(screen.queryByText(/%/)).not.toBeInTheDocument()
-    expect(document.querySelector('progress')).not.toBeInTheDocument()
-    expect(document.querySelector('[role="progressbar"]')).not.toBeInTheDocument()
-  })
-
-  it('in-progress with a real contract progress number echoes exactly that number, not a guess', () => {
-    render(<IosSurface enabled readiness={{ state: 'in-progress', progress: 42 }} />)
-    expect(screen.getByText(/42% complete/)).toBeInTheDocument()
-  })
-
-  it('ready, unavailable, and never-configured never render a percentage even if the field is present', () => {
-    for (const state of ['ready', 'unavailable', 'never-configured']) {
-      const { unmount } = render(<IosSurface enabled readiness={{ state, progress: 77 }} />)
-      expect(screen.queryByText(/77%/)).not.toBeInTheDocument()
+describe('no fabrication', () => {
+  it('never renders a percentage: the contract has no progress field to show', () => {
+    for (const [readiness, stage] of [
+      [{ healthy: true, launchable: false }, 'UPLOADED'],
+      [{ healthy: true, launchable: true }, 'RECEIPT'],
+      [{ healthy: false, launchable: false }, null],
+    ]) {
+      const { unmount } = render(<IosSurface enabled contract={contractWith(readiness, stage)} />)
+      expect(screen.queryByText(/%/)).not.toBeInTheDocument()
       unmount()
     }
   })
-})
 
-describe('the contract is the only source of truth', () => {
-  it('renders nothing when no readiness contract has been read yet', () => {
-    const { container } = render(<IosSurface enabled readiness={null} />)
-    expect(container).toBeEmptyDOMElement()
+  it('a malformed contract (readiness missing booleans) renders nothing rather than a guessed state', () => {
+    for (const bad of [
+      contractWith({ healthy: true }),
+      contractWith({ launchable: true }),
+      contractWith('healthy'),
+      contractWith(undefined),
+    ]) {
+      const { container, unmount } = render(<IosSurface enabled contract={bad} />)
+      expect(container).toBeEmptyDOMElement()
+      unmount()
+    }
   })
 
-  it('renders nothing for a state the contract never defined, rather than guessing', () => {
-    const { container } = render(<IosSurface enabled readiness={{ state: 'mid-flight-invented-state' }} />)
-    expect(container).toBeEmptyDOMElement()
+  it('renders strictly from props: no fetch is issued', () => {
+    const calls = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (...args) => { calls.push(args); return Promise.reject(new Error('no')) }
+    try {
+      const { unmount } = render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: true })} />)
+      unmount()
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    expect(calls).toEqual([])
   })
 })
