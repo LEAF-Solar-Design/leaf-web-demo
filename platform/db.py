@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    # Wave B durable conversation store (0046).
+    "conversations": {
+        "conversation_id", "org_id", "project_id", "title",
+        "created_by_binding_id", "created_at", "updated_at",
+    },
     # P8 server-owned repository authority and durable edit state (0043-0044).
     "project_repository_authorities": {
         "tenant_id", "organization_id", "project_id", "repo_key", "created_at",
