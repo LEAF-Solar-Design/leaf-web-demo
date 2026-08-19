@@ -13,23 +13,81 @@ receipt reaches a caller. A version whose content and frozen digest have
 drifted apart fails closed with :class:`TemplateDigestMismatchError` rather
 than silently shipping unverified bytes.
 
-``migration: false`` on this card -- there is no database table here. The
-registry is a fixed, in-process catalog, the same shape as
-``capability_families.json`` (see ``catalog.py``) but for templates.
+The fixed ``_REGISTRY`` below (card C2-2) is a bootstrap catalog, the same
+shape as ``capability_families.json`` (see ``catalog.py``) but for templates.
+
+Card C2-1R adds ``platform/migrations/0049_solar_template.sql``'s
+``template_versions`` table -- an immutable, append-only store -- and makes
+it AUTHORITATIVE: :func:`resolve_version` reads through it whenever
+``solar_template_beta`` is on (see :func:`_read_through_stored_version`).
+The in-process ``_REGISTRY`` never becomes a second, divergent source of
+truth -- it is consulted only as a fallback for a (template_id, version)
+that has never been published to the table, and a version's content is
+immutable in BOTH stores from the moment it exists, so the two can never
+disagree about a version either of them has actually served.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import psycopg
+from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
+
 from customization_authority import AuthorityError, TENANT_ROLES, TenantBinding
+
+_SERVER_DIR = Path(__file__).resolve().parent
+_PROVENANCE_SOURCES = frozenset({"seed", "operator_publish"})
+
+
+def platform_db():
+    """Load the local platform database package under the collision-safe
+    ``leaf_platform`` alias.
+
+    Duplicated from ``conversations.platform_db()`` on purpose (see that
+    module's docstring): every copy populates the SAME
+    ``sys.modules["leaf_platform"]`` entry, so all copies share one loaded
+    package -- one connection pool -- at runtime.
+    """
+    loaded = sys.modules.get("leaf_platform")
+    if loaded is None:
+        pkg_dir = _SERVER_DIR.parent / "platform"
+        spec = importlib.util.spec_from_file_location(
+            "leaf_platform", pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("could not load the Leaf platform database package")
+        loaded = importlib.util.module_from_spec(spec)
+        sys.modules["leaf_platform"] = loaded
+        spec.loader.exec_module(loaded)
+    from leaf_platform import db
+    return db
+
+
+def _database_configured() -> bool:
+    """True iff a DATABASE_URL resolves (env or platform/.env.local).
+
+    Never raises. False is the fallback-to-registry path -- the same shape
+    as ``platform_link._db_configured()`` -- so a demo/test process with no
+    database configured never blocks or errors on a read-through attempt.
+    """
+    try:
+        platform_db().get_database_url()
+        return True
+    except Exception:
+        return False
 
 FLAG_SOLAR_TEMPLATE_BETA = "LEAF_SOLAR_TEMPLATE_BETA_ENABLED"
 
@@ -185,12 +243,143 @@ def resolve_version(template_id: str, version: Optional[str]) -> TemplateVersion
     clone) works from the same pinned identity rather than re-resolving
     "latest" against a registry that could differ between calls.
     """
+    # The 0049 store is AUTHORITATIVE for anything it has published (card
+    # C2-1R superseding ruling); the in-process registry is the bootstrap
+    # fallback for versions that have never been published there. Both are
+    # immutable, so a version either store serves can never drift.
+    if solar_template_beta_enabled() and _database_configured():
+        stored = _read_through_stored_version(template_id, version)
+        if stored is not None:
+            return stored
     template = _get_template(template_id)
     exact = version or template.latest_version
     resolved = template.versions.get(exact)
     if resolved is None:
         raise TemplateVersionNotFoundError(f"{template_id}@{exact}")
     return resolved
+
+
+# --- immutable versioned store (card C2-1R, migration 0049) ---------------- #
+
+TEMPLATE_STORE_STATEMENT_TIMEOUT_MS = 2000
+# Canonical-JSON byte cap on published content: bounds every row and every
+# digest computation; far above any real template, far below anything that
+# could hurt the store.
+MAX_TEMPLATE_CONTENT_BYTES = 65536
+STORE_TABLE = "template_versions"
+
+
+class TemplateVersionConflictError(RuntimeError):
+    """A (template_id, version) already published: refused, never overwritten.
+
+    The database UNIQUE constraint is the arbiter; this error is its typed
+    surface. Publishing a new version never mutates a prior one -- there is
+    no update arm anywhere in this module and the 0049 trigger rejects
+    UPDATE/DELETE at the database, so immutability holds even against a
+    caller that bypasses this module.
+    """
+
+
+def _validate_publish_inputs(template_id: str, version: str,
+                             content: Dict[str, Any], published_by: str,
+                             provenance_source: str) -> str:
+    """Fail closed before any DB call; returns the canonical content digest.
+
+    Mirrors 0049's CHECK constraints exactly so a bad publish is a cheap
+    typed error here, and anything that slips past is still refused by the
+    database -- two independent fences, same contract.
+    """
+    if not isinstance(template_id, str) or not (1 <= len(template_id) <= 200):
+        raise ValueError("template_id must be 1-200 characters")
+    if not isinstance(version, str) or not (1 <= len(version) <= 50):
+        raise ValueError("version must be 1-50 characters")
+    if not isinstance(published_by, str) or not (1 <= len(published_by) <= 200):
+        raise ValueError("published_by must be 1-200 characters")
+    if provenance_source not in _PROVENANCE_SOURCES:
+        raise ValueError(
+            f"provenance_source must be one of {sorted(_PROVENANCE_SOURCES)}")
+    if not isinstance(content, dict):
+        raise ValueError("content must be a JSON object")
+    canonical = json.dumps(content, ensure_ascii=False,
+                           separators=(",", ":"), sort_keys=True)
+    if len(canonical.encode("utf-8")) > MAX_TEMPLATE_CONTENT_BYTES:
+        raise ValueError(
+            f"content exceeds {MAX_TEMPLATE_CONTENT_BYTES} canonical bytes")
+    return content_digest(content)
+
+
+def publish_template_version(template_id: str, version: str,
+                             content: Dict[str, Any], *, published_by: str,
+                             provenance_source: str) -> Dict[str, Any]:
+    """INSERT-only publish: one row per (template_id, version), forever.
+
+    No conflict-resolution arm at all -- a duplicate publish surfaces the UNIQUE
+    violation as :class:`TemplateVersionConflictError`, never a silent
+    overwrite. Statement-timeout bounded (SET LOCAL, same convention as
+    conversations.create_message).
+    """
+    digest = _validate_publish_inputs(
+        template_id, version, content, published_by, provenance_source)
+    db = platform_db()
+    version_id = uuid.uuid4()
+    try:
+        with db.transaction() as conn:
+            conn.execute("SET LOCAL statement_timeout = %s",
+                         (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),))
+            conn.execute(
+                f"INSERT INTO {STORE_TABLE}"
+                " (version_id, template_id, version, content, content_sha256,"
+                "  published_by, provenance_source)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (str(version_id), template_id, version, Jsonb(content), digest,
+                 published_by, provenance_source),
+            )
+    except UniqueViolation as exc:
+        raise TemplateVersionConflictError(
+            f"{template_id}@{version} is already published; versions are "
+            "immutable and a republish never overwrites") from exc
+    return {"template_id": template_id, "version": version,
+            "content_digest": digest, "version_id": str(version_id),
+            "provenance_source": provenance_source}
+
+
+def _read_through_stored_version(template_id: str,
+                                 version: Optional[str]) -> Optional[TemplateVersion]:
+    """The store half of :func:`resolve_version`; None = not published there.
+
+    Only consulted when the beta flag is on AND a database is configured --
+    both checked by the caller -- and every returned row is digest-verified
+    against its own frozen content_sha256 before anything downstream sees
+    it: a stored row whose content and digest disagree fails closed with
+    :class:`TemplateDigestMismatchError`, exactly like a drifted registry
+    entry would.
+    """
+    db = platform_db()
+    with db.transaction() as conn:
+        conn.execute("SET LOCAL statement_timeout = %s",
+                     (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),))
+        if version is None:
+            row = conn.execute(
+                f"SELECT * FROM {STORE_TABLE} WHERE template_id = %s"
+                " ORDER BY created_at DESC, version_id DESC LIMIT 1",
+                (template_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT * FROM {STORE_TABLE}"
+                " WHERE template_id = %s AND version = %s",
+                (template_id, version),
+            ).fetchone()
+    if row is None:
+        return None
+    content = dict(row["content"])
+    recomputed = content_digest(content)
+    if recomputed != row["content_sha256"]:
+        raise TemplateDigestMismatchError(
+            f"{template_id}@{row['version']}: stored content_sha256 "
+            f"{row['content_sha256']!r} does not match recomputed {recomputed!r}")
+    return TemplateVersion(template_id=template_id, version=row["version"],
+                           content=content, digest=row["content_sha256"])
 
 
 def verify_digest(template_version: TemplateVersion) -> None:
