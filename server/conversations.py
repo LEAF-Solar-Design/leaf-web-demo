@@ -19,6 +19,7 @@ room for a fifth file.
 """
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
@@ -27,7 +28,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -766,6 +767,197 @@ def run_retention_gc(org_id: Any, *, now: Optional[datetime] = None) -> Dict[str
         "started_at": now.isoformat(),
         "finished_at": finished.isoformat(),
     }
+
+# --- message tail (0048) / recovery-on-reconnect (card B-C3) --------------- #
+
+RECOVERY_DEFAULT_LIMIT = 50
+RECOVERY_MAX_LIMIT = 200
+# Bounds the recovery query independently of the per-app request timeout, so
+# a seq-scan (a missing/unused index) fails fast and loud in staging instead
+# of quietly eating the whole request budget. idx_conversation_messages_
+# scope_order (0048) already covers (org_id, project_id, conversation_id,
+# created_at) -- exactly this query's WHERE + ORDER BY -- so this ceiling
+# should never actually bind on a healthy index; it exists as a hard fence
+# for card B-C4's "cannot wedge recovery" case, not as the primary defense.
+_RECOVERY_STATEMENT_TIMEOUT_MS = 3000
+
+
+class InvalidRecoveryCursor(ValueError):
+    """The ``cursor`` query param does not decode to a (created_at, message_id)
+    pair. Raised by ``decode_recovery_cursor``; the router maps it to a typed
+    400, never a 500 -- a caller replaying a stale/edited cursor is a normal
+    client mistake, not a server fault."""
+
+
+def _configure_recovery_statement_timeout(cur: Any) -> None:
+    """Mirrors dependency_health._configure_statement_timeout's exact
+    ``set_config(..., true)`` shape (SET LOCAL, scoped to this transaction
+    only) rather than inventing a second convention for the same thing."""
+    cur.execute(
+        "SELECT set_config('statement_timeout', %s, true)",
+        (f"{_RECOVERY_STATEMENT_TIMEOUT_MS}ms",),
+    )
+
+
+def encode_recovery_cursor(created_at: datetime, message_id: Any) -> str:
+    """Opaque cursor over exactly (created_at, message_id) -- never a project
+    or conversation scope, so a caller editing/tampering the cursor can only
+    ever shift the pagination boundary, never widen the query's WHERE-clause
+    scope (that always comes from the caller-verified org_id/project_id/
+    conversation_id, resolved server-side, on every call)."""
+    raw = f"{created_at.isoformat()}|{message_id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def decode_recovery_cursor(cursor: str) -> Tuple[datetime, uuid.UUID]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        created_at_str, message_id_str = raw.split("|", 1)
+        created_at = datetime.fromisoformat(created_at_str)
+        message_id = uuid.UUID(message_id_str)
+    except Exception as exc:
+        raise InvalidRecoveryCursor("recovery cursor is malformed") from exc
+    return created_at, message_id
+
+
+def _latest_conversation_id(org_id: Any, project_id: Any) -> Optional[str]:
+    """The project's most-recently-created conversation, matching
+    ``recover_or_create_conversation``'s own "most recent" semantics -- this
+    function only ever reads (``list_conversations``), it never creates one,
+    so an empty/new project (no conversation row yet) resolves to None
+    rather than lazily inserting anything."""
+    existing = list_conversations(org_id, project_id)
+    if not existing:
+        return None
+    return existing[-1]["conversation_id"]
+
+
+def _fence_page(
+    page_rows: List[Dict[str, Any]], org_id: Any, project_id: Any,
+    conversation_id: Any,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Apply B-C4's poison fence to ONE raw keyset page.
+
+    Quarantine receipt rows never appear in the item stream. A poisoned
+    message is skipped and surfaced as a gap entry (reason code + receipt
+    reference, never the raw payload), matching recover_conversation_messages'
+    whole-tail semantics. Because a receipt row can land on a later page than
+    the message it fences, receipts are resolved with one additional bounded
+    lookup keyed by the page's message ids (at most one statement per page,
+    statement-timeout configured) instead of trusting page locality.
+    """
+    candidates = [
+        row for row in page_rows
+        if (row["metadata"] or {}).get("kind") != _QUARANTINE_KIND
+    ]
+    if not candidates:
+        return [], []
+    receipt_keys = [f"quarantine:{row['message_id']}" for row in candidates]
+    db = platform_db()
+    with db.cursor() as cur:
+        _configure_recovery_statement_timeout(cur)
+        cur.execute(
+            f"SELECT * FROM {MESSAGES_TABLE}"
+            " WHERE org_id = %s AND project_id = %s AND conversation_id = %s"
+            " AND idempotency_key = ANY(%s)",
+            (str(org_id), str(project_id), str(conversation_id), receipt_keys),
+        )
+        receipts = {
+            str((r["metadata"] or {}).get("poison_message_id")): r
+            for r in cur.fetchall()
+        }
+    items: List[Dict[str, Any]] = []
+    gaps: List[Dict[str, Any]] = []
+    for row in candidates:
+        message_id = str(row["message_id"])
+        receipt = receipts.get(message_id)
+        if receipt is not None:
+            gaps.append({
+                "message_id": message_id,
+                "reason": (receipt["metadata"] or {}).get("reason"),
+                "receipt_id": str(receipt["message_id"]),
+                "quarantined_at": receipt["created_at"].isoformat()
+                    if receipt["created_at"] else None,
+            })
+            continue
+        items.append(_row_message(row))
+    return items, gaps
+
+
+def list_conversation_messages_page(
+    org_id: Any, project_id: Any, conversation_id: Any, *,
+    after: Optional[Tuple[datetime, Any]] = None,
+    limit: int = RECOVERY_DEFAULT_LIMIT,
+) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    """One page of a conversation's message tail, in insertion order.
+
+    Ordered ``(created_at, message_id) ASC`` -- the id tiebreak makes a
+    same-transaction timestamp burst a total order, so a page boundary
+    landing inside a tie can never dup or drop a row. ``after`` is an
+    EXCLUSIVE boundary (``> (cursor_created_at, cursor_message_id)``): the
+    caller already has that row, so it is never replayed on the next page,
+    unlike an inclusive ``>=`` cursor which would double-deliver it on every
+    reconnect. Fetches ``limit + 1`` rows to compute ``has_more`` without a
+    second COUNT query; performs zero writes.
+    """
+    db = platform_db()
+    with db.cursor() as cur:
+        _configure_recovery_statement_timeout(cur)
+        if after is None:
+            cur.execute(
+                f"SELECT * FROM {MESSAGES_TABLE}"
+                " WHERE org_id = %s AND project_id = %s AND conversation_id = %s"
+                " ORDER BY created_at ASC, message_id ASC LIMIT %s",
+                (str(org_id), str(project_id), str(conversation_id), limit + 1),
+            )
+        else:
+            after_created_at, after_message_id = after
+            cur.execute(
+                f"SELECT * FROM {MESSAGES_TABLE}"
+                " WHERE org_id = %s AND project_id = %s AND conversation_id = %s"
+                " AND (created_at, message_id) > (%s, %s)"
+                " ORDER BY created_at ASC, message_id ASC LIMIT %s",
+                (str(org_id), str(project_id), str(conversation_id),
+                 after_created_at, str(after_message_id), limit + 1),
+            )
+        rows = cur.fetchall()
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    items, gaps = _fence_page(page_rows, org_id, project_id, conversation_id)
+    next_cursor = None
+    if has_more and page_rows:
+        last = page_rows[-1]
+        next_cursor = encode_recovery_cursor(last["created_at"], last["message_id"])
+    return items, gaps, next_cursor, has_more
+
+
+def recover_conversation_tail(
+    org_id: Any, project_id: Any, *, cursor: Optional[str] = None,
+    limit: int = RECOVERY_DEFAULT_LIMIT,
+) -> Dict[str, Any]:
+    """The project's most recent conversation, tail-paginated from ``cursor``.
+
+    Pure read -- never creates a conversation, never touches a message row.
+    An empty/new project (no conversation yet) returns the full empty-page
+    envelope shape (``items: [] , next_cursor: null, has_more: false``), NOT
+    a 404 -- the caller must already be authorized for this project before
+    this function is ever reached (the router's job), so "no conversation
+    yet" and "not authorized" are never conflated here.
+
+    Raises ``InvalidRecoveryCursor`` for a malformed ``cursor`` -- the router
+    maps that to a typed 400. Decoded BEFORE any DB call: a bad cursor is
+    cheap-to-reject caller input, not a reason to spend a query.
+    """
+    after = decode_recovery_cursor(cursor) if cursor else None
+    conversation_id = _latest_conversation_id(org_id, project_id)
+    if conversation_id is None:
+        return {"items": [], "gaps": [], "next_cursor": None, "has_more": False}
+    items, gaps, next_cursor, has_more = list_conversation_messages_page(
+        org_id, project_id, conversation_id, after=after, limit=limit,
+    )
+    return {"items": items, "gaps": gaps, "next_cursor": next_cursor,
+            "has_more": has_more}
+
 
 
 # --- router ----------------------------------------------------------------- #
