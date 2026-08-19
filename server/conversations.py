@@ -23,9 +23,11 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -461,6 +463,221 @@ def recover_conversation_messages(
         messages.append(_row_message(row))
 
     return {"messages": messages, "gaps": gaps}
+
+
+# --- retention GC: bounded, tenant-scoped, in-flight-fenced ---------------- #
+#
+# One call is one tenant's (``org_id``'s) pass -- never spans orgs, so a
+# scheduler invoking this once per org keeps GC itself tenant-isolated the
+# same way every read/write path above already is. Bounded two ways so a
+# single run can never become an unbounded background job: a row cap (never
+# deletes more than ``gc_row_cap()`` rows total across every batch in one
+# call) and a wall-clock cap (``gc_wall_clock_s()``, checked BETWEEN batches
+# only -- an in-flight batch is never torn mid-delete). Deletes only rows
+# whose ``created_at`` is older than the retention window
+# (``retention_days()``). Returns a sanitized receipt: ids and counts only,
+# never message content or metadata, matching the quarantine receipt's own
+# "never embed the payload" rule above.
+#
+# The in-flight guard (oracle clause 2) is folded into the DELETE's own
+# candidate selection -- a ``NOT EXISTS`` against ``app_session_requests``'s
+# non-terminal rows for that exact (org_id, project_id) -- inside the SAME
+# statement and transaction snapshot that performs the delete, rather than a
+# separate pre-check SELECT. A request that has already committed
+# 'admitted'/'executing'/'queued' before this transaction's snapshot is
+# always visible here and blocks that project's rows this pass; the only
+# unguarded window is a request whose OWN commit lands inside this
+# transaction's snapshot, which is unreachable by any caller that awaits its
+# admission response before sending conversation traffic. Closing that
+# residual window fully would require a lock shared with
+# ``request_journal.py``, outside this card's two-file budget.
+#
+# An unrecognized future request state is treated as NOT terminal (fails
+# closed, blocking GC for that project) rather than assuming it is safe to
+# ignore -- this module names the terminal set explicitly instead of
+# importing ``request_journal``'s private ``_TERMINAL``, so the two stay
+# independent artifacts a reviewer can diff against each other.
+_JOURNAL_TERMINAL_STATES = ("completed", "failed", "abandoned")
+
+GC_DEFAULT_RETENTION_DAYS = 90.0
+GC_DEFAULT_ROW_CAP = 500
+GC_DEFAULT_WALL_CLOCK_S = 5.0
+GC_DEFAULT_BATCH_SIZE = 200
+
+
+def retention_days() -> float:
+    """The GC retention window in days. Non-positive or unparseable falls
+    back to the default rather than disabling retention entirely."""
+    raw = os.environ.get("LEAF_CONV_RETENTION_DAYS", "").strip()
+    if not raw:
+        return GC_DEFAULT_RETENTION_DAYS
+    try:
+        value = float(raw)
+    except ValueError:
+        return GC_DEFAULT_RETENTION_DAYS
+    return value if value > 0 else GC_DEFAULT_RETENTION_DAYS
+
+
+def gc_row_cap() -> int:
+    """Maximum rows one GC call may delete in total across all its batches."""
+    raw = os.environ.get("LEAF_CONV_GC_ROW_CAP", "").strip()
+    if not raw:
+        return GC_DEFAULT_ROW_CAP
+    try:
+        value = int(raw)
+    except ValueError:
+        return GC_DEFAULT_ROW_CAP
+    return value if value > 0 else GC_DEFAULT_ROW_CAP
+
+
+def gc_wall_clock_s() -> float:
+    """Maximum wall-clock seconds one GC call may run, checked between
+    batches only -- never aborts a batch already in flight."""
+    raw = os.environ.get("LEAF_CONV_GC_WALL_CLOCK_S", "").strip()
+    if not raw:
+        return GC_DEFAULT_WALL_CLOCK_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return GC_DEFAULT_WALL_CLOCK_S
+    return value if value > 0 else GC_DEFAULT_WALL_CLOCK_S
+
+
+def _gc_delete_batch(
+    conn: Any, *, org_id: str, cutoff: datetime, limit: int,
+) -> List[Dict[str, Any]]:
+    """One bounded batch: candidate selection and delete share one statement
+    and one transaction snapshot, so the in-flight guard below can never be
+    stale relative to the rows it is about to delete.
+
+    ``SKIP LOCKED`` lets a concurrent GC pass over the same org make forward
+    progress on disjoint candidates instead of blocking, the same pattern
+    ``request_journal.claim_next_queued_and_turn`` already uses for queue
+    claims.
+    """
+    cur = conn.execute(
+        "WITH candidates AS ("
+        "  SELECT message_id, project_id, conversation_id"
+        "  FROM conversation_messages"
+        "  WHERE org_id = %s AND created_at < %s"
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM app_session_requests AS r"
+        "    WHERE r.org_id = conversation_messages.org_id"
+        "    AND r.project_id = conversation_messages.project_id"
+        "    AND NOT (r.state = ANY(%s))"
+        "  )"
+        "  ORDER BY created_at ASC, message_id ASC"
+        "  LIMIT %s"
+        "  FOR UPDATE OF conversation_messages SKIP LOCKED"
+        ")"
+        " DELETE FROM conversation_messages"
+        " WHERE message_id IN (SELECT message_id FROM candidates)"
+        " RETURNING message_id, project_id, conversation_id",
+        (org_id, cutoff, list(_JOURNAL_TERMINAL_STATES), limit),
+    )
+    return list(cur.fetchall())
+
+
+def _empty_gc_receipt(org_id: Any, *, flag_enabled: bool, cutoff: Optional[datetime] = None,
+                       row_cap: Optional[int] = None,
+                       wall_clock_cap: Optional[float] = None) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "org_id": str(org_id),
+        "flag_enabled": flag_enabled,
+        "cutoff": cutoff.isoformat() if cutoff is not None else None,
+        "retention_days": retention_days(),
+        "row_cap": row_cap if row_cap is not None else gc_row_cap(),
+        "wall_clock_cap_s": wall_clock_cap if wall_clock_cap is not None else gc_wall_clock_s(),
+        "deleted_message_count": 0,
+        "projects_touched": [],
+        "conversations_touched_count": 0,
+        "batches": 0,
+        "truncated_by_row_cap": False,
+        "truncated_by_wall_clock": False,
+        "started_at": now.isoformat(),
+        "finished_at": now.isoformat(),
+    }
+
+
+def run_retention_gc(org_id: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Run one bounded, tenant-scoped retention GC pass for ``org_id``.
+
+    Gated by ``conv_durable_enabled()`` FIRST, exactly like every route above
+    -- when the flag is off this makes no store call and deletes nothing,
+    matching the "checked before any store call" rule the rest of this
+    module already follows (the module docstring's "checked FIRST in every
+    handler" is not route-only: a scheduled background pass is held to the
+    same rule so a negative control that only probes the POST route cannot
+    miss a GC path that deletes durable data while the feature is disabled).
+
+    Deletes durable message rows older than the retention window in capped
+    batches, skipping any project with a non-terminal ``app_session_requests``
+    row (oracle clause 2). Stops after ``gc_row_cap()`` total deletions or
+    ``gc_wall_clock_s()`` elapsed wall-clock time, whichever comes first, and
+    returns a sanitized receipt describing what happened -- ids and counts
+    only.
+    """
+    if not conv_durable_enabled():
+        return _empty_gc_receipt(org_id, flag_enabled=False)
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days())
+    row_cap = gc_row_cap()
+    wall_clock_cap = gc_wall_clock_s()
+    batch_size = min(GC_DEFAULT_BATCH_SIZE, row_cap)
+
+    db = platform_db()
+    started = time.monotonic()
+    deleted_total = 0
+    batches = 0
+    projects_touched: Set[str] = set()
+    conversations_touched: Set[str] = set()
+    truncated_by_row_cap = False
+    truncated_by_wall_clock = False
+
+    while True:
+        if deleted_total >= row_cap:
+            truncated_by_row_cap = True
+            break
+        if time.monotonic() - started >= wall_clock_cap:
+            truncated_by_wall_clock = True
+            break
+        limit = min(batch_size, row_cap - deleted_total)
+
+        def operation(conn: Any, _limit: int = limit) -> List[Dict[str, Any]]:
+            return _gc_delete_batch(
+                conn, org_id=str(org_id), cutoff=cutoff, limit=_limit)
+
+        rows = db.run_transaction(operation)
+        batches += 1
+        if not rows:
+            break
+        deleted_total += len(rows)
+        for row in rows:
+            projects_touched.add(str(row["project_id"]))
+            conversations_touched.add(str(row["conversation_id"]))
+        if len(rows) < limit:
+            break  # fewer candidates than requested: this org is drained
+
+    finished = datetime.now(timezone.utc)
+    return {
+        "org_id": str(org_id),
+        "flag_enabled": True,
+        "cutoff": cutoff.isoformat(),
+        "retention_days": retention_days(),
+        "row_cap": row_cap,
+        "wall_clock_cap_s": wall_clock_cap,
+        "deleted_message_count": deleted_total,
+        "projects_touched": sorted(projects_touched),
+        "conversations_touched_count": len(conversations_touched),
+        "batches": batches,
+        "truncated_by_row_cap": truncated_by_row_cap,
+        "truncated_by_wall_clock": truncated_by_wall_clock,
+        "started_at": now.isoformat(),
+        "finished_at": finished.isoformat(),
+    }
 
 
 # --- router ----------------------------------------------------------------- #
