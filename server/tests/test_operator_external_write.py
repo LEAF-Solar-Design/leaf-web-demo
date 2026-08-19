@@ -397,7 +397,7 @@ def _new_op():
     import subprocess
     subprocess.run(
         [sys.executable, str(SERVER_DIR.parent / "scripts" /
-                             "operator_principal_admin.py"), "grant", op.subject],
+                             "operator_principal_admin.py"), "grant", op.subject, "--granted-by", "test-harness"],
         capture_output=True, text=True,
         env=dict(os.environ, DATABASE_URL=PG_URL), check=True)
     import operator_principals

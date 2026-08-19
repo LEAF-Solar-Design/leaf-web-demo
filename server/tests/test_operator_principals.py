@@ -40,7 +40,7 @@ def _grant(subject: str, profiles: str = "default",
     proc = subprocess.run(
         [sys.executable, str(SERVER_DIR.parent / "scripts" /
                              "operator_principal_admin.py"),
-         "grant", subject, "--profiles", profiles,
+         "grant", subject, "--granted-by", "test-harness", "--profiles", profiles,
          "--environment", environment],
         capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
