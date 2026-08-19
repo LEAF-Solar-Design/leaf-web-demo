@@ -188,6 +188,27 @@ _TASK_LOCAL_STATE: dict[str, _State] = {
             "existed. The app manifest names it."
         ),
     ),
+    "LEAF_CAD_UPLOAD_DIR": _State(
+        container_default="/app/data/cad_uploads",
+        modules=("server/routers/cad_upload.py",),
+        manifests=(),
+        selectors=("LEAF_CAD_UPLOAD_ENABLED",),
+        compose={},
+        compose_absent_why=(
+            "cad_upload is a dormant, flag-off surface (card C1-3): no "
+            "deployed environment enables LEAF_CAD_UPLOAD_ENABLED yet, so "
+            "nothing can write here and there is nothing to lose. This "
+            "declaration is the tracked debt: before the flag flips on in "
+            "any deployed environment, the app manifest must name a durable "
+            "mount for accepted uploads and this entry must list it."
+        ),
+        why=(
+            "Landing zone for accepted DWG/DXF uploads (digest + version "
+            "receipts). User data once live, so image-local is acceptable "
+            "ONLY while the route is flag-off dormant everywhere; the "
+            "compose_absent_why above states the flip-time requirement."
+        ),
+    ),
     "LEAF_GUEST_STORE_DIR": _State(
         container_default="/app/server/guest_drawings",
         modules=("server/write_loop.py",),
