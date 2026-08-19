@@ -21,7 +21,8 @@ foreign tenant/role). A legacy caller (``tenant`` is a plain str, i.e.
 to the pre-C2-6 surface -- role claims only exist once auth is live, so
 there is nothing to gate on.
 
-ROLE MATRIX (card C2-7, clone-into-project + write + undo authority):
+ROLE MATRIX (card C2-7, clone-into-project + write + undo authority; card
+C2-4's PATCH content route shares this SAME gate -- see its own docstring):
 ``editor``/``owner`` only -- ``reviewer``/``viewer``/read-only and any
 unrecognized role are denied, same shape as no role at all. Three traps this
 closes, all found on the C2-6 sibling route and equally reachable here:
@@ -56,7 +57,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 import deps
 import roles as roles_mod
@@ -94,6 +95,17 @@ class ProjectCloneUndoRequest(BaseModel):
     write_id: str
 
 
+class UpdateProjectCloneContentRequest(BaseModel):
+    """The ONE mutation payload (card C2-4). ``extra="forbid"`` rejects any
+    unknown field as a typed 4xx before ``templates.py`` ever sees the body
+    -- schema validation, not just the caps enforced past this boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: Dict[str, Any]
+    expected_content_version: int = Field(..., ge=1)
+
+
 def _flag_off() -> JSONResponse:
     return error_response(
         ErrorCode.BAD_PARAMS, "solar template beta is not enabled",
@@ -103,6 +115,21 @@ def _flag_off() -> JSONResponse:
 
 def _not_found(message: str) -> JSONResponse:
     return error_response(ErrorCode.BAD_PARAMS, message, retryable=False, status_code=404)
+
+
+def _write_validation_error(message: str) -> JSONResponse:
+    return error_response(ErrorCode.BAD_PARAMS, message, retryable=False, status_code=400)
+
+
+def _conflict(message: str) -> JSONResponse:
+    # No dedicated CONFLICT machine code exists in envelopes.ErrorCode (out of
+    # this card's file budget to add one) -- BAD_PARAMS carries the message,
+    # the OVERRIDDEN status_code=409 is what callers actually branch on.
+    return error_response(ErrorCode.BAD_PARAMS, message, retryable=True, status_code=409)
+
+
+def _write_timeout(message: str) -> JSONResponse:
+    return error_response(ErrorCode.TIMEOUT, message, retryable=True, status_code=504)
 
 
 def _digest_mismatch(message: str) -> JSONResponse:
@@ -347,6 +374,75 @@ def undo_project_clone_write(clone_id: str, req: ProjectCloneUndoRequest,
         "clone_id": clone_id,
         "undone": result.undone,
         "already_undone": result.already_undone,
+        "receipt": result.receipt,
+    }
+    return deps.tenant_echo(with_envelope_fields(body), tenant)
+
+
+# --------------------------------------------------------------------------- #
+# The ONE write path: bounded, validated, fails closed (card C2-4).
+#
+# The ONLY mutation route "on the cloned instance" -- distinct from the
+# template-registry preview routes above, which never persist anything. Body
+# shape is pydantic-validated (``extra="forbid"``, non-negative version)
+# BEFORE this handler runs; ``templates.update_project_clone_content`` layers
+# the caps, the tenant-scoped lookup, the CAS conflict check, and the
+# statement-timeout-bounded atomic write (see its docstring). Every failure
+# mode maps to its own typed 4xx/5xx and lands NOTHING.
+#
+# Authority (closes PR #704 finding 7): this route shares the EXACT SAME
+# ``_write_role``/``_binding_for``/``_write_denied`` gate as clone/write/undo
+# above -- checked BEFORE ``templates.update_project_clone_content`` is ever
+# called, so a viewer/reviewer/no-role caller gets the SAME-SHAPE
+# ``_write_denied()`` 403, never a write, regardless of whether the
+# clone_id is real. ``templates.py`` re-verifies the binding a second time,
+# INSIDE its critical section (defense in depth, matching
+# ``write_project_clone_content``'s pattern) -- so a revoked/unverified
+# binding is denied even if this router-level check were ever bypassed by a
+# direct function call. The unknown-vs-foreign-tenant clone_id 404 stays a
+# DISTINCT shape from the role-denial 403 (unlike write/undo's collapsed
+# 403-only shape above): tenant-scoping predates this card's role gate and
+# an existing oracle already locks in byte-identical 404s for that pair.
+# --------------------------------------------------------------------------- #
+@router.patch("/api/templates/clones/{clone_id}")
+def update_project_clone_content(
+    clone_id: str, req: UpdateProjectCloneContentRequest,
+    tenant: Any = Depends(deps.require_tenant),
+):
+    if not templates.solar_template_beta_enabled():
+        return _flag_off()
+    role = _write_role(tenant)
+    if role is None:
+        return _write_denied()
+    binding = _binding_for(tenant, role)
+    try:
+        result = templates.update_project_clone_content(
+            clone_id, str(tenant), req.content, req.expected_content_version,
+            binding=binding,
+            # Read at CALL time (not the function's def-time default) so an
+            # operator/test override of the module constant always applies.
+            lock_timeout_seconds=templates._CLONE_WRITE_LOCK_TIMEOUT_SECONDS,
+        )
+    except templates.TemplateBetaDisabledError:
+        return _flag_off()
+    except templates.ProjectTemplateCloneWriteValidationError as exc:
+        return _write_validation_error(str(exc))
+    except templates.ProjectTemplateCloneNotFoundError:
+        return _not_found(f"unknown project template clone {clone_id!r}")
+    except AuthorityError:
+        return _write_denied()
+    except templates.ProjectTemplateCloneConflictError as exc:
+        return _conflict(str(exc))
+    except templates.ProjectTemplateCloneWriteTimeoutError as exc:
+        return _write_timeout(str(exc))
+    body = {
+        "clone_id": result.clone_id,
+        "tenant_id": result.tenant_id,
+        "project_id": result.project_id,
+        "template_id": result.template_id,
+        "version": result.version,
+        "content": result.content,
+        "content_version": result.content_version,
         "receipt": result.receipt,
     }
     return deps.tenant_echo(with_envelope_fields(body), tenant)
