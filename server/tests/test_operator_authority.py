@@ -131,7 +131,7 @@ def op(monkeypatch, tmp_path):
     proc = subprocess.run(
         [sys.executable, str(SERVER_DIR.parent / "scripts" /
                              "operator_principal_admin.py"),
-         "grant", subject], capture_output=True, text=True, env=env)
+         "grant", subject, "--granted-by", "test-harness"], capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
     import operator_principals as prin
     principal = prin.resolve_principal(subject)

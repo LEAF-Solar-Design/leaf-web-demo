@@ -25,8 +25,9 @@ operator_principals (
   role_revision  INTEGER NOT NULL,   -- monotonic; bumped on ANY row change
   status         TEXT NOT NULL,      -- 'active' | 'suspended' | 'revoked'
   profiles       TEXT[] NOT NULL,    -- allowed operator profiles
-  environment    TEXT NOT NULL,      -- 'staging' | 'production'
-  granted_by TEXT, granted_at, updated_at
+  environment    TEXT NOT NULL,      -- 'staging' | 'production' (CHECK, 0047)
+  granted_by     TEXT NOT NULL,      -- accountable human; non-empty (CHECK, 0047)
+  granted_at, updated_at
 )
 ```
 
@@ -41,6 +42,25 @@ Rules (normative):
 - No claim value, tier (including `admin`), role (including
   `platform_admin`), ops secret, dispatch header, browser flag, or model
   output can mint, imply, or extend operator authority.
+
+### 1.1 Roster mutations (normative)
+
+The roster is an authorization surface, so its mutations are guarded and fail
+closed on anything outside this table:
+
+- `grant` creates an `active` row and requires `--granted-by` (schema
+  `NOT NULL` + non-empty CHECK per migration 0047: attribution is a schema
+  invariant, not a CLI courtesy). A grant naming an existing `suspended` or
+  `revoked` principal is refused unless `--reactivate` is passed explicitly.
+  A bare re-grant bumps `role_revision` and re-attributes, but never resets
+  scope: `profiles` and `environment` change only when passed explicitly.
+- `suspend` applies to `active` principals only.
+- `resume` applies to `suspended` principals only — resume can never
+  un-revoke.
+- `revoke` is terminal: legal from `active` or `suspended`, idempotent on an
+  already-revoked row, and no status command ever leaves `revoked`. The only
+  path back is an explicit `grant --reactivate`, which is a new attributed
+  grant, not a resumption.
 
 ## 2. Operator sessions
 

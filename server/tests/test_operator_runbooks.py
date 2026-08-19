@@ -346,7 +346,7 @@ def _grant(subject):
     env = dict(os.environ, DATABASE_URL=PG_URL)
     subprocess.run(
         [sys.executable, str(SERVER_DIR.parent / "scripts" /
-                             "operator_principal_admin.py"), "grant", subject],
+                             "operator_principal_admin.py"), "grant", subject, "--granted-by", "test-harness"],
         capture_output=True, text=True, env=env, check=True)
 
 
