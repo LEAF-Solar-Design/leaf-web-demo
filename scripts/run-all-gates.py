@@ -1568,6 +1568,13 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         c = parse_pytest(out)
         passed = rc == 0 and c["failed"] == 0 and c["errors"] == 0
         note = pre_note
+        if c["failed"] or c["errors"]:
+            # The real refusal goes first: a bare EXP/GOT pair on the
+            # scoreboard reads as an equality check, but the floor is a
+            # skip-adjusted minimum, not an equality, and a genuine test
+            # failure must never be left for the numbers alone to explain.
+            real_fail = f"suite FAILED: {c['failed']} failed, {c['errors']} errors"
+            note = (real_fail + " " + note) if note else real_fail
         if fail_hint and not passed:
             note = (note + " " if note else "") + fail_hint
         if c["skipped"]:
@@ -1584,14 +1591,22 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 passed = False
                 note += "; non-allowlisted skip: " + "; ".join(unexpected)
         passed, note = coverage_verdict(c, suite.expected, passed, note)
+        # A FAIL row must never reach the scoreboard with an empty note: an
+        # empty note leaves the reader to infer the reason from the EXP/GOT
+        # columns, which is exactly the misreading this card exists to close.
+        if not passed and not note:
+            note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
         passed = rc == 0 and c["failed"] == 0
-        note = f"{c['skipped']} skipped" if c.get("skipped") else ""
+        note = ""
+        if c["failed"]:
+            note = f"suite FAILED: {c['failed']} failed"
         if c.get("skipped"):
+            note = (note + " " if note else "") + f"{c['skipped']} skipped"
             actual = dict(c["skipped_files"])
             allowed = dict(suite.allowed_vitest_skips)
             reported = sum(actual.values())
@@ -1610,6 +1625,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         # the same helper: vitest's `got` counts skips too, so an all-skipped
         # run used to clear its floor here and report a vacuous PASS.
         passed, note = coverage_verdict(c, suite.expected, passed, note)
+        if not passed and not note:
+            note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
                       note=note.strip(), log_path=log_path, counts=c)
 
@@ -2274,8 +2291,21 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
                      selection: str = NO_FILTER) -> None:
     rows = []
     for r in results:
-        exp = "-" if r.suite.expected is None else str(r.suite.expected)
-        rows.append((r.suite.label, exp, r.got, r.status, f"{r.seconds:5.1f}", r.note))
+        if r.suite.expected is None:
+            exp = "-"
+            got_cell = r.got
+        else:
+            # ">=N", never a bare number: a floor is a minimum, not an
+            # equality, so the column must not invite a reader to compare
+            # it against GOT as if EXP == GOT were the pass condition.
+            exp = f">={r.suite.expected}"
+            executed = executed_count(r)
+            # GOT mirrors the same executed (skip-adjusted) count the floor
+            # is actually checked against, so a suite that only cleared its
+            # raw test count via skips cannot LOOK floor-satisfied here while
+            # having FAILED the real check.
+            got_cell = str(executed) if executed is not None else r.got
+        rows.append((r.suite.label, exp, got_cell, r.status, f"{r.seconds:5.1f}", r.note))
 
     headers = ("SUITE", "EXP", "GOT", "RESULT", "SECS", "NOTE")
     widths = [len(h) for h in headers]
