@@ -1,0 +1,65 @@
+name: license-fence
+
+# Card C1-1. Blocks a GPL-3.0 / OpenCADStudio source from landing in the web
+# bundle or vendored sources, and blocks an out-of-prefix import of the
+# MPL-2.0 acadrust engine. See docs/CAD-ENGINE-LICENSE-FENCE.md for the exact
+# deny-list, the allowed acadrust prefix, and the required-check context name
+# to pin in branch protection.
+#
+# CI-wiring choices, each closing a specific way this class of check goes
+# quietly ineffective:
+#   * Trigger is plain `pull_request` (no `pull_request_target`) with NO
+#     `paths:`/`paths-ignore:` filter, so every PR — including one that only
+#     touches vendored/ or docs/ — runs the fence, and `actions/checkout@v4`
+#     on a `pull_request` event checks out the PR's own merge ref, not the
+#     base branch. A hostile fork PR is scanned on its own content.
+#   * `submodules: recursive` on checkout: a vendored dependency pulled in as
+#     a git submodule is real files on disk by the time the scan runs, not a
+#     single gitlink line a plain grep would see nothing inside of.
+#   * No `actions/cache` for web/node_modules or web/dist: every run installs
+#     and builds from scratch, so a stale cached vendor tree can never be
+#     served back unscanned.
+#   * No `concurrency:` / `cancel-in-progress`: a cancelled run must never
+#     leave this required check sitting pending on a PR.
+#   * `npm run build` runs before the scan so `web/dist` (the actual bundled,
+#     minified output — exactly where a GPL license header comment gets
+#     stripped by minification) is on disk and in scope, not just source.
+#   * The scan step calls the script with a plain positional root and reads
+#     its exit code; the script itself does the RED/GREEN decision in Python
+#     (see scripts/check_license_fence.py), never `grep`'s own exit-code
+#     semantics, which are inverted under `set -e` on a clean tree.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  license-fence:
+    name: license-fence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build web bundle
+        working-directory: web
+        run: npm run build
+
+      - name: License fence self-test (negative + positive controls)
+        run: python scripts/check_license_fence.py --self-test
+
+      - name: License fence scan (web bundle inputs + vendored sources)
+        run: python scripts/check_license_fence.py .
