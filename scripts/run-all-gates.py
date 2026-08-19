@@ -1019,6 +1019,17 @@ def build_suites() -> List[Suite]:
         # it up. gate-runner-selftest now pins this list against
         # glob("platform/tests/*_static.py") so the next *_static.py file
         # cannot silently run nowhere.
+        # Card PIPE-3 added 3 tests here (2 in test_db_readiness_static.py, 1
+        # in test_db_schema_proof_static.py) proving their hand-pinned
+        # closed-world registry checks -- the migration manifest tail, and
+        # "every shipped table has a proven readiness contract" -- still go
+        # RED and now name their own file:line plus a remediation instead of
+        # a bare AssertionError. Executed count on this tree is now 175, but
+        # the floor stays 172: scripts/test_gate_runner.py:68 pins this exact
+        # number and is out of this card's file boundary, so 175 reports as a
+        # PASS with an "(executed-count drift: expected >= 172, got 175)"
+        # note rather than moving the floor unilaterally. Re-measure and move
+        # both together in one PR that can touch test_gate_runner.py.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",

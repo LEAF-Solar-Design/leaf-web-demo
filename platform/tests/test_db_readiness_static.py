@@ -1,4 +1,5 @@
 """Dependency-light proofs for the PostgreSQL production configuration seam."""
+import inspect
 import json
 import importlib.util
 from pathlib import Path
@@ -12,6 +13,29 @@ _AUTHORITY_INVENTORY_PATH = _DB_PATH.with_name("authority-inventory.json")
 _SPEC = importlib.util.spec_from_file_location("leaf_platform_db_readiness", _DB_PATH)
 db = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(db)
+
+# The path a failure message below names, so a reviewer staring at a red CI
+# job can jump straight to the pin instead of spelunking the traceback for a
+# path relative to some other cwd (the platform suite runs from REPO_PARENT).
+_THIS_FILE = "platform/tests/test_db_readiness_static.py"
+
+
+def _assert_closed_world_pin(actual, expected, remediation):
+    """Fail a hand-pinned "tail of main" check by naming the exact call site.
+
+    These pins exist because a closed-world registry (the migration
+    manifest's last entry, here) can drift silently past main: nothing else
+    in the codebase notices when a new migration lands without this file's
+    pin being bumped to match. A bare ``assert actual == expected`` makes a
+    reviewer diff two opaque values and guess what to edit; naming the file,
+    the exact line holding the stale pin, and what to change there turns that
+    guess into a one-line fix.
+    """
+    caller = inspect.stack()[1]
+    location = f"{_THIS_FILE}:{caller.lineno}"
+    assert actual == expected, (
+        f"{location} pins {expected!r} but found {actual!r}. {remediation}"
+    )
 
 
 def _assert_manifest_matches_inventory(manifest_names, migration_ids):
@@ -66,8 +90,16 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     manifest_names = [item["name"] for item in db.migration_manifest()]
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
-    assert manifest_names[-1] == "0049_solar_template.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0049"
+    _assert_closed_world_pin(
+        manifest_names[-1], "0049_solar_template.sql",
+        "Update this pin to the new last migration filename once main adds "
+        "one (and the migration_ids pin below to match).",
+    )
+    _assert_closed_world_pin(
+        inventory["scope"]["migration_ids"][-1], "0049",
+        "Update this pin (and authority-inventory.json's "
+        "scope.migration_ids) to the new last migration id.",
+    )
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
     assert "annotation_audit" in db._REQUIRED_COLUMNS
@@ -302,4 +334,46 @@ def test_drawing_import_schema_is_required_before_startup():
     } <= db._REQUIRED_COLUMNS["drawing_store_versions"]
     assert {"binding_id", "platform_tenant_id", "role", "status"} <= (
         db._REQUIRED_COLUMNS["identity_bindings"]
+    )
+
+
+def test_manifest_tail_pin_drift_names_the_pin_line_and_remediation():
+    """lwd#690 shape: main added a migration and this file's tail pin was not
+    bumped to match it. Re-running that shard shape must not surface a bare
+    ``AssertionError`` -- it must name this file, the exact line holding the
+    stale pin, and how to fix it, or a reviewer has to reverse-engineer the
+    fix from two opaque diffed values.
+    """
+    with pytest.raises(AssertionError) as exc_info:
+        _assert_closed_world_pin(
+            "0050_next_migration.sql", "0049_solar_template.sql",
+            "Update this pin to the new last migration filename once main "
+            "adds one.",
+        )
+    message = str(exc_info.value)
+    assert re.search(rf"{re.escape(_THIS_FILE)}:\d+", message), message
+    assert "0050_next_migration.sql" in message
+    assert "0049_solar_template.sql" in message
+    assert (
+        "Update this pin to the new last migration filename once main "
+        "adds one." in message
+    )
+
+
+def test_migration_id_tail_pin_drift_names_the_pin_line_and_remediation():
+    """The migration_ids counterpart of the pin above must fail the same way:
+    naming this file, the drifted line, and the exact remediation."""
+    with pytest.raises(AssertionError) as exc_info:
+        _assert_closed_world_pin(
+            "0050", "0049",
+            "Update this pin (and authority-inventory.json's "
+            "scope.migration_ids) to the new last migration id.",
+        )
+    message = str(exc_info.value)
+    assert re.search(rf"{re.escape(_THIS_FILE)}:\d+", message), message
+    assert "'0050'" in message
+    assert "'0049'" in message
+    assert (
+        "Update this pin (and authority-inventory.json's "
+        "scope.migration_ids) to the new last migration id." in message
     )
