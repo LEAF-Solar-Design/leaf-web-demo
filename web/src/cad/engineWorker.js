@@ -69,6 +69,10 @@ function defaultCreateWorker() {
 // Construction never instantiates anything; start() only instantiates a real
 // Worker when cad_edit is on, so an off flag is a true negative control —
 // no worker, no thread, no wasted instantiation.
+
+// Cap on retained drop receipts (droppedCount still counts every drop).
+export const MAX_DROPPED_RECEIPTS = 32
+
 export class EngineBoundary {
   constructor({ flags, createWorker } = {}) {
     this._enabled = isCadEditEnabled(flags)
@@ -130,7 +134,14 @@ export class EngineBoundary {
 
   _recordDropped(direction, reason) {
     this.droppedCount += 1
+    // Bounded ring, never an unbounded log: a flood of malformed messages
+    // must cost O(MAX_DROPPED_RECEIPTS) memory, not O(flood). droppedCount
+    // stays the full total; the ring keeps only the newest receipts.
     this.droppedReceipts.push({ direction, reason, at: Date.now() })
+    if (this.droppedReceipts.length > MAX_DROPPED_RECEIPTS) {
+      this.droppedReceipts.splice(
+        0, this.droppedReceipts.length - MAX_DROPPED_RECEIPTS)
+    }
   }
 }
 

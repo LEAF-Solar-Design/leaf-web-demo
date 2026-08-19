@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { EngineBoundary, isCadEditEnabled, validateBoundaryMessage } from './engineWorker.js'
+import { EngineBoundary, MAX_DROPPED_RECEIPTS, isCadEditEnabled, validateBoundaryMessage } from './engineWorker.js'
 
 const CAD_DIR = path.dirname(fileURLToPath(import.meta.url))
 const WEB_SRC_DIR = path.dirname(CAD_DIR)
@@ -63,6 +63,21 @@ describe('engine worker boundary flag gating', () => {
 
   it('defaults dormant when no flag is provided at all', () => {
     expect(isCadEditEnabled(undefined)).toBe(false)
+  })
+})
+
+describe('engine worker boundary drop-receipt bound', () => {
+  it('a malformed-message flood is O(cap) memory: count keeps the total, the receipt ring stays capped at the newest entries', () => {
+    const boundary = new EngineBoundary({ flags: { cad_edit: false } })
+    const flood = MAX_DROPPED_RECEIPTS * 3
+    for (let i = 0; i < flood; i += 1) {
+      boundary._recordDropped('fromWorker', `reason-${i}`)
+    }
+    expect(boundary.droppedCount).toBe(flood)
+    expect(boundary.droppedReceipts.length).toBe(MAX_DROPPED_RECEIPTS)
+    // Newest are retained, oldest evicted.
+    expect(boundary.droppedReceipts[0].reason).toBe(`reason-${flood - MAX_DROPPED_RECEIPTS}`)
+    expect(boundary.droppedReceipts.at(-1).reason).toBe(`reason-${flood - 1}`)
   })
 })
 
