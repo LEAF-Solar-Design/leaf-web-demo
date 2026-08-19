@@ -19,11 +19,16 @@ registry is a fixed, in-process catalog, the same shape as
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
+import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+from customization_authority import AuthorityError, TENANT_ROLES, TenantBinding
 
 FLAG_SOLAR_TEMPLATE_BETA = "LEAF_SOLAR_TEMPLATE_BETA_ENABLED"
 
@@ -45,6 +50,14 @@ class TemplateVersionNotFoundError(LookupError):
 
 class TemplateDigestMismatchError(RuntimeError):
     """The content actually served does not hash to its frozen registry digest."""
+
+
+class TemplateBetaDisabledError(RuntimeError):
+    """``solar_template_beta`` is off; the fence for any project clone write."""
+
+
+class ProjectTemplateCloneNotFoundError(LookupError):
+    """Unknown ``clone_id`` (or one that does not belong to the caller's scope)."""
 
 
 def content_digest(content: Dict[str, Any]) -> str:
@@ -227,3 +240,132 @@ def clone_template(template_id: str, version: Optional[str] = None) -> TemplateC
         template_id=read.template_id, version=read.version,
         content=read.content, receipt=receipt,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Project-owned template clone (card C2-3)
+#
+# ``clone_template_for_project`` lands an ISOLATED copy bound to one
+# (tenant_id, project_id) pair. The caller must pass a verified
+# ``customization_authority.TenantBinding`` naming the caller's role for the
+# EXACT ``tenant_id`` being cloned into -- ``_authorize_project_clone`` below
+# is a real, enforced check (not a docstring promise) that mirrors
+# ``CustomizationAuthority.authorize_stage``'s pattern: a verified binding
+# whose role is ``owner``/``editor`` and whose tenant matches the requested
+# tenant EXACTLY. A caller can never mint a clone bound to a tenant/project
+# other than the one their own binding names.
+#
+# Isolation is by ``copy.deepcopy`` of the SOURCE template's content, never a
+# shallow ``dict()``/``__dict__`` copy and never a shared reference -- nested
+# payload structures must never alias the template's own stored content, so a
+# later mutation of the clone can never write through to the template.
+#
+# The receipt's ``content_digest`` is the template's FROZEN registry digest
+# (``resolved.digest``), copied verbatim -- never recomputed over the clone's
+# own (re-serialized) copy, so it stays byte-identical to every other
+# receipt naming that same source version.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ProjectTemplateClone:
+    clone_id: str
+    tenant_id: str
+    project_id: str
+    template_id: str
+    version: str
+    content: Dict[str, Any]
+    receipt: Dict[str, Any]
+
+
+_PROJECT_CLONES: Dict[str, ProjectTemplateClone] = {}
+_PROJECT_CLONES_LOCK = threading.Lock()
+
+# Roles allowed to clone a template into a project -- the same owner/editor
+# split ``customization_authority._STAGE_ROLES`` uses for staging writes.
+_CLONE_AUTHORIZED_ROLES = frozenset({"owner", "editor"})
+
+
+def _authorize_project_clone(binding: TenantBinding, tenant_id: str) -> None:
+    """Require a verified owner/editor binding for the EXACT target tenant.
+
+    Every failure -- an unverified binding, a role outside
+    ``customization_authority.TENANT_ROLES``, a role outside owner/editor, or
+    a binding whose tenant does not match the requested ``tenant_id`` -- raises
+    the SAME :class:`AuthorityError` shape (``"template_clone_denied"``), so a
+    denial never tells a caller which check failed or whether the target
+    tenant/project even exists.
+    """
+    authorized = (
+        isinstance(binding, TenantBinding)
+        and binding.verified is True
+        and isinstance(binding.tenant_id, str)
+        and binding.tenant_id == tenant_id
+        and binding.role in TENANT_ROLES
+        and binding.role in _CLONE_AUTHORIZED_ROLES
+    )
+    if not authorized:
+        raise AuthorityError("template_clone_denied")
+
+
+def clone_template_for_project(
+    template_id: str,
+    tenant_id: str,
+    project_id: str,
+    version: Optional[str] = None,
+    *,
+    binding: TenantBinding,
+) -> ProjectTemplateClone:
+    """Clone one exact pinned template version into a project-owned copy.
+
+    Fails closed (raises, writes nothing) when ``solar_template_beta`` is
+    off, when ``tenant_id``/``project_id`` are missing, when ``binding`` does
+    not authorize an owner/editor of the exact target tenant (see
+    :func:`_authorize_project_clone`), or when the source version's content
+    digest does not verify -- in every case before any clone is landed in
+    the store.
+    """
+    if not solar_template_beta_enabled():
+        raise TemplateBetaDisabledError("solar_template_beta is not enabled")
+    if not tenant_id or not tenant_id.strip():
+        raise ValueError("tenant_id is required to bind a project clone")
+    if not project_id or not project_id.strip():
+        raise ValueError("project_id is required to bind a project clone")
+    _authorize_project_clone(binding, tenant_id)
+
+    resolved = resolve_version(template_id, version)
+    verify_digest(resolved)
+
+    isolated_content = copy.deepcopy(resolved.content)
+    clone_id = str(uuid.uuid4())
+    receipt = {
+        "template_id": resolved.template_id,
+        "version": resolved.version,
+        "content_digest": resolved.digest,
+        "action": "clone",
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "clone_id": clone_id,
+    }
+    clone = ProjectTemplateClone(
+        clone_id=clone_id, tenant_id=tenant_id, project_id=project_id,
+        template_id=resolved.template_id, version=resolved.version,
+        content=isolated_content, receipt=receipt,
+    )
+    with _PROJECT_CLONES_LOCK:
+        _PROJECT_CLONES[clone_id] = clone
+    return clone
+
+
+def get_project_clone(clone_id: str) -> ProjectTemplateClone:
+    """Fetch a previously landed project clone by its id."""
+    clone = _PROJECT_CLONES.get(clone_id)
+    if clone is None:
+        raise ProjectTemplateCloneNotFoundError(clone_id)
+    return clone
+
+
+def list_project_clones(tenant_id: str, project_id: str) -> List[ProjectTemplateClone]:
+    """All clones landed for one (tenant_id, project_id) pair."""
+    return [
+        clone for clone in _PROJECT_CLONES.values()
+        if clone.tenant_id == tenant_id and clone.project_id == project_id
+    ]
