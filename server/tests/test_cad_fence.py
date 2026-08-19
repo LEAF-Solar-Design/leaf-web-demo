@@ -1,202 +1,108 @@
 """CAD upload/edit fence: standalone negative controls (Lane C1, card C1-7).
 
-The real cad_upload production surface (server/routers/cad_upload.py,
-server/cad_versions.py) is built by sibling cards C1-2..C1-4 and has not
-landed on this app revision. This suite proves the fence itself -- the
-negative controls the oracle demands -- using ONLY what already exists on
-this revision:
+Both controls target the REAL landed surfaces:
 
-1. cad_upload OFF refuses everything. Modeled with the SAME rollout-mode
-   convention `server/customization_flags.py` already establishes for
-   R5/R6/R7 (env-var driven, fail-closed on garbage), scoped to a new
-   `LEAF_CAD_UPLOAD_MODE` var. The reference gate below wraps a toy "accept
-   upload" step that would write bytes + a version receipt; with the flag
-   OFF every call is refused BEFORE the write, so zero bytes ever touch
-   storage. NOTE for the C1-3 lane: land the real check at this env name (or
-   amend `_cad_upload_enabled` here) in the same PR that mounts
-   `cad_upload.py`, so this file keeps proving the real gate.
+1. cad_upload OFF refuses everything. Drives the REAL
+   ``server/routers/cad_upload.py`` route (``POST /api/cad/upload``) mounted
+   on a TestClient app exactly as ``server/tests/test_cad_upload_validation.py``
+   mounts it, with the real ``LEAF_CAD_UPLOAD_ENABLED`` boolean flag left off.
+   Asserts the real flag-off envelope (503 INTERNAL, never 405/500) AND that
+   the store saw zero writes -- inspected directly, not inferred from the
+   status code alone.
 
-2. cad_edit OFF never mounts the worker -- a standalone flip-time proof.
-   Mirrors the precedent in `test_operator_vocab_freeze.py`
-   (`test_no_registered_route_under_operator_namespace`): sweep the live
-   FastAPI `app` for any route under the CAD-edit worker namespace and prove
-   none is registered, THEN flip the env var at runtime in the SAME process
-   and re-check the flag reader itself resolves ON -- proving the fence
-   mechanism (not merely today's route absence) responds to the flip both
-   ways. NOTE for the C1-5/C1-6 lane: extend `_cad_edit_worker_routes()` to
-   the real route prefix when the worker mounts, so this gate keeps proving
-   the OFF state once ON is reachable.
+2. cad_edit OFF never mounts the worker. ``cad_edit`` has no server-side
+   route at all on this revision (C1-5/C1-6 landed it entirely client-side --
+   ``web/src/cad/engineWorker.js``'s ``EngineBoundary`` + ``CadEntry.jsx`` /
+   ``EditSurface.jsx``), so a FastAPI route-mount check here would be a toy
+   proving nothing real. The genuine flip-time proof for this control lives
+   in ``harness/tests/cad_upload.spec.ts``, which imports the real
+   ``EngineBoundary`` and spies on the ``Worker`` constructor.
 """
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from customization_flags import RolloutMode, mode
+from routers import cad_upload as cad_upload_router
 
-CAD_UPLOAD_ENV = "LEAF_CAD_UPLOAD_MODE"
-CAD_EDIT_ENV = "LEAF_CAD_EDIT_MODE"
-CAD_INTERNAL_TENANTS_ENV = "LEAF_CAD_INTERNAL_TENANTS"
-
-
-def _internal_tenants() -> frozenset[str]:
-    return frozenset(
-        part.strip() for part in os.environ.get(
-            CAD_INTERNAL_TENANTS_ENV, "").split(",") if part.strip())
+VALID_DWG = b"AC1032" + os.urandom(64)
 
 
-def _flag_enabled(env_name: str, tenant_id: str) -> bool:
-    selected = mode(env_name)
-    if selected is RolloutMode.ALL:
-        return True
-    if selected is RolloutMode.INTERNAL:
-        return tenant_id in _internal_tenants()
-    return False
+@pytest.fixture()
+def client():
+    app = FastAPI()
+    app.include_router(cad_upload_router.router)
+    return TestClient(app)
 
 
-def _cad_upload_enabled(tenant_id: str = "demo-tenant") -> bool:
-    return _flag_enabled(CAD_UPLOAD_ENV, tenant_id)
+def _staged_files(upload_dir):
+    if not upload_dir.exists():
+        return []
+    return [
+        p for p in upload_dir.iterdir()
+        if p.is_file() and p.name != cad_upload_router._RECEIPTS_FILENAME
+    ]
 
 
-def _cad_edit_enabled(tenant_id: str = "demo-tenant") -> bool:
-    return _flag_enabled(CAD_EDIT_ENV, tenant_id)
+def _post(client, filename: str, data: bytes):
+    return client.post(
+        "/api/cad/upload", files={"file": (filename, data, "application/octet-stream")})
 
 
-class CadUploadRefused(Exception):
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
+# --- 1. cad_upload OFF refuses everything, against the REAL route ----------
+
+@pytest.mark.parametrize("flag_value", [None, "", "0", "false", "no", "off",
+                                         "not-a-real-mode", "  "])
+def test_cad_upload_off_refuses_the_real_route(monkeypatch, tmp_path, flag_value):
+    if flag_value is None:
+        monkeypatch.delenv(cad_upload_router.FLAG_CAD_UPLOAD, raising=False)
+    else:
+        monkeypatch.setenv(cad_upload_router.FLAG_CAD_UPLOAD, flag_value)
+    upload_dir = tmp_path / "cad_uploads"
+    monkeypatch.setenv("LEAF_CAD_UPLOAD_DIR", str(upload_dir))
+    assert cad_upload_router.cad_upload_enabled() is False
+
+    app = FastAPI()
+    app.include_router(cad_upload_router.router)
+    resp = TestClient(app).post(
+        "/api/cad/upload",
+        files={"file": ("plan.dwg", VALID_DWG, "application/octet-stream")})
+
+    # The real flag-off envelope: a typed 503, never a routing 405/500.
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["error_code"] == "INTERNAL"
+
+    # Nothing was written: the store directory itself was never even created.
+    assert not upload_dir.exists()
+    assert _staged_files(upload_dir) == []
 
 
-def _reference_accept_upload(store_dir: Path, filename: str, payload: bytes,
-                              tenant_id: str = "demo-tenant") -> dict:
-    """Toy reference of the write-before-store gate C1-3 implements for real:
-    refuse BEFORE any byte is written when the flag is off."""
-    if not _cad_upload_enabled(tenant_id):
-        raise CadUploadRefused("cad_upload_disabled")
-    store_dir.mkdir(parents=True, exist_ok=True)
-    target = store_dir / filename
-    target.write_bytes(payload)
-    return {"path": str(target), "bytes": len(payload)}
+def test_cad_upload_flip_time_on_then_off_against_the_real_route(monkeypatch, tmp_path):
+    upload_dir = tmp_path / "cad_uploads"
+    monkeypatch.setenv("LEAF_CAD_UPLOAD_DIR", str(upload_dir))
+    app = FastAPI()
+    app.include_router(cad_upload_router.router)
+    client = TestClient(app)
+
+    monkeypatch.setenv(cad_upload_router.FLAG_CAD_UPLOAD, "1")
+    on_resp = _post(client, "plan.dwg", VALID_DWG)
+    assert on_resp.status_code == 201
+    assert len(_staged_files(upload_dir)) == 1
+
+    monkeypatch.setenv(cad_upload_router.FLAG_CAD_UPLOAD, "0")
+    off_resp = _post(client, "plan2.dwg", VALID_DWG)
+    assert off_resp.status_code == 503
+    assert off_resp.json()["error"]["error_code"] == "INTERNAL"
+    # No second file landed once the flag flipped off, in the SAME process.
+    assert len(_staged_files(upload_dir)) == 1
 
 
-# --- 1. cad_upload OFF refuses everything -----------------------------------
-
-@pytest.mark.parametrize("filename,payload", [
-    ("plan.dwg", b"AC1027-fake-dwg-bytes"),
-    ("plan.dxf", b"0\nSECTION\n"),
-    ("empty.dwg", b""),
-    ("chunky.dwg", b"x" * 4096),
-])
-def test_cad_upload_off_by_default_refuses_every_call(monkeypatch, tmp_path,
-                                                        filename, payload):
-    monkeypatch.delenv(CAD_UPLOAD_ENV, raising=False)
-    assert _cad_upload_enabled() is False  # unset == off, no other config needed
-    store_dir = tmp_path / "cad-store"
-    with pytest.raises(CadUploadRefused) as err:
-        _reference_accept_upload(store_dir, filename, payload)
-    assert err.value.reason == "cad_upload_disabled"
-    assert not store_dir.exists(), "a refused upload must leave zero orphan bytes"
-
-
-def test_cad_upload_explicit_off_refuses(monkeypatch, tmp_path):
-    monkeypatch.setenv(CAD_UPLOAD_ENV, "off")
-    store_dir = tmp_path / "cad-store"
-    with pytest.raises(CadUploadRefused):
-        _reference_accept_upload(store_dir, "plan.dwg", b"data")
-    assert not store_dir.exists()
-
-
-def test_cad_upload_malformed_mode_fails_closed(monkeypatch, tmp_path):
-    # An unparseable mode value is always off (RolloutMode.mode's own contract).
-    monkeypatch.setenv(CAD_UPLOAD_ENV, "not-a-real-mode")
-    assert mode(CAD_UPLOAD_ENV) is RolloutMode.OFF
-    store_dir = tmp_path / "cad-store"
-    with pytest.raises(CadUploadRefused):
-        _reference_accept_upload(store_dir, "plan.dwg", b"data")
-    assert not store_dir.exists()
-
-
-def test_cad_upload_internal_mode_refuses_a_non_internal_tenant(monkeypatch, tmp_path):
-    monkeypatch.setenv(CAD_UPLOAD_ENV, "internal")
-    monkeypatch.setenv(CAD_INTERNAL_TENANTS_ENV, "trusted-tenant")
-    store_dir = tmp_path / "cad-store"
-    with pytest.raises(CadUploadRefused):
-        _reference_accept_upload(store_dir, "plan.dwg", b"data", tenant_id="other-tenant")
-    assert not store_dir.exists()
-    # The SAME flag, same process, accepts the trusted tenant.
-    accepted = _reference_accept_upload(store_dir, "plan.dwg", b"data",
-                                         tenant_id="trusted-tenant")
-    assert Path(accepted["path"]).read_bytes() == b"data"
-
-
-def test_cad_upload_flip_time_on_then_off_in_the_same_process(monkeypatch, tmp_path):
-    # Flip-time proof: the SAME reference gate, in the SAME process, is
-    # entirely governed by the live env var, not by any cached/imported state.
-    store_dir = tmp_path / "cad-store"
-    monkeypatch.setenv(CAD_UPLOAD_ENV, "all")
-    accepted = _reference_accept_upload(store_dir, "plan.dwg", b"payload-bytes")
-    assert Path(accepted["path"]).read_bytes() == b"payload-bytes"
-
-    monkeypatch.setenv(CAD_UPLOAD_ENV, "off")
-    with pytest.raises(CadUploadRefused):
-        _reference_accept_upload(store_dir, "plan2.dwg", b"more-bytes")
-    assert not (store_dir / "plan2.dwg").exists()
-
-
-# --- 2. cad_edit OFF never mounts the worker: standalone flip-time proof ---
-
-def _cad_edit_worker_routes() -> tuple[str, ...]:
-    """Every path prefix the future editing-worker mount is expected to use.
-    Extend this in the SAME PR that mounts the real worker (see module
-    docstring) so this gate keeps proving the OFF state once ON exists."""
-    return ("/api/cad", "/api/cad-worker", "/api/drawings/edit",
-            "/api/cad/edit", "/api/cad/worker")
-
-
-def test_cad_edit_worker_not_mounted_on_this_app_revision():
-    from app import app
-
-    mounted = [getattr(r, "path", "") for r in app.routes
-               if getattr(r, "path", "").startswith(_cad_edit_worker_routes())]
-    assert mounted == [], (
-        f"a CAD-edit worker route is registered on a pre-cad_edit app "
-        f"revision: {mounted}; the C1-5/C1-6 lane must amend this gate in "
-        "the same PR that mounts the real worker")
-
-
-def test_cad_edit_flag_reader_flips_both_ways_in_the_same_process(monkeypatch):
-    # Standalone: no server process, no worker module -- proves the FENCE
-    # ITSELF (not merely current route absence) tracks the live flag in both
-    # directions within one process.
-    monkeypatch.delenv(CAD_EDIT_ENV, raising=False)
-    assert _cad_edit_enabled() is False
-
-    monkeypatch.setenv(CAD_EDIT_ENV, "all")
-    assert _cad_edit_enabled() is True
-
-    monkeypatch.setenv(CAD_EDIT_ENV, "off")
-    assert _cad_edit_enabled() is False
-
-    monkeypatch.setenv(CAD_EDIT_ENV, "internal")
-    monkeypatch.delenv(CAD_INTERNAL_TENANTS_ENV, raising=False)
-    assert _cad_edit_enabled("demo-tenant") is False
-    monkeypatch.setenv(CAD_INTERNAL_TENANTS_ENV, "demo-tenant")
-    assert _cad_edit_enabled("demo-tenant") is True
-    assert _cad_edit_enabled("other-tenant") is False
-
-
-def test_cad_edit_worker_absence_holds_even_after_flipping_the_flag_on(monkeypatch):
-    # Even flipped ON, THIS app revision still mounts nothing (the worker
-    # literally does not exist here yet) -- proves the route-absence
-    # assertion above is not accidentally passing only because the flag
-    # happens to be off in the collecting test process.
-    from app import app
-
-    monkeypatch.setenv(CAD_EDIT_ENV, "all")
-    assert _cad_edit_enabled() is True
-    mounted = [getattr(r, "path", "") for r in app.routes
-               if getattr(r, "path", "").startswith(_cad_edit_worker_routes())]
-    assert mounted == []
+# --- 2. cad_edit OFF never mounts the worker --------------------------------
+#
+# No server-side route exists for cad_edit on this revision -- see module
+# docstring. The real flip-time proof (Worker-constructor spy against the
+# real EngineBoundary) lives in harness/tests/cad_upload.spec.ts.
