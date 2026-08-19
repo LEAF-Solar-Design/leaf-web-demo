@@ -1133,6 +1133,9 @@ def build_suites() -> List[Suite]:
                   ("test/tenantRepoLease.test.ts", 4),
                   ("test/harnessSchema.pg.test.ts", 1),
                   ("test/pgSessionStore.contract.test.ts", 5),
+                  # B-C6 conversation e2e: Postgres-gated (needs a live
+                  # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
+                  ("test/conversation.test.ts", 1),
               )),
         # --- web unit (cwd=web) --- #
         # The web workspace had NO unit runner until the T1 overlay card; its
