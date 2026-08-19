@@ -388,6 +388,29 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
 }
 
 
+def _stage_authority_refusal_detail(
+    authority_session_id: str | None, authority_turn_id: str | None,
+) -> str:
+    """Name which side of the authority contract refused, for the operator log.
+
+    `stage_author_identity` answers only None, and the XOR case already 422s
+    before it runs, so exactly two shapes reach the 409: no tuple at all (the
+    caller never named a turn — a client that does not send the headers), or a
+    full tuple the identity resolution rejected (turn missing, completed,
+    superseded, stale, subject mismatch, or an unresolved back-edge binding).
+    Splitting those two here needs no second lookup and cannot drift from the
+    resolver. The value rides `CustomizationServiceError.detail`, which is
+    log-only by contract (customization_service.py) and never serialized into
+    a response — the tenant keeps seeing only the opaque reason code, so this
+    adds no probing oracle. The 2026-08-18 staging acceptance failure printed
+    `detail=-` and cost an hour of ALB-log forensics to learn it was the
+    missing-tuple shape; this line answers that in one read.
+    """
+    if not authority_session_id and not authority_turn_id:
+        return "missing_authority_tuple"
+    return "authority_tuple_rejected"
+
+
 def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
     """Bind an authoring idempotency key to the subject that requested it.
 
@@ -674,7 +697,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         tenant, authority_session_id, authority_turn_id)
     if tenant is None:
         return _customization_error(
-            CustomizationServiceError("stage_authority_invalid", 409)
+            CustomizationServiceError(
+                "stage_authority_invalid", 409,
+                detail=_stage_authority_refusal_detail(
+                    authority_session_id, authority_turn_id),
+            )
         )
     denied = _customization_gate(5, tenant)
     if denied is not None:
@@ -748,7 +775,11 @@ def stage(
     )
     if tenant is None:
         return _customization_error(
-            CustomizationServiceError("stage_authority_invalid", 409)
+            CustomizationServiceError(
+                "stage_authority_invalid", 409,
+                detail=_stage_authority_refusal_detail(
+                    authority_session_id, authority_turn_id),
+            )
         )
     try:
         service = CustomizationService.configured()

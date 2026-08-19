@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -656,6 +657,62 @@ def test_direct_authenticated_author_cannot_bypass_missing_turn_authority(
         )
     assert response.status_code == 409
     assert dispatched == []
+
+
+@pytest.mark.parametrize("route_name", ["author", "stage"])
+@pytest.mark.parametrize("tuple_state,expected_detail", [
+    ("missing", "missing_authority_tuple"),
+    ("rejected", "authority_tuple_rejected"),
+])
+def test_stage_authority_refusal_names_its_branch_in_the_log_only(
+    monkeypatch, caplog, route_name, tuple_state, expected_detail
+):
+    # The 2026-08-18 staging acceptance failure logged `detail=-`, which
+    # distinguished nothing: a client that never sent the authority headers
+    # reads identically to a live turn the resolver rejected. The refusal must
+    # name its branch in the OPERATOR LOG, and only there — the §10 response
+    # keeps the opaque reason code, so the split adds no probing oracle.
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    headers = {}
+    if tuple_state == "rejected":
+        # A full tuple the resolver rejects (turn missing, stale, superseded,
+        # subject mismatch, or an unresolved binding — all one branch here).
+        monkeypatch.setattr(
+            author_router.deps, "stage_author_identity", lambda *_: None
+        )
+        headers = {
+            "authority_session_id": "session-a",
+            "authority_turn_id": "turn-a",
+        }
+    tenant = deps.TenantContext("tenant-a", tier="hosted_pro", subject=ALICE)
+    with caplog.at_level(logging.DEBUG):
+        if route_name == "author":
+            response = author_router.author(
+                author_router.AuthorRequest(description=DESCRIPTION, mode="build"),
+                tenant=tenant,
+                idempotency_key="request-a",
+                **headers,
+            )
+        else:
+            response = author_router.stage(
+                author_router.StageRequest(
+                    description=DESCRIPTION, mode="build",
+                    idempotency_key="request-a",
+                ),
+                tenant=tenant,
+                **headers,
+            )
+    assert response.status_code == 409
+    refusals = [
+        r.getMessage() for r in caplog.records
+        if "stage_authority_invalid" in r.getMessage()
+    ]
+    assert refusals, "the refusal must be logged"
+    assert f"detail={expected_detail}" in refusals[0]
+    # Log-only by contract: the branch name must never reach the tenant.
+    assert expected_detail not in bytes(response.body).decode()
 
 
 @pytest.mark.parametrize("active_subject", [MALLORY, None])
