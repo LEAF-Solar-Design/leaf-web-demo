@@ -66,8 +66,8 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     manifest_names = [item["name"] for item in db.migration_manifest()]
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
-    assert manifest_names[-1] == "0046_conversation_durable.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0046"
+    assert manifest_names[-1] == "0047_solar_template.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0047"
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
     assert "annotation_audit" in db._REQUIRED_COLUMNS
