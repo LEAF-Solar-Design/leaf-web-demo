@@ -15,10 +15,10 @@
 # Deliberately carries NO concurrency block (the tf immune pattern) -- do NOT
 # copy test-gate.yml's cancel-in-progress: true + per-PR group here.
 #
-# KNOWN LIMIT (PIPE-11, escalation_tier 1): this workflow lives under
-# .github/workflows/, so the PR that adds it cannot be checked by its own
-# not-yet-existing `contract` status. Merging it needs a one-time operator
-# admin action; every PR after this one gets the real signal.
+# BOOTSTRAP NOTE (PIPE-11): pull_request workflows run from the PR's merge
+# ref, so this check DID run on the PR that adds it -- no admin bypass was
+# needed. Every workflow-touching PR (this one included) carries a real
+# `contract` check-run on its head.
 # ---------------------------------------------------------------------------
 
 on:
