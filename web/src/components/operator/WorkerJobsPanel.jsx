@@ -1,10 +1,8 @@
 /**
  * WorkerJobsPanel — "worker job status and cancellation" (Wave 2 Lane E
- * plan). server/routers/operator_worker.py exposes ONLY
- * POST /api/operator/worker/dispatch on main: no GET status/list route and
- * no cancel route exist. So this panel can only ever show the receipt from
- * the dispatch call the console itself made, and Cancel is a disabled
- * control with the reason spelled out — never a fabricated "cancelled".
+ * plan). This bounded panel only offers cancellation for an exact active
+ * worker/run pair returned by the server. The server, not the browser,
+ * resolves its owner, tenant, freshness, and terminal state.
  *
  * The commands field is free-text shell commands the operator is about to
  * run in the DISPOSABLE worker (contract/OPERATOR.md section 6); it is
@@ -15,13 +13,22 @@ import { useState } from 'react'
 import * as operatorClient from '../../operatorClient.js'
 
 const CANCEL_DISABLED_REASON =
-  'No worker-cancel endpoint is mounted on main (operator.worker_cancel_job is declared "v1: on" in the ' +
-  'contract but server/routers/operator_worker.py exposes only POST /dispatch) — flagged as a follow-up.'
+  'Cancellation is available only while this receipt identifies one active worker and run.'
+
+function cancelTarget(receipt) {
+  const workerId = receipt?.worker_id ?? receipt?.workerId
+  const runId = receipt?.run_id ?? receipt?.runId
+  const active = receipt?.status === 'running' || receipt?.status === 'accepted'
+  return active && typeof workerId === 'string' && typeof runId === 'string'
+    ? { workerId, runId }
+    : null
+}
 
 export default function WorkerJobsPanel({ onSignedOut }) {
   const [commandsText, setCommandsText] = useState('')
   const [receipt, setReceipt] = useState(null)
   const [dispatching, setDispatching] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState(null)
 
   const dispatch = async () => {
@@ -38,6 +45,23 @@ export default function WorkerJobsPanel({ onSignedOut }) {
       setDispatching(false)
     }
   }
+
+  const cancel = async () => {
+    const target = cancelTarget(receipt)
+    if (!target || cancelling) return
+    setCancelling(true)
+    setError(null)
+    try {
+      setReceipt(await operatorClient.cancelWorker(target.workerId, target.runId))
+    } catch (e) {
+      setError(e?.body?.detail || e?.message || 'The worker did not cancel.')
+      if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  const target = cancelTarget(receipt)
 
   return (
     <section className="operator-panel operator-worker-panel" aria-label="Worker jobs">
@@ -61,13 +85,14 @@ export default function WorkerJobsPanel({ onSignedOut }) {
           <button
             type="button"
             className="chip-act operator-cancel"
-            disabled
-            aria-label={`Cancel (unavailable — ${CANCEL_DISABLED_REASON})`}
-            title={CANCEL_DISABLED_REASON}
+            disabled={!target || cancelling}
+            aria-label={target ? 'Cancel active worker' : `Cancel (unavailable — ${CANCEL_DISABLED_REASON})`}
+            title={target ? 'Cancel this exact active worker run' : CANCEL_DISABLED_REASON}
+            onClick={cancel}
           >
-            Cancel
+            {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
-          <p className="dim">{CANCEL_DISABLED_REASON}</p>
+          {!target && <p className="dim">{CANCEL_DISABLED_REASON}</p>}
         </div>
       )}
 

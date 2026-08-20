@@ -198,12 +198,19 @@ export function describeSecret(handle) {
   return operatorFetch(`/api/operator/secrets/${encodeURIComponent(handle)}`)
 }
 
-// --- Worker dispatch (server/routers/operator_worker.py) -----------------
-// CAPABILITY-ONLY: there is no GET status/list route and no cancel route on
-// main. The console can only show the receipt from the dispatch it made.
+// --- Worker dispatch and cancellation (server/routers/operator_worker.py) -
+// The server resolves owner, tenant, freshness, and active state. The browser
+// can only name the exact worker/run pair from a dispatch receipt.
 export function dispatchWorker(commands, { repo = null, timeoutMs = null } = {}) {
   const body = { commands }
   if (repo != null) body.repo = repo
   if (timeoutMs != null) body.timeout_ms = timeoutMs
   return postJson('/api/operator/worker/dispatch', body)
+}
+
+export function cancelWorker(workerId, runId) {
+  return postJson('/api/operator/worker/cancel', {
+    worker_id: workerId,
+    run_id: runId,
+  })
 }

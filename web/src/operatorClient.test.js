@@ -146,6 +146,14 @@ describe('route shapes (unowned server contract, asserted so a rename is caught)
     expect(body).not.toHaveProperty('network')
     expect(body.commands).toEqual(['echo hi'])
   })
+
+  it('cancelWorker sends only the exact worker/run tuple', async () => {
+    fetch.mockResolvedValue(jsonResponse(200, { worker_id: 'worker-1', run_id: 'run-1', status: 'cancelled' }))
+    await operatorClient.cancelWorker('worker-1', 'run-1')
+    const [url, init] = fetch.mock.calls[0]
+    expect(url).toContain('/api/operator/worker/cancel')
+    expect(JSON.parse(init.body)).toEqual({ worker_id: 'worker-1', run_id: 'run-1' })
+  })
 })
 
 describe('failure surfaces a status-tagged error, never a silent open', () => {
