@@ -79,7 +79,7 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, onOpen
           <ul>{surface.additions.map((addition) => <li key={addition}>{addition}</li>)}</ul>
         </div>
       </div>
-      {surface.id === 'browser' && <p className="tc-product-note">Project files and full blank-slate composition arrive in the next product wave. The shared identity and project rail are live now.</p>}
+      {surface.id === 'browser' && <p className="tc-product-note">Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.</p>}
       {surface.id === 'solar' && <p className="tc-product-note">The versioned LEAF solar template is not loaded yet. No shared seed is mutable from this preview.</p>}
       {surface.id === 'ios' && <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>}
       <button type="button" className="tc-product-cad-link" onClick={onOpenCad}>Open the live CAD workspace</button>
