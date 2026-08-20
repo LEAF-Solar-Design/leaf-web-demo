@@ -7,7 +7,8 @@ import * as operatorClient from '../../operatorClient.js'
 afterEach(cleanup)
 
 beforeEach(() => {
-  vi.spyOn(operatorClient, 'dispatchWorker').mockResolvedValue({ jobId: 'op-1', status: 'accepted' })
+  vi.spyOn(operatorClient, 'dispatchWorker').mockResolvedValue({ jobId: 'op-1', worker_id: 'worker-1', run_id: 'run-1', status: 'running' })
+  vi.spyOn(operatorClient, 'cancelWorker').mockResolvedValue({ worker_id: 'worker-1', run_id: 'run-1', status: 'cancelled' })
   vi.spyOn(operatorClient, 'isOperatorDenied').mockReturnValue(false)
 })
 
@@ -20,13 +21,25 @@ describe('acceptance: worker job status and cancellation', () => {
     expect(await screen.findByText(/"jobId": "op-1"/)).toBeTruthy()
   })
 
-  it('renders Cancel as a disabled control naming the reason, never a fake cancellation', async () => {
+  it('cancels only the exact active worker/run pair returned by the server', async () => {
+    render(<WorkerJobsPanel />)
+    fireEvent.change(screen.getByLabelText(/commands/i), { target: { value: 'echo hi' } })
+    fireEvent.click(screen.getByRole('button', { name: /dispatch job/i }))
+    const cancel = await screen.findByRole('button', { name: /cancel/i })
+    expect(cancel.disabled).toBe(false)
+    fireEvent.click(cancel)
+    await waitFor(() => expect(operatorClient.cancelWorker).toHaveBeenCalledWith('worker-1', 'run-1'))
+    expect(await screen.findByText(/"status": "cancelled"/)).toBeTruthy()
+  })
+
+  it('keeps Cancel disabled when a receipt lacks an exact active worker/run pair', async () => {
+    operatorClient.dispatchWorker.mockResolvedValueOnce({ jobId: 'op-1', status: 'accepted' })
     render(<WorkerJobsPanel />)
     fireEvent.change(screen.getByLabelText(/commands/i), { target: { value: 'echo hi' } })
     fireEvent.click(screen.getByRole('button', { name: /dispatch job/i }))
     const cancel = await screen.findByRole('button', { name: /cancel/i })
     expect(cancel.disabled).toBe(true)
-    expect(screen.getByText(/no worker-cancel endpoint is mounted/i)).toBeTruthy()
+    expect(screen.getByText(/only while this receipt identifies/i)).toBeTruthy()
   })
 })
 
