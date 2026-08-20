@@ -44,6 +44,12 @@ describe('product surface contract', () => {
     expect(productSurfaceStates({ sessionActive: true }).ios).toEqual({ state: 'setup', label: 'Setup required' })
   })
 
+  it('describes the completed browser projection as live', () => {
+    const frame = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
+    expect(frame).toContain('Project-scoped files, conversation, and browser composition are live')
+    expect(frame).not.toContain('arrive in the next product wave')
+  })
+
   it('places the profile rail below the persistent header', () => {
     const css = readFileSync(`${process.cwd()}/src/site/landing.css`, 'utf8')
     expect(css).toMatch(/\.lp-topbar\s*\{[^}]*height:\s*52px;[^}]*z-index:\s*50;/s)
