@@ -34,9 +34,127 @@ from fastapi.responses import JSONResponse
 import conversations
 import deps
 import platform_link
+import telemetry_sink
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+
+# --- conversation.* telemetry (TEL-2a, split of parked TEL-2; SERVER SIDE
+# ONLY -- the panel's client-side track() calls are TEL-2b) ----------------- #
+#
+# PLATFORM_TELEMETRY.md conventions: domain.action names, string labels, no
+# secrets or prompt text (only ids and the allowlisted `role` metadata value,
+# never `content`). No natural interactive-session id exists for a
+# conversation resource event, so `session_id="server"` -- the same
+# placeholder drawing.uploaded/org.created/cad_upload use for the same
+# reason.
+#
+# conversation.message_appended and conversation.recovered are wired below
+# into the two real route choke points THIS file owns (api_post_message,
+# api_recover_conversation_tail): true mutation-red via TestClient.
+#
+# conversation.started / conversation.truncated / conversation.deleted have
+# no real choke point inside this card's file boundary:
+#   - started's real caller is conversations.py `api_create_conversation`
+#     (create_conversation) -- outside files_expected.
+#   - truncated's real caller is conversations.run_retention_gc's receipt,
+#     already fully implemented and unit-tested
+#     (tests/test_conversation_retention.py) but not wired to any HTTP route
+#     anywhere in this repo today.
+#   - deleted has no real choke point anywhere in this repo: no
+#     delete_conversation storage function and no delete route exist yet;
+#     building one is a new, irreversible-data feature outside a telemetry
+#     card's scope.
+# Reusable emitters proven here by direct unit test (captured
+# telemetry_sink.emit calls) instead of a live route, exactly the
+# TEL-5 -> TEL-7 checkpoint.created/restored precedent
+# (routers/skills.py): wiring the real caller is the named follow-up.
+
+
+def _tenant_identity(tenant: Any) -> tuple[str, str]:
+    tenant_id = str(getattr(tenant, "tenant_id", tenant))
+    return tenant_id, ("guest" if tenant_id.startswith("guest-") else "account")
+
+
+def record_conversation_started(*, tenant_id: str, tenant_kind: str,
+                                conversation_id: str) -> None:
+    """Emit conversation.started. See module note: real caller is
+    conversations.py `api_create_conversation`, out of this card's file
+    boundary."""
+    try:  # telemetry never touches the response
+        telemetry_sink.emit(
+            "conversation.started", tenant_id=tenant_id, tenant_kind=tenant_kind,
+            session_id="server", labels={"conversation_id": conversation_id},
+        )
+    except Exception:
+        pass
+
+
+def record_conversation_message_appended(*, tenant_id: str, tenant_kind: str,
+                                         conversation_id: str,
+                                         role: Optional[str] = None) -> None:
+    """Emit conversation.message_appended {role}. Wired below at this card's
+    own real choke point: api_post_message's successful, non-replayed
+    insert. ``role`` is the message's own allowlisted metadata value (never
+    free text), omitted from labels when the caller did not supply one."""
+    try:  # telemetry never touches the response
+        labels: Dict[str, Any] = {"conversation_id": conversation_id}
+        if role is not None:
+            labels["role"] = role
+        telemetry_sink.emit(
+            "conversation.message_appended", tenant_id=tenant_id,
+            tenant_kind=tenant_kind, session_id="server", labels=labels,
+        )
+    except Exception:
+        pass
+
+
+def record_conversation_recovered(*, tenant_id: str, tenant_kind: str,
+                                  project_id: str, items_n: int, gaps_n: int,
+                                  has_more: bool) -> None:
+    """Emit conversation.recovered. Wired below at this card's own real
+    choke point: api_recover_conversation_tail's successful response."""
+    try:  # telemetry never touches the response
+        telemetry_sink.emit(
+            "conversation.recovered", tenant_id=tenant_id, tenant_kind=tenant_kind,
+            session_id="server",
+            labels={"project_id": project_id, "items_n": str(items_n),
+                    "gaps_n": str(gaps_n), "has_more": str(has_more)},
+        )
+    except Exception:
+        pass
+
+
+def record_conversation_truncated(*, tenant_id: str, tenant_kind: str,
+                                  deleted_message_count: int,
+                                  truncated_by_row_cap: bool,
+                                  truncated_by_wall_clock: bool) -> None:
+    """Emit conversation.truncated. See module note: real caller is
+    conversations.run_retention_gc's receipt, unwired to any HTTP route in
+    this repo today."""
+    try:  # telemetry never touches the response
+        telemetry_sink.emit(
+            "conversation.truncated", tenant_id=tenant_id, tenant_kind=tenant_kind,
+            session_id="server",
+            labels={"deleted_message_count": str(deleted_message_count),
+                    "truncated_by_row_cap": str(truncated_by_row_cap),
+                    "truncated_by_wall_clock": str(truncated_by_wall_clock)},
+        )
+    except Exception:
+        pass
+
+
+def record_conversation_deleted(*, tenant_id: str, tenant_kind: str,
+                                conversation_id: str) -> None:
+    """Emit conversation.deleted. See module note: no delete route exists
+    anywhere in this repo yet."""
+    try:  # telemetry never touches the response
+        telemetry_sink.emit(
+            "conversation.deleted", tenant_id=tenant_id, tenant_kind=tenant_kind,
+            session_id="server", labels={"conversation_id": conversation_id},
+        )
+    except Exception:
+        pass
 
 # The route's own time budget: bigger than any single statement timeout below
 # it (conversations.MESSAGE_STATEMENT_TIMEOUT_MS covers the INSERT, and
@@ -117,6 +235,12 @@ def _resolve_and_write(
         org_id, project_id, conversation_id, actor_binding_id,
         idempotency_key=idempotency_key, content=content, metadata=metadata,
     )
+    if not result["replayed"]:
+        tenant_id, tenant_kind = _tenant_identity(tenant)
+        record_conversation_message_appended(
+            tenant_id=tenant_id, tenant_kind=tenant_kind,
+            conversation_id=conversation_id, role=metadata.get("role"),
+        )
     return JSONResponse(
         status_code=200 if result["replayed"] else 201,
         content=deps.tenant_echo(with_envelope_fields(result["message"]), tenant),
@@ -226,4 +350,10 @@ def api_recover_conversation_tail(
             org_id, project_id, cursor=cursor, limit=limit)
     except conversations.InvalidRecoveryCursor:
         return _invalid_cursor()
+    tenant_id, tenant_kind = _tenant_identity(tenant)
+    record_conversation_recovered(
+        tenant_id=tenant_id, tenant_kind=tenant_kind, project_id=project_id,
+        items_n=len(page["items"]), gaps_n=len(page["gaps"]),
+        has_more=page["has_more"],
+    )
     return deps.tenant_echo(with_envelope_fields(page), tenant)
