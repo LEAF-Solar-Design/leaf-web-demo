@@ -152,6 +152,7 @@ describe("operator worker route (Lane D wiring e2e)", () => {
     const cancelled = await post(baseUrl, { ...controlTarget, principalSubject: BODY.principalSubject, tenantId: BODY.tenantId, roleRevision: BODY.roleRevision },
       { "X-Harness-Secret": "route-secret" }, "/operator/worker/cancel");
     expect(cancelled.status).toBe(200);
-    expect((await cancelled.json()).status).toBe("cancelled");
+    const cancelledBody = await cancelled.json() as { status: string };
+    expect(cancelledBody.status).toBe("cancelled");
   });
 });
