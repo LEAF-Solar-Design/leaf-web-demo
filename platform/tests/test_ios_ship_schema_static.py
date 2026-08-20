@@ -116,7 +116,10 @@ def test_new_provider_dispatch_runs_only_after_admission_context_exits(monkeypat
         def __exit__(self, *_args):
             return None
 
-        def execute(self, statement, *_args, **_kwargs):
+        def execute(self, statement, params=None, **_kwargs):
+            if isinstance(params, dict):
+                placeholders = set(re.findall(r"%\(([a-z_][a-z0-9_]*)\)s", statement))
+                assert placeholders <= set(params)
             self.statement = statement
 
         def fetchone(self):

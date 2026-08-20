@@ -775,7 +775,7 @@ def launch_execution(
                 "%(build_number)s, %(app_color)s, %(key)s, %(fingerprint)s)",
                 {"id": execution_id, "org": org, "project": project, "tenant": tenant_id,
                  "principal": principal, "approval": approval_uuid, "key": idempotency_key,
-                 "fingerprint": fingerprint, **fields})
+                 "app_color": app_color, "fingerprint": fingerprint, **fields})
             cur.execute("UPDATE ios_ship_revision_approvals SET consumed_at=NOW(), "
                         "consumed_execution_id=%(execution)s WHERE approval_id=%(approval)s",
                         {"execution": execution_id, "approval": approval_uuid})
