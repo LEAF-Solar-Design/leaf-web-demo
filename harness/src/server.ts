@@ -64,7 +64,7 @@ import {
   type LeafStandardServicesHumanApprovalHost,
 } from "./ports/impl/leafStandardServicesResolver.js";
 import {
-  dispatchOperatorWorkerJob,
+  startOperatorWorkerJob,
   OperatorWorkerDispatchError,
   type OperatorWorkerDispatchRequest,
 } from "./operatorWorker/operatorWorkerDispatch.js";
@@ -822,12 +822,14 @@ export function createHarness(ports: HarnessPorts, opts?: {
           repo: typeof body.repo === "string" ? body.repo : undefined,
           idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : "",
           principalSubject: typeof body.principalSubject === "string" ? body.principalSubject : "",
+          tenantId: typeof body.tenantId === "string" ? body.tenantId : "",
+          roleRevision: typeof body.roleRevision === "number" ? body.roleRevision : Number.NaN,
           sessionId: typeof body.sessionId === "string" ? body.sessionId : "",
           timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
         };
         try {
-          const receipt = await dispatchOperatorWorkerJob(opts.operatorWorker.manager, request);
-          return send(res, 200, receipt);
+          const active = startOperatorWorkerJob(opts.operatorWorker.manager, request);
+          return send(res, 200, active);
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           if (reason === "substrate_not_isolating") {
@@ -846,6 +848,33 @@ export function createHarness(ports: HarnessPorts, opts?: {
           }
           throw err;
         }
+      }
+
+      // Control plane routes share the same F5 caller-auth gate as dispatch.
+      // The app supplies only its authenticated subject, tenant, and role
+      // revision, never browser-provided ownership claims.
+      if (method === "POST" && (path === "/operator/worker/resolve" || path === "/operator/worker/cancel")) {
+        if (!opts?.operatorWorker) {
+          return send(res, 501, { error: { code: "not_implemented", message: "operator worker not configured" } });
+        }
+        const body = await readJsonBody(req);
+        const workerId = typeof body.workerId === "string" ? body.workerId : "";
+        const runId = typeof body.runId === "string" ? body.runId : "";
+        const subject = typeof body.principalSubject === "string" ? body.principalSubject : "";
+        const tenantId = typeof body.tenantId === "string" ? body.tenantId : "";
+        const roleRevision = typeof body.roleRevision === "number" ? body.roleRevision : Number.NaN;
+        const manager = opts.operatorWorker.manager;
+        if (path === "/operator/worker/resolve") {
+          const binding = manager.resolve(workerId, runId, subject, tenantId, roleRevision);
+          if (!binding) return send(res, 404, { error: { code: "worker_run_not_found", message: "worker run not found" } });
+          return send(res, 200, binding);
+        }
+        const binding = await manager.cancelExact(workerId, runId, subject, tenantId, roleRevision);
+        if (!binding) return send(res, 404, { error: { code: "worker_run_not_found", message: "worker run not found" } });
+        if (binding.status !== "cancelled") {
+          return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
+        }
+        return send(res, 200, binding);
       }
 
       if (method === "POST" && path === "/internal/project-repository-source/verify") {

@@ -113,3 +113,11 @@ def test_forged_terminal_receipt_is_not_reported_as_a_cancel(monkeypatch):
     assert response.status_code == 502
     assert response.json()["detail"] == "worker_stop_receipt_invalid"
     assert len(stops) == 1
+
+
+def test_already_cancelled_exact_owned_run_is_truthful_and_idempotent(monkeypatch):
+    client, stops = _client(monkeypatch, binding=_binding(status="cancelled", active=False))
+    response = client.post("/api/operator/worker/cancel", json=_payload())
+    assert response.status_code == 200
+    assert response.json() == {"worker_id": "worker-a", "run_id": "run-a", "status": "cancelled"}
+    assert stops == []

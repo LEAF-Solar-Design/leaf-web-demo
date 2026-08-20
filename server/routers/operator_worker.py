@@ -47,7 +47,8 @@ class WorkerCancelBody(BaseModel):
 
 @router.post("/api/operator/worker/dispatch")
 def dispatch_worker(body: WorkerDispatchBody,
-                    op: OperatorContext = Depends(operator_deps.require_operator)):
+                    op: OperatorContext = Depends(operator_deps.require_operator),
+                    tenant=Depends(tenant_deps.require_tenant)):
     # Admission step 1 (contract section 5): the kill switch denies every
     # operator write path, this one included. 409 like the sibling runbooks.
     if operator_authority.kill_switch_active():
@@ -57,7 +58,8 @@ def dispatch_worker(body: WorkerDispatchBody,
     import operator_worker_dispatch as dispatch
     try:
         return dispatch.dispatch_to_isolated_worker(
-            op, body.commands, repo=body.repo, timeout_ms=body.timeout_ms)
+            op, body.commands, repo=body.repo, timeout_ms=body.timeout_ms,
+            tenant_id=str(tenant))
     except dispatch.OperatorWorkerError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.reason) from exc
     except Exception as exc:  # harness unreachable etc. -> fail closed

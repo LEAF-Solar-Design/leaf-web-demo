@@ -48,7 +48,7 @@ def _worker_url() -> str:
 
 def build_dispatch_payload(ctx: OperatorContext, commands: List[str],
                            repo: Optional[str],
-                           timeout_ms: Optional[int]) -> Dict[str, Any]:
+                           timeout_ms: Optional[int], tenant_id: str = "") -> Dict[str, Any]:
     if not isinstance(commands, list) or not commands or len(commands) > MAX_COMMANDS:
         raise OperatorWorkerError("commands_invalid")
     return {
@@ -58,6 +58,8 @@ def build_dispatch_payload(ctx: OperatorContext, commands: List[str],
         "commands": commands,
         "repo": repo,
         "principalSubject": ctx.subject,   # server-attested, never client input
+        "tenantId": tenant_id,
+        "roleRevision": getattr(ctx, "role_revision", 0),
         "sessionId": f"op-{uuid.uuid4().hex[:12]}",
         "idempotencyKey": uuid.uuid4().hex,
         "timeoutMs": min(int(timeout_ms or 120_000), MAX_TIMEOUT_MS),
@@ -66,11 +68,12 @@ def build_dispatch_payload(ctx: OperatorContext, commands: List[str],
 
 def dispatch_to_isolated_worker(ctx: OperatorContext, commands: List[str],
                                 repo: Optional[str] = None,
-                                timeout_ms: Optional[int] = None) -> Dict[str, Any]:
+                                timeout_ms: Optional[int] = None,
+                                tenant_id: str = "") -> Dict[str, Any]:
     """POST the bounded job to the harness operator worker route. NEVER executes
     the commands in this process; the isolated worker runs them. A non-200 from
     the harness is a REFUSAL and raises - it is never returned as a success."""
-    payload = build_dispatch_payload(ctx, commands, repo, timeout_ms)
+    payload = build_dispatch_payload(ctx, commands, repo, timeout_ms, tenant_id)
     # Harness caller-auth only: this hop terminates at the harness, so the
     # broker secret has no business on it.
     headers = broker_client.harness_headers()
@@ -188,6 +191,14 @@ def cancel_exact_active_worker(ctx: OperatorContext, tenant_id: str,
                                worker_id: str, run_id: str) -> Dict[str, Any]:
     """Resolve, authorize, then stop one exact active worker/run tuple."""
     binding = _resolve_active_worker_run(ctx, tenant_id, worker_id, run_id)
+    if (binding.get("worker_id") == worker_id and binding.get("run_id") == run_id
+            and binding.get("owner_subject") == ctx.subject
+            and binding.get("tenant_id") == tenant_id
+            and binding.get("role_revision") == ctx.role_revision
+            and binding.get("status") == _CANCELLED_STATUS):
+        # A first cancellation can race its terminal receipt. Repeating the
+        # exact owned request is truthful and does not call the stop primitive.
+        return {"worker_id": worker_id, "run_id": run_id, "status": _CANCELLED_STATUS}
     _require_exact_active_binding(binding, ctx, tenant_id, worker_id, run_id)
     receipt = _stop_exact_worker_run(ctx, tenant_id, worker_id, run_id)
     if (receipt.get("worker_id") != worker_id or receipt.get("run_id") != run_id

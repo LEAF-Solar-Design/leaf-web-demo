@@ -180,4 +180,19 @@ describe("job ownership is enforced", () => {
     expect(manager.cancel(receipt.jobId, "auth0|attacker")).toBe(false);
     expect(receipt.principalSubject).toBe("auth0|owner");
   });
+
+  it("returns an active owner-bound identity and only cancels that named worker", async () => {
+    const sleep = process.platform === "win32" ? "ping -n 30 127.0.0.1 > NUL" : "sleep 30";
+    const active = manager.start(envelope({
+      commands: [sleep], tenantId: "tenant-a", roleRevision: 7,
+      idempotencyKey: "cancel-active",
+    }));
+    expect(active.status).toBe("running");
+    expect(manager.resolve(active.worker_id, active.run_id, "auth0|attacker", "tenant-a", 7)).toBeUndefined();
+    const cancelled = await manager.cancelExact(
+      active.worker_id, active.run_id, "auth0|op-test", "tenant-a", 7);
+    expect(cancelled?.status).toBe("cancelled");
+    expect(await manager.cancelExact(
+      active.worker_id, active.run_id, "auth0|op-test", "tenant-a", 7)).toMatchObject({ status: "cancelled" });
+  });
 });
