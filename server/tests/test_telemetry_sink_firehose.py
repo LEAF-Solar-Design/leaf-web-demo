@@ -186,6 +186,40 @@ def test_flush_batch_dual_routes_to_both_with_the_identical_rows(monkeypatch):
     assert calls[0][1] is batch and calls[1][1] is batch
 
 
+def test_flush_batch_dual_firehose_runs_when_bigquery_raises(monkeypatch):
+    monkeypatch.setenv("LEAF_TELEMETRY_BACKEND", "dual")
+    calls = []
+
+    def _raise(_rows):
+        raise RuntimeError("unexpected BigQuery defect")
+
+    monkeypatch.setattr(telemetry_sink, "_flush_bigquery", _raise)
+    monkeypatch.setattr(
+        telemetry_sink, "_flush_firehose", lambda rows: calls.append(rows)
+    )
+    batch = [{"event_name": "a.b"}]
+    telemetry_sink._flush_batch(batch)
+    assert calls == [batch]
+    assert telemetry_sink.stats()["dropped_flush"] == 1
+
+
+def test_flush_batch_dual_bigquery_runs_when_firehose_raises(monkeypatch):
+    monkeypatch.setenv("LEAF_TELEMETRY_BACKEND", "dual")
+    calls = []
+
+    def _raise(_rows):
+        raise RuntimeError("unexpected Firehose defect")
+
+    monkeypatch.setattr(
+        telemetry_sink, "_flush_bigquery", lambda rows: calls.append(rows)
+    )
+    monkeypatch.setattr(telemetry_sink, "_flush_firehose", _raise)
+    batch = [{"event_name": "a.b"}]
+    telemetry_sink._flush_batch(batch)
+    assert calls == [batch]
+    assert telemetry_sink.stats()["dropped_flush"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # _flush_firehose(): row shape, batching, partial + whole-batch failure
 # --------------------------------------------------------------------------- #

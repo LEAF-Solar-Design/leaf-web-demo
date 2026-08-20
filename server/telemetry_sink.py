@@ -360,9 +360,27 @@ def _flush_batch(rows: List[Dict[str, Any]]) -> None:
     list, which is what makes their counts agree under healthy delivery."""
     b = backend()
     if b in ("bigquery", "dual"):
-        _flush_bigquery(rows)
+        try:
+            _flush_bigquery(rows)
+        except Exception as exc:  # noqa: BLE001 - preserve the other dual leg
+            with _lock:
+                _stats["dropped_flush"] += len(rows)
+            _note_once(
+                "bigquery_unexpected",
+                f"bigquery flush raised unexpectedly for {len(rows)} event(s): "
+                f"{type(exc).__name__}: {exc}",
+            )
     if b in ("firehose", "dual"):
-        _flush_firehose(rows)
+        try:
+            _flush_firehose(rows)
+        except Exception as exc:  # noqa: BLE001 - preserve the other dual leg
+            with _lock:
+                _stats["dropped_flush"] += len(rows)
+            _note_once(
+                "firehose_unexpected",
+                f"firehose flush raised unexpectedly for {len(rows)} event(s): "
+                f"{type(exc).__name__}: {exc}",
+            )
 
 
 def _drain_once(block_s: float) -> None:
