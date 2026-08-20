@@ -18,6 +18,7 @@ import platform_link
 import session_store
 import write_loop
 from routers import drawings
+from routers import skills
 import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
@@ -118,6 +119,11 @@ def create_checkpoint(session_id: str, req: CreateCheckpointRequest,
             retryable=False,
             status_code=409,
         )
+    tenant_id, tenant_kind = skills._tenant_identity(tenant)
+    skills.record_checkpoint_created(
+        tenant_id=tenant_id, tenant_kind=tenant_kind, session_id=session_id,
+        checkpoint_id=checkpoint["checkpoint_id"],
+    )
     return JSONResponse(
         status_code=201,
         content=deps.tenant_echo(with_envelope_fields(checkpoint), tenant),
@@ -247,6 +253,11 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
             "event_seq": event_seq,
             "event_recorded": event_recorded,
         }
+        tenant_id, tenant_kind = skills._tenant_identity(tenant)
+        skills.record_checkpoint_restored(
+            tenant_id=tenant_id, tenant_kind=tenant_kind, session_id=session_id,
+            checkpoint_id=checkpoint["checkpoint_id"],
+        )
         return deps.tenant_echo(with_envelope_fields(body), tenant)
     finally:
         session_store.end_turn(session_id, restore_turn_id)

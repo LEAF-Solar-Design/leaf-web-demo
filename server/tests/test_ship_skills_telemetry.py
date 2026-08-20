@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List
@@ -26,8 +27,15 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+# session_store/checkpoints read SESSIONS_DB once at import, so this must be
+# set before either is imported (matches test_checkpoints.py, test_rewind.py).
+_TMP_DIR = Path(tempfile.mkdtemp(prefix="ship-skills-telemetry-test-"))
+os.environ.setdefault("SESSIONS_DB", str(_TMP_DIR / "sessions.db"))
+
 import deps  # noqa: E402
+import session_store  # noqa: E402
 import telemetry_sink  # noqa: E402
+from routers import checkpoints as checkpoints_router  # noqa: E402
 from routers import ios_ship  # noqa: E402
 from routers import skills  # noqa: E402
 
@@ -323,6 +331,75 @@ def test_checkpoint_events_omit_skill_label_when_not_supplied(captured):
     for call in captured:
         assert call["labels"] == {"checkpoint_id": "cp-2"}
         assert "skill" not in call["labels"]
+
+
+# --------------------------------------------------------------------------- #
+# routers/checkpoints.py: the live choke point (mutation-red -- these read
+# telemetry_sink.emit's captured calls after hitting the REAL route through
+# TestClient, so deleting either wired call in checkpoints.py fails these).
+# --------------------------------------------------------------------------- #
+
+def _checkpoints_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(checkpoints_router.router)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _checkpoints_session(tenant_id: str = "tenant-a") -> Dict[str, Any]:
+    return session_store.get_or_create_session(tenant_id, f"checkpoint-drawing-{uuid.uuid4()}")
+
+
+def test_checkpoint_create_route_fires_checkpoint_created_with_real_ids(monkeypatch, captured):
+    monkeypatch.setattr(checkpoints_router, "_drawing_version", lambda tenant, drawing: 7)
+    session = _checkpoints_session()
+    client = _checkpoints_client()
+
+    response = client.post(
+        f"/api/sessions/{session['session_id']}/checkpoints", json={},
+        headers={"X-Tenant-Id": session["tenant_id"]},
+    )
+
+    assert response.status_code == 201, response.text
+    checkpoint_id = response.json()["checkpoint_id"]
+    assert _names(captured) == ["checkpoint.created"]
+    call = captured[0]
+    assert call["tenant_id"] == session["tenant_id"]
+    assert call["tenant_kind"] == "account"
+    assert call["session_id"] == session["session_id"]
+    assert call["labels"] == {"checkpoint_id": checkpoint_id}
+
+
+def test_checkpoint_restore_route_fires_checkpoint_restored_with_real_ids(monkeypatch, captured):
+    monkeypatch.setattr(checkpoints_router, "_drawing_version", lambda tenant, drawing: 7)
+    monkeypatch.setattr(checkpoints_router, "store_authority_mode", lambda: "legacy")
+    session = _checkpoints_session()
+    client = _checkpoints_client()
+    created = client.post(
+        f"/api/sessions/{session['session_id']}/checkpoints", json={},
+        headers={"X-Tenant-Id": session["tenant_id"]},
+    )
+    assert created.status_code == 201, created.text
+    checkpoint_id = created.json()["checkpoint_id"]
+
+    class _Restored:
+        version = 99
+
+    monkeypatch.setattr(checkpoints_router.drawings, "restore_drawing_version",
+                        lambda *a, **k: _Restored())
+    captured.clear()
+
+    response = client.post(
+        f"/api/sessions/{session['session_id']}/checkpoints/{checkpoint_id}/restore",
+        headers={"X-Tenant-Id": session["tenant_id"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert _names(captured) == ["checkpoint.restored"]
+    call = captured[0]
+    assert call["tenant_id"] == session["tenant_id"]
+    assert call["tenant_kind"] == "account"
+    assert call["session_id"] == session["session_id"]
+    assert call["labels"] == {"checkpoint_id": checkpoint_id}
 
 
 # --------------------------------------------------------------------------- #
