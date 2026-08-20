@@ -168,6 +168,45 @@ def _append_receipt(directory: Path, receipt: Dict[str, Any]) -> None:
         fh.write(json.dumps(receipt) + "\n")
 
 
+def _size_class(size_bytes: Optional[int]) -> str:
+    """Bucketed size, never the raw byte count -- a shape, not the payload."""
+    if size_bytes is None:
+        return "unknown"
+    if size_bytes <= 64 * 1024:
+        return "xs"
+    if size_bytes <= 1024 * 1024:
+        return "s"
+    if size_bytes <= 8 * 1024 * 1024:
+        return "m"
+    if size_bytes <= max_upload_bytes():
+        return "l"
+    return "oversize"
+
+
+def _emit_cad_event(
+    accepted: bool, reason: Optional[str], ext_hint: Optional[str],
+    size_hint: Optional[int],
+) -> None:
+    """Best-effort cad.upload_received / cad.upload_rejected (TEL-4), called
+    exactly once per request from the ONE terminal branch the caller reaches.
+    NEVER raises; labels carry only a reason code, a bucketed size class, and
+    the extension -- never the filename, digest, or file bytes."""
+    try:
+        import telemetry_sink
+
+        fmt = ext_hint.lstrip(".") if ext_hint else "unknown"
+        labels: Dict[str, Any] = {"size_class": _size_class(size_hint), "format": fmt}
+        if not accepted:
+            labels["reason"] = reason
+        telemetry_sink.emit(
+            "cad.upload_received" if accepted else "cad.upload_rejected",
+            tenant_id="anon", tenant_kind="anon", session_id="server",
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the response
+        pass
+
+
 def _write_accepted_upload(filename: str, ext: str, data: bytes) -> Dict[str, Any]:
     """Every effect here happens only for bytes that already cleared every
     gate above — nothing malformed or oversized ever reaches this function,
@@ -196,6 +235,7 @@ def _write_accepted_upload(filename: str, ext: str, data: bytes) -> Dict[str, An
 @router.post("/api/cad/upload")
 def upload_cad_file(request: Request, file: UploadFile = File(...)) -> Any:
     if not cad_upload_enabled():
+        _emit_cad_event(False, "disabled", None, None)
         return error_response(
             ErrorCode.INTERNAL,
             "cad upload validation is not enabled on this deployment",
@@ -207,6 +247,7 @@ def upload_cad_file(request: Request, file: UploadFile = File(...)) -> Any:
     # or lying body, matching the pattern in routers/uploads.py.
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > cap + 65536:
+        _emit_cad_event(False, "oversize", None, int(declared))
         return error_response(
             ErrorCode.BAD_PARAMS,
             f"request exceeds the {cap} byte upload cap", retryable=False,
@@ -214,6 +255,7 @@ def upload_cad_file(request: Request, file: UploadFile = File(...)) -> Any:
 
     data = _read_bounded(file.file, cap)
     if len(data) > cap:
+        _emit_cad_event(False, "oversize", None, len(data))
         return error_response(
             ErrorCode.BAD_PARAMS,
             f"file exceeds the {cap} byte upload cap", retryable=False,
@@ -222,19 +264,23 @@ def upload_cad_file(request: Request, file: UploadFile = File(...)) -> Any:
     name = str(file.filename or "").lower()
     ext = next((e for e in _ACCEPTED_EXTENSIONS if name.endswith(e)), "")
     if not ext:
+        _emit_cad_event(False, "bad_extension", None, len(data))
         return error_response(
             ErrorCode.BAD_PARAMS, "only .dwg and .dxf files are accepted",
             retryable=False, status_code=400)
 
     sniff_reason = _sniff_reason(ext, data)
     if sniff_reason is not None:
+        _emit_cad_event(False, "sniff_failed", ext, len(data))
         return error_response(
             ErrorCode.BAD_PARAMS, sniff_reason, retryable=False, status_code=400)
 
     bomb_reason = _bomb_reason(ext, data)
     if bomb_reason is not None:
+        _emit_cad_event(False, "bomb_heuristic", ext, len(data))
         return error_response(
             ErrorCode.BAD_PARAMS, bomb_reason, retryable=False, status_code=422)
 
     receipt = _write_accepted_upload(file.filename or f"upload{ext}", ext, data)
+    _emit_cad_event(True, None, ext, len(data))
     return JSONResponse(status_code=201, content=with_envelope_fields(receipt))

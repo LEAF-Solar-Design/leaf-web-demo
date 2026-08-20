@@ -42,6 +42,57 @@ def _body_tenant(body: object, *, receipt_owned: bool) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _bytes_class(size_bytes: int | None) -> str:
+    """Bucketed request-body size, never the raw byte count or its content."""
+    if size_bytes is None:
+        return "unknown"
+    if size_bytes <= 4 * 1024:
+        return "xs"
+    if size_bytes <= 32 * 1024:
+        return "s"
+    if size_bytes <= 256 * 1024:
+        return "m"
+    if size_bytes <= 2 * 1024 * 1024:
+        return "l"
+    return "xl"
+
+
+def _emit_edit_applied(body: object, result: object) -> None:
+    """Best-effort project.edit_applied (TEL-4). ``record_staged`` is the ONE
+    place a project edit's content enters this system -- authorize/settle/
+    recover only lease, consume, or settle an edit already recorded here --
+    so this is the single write path the acceptance oracle requires be
+    observable. Fires only when ``_dispatch`` actually reached the handler
+    and it returned a coordination result (never on a 401/404/503 denial).
+    Labels carry a changed-path COUNT and a bucketed body-size class, never
+    a path, a digest, or any other payload content. NEVER raises.
+    """
+    if type(result) is not dict:
+        return
+    try:
+        import json as _json
+
+        import telemetry_sink
+
+        receipt = body.get("receipt") if type(body) is dict else None
+        changed_paths = receipt.get("changed_paths") if type(receipt) is dict else None
+        files_changed = len(changed_paths) if isinstance(changed_paths, list) else None
+        tenant_id = receipt.get("tenant_id") if type(receipt) is dict else None
+        try:
+            body_size = len(_json.dumps(body))
+        except Exception:  # noqa: BLE001
+            body_size = None
+        telemetry_sink.emit(
+            "project.edit_applied",
+            tenant_id=str(tenant_id) if isinstance(tenant_id, str) else "anon",
+            tenant_kind="account",
+            session_id="server",
+            labels={"files_changed": files_changed, "bytes_class": _bytes_class(body_size)},
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the response
+        pass
+
+
 def _dispatch(
     handler: Callable[[RepositoryEditCoordinationState, object], dict],
     body: object,
@@ -68,13 +119,15 @@ def record_staged(
     x_tenant_id: str | None = Header(default=None),
     x_dispatch_secret: str | None = Header(default=None),
 ) -> Any:
-    return _dispatch(
+    result = _dispatch(
         handle_record_staged,
         body,
         tenant_id=x_tenant_id,
         dispatch_secret=x_dispatch_secret,
         receipt_owned=True,
     )
+    _emit_edit_applied(body, result)
+    return result
 
 
 @router.post("/internal/project-repository-edit/authorize-publish")
