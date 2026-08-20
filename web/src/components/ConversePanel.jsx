@@ -17,6 +17,7 @@ import {
   cancelTurn,
   classifyAgentError,
 } from '../converse.js'
+import { track } from '../telemetry.js'
 import {
   acceptQueuedTurn,
   clearSendingQuestion,
@@ -235,6 +236,7 @@ export default function ConversePanel({
     setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
     setQueueState(createQueuedTurnState())
+    track('conversation.opened') // P2: panel opened/reopened a session — no session id in labels (identity is server-stamped)
     const stream = openStream(sessionId, 0, {
       onEvent: (env) => {
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
@@ -407,6 +409,7 @@ export default function ConversePanel({
     setStopping(true); setSendErr(null)
     try {
       await cancelTurn(sessionId, stoppableTurnId)
+      track('conversation.truncated', { reason: 'user_stop' }) // P2: interrupt ends the turn's output early
       // No optimistic local state: the server appends
       // turn_complete{stop_reason:'interrupted'} and the stream reconciles,
       // so the panel shows the turn ending for the SAME reason a spontaneous
@@ -485,9 +488,13 @@ export default function ConversePanel({
       const images = await attachmentPayloads()
       try {
         accept(await postMessage(sessionId, { ...(text ? { text } : {}), ...(images.length ? { images } : {}) }), images)
+        track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
         accept(await postMessage(sessionId, { text, queue: true }), images)
+        // P2: the direct post failed (turn busy) and the queued retry landed —
+        // the panel recovered the send rather than surfacing an error.
+        track('conversation.recovered', { reason: 'busy_retry_queued' })
       }
       delivered = true
     } catch (e) {
@@ -559,6 +566,13 @@ export default function ConversePanel({
     } finally {
       setDeciding(null)
     }
+  }
+
+  // Removes the panel from view (the server-side conversation is untouched —
+  // "Hide" is the closest panel-level analog to the server's conversation.deleted).
+  const dismiss = () => {
+    track('conversation.deleted', { reason: 'user_hide' })
+    if (onDismiss) onDismiss()
   }
 
   const showQuota = model.quota || sendErr?.kind === 'quota'
@@ -816,7 +830,7 @@ export default function ConversePanel({
           <span className="dim"> · </span>
           <span className="route-tool">{orDash(usageCost(model.latestUsage), (c) => `~$${c.toFixed(3)}`)}</span>
         </span>
-        <button type="button" className="chip-neutral" onClick={onDismiss}>Hide</button>
+        <button type="button" className="chip-neutral" onClick={dismiss}>Hide</button>
       </div>
 
       {showQuota && (
