@@ -188,6 +188,29 @@ def _write_role(tenant: Any) -> Optional[str]:
     return None
 
 
+def _tenant_kind(tenant: Any) -> str:
+    tid = str(tenant)
+    return "guest" if tid.startswith("guest-") else "account"
+
+
+def _emit_template_event(name: str, tenant: Any, template_id: str, version: Any) -> None:
+    """Best-effort template.pinned / template.applied (TEL-4). NEVER raises;
+    labels are exactly {template_id, version} -- no content, no receipt
+    digest, no clone_id."""
+    try:
+        import telemetry_sink
+
+        telemetry_sink.emit(
+            name,
+            tenant_id=str(tenant),
+            tenant_kind=_tenant_kind(tenant),
+            session_id="server",
+            labels={"template_id": str(template_id), "version": str(version)},
+        )
+    except Exception:  # noqa: BLE001 - telemetry never touches the response
+        pass
+
+
 def _binding_for(tenant: Any, role: str) -> TenantBinding:
     """A ``TenantBinding`` for the CALLER's own verified tenant -- ``tenant_id``
     is always ``str(tenant)`` (the verified claim), never a caller-supplied
@@ -222,6 +245,7 @@ def read_template(template_id: str, version: Optional[str] = None,
         return _not_found(f"unknown version for template {template_id!r}")
     except templates.TemplateDigestMismatchError as exc:
         return _digest_mismatch(str(exc))
+    _emit_template_event("template.pinned", tenant, result.template_id, result.version)
     body = {
         "template_id": result.template_id,
         "version": result.version,
@@ -291,6 +315,7 @@ def clone_template_into_project(template_id: str, req: ProjectCloneRequest,
         return _digest_mismatch(str(exc))
     except ValueError as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
+    _emit_template_event("template.applied", tenant, clone.template_id, clone.version)
     body = {
         "clone_id": clone.clone_id,
         "tenant_id": clone.tenant_id,
