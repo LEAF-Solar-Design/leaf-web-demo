@@ -179,6 +179,112 @@ def _post(client, body, headers=None):
     return client.post("/api/telemetry", json=body, headers=headers or {})
 
 
+def _enable_plugin_auth(monkeypatch, tenant="tenant-real", subject="auth0|user-real"):
+    principal = telemetry_router.deps.TenantContext(
+        tenant, subject=subject, authority_resolved=True
+    )
+    monkeypatch.setattr(telemetry_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(
+        telemetry_router.deps,
+        "require_tenant",
+        lambda request, x_tenant_id, authorization, x_dispatch_secret,
+        x_guest_session: principal,
+    )
+    return principal
+
+
+def _post_plugin(client, body, token="good-token"):
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return client.post("/api/telemetry/plugin", json=body, headers=headers)
+
+
+def _plugin_envelope(**overrides):
+    body = {
+        "message": "Event: panels.created",
+        "severity": "INFO",
+        "labels": {
+            "event_type": "custom_event",
+            "event_name": "panels.created",
+            "session_id": "branch-session",
+            "drawing_id": "drawing-1",
+        },
+        "timestamp": "2026-08-20T12:00:00.000Z",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_plugin_ingest_requires_live_bearer_auth(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    c = _client()
+    assert _post_plugin(c, _plugin_envelope(), token=None).status_code == 401
+    monkeypatch.setattr(telemetry_router.deps, "auth_live", lambda: False)
+    assert _post_plugin(c, _plugin_envelope()).status_code == 503
+
+
+def test_plugin_ingest_normalizes_and_overwrites_identity(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    _enable_plugin_auth(monkeypatch)
+    c = _client()
+    body = _plugin_envelope()
+    body["labels"].update({
+        "tenant_id": "victim",
+        "user_id": "attacker",
+        "user_email": "attacker@example.test",
+        "environment": "production",
+        "schema_version": "999",
+    })
+    resp = _post_plugin(c, body)
+    assert resp.status_code == 202
+    assert resp.json() == {"accepted": 1}
+    row = telemetry_sink._queue[-1]
+    assert row["event_type"] == "custom_event"
+    assert row["event_name"] == "panels.created"
+    assert row["tenant_id"] == "tenant-real"
+    assert row["tenant_kind"] == "account"
+    assert row["session_id"] == "branch-session"
+    labels = json.loads(row["labels"])
+    assert labels["source"] == "branch2025"
+    assert labels["message"] == "Event: panels.created"
+    assert labels["severity"] == "INFO"
+    assert labels["client_timestamp"] == "2026-08-20T12:00:00.000Z"
+    assert labels["user_id"] == "auth0|user-real"
+    assert labels["drawing_id"] == "drawing-1"
+    assert labels["schema_version"] == "1"
+    assert "tenant_id" not in labels
+    assert "user_email" not in labels
+    assert "environment" not in labels
+
+
+def test_plugin_ingest_enforces_body_and_envelope_bounds(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    _enable_plugin_auth(monkeypatch)
+    c = _client()
+    oversized = _plugin_envelope(message="x" * (telemetry_router.MAX_BODY_BYTES + 1))
+    assert _post_plugin(c, oversized).status_code == 413
+    assert _post_plugin(c, _plugin_envelope(labels=[])).status_code == 400
+    assert _post_plugin(c, _plugin_envelope(severity="invented")).status_code == 400
+
+
+def test_plugin_ingest_caps_label_count_key_and_value(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    _enable_plugin_auth(monkeypatch)
+    c = _client()
+    labels = {
+        "event_name": "plugin.event",
+        "event_type": "custom_event",
+        "session_id": "s",
+        "k" * 100: "v" * 1000,
+    }
+    labels.update({f"extra_{i}": i for i in range(100)})
+    resp = _post_plugin(c, _plugin_envelope(labels=labels))
+    assert resp.status_code == 202
+    normalized = json.loads(telemetry_sink._queue[-1]["labels"])
+    assert len(normalized) <= telemetry_router.MAX_LABELS_PER_EVENT
+    assert max(map(len, normalized)) <= telemetry_router.MAX_LABEL_KEY_LEN
+    assert max(map(len, normalized.values())) <= telemetry_router.MAX_LABEL_VALUE_LEN
+
+
 def test_ingest_always_202_even_for_garbage(monkeypatch):
     _enable_fake_sink(monkeypatch)
     c = _client()

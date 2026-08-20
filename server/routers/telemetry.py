@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 
 import deps
 import telemetry_sink
@@ -45,6 +45,17 @@ RESERVED_LABEL_KEYS = frozenset({
 MAX_LABELS_PER_EVENT = 40
 MAX_LABEL_KEY_LEN = 64
 MAX_LABEL_VALUE_LEN = 512
+
+PLUGIN_SEVERITIES = frozenset({
+    "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT",
+    "EMERGENCY",
+})
+PLUGIN_FALLBACK_EVENT_NAMES = {
+    "custom_event": "plugin.event",
+    "error": "plugin.error",
+    "exception": "plugin.exception",
+    "page_view": "plugin.page_view",
+}
 
 # Pre-auth allowlist: the top-of-funnel events that fire before any identity
 # exists, plus auth.completed, whose failure branch NEVER has a bearer (that
@@ -282,6 +293,138 @@ def _clamped_client_ts(value: Any) -> Optional[str]:
     if abs(now - ts) > CLIENT_TS_CLAMP_S:
         ts = max(min(ts, now + CLIENT_TS_CLAMP_S), now - CLIENT_TS_CLAMP_S)
     return f"{ts:.3f}"
+
+
+def _bounded_plugin_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            rendered = value
+        elif isinstance(value, (dict, list)):
+            import json as _json
+
+            rendered = _json.dumps(value, default=str)
+        else:
+            rendered = str(value)
+    except Exception:  # noqa: BLE001 - one bad label must not break the event
+        return None
+    return rendered[:MAX_LABEL_VALUE_LEN]
+
+
+def _plugin_identity(request: Request, authorization: Optional[str]) -> Any:
+    """Resolve only a live Auth0 bearer identity for the desktop collector.
+
+    The general product-event door deliberately supports auth-off development,
+    guest sessions, and a small anonymous allowlist. Branch2025 telemetry is a
+    different trust boundary: its legacy GCP collector required Auth0, so this
+    replacement must not silently widen access when LEAF_AUTH_LIVE is off.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    if not deps.auth_live():
+        raise HTTPException(
+            status_code=503,
+            detail="Plugin telemetry requires live authentication",
+        )
+    principal = deps.require_tenant(request, None, authorization, None, None)
+    subject = getattr(principal, "subject", None)
+    if not isinstance(subject, str) or not subject.strip():
+        raise HTTPException(status_code=403, detail="Authenticated subject required")
+    return principal
+
+
+def _normalized_plugin_labels(
+    body: Dict[str, Any], principal: Any
+) -> tuple[str, str, str, Dict[str, str]]:
+    """Map the Branch2025 envelope to the promoted platform row contract."""
+    message = body.get("message")
+    severity = body.get("severity")
+    source_labels = body.get("labels")
+    client_timestamp = body.get("timestamp")
+    if (
+        not isinstance(message, str)
+        or not isinstance(severity, str)
+        or not isinstance(source_labels, dict)
+        or not isinstance(client_timestamp, str)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid plugin telemetry envelope")
+
+    severity = severity.strip().upper()
+    if severity not in PLUGIN_SEVERITIES:
+        raise HTTPException(status_code=400, detail="Invalid telemetry severity")
+
+    raw_type = source_labels.get("event_type", "custom_event")
+    event_type = raw_type if raw_type in telemetry_sink.EVENT_TYPES else (
+        "error" if severity in {"ERROR", "CRITICAL", "ALERT", "EMERGENCY"}
+        else "custom_event"
+    )
+    raw_name = source_labels.get("event_name")
+    event_name = (
+        raw_name if isinstance(raw_name, str) and _NAME_RE.match(raw_name)
+        else PLUGIN_FALLBACK_EVENT_NAMES[event_type]
+    )
+    raw_session = source_labels.get("session_id")
+    session_id = (
+        raw_session[:64]
+        if isinstance(raw_session, str) and raw_session
+        else "none"
+    )
+
+    subject = str(getattr(principal, "subject"))
+    labels: Dict[str, str] = {
+        "source": "branch2025",
+        "message": message[:MAX_LABEL_VALUE_LEN],
+        "severity": severity,
+        "client_timestamp": client_timestamp[:MAX_LABEL_VALUE_LEN],
+        "user_id": subject[:MAX_LABEL_VALUE_LEN],
+        "ingest": "plugin",
+    }
+    # Leave one slot for telemetry_sink's server-owned schema_version label.
+    output_cap = MAX_LABELS_PER_EVENT - 1
+    for key_in, value in source_labels.items():
+        if len(labels) >= output_cap:
+            break
+        key = str(key_in)[:MAX_LABEL_KEY_LEN]
+        if not key or key in RESERVED_LABEL_KEYS or key in labels:
+            continue
+        rendered = _bounded_plugin_value(value)
+        if rendered is not None:
+            labels[key] = rendered
+    return event_name, str(event_type), session_id, labels
+
+
+@router.post("/api/telemetry/plugin", status_code=202)
+async def ingest_plugin(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> Any:
+    """Authenticated Branch2025 envelope collector backed by the shared sink."""
+    principal = _plugin_identity(request, authorization)
+    raw = await _bounded_body(request)
+    if raw is None:
+        raise HTTPException(status_code=413, detail="Telemetry body exceeds 32 KB")
+    try:
+        import json as _json
+
+        body = _json.loads(raw or b"{}")
+    except Exception as exc:  # noqa: BLE001 - report a bounded client error
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid plugin telemetry envelope")
+
+    event_name, event_type, session_id, labels = _normalized_plugin_labels(
+        body, principal
+    )
+    accepted = telemetry_sink.emit(
+        event_name,
+        event_type=event_type,
+        tenant_id=str(principal),
+        tenant_kind="account",
+        session_id=session_id,
+        labels=labels,
+    )
+    return {"accepted": 1 if accepted else 0}
 
 
 @router.post("/api/telemetry", status_code=202)
