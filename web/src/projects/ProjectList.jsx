@@ -17,6 +17,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { listProjects, createProject } from './api.js'
 import { humanizeError } from '../errorHumanize.js'
 
+// Build-stamp 2026-08-20: the flag entered CI env via workflow-only change
+// 78b9e904, which the image reuse fingerprint does not cover; this source
+// change forces the web artifact to actually rebuild with the flag baked.
 const ENV_LIFECYCLE_UI = import.meta.env?.VITE_LIFECYCLE_UI === '1'
 
 export default function ProjectList({ enabled = ENV_LIFECYCLE_UI, onOpenProject }) {
