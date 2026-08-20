@@ -1,4 +1,4 @@
-name: Contract
+﻿name: Contract
 
 # ---------------------------------------------------------------------------
 # The repo's first structural safety check over .github/workflows/ itself.
@@ -41,4 +41,9 @@ jobs:
       - name: Install contract test dependencies
         run: python -m pip install pytest "PyYAML>=6"
       - name: Run workflow shape contract
+        # PYTHONSAFEPATH keeps the repo root off sys.path[0]: the repo's own
+        # platform/ package (platform/__init__.py) otherwise shadows stdlib
+        # platform and crashes pytest at import (uuid -> platform.system).
+        env:
+          PYTHONSAFEPATH: "1"
         run: python -m pytest -q tests/test_contract_workflow_shape.py
