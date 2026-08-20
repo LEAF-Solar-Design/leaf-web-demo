@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import deps
+import telemetry_sink
 
 router = APIRouter()
 _DISPATCH: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
@@ -168,34 +169,60 @@ def readiness(project_id: str, revision: str,
             _closed_readiness(project_id, "readiness_unavailable", _SETUP_ACTION)})
 
 
+def _ship_event(tenant_id: str, tenant_kind: str, name: str, stage: str,
+                reason: Optional[str] = None) -> None:
+    try:  # telemetry never touches the response
+        labels: Dict[str, Any] = {"stage": stage}
+        if reason is not None:
+            labels["reason"] = reason
+        telemetry_sink.emit(name, tenant_id=tenant_id, tenant_kind=tenant_kind,
+                            session_id="none", labels=labels)
+    except Exception:
+        pass
+
+
 @router.post("/api/ios-ship/launch")
 async def launch(request: Request, req: LaunchRequest,
                  tenant: Any = Depends(deps.require_tenant),
                  idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")) -> JSONResponse:
+    tid = _tenant_id(tenant)
+    tkind = "guest" if tid.startswith("guest-") else "account"
+
+    def ship_event(name: str, stage: str, reason: Optional[str] = None) -> None:
+        _ship_event(tid, tkind, name, stage, reason)
+
+    ship_event("ship.requested", "received")
     if not idempotency_key:
+        ship_event("ship.failed", "validation", "idempotency_key_required")
         return _failure(400, "idempotency_key_required", "Idempotency-Key header is required")
     try:
         _reject_secret_shaped(await request.json())
     except ValueError as exc:
+        ship_event("ship.failed", "validation", "secret_shaped_field")
         return _failure(400, "secret_shaped_field", str(exc))
     if _DISPATCH is None:
+        ship_event("ship.failed", "provisioning", "dispatch_unavailable")
         return _failure(503, "dispatch_unavailable", "ship dispatch is not mounted",
                         setup_action=_SETUP_ACTION)
     app_color = _app_color()
     if app_color is None:
+        ship_event("ship.failed", "provisioning", "app_color_unavailable")
         return _failure(503, "app_color_unavailable", "server app color is unavailable",
                         setup_action=_SETUP_ACTION)
     try:
         store = _store()
     except Exception:
+        ship_event("ship.failed", "provisioning", "launch_unavailable")
         return _failure(503, "launch_unavailable", "launch store is unavailable",
                         setup_action=_SETUP_ACTION)
     try:
         org_id = _caller_org(store, tenant, req.project_id)
         if org_id is None:
+            ship_event("ship.failed", "authorization", "project_unavailable")
             return _failure(404, "project_unavailable", "project is unavailable")
         principal = _launch_principal(store, tenant, org_id, req.project_id)
         if principal is None:
+            ship_event("ship.failed", "authorization", "launch_forbidden")
             return _failure(403, "launch_forbidden", "platform role does not permit iOS launch")
         execution = store.launch_execution(
             org_id, _tenant_id(tenant), principal, req.project_id,
@@ -204,14 +231,19 @@ async def launch(request: Request, req: LaunchRequest,
             bundle_identifier=req.bundle_identifier, marketing_version=req.marketing_version,
             build_number=req.build_number, app_color=app_color, idempotency_key=idempotency_key,
             dispatch=_DISPATCH)
+        ship_event("ship.completed", "dispatched")
         return JSONResponse(status_code=202, content={"ok": True, "execution": execution})
     except (store.GrantInvalid, store.RevisionNotApproved, store.LaunchConflict) as exc:
+        ship_event("ship.failed", "grant", exc.code)
         return _failure(409, exc.code, str(exc), setup_action=exc.setup_action)
     except store.ProjectUnavailable as exc:
+        ship_event("ship.failed", "authorization", exc.code)
         return _failure(404, exc.code, str(exc))
     except store.IosShipError as exc:
+        ship_event("ship.failed", "dispatch", exc.code)
         return _failure(400, exc.code, str(exc), setup_action=exc.setup_action)
     except Exception:
+        ship_event("ship.failed", "dispatch", "launch_unavailable")
         return _failure(503, "launch_unavailable", "launch is unavailable",
                         setup_action=_SETUP_ACTION)
 
