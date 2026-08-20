@@ -380,8 +380,9 @@ def _normalized_plugin_labels(
         "user_id": subject[:MAX_LABEL_VALUE_LEN],
         "ingest": "plugin",
     }
-    # Leave one slot for telemetry_sink's server-owned schema_version label.
-    output_cap = MAX_LABELS_PER_EVENT - 1
+    # Leave two slots for telemetry_sink's server-owned schema_version and
+    # event_id labels.
+    output_cap = MAX_LABELS_PER_EVENT - 2
     for key_in, value in source_labels.items():
         if len(labels) >= output_cap:
             break
