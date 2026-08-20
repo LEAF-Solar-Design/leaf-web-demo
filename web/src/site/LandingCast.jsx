@@ -8,12 +8,13 @@
 
 import { useEffect, useState } from 'react'
 import { navigate } from './router.js'
-import { login, authConfigured } from '../auth.js'
 import { loadDemoSolve } from './intakeCache.js'
 
 function startTrial() {
-  if (authConfigured) login()
-  else navigate('/app')
+  // Single trial entry (front-door contract, contract/FRONT-DOOR.md): billing
+  // and entitlement live on the marketing site; the SPA never mints its own
+  // trial path. Sign-in for existing users is untouched (auth.js stays).
+  window.location.assign('https://www.leafautomation.ai/get-started')
 }
 
 const SHEETS = [
