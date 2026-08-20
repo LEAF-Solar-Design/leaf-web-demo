@@ -39,11 +39,16 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
+import logging
 import os
 import re
 import sys
+import time
 import urllib.parse
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, NoReturn
+
+_logger = logging.getLogger(__name__)
 
 _operator_armed: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "leaf_operator_egress_armed", default=False)
@@ -60,6 +65,108 @@ class OperatorEgressDenied(RuntimeError):
             f"(production is unreachable from the operator plane)")
         self.target = target
         self.kind = kind
+
+
+# --- Observability: a firing denial is a SECURITY-RELEVANT event and, until
+#     now, produced no log line, no metric, no event -- invisible in
+#     production. `_deny` is the single choke point every raise site below
+#     goes through, so no future call site can add a silent denial. NEVER
+#     the raw target/host: an aliased or env-composed target can carry a
+#     secret (contract/OPERATOR.md section 7), so only the bounded
+#     kind/host_class/caller_surface classification travels. ---------------
+
+# host_class: an ALLOWLISTED CLASS, never the raw host.
+_HOST_CLASS_PROCESS = "process"                    # a spawn: no host at all
+_HOST_CLASS_DEPLOY_CONTROL_PLANE = "deploy_control_plane"  # Layer 1 known route
+_HOST_CLASS_UNALLOWLISTED = "unallowlisted"        # Layer 2 host not on the allowlist
+
+# caller_surface: which layer/context produced the denial.
+_CALLER_SURFACE_PROCESS_WIDE = "process_wide"      # Layer 1, unconditional
+_CALLER_SURFACE_OPERATOR_CONTEXT = "operator_context"  # Layer 2, while armed
+
+_EVENT_EGRESS_DENIED = "security.egress_denied"
+
+
+def _emit_egress_denied_metric(kind: str) -> None:
+    """EMF metric emission for EgressDenied (Count, dimension {kind}) in
+    Leaf/Platform/APS, via the SAME pattern as emf_metrics.py's own _emit:
+    one JSON line to stderr with an `_aws`/`CloudWatchMetrics` envelope; the
+    ECS awslogs driver ships it and CloudWatch extracts the metric. Kept
+    local (not added to emf_metrics.py) because this card's file boundary is
+    frozen to this module and its test. Best-effort, NEVER raises."""
+    if os.environ.get("APS_EMF_DISABLED", "") == "1":
+        return
+    try:
+        namespace = "Leaf/Platform/APS"
+        try:
+            import emf_metrics  # first-party sibling module; NAMESPACE mirror
+
+            namespace = emf_metrics.NAMESPACE
+        except Exception:  # noqa: BLE001 - fall back to the literal namespace
+            pass
+        doc = {
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [{
+                    "Namespace": namespace,
+                    "Dimensions": [["kind"]],
+                    "Metrics": [{"Name": "EgressDenied", "Unit": "Count"}],
+                }],
+            },
+            "kind": kind,
+            "EgressDenied": 1,
+        }
+        sys.stderr.write(json.dumps(doc, separators=(",", ":"), allow_nan=False) + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 - metrics must never break the deny
+        pass
+
+
+def _emit_egress_denied_event(kind: str, host_class: str, caller_surface: str) -> None:
+    """Product event security.egress_denied via telemetry_sink.emit(), the
+    existing product-event door (docs/PLATFORM_TELEMETRY.md). This fires
+    outside any tenant/session context (a process-wide security control, not
+    a tenant handler), so identity is stamped "anon", the existing
+    convention for events with no resolved principal (routers/telemetry.py).
+    Best-effort, NEVER raises."""
+    try:
+        import telemetry_sink
+
+        telemetry_sink.emit(
+            _EVENT_EGRESS_DENIED,
+            tenant_id="anon",
+            tenant_kind="anon",
+            session_id="server",
+            labels={
+                "kind": kind,
+                "host_class": host_class,
+                "caller_surface": caller_surface,
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break the deny
+        pass
+
+
+def _emit_egress_denied_log(kind: str, host_class: str, caller_surface: str) -> None:
+    """Structured log line at deny. Best-effort, NEVER raises."""
+    try:
+        _logger.warning(json.dumps({
+            "event": _EVENT_EGRESS_DENIED,
+            "kind": kind,
+            "host_class": host_class,
+            "caller_surface": caller_surface,
+        }, separators=(",", ":")))
+    except Exception:  # noqa: BLE001 - logging must never break the deny
+        pass
+
+
+def _deny(target: str, kind: str, host_class: str, caller_surface: str) -> NoReturn:
+    """The single raise site for OperatorEgressDenied: emit log + event +
+    metric, THEN raise. A firing denial must never be silent again."""
+    _emit_egress_denied_log(kind, host_class, caller_surface)
+    _emit_egress_denied_event(kind, host_class, caller_surface)
+    _emit_egress_denied_metric(kind)
+    raise OperatorEgressDenied(target, kind)
 
 
 # --- Layer 1: the KNOWN production deploy control plane, denied for the whole
@@ -221,10 +328,12 @@ def _audit_hook(event: str, args: tuple) -> None:
         # Layer 1: a deploy-CLI spawn is denied for the whole process, always
         # (incl. wrapper forms like `npx cdk deploy`).
         if _is_deploy_cli_spawn(tokens):
-            raise OperatorEgressDenied(target, "deploy-cli-spawn")
+            _deny(target, "deploy-cli-spawn", _HOST_CLASS_PROCESS,
+                  _CALLER_SURFACE_PROCESS_WIDE)
         # Layer 2: an operator handler spawns NO process at all.
         if armed:
-            raise OperatorEgressDenied(target, "process-spawn")
+            _deny(target, "process-spawn", _HOST_CLASS_PROCESS,
+                  _CALLER_SURFACE_OPERATOR_CONTEXT)
         return
 
     # Network events: resolve the host once.
@@ -241,11 +350,13 @@ def _audit_hook(event: str, args: tuple) -> None:
     # Layer 1: the known production deploy control plane is denied unconditionally
     # (no context to escape via a fresh context / raw thread / executor).
     if _is_deploy_control_plane(host):
-        raise OperatorEgressDenied(host, f"deploy-route/{kind}")
+        _deny(host, f"deploy-route/{kind}", _HOST_CLASS_DEPLOY_CONTROL_PLANE,
+              _CALLER_SURFACE_PROCESS_WIDE)
     # Layer 2: while an operator handler runs, deny-by-default (closes aliased /
     # env-provided targets on the innocent same-context path).
     if armed and not _host_allowed(host):
-        raise OperatorEgressDenied(host, kind)
+        _deny(host, kind, _HOST_CLASS_UNALLOWLISTED,
+              _CALLER_SURFACE_OPERATOR_CONTEXT)
 
 
 def install_operator_egress_guard() -> None:
