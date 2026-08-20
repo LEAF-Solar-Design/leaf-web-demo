@@ -171,11 +171,14 @@ def readiness(project_id: str, revision: str,
 
 def _ship_event(tenant_id: str, tenant_kind: str, name: str, stage: str,
                 reason: Optional[str] = None) -> None:
-    labels: Dict[str, Any] = {"stage": stage}
-    if reason is not None:
-        labels["reason"] = reason
-    telemetry_sink.emit(name, tenant_id=tenant_id, tenant_kind=tenant_kind,
-                        session_id="none", labels=labels)
+    try:  # telemetry never touches the response
+        labels: Dict[str, Any] = {"stage": stage}
+        if reason is not None:
+            labels["reason"] = reason
+        telemetry_sink.emit(name, tenant_id=tenant_id, tenant_kind=tenant_kind,
+                            session_id="none", labels=labels)
+    except Exception:
+        pass
 
 
 @router.post("/api/ios-ship/launch")

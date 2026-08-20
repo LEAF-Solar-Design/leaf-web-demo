@@ -30,21 +30,27 @@ def record_checkpoint_created(*, tenant_id: str, tenant_kind: str, session_id: s
     proven by direct unit test, so the event family and label shape exist
     before the caller does.
     """
-    labels: Dict[str, Any] = {"checkpoint_id": checkpoint_id}
-    if skill is not None:
-        labels["skill"] = skill
-    telemetry_sink.emit("checkpoint.created", tenant_id=tenant_id, tenant_kind=tenant_kind,
-                        session_id=session_id, labels=labels)
+    try:  # telemetry never touches the response
+        labels: Dict[str, Any] = {"checkpoint_id": checkpoint_id}
+        if skill is not None:
+            labels["skill"] = skill
+        telemetry_sink.emit("checkpoint.created", tenant_id=tenant_id, tenant_kind=tenant_kind,
+                            session_id=session_id, labels=labels)
+    except Exception:
+        pass
 
 
 def record_checkpoint_restored(*, tenant_id: str, tenant_kind: str, session_id: str,
                                checkpoint_id: str, skill: Optional[str] = None) -> None:
     """Emit checkpoint.restored. See record_checkpoint_created for the wiring note."""
-    labels: Dict[str, Any] = {"checkpoint_id": checkpoint_id}
-    if skill is not None:
-        labels["skill"] = skill
-    telemetry_sink.emit("checkpoint.restored", tenant_id=tenant_id, tenant_kind=tenant_kind,
-                        session_id=session_id, labels=labels)
+    try:  # telemetry never touches the response
+        labels: Dict[str, Any] = {"checkpoint_id": checkpoint_id}
+        if skill is not None:
+            labels["skill"] = skill
+        telemetry_sink.emit("checkpoint.restored", tenant_id=tenant_id, tenant_kind=tenant_kind,
+                            session_id=session_id, labels=labels)
+    except Exception:
+        pass
 
 
 def _is_operator(x_ops_secret: Optional[str]) -> bool:
@@ -81,6 +87,9 @@ def get_skills(
     for skill in result.get("skills", []):
         name = skill.get("name")
         if isinstance(name, str):
-            telemetry_sink.emit("skill.invoked", tenant_id=tenant_id, tenant_kind=tenant_kind,
-                                session_id="none", labels={"skill": name})
+            try:  # telemetry never touches the response
+                telemetry_sink.emit("skill.invoked", tenant_id=tenant_id, tenant_kind=tenant_kind,
+                                    session_id="none", labels={"skill": name})
+            except Exception:
+                pass
     return result

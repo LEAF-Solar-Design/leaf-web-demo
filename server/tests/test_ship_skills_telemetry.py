@@ -372,3 +372,25 @@ def test_inventory_shows_every_named_family(monkeypatch, tmp_path, captured):
     seen = set(_names(captured))
     missing = set(EVENT_FAMILIES) - seen
     assert not missing, f"acceptance oracle families never emitted: {sorted(missing)}"
+
+
+class TestEmissionFailureNeverBreaksTheCaller:
+    """Train-gate requirement: a raising sink must not reach the caller (fail-open telemetry)."""
+
+    def _raising_emit(self, *a, **k):
+        raise RuntimeError("sink down")
+
+    def test_ship_event_swallows_sink_failure(self, monkeypatch):
+        import telemetry_sink
+        from routers import ios_ship
+        monkeypatch.setattr(telemetry_sink, "emit", self._raising_emit)
+        ios_ship._ship_event("t1", "account", "ship.failed", "build", "boom")  # must not raise
+
+    def test_checkpoint_helpers_swallow_sink_failure(self, monkeypatch):
+        import telemetry_sink
+        from routers import skills
+        monkeypatch.setattr(telemetry_sink, "emit", self._raising_emit)
+        skills.record_checkpoint_created(tenant_id="t1", tenant_kind="account",
+                                         session_id="s1", checkpoint_id="c1")
+        skills.record_checkpoint_restored(tenant_id="t1", tenant_kind="account",
+                                          session_id="s1", checkpoint_id="c1", skill="x")
