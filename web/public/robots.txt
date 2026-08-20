@@ -1,0 +1,4 @@
+# App-only surface. The indexable marketing site is https://www.leafautomation.ai
+# Front-door contract: contract/FRONT-DOOR.md
+User-agent: *
+Disallow: /
