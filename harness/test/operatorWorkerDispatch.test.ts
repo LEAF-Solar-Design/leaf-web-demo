@@ -21,6 +21,8 @@ const REQ = {
   commands: ["echo hi"],
   idempotencyKey: "k1",
   principalSubject: "auth0|op-test",
+  tenantId: "tenant-test",
+  roleRevision: 7,
   sessionId: "opsess-1",
 };
 
@@ -41,6 +43,7 @@ describe("operator worker dispatch (Lane D binding)", () => {
     expect(env.network).toEqual([]); // no egress
     expect(env.timeoutMs).toBeLessThanOrEqual(1_800_000);
     expect(env.principalSubject).toBe("auth0|op-test");
+    expect(env.tenantId).toBe("tenant-test");
   });
 
   it("rejects an unbounded dispatch request", () => {
@@ -48,6 +51,8 @@ describe("operator worker dispatch (Lane D binding)", () => {
       .toThrow(OperatorWorkerDispatchError);
     expect(() => buildOperatorWorkerEnvelope({ ...REQ, commands: Array(51).fill("x") }))
       .toThrow(OperatorWorkerDispatchError);
+    expect(() => buildOperatorWorkerEnvelope({ ...REQ, tenantId: "" }))
+      .toThrow("worker_binding_invalid");
   });
 
   it("FAILS CLOSED: broad work is refused on a non-isolating substrate", async () => {

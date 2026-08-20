@@ -20,6 +20,9 @@ export interface WorkerJobEnvelope {
   network?: string[]; // allowlisted host suffixes; empty = fully denied
   idempotencyKey: string;
   principalSubject: string;
+  /** Attested by the app server. It is never accepted from a browser. */
+  tenantId?: string;
+  roleRevision?: number;
   sessionId: string;
   timeoutMs?: number;
 }
@@ -33,12 +36,26 @@ export interface WorkerArtifact {
 export interface WorkerJobReceipt {
   jobId: string;
   principalSubject: string;
-  status: "succeeded" | "failed" | "cancelled" | "timeout";
+  status: "running" | "succeeded" | "failed" | "cancelled" | "timeout";
   exitCodes: number[];
   stdoutTail: string;
   artifacts: WorkerArtifact[];
   workspaceRemoved: boolean;
   terminatedBy?: "timeout" | "cancel";
+}
+
+export interface WorkerControlView {
+  worker_id: string;
+  run_id: string;
+  owner_subject: string;
+  tenant_id: string;
+  role_revision: number;
+  status: WorkerJobReceipt["status"];
+  active: boolean;
+}
+
+interface WorkerControl extends WorkerControlView {
+  jobId: string;
 }
 
 // Only these keys may cross from manager env into a job. NO credential,
@@ -132,6 +149,9 @@ export class OperatorWorkerManager {
   private readonly byIdempotency = new Map<string, string>();
   private readonly aborts = new Map<string, AbortController>();
   private readonly jobSubjects = new Map<string, string>();
+  private readonly controls = new Map<string, WorkerControl>();
+  private readonly controlIdempotency = new Map<string, string>();
+  private readonly completions = new Map<string, Promise<WorkerJobReceipt>>();
   private readonly allowNonIsolated: boolean;
 
   constructor(
@@ -172,7 +192,7 @@ export class OperatorWorkerManager {
     return null;
   }
 
-  async submit(envelope: WorkerJobEnvelope): Promise<WorkerJobReceipt> {
+  async submit(envelope: WorkerJobEnvelope, jobId = `opjob-${randomUUID()}`): Promise<WorkerJobReceipt> {
     // Fail closed on isolation: broad command execution requires a substrate
     // that enforces real filesystem + network isolation. The manager NEVER
     // runs untrusted commands on a non-isolating substrate outside tests.
@@ -187,7 +207,6 @@ export class OperatorWorkerManager {
     const existing = this.byIdempotency.get(idemKey);
     if (existing) return this.jobs.get(existing)!;
 
-    const jobId = `opjob-${randomUUID()}`;
     this.byIdempotency.set(idemKey, jobId);
     this.jobSubjects.set(jobId, envelope.principalSubject);
     const abort = new AbortController();
@@ -233,6 +252,96 @@ export class OperatorWorkerManager {
       if (receipt) receipt.workspaceRemoved = !fs.existsSync(workspace.dir);
       this.aborts.delete(jobId);
     }
+  }
+
+  /** Start a job without waiting for execution to finish. The returned pair is
+   * opaque to the browser and remains bound to the app-attested owner tuple. */
+  start(envelope: WorkerJobEnvelope): WorkerControlView {
+    if (!this.substrate.isolating && !this.allowNonIsolated) {
+      throw new Error("substrate_not_isolating");
+    }
+    const invalid = this.validate(envelope);
+    if (invalid) throw new Error(invalid);
+    const roleRevision = envelope.roleRevision;
+    if (!envelope.tenantId || !Number.isInteger(roleRevision)) {
+      throw new Error("worker_binding_invalid");
+    }
+    const idemKey = `${envelope.principalSubject}:${envelope.idempotencyKey}`;
+    const existingWorkerId = this.controlIdempotency.get(idemKey);
+    if (existingWorkerId) return this.toView(this.controls.get(existingWorkerId)!);
+
+    const jobId = `opjob-${randomUUID()}`;
+    const workerId = `opworker-${randomUUID()}`;
+    const control: WorkerControl = {
+      jobId, worker_id: workerId, run_id: `oprun-${randomUUID()}`,
+      owner_subject: envelope.principalSubject, tenant_id: envelope.tenantId,
+      role_revision: roleRevision!, status: "running", active: true,
+    };
+    this.controls.set(workerId, control);
+    this.controlIdempotency.set(idemKey, workerId);
+    const completion = this.submit(envelope, jobId).then(
+      (receipt) => {
+        control.status = receipt.status;
+        control.active = false;
+        return receipt;
+      },
+      (err) => {
+        control.status = "failed";
+        control.active = false;
+        throw err;
+      },
+    );
+    // Keep the rejection observed. The control route reports the failed
+    // lifecycle state rather than leaking an unhandled background promise.
+    void completion.catch(() => undefined);
+    this.completions.set(jobId, completion);
+    return this.toView(control);
+  }
+
+  private toView(control: WorkerControl): WorkerControlView {
+    return {
+      worker_id: control.worker_id,
+      run_id: control.run_id,
+      owner_subject: control.owner_subject,
+      tenant_id: control.tenant_id,
+      role_revision: control.role_revision,
+      status: control.status,
+      active: control.active,
+    };
+  }
+
+  private resolveControl(workerId: string, runId: string, subject: string,
+                         tenantId: string, roleRevision: number): WorkerControl | undefined {
+    const control = this.controls.get(workerId);
+    if (!control || control.run_id !== runId || control.owner_subject !== subject
+      || control.tenant_id !== tenantId || control.role_revision !== roleRevision) {
+      return undefined;
+    }
+    return control;
+  }
+
+  /** No-oracle control-plane lookup. Any identity mismatch returns undefined. */
+  resolve(workerId: string, runId: string, subject: string, tenantId: string,
+          roleRevision: number): WorkerControlView | undefined {
+    const control = this.resolveControl(workerId, runId, subject, tenantId, roleRevision);
+    return control ? this.toView(control) : undefined;
+  }
+
+  /** Cancel only the exact resolved worker. A prior cancelled receipt is
+   * returned truthfully, while all other terminal states remain refusals. */
+  async cancelExact(workerId: string, runId: string, subject: string,
+                    tenantId: string, roleRevision: number):
+      Promise<WorkerControlView | undefined> {
+    const control = this.resolveControl(workerId, runId, subject, tenantId, roleRevision);
+    if (!control) return undefined;
+    if (control.status === "cancelled") return this.toView(control);
+    if (!control.active || control.status !== "running") return this.toView(control);
+    // This is the only control-plane call site for the stop primitive. It
+    // receives the job id obtained from the exact, owned binding above.
+    if (!this.cancel(control.jobId, subject)) return this.resolve(
+      workerId, runId, subject, tenantId, roleRevision);
+    try { await this.completions.get(control.jobId); } catch { /* state is failed */ }
+    return this.resolve(workerId, runId, subject, tenantId, roleRevision);
   }
 
   /** Ownership-enforced: only the submitting principal may cancel. A

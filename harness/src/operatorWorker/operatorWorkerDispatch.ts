@@ -24,6 +24,8 @@ export interface OperatorWorkerDispatchRequest {
   repo?: string;
   idempotencyKey: string;
   principalSubject: string;
+  tenantId: string;
+  roleRevision: number;
   sessionId: string;
   timeoutMs?: number;
 }
@@ -47,6 +49,9 @@ export function buildOperatorWorkerEnvelope(
   if (!req.principalSubject) {
     throw new OperatorWorkerDispatchError("principal_required");
   }
+  if (!req.tenantId || !Number.isInteger(req.roleRevision)) {
+    throw new OperatorWorkerDispatchError("worker_binding_invalid");
+  }
   if (!req.idempotencyKey) {
     throw new OperatorWorkerDispatchError("idempotency_key_required");
   }
@@ -61,6 +66,8 @@ export function buildOperatorWorkerEnvelope(
     network: [], // ALWAYS fully denied — no egress from broad operator work.
     idempotencyKey: req.idempotencyKey,
     principalSubject: req.principalSubject,
+    tenantId: req.tenantId,
+    roleRevision: req.roleRevision,
     sessionId: req.sessionId,
     timeoutMs: Math.min(req.timeoutMs ?? 120_000, MAX_TIMEOUT_MS),
   };
@@ -75,4 +82,13 @@ export async function dispatchOperatorWorkerJob(
 ): Promise<WorkerJobReceipt> {
   const envelope = buildOperatorWorkerEnvelope(req);
   return manager.submit(envelope);
+}
+
+/** Admit a bounded job and return its active, owner-bound identity before the
+ * worker finishes. Execution continues only inside the manager's substrate. */
+export function startOperatorWorkerJob(
+  manager: OperatorWorkerManager,
+  req: OperatorWorkerDispatchRequest,
+) {
+  return manager.start(buildOperatorWorkerEnvelope(req));
 }

@@ -24,6 +24,8 @@ const BODY = {
   commands: ["echo route-e2e"],
   idempotencyKey: "route-k1",
   principalSubject: "auth0|op-route-test",
+  tenantId: "tenant-route-test",
+  roleRevision: 7,
   sessionId: "opsess-route-1",
 };
 
@@ -63,8 +65,8 @@ function isolatedManager(): OperatorWorkerManager {
     { allowNonIsolatedSubstrate: true });
 }
 
-async function post(baseUrl: string, body: unknown, headers: Record<string, string> = {}) {
-  return fetch(`${baseUrl}/operator/worker/dispatch`, {
+async function post(baseUrl: string, body: unknown, headers: Record<string, string> = {}, route = "/operator/worker/dispatch") {
+  return fetch(`${baseUrl}${route}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
@@ -87,18 +89,36 @@ describe("operator worker route (Lane D wiring e2e)", () => {
     expect(denied.status).toBe(401);
     const allowed = await post(baseUrl, BODY, { "X-Harness-Secret": "route-secret" });
     expect(allowed.status).toBe(200);
+    const active = await allowed.json() as { worker_id: string; run_id: string };
+    let settled = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const resolved = await post(baseUrl, {
+        workerId: active.worker_id,
+        runId: active.run_id,
+        principalSubject: BODY.principalSubject,
+        tenantId: BODY.tenantId,
+        roleRevision: BODY.roleRevision,
+      }, { "X-Harness-Secret": "route-secret" }, "/operator/worker/resolve");
+      const binding = await resolved.json() as { active?: boolean };
+      if (binding.active === false) {
+        settled = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(settled).toBe(true);
   });
 
-  it("round trip: a dispatched job runs in the worker and returns its receipt", async () => {
+  it("accepts an active worker identity before execution finishes", async () => {
     const baseUrl = boot({ operatorWorker: { manager: isolatedManager() } });
     const res = await post(baseUrl, BODY);
     expect(res.status).toBe(200);
     const receipt = (await res.json()) as {
-      status: string; stdoutTail: string; workspaceRemoved: boolean;
+      status: string; worker_id: string; run_id: string;
     };
-    expect(receipt.status).toBe("succeeded");
-    expect(receipt.stdoutTail).toContain("route-e2e");
-    expect(receipt.workspaceRemoved).toBe(true);
+    expect(receipt.status).toBe("running");
+    expect(receipt.worker_id).toMatch(/^opworker-/);
+    expect(receipt.run_id).toMatch(/^oprun-/);
   });
 
   it("FAILS CLOSED over the wire: a non-isolating substrate is a 503 refusal, not execution", async () => {
@@ -115,5 +135,23 @@ describe("operator worker route (Lane D wiring e2e)", () => {
     const baseUrl = boot({ operatorWorker: { manager: isolatedManager() } });
     const res = await post(baseUrl, { ...BODY, principalSubject: "" });
     expect(res.status).toBe(400);
+  });
+
+  it("authenticates resolve and cancels only the exact owned active worker", async () => {
+    const baseUrl = boot({
+      auth: { enabled: true, secret: "route-secret" },
+      operatorWorker: { manager: isolatedManager() },
+    });
+    const long = process.platform === "win32" ? "ping -n 30 127.0.0.1 > NUL" : "sleep 30";
+    const accepted = await post(baseUrl, { ...BODY, commands: [long], idempotencyKey: "route-cancel" },
+      { "X-Harness-Secret": "route-secret" });
+    const target = await accepted.json() as { worker_id: string; run_id: string };
+    const controlTarget = { workerId: target.worker_id, runId: target.run_id };
+    const denied = await post(baseUrl, { ...controlTarget, principalSubject: "auth0|attacker", tenantId: BODY.tenantId, roleRevision: BODY.roleRevision }, {}, "/operator/worker/resolve");
+    expect(denied.status).toBe(401);
+    const cancelled = await post(baseUrl, { ...controlTarget, principalSubject: BODY.principalSubject, tenantId: BODY.tenantId, roleRevision: BODY.roleRevision },
+      { "X-Harness-Secret": "route-secret" }, "/operator/worker/cancel");
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()).status).toBe("cancelled");
   });
 });
