@@ -1474,6 +1474,11 @@ jobs:
           VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
           VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
           VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          # lifecycle_ui flip (leaf-plan envelope, operator pre-authorized
+          # 2026-08-19T12:35Z): bake the Wave B browser projection into the
+          # web bundle. Build-time Vite flag, so this env block IS the
+          # envelope's configuration rail; rollback = set this back to 0.
+          VITE_LIFECYCLE_UI: "1"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -1981,6 +1986,11 @@ jobs:
           VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
           VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
           VITE_AUTH0_AUDIENCE: https://api.leafdesign.ai
+          # lifecycle_ui flip (leaf-plan envelope, operator pre-authorized
+          # 2026-08-19T12:35Z): bake the Wave B browser projection into the
+          # web bundle. Build-time Vite flag, so this env block IS the
+          # envelope's configuration rail; rollback = set this back to 0.
+          VITE_LIFECYCLE_UI: "1"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
