@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -30,6 +31,100 @@ import turn_runner
 router = APIRouter()
 
 
+# --- Observability (TEL-3): every HTTP authority denial, credential mint, and
+#     human-approved tool execution in this router funnels through ONE of the
+#     three choke points below (_deny / _emit_attachment_exchanged /
+#     _emit_tool_invoked) before it returns to the caller. All three are
+#     best-effort (mirrors telemetry_sink.emit's own never-raise contract): a
+#     broken sink can never mask, delay, or soften the actual HTTP response.
+#     The EMF plane (Leaf/Platform/APS) tracks reliability only, never
+#     per-tool identity, so per-tool usage is answerable ONLY from these
+#     events. --------------------------------------------------------------
+def _ledger_tool(value: Any) -> str | None:
+    """Normalize `tool` exactly the way broker.py's ledger choke point does
+    (`_conform_ledger_entry`, server/broker.py:332-333): a string or None,
+    never any other JSON shape a harness response could carry."""
+    return value if isinstance(value, str) else None
+
+
+def _emit_authority_denied(reason: str) -> None:
+    """Best-effort mcp.authority_denied {reason}. No tenant/session identity
+    is stamped: a denial can fire before either is verified (an
+    unauthenticated caller has neither), so every row uses the same
+    process-level identity operator_egress_guard's security events use."""
+    try:
+        import telemetry_sink
+
+        telemetry_sink.emit(
+            "mcp.authority_denied", tenant_id="system", tenant_kind="system",
+            session_id="server", labels={"reason": reason},
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never mask a denial
+        pass
+
+
+def _deny(status_code: int, detail: str, reason: str) -> HTTPException:
+    """Single choke point for every authority-denying HTTPException this
+    router raises: emit mcp.authority_denied BEFORE returning the exception
+    for the caller to raise (mirrors operator_egress_guard._deny), so a
+    telemetry fault can never suppress or delay the deny itself."""
+    _emit_authority_denied(reason)
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _emit_attachment_exchanged(direction: str, tenant_id: str, session_id: str) -> None:
+    """Best-effort mcp.attachment_exchanged {direction, mime_class}, fired
+    once per minted credential bundle from the single _mint_attachment choke
+    point. `direction` is one of the two exchanges this module's own
+    docstring names: "internal" (the trusted-harness route) or "human" (the
+    verified-human approval route). Every bundle minted here is the JSON
+    credential envelope (bearer_token + channel_secret) -- its real wire
+    Content-Type -- so mime_class is "json" today; the label exists so a
+    future non-JSON channel lands in its own class instead of a silent
+    mislabel."""
+    try:
+        import telemetry_sink
+
+        telemetry_sink.emit(
+            "mcp.attachment_exchanged",
+            tenant_id=tenant_id,
+            tenant_kind="guest" if tenant_id.startswith("guest-") else "account",
+            session_id=session_id,
+            labels={"direction": direction, "mime_class": "json"},
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never mask the mint
+        pass
+
+
+def _emit_tool_invoked(
+    tool: str | None, outcome: str, duration_ms: int, approval_state: str,
+    tenant_id: str, session_id: str,
+) -> None:
+    """Best-effort mcp.tool_invoked {tool, outcome, duration_ms,
+    approval_state}, fired exactly once per /approvals/execute request from
+    the single choke point in execute_human_approval -- the one place a
+    human-approved tool call actually runs. `tool` is null -> absent (see
+    _ledger_tool)."""
+    try:
+        import telemetry_sink
+
+        labels: dict[str, Any] = {
+            "outcome": outcome, "duration_ms": duration_ms,
+            "approval_state": approval_state,
+        }
+        if tool is not None:
+            labels["tool"] = tool
+        telemetry_sink.emit(
+            "mcp.tool_invoked",
+            tenant_id=tenant_id,
+            tenant_kind="guest" if tenant_id.startswith("guest-") else "account",
+            session_id=session_id,
+            labels=labels,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never mask the result
+        pass
+
+
 def _require_project_execution(
     session_id: str, tenant_id: str, subject: str, tier: str,
 ) -> None:
@@ -42,11 +137,12 @@ def _require_project_execution(
             session_store.get_session(session_id), tenant, write=True,
         )
     except platform_link.ProjectSessionForbidden as exc:
-        raise HTTPException(
-            status_code=403, detail="current project role does not permit execution",
+        raise _deny(
+            403, "current project role does not permit execution",
+            "execution_forbidden",
         ) from exc
     if session is None:
-        raise HTTPException(status_code=409, detail="MCP session is unavailable")
+        raise _deny(409, "MCP session is unavailable", "session_unavailable")
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _APPROVAL_ID = re.compile(r"^[A-Za-z0-9_-]{8,256}$")
@@ -251,15 +347,15 @@ def _active_authority(
         turn_runner.turn_max_s(),
     )
     if not isinstance(subject, str) or not subject:
-        raise HTTPException(
-            status_code=409,
-            detail="the named tenant session and turn are not active",
+        raise _deny(
+            409, "the named tenant session and turn are not active",
+            "turn_inactive",
         )
     platform_tenant_id, tier = deps.resolve_active_platform_tenant_authority(subject)
     if platform_tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=409,
-            detail="the active turn no longer belongs to the named tenant",
+        raise _deny(
+            409, "the active turn no longer belongs to the named tenant",
+            "tenant_mismatch",
         )
     return subject, tier
 
@@ -270,6 +366,7 @@ def _mint_attachment(
     subject_id: str,
     tier: str,
     request: AttachmentExchangeRequest,
+    direction: str,
 ) -> dict[str, Any]:
     plan, effects = mcp_authority.tier_authority(tier)
     channel_secret = secrets.token_urlsafe(48)
@@ -293,6 +390,7 @@ def _mint_attachment(
         audience=mcp_authority.attachment_audience(),
         ttl_seconds=mcp_authority.ATTACHMENT_TTL_SECONDS,
     )
+    _emit_attachment_exchanged(direction, tenant_id, request.session_id)
     return {
         "bearer_token": token,
         "channel_secret": channel_secret,
@@ -425,7 +523,7 @@ def gateway_jwks() -> dict[str, list[dict[str, str]]]:
     try:
         return {"keys": [mcp_authority.signer().public_jwk()]}
     except mcp_authority.McpAuthorityError as exc:
-        raise HTTPException(status_code=503, detail="MCP signing is unavailable") from exc
+        raise _deny(503, "MCP signing is unavailable", "signing_unavailable") from exc
 
 
 @router.post("/internal/mcp/gateway/attachment")
@@ -436,9 +534,9 @@ def exchange_attachment(
     x_dispatch_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
     if not deps.auth_live():
-        raise HTTPException(status_code=503, detail="live authentication is required")
+        raise _deny(503, "live authentication is required", "auth_not_live")
     if not x_tenant_id or not deps._dispatch_secret_ok(x_dispatch_secret):
-        raise HTTPException(status_code=401, detail="valid dispatch authority is required")
+        raise _deny(401, "valid dispatch authority is required", "unauthenticated")
     tenant_id = _id("tenant_id", x_tenant_id)
     _id("session_id", request.session_id)
     _id("authority_session_id", request.authority_session_id)
@@ -460,12 +558,13 @@ def exchange_attachment(
             subject_id=subject,
             tier=tier,
             request=request,
+            direction="internal",
         )
     except mcp_authority.McpMountDenied as exc:
-        raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc
+        raise _deny(403, "subscription mount is unavailable", "mount_denied") from exc
     except mcp_authority.McpAuthorityError as exc:
-        raise HTTPException(
-            status_code=503, detail="MCP attachment authority is unavailable"
+        raise _deny(
+            503, "MCP attachment authority is unavailable", "attachment_unavailable",
         ) from exc
 
 
@@ -483,7 +582,7 @@ def exchange_human_approval_token(
         or not isinstance(tenant.subject, str)
         or not tenant.subject
     ):
-        raise HTTPException(status_code=401, detail="verified human identity is required")
+        raise _deny(401, "verified human identity is required", "unauthenticated")
     tenant_id = _id("tenant_id", str(tenant))
     _id("session_id", request.session_id)
     _id("authority_session_id", request.authority_session_id)
@@ -498,15 +597,15 @@ def exchange_human_approval_token(
         tenant_id, request.authority_session_id, request.authority_turn_id
     )
     if not secrets.compare_digest(active_subject, tenant.subject):
-        raise HTTPException(
-            status_code=409,
-            detail="the active turn belongs to another authenticated subject",
+        raise _deny(
+            409, "the active turn belongs to another authenticated subject",
+            "subject_mismatch",
         )
     current_tenant, current_tier = deps.resolve_active_platform_tenant_authority(
         tenant.subject
     )
     if current_tenant != tenant_id or current_tier != active_tier:
-        raise HTTPException(status_code=409, detail="platform authority changed")
+        raise _deny(409, "platform authority changed", "authority_changed")
     _require_project_execution(
         request.authority_session_id, tenant_id, tenant.subject, current_tier,
     )
@@ -529,10 +628,10 @@ def exchange_human_approval_token(
             argument_digest=request.argument_digest,
         )
     except mcp_authority.McpMountDenied as exc:
-        raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc
+        raise _deny(403, "subscription mount is unavailable", "mount_denied") from exc
     except mcp_authority.McpAuthorityError as exc:
-        raise HTTPException(
-            status_code=503, detail="MCP approval authority is unavailable"
+        raise _deny(
+            503, "MCP approval authority is unavailable", "approval_unavailable",
         ) from exc
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
@@ -556,7 +655,7 @@ def execute_human_approval(
         or not isinstance(tenant.subject, str)
         or not tenant.subject
     ):
-        raise HTTPException(status_code=401, detail="verified human identity is required")
+        raise _deny(401, "verified human identity is required", "unauthenticated")
     tenant_id = _id("tenant_id", str(tenant))
     if not _APPROVAL_ID.fullmatch(request.approval_id):
         raise HTTPException(status_code=422, detail="invalid approval_id")
@@ -566,131 +665,163 @@ def execute_human_approval(
         tenant.subject
     )
     if current_tenant != tenant_id:
-        raise HTTPException(status_code=409, detail="platform authority changed")
+        raise _deny(409, "platform authority changed", "authority_changed")
 
+    # mcp.tool_invoked (TEL-3) fires exactly once below, from the `finally`,
+    # timing the whole review+mint+execute round trip -- THE one place a
+    # human-approved tool call actually runs. Nothing before this point
+    # identifies a tool, so the 401/422/409 guards above are
+    # mcp.authority_denied's job, not this event's.
+    start = time.monotonic()
+    invocation: dict[str, Any] = {
+        "tool": None, "approval_state": "error", "outcome": "error",
+        "session_id": "unknown",
+    }
     try:
-        reviewed = _harness_approval_call("review", {
-            "approval_id": request.approval_id,
-            "argument_digest": request.argument_digest,
-            "tenant_id": tenant_id,
-            "subject_id": tenant.subject,
-        })
-        identity_value = reviewed.get("identity")
-        approval_status = reviewed.get("status")
-        if approval_status not in {"pending", "approved", "completed", "uncertain"} or not isinstance(identity_value, dict):
-            raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
-        identity = {
-            "session_id": _id("session_id", identity_value.get("session_id")),
-            "authority_turn_id": _id(
-                "authority_turn_id", identity_value.get("authority_turn_id")
-            ),
-            "subscription_mount_id": _id(
-                "subscription_mount_id", identity_value.get("subscription_mount_id")
-            ),
-            "runner_profile_id": _runner_profile(
-                identity_value.get("runner_profile_id")
-            ),
-        }
-        if (
-            identity_value.get("tenant_id") != tenant_id
-            or identity_value.get("subject_id") != tenant.subject
-        ):
-            raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
-        session = session_store.get_session(identity["session_id"])
-        if not session or session.get("tenant_id") != tenant_id:
-            raise mcp_authority.McpAuthorityError(
-                "MCP approval receipt session is unavailable"
-            )
-        _require_project_execution(
-            identity["session_id"], tenant_id, tenant.subject, current_tier,
-        )
-        if approval_status in {"pending", "approved"}:
-            mcp_authority.verify_subscription_mount(
-                tenant_id, identity["subscription_mount_id"]
-            )
-            human_token, _human_expires = _mint_human_approval_token(
-                tenant_id=tenant_id,
-                subject_id=tenant.subject,
-                identity=identity,
-                approval_id=request.approval_id,
-                argument_digest=request.argument_digest,
-            )
-            attachment_request = AttachmentExchangeRequest(
-                session_id=identity["session_id"],
-                authority_session_id=identity["session_id"],
-                authority_turn_id=identity["authority_turn_id"],
-                subscription_mount_id=identity["subscription_mount_id"],
-                runner_profile_id=identity["runner_profile_id"],
-            )
-            attachment = _mint_attachment(
-                tenant_id=tenant_id,
-                subject_id=tenant.subject,
-                tier=current_tier,
-                request=attachment_request,
-            )
-            receipt = _harness_approval_call("execute", {
+        try:
+            reviewed = _harness_approval_call("review", {
                 "approval_id": request.approval_id,
                 "argument_digest": request.argument_digest,
-                "identity": attachment["identity"],
-                "human_bearer": human_token,
-                "attachment": {
-                    "bearer_token": attachment["bearer_token"],
-                    "channel_secret": attachment["channel_secret"],
-                    "expires_at": attachment["expires_at"],
-                },
+                "tenant_id": tenant_id,
+                "subject_id": tenant.subject,
             })
-            approval_status = receipt.get("status")
-        else:
-            receipt = reviewed
-
-        if approval_status == "uncertain":
-            session_store.append_event(
-                identity["session_id"],
-                identity["authority_turn_id"],
-                "standard_service_approval_status",
-                {
-                    "status": "uncertain",
-                    "approval_id": request.approval_id,
-                },
+            invocation["tool"] = _ledger_tool(reviewed.get("tool"))
+            identity_value = reviewed.get("identity")
+            approval_status = reviewed.get("status")
+            if approval_status not in {"pending", "approved", "completed", "uncertain"} or not isinstance(identity_value, dict):
+                raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+            invocation["approval_state"] = approval_status
+            identity = {
+                "session_id": _id("session_id", identity_value.get("session_id")),
+                "authority_turn_id": _id(
+                    "authority_turn_id", identity_value.get("authority_turn_id")
+                ),
+                "subscription_mount_id": _id(
+                    "subscription_mount_id", identity_value.get("subscription_mount_id")
+                ),
+                "runner_profile_id": _runner_profile(
+                    identity_value.get("runner_profile_id")
+                ),
+            }
+            invocation["session_id"] = identity["session_id"]
+            if (
+                identity_value.get("tenant_id") != tenant_id
+                or identity_value.get("subject_id") != tenant.subject
+            ):
+                raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
+            session = session_store.get_session(identity["session_id"])
+            if not session or session.get("tenant_id") != tenant_id:
+                raise mcp_authority.McpAuthorityError(
+                    "MCP approval receipt session is unavailable"
+                )
+            _require_project_execution(
+                identity["session_id"], tenant_id, tenant.subject, current_tier,
             )
-            response.headers["Cache-Control"] = "no-store"
-            response.headers["Pragma"] = "no-cache"
-            return {"status": "uncertain"}
+            if approval_status in {"pending", "approved"}:
+                mcp_authority.verify_subscription_mount(
+                    tenant_id, identity["subscription_mount_id"]
+                )
+                human_token, _human_expires = _mint_human_approval_token(
+                    tenant_id=tenant_id,
+                    subject_id=tenant.subject,
+                    identity=identity,
+                    approval_id=request.approval_id,
+                    argument_digest=request.argument_digest,
+                )
+                attachment_request = AttachmentExchangeRequest(
+                    session_id=identity["session_id"],
+                    authority_session_id=identity["session_id"],
+                    authority_turn_id=identity["authority_turn_id"],
+                    subscription_mount_id=identity["subscription_mount_id"],
+                    runner_profile_id=identity["runner_profile_id"],
+                )
+                attachment = _mint_attachment(
+                    tenant_id=tenant_id,
+                    subject_id=tenant.subject,
+                    tier=current_tier,
+                    request=attachment_request,
+                    direction="human",
+                )
+                receipt = _harness_approval_call("execute", {
+                    "approval_id": request.approval_id,
+                    "argument_digest": request.argument_digest,
+                    "identity": attachment["identity"],
+                    "human_bearer": human_token,
+                    "attachment": {
+                        "bearer_token": attachment["bearer_token"],
+                        "channel_secret": attachment["channel_secret"],
+                        "expires_at": attachment["expires_at"],
+                    },
+                })
+                approval_status = receipt.get("status")
+                invocation["tool"] = _ledger_tool(receipt.get("tool")) or invocation["tool"]
+                invocation["approval_state"] = (
+                    approval_status if isinstance(approval_status, str)
+                    else invocation["approval_state"]
+                )
+            else:
+                receipt = reviewed
 
-        receipt_id = receipt.get("receipt_id")
-        artifact_ids = receipt.get("artifact_ids")
-        if (
-            receipt.get("status") != "completed"
-            or not isinstance(receipt_id, str)
-            or not _DIGEST.fullmatch(receipt_id)
-            or (
-                artifact_ids is not None
-                and (
-                    not standard_service_contract.valid_artifact_ids(
-                        artifact_ids
+            if approval_status == "uncertain":
+                session_store.append_event(
+                    identity["session_id"],
+                    identity["authority_turn_id"],
+                    "standard_service_approval_status",
+                    {
+                        "status": "uncertain",
+                        "approval_id": request.approval_id,
+                    },
+                )
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Pragma"] = "no-cache"
+                invocation["outcome"] = "uncertain"
+                return {"status": "uncertain"}
+
+            receipt_id = receipt.get("receipt_id")
+            artifact_ids = receipt.get("artifact_ids")
+            if (
+                receipt.get("status") != "completed"
+                or not isinstance(receipt_id, str)
+                or not _DIGEST.fullmatch(receipt_id)
+                or (
+                    artifact_ids is not None
+                    and (
+                        not standard_service_contract.valid_artifact_ids(
+                            artifact_ids
+                        )
                     )
                 )
+            ):
+                raise mcp_authority.McpAuthorityError(
+                    "MCP approval host returned invalid data"
+                )
+            _append_completed_receipt_once(
+                identity["session_id"],
+                identity["authority_turn_id"],
+                receipt_id,
+                artifact_ids,
             )
-        ):
-            raise mcp_authority.McpAuthorityError(
-                "MCP approval host returned invalid data"
-            )
-        _append_completed_receipt_once(
-            identity["session_id"],
-            identity["authority_turn_id"],
-            receipt_id,
-            artifact_ids,
+            invocation["outcome"] = "completed"
+        except mcp_authority.McpMountDenied as exc:
+            invocation["outcome"] = "denied"
+            raise _deny(403, "subscription mount is unavailable", "mount_denied") from exc
+        except (mcp_authority.McpAuthorityError, HTTPException) as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            invocation["outcome"] = "error"
+            raise _deny(
+                409, "MCP approval is unavailable", "approval_unavailable",
+            ) from exc
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return {
+            "status": "completed",
+            "receipt_id": receipt_id,
+            **({"artifact_ids": artifact_ids} if artifact_ids else {}),
+        }
+    finally:
+        _emit_tool_invoked(
+            invocation["tool"], invocation["outcome"],
+            int((time.monotonic() - start) * 1000), invocation["approval_state"],
+            tenant_id, invocation["session_id"],
         )
-    except mcp_authority.McpMountDenied as exc:
-        raise HTTPException(status_code=403, detail="subscription mount is unavailable") from exc
-    except (mcp_authority.McpAuthorityError, HTTPException) as exc:
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=409, detail="MCP approval is unavailable") from exc
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    return {
-        "status": "completed",
-        "receipt_id": receipt_id,
-        **({"artifact_ids": artifact_ids} if artifact_ids else {}),
-    }
