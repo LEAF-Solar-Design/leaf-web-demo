@@ -10,6 +10,7 @@ caps. No test talks to GCP.
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -95,6 +96,7 @@ def test_sink_enqueues_row_with_stringified_labels(monkeypatch):
     assert labels["attempts"] == "2"
     assert labels["usd_est"] == "0.01"
     assert labels["schema_version"] == "1"
+    assert uuid.UUID(labels["event_id"])
     assert "none_dropped" not in labels
 
 
@@ -104,6 +106,18 @@ def test_sink_schema_version_is_server_authority(monkeypatch):
         "a.b", tenant_id="t", tenant_kind="account", session_id="s",
         labels={"schema_version": "999"})
     assert json.loads(telemetry_sink._queue[-1]["labels"])["schema_version"] == "1"
+
+
+def test_sink_event_id_is_unique_server_authority(monkeypatch):
+    _enable_fake_sink(monkeypatch)
+    for _ in range(2):
+        telemetry_sink.emit(
+            "a.b", tenant_id="t", tenant_kind="account", session_id="s",
+            labels={"event_id": "client-controlled"})
+    event_ids = [json.loads(row["labels"])["event_id"] for row in telemetry_sink._queue]
+    assert len(set(event_ids)) == 2
+    assert all(uuid.UUID(value) for value in event_ids)
+    assert "client-controlled" not in event_ids
 
 
 def test_ensure_table_failure_is_not_cached_as_created(monkeypatch):

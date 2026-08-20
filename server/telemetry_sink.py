@@ -56,6 +56,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Any, Dict, List, Optional
 
@@ -463,8 +464,11 @@ def emit(
             return False
         merged = dict(labels or {})
         # Server authority: no caller (least of all a client payload routed
-        # through the ingest door) may assert a different schema_version.
+        # through the ingest door) may assert a different schema_version or
+        # parity identity. The one generated event_id rides inside labels so
+        # the existing BigQuery JSON column and Firehose row stay compatible.
         merged["schema_version"] = "1"
+        merged["event_id"] = str(uuid.uuid4())
         row = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
             + f".{int((time.time() % 1) * 1e6):06d}Z",
