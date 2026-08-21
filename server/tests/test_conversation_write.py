@@ -697,8 +697,8 @@ def test_message_insert_statement_timeout_is_set_on_the_executing_connection(
     with pg.get_pool().connection() as conn:
         with conn.transaction():
             conn.execute(
-                "SET LOCAL statement_timeout = %s",
-                (str(conversations.MESSAGE_STATEMENT_TIMEOUT_MS),),
+                "SELECT set_config('statement_timeout', %s, true)",
+                (f"{conversations.MESSAGE_STATEMENT_TIMEOUT_MS}ms",),
             )
             row = conn.execute("SHOW statement_timeout").fetchone()
             assert row[0] == f"{conversations.MESSAGE_STATEMENT_TIMEOUT_MS}ms"
