@@ -17,8 +17,11 @@ assert.match(dockerfile, /^ARG VITE_API_BASE=$/m,
 assert.match(dockerfile, /^ARG VITE_AUTH0_DOMAIN=leafautomation\.us\.auth0\.com$/m)
 assert.match(dockerfile, /^ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O$/m)
 assert.match(dockerfile, /^ARG VITE_AUTH0_AUDIENCE=https:\/\/api\.leafdesign\.ai$/m)
+assert.match(dockerfile, /^ARG VITE_LIFECYCLE_UI=1$/m,
+  'the deployable web image must bake the reviewed lifecycle UI selector on')
 assert.match(dockerfile, /VITE_AUTH0_DOMAIN=\$\{VITE_AUTH0_DOMAIN\}/)
 assert.match(dockerfile, /VITE_AUTH0_CLIENT_ID=\$\{VITE_AUTH0_CLIENT_ID\}/)
 assert.match(dockerfile, /VITE_AUTH0_AUDIENCE=\$\{VITE_AUTH0_AUDIENCE\}/)
+assert.match(dockerfile, /VITE_LIFECYCLE_UI=\$\{VITE_LIFECYCLE_UI\}/)
 
 console.log('web container config: page assets, API, and Auth0 SPA values are pinned')
