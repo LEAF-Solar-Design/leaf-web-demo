@@ -78,10 +78,13 @@ def test_module_has_no_update_or_delete_statement_on_the_store() -> None:
     src = inspect.getsource(templates)
     for match in re.finditer(r'"(UPDATE|DELETE)[^"]*"', src, re.IGNORECASE):
         assert templates.STORE_TABLE not in match.group(0), match.group(0)
-    assert "SET LOCAL statement_timeout" in inspect.getsource(
-        templates.publish_template_version)
-    assert "SET LOCAL statement_timeout" in inspect.getsource(
-        templates._read_through_stored_version)
+    for function in (
+        templates.publish_template_version,
+        templates._read_through_stored_version,
+    ):
+        src = inspect.getsource(function)
+        assert "SELECT set_config('statement_timeout', %s, true)" in src
+        assert "SET LOCAL statement_timeout = %s" not in src
 
 
 def test_resolve_version_reads_through_the_store_only_behind_the_flag() -> None:
