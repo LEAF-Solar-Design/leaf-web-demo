@@ -14,6 +14,7 @@ INSERT and skip cleanly without DATABASE_URL.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -697,10 +698,16 @@ def test_message_insert_statement_timeout_is_set_on_the_executing_connection(
     with pg.get_pool().connection() as conn:
         with conn.transaction():
             conn.execute(
-                "SET LOCAL statement_timeout = %s",
+                "SELECT set_config('statement_timeout', %s, true)",
                 (str(conversations.MESSAGE_STATEMENT_TIMEOUT_MS),),
             )
             row = conn.execute("SHOW statement_timeout").fetchone()
             assert row[0] == f"{conversations.MESSAGE_STATEMENT_TIMEOUT_MS}ms"
         row_after = conn.execute("SHOW statement_timeout").fetchone()
         assert row_after[0] != f"{conversations.MESSAGE_STATEMENT_TIMEOUT_MS}ms"
+
+
+def test_conversation_lookup_uses_parameter_safe_transaction_timeout() -> None:
+    src = inspect.getsource(conversations.get_conversation)
+    assert "SELECT set_config('statement_timeout', %s, true)" in src
+    assert "SET LOCAL statement_timeout = %s" not in src

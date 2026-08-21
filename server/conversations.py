@@ -174,8 +174,10 @@ def get_conversation(org_id: Any, project_id: Any,
     """
     db = platform_db()
     with db.transaction() as conn:
-        conn.execute("SET LOCAL statement_timeout = %s",
-                     (str(MESSAGE_STATEMENT_TIMEOUT_MS),))
+        conn.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(MESSAGE_STATEMENT_TIMEOUT_MS),),
+        )
         row = conn.execute(
             f"SELECT * FROM {TABLE}"
             " WHERE conversation_id = %s AND org_id = %s AND project_id = %s",
