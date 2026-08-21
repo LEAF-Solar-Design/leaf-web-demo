@@ -20,11 +20,10 @@ write did, and per C2-4's merged contract the undo bumps (never resets) the
 ``content_version`` lineage -- proven here by a THIRD PATCH that reuses the
 now-superseded write-time version and must 409, not silently apply.
 
-``server/app.py`` does not mount ``routers.templates`` yet (out of this
-card's file budget), so this drives the router's handler functions directly
--- the same offline, in-process calling convention every sibling
-``tests/test_template_*.py`` file already uses (see ``test_template_write.py``
-in particular, which this file's CAS assertions deliberately mirror).
+``server/app.py`` mounts ``routers.templates`` so the same fail-closed handlers
+are reachable in the deployed application. The lifecycle checks below still
+drive the handlers directly to keep their state and authority assertions
+focused.
 
 Run:  cd server && python -m pytest tests/test_template_e2e.py -q
 """
@@ -43,6 +42,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import pytest  # noqa: E402
 
+import app as application  # noqa: E402
 import deps  # noqa: E402
 import templates  # noqa: E402
 from customization_authority import TenantBinding  # noqa: E402
@@ -51,6 +51,13 @@ from routers import templates as templates_router  # noqa: E402
 TEMPLATE_ID = "rooftop-standard-string"
 TENANT = "tenant-e2e"
 PROJECT = "project-e2e"
+
+
+def test_application_mounts_every_solar_template_route():
+    mounted = {route.path for route in application.app.routes}
+    expected = {route.path for route in templates_router.router.routes}
+    assert expected
+    assert expected <= mounted
 
 
 @pytest.fixture(autouse=True)
