@@ -324,8 +324,10 @@ def publish_template_version(template_id: str, version: str,
     version_id = uuid.uuid4()
     try:
         with db.transaction() as conn:
-            conn.execute("SET LOCAL statement_timeout = %s",
-                         (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),))
+            conn.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),),
+            )
             conn.execute(
                 f"INSERT INTO {STORE_TABLE}"
                 " (version_id, template_id, version, content, content_sha256,"
@@ -356,8 +358,10 @@ def _read_through_stored_version(template_id: str,
     """
     db = platform_db()
     with db.transaction() as conn:
-        conn.execute("SET LOCAL statement_timeout = %s",
-                     (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),))
+        conn.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(TEMPLATE_STORE_STATEMENT_TIMEOUT_MS),),
+        )
         if version is None:
             row = conn.execute(
                 f"SELECT * FROM {STORE_TABLE} WHERE template_id = %s"
