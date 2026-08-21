@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 import dependency_health
 import deps
+import conversations as conversation_crud
 import ios_ship_provider as ios_ship_provider_client
 import ios_ship_callback_listener
 import jobs as job_store
@@ -201,6 +202,7 @@ install_error_handlers(app)
 app.include_router(session.router)
 app.include_router(sessions.router)  # sessions wire spec (S2): POST /api/sessions, .../messages, .../stream, .../transcript
 app.include_router(checkpoints.router)  # session checkpoint metadata
+app.include_router(conversation_crud.router)  # project conversation CRUD
 app.include_router(conversations_router.router)  # B-C2: conversation message write path (POST .../messages)
 app.include_router(skills.router)
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
