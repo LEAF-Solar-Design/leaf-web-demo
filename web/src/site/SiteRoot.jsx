@@ -13,6 +13,7 @@ import { sceneForPath } from './routeScene.js'
 import StageLayer from './StageLayer.jsx'
 import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
+import ProjectList from '../projects/ProjectList.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
@@ -210,6 +211,9 @@ export default function SiteRoot() {
           onSelectedHandleChange={setOperatorSelectedHandle}
           onResultOverlayChange={setOperatorOverlay}
         />
+        <div className="projects-stage-panel" data-cast="tool" style={{ '--rank': 4 }}>
+          <ProjectList />
+        </div>
       </main>
     </WorkspaceControllerProvider>
   )
