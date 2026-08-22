@@ -489,6 +489,9 @@ export interface BuildTurnOptionsInput {
   services?: RunnerServicesAttachment;
   canUseTool: CanUseTool;
   planFirst?: boolean;
+  /** SDK process diagnostics. The production callback must classify each fragment
+   * immediately and must never retain or print the raw text. */
+  stderr?: (data: string) => void;
 }
 
 /** Assemble SDK options in one testable place from private and contained servers. */
@@ -516,7 +519,36 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
     // denied. plan_first only ever narrows.
     allowedTools: input.planFirst ? [] : [APS_TEST_RUN_MCP_NAME],
     canUseTool: input.canUseTool,
+    ...(input.stderr ? { stderr: input.stderr } : {}),
   };
+}
+
+type SafeSdkFailure = {
+  errorCode: string;
+  stopReason: StopReason;
+  priority: number;
+};
+
+/** Reduce one untrusted SDK stderr fragment to an allowlisted classification.
+ * The caller retains only this fixed object, never the source fragment. */
+export function classifyAgentSdkStderr(fragment: string): SafeSdkFailure | null {
+  const text = fragment.toLowerCase();
+  if (/authentication|unauthorized|invalid api key|invalid.*oauth|oauth.*(failed|expired)|\b401\b|\b403\b/.test(text)) {
+    return { errorCode: "authentication_failed", stopReason: "error", priority: 5 };
+  }
+  if (/billing|quota|credit balance|insufficient credit|spend limit/.test(text)) {
+    return { errorCode: "llm_quota_exhausted", stopReason: "llm_quota_exhausted", priority: 4 };
+  }
+  if (/rate.?limit|overloaded|\b429\b/.test(text)) {
+    return { errorCode: "llm_rate_limited", stopReason: "llm_rate_limited", priority: 3 };
+  }
+  if (/module not found|cannot find module|executable not found|failed to spawn|sdk setup/.test(text)) {
+    return { errorCode: "agent_sdk_turn_sdk_setup_failed", stopReason: "error", priority: 2 };
+  }
+  if (/query failed|request failed|connection (failed|refused)|network error|fetch failed/.test(text)) {
+    return { errorCode: "agent_sdk_turn_query_failed", stopReason: "error", priority: 1 };
+  }
+  return null;
 }
 
 function summarizeEnvelope(envelope: ResultEnvelope): string {
@@ -854,6 +886,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     if (external?.aborted) abort.abort();
     else external?.addEventListener("abort", onExternalAbort, { once: true });
     let awaitingApproval = false;
+    let stderrFailure: SafeSdkFailure | null = null;
 
     const apsTestRunTool = sdk.tool(
       APS_TEST_RUN_TOOL,
@@ -967,6 +1000,12 @@ export class AgentSdkTurnRunner implements ConverseRunner {
           // This list stays the APS tool only; the money-gated canUseTool
           // envelope below is unchanged.
           canUseTool,
+          stderr: (fragment: string): void => {
+            const classified = classifyAgentSdkStderr(fragment);
+            if (classified && (!stderrFailure || classified.priority > stderrFailure.priority)) {
+              stderrFailure = classified;
+            }
+          },
         }),
       });
     } catch (error) {
@@ -1015,7 +1054,20 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     if (pending.length) {
       for (const ev of pending.splice(0)) yield ev;
     }
-    yield { type: "turn_complete", data: { stop_reason: awaitingApproval ? "awaiting_approval" : "error" } };
+    if (awaitingApproval) {
+      yield { type: "turn_complete", data: { stop_reason: "awaiting_approval" } };
+      return;
+    }
+    const failure = stderrFailure ?? {
+      errorCode: "agent_sdk_turn_failed",
+      stopReason: "error" as StopReason,
+      priority: 0,
+    };
+    yield {
+      type: "error",
+      data: { error: { error_code: failure.errorCode, message: "Agent SDK turn failed." } },
+    };
+    yield { type: "turn_complete", data: { stop_reason: failure.stopReason } };
   }
 
   private async capabilityFor(tenantId: string, targetTool: string | undefined): Promise<string | undefined> {
