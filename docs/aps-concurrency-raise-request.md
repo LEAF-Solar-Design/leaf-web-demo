@@ -93,14 +93,17 @@ concurrency limit** on our production app.
 
 ## 2. Current limit (observed)
 
-Our app currently runs against the **default per-app WorkItem concurrency limit**.
-In practice our submit path is throttled to a conservative in-app ceiling of
-**`APS_MAX_CONCURRENCY = 1–2`** concurrent WorkItems to stay safely under that
-limit, which serializes all tenants behind a single in-flight WorkItem.
+Our product-side scheduler ceiling is exactly **`APS_MAX_CONCURRENCY = 1`**.
+Current source defaults to `1` in `server/broker.py`, and the live acceptance
+broker task definition explicitly sets `APS_LIVE=1` and
+`APS_MAX_CONCURRENCY=1`. This serializes all tenants behind one in-flight
+WorkItem.
 
-The exact account-side limit was not exposed in the available APS console. The
-request was submitted using the observed/assumed **1–2** figure; APS can confirm
-the authoritative limit from the app id above.
+The exact Autodesk account-side or app-side service limit is not exposed in the
+available APS console, so we do not claim a value for it. Earlier drafts used an
+assumed **1-2** figure. This request replaces that assumption with the exact
+product-side ceiling above and asks APS to confirm the authoritative service
+limit for the application ID above.
 
 ## 3. Requested limit
 
