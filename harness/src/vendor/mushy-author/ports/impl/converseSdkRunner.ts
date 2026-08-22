@@ -446,6 +446,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     let streamFault: string | null = null;
     let sdkSessionReset = false;
     let attemptProducedOutput = false;
+    let emittedAssistantText = false;
 
     try {
       let prompt = input.userMessage;
@@ -466,6 +467,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
                 const delta = (ev.delta ?? {}) as Record<string, unknown>;
                 if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
                   attemptProducedOutput = true;
+                  emittedAssistantText = true;
                   yield { type: "text_delta", text: delta.text };
                 }
               }
@@ -631,11 +633,16 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         message: `turn hit the ${this.maxTurns}-SDK-turn spend cap`,
         retryable: false,
       };
+    } else if (emittedAssistantText) {
+      // The SDK can cleanly exhaust after streaming a complete user-visible answer
+      // without emitting its usual terminal result. Do not turn that already-delivered
+      // answer into a durable failure or retry it and risk duplicate provider work.
+      stopReason = "end_turn";
     } else {
       stopReason = "error";
       error = {
-        error_code: "internal",
-        message: "Agent service ended without a success result",
+        error_code: "agent_sdk_turn_failed",
+        message: "Agent service ended without producing an answer",
         retryable: false,
       };
     }
