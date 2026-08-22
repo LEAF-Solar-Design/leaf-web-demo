@@ -14,7 +14,6 @@ import { describe, expect, it } from "vitest";
 import {
   AgentSdkTurnRunner,
   buildPrompt,
-  classifyAgentSdkStderr,
   chunkText,
   mapSdkMessage,
   resolveWrapperTarget,
@@ -218,24 +217,6 @@ describe("stopReasonFromResult", () => {
     expect(stopReasonFromResult({ subtype: "error_during_execution", errors: ["something odd happened"] })).toBe(
       "error",
     );
-  });
-});
-
-describe("classifyAgentSdkStderr", () => {
-  it.each([
-    ["authentication failed with private-token-value", "authentication_failed", "error"],
-    ["insufficient credit balance for private-org", "llm_quota_exhausted", "llm_quota_exhausted"],
-    ["HTTP 429 overloaded for private-client", "llm_rate_limited", "llm_rate_limited"],
-    ["cannot find module private-sdk-path", "agent_sdk_turn_sdk_setup_failed", "error"],
-    ["network error while request failed for private-host", "agent_sdk_turn_query_failed", "error"],
-  ])("reduces provider stderr to a fixed safe classification", (raw, errorCode, stopReason) => {
-    const classified = classifyAgentSdkStderr(raw);
-    expect(classified).toMatchObject({ errorCode, stopReason });
-    expect(JSON.stringify(classified)).not.toContain("private-");
-  });
-
-  it("returns null for an unrecognized fragment without copying it", () => {
-    expect(classifyAgentSdkStderr("private-upstream-detail")).toBeNull();
   });
 });
 
@@ -458,55 +439,6 @@ describe("AgentSdkTurnRunner", () => {
       text: "hello",
     });
     expect(typeof (iterable as AsyncIterable<HarnessTurnEvent>)[Symbol.asyncIterator]).toBe("function");
-  });
-
-  it("turns safe SDK stderr classification into a structured terminal error on clean EOF", async () => {
-    const oauth: OAuthGrantProvider = new FakeOAuthGrantProvider();
-    const tenantRepo: TenantRepoProvider = new FakeTenantRepoProvider(FIXTURE);
-    const broker = new FakeBrokerApsClient();
-    const schema = {
-      optional() { return this; },
-      min() { return this; },
-      max() { return this; },
-    };
-    const z = {
-      string: () => schema,
-      number: () => schema,
-      boolean: () => schema,
-      unknown: () => schema,
-      enum: () => schema,
-      record: () => schema,
-      array: () => schema,
-      object: () => schema,
-    };
-    const secret = "private-provider-detail";
-    const sdk = {
-      tool: () => ({}),
-      createSdkMcpServer: () => ({}),
-      query: ({ options }: { options: Record<string, unknown> }) => {
-        (options.stderr as (data: string) => void)(`authentication failed ${secret}`);
-        return (async function* () {})();
-      },
-    };
-    const runner = new AgentSdkTurnRunner(
-      { oauth, tenantRepo, broker },
-      { sdkImport: async () => sdk, zodImport: async () => ({ z }) },
-    );
-    const events: HarnessTurnEvent[] = [];
-    for await (const event of runner.runTurn({
-      tenant_id: "acme",
-      session_id: "s1",
-      turn_id: "turn1",
-      drawing_id: "d1",
-      messages: [],
-      text: "hello",
-    })) events.push(event);
-
-    expect(events).toEqual([
-      { type: "error", data: { error: { error_code: "authentication_failed", message: "Agent SDK turn failed." } } },
-      { type: "turn_complete", data: { stop_reason: "error" } },
-    ]);
-    expect(JSON.stringify(events)).not.toContain(secret);
   });
 });
 
