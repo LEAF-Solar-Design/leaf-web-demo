@@ -682,11 +682,43 @@ describe("ConverseSdkRunner — events", () => {
     expectPublicError(done);
   });
 
-  it("publishes a stable public error when the SDK ends without a result", async () => {
+  it("treats clean EOF after streamed assistant text as end_turn and preserves measured usage", async () => {
+    const events = await collect(
+      runnerWith(makeMockSdk([streamDelta("A complete answer."), assistant()])),
+      makeInput(),
+    );
+
+    expect(events).toContainEqual({ type: "text_delta", text: "A complete answer." });
+    const usage = events.find((event) => event.type === "usage");
+    expect(usage && usage.type === "usage" ? usage.usage : null).toMatchObject({
+      turns: 1,
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_creation_tokens: 2,
+      cache_read_tokens: 100,
+      cost_tokens: 17,
+    });
+    const done = doneOf(events);
+    expect(done.stopReason).toBe("end_turn");
+    expect(done.error).toBeUndefined();
+  });
+
+  it("publishes a typed stable error when the SDK cleanly ends without assistant text", async () => {
     const done = doneOf(await collect(runnerWith(makeMockSdk([])), makeInput()));
     expect(done.error).toEqual({
-      error_code: "internal",
-      message: "Agent service ended without a success result",
+      error_code: "agent_sdk_turn_failed",
+      message: "Agent service ended without producing an answer",
+      retryable: false,
+    });
+    expectPublicError(done);
+  });
+
+  it("does not treat a metadata-only assistant envelope as a successful answer", async () => {
+    const done = doneOf(await collect(runnerWith(makeMockSdk([assistant()])), makeInput()));
+    expect(done.stopReason).toBe("error");
+    expect(done.error).toEqual({
+      error_code: "agent_sdk_turn_failed",
+      message: "Agent service ended without producing an answer",
       retryable: false,
     });
     expectPublicError(done);
