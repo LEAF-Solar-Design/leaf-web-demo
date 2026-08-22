@@ -27,7 +27,7 @@
     "ports/impl/agentSdkRunner.ts": "ca46904686333321f28f516a784e911d3207669b31f5fa3cd5ef37ef1ca660c1",
     "ports/impl/agentSdkTurnRunner.ts": "2f8bcaec9c5f99d4e7ad7357ef1a100560a618f6f32b08dd4bc5dd22a5c386b0",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "0d05d0ad1e5180d72903698eaa13b1cd6f862c8f6b8c3f6103980397eee66913",
+    "ports/impl/converseSdkRunner.ts": "482b0c8981a2e2b82958e977c265cb4d43af75f99720739fcc88dbfc16759d44",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
