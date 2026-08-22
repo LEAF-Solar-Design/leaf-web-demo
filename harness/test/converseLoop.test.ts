@@ -5,7 +5,7 @@
  * confirm-resume dispatch, gate-deny relay, and the wire event vocabulary.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 
 import {
@@ -181,6 +181,7 @@ describe("ConverseLoop — sessions", () => {
   });
 
   it("keeps a thrown runner exception out of the durable public error", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();
     const store = new FakeSessionStore();
@@ -208,6 +209,44 @@ describe("ConverseLoop — sessions", () => {
     });
     expect(JSON.stringify(events)).not.toContain("mysql://");
     expect(JSON.stringify(events)).not.toContain("018f5f5d");
+    expect(errorLog).toHaveBeenCalledWith(
+      "[leaf-harness] conversation runner failed code=unclassified",
+    );
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain("mysql://");
+    errorLog.mockRestore();
+  });
+
+  it("logs an allowlisted runner stage without changing the public error", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runner: SpineConverseRunner = {
+      async *run() {
+        throw new Error("agent_sdk_turn_query_failed");
+      },
+    };
+    const store = new FakeSessionStore();
+    const loop = new ConverseLoop({
+      runner,
+      appRun: new FakeAppRunClient(),
+      gate: new FakeGateClient(),
+      store,
+    });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+
+    await sendText(loop, session, "hello");
+
+    expect(errorLog).toHaveBeenCalledWith(
+      "[leaf-harness] conversation runner failed code=agent_sdk_turn_query_failed",
+    );
+    const events = await store.eventsAfter(session.session_id, 0);
+    expect(ofType(events, "error")[0]!.data).toEqual({
+      error: {
+        error_code: "internal",
+        message: "Agent conversation failed",
+        retryable: false,
+      },
+      degraded_mode: false,
+    });
+    errorLog.mockRestore();
   });
 });
 

@@ -60,6 +60,27 @@ export class SessionNotFoundError extends Error {
   }
 }
 
+const RUNNER_DIAGNOSTIC_CODES = new Set([
+  "agent_sdk_turn_broker_failed",
+  "agent_sdk_turn_failed",
+  "agent_sdk_turn_input_invalid",
+  "agent_sdk_turn_oauth_failed",
+  "agent_sdk_turn_query_failed",
+  "agent_sdk_turn_sdk_setup_failed",
+  "standard_services_attachment_expired",
+  "standard_services_attachment_identity_mismatch",
+  "standard_services_attachment_incomplete",
+  "standard_services_context_invalid",
+  "standard_services_context_required",
+  "standard_services_context_turn_mismatch",
+  "standard_services_resolver_setup_failed",
+]);
+
+function runnerDiagnosticCode(error: unknown): string {
+  if (!(error instanceof Error)) return "unclassified";
+  return RUNNER_DIAGNOSTIC_CODES.has(error.message) ? error.message : "unclassified";
+}
+
 /** 400 — a body carries either a user message (text and/or images) or confirm. */
 export class BadMessageError extends Error {
   constructor(message: string) {
@@ -537,6 +558,9 @@ export class ConverseLoop {
       }
     } catch (e) {
       stopReason = "error";
+      console.error(
+        `[leaf-harness] conversation runner failed code=${runnerDiagnosticCode(e)}`,
+      );
       try {
         await emit("error", {
           error: {
