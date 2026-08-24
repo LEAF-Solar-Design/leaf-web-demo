@@ -41,6 +41,9 @@ import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import ProjectLifecyclePanel from '../projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from '../projects/flag.js'
+import IosSurface from '../ios/IosSurface.jsx'
+import { ENV_IOS_SURFACE } from '../ios/flag.js'
+import useIosSurface from '../ios/useIosSurface.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
@@ -1263,6 +1266,19 @@ export default function ToolCast({
     })
     return () => { live = false }
   }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
+  // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one live read of
+  // GET /api/ios-surface/status for the open project/revision, distinct from the
+  // ios_ship LAUNCH lane above (this one only ever reads). Inert unless the
+  // build flag is on AND an operator workspace with an open project is showing;
+  // the backend refuses (404) while LEAF_IOS_SURFACE_ENABLED is off regardless.
+  const iosSurface = useIosSurface(
+    workspace.openProjectId,
+    workspace.canonicalVersionId,
+    {
+      enabled: ENV_IOS_SURFACE && leftView === 'workspace'
+        && !PUBLIC_DEMO && !transportMock && canOperate,
+    },
+  )
   const launchIosShip = useCallback(async () => {
     const projectId = workspace.openProjectId
     const revision = workspace.canonicalVersionId
@@ -1499,6 +1515,16 @@ export default function ToolCast({
               projectName={currentProjectName}
               onProjectDeleted={forgetDeletedProject}
             />
+          )}
+          {/* Consume-only iOS readiness (cards D-1..D-4). Rendered on the
+              workspace context (NOT flag-first, unlike the lifecycle fence
+              above) so that with the flag off it shows the DORMANT placeholder
+              the envelope's negative control requires; enabled={ENV_IOS_SURFACE}
+              drives dormant-vs-live, and the backend route refuses (404) while
+              off. Passive read only — the ios_ship LAUNCH lane is separate. */}
+          {leftView === 'workspace'
+            && !PUBLIC_DEMO && !transportMock && canOperate && workspace.openProjectId && (
+            <IosSurface enabled={ENV_IOS_SURFACE} contract={iosSurface.contract} />
           )}
           {leftView === 'author' && (
             <AuthorPanel
