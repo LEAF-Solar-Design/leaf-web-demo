@@ -51,6 +51,7 @@ from routers import (
     drawings,
     ios_ship,
     ios_ship_provider as ios_ship_provider_router,
+    ios_surface,
     jobs as jobs_router,
     mcp_gateway,
     mcp_status,
@@ -228,6 +229,15 @@ app.include_router(templates_router.router)  # Wave C solar template beta, fail-
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
+app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
+# SOURCE SEAM (ios_surface): the consume route reports "unavailable" until a
+# published-contract reader is injected via ios_surface.set_contract_source(fn),
+# where fn({tenant_id, project_id, revision}) -> the ship-lane's sanitized
+# leaf.ios-ship-surface.v1 dict. That reader belongs to the EXTERNAL Apple ship
+# pipeline (the operator's TestFlight leg); it is deliberately NOT wired here so
+# the surface degrades truthfully ("surface_source_unavailable") until real,
+# credential-free contract data exists to read. No Apple credential ever reaches
+# this consumer -- the reader hands it only the three published categories.
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
 # at their STAMPED expiry. It starts by default even when

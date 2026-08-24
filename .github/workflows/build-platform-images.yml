@@ -1479,6 +1479,12 @@ jobs:
           # web bundle. Build-time Vite flag, so this env block IS the
           # envelope's configuration rail; rollback = set this back to 0.
           VITE_LIFECYCLE_UI: "1"
+          # ios_surface flip: OFF ("0") pending the operator's Apple/TestFlight
+          # leg (leaf-plan envelope ios_surface). Build-time Vite flag, so this
+          # env block is its build-time rail; flip to "1" here (both web-build
+          # env blocks) AND set config-rail LEAF_IOS_SURFACE_ENABLED=1 to take
+          # the consume-only iOS surface live. Rollback = set back to "0".
+          VITE_IOS_SURFACE: "0"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -1991,6 +1997,12 @@ jobs:
           # web bundle. Build-time Vite flag, so this env block IS the
           # envelope's configuration rail; rollback = set this back to 0.
           VITE_LIFECYCLE_UI: "1"
+          # ios_surface flip: OFF ("0") pending the operator's Apple/TestFlight
+          # leg (leaf-plan envelope ios_surface). Build-time Vite flag, so this
+          # env block is its build-time rail; flip to "1" here (both web-build
+          # env blocks) AND set config-rail LEAF_IOS_SURFACE_ENABLED=1 to take
+          # the consume-only iOS surface live. Rollback = set back to "0".
+          VITE_IOS_SURFACE: "0"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
