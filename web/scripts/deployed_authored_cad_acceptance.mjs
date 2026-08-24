@@ -295,6 +295,18 @@ export function evaluateDeploymentIdentity(identity, expectedRevision) {
   if (identity.environment !== 'staging') {
     throw new AcceptanceError('deployment_identity', 'live deployment identity is not for staging')
   }
+  // The endpoint derives digests from live ECS and reports how far the stored
+  // receipt corroborates them. Only `verified` means every running service is
+  // attested to one source revision; `mismatch` means the receipt contradicts
+  // live state and `unattested` means nothing vouches for the commit. Both are
+  // non-answers, and naming which one it was beats reporting a missing field.
+  // A pre-status endpoint omits it, so absence is tolerated rather than failed.
+  if (identity.status !== undefined && identity.status !== 'verified') {
+    throw new AcceptanceError(
+      identity.status === 'mismatch' ? 'mixed_revision' : 'deployment_identity',
+      `live deployment identity is ${identity.status}, not verified against running services`,
+    )
+  }
   if (!SOURCE_SHA.test(String(identity.source_revision || ''))) {
     throw new AcceptanceError('deployment_identity', 'live deployment identity lacks a full source SHA')
   }

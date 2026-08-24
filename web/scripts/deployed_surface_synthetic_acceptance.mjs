@@ -158,6 +158,16 @@ export function evaluateSurfaceIdentity(identity, config) {
   if (![config.environment, expectedEnvironment].includes(identity.environment)) {
     throw new AcceptanceError('deployment_identity', 'deployment identity has the wrong environment')
   }
+  // `status` is reported by the live-derived endpoint: only `verified` means
+  // the running services are attested to one source revision. Naming the
+  // actual state beats reporting a missing source_revision. Absence is
+  // tolerated so a pre-status endpoint still evaluates.
+  if (identity.status !== undefined && identity.status !== 'verified') {
+    throw new AcceptanceError(
+      'deployment_identity',
+      `deployment identity is ${identity.status}, not verified against running services`,
+    )
+  }
   if (identity.source_revision !== config.expectedRevision) {
     throw new AcceptanceError('deployment_identity', 'deployment identity has the wrong source revision')
   }
