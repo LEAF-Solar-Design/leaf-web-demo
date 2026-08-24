@@ -116,7 +116,42 @@ COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
 COPY scripts/reconcile_sessions_authority.py /app/scripts/reconcile_sessions_authority.py
 COPY server/start-app.sh /app/server/start-app.sh
-RUN chmod 0500 /app/server/start-app.sh
+# 0555 ROOT-OWNED, and the ownership is the point. This image now drops
+# privilege (below), so the runtime uid must be able to EXECUTE its entrypoint —
+# the previous 0500 root-owned mode would have made the container unable to
+# start at all. The other way to fix that is `chown` to the runtime uid, and it
+# is the WRONG fix: it would let the unprivileged process rewrite its own
+# entrypoint. Root-owned + world-execute gives the process exactly the read and
+# execute it needs and no write.
+RUN chmod 0555 /app/server/start-app.sh
+
+# --- Drop privilege. THE LAST ROOT INSTRUCTION IN THIS FILE. -------------------
+# Deterministic scan finding D2: this image ran as root, alone among the four
+# (broker 10001, harness 10002, canonical-worker 65532 all already drop). It is
+# the compounding factor on F1: the DWG parser eats UNAUTHENTICATED bytes, so a
+# memory-corruption exploit in it landed as ROOT-in-container. Dropping to an
+# unprivileged uid turns that ceiling into a low-privilege account.
+#
+# /data MUST BE CREATED HERE, and this is not housekeeping. Every writable path
+# the deployed task uses is under a TOP-LEVEL /data (LEAF_STORE_DIR
+# /data/drawings, LEAF_UPLOADS_DIR /data/drawings/uploads, LEAF_TENANT_GIT_DIR
+# /data/tenant-git, LEAF_CUSTOMIZATION_DB /data/state/customization.db, ...
+# terraform leaf_platform.tf), no volume is mounted there, and the app mkdirs it
+# at runtime. `/` is root-owned 0755, so uid 10003 CANNOT create a top-level
+# directory: without this line the container starts and then fails every write.
+# The app's own mkdir(parents=True) makes the subtree once /data exists.
+#
+# /app is deliberately left ROOT-OWNED and read-only to the runtime user. The
+# app never writes there (PYTHONDONTWRITEBYTECODE=1 is set below, and the
+# deployed task points every store at /data or postgres), so the process cannot
+# modify its own code or its reconcilers.
+RUN groupadd --system --gid 10003 leaf \
+ && useradd --system --uid 10003 --gid 10003 --home-dir /nonexistent \
+      --shell /usr/sbin/nologin leaf \
+ && mkdir -p /data \
+ && chown 10003:10003 /data \
+ && chmod 0750 /data
+USER 10003:10003
 
 # The stdlib `platform` module is shadowed by /app/platform once /app is on
 # sys.path; app.py loads the platform package under a `leaf_platform` alias and
@@ -161,7 +196,7 @@ WORKDIR /app/server
 # every static check still green. A review confirmed it by replaying the
 # mutation. Exec form names the interpreter itself and ignores SHELL, so no
 # instruction above the guard can change what the guard means.
-RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py"]
+RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -r /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py && test -r /app/scripts/reconcile_sessions_authority.py"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache
