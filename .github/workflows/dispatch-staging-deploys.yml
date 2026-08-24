@@ -1583,10 +1583,10 @@ jobs:
 
           # Newest SUCCESSFUL deploy run for one service, as its full run name.
           # Every dispatch of the infra workflow names itself
-          # "Deploy leaf-platform staging <service> (<image_tag|sha|live
-          # baseline>)". Best effort ONLY: this feeds the loop ORDER and
-          # nothing else, so every failure mode below falls back to the old
-          # fixed order rather than failing the release.
+          # "Deploy leaf-platform staging <service> (<release identity>)".
+          # Best effort ONLY: this feeds the loop ORDER and nothing else, so
+          # every failure mode below falls back to the old fixed order rather
+          # than failing the release.
           newest_deploy_title() {
             gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
               --limit 200 --json databaseId,displayTitle,conclusion \
@@ -1596,32 +1596,54 @@ jobs:
                    | sort_by(-.databaseId) | first | .displayTitle // empty'
           }
 
-          # "...staging app (prod-abc1234)" -> "prod-abc1234"
-          tag_of_title() {
+          # A run name -> the SOURCE COMMIT that deploy carried, or empty when
+          # that cannot be read without guessing.
+          #
+          # TWO identity grammars reach this function and both must be read.
+          # The legacy path names its runs "(prod-<sha>)". The v3 digest-aware
+          # path names them "(<sha>-<attempt>-<service>)" (see CONVERGENCE_ID
+          # at the dispatch site). The previous reader matched ^prod- only, so
+          # activating v3 silently reverted the ordering to the fixed
+          # `web app` this read exists to remove -- the file's own header said
+          # so and then said v3 was dormant. It is not: every staging deploy
+          # run on 2026-08-24 was already v3-named, so this read decided
+          # NOTHING all day while the comment above it claimed need-first was
+          # live. Reading both grammars is what makes the claim true again.
+          #
+          # The sha-/src-<40> deploy-only forms are accepted too, so an
+          # operator dispatch landing between two relay deploys does not blind
+          # the read. Anything else -- "live baseline", a surface-v1 digest
+          # name, a malformed title -- returns empty and the caller falls back.
+          source_of_title() {
             local rest=${1#*\(}
-            printf '%s' "${rest%\)}"
+            local ident=${rest%\)}
+            if [[ "$ident" =~ ^(prod|sha|src)-([0-9a-f]{7,40})$ ]]; then
+              printf '%s' "${BASH_REMATCH[2]}"
+            elif [[ "$ident" =~ ^([0-9a-f]{40})-[1-9][0-9]*-[a-z-]+$ ]]; then
+              printf '%s' "${BASH_REMATCH[1]}"
+            fi
           }
 
-          # Hand the first slot to whichever service looks further behind, so
-          # the one abandoned by the last superseded relay is the one that
-          # advances now. Only the FIRST service is dispatched
-          # unconditionally, so this decides who gets skipped if main moves;
-          # read the header for why that trade is taken. It cannot change the
-          # tag, drop a service, or fail the release.
+          # Hand the first slot to whichever service looks further behind.
+          # Since both services are now dispatched before either is watched
+          # (the atomic dispatch phase below), this no longer decides who gets
+          # SKIPPED, because no service is skipped for want of a dispatch. It
+          # decides only which leg reaches the shared, non-FIFO staging lock
+          # first, which is a preference and not an ordering guarantee. It
+          # still cannot change a tag, drop a service, or fail the release.
           SERVICES="web app"
-          WEB_TAG=$(tag_of_title "$(newest_deploy_title web || true)")
-          APP_TAG=$(tag_of_title "$(newest_deploy_title app || true)")
-          if [[ "$WEB_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
-            && [[ "$APP_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] \
-            && [ "$WEB_TAG" != "$APP_TAG" ]; then
+          WEB_SOURCE=$(source_of_title "$(newest_deploy_title web || true)")
+          APP_SOURCE=$(source_of_title "$(newest_deploy_title app || true)")
+          if [ -n "$WEB_SOURCE" ] && [ -n "$APP_SOURCE" ] \
+            && [ "$WEB_SOURCE" != "$APP_SOURCE" ]; then
             # compare/<base>...<head> reports the HEAD side, so with web as
             # base "behind" means APP is behind and app goes first.
             RELATION=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/compare/${WEB_TAG#prod-}...${APP_TAG#prod-}" \
+              "repos/$GITHUB_REPOSITORY/compare/$WEB_SOURCE...$APP_SOURCE" \
               --jq '.status' || true)
             if [ "$RELATION" = "behind" ]; then
               SERVICES="app web"
-              echo "::notice::app ($APP_TAG) trails web ($WEB_TAG); deploying app first so the service that lost the last race is the one that advances now. This does not guarantee app lands: if main moves before its dispatch, this relay stands down and web is the service left behind instead."
+              echo "::notice::app ($APP_SOURCE) trails web ($WEB_SOURCE); queueing the app leg first so the service that lost the last race reaches the staging lock first."
             fi
           fi
 
@@ -1670,12 +1692,72 @@ jobs:
           }
 
           DEPLOYED_ANY=false
+          DISPATCHED_ANY=false
           mkdir -p surface-results
 
-          for SERVICE in $SERVICES; do
-            SERVICE_TAG="$IMAGE_TAG"
-            SERVICE_DIGEST=""
-            CONVERGENCE_ID=""
+          # ATOMIC TWO-LEG DISPATCH (2026-08-24). Every service is dispatched
+          # from ONE tip observation, before ANY of them is watched, and only
+          # then are they watched to a terminal state.
+          #
+          # WHAT THIS FIXES. The loop used to dispatch a service, watch it to
+          # terminal (observed ~8 min web, ~14 min app, plus time queued behind
+          # the shared staging lock), and only then re-read the tip and
+          # dispatch the second. The second service therefore sat behind a
+          # whole deploy's worth of exposure, and any merge arriving inside
+          # that window cost it its dispatch outright. At the observed staging
+          # merge cadence (~6-8 min) that window was essentially never
+          # survived: between 15:53Z and 17:06Z on 2026-08-24 five consecutive
+          # relays landed a web deploy and dispatched no app deploy at all, and
+          # staging ran split across two different source commits for hours.
+          # Need-first ordering was supposed to spread that loss across both
+          # services rather than always billing one, and could not, because its
+          # read had been dead since v3 naming went live (source_of_title
+          # above). Dispatching every leg up front removes the abandoned leg
+          # instead of choosing its victim: a relay cancelled or superseded
+          # after this phase has ALREADY dispatched both deploys, and
+          # workflow_dispatch is fire-and-forget, so both still land.
+          #
+          # WHY THIS IS SAFE NOW AND WAS NOT BEFORE. Serial dispatch existed
+          # for exactly one reason, quoted from this file's header: GitHub kept
+          # at most ONE pending run per concurrency group and a newly queued
+          # run CANCELLED the pending one, so firing both deploys two seconds
+          # apart made the second evict the first, silently half-deploying four
+          # merges between 2026-08-05 and 2026-08-06. That premise no longer
+          # holds. The infra deploy workflow now declares `queue: max` on
+          # leaf-platform-staging-ecs-mutation, which its own comment documents
+          # as guaranteeing no cancellation, and that group was observed seven
+          # runs deep on 2026-08-24, which a queue depth of one cannot produce.
+          # Two dispatches can no longer evict each other; they queue.
+          #
+          # WHAT ORDERS RELAYS AGAINST EACH OTHER, and it is not this file: the
+          # infra workflow's in-lock monotonic-forward guard ("Guard against a
+          # non-forward (superseded) image move"), which runs inside the shared
+          # lock before any task definition is minted and refuses a candidate
+          # proven to be a strict ancestor of what the service is running. That
+          # guard's own comment states the division plainly -- "The relay
+          # cannot prevent this from leaf-web-demo because the actual ECS
+          # ordering lives here" -- so the relay's job is to make its OWN legs
+          # one unit, not to police cross-relay ordering. This change does not
+          # touch that guard and does not weaken it.
+          #
+          # WHAT THIS DOES NOT DO, stated plainly because every overclaim in
+          # this file has been returned RED. It does not guarantee convergence
+          # and it does not bound a split. A relay cancelled BETWEEN its two
+          # dispatches still leaves one leg undispatched; the exposure window
+          # shrinks from a whole deploy to the seconds between two
+          # `gh workflow run` calls, which is a large reduction and not an
+          # elimination. It does not stop the tip from moving, it does not make
+          # the shared lock FIFO, and a dispatched deploy can still be refused
+          # by the forward guard or fail on its own. The convergence receipt
+          # below remains the only proof that every leg landed.
+          declare -A SERVICE_TAG_OF SERVICE_DIGEST_OF CONVERGENCE_ID_OF
+          declare -A WANT_OF RUN_ID_OF ATTEMPT_OF BEFORE_OF
+
+          # Resolve one service's release identity. Reads the verified supply
+          # set and dispatches nothing.
+          plan_service() {
+            local SERVICE=$1
+            local SERVICE_TAG="$IMAGE_TAG" SERVICE_DIGEST="" CONVERGENCE_ID=""
             if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
               SERVICE_TAG=$(jq -er --arg service "$SERVICE" \
                 '.services[$service].immutable_lookup_tag' staging-supply-set.json)
@@ -1683,123 +1765,154 @@ jobs:
                 '.services[$service].image_digest' staging-supply-set.json)
               # Validated against $SUPPLY_ARTIFACT_NAME at the v3 gate above.
               CONVERGENCE_ID="$RELEASE_SOURCE-$RELEASE_ATTEMPT-$SERVICE"
-              WANT="Deploy leaf-platform staging $SERVICE ($CONVERGENCE_ID)"
+              WANT_OF[$SERVICE]="Deploy leaf-platform staging $SERVICE ($CONVERGENCE_ID)"
             else
-              WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+              WANT_OF[$SERVICE]="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
             fi
-            ATTEMPT=0
+            SERVICE_TAG_OF[$SERVICE]="$SERVICE_TAG"
+            SERVICE_DIGEST_OF[$SERVICE]="$SERVICE_DIGEST"
+            CONVERGENCE_ID_OF[$SERVICE]="$CONVERGENCE_ID"
+            ATTEMPT_OF[$SERVICE]=0
+          }
 
-            while :; do
-              # Re-read the tip as the FIRST thing in every dispatch attempt,
-              # retries included, and never gate it. Dispatching a tag that is
-              # no longer current rolls staging BACKWARDS, and that is not
-              # hypothetical: relay A can hold a queued app deploy across a
-              # newer relay B's whole web-then-app sequence, each eviction
-              # dutifully retried, and A's older app then lands on top of B's.
-              # Deploying web before app orders the two services within ONE
-              # relay; it does not order two relays against each other.
-              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-              if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
-                if [ "$DEPLOYED_ANY" != "true" ]; then
-                  echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release put anything live; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
-                  exit 0
-                fi
-                # Something of this release is already live, so standing down
-                # leaves staging on a mixed identity. Whether that is benign
-                # turns entirely on whether the superseder converges it.
-                CONVERGER=$(superseder_deploys "$MAIN_SHA")
-                if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then
-                  # `unknown`: the superseder's build failed, never appeared, or
-                  # outlived this watch, so nothing is KNOWN to converge staging.
-                  # Stand down RED rather than finish this older tag on top of
-                  # whatever it may deploy.
-                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                  exit 1
-                fi
-                # CONVERGE-AND-WAIT. Both a deployable superseder (`yes`) and,
-                # since PR #519, a DOCS-ONLY superseder (`no`) converge staging:
-                # the deployable one deploys its own images, the docs-only one
-                # RECONCILES both services onto the last built tag, and BOTH
-                # publish the same staging-converged receipt. So this relay no
-                # longer finishes its own remaining service on a moved tip -- that
-                # would race the superseder's deploy and could land this older tag
-                # last, the sol-critic RED #497/#508 race reopened by making
-                # docs-only commits dispatch (sol-critic RED round 2 on PR #519).
-                # It stands down on PROOF the superseder converged, exactly as the
-                # deployable case already did. #508's fail-red-on-split principle
-                # is unchanged: no receipt within budget is still RED.
-                #
-                # The classification POLLED, so $MAIN_SHA is a snapshot. Re-read
-                # the tip and fail CLOSED if it moved: the superseder we are about
-                # to trust may no longer be the tip, and its own relay may then
-                # stand down and converge nothing.
-                TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                  "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-                if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
-                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                  exit 1
-                fi
-                # A fresh tip read proves $MAIN_SHA is the tip at that instant and
-                # nothing more, so the proof of convergence has to come from the
-                # superseder ACTUALLY LANDING both services: its receipt. Wait for
-                # it, bounded by this relay's own deadline. A superseder that was
-                # itself superseded publishes none and this relay then fails RED.
-                SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
-                if [ -z "$SUP_ATTEMPT_SEEN" ]; then
-                  echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-                  exit 1
-                fi
-                if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
-                  echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
-                  exit 0
-                fi
-                echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already deployed a service, so $SERVICE stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+          # The tip gate, unchanged in substance and never gated: dispatching a
+          # tag that is no longer current rolls staging BACKWARDS. It now runs
+          # ONCE before the dispatch phase instead of once per service, so both
+          # legs provably carry the same tag from the same tip observation, and
+          # again before any eviction re-dispatch, which happens minutes later
+          # and therefore still needs its own read.
+          #
+          # The clean stand-down now keys on DISPATCHED_ANY, not DEPLOYED_ANY.
+          # Once anything has been dispatched, a deploy may still land after
+          # this relay exits, so "nothing of this release is live" stops being
+          # provable and this relay must not claim it. That is strictly more
+          # conservative than the previous condition.
+          require_tip_current() {
+            local pending=$1
+            local MAIN_SHA TIP_NOW CONVERGER SUP_ATTEMPT_SEEN
+            MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+            [ "$MAIN_SHA" = "$BUILD_HEAD_SHA" ] && return 0
+
+            if [ "$DISPATCHED_ANY" != "true" ]; then
+              echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release dispatched anything; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
+              exit 0
+            fi
+            # Something of this release is already in flight or live, so
+            # standing down leaves staging on a mixed identity. Whether that is
+            # benign turns entirely on whether the superseder converges it.
+            CONVERGER=$(superseder_deploys "$MAIN_SHA")
+            if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then
+              # `unknown`: the superseder's build failed, never appeared, or
+              # outlived this watch, so nothing is KNOWN to converge staging.
+              # Stand down RED rather than finish this older tag on top of
+              # whatever it may deploy.
+              echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+              exit 1
+            fi
+            # CONVERGE-AND-WAIT. Both a deployable superseder (`yes`) and a
+            # DOCS-ONLY superseder (`no`) converge staging: the deployable one
+            # deploys its own images, the docs-only one RECONCILES both
+            # services onto the last built tag, and BOTH publish the same
+            # staging-converged receipt. So this relay does not finish its own
+            # remaining service on a moved tip -- that would race the
+            # superseder's deploy and could land this older tag last, the
+            # sol-critic RED #497/#508 race reopened by making docs-only
+            # commits dispatch (sol-critic RED round 2 on PR #519). It stands
+            # down on PROOF the superseder converged. #508's fail-red-on-split
+            # principle is unchanged: no receipt within budget is still RED.
+            #
+            # The classification POLLED, so $MAIN_SHA is a snapshot. Re-read
+            # the tip and fail CLOSED if it moved: the superseder we are about
+            # to trust may no longer be the tip, and its own relay may then
+            # stand down and converge nothing.
+            TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+            if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
+              echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+              exit 1
+            fi
+            # A fresh tip read proves $MAIN_SHA is the tip at that instant and
+            # nothing more, so the proof of convergence has to come from the
+            # superseder ACTUALLY LANDING both services: its receipt. Wait for
+            # it, bounded by this relay's own deadline. A superseder that was
+            # itself superseded publishes none and this relay then fails RED.
+            SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
+            if [ -z "$SUP_ATTEMPT_SEEN" ]; then
+              echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+              exit 1
+            fi
+            if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
+              echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
+              exit 0
+            fi
+            echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+            exit 1
+          }
+
+          dispatch_service() {
+            local SERVICE=$1
+            local SERVICE_TAG=${SERVICE_TAG_OF[$SERVICE]}
+            local CONVERGENCE_ID=${CONVERGENCE_ID_OF[$SERVICE]}
+            local dispatch_args=()
+            BEFORE_OF[$SERVICE]=$(latest_any_run_id)
+            dispatch_args=(
+              --repo "$INFRA_REPO"
+              --ref main
+              -f "service=$SERVICE"
+              -f "expected_task_definition=auto-live"
+              -f "image_tag=$SERVICE_TAG"
+              -f "app_deploy_intent=forward"
+            )
+            if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]; then
+              [ -n "$SUPPLY_EVIDENCE_B64" ] || {
+                echo "::error::V2/v3 dispatch is missing its closed supply evidence envelope."
                 exit 1
-              fi
-
-              BEFORE=$(latest_any_run_id)
-              dispatch_args=(
-                --repo "$INFRA_REPO"
-                --ref main
-                -f "service=$SERVICE"
-                -f "expected_task_definition=auto-live"
-                -f "image_tag=$SERVICE_TAG"
-                -f "app_deploy_intent=forward"
+              }
+              dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")
+            fi
+            if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
+              require_contract_still_latest
+              dispatch_args+=(
+                -f "digest_aware_reconcile=true"
+                -f "convergence_id=$CONVERGENCE_ID"
+                -f "consumer_contract_b64=$CONSUMER_CONTRACT_B64"
               )
-              if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]; then
-                [ -n "$SUPPLY_EVIDENCE_B64" ] || {
-                  echo "::error::V2/v3 dispatch is missing its closed supply evidence envelope."
-                  exit 1
-                }
-                dispatch_args+=(-f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64")
-              fi
-              if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
-                require_contract_still_latest
-                dispatch_args+=(
-                  -f "digest_aware_reconcile=true"
-                  -f "convergence_id=$CONVERGENCE_ID"
-                  -f "consumer_contract_b64=$CONSUMER_CONTRACT_B64"
-                )
-              fi
-              gh workflow run "$DEPLOY_WORKFLOW" "${dispatch_args[@]}"
-              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG (attempt $((ATTEMPT + 1)))."
+            fi
+            gh workflow run "$DEPLOY_WORKFLOW" "${dispatch_args[@]}"
+            DISPATCHED_ANY=true
+            echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG (attempt $(( ${ATTEMPT_OF[$SERVICE]} + 1 )))."
+          }
 
-              # Transient gh failures inside poll loops are tolerated and fail
-              # CLOSED: an unresolved run exhausts its budget and errors below.
-              RUN_ID=""
-              RESOLVE_BY=$(( $(date +%s) + 5 * 60 ))
-              while [ "$(date +%s)" -lt "$RESOLVE_BY" ] && before_deadline; do
-                sleep 3
-                RUN_ID=$(find_run_named "$BEFORE" "$WANT" || true)
-                if [ -n "$RUN_ID" ]; then break; fi
-              done
-              if [ -z "$RUN_ID" ]; then
-                echo "::error::Dispatched the $SERVICE deploy of $IMAGE_TAG but no run named '$WANT' appeared. This relay identifies its run by name and never guesses, so it fails here rather than watch a run that may not be ours. PREREQUISITE: $INFRA_REPO must set run-name on $DEPLOY_WORKFLOW to 'Deploy leaf-platform staging <service> (<image_tag>)'. Staging is NOT converged on $BUILD_HEAD_SHA."
-                exit 1
-              fi
-              echo "Watching $SERVICE deploy run $RUN_ID."
+          # Transient gh failures inside poll loops are tolerated and fail
+          # CLOSED: an unresolved run exhausts its budget and errors below.
+          resolve_service_run() {
+            local SERVICE=$1
+            local WANT=${WANT_OF[$SERVICE]}
+            local BEFORE=${BEFORE_OF[$SERVICE]}
+            local RUN_ID="" RESOLVE_BY
+            RESOLVE_BY=$(( $(date +%s) + 5 * 60 ))
+            while [ "$(date +%s)" -lt "$RESOLVE_BY" ] && before_deadline; do
+              sleep 3
+              RUN_ID=$(find_run_named "$BEFORE" "$WANT" || true)
+              if [ -n "$RUN_ID" ]; then break; fi
+            done
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::Dispatched the $SERVICE deploy of $IMAGE_TAG but no run named '$WANT' appeared. This relay identifies its run by name and never guesses, so it fails here rather than watch a run that may not be ours. PREREQUISITE: $INFRA_REPO must set run-name on $DEPLOY_WORKFLOW to 'Deploy leaf-platform staging <service> (<image_tag>)'. Staging is NOT converged on $BUILD_HEAD_SHA."
+              exit 1
+            fi
+            RUN_ID_OF[$SERVICE]="$RUN_ID"
+            echo "Watching $SERVICE deploy run $RUN_ID."
+          }
 
+          watch_service() {
+            local SERVICE=$1
+            local SERVICE_DIGEST=${SERVICE_DIGEST_OF[$SERVICE]}
+            local CONVERGENCE_ID=${CONVERGENCE_ID_OF[$SERVICE]}
+            local RUN_ID STATE STATUS CONCLUSION JOBS
+            local RESULT_NAME RESULT_LIST RESULT_COUNT RESULT_ID RESULT_FILE OUTCOME
+            while :; do
+              RUN_ID=${RUN_ID_OF[$SERVICE]}
               STATUS=""
               CONCLUSION=""
               while before_deadline; do
@@ -1880,25 +1993,52 @@ jobs:
                   DEPLOYED_ANY=true
                   echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."
                 fi
-                break
+                return 0
               fi
 
               # Zero jobs means the run was cancelled while still queued, i.e.
               # evicted from the shared staging lock before touching AWS. Only
               # that is retryable; a run that started and then failed must
-              # never be re-dispatched blind.
+              # never be re-dispatched blind. `queue: max` on the infra group
+              # should make this unreachable; it stays as the fail-safe.
               JOBS=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/jobs" \
                 --jq '.total_count')
               if [ "$CONCLUSION" = "cancelled" ] && [ "$JOBS" -eq 0 ] \
-                && [ "$ATTEMPT" -lt "$EVICTION_RETRIES" ]; then
-                ATTEMPT=$((ATTEMPT + 1))
+                && [ "${ATTEMPT_OF[$SERVICE]}" -lt "$EVICTION_RETRIES" ]; then
+                ATTEMPT_OF[$SERVICE]=$(( ${ATTEMPT_OF[$SERVICE]} + 1 ))
                 echo "::warning::The $SERVICE deploy run $RUN_ID was evicted from the staging lock before starting a job; re-dispatching."
+                require_tip_current "$SERVICE"
+                dispatch_service "$SERVICE"
+                resolve_service_run "$SERVICE"
                 continue
               fi
 
               echo "::error::The $SERVICE deploy of $IMAGE_TAG concluded '$CONCLUSION' (run $RUN_ID, $JOBS jobs). Staging is NOT converged on $BUILD_HEAD_SHA."
               exit 1
             done
+          }
+
+          for SERVICE in $SERVICES; do
+            plan_service "$SERVICE"
+          done
+
+          # PHASE 1 -- ATOMIC DISPATCH. One tip read, then every leg dispatched
+          # back to back, then every run resolved. Resolution is deliberately a
+          # SEPARATE pass: it polls for up to five minutes, and doing it
+          # between the dispatches would reopen the very window this phase
+          # closes.
+          require_tip_current "$SERVICES"
+          for SERVICE in $SERVICES; do
+            dispatch_service "$SERVICE"
+          done
+          for SERVICE in $SERVICES; do
+            resolve_service_run "$SERVICE"
+          done
+
+          # PHASE 2 -- WATCH. Every leg is already dispatched, so nothing here
+          # can abandon one; a failure below fails the release loudly instead.
+          for SERVICE in $SERVICES; do
+            watch_service "$SERVICE"
           done
 
           # EVERY service landed, so this release converged staging. Record
