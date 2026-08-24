@@ -52,6 +52,7 @@ import useJobController from '../controllers/useJobController.js'
 import useAuthorStageController from '../controllers/useAuthorStageController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
+import useSessionOrgAdoption from '../controllers/workspace/useSessionOrgAdoption.js'
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
@@ -684,6 +685,9 @@ export default function ToolCast({
     await login()
   }, [checkout.actions])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
+  // Live sessions echo the verified subject's org — persist it (leaf.org_id)
+  // so a fresh browser lists its projects instead of the create-org bootstrap.
+  useSessionOrgAdoption(sessionOrg, workspace.adoptOrgId)
   useEffect(() => {
     bindConverseProject(workspace.openProjectId || null)
   }, [bindConverseProject, workspace.openProjectId])
