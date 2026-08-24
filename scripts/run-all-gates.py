@@ -442,12 +442,22 @@ def build_suites() -> List[Suite]:
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 61),
         # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
-        # The one real-binary test runs wherever dwg2dxf is installed (the app
-        # container ships it; see deploy/Dockerfile.app) and skips with this
-        # exact allowlisted reason everywhere else.
+        # THREE real-binary tests run wherever their tools are installed (the app
+        # container ships them; see deploy/Dockerfile.app) and skip with these
+        # exact allowlisted reasons everywhere else. The second reason covers the
+        # two CAGE tests, which need util-linux's prlimit/setpriv as well as
+        # dwg2dxf — the cage is what bounds a memory-corruption exploit in the
+        # parser, so those two must not be allowed to skip for any OTHER reason.
+        # Floor 22, not 16: 25 tests, of which exactly those 3 are host-gated, so
+        # 22 is the count that must run EVERYWHERE. Raising it is what makes a
+        # silently-lost cage test a red gate rather than a smaller green number.
         Suite("server-dwg-local-extract", "server tests/test_dwg_local_extract.py", "pytest",
-              SERVER, _py_pytest("tests/test_dwg_local_extract.py"), 16,
-              allowed_skip_reasons=(r"dwg2dxf binary not installed on this host",)),
+              SERVER, _py_pytest("tests/test_dwg_local_extract.py"), 22,
+              allowed_skip_reasons=(
+                  r"dwg2dxf binary not installed on this host",
+                  r"the real dwg2dxf plus util-linux prlimit/setpriv are not "
+                  r"installed on this host",
+              )),
         # The cross-process fence probe uses POSIX fcntl and therefore skips on
         # Windows operator boxes. Linux CI executes it. Keep the Windows run
         # honest with the exact measured floor for every portable test and an

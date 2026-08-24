@@ -342,8 +342,7 @@ def test_a_deployment_that_requires_the_cage_fails_closed_without_it(
 
 
 @pytest.mark.skipif(_REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT,
-                    reason="needs the real dwg2dxf plus util-linux "
-                           "(prlimit/setpriv); ships in the app container")
+                    reason="the real dwg2dxf plus util-linux prlimit/setpriv are not installed on this host")
 def test_real_caged_conversion_still_converts_the_repo_fixture(monkeypatch):
     """The cage must not cost the honest path anything. Runs the REAL parser
     under the REAL limits against the repo's real DWG."""
@@ -356,8 +355,7 @@ def test_real_caged_conversion_still_converts_the_repo_fixture(monkeypatch):
 
 
 @pytest.mark.skipif(_REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT,
-                    reason="needs the real dwg2dxf plus util-linux "
-                           "(prlimit/setpriv); ships in the app container")
+                    reason="the real dwg2dxf plus util-linux prlimit/setpriv are not installed on this host")
 def test_real_caged_conversion_refuses_hostile_bytes_cleanly(
         monkeypatch, tmp_path):
     """Hostile bytes that clear the 3-byte magic gate must produce a structured
