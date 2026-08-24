@@ -21,7 +21,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from fastapi import Header, HTTPException, status
 
@@ -120,6 +120,52 @@ def get_org_id(
     return _verified_org(authorization)
 
 
+class WriteActor(NamedTuple):
+    """The org a mutation writes to, plus the actor that is accountable for it.
+
+    ``binding_id`` is the VERIFIED actor under live auth, and is None only on the
+    auth-off dev seam where no identity was proven. A route that must record who
+    created a row (project membership, audit actor) takes this instead of the
+    bare org so it never pays a second token verification for the same request.
+    """
+
+    org_id: uuid.UUID
+    binding_id: Optional[uuid.UUID]
+
+
+def get_write_actor(
+    x_org_id: str | None = Header(default=None),
+    x_actor_binding_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> WriteActor:
+    """Resolve org AND the accountable actor in ONE verification pass.
+
+    THE policy seam behind get_write_org_id (which delegates here), so the two
+    can never drift. Auth off keeps the permissive header-scoped demo seam; the
+    optional ``X-Actor-Binding-Id`` is accepted there only as a dev convenience
+    and is absent by default, so an existing caller behaves exactly as before.
+    Live auth IGNORES both headers: org, role, and actor all come from the
+    verified Auth0 subject, and no client claim can select any of them.
+    """
+    if not auth_live():
+        org_id = get_org_id(x_org_id=x_org_id, authorization=authorization)
+        # DEV SEAM ONLY. With auth off the org itself is already client-supplied,
+        # so this header grants no authority the caller did not already hold.
+        if not x_actor_binding_id:
+            return WriteActor(org_id, None)
+        try:
+            return WriteActor(org_id, uuid.UUID(x_actor_binding_id))
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="invalid X-Actor-Binding-Id") from None
+    binding = _verified_identity(authorization)
+    from .store import active_identity_role
+    role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
+    if role not in {"owner", "editor"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="platform role does not permit mutation")
+    return WriteActor(binding.platform_tenant_id, binding.binding_id)
+
+
 def get_write_org_id(
     x_org_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
@@ -130,15 +176,9 @@ def get_write_org_id(
     In live mode, the role is read from the verified subject's tenant-scoped
     binding; no client claim, header, or request body can select it.
     """
-    if not auth_live():
-        return get_org_id(x_org_id=x_org_id, authorization=authorization)
-    binding = _verified_identity(authorization)
-    from .store import active_identity_role
-    role = active_identity_role(binding.platform_tenant_id, binding.binding_id)
-    if role not in {"owner", "editor"}:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="platform role does not permit mutation")
-    return binding.platform_tenant_id
+    return get_write_actor(
+        x_org_id=x_org_id, x_actor_binding_id=None, authorization=authorization,
+    ).org_id
 
 
 def get_write_binding_id(
