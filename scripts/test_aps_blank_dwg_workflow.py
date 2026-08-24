@@ -325,3 +325,59 @@ def test_every_receipt_the_producer_can_emit_validates_against_the_contract():
         assert receipt["marker_layer"] == da.marker()
         seen.add(expected)
     assert len(seen) == len(cases)
+
+
+def test_the_closed_contract_is_a_credential_guard():
+    """`additionalProperties: false` here is load-bearing SECURITY, not tidiness.
+
+    leaf-web-demo went public 2026-08-24. APS returns presigned reportUrls whose
+    query string carries a temporary AWS credential (X-Amz-Signature and
+    friends), and GitHub secret scanning opened six alerts the same day on other
+    committed receipts that had them. This receipt cannot acquire that defect,
+    for two reasons that must BOTH keep holding:
+
+      1. server/da/blank_dwg.py never reads reportUrl at all, and
+      2. the contract is CLOSED, so a future edit that started smuggling one in
+         would fail validation instead of shipping.
+
+    Anyone loosening these to "just add one field" is removing a credential
+    guard. This test is here so they find that out from a red test rather than
+    from a secret-scanning alert.
+    """
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert schema["additionalProperties"] is False
+    for field in ("output", "drawing", "read"):
+        obj = next(branch for branch in schema["properties"][field]["oneOf"]
+                   if branch.get("type") == "object")
+        assert obj["additionalProperties"] is False, field
+
+    base = {
+        "contract": "leaf.aps-blank-dwg-feasibility.v1",
+        "status": "unsupported",
+        "source_sha": "a" * 40,
+        "activity": "LeafBlankDwgFeasibility",
+        "marker_layer": "LEAF_BLANK_ABCDEF123456",
+        "workitem_id": "wi-1",
+        "output": None, "drawing": None, "read": None,
+        "cost": None, "fallback": "upload_only",
+        "reason": "no_input_activity_rejected", "degraded_mode": False,
+    }
+    jsonschema.validate(base, schema)  # the clean receipt is valid
+
+    leaky = dict(base, reportUrl=(
+        "https://dasprod-store.s3.amazonaws.com/report.txt"
+        "?X-Amz-Signature=deadbeef&X-Amz-Security-Token=abc"))
+    try:
+        jsonschema.validate(leaky, schema)
+    except jsonschema.ValidationError:
+        pass
+    else:
+        raise AssertionError(
+            "the contract accepted a receipt carrying a presigned reportUrl - "
+            "the credential guard is gone")
+
+
+def test_the_producer_never_reads_report_url():
+    """Belt to the schema's braces: the leak cannot start upstream either."""
+    source = (ROOT / "server" / "da" / "blank_dwg.py").read_text(encoding="utf-8")
+    assert "reportUrl" not in source
