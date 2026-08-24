@@ -21,13 +21,13 @@ resolves: "B2B PE-stamp buyers will demand ... deletion-on-request (which confli
 ## Grounding artifacts (read; cited)
 - `C:/tmp/mushy-platform/MATRIX.md` line 66 — the compliance/offboarding risk and the never-hard-delete
   conflict this design carves the exception out of.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/postgres.ts:80-92` — the `deployments`
+- the orchestration platform's `src/lib/tenancy/postgres.ts:80-92` — the `deployments`
   table (the Postgres tenant row). `postgres.ts:104-126` — the upsert that round-trips it.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/vault.ts:5-9` — the `SecretsVault`
+- the orchestration platform's `src/lib/tenancy/vault.ts:5-9` — the `SecretsVault`
   interface with `deleteSecret(key)`; `vault.ts:48-55` — `KeytarVault.deleteSecret`; `vault.ts:204-208`
-  — `assertAwsSecretRef` proving the AWS secret ref shape `cadwalk/<deployment_id>/<key_name>`.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/app/api/ops/credentials/route.ts:191-193` — the
-  single-user credentials file `~/.cadwalk/credentials.json`; `route.ts:10-16` — `CREDENTIAL_KEYS`
+  — `assertAwsSecretRef` proving the AWS secret ref shape `<vault-ns>/<deployment_id>/<key_name>`.
+- the orchestration platform's `src/app/api/ops/credentials/route.ts:191-193` — the
+  single-user credentials file `~/.<app-home>/credentials.json`; `route.ts:10-16` — `CREDENTIAL_KEYS`
   (`anthropic_api_key`, `openai_api_key`, `github_token`, `cloudflare_api_token`, `vercel_token`). It is
   **not** per-tenant and has **no** tenant-delete path.
 - `C:/tmp/mushy-platform/plans/project-job-schema.md` — the sibling building the canonical Project/Job
@@ -46,10 +46,10 @@ A purge that walks only the database silently leaves tenant IP behind — this e
 | # | Store | Ref/shape | What it holds | Purge action |
 |---|---|---|---|---|
 | 1 | **Postgres `deployments` row + future `Project`/`Job` rows** | `deployment_id` (`.../tenancy/postgres.ts:80-92`); `projects`/`jobs`/`drawing_versions`/`built_tools` keyed by `org_id`/`project_id` (schema sibling, `project-job-schema.md`) | tenant config, projects, drawing versions, job history, built-tool registry | `DELETE` the tenant rows; the schema's `orgs ON DELETE CASCADE` (`project-job-schema.md:58`) wipes projects → versions/jobs/built_tools in one statement. Write a tombstone row (§2). |
-| 2 | **Vault secret refs** | `cadwalk/<deployment_id>/<key_name>` (`.../tenancy/vault.ts:204-208`) | per-tenant LLM/API keys, gateway tokens, telegram bot tokens | Enumerate every ref under `cadwalk/<deployment_id>/*` and call **`SecretVault.deleteSecret(ref)`** once per ref (`.../tenancy/vault.ts:8`, impl `:48-55`). Injected as a hook; not implemented here. |
+| 2 | **Vault secret refs** | `<vault-ns>/<deployment_id>/<key_name>` (`.../tenancy/vault.ts:204-208`) | per-tenant LLM/API keys, gateway tokens, telegram bot tokens | Enumerate every ref under `<vault-ns>/<deployment_id>/*` and call **`SecretVault.deleteSecret(ref)`** once per ref (`.../tenancy/vault.ts:8`, impl `:48-55`). Injected as a hook; not implemented here. |
 | 3 | **Per-tenant APS OSS bucket + objects** | APS OSS bucket/object keys (the `oss_object` refs on `drawing_versions`, `project-job-schema.md:72`) | uploaded DWGs, WorkItem outputs, versioned drawing blobs | APS OSS object-delete for every object, then bucket delete for the tenant bucket. These bytes live out of band; the DB cascade cannot reach them — a dedicated `blob_purge_hook(ref)`. |
 | 4 | **Per-tenant "mushy" git repo** | the tenant's mushy-codebase repo (deterministic tool files the agent edits; `source_ref` on `built_tools`, `project-job-schema.md:108`) | agent-authored/edited deterministic tool source | Repo deletion (hard purge) or archival (soft delete): remove the tenant's git repo / worktree, or move it to a tombstoned archive location. |
-| 5 | **Credentials file / its per-tenant successor** | `~/.cadwalk/credentials.json` (`.../ops/credentials/route.ts:191-193`), keys in `CREDENTIAL_KEYS` (`route.ts:10-16`) | anthropic/openai/github/cloudflare/vercel credentials | **Gap flagged:** this file is single-user and has **no** tenant-delete path. A per-tenant successor (or migration of these keys into store #2, the vault, under `cadwalk/<deployment_id>/*`) is required so purge can remove them. Until then, credentials are a store the purge cannot fully reach — call this out as a build obligation. |
+| 5 | **Credentials file / its per-tenant successor** | `~/.<app-home>/credentials.json` (`.../ops/credentials/route.ts:191-193`), keys in `CREDENTIAL_KEYS` (`route.ts:10-16`) | anthropic/openai/github/cloudflare/vercel credentials | **Gap flagged:** this file is single-user and has **no** tenant-delete path. A per-tenant successor (or migration of these keys into store #2, the vault, under `<vault-ns>/<deployment_id>/*`) is required so purge can remove them. Until then, credentials are a store the purge cannot fully reach — call this out as a build obligation. |
 
 ## 2. Default = soft-delete + tombstone (honors the fleet "never hard-delete" rule)
 For **routine** deletes (a user deletes a project, archives a drawing, or a tenant is deactivated

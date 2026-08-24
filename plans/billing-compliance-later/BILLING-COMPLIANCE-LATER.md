@@ -16,9 +16,9 @@
   deletion-on-request (which conflicts with the fleet's 'never hard-delete' rule)"), line 67
   (per-tenant spend-cap kill switch / uncapped liability), MATRIX ¶22 (the tenancy tier schema is
   "0% enforced (nothing branches on tier)").
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/types.ts:3` — the `DeploymentTier`
+- the orchestration platform's `src/lib/tenancy/types.ts:3` — the `DeploymentTier`
   literal union `"self_hosted" | "hosted_starter" | "hosted_pro"` that Stripe products map onto 1:1.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/postgres.ts:104-126` — the
+- the orchestration platform's `src/lib/tenancy/postgres.ts:104-126` — the
   `UPSERT_DEPLOYMENT_SQL` that already round-trips the `tier` column; the billing webhook flips
   `tier` here, no schema change needed.
 - `C:/tmp/leaf-web-demo/server/app.py` — the APS-money endpoints (`POST /api/run`, `GET /api/session`

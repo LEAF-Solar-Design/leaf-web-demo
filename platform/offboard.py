@@ -45,7 +45,7 @@ def _default_secret_ref_provider(org_id: uuid.UUID) -> List[str]:
 
     The credential-broker sibling (the keystone) owns real secret storage; at
     integration it supplies the true provider. Ref shape mirrors the vault prior art
-    (cadwalk/<deployment_id>/<key>); here deployment == org.
+    (a fixed namespace prefix, then <deployment_id>/<key>); here deployment == org.
     """
     return [f"leaf/{org_id}/credentials"]
 

@@ -3,9 +3,9 @@ server/tenancy.py — token -> tenant-workspace mapping (Concern 1, storage seam
 
 Given the tenant_id extracted from a verified Auth0 token (see auth.py), resolve
 the tenant's Workspace. This is the JSON-backed DEMO implementation of a seam
-whose production impl backs onto the cadwalk-studio Postgres tenancy tables
-(see claudewalk-build/cadwalk-studio/src/lib/tenancy/types.ts — `Deployment`,
-`DeploymentTier`). Swap `TenantStore` for a Postgres impl without touching the
+whose production impl backs onto the orchestration platform's Postgres tenancy
+tables (`Deployment`, `DeploymentTier` in its tenancy types module). Swap
+`TenantStore` for a Postgres impl without touching the
 verifier or the routers.
 
 The composed `require_tenant` FastAPI dependency lives in `deps.py` (the shared
@@ -27,7 +27,7 @@ from typing import Dict, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# DeploymentTier enum mirrored from cadwalk-studio (types.ts). Surface-only here;
+# DeploymentTier enum mirrored from the orchestration platform. Surface-only here;
 # ENTITLEMENT ENFORCEMENT is explicitly out of scope for this lane.
 TIERS = ("self_hosted", "hosted_starter", "hosted_pro")
 DEFAULT_TIER = "hosted_starter"

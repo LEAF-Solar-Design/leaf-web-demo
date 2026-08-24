@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch/run-local-ci.sh — CI bucket runner for leaf-web-demo.
 #
-# Contract (claudewalk fleet worker / ci_runnerd): invoked from the repo root as
+# Contract (fleet CI worker / ci_runnerd): invoked from the repo root as
 #     bash dispatch/run-local-ci.sh --only <bucket>
 # inside a hermetic sandbox — NO network, host filesystem read-only, only the
 # cloned workspace (and /tmp) writable, running as an unprivileged uid.

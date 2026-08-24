@@ -42,8 +42,8 @@ tenants/{tenant_id}/drawings/{drawing_id}/manifest.json         # version index 
 ```
 
 - `tenant_id` / `drawing_id` are sanitized to `[a-z0-9-]` (lowercased, disallowed runs → `-`).
-  `drawing_id` is ideally a **UUIDv7** (`store.new_drawing_id()`) to match cadwalk-studio
-  `src/lib/tenancy/types.ts` `UuidV7`; a uuid string is already `[a-z0-9-]`.
+  `drawing_id` is ideally a **UUIDv7** (`store.new_drawing_id()`) to match the
+  orchestration platform's `UuidV7` tenancy id type; a uuid string is already `[a-z0-9-]`.
 - `drawing_version_key(t, d, v)` is deterministic and matches
   `^tenants/[a-z0-9-]+/drawings/[a-z0-9-]+/v/\d{8}\.dwg$`.
 - **Immutability is the undo guarantee: we NEVER PUT over an existing `.../v/NNNNNNNN.dwg`

@@ -9,7 +9,7 @@ API turns a missing single resource into HTTP 404 (never 403: a 403 leaks existe
 carries an org_id predicate and that every read function's first parameter is
 ``org_id`` — so a future read cannot silently skip org scoping.
 
-Ports cadwalk-studio/src/lib/tenancy/store.ts (loadDeployments/findDeployment/
+Ports the orchestration platform's tenancy store (loadDeployments/findDeployment/
 saveDeployment) to org-scoped list/get/create.
 """
 from __future__ import annotations

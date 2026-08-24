@@ -20,9 +20,9 @@ the billing trigger in `BILLING-COMPLIANCE-LATER.md` (Doc 1) fires. This documen
   `POST /api/run` (`app.py:197`), each with an `if APS_LIVE:` branch (`app.py:177` and `app.py:210`).
   `APS_LIVE = os.environ.get("APS_LIVE","0")=="1"` (`app.py:47`); default `APS_LIVE=0` runs pure-python/
   mock and costs nothing.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/types.ts:3` — `DeploymentTier =
+- the orchestration platform's `src/lib/tenancy/types.ts:3` — `DeploymentTier =
   "self_hosted" | "hosted_starter" | "hosted_pro"`, the real union the limit map is keyed on.
-- `C:/Users/ehaug/claudewalk-build/cadwalk-studio/src/lib/tenancy/postgres.ts:80-92` — the `deployments`
+- the orchestration platform's `src/lib/tenancy/postgres.ts:80-92` — the `deployments`
   table (`CREATE_DEPLOYMENTS_TABLE_SQL`): persists `tier` but has **no** usage/quota/counter column.
   MATRIX ¶22: the tier schema is "0% enforced (nothing branches on tier)" — this spec is the first
   thing that branches on tier.
