@@ -189,3 +189,139 @@ def test_schema_rejects_an_implausibly_small_drawing():
     except jsonschema.ValidationError:
         return
     raise AssertionError("an implausibly small drawing unexpectedly validated")
+
+
+def _producer():
+    """Load the broker producer the same way the broker itself does: by path."""
+    import importlib.util
+    path = ROOT / "server" / "da" / "blank_dwg.py"
+    spec = importlib.util.spec_from_file_location("contract_blank_dwg", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeDa:
+    """The smallest APS surface the producer touches. Deliberately in THIS file:
+    it must be the real producer's output that meets the real schema, and this
+    module is the one that can import jsonschema past the repo's `platform`
+    package shadow (see the sys.path dance at the top)."""
+
+    ENGINE = "Autodesk.AutoCAD+24_3"
+    DA = "https://example.invalid/da/us-east/v3"
+    ALIAS = "prod"
+    _HTTP_TIMEOUT = 5
+    json = json
+
+    def __init__(self, *, create_status="success", payload=None, counts=None,
+                 read_ok=True):
+        from types import SimpleNamespace
+        self.create_status = create_status
+        self.payload = payload if payload is not None else b"AC1032" + b"\x00" * 8192
+        self.counts = counts
+        self.read_ok = read_ok
+        self.script = ""
+        self.requests = SimpleNamespace(
+            post=lambda url, **kw: _Ok(200),
+            get=lambda url, **kw: _Ok(200, {}),
+            patch=lambda url, **kw: _Ok(200),
+        )
+
+    def _auth_headers(self):
+        return {}
+
+    def activity_qualified(self, activity):
+        return f"leaf.{activity}+prod"
+
+    def upload_scratch_object(self, local_path, _key):
+        self.script = Path(local_path).read_text(encoding="utf-8")
+
+    def scratch_signed_download_url(self, _key):
+        return "https://signed.invalid/script"
+
+    def scratch_signed_upload_url(self, _key):
+        return "upload-key", "https://signed.invalid/output"
+
+    def finalize_scratch_upload(self, _key, _upload_key):
+        pass
+
+    def download_scratch_object(self, _key):
+        return self.payload
+
+    def delete_scratch_object(self, _key):
+        pass
+
+    def submit_workitem(self, _activity, _arguments, **_kwargs):
+        return {"id": "wi-1", "status": self.create_status}
+
+    def marker(self):
+        return re.search(r"LEAF-BLANK-MARKER=(LEAF_BLANK_[0-9A-F]+)", self.script).group(1)
+
+    def run_tool(self, _path, tool, _params, **_kwargs):
+        if not self.read_ok:
+            return {"ok": False, "error": "re-extract failed"}
+        counts = self.counts if self.counts is not None else {self.marker(): 1}
+        return {"ok": True, "result": {"counts": counts},
+                "cost": {"engine_seconds": 3.0, "usd_est": 0.01}}
+
+    @staticmethod
+    def _engine_seconds(_status):
+        return 2.0
+
+
+class _Ok:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_every_receipt_the_producer_can_emit_validates_against_the_contract():
+    """The producer and the contract must not drift apart.
+
+    Checking them separately lets the producer emit a shape the schema rejects,
+    which would only surface on the one paid run this route ever makes. So walk
+    every terminal branch of run() and validate what actually comes out of it.
+    """
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    producer = _producer()
+
+    def publish(_payload, digest):
+        return {
+            "tenant_id": "11111111-1111-4111-8111-111111111111",
+            "project_id": "22222222-2222-4222-8222-222222222222",
+            "drawing_id": "33333333-3333-4333-8333-333333333333",
+            "version_id": "44444444-4444-4444-8444-444444444444",
+            "version": 1,
+            "object_key": "tenants/t/drawings/d/v/00000001.dwg",
+            "sha256": digest,
+        }
+
+    cases = [
+        (_FakeDa(), "supported"),
+        (_FakeDa(create_status="failed"), "no_input_activity_rejected"),
+        (_FakeDa(payload=b"AC1032" + b"\x00" * 16), "invalid_dwg_output"),
+        (_FakeDa(read_ok=False), "read_tool_failed"),
+        (_FakeDa(counts={}), "provenance_mismatch"),
+    ]
+    seen = set()
+    for da, expected in cases:
+        receipt = producer.run(
+            da,
+            tenant_id="11111111-1111-4111-8111-111111111111",
+            source_sha="a" * 40,
+            read_tool={"name": "count-by-layer"},
+            publish=publish,
+        )
+        jsonschema.validate(receipt, schema)
+        assert (receipt["reason"] or receipt["status"]) == expected
+        assert receipt["marker_layer"] == da.marker()
+        seen.add(expected)
+    assert len(seen) == len(cases)
