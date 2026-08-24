@@ -42,7 +42,11 @@ def _client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_source():
+def _reset_source(monkeypatch):
+    # These contract tests exercise the ON surface (flag set here); the source
+    # seam is what each test drives. test_flag_off_refuses_* overrides the flag
+    # to 0 to prove the negative control.
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", "1")
     router.set_contract_source(None)
     yield
     router.set_contract_source(None)
@@ -58,6 +62,20 @@ def test_source_not_mounted_is_truthfully_unavailable():
     body = response.json()
     assert body == {"ok": True, "status": "unavailable", "reason": "surface_source_unavailable",
                      "project_id": PROJECT, "revision": REVISION}
+
+
+def test_flag_off_refuses_even_with_a_healthy_source(monkeypatch):
+    # Negative control (envelope): with ios_surface OFF the consume route
+    # refuses (404 "refused") and never serves a contract -- even when a fully
+    # healthy source is mounted. The LEAF_IOS_SURFACE_ENABLED flag, not the
+    # source, is the deploy-time gate; the flip is what changes observable
+    # behavior.
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", "0")
+    router.set_contract_source(lambda scope: _contract())
+    response = _get(_client())
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "status": "refused", "reason": "ios_surface_disabled",
+                               "project_id": PROJECT, "revision": REVISION}
 
 
 def test_reads_only_readiness_build_stage_and_receipt_id_and_drops_unknown_fields():

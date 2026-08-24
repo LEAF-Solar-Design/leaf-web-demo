@@ -9,6 +9,7 @@ stale "fresh" contract.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
@@ -22,6 +23,21 @@ router = APIRouter()
 
 _CONTRACT_SCHEMA = "leaf.ios-ship-surface.v1"
 _SOURCE: Optional[Callable[[Dict[str, str]], Dict[str, Any]]] = None
+
+# The ios_surface flag. Off by default; checked FIRST in the consume route, so
+# the surface refuses (404) while off -- the envelope's negative control
+# ("consume routes refuse"). Same {1,true,yes,on} vocabulary the other Leaf
+# flags use (see server/templates.py FLAG_SOLAR_TEMPLATE_BETA). Flipping this
+# env to 1 on the config rail is the ONLY switch that makes the route serve;
+# nothing here caches, so the flip is fully reversible with no data coupling.
+FLAG_IOS_SURFACE = "LEAF_IOS_SURFACE_ENABLED"
+
+
+def ios_surface_enabled() -> bool:
+    """True iff the ``ios_surface`` consume-only surface is enabled."""
+    return os.environ.get(FLAG_IOS_SURFACE, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 # Same closed vocabulary the ship-lane controller emits (platform/ios_ship.py
 # _CONTROLLER_STAGES). Duplicated per this repo's frozen-vocabulary
@@ -131,6 +147,16 @@ def _unavailable(project_id: str, revision: str, reason: str) -> JSONResponse:
         "project_id": project_id, "revision": revision})
 
 
+def _refused(project_id: str, revision: str) -> JSONResponse:
+    # Flag off -> the consume route REFUSES (404), distinct from the 200
+    # "unavailable" a flag-on-but-upstream-down surface returns. This is the
+    # envelope's negative control: with ios_surface off the probe asserts a
+    # refusal, never a served (even empty) contract.
+    return JSONResponse(status_code=404, content={
+        "ok": False, "status": "refused", "reason": "ios_surface_disabled",
+        "project_id": project_id, "revision": revision})
+
+
 def _tenant_id(tenant: Any) -> str:
     return str(getattr(tenant, "tenant_id", tenant))
 
@@ -138,6 +164,8 @@ def _tenant_id(tenant: Any) -> str:
 @router.get("/api/ios-surface/status")
 def status(project_id: str, revision: str,
            tenant: Any = Depends(deps.require_tenant)) -> JSONResponse:
+    if not ios_surface_enabled():
+        return _refused(project_id, revision)
     if _SOURCE is None:
         return _unavailable(project_id, revision, "surface_source_unavailable")
     try:

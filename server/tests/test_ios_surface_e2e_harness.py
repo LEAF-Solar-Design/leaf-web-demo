@@ -10,10 +10,11 @@ Oracle (frozen, card D-4):
     status text, matching card B-C6's flip-time fence precedent.
 
 This file mounts routers.ios_surface into an isolated FastAPI app the same
-way server/tests/test_ios_surface_contract.py (card D-1) already does --
-that is the established, real way this unmounted-by-default router is
-exercised in this repo (server/app.py does not include it either; D-1's own
-test is the router's only real caller).
+way server/tests/test_ios_surface_contract.py (card D-1) does. The router is
+now ALSO mounted in server/app.py behind the LEAF_IOS_SURFACE_ENABLED flag
+(the deploy-time gate); the isolated app here keeps these e2e assertions
+independent of the full app wiring. The source-injection None/set fence
+below is a SECOND, defense-in-depth layer beneath that flag.
 """
 from __future__ import annotations
 
@@ -61,7 +62,10 @@ def _client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_source():
+def _reset_source(monkeypatch):
+    # The flag is the deploy-time gate; set ON here so these e2e tests drive
+    # the source seam beneath it. test_ios_surface_flag_off_* overrides it.
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", "1")
     router.set_contract_source(None)
     yield
     router.set_contract_source(None)
@@ -139,14 +143,16 @@ def test_a_prior_success_is_never_served_stale_via_real_route_when_upstream_late
 
 
 def test_ios_surface_off_refuses_without_touching_the_source_flip_on_then_off_again():
-    """Flip-time fence proof against the REAL route (card B-C6 precedent).
+    """Source-seam fence proof against the REAL route (card B-C6 precedent).
 
-    OFF means no contract source is mounted on the REAL router module --
-    the same mechanism server/app.py itself would use to gate this surface,
-    since app.py never mounts this router by default either. A call-count
-    spy proves the source is never invoked while OFF, is reached exactly
-    once per request once flipped ON, and is not touched again once
-    flipped back OFF.
+    This proves the SECOND, defense-in-depth layer BENEATH the
+    LEAF_IOS_SURFACE_ENABLED flag: even with the flag ON (autouse fixture),
+    an unmounted source (None) is never touched and the route reports
+    "surface_source_unavailable" truthfully. A call-count spy proves the
+    source is never invoked while unmounted, is reached exactly once per
+    request once mounted, and is not touched again once unmounted. (The
+    flag-level gate is proven by
+    test_ios_surface_flag_off_refuses_the_real_route.)
     """
     client = _client()
     calls = []
@@ -183,3 +189,28 @@ def test_ios_surface_off_refuses_without_touching_the_source_flip_on_then_off_ag
         assert off_again.status_code == 200
         assert off_again.json()["reason"] == "surface_source_unavailable"
     assert len(calls) == 1
+
+
+def test_ios_surface_flag_off_refuses_the_real_route(monkeypatch):
+    """Flag-level flip proof against the REAL route: with
+    LEAF_IOS_SURFACE_ENABLED off, the route refuses (404 "refused") even when
+    a fully healthy source IS mounted, and never touches it. This is the
+    deploy-time gate the config rail flips; the source-seam test above is the
+    layer beneath it."""
+    client = _client()
+    calls = []
+
+    def spy_source(scope):
+        calls.append(scope)
+        return _raw_contract(readiness={"healthy": True, "launchable": True},
+                             build_stage="RECEIPT", receipt_id="receipt-ship-1")
+
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", "0")
+    router.set_contract_source(spy_source)
+    for _ in range(3):
+        response = _get(client)
+        assert response.status_code == 404
+        assert response.json() == {
+            "ok": False, "status": "refused", "reason": "ios_surface_disabled",
+            "project_id": PROJECT, "revision": REVISION}
+    assert calls == []
