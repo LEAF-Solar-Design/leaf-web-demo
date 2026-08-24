@@ -45,7 +45,7 @@ import { EngineBoundary } from './engineWorker.js'
 // any other way from this file or anywhere else under web/.
 function createEngineWorker() {
   return new Worker(
-    new URL('../../../engine/acadrust-worker/worker-entry.mjs', import.meta.url),
+    new URL('../../../vendor/acadrust-worker/worker-entry.mjs', import.meta.url),
     { type: 'module' },
   )
 }
