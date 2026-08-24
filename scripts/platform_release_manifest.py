@@ -63,6 +63,7 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
     "app": (
         ".dockerignore",
         "deploy/Dockerfile.app",
+        "deploy/gen_seccomp_filter.c",
         "server",
         "da",
         "engine",

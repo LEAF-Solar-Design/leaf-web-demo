@@ -371,6 +371,131 @@ def test_real_caged_conversion_refuses_hostile_bytes_cleanly(
 
 
 # --------------------------------------------------------------------------- #
+# the seccomp layer: syscall denylist on top of the rlimit/no-new-privs cage
+# --------------------------------------------------------------------------- #
+# deploy/gen_seccomp_filter.c is compiled and run inside deploy/Dockerfile.app,
+# so the compiled .bpf only exists in the real app image — never on a plain
+# dev host, even one with prlimit/setpriv installed. That gate is exactly what
+# _SECCOMP_FILTER_PRESENT checks, kept separate from _CAGE_TOOLS_PRESENT.
+_SECCOMP_FILTER_PRESENT = dwg_convert.seccomp_filter_path() is not None
+
+
+def test_seccomp_filter_is_wired_into_the_setpriv_argv_when_present(
+        monkeypatch, tmp_path):
+    _fake_cage_tools(monkeypatch, True)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    bpf = tmp_path / "fake.bpf"
+    bpf.write_bytes(b"\x00" * 8)  # one dummy sock_filter entry, contents unused
+    argv = _captured_argv(monkeypatch, tmp_path,
+                          LEAF_DWG_CONVERT_SECCOMP_FILE=str(bpf))
+    assert f"--seccomp-filter={bpf}" in argv
+    # It must land BEFORE the final "--" so setpriv treats it as its own flag,
+    # not part of the wrapped command.
+    setpriv = argv.index("setpriv")
+    tail = argv.index("--", setpriv)
+    assert f"--seccomp-filter={bpf}" in argv[setpriv:tail]
+
+
+def test_seccomp_filter_is_omitted_when_absent(monkeypatch, tmp_path):
+    """The base rlimit/no-new-privs cage must not depend on the filter being
+    compiled in — a dev host with util-linux but no built image still runs
+    caged, just without this one additive layer."""
+    _fake_cage_tools(monkeypatch, True)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_SECCOMP_FILE", raising=False)
+    monkeypatch.setattr(dwg_convert, "_DEFAULT_SECCOMP_FILTER_PATH",
+                        str(tmp_path / "does-not-exist.bpf"))
+    argv = _captured_argv(monkeypatch, tmp_path)
+    assert not [a for a in argv if a.startswith("--seccomp-filter=")]
+    assert "--no-new-privs" in argv, "the rest of the cage is unaffected"
+
+
+def test_a_deployment_that_requires_the_cage_fails_closed_without_its_seccomp_filter(
+        monkeypatch, tmp_path):
+    """THE seccomp half of the load-bearing fail-closed test above: prlimit
+    and setpriv being present is not enough once the deployment declared
+    itself caged (LEAF_DWG_CONVERT_REQUIRE_CAGE=1) — a build that lost JUST
+    the compiled filter must refuse rather than parse hostile bytes one
+    defense layer thinner with no health check able to see the downgrade."""
+    _fake_cage_tools(monkeypatch, True)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_SECCOMP_FILE", raising=False)
+    monkeypatch.setattr(dwg_convert, "_DEFAULT_SECCOMP_FILTER_PATH",
+                        str(tmp_path / "does-not-exist.bpf"))
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    monkeypatch.setenv("LEAF_DWG2DXF_BIN", str(_stub_converter(tmp_path)))
+
+    def _never(*args, **kwargs):
+        raise AssertionError("the parser must NOT run without its seccomp filter")
+
+    monkeypatch.setattr(dwg_convert.subprocess, "run", _never)
+    src = tmp_path / "u.dwg"
+    src.write_bytes(MALFORMED_DWG)
+    with pytest.raises(dwg_convert.ConvertError) as err:
+        with dwg_convert.converted_dxf(src):
+            pass
+    assert err.value.error_code == "INTERNAL"
+    assert err.value.retryable is False
+
+
+@pytest.mark.skipif(
+    _REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT or not _SECCOMP_FILTER_PRESENT,
+    reason="needs the real app image: dwg2dxf, prlimit/setpriv, AND the "
+           "compiled seccomp filter deploy/Dockerfile.app bakes in")
+def test_real_seccomp_caged_conversion_matches_the_uncaged_parse(monkeypatch):
+    """The filter must not cost the honest path a single byte of intake.
+    Converts the repo's real DWG twice — once through the full seccomp+rlimit
+    cage, once through the base cage with the seccomp layer explicitly
+    disabled — and asserts identical layers, polyline count, and total point
+    count, so the comparison is self-verifying rather than pinned to numbers
+    this test cannot independently confirm."""
+    monkeypatch.delenv("LEAF_DWG2DXF_BIN", raising=False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    with dwg_convert.converted_dxf(ROOFTOP_DWG) as dxf_path:
+        seccomp_intake = dxf_intake.parse_dxf_file(
+            dxf_path, source_name="rooftop_demo.dwg")
+
+    # REQUIRE_CAGE off for this leg: with the filter pointed at a path that
+    # does not exist, REQUIRE_CAGE=1 would correctly fail closed (see the
+    # test above) rather than run degraded — that refusal is the point of
+    # this whole change, so proving the seccomp layer is a no-op for the
+    # honest path has to ask for the base cage explicitly, not lean on a
+    # combination the deployment itself would refuse to run.
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_SECCOMP_FILE", "/nonexistent")
+    with dwg_convert.converted_dxf(ROOFTOP_DWG) as dxf_path:
+        base_intake = dxf_intake.parse_dxf_file(
+            dxf_path, source_name="rooftop_demo.dwg")
+
+    assert seccomp_intake["layers"] == base_intake["layers"]
+    assert len(seccomp_intake["polylines"]) == len(base_intake["polylines"])
+    seccomp_pts = sum(len(p["pts"]) for p in seccomp_intake["polylines"])
+    base_pts = sum(len(p["pts"]) for p in base_intake["polylines"])
+    assert seccomp_pts == base_pts
+    assert seccomp_intake["layers"], "the real drawing must yield real layer names"
+    assert seccomp_intake["polylines"], "the real drawing must yield real polylines"
+
+
+@pytest.mark.skipif(
+    _REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT or not _SECCOMP_FILTER_PRESENT,
+    reason="needs the real app image: dwg2dxf, prlimit/setpriv, AND the "
+           "compiled seccomp filter deploy/Dockerfile.app bakes in")
+def test_real_seccomp_caged_conversion_refuses_hostile_bytes_cleanly(
+        monkeypatch, tmp_path):
+    """Same guarantee as the base-cage version above, under the seccomp
+    filter too: a structured rejection, never a hang, never a container
+    death (SIGSYS would kill dwg2dxf's process, not the app — this proves
+    the caller still sees a clean ConvertError either way)."""
+    monkeypatch.delenv("LEAF_DWG2DXF_BIN", raising=False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    src = tmp_path / "hostile.dwg"
+    src.write_bytes(b"AC1032" + os.urandom(64 * 1024))
+    with pytest.raises(dwg_convert.ConvertError) as err:
+        with dwg_convert.converted_dxf(src):
+            raise AssertionError("hostile bytes must never yield a DXF")
+    assert err.value.error_code == "BAD_PARAMS"
+
+
+# --------------------------------------------------------------------------- #
 # engine resolution
 # --------------------------------------------------------------------------- #
 def test_engine_default_auto_tracks_converter_availability(monkeypatch, tmp_path):
