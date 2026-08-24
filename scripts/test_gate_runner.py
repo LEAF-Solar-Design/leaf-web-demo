@@ -1512,3 +1512,47 @@ def test_fanin_emits_proof_only_on_a_proven_gate(tmp_path, monkeypatch, capsys):
     assert rc == 1
     assert emitted == []
     assert "the fan-in did not prove the gate" in out
+
+
+def test_vitest_skip_in_a_js_family_file_can_be_named_and_allowlisted(tmp_path):
+    """A skip in a .test.js/.jsx file must be nameable, not just .test.ts.
+
+    web/ is almost entirely .test.js and .test.jsx, so a ts-only skip pattern
+    made every skip there unnameable and tripped the "reported N but named 0"
+    rule on a correctly-declared, correctly-allowlisted skip. Regression guard
+    for that gap: same shape as the .test.ts case above, JS extension.
+    """
+    g = _load_runner()
+    output = (
+        "src/cad/engineWasmHarness.realwasm.test.js (1 test | 1 skipped)\n"
+        "Tests 327 passed | 1 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-js-known-skip", "vitest js known skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(("src/cad/engineWasmHarness.realwasm.test.js", 1),),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS", result.note
+
+
+def test_vitest_skip_in_a_jsx_file_that_is_not_allowlisted_still_fails(tmp_path):
+    """Widening the pattern must not weaken the rule: an undeclared skip in a
+    JS-family file is now VISIBLE, and therefore must fail as non-allowlisted
+    rather than pass unnoticed."""
+    g = _load_runner()
+    output = (
+        "src/projects/states.test.jsx (19 tests | 2 skipped)\n"
+        "Tests 17 passed | 2 skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-jsx-undeclared-skip", "vitest jsx undeclared skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "non-allowlisted vitest skip" in result.note
