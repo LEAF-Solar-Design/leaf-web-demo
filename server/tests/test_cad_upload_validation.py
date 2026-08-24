@@ -13,12 +13,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from routers import cad_upload as cad_upload_router
+SERVER_DIR = Path(__file__).resolve().parent.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+
+from routers import cad_upload as cad_upload_router  # noqa: E402
 
 VALID_DWG = b"AC1032" + os.urandom(200)
 VALID_DXF = (
@@ -217,3 +223,54 @@ def test_reupload_of_identical_content_gets_next_version(client, cad_env):
     rows = [json.loads(line) for line in receipts_path.read_text().splitlines()]
     assert len(rows) == 2
     assert {row["version"] for row in rows} == {1, 2}
+
+
+# --------------------------------------------------------------------------- #
+# MOUNTED on the real server app (not a per-test FastAPI() shim)
+#
+# Every test above builds its own FastAPI and includes the router, so all of
+# them pass just as well while server/app.py never mounts it -- which is
+# exactly the inert-by-construction state this section exists to refute. The
+# negative control is the STATUS CODE both ways against ``app_module.app``:
+#   flag OFF -> 503 (the router's own fail-closed refusal; a 404 here would
+#               mean the route is not mounted at all)
+#   flag ON  -> the route is reachable AND still performs its validation
+#               (201 for admissible bytes, typed 4xx for a bad payload).
+# --------------------------------------------------------------------------- #
+import app as app_module  # noqa: E402
+
+
+@pytest.fixture()
+def mounted_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_CAD_UPLOAD_DIR", str(tmp_path / "mounted_cad_uploads"))
+    monkeypatch.setenv("LEAF_CAD_UPLOAD_MAX_BYTES", str(64 * 1024))
+    return TestClient(app_module.app, raise_server_exceptions=False)
+
+
+def test_mounted_route_exists_on_the_real_app():
+    assert any(getattr(route, "path", None) == "/api/cad/upload"
+               and "POST" in getattr(route, "methods", set())
+               for route in app_module.app.routes)
+
+
+def test_mounted_flag_off_is_503_not_404(mounted_client, monkeypatch):
+    monkeypatch.delenv(cad_upload_router.FLAG_CAD_UPLOAD, raising=False)
+    resp = _post(mounted_client, "drawing.dwg", VALID_DWG)
+    assert resp.status_code == 503, "404 here means the router is not mounted in app.py"
+    assert resp.json()["error"]["error_code"] == "INTERNAL"
+
+
+def test_mounted_flag_on_is_reachable_and_still_validates(mounted_client, monkeypatch):
+    monkeypatch.setenv(cad_upload_router.FLAG_CAD_UPLOAD, "1")
+
+    accepted = _post(mounted_client, "site-plan.dwg", VALID_DWG)
+    assert accepted.status_code == 201
+    assert accepted.json()["digest"] == hashlib.sha256(VALID_DWG).hexdigest()
+
+    # Reachable is not enough: the mounted route must still run every gate.
+    rejected = _post(mounted_client, "payload.txt", b"not a cad file")
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["error_code"] == "BAD_PARAMS"
+
+    bomb = _post(mounted_client, "polyglot.dwg", b"AC1032" + b"PK\x03\x04" + os.urandom(64))
+    assert bomb.status_code == 422
