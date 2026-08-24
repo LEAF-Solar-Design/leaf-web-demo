@@ -17,10 +17,14 @@ AutoCAD profile", the script ran, and SAVEAS produced a valid 31,726-byte DWG.
 ORDER IS LOAD-BEARING
 ---------------------
   1. MAKE the run-scoped marker layer. Two jobs at once:
-       (a) PROVENANCE — the marker is unique per run, so a read round-trip that
+       (a) PROVENANCE - the marker is unique per run, so a read round-trip that
            returns some OTHER drawing's bytes cannot be mistaken for success.
        (b) it dirties the database (DBMOD != 0), so SAVEAS never stops on an
            "already saved" prompt and hangs the WorkItem to its timeout.
+  1b. OPTIONALLY draw one witness POINT on that layer (`witness=True`). Needed
+      only when the read oracle counts ENTITIES rather than reading the layer
+      table - see WITNESS_POINT below. Off by default: the proven spike's
+      recipe is unchanged.
   2. SAVEAS an EXPLICIT format to output.dwg (the Activity's Result localName).
      Explicit beats "" (current): the empty answer inherits whatever the engine
      image defaults to, which is a silent contract with the engine version.
@@ -48,6 +52,22 @@ SAVEAS_FORMAT = "2018"
 # Marker layer prefix. The suffix is per-run entropy, so the full name is the
 # provenance token the read leg asserts on.
 MARKER_PREFIX = "LEAF_BLANK_"
+
+# Model-space witness entity, drawn on the marker layer right after the layer
+# MAKE (which also makes that layer current). Emitted only when witness=True.
+#
+# WHY A BARE LAYER IS NOT ENOUGH FOR EVERY READ ORACLE (measured 2026-08-24 on
+# a real AutoCAD 2026 accoreconsole, $0, not inferred):
+#   engine/tools/count_by_layer.lsp - the BROKER's read witness - counts model
+#   space ENTITIES grouped by layer, via (ssget "_X" (list (cons 410 "Model"))).
+#   A marker layer carrying no entity is therefore INVISIBLE to it. Same recipe,
+#   same engine, one variable: with the point below the read returned
+#   counts={"LEAF_BLANK_AABBCCDD1122":1}; without it, counts={}.
+#   da/client.py extract() reads the layer TABLE, so the spike sees the marker
+#   either way and does not need this.
+# One POINT is the cheapest entity that closes the gap: no prompts beyond the
+# coordinate, no linetype or block dependency, negligible bytes.
+WITNESS_POINT = "0,0"
 
 # AutoCAD layer names forbid < > / \ " : ; ? * | , = ` and control chars. We are
 # far stricter than that on purpose: A-Z 0-9 and underscore only, so the name
@@ -81,22 +101,37 @@ def validate_marker(marker: str) -> str:
 
 
 def build_blank_scr(marker: str, out_localname: str = OUT_LOCALNAME,
-                    saveas_format: str = SAVEAS_FORMAT) -> str:
-    """The complete .scr the LeafBlankCreate Activity runs headless.
+                    saveas_format: str = SAVEAS_FORMAT,
+                    witness: bool = False) -> str:
+    """The complete .scr a blank-CREATE Activity runs headless.
 
     `marker` is validated before interpolation, so this cannot emit a script
     with an injected command line.
+
+    `witness=True` adds one POINT on the marker layer. Set it when the read
+    oracle counts entities (the broker's count-by-layer) rather than reading
+    the layer table (the spike's client.extract). See WITNESS_POINT. Default
+    False keeps the byte-for-byte recipe proven live on 2026-08-24.
     """
     validate_marker(marker)
     if not out_localname or '"' in out_localname:
         raise ValueError(f"unsafe out_localname {out_localname!r}")
     if not saveas_format or '"' in saveas_format:
         raise ValueError(f"unsafe saveas_format {saveas_format!r}")
-    return "\n".join([
+    lines = [
         '(setvar "CMDECHO" 0)',
         # 1) marker layer: provenance token + guarantees DBMOD != 0
         f'(command "_.-LAYER" "_Make" "{marker}" "")',
         f'(progn (princ "LEAF-BLANK-MARKER={marker}") (princ))',
+    ]
+    if witness:
+        # 1b) one entity ON the marker layer, so entity-counting read
+        # oracles can see the marker at all. See WITNESS_POINT.
+        lines += [
+            f'(command "_.POINT" "{WITNESS_POINT}")',
+            '(progn (princ "LEAF-BLANK-WITNESS") (princ))',
+        ]
+    return "\n".join(lines + [
         # 2) explicit-format SAVEAS to the Activity's Result localName
         f'(command "_.SAVEAS" "{saveas_format}" "{out_localname}")',
         '(progn (princ "LEAF-BLANK-SAVED") (princ))',

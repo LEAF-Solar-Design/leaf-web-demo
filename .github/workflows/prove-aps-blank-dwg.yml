@@ -31,6 +31,7 @@ jobs:
           python -m pytest -q
           server/tests/test_broker_blank_dwg.py
           scripts/test_aps_blank_dwg_workflow.py
+          da/test_blank_spike.py
       - name: Record source-only eligibility
         shell: bash
         run: |

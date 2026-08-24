@@ -375,3 +375,34 @@ def test_scr_reference_matches_the_builder(tmp_path):
             assert blank_lisp.build_blank_scr("LEAF_BLANK_XXXXXXXXXXXX") in fh.read(), \
                 "engine/blank_create.scr is stale: regenerate with " \
                 "`python da/blank_spike.py --write-scr-reference`"
+
+
+# --------------------------------------------------------------------------- #
+# witness entity (the broker's read oracle counts entities, not layer names)
+# --------------------------------------------------------------------------- #
+def test_default_recipe_carries_no_witness_entity():
+    """The spike's own recipe is unchanged: client.extract reads the layer TABLE."""
+    scr = blank_lisp.build_blank_scr("LEAF_BLANK_ABCDEF123456")
+    assert "_.POINT" not in scr
+
+
+def test_witness_draws_one_point_on_the_marker_layer_before_saveas():
+    """Measured 2026-08-24 on real accoreconsole 2026: count_by_layer.lsp reports
+    counts={} for a bare marker layer and counts={marker: 1} with this point."""
+    marker = "LEAF_BLANK_ABCDEF123456"
+    scr = blank_lisp.build_blank_scr(marker, witness=True)
+    assert f'(command "_.POINT" "{blank_lisp.WITNESS_POINT}")' in scr
+    # MAKE sets the marker layer current, so the point must land after it and
+    # before the drawing is written.
+    assert scr.index('"_Make"') < scr.index('"_.POINT"') < scr.index("SAVEAS")
+    assert scr.count('"_.POINT"') == 1
+
+
+def test_witness_is_the_only_difference_from_the_proven_recipe():
+    marker = "LEAF_BLANK_ABCDEF123456"
+    plain = blank_lisp.build_blank_scr(marker).splitlines()
+    witness = blank_lisp.build_blank_scr(marker, witness=True).splitlines()
+    assert [line for line in witness if line not in plain] == [
+        f'(command "_.POINT" "{blank_lisp.WITNESS_POINT}")',
+        '(progn (princ "LEAF-BLANK-WITNESS") (princ))',
+    ]
