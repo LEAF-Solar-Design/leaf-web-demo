@@ -1,13 +1,16 @@
-// useIosSurface — ONE live GET /api/ios-surface/status read for the open
-// project/revision, kept inert behind the flag. Mirrors useProjectLifecycle's
+// useIosSurface — ONE point-in-time GET /api/ios-surface/status read per
+// (project, revision), kept inert behind the flag. Mirrors useProjectLifecycle's
 // enabled-gate + generation-guard discipline: a stale response never overwrites
 // a newer one, and a resolved fetch after unmount never sets state.
 //
-// `enabled` false (the flag is off, or no project/revision) keeps the hook
-// completely inert: no fetch, contract stays null, and IosSurface renders its
-// dormant placeholder. Nothing is cached — a project/revision change refetches
-// live, and a failed/absent upstream yields null ("never-configured"), never a
-// stale contract.
+// SCOPE — point-in-time, NOT a live poll. The last contract for the current
+// (project, revision) is held in React state; a build's stage advancing (e.g.
+// BUILT -> RECEIPT) is NOT reflected until the project/revision changes or the
+// panel remounts. The sibling ios_ship lane polls on a timer; this consume-only
+// glance deliberately does not. Each individual read IS live (iosSurfaceStatus
+// never caches and never serves a prior success once the upstream fails), and
+// `enabled` false (flag off, or no project/revision) keeps the hook fully inert:
+// no fetch, contract null -> IosSurface renders its dormant placeholder.
 import { useEffect, useRef, useState } from 'react'
 
 import { fetchIosSurfaceStatus } from './iosSurfaceStatus.js'
