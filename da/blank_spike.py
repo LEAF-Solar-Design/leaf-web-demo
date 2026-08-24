@@ -68,6 +68,7 @@ _REPO = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 
 import blank_lisp  # noqa: E402  (pure sibling: no network, no creds)
+import redact      # noqa: E402  (pure sibling: credential stripper)
 
 BLANK_ACTIVITY = os.environ.get("APS_BLANK_ACTIVITY", "LeafBlankCreate")
 RECEIPT_PATH = os.path.join(_REPO, "data", "blank_spike_receipt.json")
@@ -417,9 +418,11 @@ def run(tenant_id: str, dry_run: bool, receipt_path: str) -> dict:
                                         tenant_id=tenant_id)
         receipt["create_workitem"] = _record(client, "create", status)
         if status.get("status") != "success":
+            # Redacted: this exception text reaches logs and stderr, and a raw
+            # reportUrl is a presigned S3 url carrying a live AWS credential.
             raise RuntimeError("create WorkItem " + str(status.get("id"))
                                + " status=" + str(status.get("status"))
-                               + " report=" + str(status.get("reportUrl")))
+                               + " report=" + redact.redact_url(status.get("reportUrl")))
 
         client.finalize_upload(output_key, up_key)
         data = client.download_object(output_key)

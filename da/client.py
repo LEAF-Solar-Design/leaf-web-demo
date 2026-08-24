@@ -47,6 +47,7 @@ from requests import HTTPError as RequestsHTTPError
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # resolve sibling imports when imported from elsewhere
 from intake_parse import parse_text
+import redact  # credential stripper: never log or persist a raw reportUrl
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -873,7 +874,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
                                  tenant_id=tenant_id)
         if status.get("status") != "success":
             raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
-                               f"report={status.get('reportUrl')}")
+                               f"report={redact.redact_url(status.get('reportUrl'))}")
         finalize_upload(output_key, up_key)
         families = download_object(output_key).decode("utf-8", "replace")
         return parse_text(families, dwg_local_path)
@@ -909,7 +910,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
                              tenant_id=tenant_id)
     if status.get("status") != "success":
         raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
-                           f"report={status.get('reportUrl')}")
+                           f"report={redact.redact_url(status.get('reportUrl'))}")
     finalize_upload(output_key, up_key)
     families = download_object(output_key).decode("utf-8", "replace")
     return parse_text(families, dwg_local_path)
@@ -995,7 +996,7 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
             "ok": False, "tool": tool.get("name"), "version": tool.get("version"),
             "result": None, "overlay": None, "timing_ms": timing_ms, "cost": None,
             "error": f"WorkItem {status.get('id')} status={status.get('status')} "
-                     f"report={status.get('reportUrl')}",
+                     f"report={redact.redact_url(status.get('reportUrl'))}",
         }
     finalize_upload(output_key, up_key)
     raw = download_object(output_key).decode("utf-8", "replace")

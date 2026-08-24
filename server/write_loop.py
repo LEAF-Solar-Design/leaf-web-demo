@@ -67,6 +67,11 @@ _DA_DIR = str(PROJECT_ROOT / "da")
 if _DA_DIR not in sys.path:
     sys.path.append(_DA_DIR)
 
+# Credential stripper for report urls. Imported eagerly (leaf-pure: stdlib only,
+# no da/client import) so no error path can forget it and emit a raw presigned
+# url into an envelope, a log line, or a receipt.
+import redact  # noqa: E402
+
 # Well-known demo drawing bootstrapped from the cached intake at APS_LIVE=0.
 DEMO_DRAWING_ID = "demo"
 # Reserved tenant-id namespace for ephemeral guest uploads (server/guest_uploads.py
@@ -1370,7 +1375,7 @@ def _run_write_live_legacy(tool: Dict[str, Any], params: Dict[str, Any], tenant_
         if status.get("status") != "success":
             return (err_envelope(ErrorCode.WORKITEM_FAILED,
                                  f"write WorkItem {status.get('id')} status={status.get('status')} "
-                                 f"report={status.get('reportUrl')}", retryable=True,
+                                 f"report={redact.redact_url(status.get('reportUrl'))}", retryable=True,
                                  tool=name, version=tool_version),
                     DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
         if hasattr(da, "finalize_scratch_upload"):

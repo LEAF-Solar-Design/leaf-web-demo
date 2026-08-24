@@ -83,6 +83,7 @@ def _import_client(retries: int = 4, wait_s: float = 10.0):
 
 
 client = _import_client()
+import redact      # noqa: E402  (our sibling, safe) -- credential stripper
 import write_lisp  # noqa: E402  (our sibling, safe)
 
 import requests  # noqa: E402
@@ -118,7 +119,9 @@ def _record(label: str, status: dict) -> dict:
         "label": label,
         "id": status.get("id"),
         "status": status.get("status"),
-        "reportUrl": status.get("reportUrl"),
+        # Redacted at WRITE time: a raw reportUrl is a presigned S3 url whose
+        # query string carries a LIVE one-hour AWS credential. See da/redact.py.
+        **redact.report_url_fields(status),
         "engine_seconds": eng,
         "usd_est": _usd_est(eng),
     }
@@ -217,7 +220,7 @@ def _extract_with_status(dwg_local_path: str):
     status = client.submit_workitem(activity_id, arguments, dry_run=False, poll=True)
     if status.get("status") != "success":
         raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
-                           f"report={status.get('reportUrl')}")
+                           f"report={redact.redact_url(status.get('reportUrl'))}")
     client.finalize_upload(output_key, up_key)
     families = client.download_object(output_key).decode("utf-8", "replace")
     return client.parse_text(families, dwg_local_path), status
@@ -331,7 +334,7 @@ def run(dwg: str) -> int:
         receipt["write_workitem"] = _record("write", st_w)
         if st_w.get("status") != "success":
             raise RuntimeError(f"write WorkItem {st_w.get('id')} status={st_w.get('status')} "
-                               f"report={st_w.get('reportUrl')}")
+                               f"report={redact.redact_url(st_w.get('reportUrl'))}")
         client.finalize_upload(out_key, up_key)
         out_bytes = client.download_object(out_key)
         if not out_bytes:
