@@ -1,11 +1,25 @@
 """
 Local DWG -> ASCII DXF conversion (the APS-free guest DWG read lane).
 
-Runs GNU libredwg's ``dwg2dxf`` as a SANDBOXED SUBPROCESS: fixed argv (no
-shell), stdin closed, output confined to a fresh scratch directory that is
-always deleted, a wall-clock timeout that kills the child, and a size cap on
-the converted output. The converted DXF feeds the EXISTING dxf_intake parser
-unchanged — this module produces a file, never intake, so the honesty rule
+Runs GNU libredwg's ``dwg2dxf`` as a CAGED SUBPROCESS. Two tiers, kept
+distinct because conflating them is what made an earlier version of this
+docstring overstate its own guarantees:
+
+  * Bounds MISUSE and DoS: fixed argv (no shell), stdin closed, output confined
+    to a fresh scratch directory that is always deleted, a wall-clock timeout
+    that kills the child, and a size cap on the converted output.
+  * Bounds a MEMORY-CORRUPTION exploit: hard rlimits (address space, CPU, file
+    size, core, fds, procs) and ``no_new_privs`` with no inheritable
+    capabilities, applied by prlimit(1)/setpriv(1) around the exec. See "the
+    cage" below for why it is spelled that way and not as a preexec_fn.
+
+This matters because the bytes are attacker-controlled and UNAUTHENTICATED by
+design (guest sandbox front door, CONTRACT-ADDENDUM §19), and the parser is C.
+The cage is defense in depth UNDER a current libredwg pin, never a substitute
+for it: keep deploy/Dockerfile.app's version current.
+
+The converted DXF feeds the EXISTING dxf_intake parser unchanged — this module
+produces a file, never intake, so the honesty rule
 (geometry only ever comes from the user's actual bytes) is inherited from the
 parser rather than re-implemented here.
 
@@ -80,6 +94,119 @@ class ConvertError(Exception):
         self.retryable = retryable
 
 
+# --------------------------------------------------------------------------- #
+# the cage: hard bounds on the NATIVE parser child
+# --------------------------------------------------------------------------- #
+# WHY THIS EXISTS. dwg2dxf is a C parser with a long OSS-Fuzz history, and the
+# bytes it parses arrive from an UNAUTHENTICATED upload by design (guest sandbox
+# front door, CONTRACT-ADDENDUM §19). The controls above this line — fixed argv,
+# closed stdin, scratch dir, wall-clock timeout, output cap — bound MISUSE and
+# DoS. They do not bound a controlled memory-corruption exploit. These do:
+# hard rlimits so a hostile DWG cannot groom an unbounded heap, plus
+# no_new_privs so a corrupted child can never gain privilege it did not start
+# with. Defense in depth that survives the NEXT parser CVE, not just today's.
+#
+# NOT preexec_fn. The obvious spelling — resource.setrlimit in a
+# subprocess preexec_fn — is documented-unsafe here: this process is a threaded
+# ASGI server, and CPython states preexec_fn "is not thread-safe" and "may lead
+# to deadlock in the child process before exec is called" (a fork that inherits
+# a held malloc lock hangs the conversion worker, and a hung worker is the DoS
+# the cage was supposed to prevent). prlimit(1) and setpriv(1) set the same
+# limits from OUTSIDE the interpreter and then exec, so there is no fork window
+# to deadlock in.
+#
+# ONE PROCESS, still. prlimit and setpriv each exec their argument rather than
+# forking it, so the whole chain collapses into the single child that
+# subprocess.run holds — the wall-clock timeout still kills the real parser, and
+# no grandchild can outlive it.
+#
+# Both tools ship in the base image's util-linux (deploy/Dockerfile.app), which
+# is why this needs no new dependency.
+
+_CAGE_TOOLS = ("prlimit", "setpriv")
+
+
+def _int_env(name: str, default: int) -> int:
+    """A non-negative integer from the environment, or ``default``. Never raises:
+    a malformed operator value must not take the upload lane down, and the
+    default is the SAFE value in every case here."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def convert_mem_limit_bytes() -> int:
+    """RLIMIT_AS for the parser child — the load-bearing one. Bounds the address
+    space a memory-corruption defect can groom. 0 disables ONLY this limit (the
+    CPU/FSIZE/CORE/NOFILE/NPROC caps still apply)."""
+    return _int_env("LEAF_DWG_CONVERT_MEM_BYTES", 2 * 1024 * 1024 * 1024)
+
+
+def convert_nofile_limit() -> int:
+    """RLIMIT_NOFILE. dwg2dxf opens the input, the output and its libraries; a
+    payload that wants sockets wants far more than this."""
+    return _int_env("LEAF_DWG_CONVERT_NOFILE", 64)
+
+
+def convert_nproc_limit() -> int:
+    """RLIMIT_NPROC. dwg2dxf never forks, so this costs the honest path nothing
+    and denies a payload the fork/exec it needs to become anything else.
+    Enforced at fork(), never at exec(), so it cannot break the cage's own
+    prlimit -> setpriv -> dwg2dxf exec chain."""
+    return _int_env("LEAF_DWG_CONVERT_NPROC", 16)
+
+
+def cage_required() -> bool:
+    """Whether a missing cage is a REFUSAL rather than a downgrade.
+
+    Production sets this (deploy/Dockerfile.app) so the deployed image can never
+    silently lose its sandbox and keep parsing hostile bytes bare — that failure
+    would be invisible in every green health check. Dev hosts without
+    util-linux (macOS, Windows) leave it unset and run uncaged."""
+    return os.environ.get("LEAF_DWG_CONVERT_REQUIRE_CAGE", "0") == "1"
+
+
+def cage_available() -> bool:
+    """Whether both cage tools are on PATH. Resolved at call time so tests and
+    per-deployment images decide it, not import order."""
+    return all(shutil.which(tool) for tool in _CAGE_TOOLS)
+
+
+def _cage_prefix() -> list[str]:
+    """The argv prefix that cages the parser, or [] when this host has no cage.
+
+    Fixed tokens and integers only — nothing here is attacker-influenced, and
+    there is no shell, so the no-shell property of the argv is preserved."""
+    if not cage_available():
+        return []
+    # FSIZE gets HEADROOM above the output cap, deliberately. Setting it AT the
+    # cap makes the kernel kill the writer one byte early, which turns the
+    # post-run size check below into dead code and downgrades its precise
+    # "exceeds the N byte conversion output cap" rejection into a generic
+    # "unreadable" one. With headroom the child can overshoot slightly, the
+    # post-run check reports the honest reason, and a RUNAWAY write is still
+    # hard-stopped by the kernel a few KiB later instead of filling the disk.
+    fsize = max_output_bytes() + 4096
+    limits = [
+        "prlimit",
+        f"--cpu={max(1, int(convert_timeout_s()) + 1)}",
+        f"--fsize={fsize}",
+        "--core=0",
+        f"--nofile={convert_nofile_limit()}",
+        f"--nproc={convert_nproc_limit()}",
+    ]
+    mem = convert_mem_limit_bytes()
+    if mem > 0:
+        limits.append(f"--as={mem}")
+    # --no-new-privs: a corrupted child cannot gain privilege through any
+    # setuid/setcap binary it manages to exec. --inh-caps=-all: it inherits no
+    # capability either. Both are unprivileged operations, so this works
+    # unchanged once the image drops root.
+    return limits + ["--", "setpriv", "--no-new-privs", "--inh-caps=-all", "--"]
+
+
 @contextlib.contextmanager
 def converted_dxf(source: Path) -> Iterator[Path]:
     """Convert ``source`` (a staged .dwg) to ASCII DXF; yield the DXF path.
@@ -93,10 +220,21 @@ def converted_dxf(source: Path) -> Iterator[Path]:
             "INTERNAL",
             "local DWG conversion is not available on this deployment",
             False)
+    cage = _cage_prefix()
+    if not cage and cage_required():
+        # FAIL CLOSED. The deployment declared that hostile bytes are only ever
+        # parsed inside the cage; without it there is no safe way to serve this
+        # request, so refuse rather than parse bare. Not retryable: a retry hits
+        # the same image with the same missing tools.
+        raise ConvertError(
+            "INTERNAL",
+            "local DWG conversion is unavailable: its sandbox is not present "
+            "on this deployment",
+            False)
     scratch = tempfile.mkdtemp(prefix="dwg2dxf-")
     try:
         out = Path(scratch) / "converted.dxf"
-        argv = [binary, "-y", "-o", str(out), str(source)]
+        argv = cage + [binary, "-y", "-o", str(out), str(source)]
         try:
             proc = subprocess.run(
                 argv, cwd=scratch, stdin=subprocess.DEVNULL,
