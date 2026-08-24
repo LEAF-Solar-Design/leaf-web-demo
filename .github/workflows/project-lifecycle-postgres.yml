@@ -1,0 +1,75 @@
+name: Project lifecycle PostgreSQL gate
+
+# WHY THIS EXISTS: platform/tests/test_project_lifecycle.py is the executable
+# Wave B lifecycle + tenant-isolation contract, and until this workflow it ran
+# NOWHERE. It skips without DATABASE_URL, and no workflow provided one, so the
+# membership/clone/export/reset/delete authority rules shipped unexercised. A
+# suite that only ever skips is not coverage, it is the appearance of coverage.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/project-lifecycle-postgres.yml'
+      - 'platform/project_lifecycle.py'
+      - 'platform/api.py'
+      - 'platform/deps.py'
+      - 'platform/store.py'
+      - 'platform/db.py'
+      - 'platform/models.py'
+      - 'platform/__init__.py'
+      - 'platform/migrations/**'
+      - 'platform/requirements.txt'
+      - 'platform/tests/conftest.py'
+      - 'platform/tests/test_project_lifecycle.py'
+  workflow_dispatch: {}
+
+jobs:
+  project-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: leaf_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d leaf_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test
+      # The repo's own platform/ package shadows stdlib platform and crashes
+      # pytest at import (uuid -> platform.system); PYTHONSAFEPATH keeps the
+      # repo root off sys.path[0]. Same reason as contract.yml.
+      PYTHONSAFEPATH: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install platform requirements
+        run: python -m pip install -r platform/requirements.txt
+
+      - name: Run the project-lifecycle contract
+        # A SKIP IS A FAILURE HERE. The suite skips itself when DATABASE_URL is
+        # not reaching pytest, which looks identical to a pass in the summary
+        # line, so assert on the absence of "skipped" rather than on exit 0.
+        run: |
+          set -o pipefail
+          if ! out=$(python -m pytest --import-mode=importlib -q -rs \
+              platform/tests/test_project_lifecycle.py 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if printf '%s\n' "$out" | grep -qi 'skipped'; then
+            printf '%s\n' "$out"
+            echo 'FAIL: lifecycle tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi

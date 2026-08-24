@@ -7,11 +7,17 @@
 //                                   LEAF_AUTH_LIVE=1; the two below are ignored.
 //   X-Org-Id                      — REQUIRED with auth off, else 400.
 //   X-Actor-Binding-Id            — REQUIRED with auth off, else 400.
-// Both dev-seam headers are therefore sent on EVERY call: harmless under live
-// auth (the server discards them), and the difference between a working demo
-// and a blanket 400 with auth off. The previous revision of this module sent
-// the bearer alone, which is exactly why GET /api/projects 400'd and
-// POST /api/projects/blank could never succeed in the demo.
+// Both dev-seam headers are sent whenever a value exists: harmless under live
+// auth (the server discards them). The bearer alone is what made the previous
+// revision 400 on every call.
+//
+// HONEST LIMIT, do not paper over it: nothing in the browser can learn its own
+// actor binding id - no route echoes one - so X-Actor-Binding-Id is absent in
+// practice and the lifecycle routes are reachable only under LEAF_AUTH_LIVE=1,
+// where the server derives the binding from the verified subject and ignores
+// these headers. With auth off the routes answer 400 and the panel says so.
+// The viewer's identity comes back in the snapshot's `viewer` field, which is
+// why no client-side binding store is consulted for authority any more.
 //
 // X-Org-Id reads the same localStorage key as web/src/api.js orgHeaders()
 // (`leaf.org_id`, WORKSPACE_ORG_KEY in controllers/workspace/
@@ -92,7 +98,7 @@ function idempotencyKey() {
 // The server's own `detail` wins when it is already a plain sentence, because
 // it is more specific than anything this table can say.
 const STATUS_MESSAGE = {
-  400: 'This workspace is missing the identity that project actions need — reopen the project and try again.',
+  400: 'Project lifecycle needs a signed-in identity: this deployment is running with live auth off, so membership, clone, export and reset are unavailable here.',
   401: 'Your session is not signed in for this project any more.',
   403: 'You do not have permission to do that in this project.',
   404: 'That project is no longer available to you.',

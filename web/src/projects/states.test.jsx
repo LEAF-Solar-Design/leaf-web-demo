@@ -19,7 +19,6 @@ vi.mock('./api.js', () => ({
   deleteProject: vi.fn(),
   exportProject: vi.fn(),
   getProjectLifecycle: vi.fn(),
-  getStoredActorBindingId: vi.fn(() => null),
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),

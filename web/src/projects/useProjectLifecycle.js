@@ -35,7 +35,6 @@ import {
   deleteProject,
   exportProject,
   getProjectLifecycle,
-  getStoredActorBindingId,
   inviteMember,
   resetProject,
   revokeMember,
@@ -48,10 +47,6 @@ export function toUiRole(role) {
 export function toApiRole(role) {
   return role === 'read-only' ? 'read_only' : role
 }
-
-// Mirrors platform/project_lifecycle.py WRITE_ROLES. Rendering only — the
-// server re-checks the same set on every mutation and is the real authority.
-const UI_WRITE_ROLES = new Set(['owner', 'editor'])
 
 function adaptMembers(members) {
   return (members || []).map((m) => ({
@@ -73,15 +68,16 @@ function adaptReceipts(receipts) {
 
 // The viewer's own row IS the authority read: absent means revoked, and
 // Membership drops the project on exactly that absence.
-function adaptAuthority(members, viewerId) {
-  if (!viewerId) return null
-  const own = (members || []).find((m) => m.member_id === viewerId)
-  const role = own?.role || null
-  const canWrite = UI_WRITE_ROLES.has(role)
+// Pass-through of the server's own authority read, translated to UI role
+// vocabulary. Nothing is computed from role strings here: Membership.jsx
+// refuses to render a guessed matrix, and guessing is what a client-side
+// derivation would be.
+function adaptAuthority(viewer) {
+  if (!viewer || !viewer.role) return null
   return {
-    role: role || 'unknown',
-    can_invite: canWrite,
-    can_manage: role === 'owner',
+    role: toUiRole(viewer.role),
+    can_invite: viewer.can_invite === true,
+    can_manage: viewer.can_manage === true,
   }
 }
 
@@ -94,6 +90,7 @@ const EMPTY = { project: null, members: [], receipts: [], authority: null, viewe
  */
 export default function useProjectLifecycle(projectId, { enabled = true } = {}) {
   const [status, setStatus] = useState('idle') // idle | loading | ready | error
+  const [refreshing, setRefreshing] = useState(false) // post-mutation revalidation
   const [data, setData] = useState(EMPTY)
   const [error, setError] = useState(null)
 
@@ -102,7 +99,12 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   const generationRef = useRef(0)
   useEffect(() => () => { generationRef.current += 1 }, [])
 
-  const load = useCallback(async () => {
+  // A REFETCH IS NOT A COLD LOAD. Mutations refetch on success, and dropping
+  // status to 'loading' unmounted the very dialog that had just been handed its
+  // receipt (clone/export/reset all lost their result and re-offered the
+  // action). A refresh keeps the last good snapshot on screen and only reports
+  // that it is revalidating.
+  const load = useCallback(async ({ refresh = false } = {}) => {
     if (!enabled || !projectId) {
       generationRef.current += 1
       setData(EMPTY)
@@ -111,21 +113,27 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       return null
     }
     const generation = ++generationRef.current
-    setStatus('loading')
+    if (refresh) setRefreshing(true)
+    else setStatus('loading')
     setError(null)
     try {
       const snapshot = await getProjectLifecycle(projectId)
       if (generationRef.current !== generation) return null
       const members = adaptMembers(snapshot.members)
-      const bindingId = getStoredActorBindingId()
-      const viewerId = bindingId
-        ? members.find((m) => m.binding_id === bindingId)?.member_id || null
+      // Viewer identity is SERVER truth (platform/project_lifecycle.py
+      // project_snapshot emits `viewer`). The browser never learns its own
+      // actor binding id any other way, so there is nothing to guess from.
+      const viewer = snapshot.viewer || null
+      const viewerId = viewer
+        ? viewer.membership_id
+          || members.find((m) => m.binding_id === viewer.binding_id)?.member_id
+          || null
         : null
       setData({
         project: snapshot.project || null,
         members,
         receipts: adaptReceipts(snapshot.receipts),
-        authority: adaptAuthority(members, viewerId),
+        authority: adaptAuthority(viewer),
         viewerId,
       })
       setStatus('ready')
@@ -133,8 +141,12 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     } catch (e) {
       if (generationRef.current !== generation) return null
       setError(humanizeError(e))
-      setStatus('error')
+      // A failed REFRESH keeps the last good snapshot readable; only a failed
+      // cold load has nothing to show.
+      if (!refresh) setStatus('error')
       return null
+    } finally {
+      if (generationRef.current === generation && refresh) setRefreshing(false)
     }
   }, [enabled, projectId])
 
@@ -145,7 +157,7 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   // untouched — the component that owns the affordance surfaces it.
   const runThenRefetch = useCallback(async (operation) => {
     const result = await operation()
-    await load()
+    await load({ refresh: true })
     return result
   }, [load])
 
@@ -171,5 +183,5 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     remove: () => deleteProject(projectId), // no refetch: the project is gone
   }), [bindingFor, projectId, runThenRefetch])
 
-  return { status, error, refetch: load, actions, ...data }
+  return { status, refreshing, error, refetch: load, actions, ...data }
 }

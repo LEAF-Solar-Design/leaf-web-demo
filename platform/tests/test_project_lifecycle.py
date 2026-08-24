@@ -307,3 +307,115 @@ def test_lifecycle_receipts_are_sanitized_and_database_immutable(make_org):
                 "WHERE receipt_id = %(receipt_id)s",
                 {"receipt_id": receipt_id},
             )
+
+
+def test_snapshot_names_the_caller_so_the_client_never_guesses_its_own_row(
+    client, make_org,
+):
+    """A browser cannot learn its actor binding id: no route echoes one back.
+
+    Without the snapshot's `viewer`, a client can only guess which roster row is
+    the caller, and the role matrix (web/src/projects/Membership.jsx) refuses to
+    render a guessed matrix - so the whole membership surface renders empty.
+    """
+    org = make_org("Lifecycle Viewer")
+    owner = _binding(org.org_id, f"wave-b-viewer-owner-{uuid.uuid4()}", "owner")
+    reader = _binding(org.org_id, f"wave-b-viewer-reader-{uuid.uuid4()}", "editor")
+    project = client.post(
+        "/api/projects/blank",
+        json={"name": f"Viewer {uuid.uuid4()}"},
+        headers=_headers(org.org_id, owner.binding_id, f"create-{uuid.uuid4()}"),
+    ).json()["project"]
+    client.post(
+        f"/api/projects/{project['project_id']}/members",
+        json={"binding_id": str(reader.binding_id), "role": "read_only"},
+        headers=_headers(org.org_id, owner.binding_id, f"invite-{uuid.uuid4()}"),
+    )
+
+    owner_view = client.get(
+        f"/api/projects/{project['project_id']}/lifecycle",
+        headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert owner_view.status_code == 200
+    owner_viewer = owner_view.json()["viewer"]
+    assert owner_viewer["binding_id"] == str(owner.binding_id)
+    assert owner_viewer["role"] == "owner"
+    assert owner_viewer["can_invite"] is True
+    assert owner_viewer["can_manage"] is True
+    # The membership id must resolve to a row actually present in the roster,
+    # which is what the client keys its "this is you" lookup on.
+    roster = {m["membership_id"] for m in owner_view.json()["members"]}
+    assert owner_viewer["membership_id"] in roster
+
+    reader_view = client.get(
+        f"/api/projects/{project['project_id']}/lifecycle",
+        headers=_headers(org.org_id, reader.binding_id),
+    )
+    assert reader_view.status_code == 200
+    reader_viewer = reader_view.json()["viewer"]
+    assert reader_viewer["binding_id"] == str(reader.binding_id)
+    assert reader_viewer["role"] == "read_only"
+    # A read-only member is told, by the server, that it may not mutate. The
+    # client never derives this from the role string itself.
+    assert reader_viewer["can_invite"] is False
+    assert reader_viewer["can_manage"] is False
+
+
+def test_cloning_twice_resolves_the_name_instead_of_raising(client, make_org):
+    """Clone names are derived, not typed.
+
+    CloneDialog takes no name field, so the panel sends "<name> (copy)" every
+    time. Migration 0041 enforces one active name per org with a RAISING
+    trigger, so an unresolved second clone surfaced as a 500 that no retry could
+    ever clear.
+    """
+    org = make_org("Lifecycle Clone Names")
+    owner = _binding(org.org_id, f"wave-b-clone-names-{uuid.uuid4()}", "owner")
+    source_name = f"Rooftop {uuid.uuid4()}"
+    project = client.post(
+        "/api/projects/blank",
+        json={"name": source_name},
+        headers=_headers(org.org_id, owner.binding_id, f"create-{uuid.uuid4()}"),
+    ).json()["project"]
+
+    requested = f"{source_name} (copy)"
+    granted = []
+    for _attempt in range(3):
+        response = client.post(
+            f"/api/projects/{project['project_id']}/clone",
+            json={"name": requested},
+            headers=_headers(org.org_id, owner.binding_id, f"clone-{uuid.uuid4()}"),
+        )
+        assert response.status_code == 201, response.text
+        granted.append(response.json()["project"]["name"])
+
+    assert granted[0] == requested
+    # Every clone lands, and each lands under its own distinct active name.
+    assert len(set(granted)) == 3, granted
+    for name in granted[1:]:
+        assert name.startswith(requested)
+
+
+def test_blank_creation_refuses_a_taken_name_as_a_conflict_not_a_crash(
+    client, make_org,
+):
+    org = make_org("Lifecycle Duplicate Name")
+    owner = _binding(org.org_id, f"wave-b-dupe-{uuid.uuid4()}", "owner")
+    name = f"Duplicate {uuid.uuid4()}"
+    first = client.post(
+        "/api/projects/blank",
+        json={"name": name},
+        headers=_headers(org.org_id, owner.binding_id, f"create-{uuid.uuid4()}"),
+    )
+    assert first.status_code == 201, first.text
+
+    # A DIFFERENT idempotency key, so this is a genuine second create rather
+    # than a replay: the name is taken, and the caller must be told that
+    # exactly, not handed a 500 from the migration's trigger.
+    second = client.post(
+        "/api/projects/blank",
+        json={"name": name},
+        headers=_headers(org.org_id, owner.binding_id, f"create-{uuid.uuid4()}"),
+    )
+    assert second.status_code == 409, second.text
+    assert "already exists" in second.json()["detail"]

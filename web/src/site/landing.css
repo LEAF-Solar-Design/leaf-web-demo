@@ -191,6 +191,75 @@
 .project-lifecycle { display: grid; gap: 12px; margin-top: 12px; }
 .project-lifecycle-tools { display: flex; flex-wrap: wrap; gap: 8px; }
 .project-lifecycle-error { color: #a1a1aa; font-size: 11px; display: grid; gap: 8px; }
+/* A failed refresh is a banner over a still-usable surface, not a replacement
+   for it; a failed cold load keeps the flatter -error treatment above. */
+.project-lifecycle-stale {
+  color: #fbbf24; font-size: 11px; display: grid; gap: 6px;
+  padding: 6px 8px; border-left: 2px solid rgba(251, 191, 36, .5);
+  background: rgba(251, 191, 36, .06);
+}
+.project-lifecycle-refreshing { color: #a1a1aa; font-size: 10px; letter-spacing: .04em; }
+
+/* Wave B lifecycle components (B-U2..B-U6). They shipped unmounted, so none of
+   these class names had ever been styled; the dialogs in particular render
+   aria-modal and MUST NOT sit in inline flow behind an interactive panel. */
+.membership-panel-wrap, .membership, .danger-zone, .receipt-panel {
+  display: grid; gap: 8px; font-size: 11px; color: #d4d4d8;
+}
+.membership-head, .receipt-panel-head, .danger-action-head,
+.clone-dialog-head, .export-dialog-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+}
+.membership-title, .receipt-panel-title, .danger-action-title,
+.clone-dialog-title, .export-dialog-title {
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; color: #e4e4e7;
+}
+.membership-role { color: #a1a1aa; font-size: 10px; }
+.membership-roster { display: grid; gap: 6px; }
+.membership-row, .receipt-row {
+  display: grid; gap: 4px; padding: 6px 8px;
+  background: rgba(255, 255, 255, .03); border-radius: 4px;
+}
+.membership-member { font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; }
+.membership-invite { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.membership-invite input, .membership-invite select {
+  background: rgba(0, 0, 0, .3); border: 1px solid rgba(255, 255, 255, .12);
+  color: #e4e4e7; border-radius: 4px; padding: 4px 6px; font-size: 11px; min-width: 0;
+}
+.membership-error, .danger-action-error, .clone-dialog-error, .export-dialog-error {
+  color: #f87171; font-size: 10px;
+}
+.receipt-timeline { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
+.receipt-row-head { display: flex; justify-content: space-between; gap: 8px; }
+.receipt-kind { font-weight: 600; color: #e4e4e7; }
+.receipt-time, .receipt-panel-empty { color: #a1a1aa; font-size: 10px; }
+.receipt-fields { display: grid; gap: 2px; }
+.receipt-field { display: flex; gap: 6px; font-size: 10px; color: #a1a1aa; }
+.receipt-field-key { color: #71717a; }
+.clone-dialog-receipt-id, .export-dialog-receipt-id, .danger-action-receipt-id {
+  font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; color: #a1a1aa;
+}
+.danger-zone { border-top: 1px solid rgba(248, 113, 113, .25); padding-top: 8px; }
+.danger-action-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.danger-action-typed input {
+  background: rgba(0, 0, 0, .3); border: 1px solid rgba(248, 113, 113, .35);
+  color: #e4e4e7; border-radius: 4px; padding: 4px 6px; font-size: 11px;
+}
+/* The one hard requirement in this block: a dialog must overlay, not stack. */
+.clone-dialog-backdrop, .export-dialog-backdrop {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+  background: rgba(0, 0, 0, .55);
+}
+.clone-dialog, .export-dialog {
+  width: min(420px, calc(100vw - 32px)); display: grid; gap: 10px;
+  padding: 14px; border-radius: 8px; font-size: 12px; color: #e4e4e7;
+  background: #18181b; border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+.clone-dialog-progress, .export-dialog-progress, .export-dialog-progress-label {
+  color: #a1a1aa; font-size: 11px;
+}
+.clone-dialog-success, .clone-dialog-done, .export-dialog-complete { color: #4ade80; font-size: 11px; }
 
 /* ---------------- landing: statement block (z 20) ---------------- */
 

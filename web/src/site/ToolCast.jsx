@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   getCapabilities,
   createOrg,
+  createProject,
   getDrawingIntake,
   getJob,
   getSession,
@@ -39,7 +40,6 @@ import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import ProjectLifecyclePanel from '../projects/ProjectLifecyclePanel.jsx'
-import { createBlankProject } from '../projects/api.js'
 import { ENV_LIFECYCLE_UI } from '../projects/flag.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
@@ -101,12 +101,16 @@ const MODE_DRAWING_ID = PROOF_MODE
       ? 'rooftop_demo'
       : null
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
-// Project creation goes through the idempotent lifecycle factory
-// (POST /api/projects/blank), NOT /api/projects: only the blank-project route
-// mints the owner membership binding and the lifecycle receipt that every
-// /api/projects/{id}/... route below requires. ProjectSwitcher's create form is
-// the one affordance that reaches it.
-const workspaceServices = { createOrg, listProjects, createProject: createBlankProject, openProject }
+// Creation stays on POST /api/projects. The lifecycle factory
+// (POST /api/projects/blank) is the better route on paper - it mints the owner
+// membership binding - but it goes through _get_lifecycle_actor, which REQUIRES
+// X-Actor-Binding-Id whenever LEAF_AUTH_LIVE is off (the default, platform/
+// deps.py auth_live). Nothing in the browser can produce that id, so routing
+// creation there breaks project creation in every auth-off deployment, flag on
+// or off. Projects created here carry no project membership row, so the
+// lifecycle panel below reports the server's own 403 for them; that is a
+// truthful read of a real tenancy gap, not a client-side failure to try.
+const workspaceServices = { createOrg, listProjects, createProject, openProject }
 const UNIFIED_TOUR_STEPS = [
   {
     id: 'welcome',

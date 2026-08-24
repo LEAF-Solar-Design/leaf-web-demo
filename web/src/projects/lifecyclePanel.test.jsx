@@ -27,7 +27,6 @@ vi.mock('./api.js', () => ({
   deleteProject: vi.fn(),
   exportProject: vi.fn(),
   getProjectLifecycle: vi.fn(),
-  getStoredActorBindingId: vi.fn(() => 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
@@ -43,6 +42,15 @@ const VIEWER_BINDING = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
 const SNAPSHOT = {
   project: { project_id: PROJECT_ID, name: 'Rooftop Array', status: 'active', profile: 'blank_browser' },
+  // Server-supplied viewer identity. The browser has no other way to know which
+  // roster row is "you": no route echoes an actor binding id back to a client.
+  viewer: {
+    binding_id: VIEWER_BINDING,
+    membership_id: 'm-1',
+    role: 'owner',
+    can_invite: true,
+    can_manage: true,
+  },
   members: [
     { membership_id: 'm-1', binding_id: VIEWER_BINDING, role: 'owner', status: 'active', created_at: '2026-08-01T00:00:00+00:00', revoked_at: null },
     { membership_id: 'm-2', binding_id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff', role: 'read_only', status: 'active', created_at: '2026-08-02T00:00:00+00:00', revoked_at: null },
@@ -79,6 +87,30 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     // Reset and delete are TERMINAL on this platform (no restore token is
     // minted), so no undo may be offered.
     expect(screen.queryByText(/undo/i)).toBeNull()
+  })
+
+  // REGRESSION GUARD. The first cut of this graft derived viewer identity from
+  // a localStorage key (`leaf.actor_binding_id`) that nothing in the web tree
+  // ever wrote, so `authority` was always null and Membership.jsx - which
+  // refuses to guess a role matrix - rendered an EMPTY DIV in every
+  // deployment. The role matrix must come from the snapshot's `viewer`.
+  it('renders the role matrix from the snapshot viewer, not from client-side storage', async () => {
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
+
+    await waitFor(() => expect(screen.getByText(/your role: owner/i)).toBeTruthy())
+    expect(screen.getByRole('button', { name: /invite/i })).toBeTruthy()
+  })
+
+  it('renders no role matrix when the server sends no viewer', async () => {
+    const { viewer, ...noViewer } = SNAPSHOT
+    getProjectLifecycle.mockResolvedValue(noViewer)
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
+
+    // The surface still mounts (timeline, danger zone, clone/export), but the
+    // membership matrix stays absent rather than guessed.
+    await waitFor(() => expect(screen.getByTestId('projects-surface')).toBeTruthy())
+    expect(screen.queryByText(/your role:/i)).toBeNull()
   })
 
   it('renders nothing at all with the flag off, and never touches the transport', async () => {
@@ -121,8 +153,15 @@ describe('ToolCast mounts the lifecycle block behind the exact ratified gate', (
     expect(source).not.toContain('ProjectList')
   })
 
-  it('creates projects through the idempotent blank-project factory, not /api/projects', () => {
-    expect(source).toContain('createProject: createBlankProject')
-    expect(source).toContain("import { createBlankProject } from '../projects/api.js'")
+  // The blank-project factory mints the owner membership binding the lifecycle
+  // routes need, but it goes through _get_lifecycle_actor, which REQUIRES
+  // X-Actor-Binding-Id whenever LEAF_AUTH_LIVE is off (the default). No browser
+  // can produce that id, so routing creation there breaks creation in every
+  // auth-off deployment, flag on OR off, because workspaceServices is a
+  // module-level const and is not behind the flag.
+  it('leaves project creation on the permissive route, flag-independent', () => {
+    expect(source).toContain('const workspaceServices = { createOrg, listProjects, createProject, openProject }')
+    expect(source).not.toContain('createProject: createBlankProject')
+    expect(source).not.toContain('createBlankProject')
   })
 })

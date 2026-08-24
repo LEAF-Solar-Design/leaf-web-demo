@@ -79,15 +79,23 @@ export default function ProjectLifecyclePanel({
         </div>
       )}
 
-      {lifecycle.status === 'error' && (
-        <div className="project-lifecycle-error" role="alert">
+      {/* A failed REFRESH keeps the surface mounted and shows the staleness
+          inline; only a failed cold load replaces the surface entirely. */}
+      {lifecycle.error && (
+        <div
+          className={lifecycle.status === 'error' ? 'project-lifecycle-error' : 'project-lifecycle-stale'}
+          role="alert"
+        >
           <p>{lifecycle.error}</p>
-          <button type="button" className="chip-act" onClick={lifecycle.refetch}>Try again</button>
+          <button type="button" className="chip-act" onClick={() => lifecycle.refetch()}>Try again</button>
         </div>
       )}
 
       {lifecycle.status === 'ready' && (
         <>
+          {lifecycle.refreshing && (
+            <div className="project-lifecycle-refreshing" role="status">Updating…</div>
+          )}
           <div data-testid="membership-panel">
             <Membership
               viewerId={lifecycle.viewerId}
