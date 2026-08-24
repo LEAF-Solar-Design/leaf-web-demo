@@ -1,6 +1,6 @@
 """
 The APS-free DWG read lane (dwg2dxf -> dxf_intake) and the engine toggle's
-server half: sandboxed conversion, structured fail-closed rejections, engine
+server half: caged conversion, structured fail-closed rejections, engine
 routing (per-upload field + LEAF_GUEST_DWG_EXTRACT default), the upfront
 availability gate, policy advertisement, and the byte-identical APS path.
 

@@ -1332,7 +1332,7 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             intake = dxf_intake.parse_dxf_file(source_path,
                                                source_name=marker.get("filename") or drawing_id)
         elif _resolved_dwg_engine(marker) == "local":
-            # APS-FREE DWG READ: dwg2dxf (sandboxed subprocess; GPL-3 note in
+            # APS-FREE DWG READ: dwg2dxf (CAGED subprocess; GPL-3 note in
             # dwg_convert.py — subprocess only, never linked) converts THEIR
             # staged bytes to ASCII DXF, and the SAME dxf_intake parser the
             # .dxf path uses reads the result. Zero new intake code; the

@@ -23,7 +23,7 @@ WORKDIR /app
 # "Unable to connect to deb.debian.org:http").
 #
 # --- dwg2dxf (GNU libredwg): the APS-free guest DWG read lane. ----------------
-# server/dwg_convert.py runs it as a sandboxed SUBPROCESS converting an
+# server/dwg_convert.py runs it as a CAGED SUBPROCESS converting an
 # uploaded .dwg to ASCII DXF for the dxf_intake parser (guest_uploads engine
 # `local`; CONTRACT-ADDENDUM §19).
 #   * Built from source because Debian trixie ships NO libredwg package

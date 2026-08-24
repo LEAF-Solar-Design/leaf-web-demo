@@ -1446,7 +1446,7 @@ not-rooftop test), `tests/test_guest_fail_closed.py` (7),
 `tests/test_guest_purge.py` (6 — short-override deletion proof),
 `tests/test_guest_session_auth.py` (12 — incl. the json↔hardcoded policy
 mirror), `tests/test_broker_upload_resolver.py` (19),
-`tests/test_dwg_local_extract.py` (the local DWG engine: sandboxed conversion,
+`tests/test_dwg_local_extract.py` (the local DWG engine: caged conversion,
 fail-closed rejections, engine routing + policy advertisement; its
 real-dwg2dxf test runs wherever the binary exists and skips allowlisted
 elsewhere).
