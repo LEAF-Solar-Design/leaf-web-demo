@@ -159,14 +159,57 @@ def activity_body_matches(live: dict, want: dict) -> bool:
     read the aliased version back, compare it here, and repoint the alias when
     this returns False.
 
+    NOT strict equality on `parameters`, deliberately. A live GET of an activity
+    version is APS's rendering of the body, and a server is free to echo back
+    defaults a client never sent (`zip`, `ondemand`, a generated description on a
+    parameter). Under `==` any such field reads as drift, so the caller would
+    publish a NEW ACTIVITY VERSION AND REPOINT THE ALIAS ON EVERY SINGLE RUN -
+    unbounded version growth on a shared APS account, and APS versions cannot be
+    deleted. So instead:
+
+      * the set of parameter NAMES must match exactly, which is what catches a
+        removed `Script` or a stale leftover `HostDwg`; and
+      * within each parameter, only the sub-keys WE SET are compared, so an
+        APS-injected default is ignored while a change to `verb`, `localName` or
+        `required` is still caught.
+
+    A live readback on 2026-08-24 (session 510f244f, real APS, read-only) showed
+    no injected sub-keys on this activity shape. This does not depend on that
+    holding.
+
+    LIMITATION, and it is the reason the .scr is a per-run ARGUMENT: the live
+    version body carries NO `settings` key at all, so an embedded script is
+    INVISIBLE here and drift in it can never be detected. Any activity that bakes
+    its script into `settings` gets a drift check that silently always passes.
+    Moving the script out of `settings` is what makes this guard functional, not
+    merely tidier - do not "simplify" it back.
+
     Pure dict comparison: no HTTP, no credential, fully testable offline.
     """
     if not isinstance(live, dict) or not isinstance(want, dict):
         return False
-    return all(
-        live.get(field) == want.get(field)
-        for field in ("engine", "commandLine", "parameters")
-    )
+    if live.get("engine") != want.get("engine"):
+        return False
+    if live.get("commandLine") != want.get("commandLine"):
+        return False
+    return _parameters_match(live.get("parameters"), want.get("parameters"))
+
+
+def _parameters_match(live: object, want: object) -> bool:
+    """Exact parameter NAME set; within each, only the sub-keys we set."""
+    if not isinstance(live, dict) or not isinstance(want, dict):
+        return live == want
+    if set(live) != set(want):
+        return False
+    for name, wanted in want.items():
+        found = live.get(name)
+        if not isinstance(wanted, dict) or not isinstance(found, dict):
+            if found != wanted:
+                return False
+            continue
+        if any(found.get(key) != value for key, value in wanted.items()):
+            return False
+    return True
 
 def blank_activity_spec(activity_id: str, engine: str,
                         out_localname: str = OUT_LOCALNAME,

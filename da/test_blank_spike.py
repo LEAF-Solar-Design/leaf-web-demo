@@ -452,3 +452,60 @@ def test_the_activex_body_that_shipped_is_detected_as_drift():
                                   "localName": "blank.dwg"}},
     }
     assert blank_lisp.activity_body_matches(shipped, spec) is False
+
+
+def test_apis_injected_parameter_defaults_are_not_drift():
+    """The version-churn trap: APS echoing back defaults must NOT read as drift.
+
+    If it did, the caller would publish a new activity VERSION and repoint the
+    alias on EVERY run. APS versions cannot be deleted, so that is unbounded
+    permanent growth on a shared account, not a cosmetic bug.
+    """
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    rendered = {
+        "id": "LeafBlankCreate",
+        "version": 3,
+        "description": "whatever APS stored",
+        "engine": spec["engine"],
+        "commandLine": spec["commandLine"],
+        "parameters": {
+            name: {**param, "zip": False, "ondemand": False, "description": ""}
+            for name, param in spec["parameters"].items()
+        },
+    }
+    assert blank_lisp.activity_body_matches(rendered, spec) is True
+
+
+def test_a_changed_parameter_field_is_still_drift_despite_the_tolerance():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    for name, key, bad in (
+        ("Script", "localName", "other.scr"),
+        ("Script", "verb", "put"),
+        ("Result", "localName", "elsewhere.dwg"),
+        ("Result", "required", False),
+    ):
+        drifted = {**spec, "parameters": {
+            pname: ({**param, key: bad} if pname == name else dict(param))
+            for pname, param in spec["parameters"].items()}}
+        assert blank_lisp.activity_body_matches(drifted, spec) is False, (name, key)
+
+
+def test_added_or_removed_parameters_are_drift():
+    """The name SET is exact, so a stale HostDwg or a missing Script is caught."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    stale = {**spec, "parameters": {**spec["parameters"],
+             "HostDwg": {"verb": "get", "required": True, "localName": "host.dwg"}}}
+    assert blank_lisp.activity_body_matches(stale, spec) is False
+    missing = {**spec, "parameters": {
+        k: v for k, v in spec["parameters"].items() if k != "Script"}}
+    assert blank_lisp.activity_body_matches(missing, spec) is False
+
+
+def test_a_settings_only_change_is_invisible_and_that_is_why_script_is_an_argument():
+    """Documents the LIMITATION found by a real-APS readback: the live version
+    body carries no `settings`, so a baked-in script cannot be drift-checked."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    assert "settings" not in spec, "the recipe must never be baked into settings"
+    # Even if a caller DID bake one in, the comparison cannot see it.
+    assert blank_lisp.activity_body_matches(
+        {**spec, "settings": {"script": {"value": "(totally different)"}}}, spec) is True
