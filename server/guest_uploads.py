@@ -28,11 +28,12 @@ credential-holding broker to the DXF-correct Activity (HostDwg localName
 A .dwg extracts through one of TWO engines, chosen per upload (the `engine`
 form field the /try toggle sends) with LEAF_GUEST_DWG_EXTRACT as the server
 default (see dwg_extract_mode):
-  * `local` — server/dwg_convert.py runs GNU libredwg's dwg2dxf as a sandboxed
-    subprocess (GPL-3 note there: subprocess only, never linked) converting
-    THEIR staged bytes to ASCII DXF, which then feeds the SAME dxf_intake
-    parser the .dxf path uses. Free, APS-free, honest — a conversion failure
-    lands in the marker as a structured rejection, never partial intake.
+  * `local` — server/dwg_convert.py runs GNU libredwg's dwg2dxf as a CAGED
+    subprocess (rlimits + no_new_privs around a native parser eating
+    unauthenticated bytes; GPL-3 note there: subprocess only, never linked)
+    converting THEIR staged bytes to ASCII DXF, which then feeds the SAME
+    dxf_intake parser the .dxf path uses. Free, APS-free, honest — a conversion
+    failure lands in the marker as a structured rejection, never partial intake.
   * `aps` — the broker (POST /broker/extract {upload: true}) at APS_LIVE=1,
     failing honestly (APS_UNAVAILABLE) at APS_LIVE=0, byte-identical to the
     pre-engine behavior.

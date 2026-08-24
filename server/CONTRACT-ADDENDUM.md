@@ -1385,11 +1385,20 @@ present, aps otherwise). The resolved engine is recorded in the upload marker
 exact choice:
 
 - `local` — `server/dwg_convert.py` runs GNU libredwg's `dwg2dxf` as a
-  sandboxed subprocess (fixed argv, no shell, scratch dir always deleted,
-  `LEAF_DWG_CONVERT_TIMEOUT_S` wall clock, `LEAF_DWG_CONVERT_MAX_OUTPUT_BYTES`
-  output cap; binary from `LEAF_DWG2DXF_BIN` or PATH, shipped in the app
-  image — provenance + GPL-3 subprocess-boundary note in
-  `deploy/Dockerfile.app` and `dwg_convert.py`) converting the staged bytes to
+  CAGED subprocess, in two distinct tiers. Bounding **misuse and DoS**: fixed
+  argv, no shell, scratch dir always deleted, `LEAF_DWG_CONVERT_TIMEOUT_S` wall
+  clock, `LEAF_DWG_CONVERT_MAX_OUTPUT_BYTES` output cap. Bounding a
+  **memory-corruption exploit** in the native parser: hard rlimits (address
+  space `LEAF_DWG_CONVERT_MEM_BYTES`, CPU, file size, core, fds
+  `LEAF_DWG_CONVERT_NOFILE`, procs `LEAF_DWG_CONVERT_NPROC`) plus
+  `no_new_privs` and no inheritable capabilities, applied by
+  `prlimit(1)`/`setpriv(1)` around the exec. The two tiers are named separately
+  because the first does NOT imply the second, and an earlier version of this
+  text read as though it did. `LEAF_DWG_CONVERT_REQUIRE_CAGE=1` (set in the app
+  image) makes a MISSING cage a refusal rather than a silent downgrade to an
+  uncaged parse. Binary from `LEAF_DWG2DXF_BIN` or PATH, shipped in the app
+  image — version pin, provenance + GPL-3 subprocess-boundary note in
+  `deploy/Dockerfile.app` and `dwg_convert.py`. Converts the staged bytes to
   ASCII DXF for the SAME `dxf_intake` parser the .dxf path uses. Free,
   APS-free, honest: a malformed/hostile DWG lands a structured failed marker
   (BAD_PARAMS/TIMEOUT/INTERNAL, never a crash, never partial intake) and
