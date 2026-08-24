@@ -297,6 +297,44 @@ def test_messages_llm_rate_limited_429(client, monkeypatch):
     assert r.json()["error"]["error_code"] == "llm_rate_limited"
 
 
+def test_messages_llm_quota_exhausted_429_relays_retry_after_s(client, monkeypatch):
+    """turn_runner's extraction of the harness's retry_after_s rides through
+    exc.extra the same way 401's grant_required does — merged top-level by
+    _turn_rejected_response, not nested under `error`."""
+    from envelopes import ErrorCode
+    sess = _seed_session()
+
+    def _boom(*a, **kw):
+        raise turn_runner.TurnRejected(
+            429, ErrorCode.LLM_QUOTA_EXHAUSTED, "quota hard cap",
+            extra={"retry_after_s": 90.0},
+        )
+
+    monkeypatch.setattr(turn_runner, "start_turn", _boom)
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"text": "hi"}, headers=_h(sess["tenant_id"]))
+    assert r.status_code == 429, r.text
+    body = r.json()
+    assert body["retry_after_s"] == 90.0
+    assert body["error"]["error_code"] == "llm_quota_exhausted"
+
+
+def test_messages_llm_quota_exhausted_429_omits_retry_after_s_when_absent(client, monkeypatch):
+    """No `extra` at all (harness sent no cooldown horizon) -> the field is
+    ABSENT from the envelope, never present as null."""
+    from envelopes import ErrorCode
+    sess = _seed_session()
+
+    def _boom(*a, **kw):
+        raise turn_runner.TurnRejected(429, ErrorCode.LLM_QUOTA_EXHAUSTED, "quota hard cap")
+
+    monkeypatch.setattr(turn_runner, "start_turn", _boom)
+    r = client.post(f"/api/sessions/{sess['session_id']}/messages",
+                    json={"text": "hi"}, headers=_h(sess["tenant_id"]))
+    assert r.status_code == 429, r.text
+    assert "retry_after_s" not in r.json()
+
+
 def test_messages_broker_unreachable_502(client, monkeypatch):
     from envelopes import ErrorCode
     sess = _seed_session()
