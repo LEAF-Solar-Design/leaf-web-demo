@@ -199,6 +199,48 @@ name: Dispatch staging deploys
 # Rollback: delete this file (or revert its PR). Manual workflow_dispatch of
 # deploy-leaf-platform-staging.yml with an exact task-definition ARN is
 # unchanged and remains the recovery path.
+#
+# COALESCE ACROSS COMMITS (2026-08-24). The group below used to be keyed by
+# head_sha, which serializes nothing between DIFFERENT commits: every
+# commit's relay ran in its own group, so a merge train left N relays alive
+# in parallel, each independently queueing for the infra repo's single
+# leaf-platform-staging-ecs-mutation lock (shared by 39 workflows). At a
+# merge cadence faster than one full web+app release (~8 min web, ~14 min
+# app, plus lock queue time), several relays would each get partway through
+# a release before being superseded, then burn their own poll budget in
+# wait_for_receipt waiting on a superseder that was ITSELF superseded before
+# it could publish one. Observed 2026-08-24: relay run 32745004973 (built
+# 72245132) deployed web, then waited 95 minutes for superseder 1c53153e's
+# convergence receipt, which never came because 1c53153e's own relay was
+# also superseded, and failed "STAGING IS SPLIT AND UNCONVERGED"; five more
+# relays then queued behind it and sat in_progress on the deploy step in a
+# row, with no relay converging staging between 13:02:46Z and this fix.
+#
+# The group is now FIXED (not per-sha) with cancel-in-progress: true, so
+# GitHub itself keeps at most one relay alive across ALL commits: a newer
+# commit's relay cancels whichever older-commit relay is still running,
+# instead of letting both run and race for the infra lock. This is safe
+# because every step through the actual AWS mutation is idempotent and
+# always targets the CURRENT release's own tag: a relay cancelled after
+# deploying only web leaves staging split exactly as a stood-down relay
+# already could, and whichever relay survives to run uncancelled deploys
+# BOTH services fresh onto its own tag, converging staging regardless of
+# what a cancelled predecessor left mid-flight. Cancellation cannot roll a
+# service backwards -- it only stops THIS relay from proceeding, it never
+# touches an already-dispatched infra deploy (fire-and-forget
+# workflow_dispatch), and every dispatch is still gated by the tip re-check
+# and the supply-set manifest exactly as before.
+#
+# WHAT THIS DOES NOT DO: it does not guarantee any relay ever completes
+# under a merge rate that never lets one finish before the next supersedes
+# it -- that ceiling is inherent (see "NOT PINNED BY A TEST" and the
+# need-first section above) and this change does not touch it. It also does
+# not replace the superseder-wait / convergence-receipt logic below, which
+# stays as the correctness backstop for the window between a newer run
+# STARTING and this job's cancellation actually taking effect (GitHub
+# cancels a running job at its next cancellable checkpoint, not
+# instantaneously), and for the case where the newer commit's own build
+# fails outright, so no relay ever exists to cancel this one.
 # ---------------------------------------------------------------------------
 
 on:
@@ -211,8 +253,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: dispatch-staging-deploys-${{ github.event.workflow_run.head_sha }}
-  cancel-in-progress: false
+  group: dispatch-staging-deploys
+  cancel-in-progress: true
 
 jobs:
   dispatch:
