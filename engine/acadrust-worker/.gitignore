@@ -1,0 +1,7 @@
+# Rust build output. This crate has no committed Cargo.lock (a library
+# consumed as a git dependency, not a top-level pinned application) — the
+# exact acadrust rev is already pinned in Cargo.toml's `rev = "..."`, which
+# is the load-bearing pin for reproducibility; Cargo.lock would only add a
+# second, redundant, easily-stale pin for this crate's own dependencies.
+target/
+Cargo.lock
