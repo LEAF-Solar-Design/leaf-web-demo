@@ -87,6 +87,8 @@ _CACHE_TTL_SECONDS = 15.0
 _CONNECT_TIMEOUT_SECONDS = 2.0
 _READ_TIMEOUT_SECONDS = 4.0
 _MAX_ATTEMPTS = 2
+# DescribeTasks accepts at most 100 identifiers per call.
+_MAX_TASKS_PER_SERVICE = 100
 
 
 class LiveIdentityUnavailable(RuntimeError):
@@ -157,17 +159,20 @@ def _routed_family(descriptions: dict[str, dict[str, Any]], service: str) -> str
     )
 
 
-def _container_digest(task_definition: dict[str, Any], service: str) -> str:
-    """Pull the service container's image reference and reduce it to a digest.
+def _service_container_digest(task: dict[str, Any], service: str) -> str:
+    """Pull the RUNNING container's resolved image digest out of one task.
 
-    Only an ``@sha256:`` reference names an immutable image. A tag reference
-    (the live app's harness sidecar uses one) does NOT, so it cannot be
-    compared against a receipt digest and is refused rather than guessed at.
+    ``containers[].imageDigest`` is what the container actually resolved and
+    pulled, which is the honest answer to "what is running". A task definition
+    only records what was INTENDED, and the two can differ while a roll is in
+    flight. Verified live 2026-08-24: leaf-platform-web's running task reported
+    sha256:87e6dd97 minutes after its service still described revision 252
+    pinning sha256:a12a9d7c, because the service rolled to 253 underneath.
     """
     name = _SERVICE_CONTAINER[service]
-    containers = task_definition.get("containerDefinitions")
+    containers = task.get("containers")
     if not isinstance(containers, list):
-        raise LiveIdentityUnavailable(f"{service} task definition has no containers")
+        raise LiveIdentityUnavailable(f"{service} task reports no containers")
     matches = [
         item
         for item in containers
@@ -175,21 +180,28 @@ def _container_digest(task_definition: dict[str, Any], service: str) -> str:
     ]
     if len(matches) != 1:
         raise LiveIdentityUnavailable(
-            f"{service} task definition does not carry exactly one {name} container"
+            f"{service} task does not carry exactly one {name} container"
         )
-    image = matches[0].get("image")
-    if not isinstance(image, str) or "@" not in image:
+    digest = matches[0].get("imageDigest")
+    if not isinstance(digest, str) or not _IMAGE_DIGEST.fullmatch(digest):
+        # Absent for a non-ECR registry, and unusable if malformed. Either way
+        # there is no honest digest to report, so refuse rather than guess.
         raise LiveIdentityUnavailable(
-            f"{service} runs a tag reference, which does not name an immutable image"
+            f"{service} running container reports no usable image digest"
         )
-    digest = image.rsplit("@", 1)[1]
-    if not _IMAGE_DIGEST.fullmatch(digest):
-        raise LiveIdentityUnavailable(f"{service} image digest is malformed")
     return digest
 
 
 def _read_live_digests(env: Mapping[str, str]) -> dict[str, str]:
-    """Map each service to the image digest it is running right now."""
+    """Map each service to the image digest its RUNNING tasks resolved.
+
+    Deliberately avoids ecs:DescribeTaskDefinition. AWS does not support
+    resource-level permissions for that action, so granting it would mean
+    account-wide read of every task definition in the account, including other
+    services' plaintext environment variables. ListTasks plus DescribeTasks
+    reads strictly less (no environment variables at all) and answers the
+    better question.
+    """
     client = _get_client(env)
     cluster = _cluster(env)
     families = sorted({f for names in _COLOR_FAMILIES.values() for f in names})
@@ -207,24 +219,52 @@ def _read_live_digests(env: Mapping[str, str]) -> dict[str, str]:
     }
 
     digests: dict[str, str] = {}
-    # Bounded: one describe_task_definition per service, five services, no
-    # per-item network call inside a loop over unbounded input.
+    # Bounded: two calls per service, five services. No per-item network call
+    # inside a loop over unbounded input.
     for service in SERVICES:
         family = _routed_family(described, service)
-        arn = described[family].get("taskDefinition")
-        if not isinstance(arn, str) or not arn:
-            raise LiveIdentityUnavailable(f"{family} has no task definition")
         try:
-            task_definition = client.describe_task_definition(taskDefinition=arn)[
-                "taskDefinition"
-            ]
+            listed = client.list_tasks(
+                cluster=cluster, serviceName=family, desiredStatus="RUNNING"
+            )
         except LiveIdentityUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001
             raise LiveIdentityUnavailable(
-                f"could not describe {family} task definition: {exc}"
+                f"could not list {family} tasks: {exc}"
             ) from exc
-        digests[service] = _container_digest(task_definition, service)
+        arns = listed.get("taskArns")
+        if not isinstance(arns, list) or not arns:
+            raise LiveIdentityUnavailable(f"{family} has no running tasks")
+        # DescribeTasks accepts at most 100 identifiers; a service running more
+        # than that is far outside this platform's shape, and silently reading
+        # the first 100 would answer a smaller question than it appears to.
+        if len(arns) > _MAX_TASKS_PER_SERVICE:
+            raise LiveIdentityUnavailable(
+                f"{family} runs {len(arns)} tasks, more than this endpoint reads"
+            )
+        try:
+            described_tasks = client.describe_tasks(cluster=cluster, tasks=arns)
+        except LiveIdentityUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise LiveIdentityUnavailable(
+                f"could not describe {family} tasks: {exc}"
+            ) from exc
+        tasks = described_tasks.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise LiveIdentityUnavailable(f"{family} returned no task detail")
+        # A mid-roll service can run two digests at once. There is no single
+        # true answer then, so refuse rather than pick whichever task sorted
+        # first: an arbitrary choice here is precisely the kind of quiet
+        # wrong answer this endpoint exists to stop.
+        observed = {_service_container_digest(task, service) for task in tasks}
+        if len(observed) != 1:
+            raise LiveIdentityUnavailable(
+                f"{service} is running {len(observed)} different image digests; "
+                "the fleet is mid-roll and has no single running identity"
+            )
+        digests[service] = observed.pop()
     return digests
 
 

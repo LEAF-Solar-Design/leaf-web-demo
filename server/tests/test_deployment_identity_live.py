@@ -243,9 +243,17 @@ def test_production_requires_an_explicit_environment_binding():
 
 
 class _FakeClient:
-    def __init__(self, services, task_definitions):
+    """Mirrors the ECS calls the reader actually makes.
+
+    DescribeServices, ListTasks, DescribeTasks. Deliberately exposes no
+    describe_task_definition, so a regression back to that action fails loudly
+    here rather than only at the IAM boundary in production.
+    """
+
+    def __init__(self, services, tasks_by_service, task_detail):
         self._services = services
-        self._task_definitions = task_definitions
+        self._tasks_by_service = tasks_by_service
+        self._task_detail = task_detail
 
     def describe_services(self, cluster, services):  # noqa: ARG002
         return {
@@ -254,34 +262,34 @@ class _FakeClient:
             ]
         }
 
-    def describe_task_definition(self, taskDefinition):  # noqa: N803
-        return {"taskDefinition": self._task_definitions[taskDefinition]}
+    def list_tasks(self, cluster, serviceName, desiredStatus):  # noqa: N803, ARG002
+        return {"taskArns": list(self._tasks_by_service.get(serviceName, []))}
+
+    def describe_tasks(self, cluster, tasks):  # noqa: ARG002
+        return {"tasks": [self._task_detail[arn] for arn in tasks]}
 
 
-def _service(name, td, desired=1, running=1):
-    return {
-        "serviceName": name,
-        "taskDefinition": td,
-        "desiredCount": desired,
-        "runningCount": running,
-    }
+def _service(name, desired=1, running=1):
+    return {"serviceName": name, "desiredCount": desired, "runningCount": running}
 
 
-def _td(container, image):
-    return {"containerDefinitions": [{"name": container, "image": image}]}
+def _task(container, image_digest):
+    return {"containers": [{"name": container, "imageDigest": image_digest}]}
 
 
 def _staging_fixture(app_active="leaf-platform-app", web_active="leaf-platform-web"):
     """Mirror the real staging shape: color pairs, one active per service."""
     services = {}
-    for family, active in (
-        ("leaf-platform-app", app_active),
-        ("leaf-platform-app-alt", app_active),
-        ("leaf-platform-web", web_active),
-        ("leaf-platform-web-alt", web_active),
+    for family in (
+        "leaf-platform-app",
+        "leaf-platform-app-alt",
+        "leaf-platform-web",
+        "leaf-platform-web-alt",
     ):
+        active = app_active if "app" in family else web_active
         services[family] = _service(
-            family, f"{family}:1", desired=1 if family == active else 0,
+            family,
+            desired=1 if family == active else 0,
             running=1 if family == active else 0,
         )
     for family in (
@@ -289,32 +297,21 @@ def _staging_fixture(app_active="leaf-platform-app", web_active="leaf-platform-w
         "leaf-platform-canonical-worker",
         "leaf-platform-harness",
     ):
-        services[family] = _service(family, f"{family}:1")
-    task_definitions = {
-        "leaf-platform-app:1": _td(
-            "leaf-platform-app", f"repo/leaf-platform-app@{LIVE['app']}"
+        services[family] = _service(family)
+
+    tasks_by_service = {family: ["task/" + family + "/1"] for family in services}
+    task_detail = {
+        "task/leaf-platform-app/1": _task("leaf-platform-app", LIVE["app"]),
+        "task/leaf-platform-app-alt/1": _task("leaf-platform-app", digest("9")),
+        "task/leaf-platform-web/1": _task("leaf-platform-web", LIVE["web"]),
+        "task/leaf-platform-web-alt/1": _task("leaf-platform-web", digest("8")),
+        "task/leaf-platform-broker/1": _task("leaf-platform-broker", LIVE["broker"]),
+        "task/leaf-platform-canonical-worker/1": _task(
+            "leaf-platform-canonical-worker", LIVE["canonical-worker"]
         ),
-        "leaf-platform-app-alt:1": _td(
-            "leaf-platform-app", f"repo/leaf-platform-app@{digest('9')}"
-        ),
-        "leaf-platform-web:1": _td(
-            "leaf-platform-web", f"repo/leaf-platform-web@{LIVE['web']}"
-        ),
-        "leaf-platform-web-alt:1": _td(
-            "leaf-platform-web", f"repo/leaf-platform-web@{digest('8')}"
-        ),
-        "leaf-platform-broker:1": _td(
-            "leaf-platform-broker", f"repo/leaf-platform-broker@{LIVE['broker']}"
-        ),
-        "leaf-platform-canonical-worker:1": _td(
-            "leaf-platform-canonical-worker",
-            f"repo/leaf-platform-canonical-worker@{LIVE['canonical-worker']}",
-        ),
-        "leaf-platform-harness:1": _td(
-            "leaf-platform-harness", f"repo/leaf-platform-harness@{LIVE['harness']}"
-        ),
+        "task/leaf-platform-harness/1": _task("leaf-platform-harness", LIVE["harness"]),
     }
-    return _FakeClient(services, task_definitions)
+    return _FakeClient(services, tasks_by_service, task_detail)
 
 
 def test_the_routed_color_is_the_one_that_is_read(monkeypatch):
@@ -328,19 +325,17 @@ def test_the_routed_color_is_the_one_that_is_read(monkeypatch):
 
 def test_the_idle_color_is_read_when_it_is_the_routed_one(monkeypatch):
     monkeypatch.setattr(
-        live, "_get_client", lambda _env: _staging_fixture(app_active="leaf-platform-app-alt")
+        live,
+        "_get_client",
+        lambda _env: _staging_fixture(app_active="leaf-platform-app-alt"),
     )
 
-    digests = live.live_digests({})
-
-    assert digests["app"] == digest("9")
+    assert live.live_digests({})["app"] == digest("9")
 
 
 def test_two_active_colors_fail_closed_rather_than_pick_one(monkeypatch):
     client = _staging_fixture()
-    client._services["leaf-platform-app-alt"] = _service(
-        "leaf-platform-app-alt", "leaf-platform-app-alt:1"
-    )
+    client._services["leaf-platform-app-alt"] = _service("leaf-platform-app-alt")
     monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="ambiguous"):
@@ -350,38 +345,101 @@ def test_two_active_colors_fail_closed_rather_than_pick_one(monkeypatch):
 def test_no_active_color_fails_closed(monkeypatch):
     client = _staging_fixture()
     for family in ("leaf-platform-app", "leaf-platform-app-alt"):
-        client._services[family] = _service(family, f"{family}:1", desired=0, running=0)
+        client._services[family] = _service(family, desired=0, running=0)
     monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="no active app"):
         live.live_digests({})
 
 
-def test_a_tag_reference_is_refused_because_it_is_not_immutable(monkeypatch):
+def test_a_mid_roll_service_running_two_digests_fails_closed(monkeypatch):
+    """The case an arbitrary pick would answer wrongly.
+
+    While a service rolls, two tasks run different images. There is no single
+    true running identity then, so refuse rather than report whichever task
+    happened to sort first.
+    """
     client = _staging_fixture()
-    client._task_definitions["leaf-platform-app:1"] = _td(
-        "leaf-platform-app", "repo/leaf-platform-app:sha-236d803d"
+    client._tasks_by_service["leaf-platform-web"] = [
+        "task/leaf-platform-web/1",
+        "task/leaf-platform-web/2",
+    ]
+    client._task_detail["task/leaf-platform-web/2"] = _task(
+        "leaf-platform-web", digest("5")
     )
     monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
-    with pytest.raises(LiveIdentityUnavailable, match="tag reference"):
+    with pytest.raises(LiveIdentityUnavailable, match="mid-roll"):
+        live.live_digests({})
+
+
+def test_several_tasks_on_one_digest_are_fine(monkeypatch):
+    """Horizontal scale is not a mid-roll: same digest, one true answer."""
+    client = _staging_fixture()
+    client._tasks_by_service["leaf-platform-web"] = [
+        "task/leaf-platform-web/1",
+        "task/leaf-platform-web/2",
+    ]
+    client._task_detail["task/leaf-platform-web/2"] = _task(
+        "leaf-platform-web", LIVE["web"]
+    )
+    monkeypatch.setattr(live, "_get_client", lambda _env: client)
+
+    assert live.live_digests({})["web"] == LIVE["web"]
+
+
+def test_a_service_with_no_running_tasks_fails_closed(monkeypatch):
+    client = _staging_fixture()
+    client._tasks_by_service["leaf-platform-web"] = []
+    monkeypatch.setattr(live, "_get_client", lambda _env: client)
+
+    with pytest.raises(LiveIdentityUnavailable, match="no running tasks"):
+        live.live_digests({})
+
+
+def test_a_container_without_a_digest_is_refused(monkeypatch):
+    """imageDigest is absent for a non-ECR registry; there is no honest answer."""
+    client = _staging_fixture()
+    client._task_detail["task/leaf-platform-web/1"] = {
+        "containers": [{"name": "leaf-platform-web"}]
+    }
+    monkeypatch.setattr(live, "_get_client", lambda _env: client)
+
+    with pytest.raises(LiveIdentityUnavailable, match="no usable image digest"):
         live.live_digests({})
 
 
 def test_sidecar_containers_do_not_shadow_the_service_image(monkeypatch):
-    """The live app task definition carries two init containers.
-
-    Reading the first container rather than the named one would compare the
-    ios-provider or fence sidecar digest against the app receipt entry.
-    """
+    """The live app task carries two init containers alongside the app."""
     client = _staging_fixture()
-    client._task_definitions["leaf-platform-app:1"] = {
-        "containerDefinitions": [
-            {"name": "init-drawing-mutations-fence", "image": f"repo/other@{digest('7')}"},
-            {"name": "init-ios-provider-files", "image": f"repo/ios@{digest('6')}"},
-            {"name": "leaf-platform-app", "image": f"repo/leaf-platform-app@{LIVE['app']}"},
+    client._task_detail["task/leaf-platform-app/1"] = {
+        "containers": [
+            {"name": "init-drawing-mutations-fence", "imageDigest": digest("7")},
+            {"name": "init-ios-provider-files", "imageDigest": digest("6")},
+            {"name": "leaf-platform-app", "imageDigest": LIVE["app"]},
         ]
     }
     monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     assert live.live_digests({})["app"] == LIVE["app"]
+
+
+def test_the_reader_never_calls_describe_task_definition(monkeypatch):
+    """Regression guard on the IAM shape.
+
+    DescribeTaskDefinition cannot be resource-scoped by AWS, so granting it
+    would mean account-wide read of every task definition, including other
+    services' plaintext environment variables. The reader must never need it.
+    """
+    client = _staging_fixture()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError(
+            "reader called describe_task_definition; that action cannot be "
+            "resource-scoped and must not be required"
+        )
+
+    client.describe_task_definition = forbidden
+    monkeypatch.setattr(live, "_get_client", lambda _env: client)
+
+    assert set(live.live_digests({})) == set(SERVICES)
