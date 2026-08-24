@@ -60,6 +60,12 @@ WORKDIR /app
 #   * --disable-shared --disable-bindings: one static binary, no bindings.
 #   * The toolchain is purged in the SAME layer; `dwg2dxf --version` at the
 #     end is the build-time proof the binary landed and runs.
+#   * make -j4, not -j"$(nproc)": the 2026-08-24 leaf-platform staging
+#     outage traced to an unbounded -j compile starving a small runner's
+#     CPU/RAM (MASTER-PLAN Phase 0.5). This build now only runs on the
+#     leaf-gha-runner-web-demo CodeBuild project (BUILD_GENERAL1_LARGE,
+#     8 vCPU / 15 GiB), but the cap is fixed rather than nproc-derived so
+#     it stays safe on any runner class this image is ever built on.
 # NOTE: the `apt-get install ... git` prefix below is pinned verbatim by
 # server/tests/test_postgres_container_wiring.py (_PINNED_GIT_INSTALL).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
@@ -77,7 +83,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
  && cd /tmp/libredwg-0.14.8584 \
  && ./configure --disable-shared --disable-bindings --disable-werror \
       > /tmp/libredwg-configure.log 2>&1 \
- && make -j"$(nproc)" > /tmp/libredwg-make.log 2>&1 \
+ && make -j4 > /tmp/libredwg-make.log 2>&1 \
  && install -s -m755 programs/dwg2dxf /usr/local/bin/dwg2dxf \
  && cd / \
  && rm -rf /tmp/libredwg-0.14.8584 /tmp/libredwg.tar.xz \
