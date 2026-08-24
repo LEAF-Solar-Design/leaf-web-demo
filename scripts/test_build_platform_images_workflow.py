@@ -2903,12 +2903,17 @@ def check_docs_noop_filter(text: str) -> None:
             "types": ["completed"],
         }
     }, "the relay trigger is frozen: broadening it re-reviews here"
+    # Coalesced across commits (2026-08-24): the group used to be keyed by
+    # head_sha, so every commit's relay ran in its own group and an
+    # unbounded number could run concurrently, racing for the infra repo's
+    # one shared ecs-mutation lock. Fixed group + cancel-in-progress mirrors
+    # the same "merge-burst coalescing" pattern already pinned above for
+    # build-platform-images.yml's push runs: a newer commit's relay cancels
+    # an older one instead of letting both run, and it is safe because every
+    # dispatch always targets the CANCELLING relay's own current tag.
     assert relay_wf["concurrency"] == {
-        "group": (
-            "dispatch-staging-deploys-"
-            "${{ github.event.workflow_run.head_sha }}"
-        ),
-        "cancel-in-progress": False,
+        "group": "dispatch-staging-deploys",
+        "cancel-in-progress": True,
     }
     # CAPABILITY WALL: dispatching the infra repo requires the PAT, and the
     # workflow's own token is pinned read-only, so an assembled command in
