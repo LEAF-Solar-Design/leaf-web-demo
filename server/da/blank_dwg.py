@@ -94,18 +94,6 @@ def activity_spec(engine: str) -> dict[str, Any]:
     }
 
 
-def _runs_the_same_thing(live: dict[str, Any], want: dict[str, Any]) -> bool:
-    """Compare only the fields that decide what the engine actually RUNS.
-
-    ``description`` and APS-assigned bookkeeping fields drift harmlessly;
-    ``engine``, ``commandLine`` and ``parameters`` do not.
-    """
-    return all(
-        live.get(field) == want.get(field)
-        for field in ("engine", "commandLine", "parameters")
-    )
-
-
 def _aliased_matching_version(
     da: Any, spec: dict[str, Any], headers: dict[str, str]
 ) -> int:
@@ -118,6 +106,10 @@ def _aliased_matching_version(
     exactly how a paid WorkItem gets spent running known-broken code.  Read the
     aliased version back, and repoint the alias if it is not the recipe we
     intend to run.
+
+    The comparison lives in ``da/blank_lisp.activity_body_matches`` so the CLI
+    spike, which has the identical 409 trap against a LIVE activity, can share
+    this one copy rather than growing a second.
     """
     alias = da.requests.get(
         f"{da.DA}/activities/{ACTIVITY_ID}/aliases/{da.ALIAS}",
@@ -133,7 +125,7 @@ def _aliased_matching_version(
                 timeout=da._HTTP_TIMEOUT,
             )
             live.raise_for_status()
-            if _runs_the_same_thing(live.json(), spec):
+            if _blank_lisp().activity_body_matches(live.json(), spec):
                 return current
     elif alias.status_code != 404:
         alias.raise_for_status()
@@ -279,8 +271,9 @@ def run(
     script = lisp.build_blank_scr(marker, out_localname=OUTPUT_NAME, witness=True)
 
     activity = _ensure_activity(da)
-    # Per-run entropy in the key, never a bare clock: da/client.py's legacy
-    # scratch keys are 1-second granular and collide under concurrency.
+    # Per-run entropy in the key, never a bare clock. da/client.py's own key
+    # shape was fixed the same way in #782 (e16f1d78); this is independent of
+    # that, so nothing here relies on a caller getting its nonce right.
     nonce = f"blank-dwg/{tenant_id}/{int(time.time())}-{os.urandom(6).hex()}"
     script_key = f"{nonce}/{SCRIPT_NAME}"
     output_key = f"{nonce}/{OUTPUT_NAME}"
@@ -368,6 +361,14 @@ def run(
             cost=_combined_cost(create_cost, read.get("cost")),
         )
 
+    # LIMITATION, deliberate for a FEASIBILITY probe: the bytes published here
+    # are not literally blank. They carry the marker layer and its witness POINT
+    # at 0,0, and they become the customer's project-owned VERSION 1. That is
+    # the correct trade for an activity named LeafBlankDwgFeasibility, whose job
+    # is to prove APS can create a DWG from nothing. If this ever becomes the
+    # real "create a blank drawing for a customer" path, BOTH artifacts have to
+    # be stripped before publish, or "blank" quietly means "blank plus our probe
+    # leftovers". Raised by the T3-02 spike lane (session 510f244f).
     drawing = publish(payload, digest)
     combined = _combined_cost(create_cost, read.get("cost"))
     return {

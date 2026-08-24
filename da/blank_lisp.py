@@ -84,9 +84,11 @@ def new_marker_layer() -> str:
     """A fresh run-scoped marker layer name, e.g. LEAF_BLANK_9F3A1C7E2B04.
 
     Entropy comes from uuid4, NOT from a clock: a timestamp at 1-second
-    granularity is exactly the collision source that makes bare scratch keys
-    unsafe on the live path (da/client.py legacy branch), and this token's whole
-    job is to be unforgeable by a concurrent run.
+    granularity cannot distinguish two runs in the same second, and this token's
+    whole job is to be unforgeable by a concurrent run. (The scratch-key shape
+    that had that exact flaw was fixed at source in da/client.py by #782,
+    e16f1d78, which now mints a uuid-derived per-run nonce. This marker is
+    defense in depth over that, not the only guard.)
     """
     return f"{MARKER_PREFIX}{uuid.uuid4().hex[:12].upper()}"
 
@@ -141,6 +143,31 @@ def build_blank_scr(marker: str, out_localname: str = OUT_LOCALNAME,
     ])
 
 
+
+def activity_body_matches(live: dict, want: dict) -> bool:
+    """True when a LIVE activity body would RUN the same thing as `want`.
+
+    Compares only the fields that decide execution. `description` and any
+    APS-assigned bookkeeping drift harmlessly; `engine`, `commandLine` and
+    `parameters` do not.
+
+    This exists because "POST /activities returned 409, so it is already
+    correct" is NOT idempotent provisioning: it keeps whatever body was
+    uploaded first, forever. The body server/da/blank_dwg.py originally
+    shipped could not produce a drawing at all, so a 409 that meant "fine"
+    would have kept spending WorkItems on known-broken code. Callers should
+    read the aliased version back, compare it here, and repoint the alias when
+    this returns False.
+
+    Pure dict comparison: no HTTP, no credential, fully testable offline.
+    """
+    if not isinstance(live, dict) or not isinstance(want, dict):
+        return False
+    return all(
+        live.get(field) == want.get(field)
+        for field in ("engine", "commandLine", "parameters")
+    )
+
 def blank_activity_spec(activity_id: str, engine: str,
                         out_localname: str = OUT_LOCALNAME,
                         script_localname: str = SCRIPT_LOCALNAME) -> dict:
@@ -149,9 +176,7 @@ def blank_activity_spec(activity_id: str, engine: str,
     Differs from every other Leaf Activity in the one structural way that IS
     T3-02: there is NO HostDwg parameter and no `/i` on the command line. The
     engine opens its own acad.dwt, so the create leg never references an OSS
-    INPUT drawing object and is structurally immune to the scratch-key
-    collision that affects input-bearing activities (da/client.py legacy
-    branch keys scratch objects on 1-second granularity + basename).
+    INPUT drawing object at all.
 
     The .scr arrives as a per-run ARGUMENT, not as a baked-in `settings`
     value. That is deliberate: the marker layer must be unique per run to be

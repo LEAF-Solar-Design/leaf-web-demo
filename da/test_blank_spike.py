@@ -406,3 +406,49 @@ def test_witness_is_the_only_difference_from_the_proven_recipe():
         f'(command "_.POINT" "{blank_lisp.WITNESS_POINT}")',
         '(progn (princ "LEAF-BLANK-WITNESS") (princ))',
     ]
+
+
+# --------------------------------------------------------------------------- #
+# activity drift comparison (shared by the spike and the broker producer)
+# --------------------------------------------------------------------------- #
+def test_activity_body_matches_ignores_cosmetic_drift():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    same = dict(spec, description="reworded", id="ignored-by-the-version-endpoint")
+    assert blank_lisp.activity_body_matches(same, spec) is True
+
+
+def test_activity_body_matches_catches_every_execution_relevant_change():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    assert blank_lisp.activity_body_matches(dict(spec), spec) is True
+    for field, drifted in (
+        ("engine", "Autodesk.AutoCAD+24_3"),
+        ("commandLine", [r'$(engine.path)\accoreconsole.exe /s "$(settings[script].path)"']),
+        ("parameters", {"Result": {"verb": "put", "required": True,
+                                   "localName": "output.dwg"}}),
+    ):
+        assert blank_lisp.activity_body_matches(dict(spec, **{field: drifted}), spec) is False
+        # A field the live body simply lacks is drift too, not a pass.
+        assert blank_lisp.activity_body_matches(
+            {k: v for k, v in spec.items() if k != field}, spec) is False
+
+
+def test_activity_body_matches_fails_closed_on_a_non_dict():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    for junk in (None, "", [], 0):
+        assert blank_lisp.activity_body_matches(junk, spec) is False
+        assert blank_lisp.activity_body_matches(spec, junk) is False
+
+
+def test_the_activex_body_that_shipped_is_detected_as_drift():
+    """The concrete case this guard exists for: the pre-consolidation broker body
+    baked its script into `settings` and had no Script parameter."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankDwgFeasibility",
+                                          "Autodesk.AutoCAD+26_0",
+                                          out_localname="blank.dwg")
+    shipped = {
+        "engine": "Autodesk.AutoCAD+26_0",
+        "commandLine": [r'$(engine.path)\accoreconsole.exe /s "$(settings[script].path)"'],
+        "parameters": {"Result": {"verb": "put", "required": True,
+                                  "localName": "blank.dwg"}},
+    }
+    assert blank_lisp.activity_body_matches(shipped, spec) is False
