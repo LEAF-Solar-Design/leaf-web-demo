@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import base64
+import math
 import os
 import sqlite3
 import sys
@@ -597,6 +598,24 @@ def _safe_json(resp: "requests.Response") -> Optional[Dict[str, Any]]:
         return None
 
 
+def _safe_retry_after_s(raw: Any) -> Optional[float]:
+    """Fail-closed extraction of the harness 429 body's `retry_after_s`.
+
+    This repo is public: the only thing allowed to cross from the harness's
+    429 body into the app's error envelope is this one non-negative, finite
+    number — never the harness's message text, a token, a mount/tenant id, or
+    any other unrecognized field. `bool` is a `int` subclass in Python, so it
+    is excluded explicitly rather than let `True`/`False` masquerade as 1/0.
+    Anything that is not cleanly numeric, or is negative/NaN/inf, is omitted
+    rather than passed through — the field is ABSENT, never null or garbage."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # start_turn
 # --------------------------------------------------------------------------- #
@@ -896,8 +915,18 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         if code not in (ErrorCode.LLM_QUOTA_EXHAUSTED, ErrorCode.LLM_RATE_LIMITED):
             code = ErrorCode.LLM_RATE_LIMITED
         msg = body.get("message") or "harness reported a rate/quota limit"
+        # Cooldown horizon only (oauthGrantProvider.ts's GrantPoolUnavailableError
+        # -> server.ts's 429 body). Decisive for telling "this mount just
+        # cooled" apart from "the pool has been walled for an hour" — but this
+        # repo is public, so only the validated number rides through `extra`
+        # (merged top-level by sessions.py's _turn_rejected_response, same as
+        # 401's grant_required); never the harness's message/tokens/ids.
+        extra: Dict[str, Any] = {}
+        retry_after_s = _safe_retry_after_s(body.get("retry_after_s"))
+        if retry_after_s is not None:
+            extra["retry_after_s"] = retry_after_s
         resp.close()
-        raise _rejected(429, code, msg, approval_unredeemed=True)
+        raise _rejected(429, code, msg, extra=extra, approval_unredeemed=True)
 
     if resp.status_code == 413:
         # The payload was too big for the harness, which is a caller-visible

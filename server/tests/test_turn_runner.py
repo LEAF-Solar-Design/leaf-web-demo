@@ -434,6 +434,84 @@ def test_immediate_429_maps_quota_vs_rate_limited(monkeypatch, turn_stub, body_c
     assert session_store.get_session(session_id)["active_turn_id"] is None
 
 
+def test_immediate_429_relays_retry_after_s(monkeypatch, turn_stub):
+    """The harness's GrantPoolUnavailableError 429 carries `retry_after_s` —
+    the cooldown horizon that tells "this mount just cooled" apart from "the
+    pool has been walled for an hour" (2026-08-24 run 32742554925 was read
+    fleet-wide as an upstream quota wall for hours because this number never
+    reached callers). It must ride through `exc.extra`, the same mechanism
+    401's `grant_required` already uses."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 429
+    stub.IMMEDIATE_BODY = {
+        "errorCode": "llm_quota_exhausted",
+        "message": "pool exhausted, mount aps-worker-7 token abc123 cooling",
+        "retry_after_s": 42,
+    }
+
+    sess = _new_session("tenant-429-retry-after")
+    session_id = sess["session_id"]
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-429-retry-after", session_id, text="hi")
+    exc = ei.value
+    assert exc.status_code == 429
+    # `extra` carries ONLY the validated number — never the message text,
+    # mount id, or token that rode alongside it in the harness body.
+    assert exc.extra == {"retry_after_s": 42.0}
+
+
+def test_immediate_429_omits_retry_after_s_when_harness_does_not_send_it(monkeypatch, turn_stub):
+    """Absent, not null/garbage, when the harness body carries no field at all
+    (e.g. a plain llm_rate_limited without a cooldown horizon)."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 429
+    stub.IMMEDIATE_BODY = {"errorCode": "llm_rate_limited", "message": "slow down"}
+
+    sess = _new_session("tenant-429-no-retry-after")
+    session_id = sess["session_id"]
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn("tenant-429-no-retry-after", session_id, text="hi")
+    exc = ei.value
+    assert exc.extra == {}
+    assert "retry_after_s" not in exc.extra
+
+
+@pytest.mark.parametrize("bad_value", [
+    "42",             # numeric string is not a number
+    True,             # bool is an int subclass; must not masquerade as 1
+    -5,               # negative is not a valid cooldown
+    float("nan"),
+    float("inf"),
+    None,
+    ["not", "a", "number"],
+    {"nested": "object"},
+])
+def test_immediate_429_drops_non_numeric_retry_after_s(monkeypatch, turn_stub, bad_value):
+    """Fail closed: anything not a clean finite non-negative number is
+    OMITTED, never passed through as-is (this repo is public; only the
+    validated number may cross the boundary)."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+    stub.IMMEDIATE_STATUS = 429
+    stub.IMMEDIATE_BODY = {"errorCode": "llm_quota_exhausted", "message": "slow down",
+                            "retry_after_s": bad_value}
+
+    sess = _new_session(f"tenant-429-bad-{id(bad_value)}")
+    session_id = sess["session_id"]
+
+    with pytest.raises(turn_runner.TurnRejected) as ei:
+        turn_runner.start_turn(f"tenant-429-bad-{id(bad_value)}", session_id, text="hi")
+    exc = ei.value
+    assert exc.extra == {}
+
+
 def test_connection_refused_maps_to_broker_unreachable_and_releases_cas(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://127.0.0.1:{_free_closed_port()}")
     monkeypatch.setenv("TURN_MAX_S", "30")
