@@ -442,21 +442,27 @@ def build_suites() -> List[Suite]:
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 61),
         # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
-        # THREE real-binary tests run wherever their tools are installed (the app
+        # FIVE real-binary tests run wherever their tools are installed (the app
         # container ships them; see deploy/Dockerfile.app) and skip with these
         # exact allowlisted reasons everywhere else. The second reason covers the
         # two CAGE tests, which need util-linux's prlimit/setpriv as well as
-        # dwg2dxf — the cage is what bounds a memory-corruption exploit in the
-        # parser, so those two must not be allowed to skip for any OTHER reason.
-        # Floor 22, not 16: 25 tests, of which exactly those 3 are host-gated, so
-        # 22 is the count that must run EVERYWHERE. Raising it is what makes a
-        # silently-lost cage test a red gate rather than a smaller green number.
+        # dwg2dxf; the third covers the two seccomp-specific real tests, which
+        # additionally need the compiled syscall-denylist file
+        # deploy/Dockerfile.app bakes in — the cage and its seccomp filter are
+        # what bound a memory-corruption exploit in the parser, so none of these
+        # five may be allowed to skip for any OTHER reason.
+        # Floor 25, not 22: 30 tests, of which exactly those 5 are host-gated, so
+        # 25 is the count that must run EVERYWHERE. Raising it is what makes a
+        # silently-lost cage or seccomp test a red gate rather than a smaller
+        # green number.
         Suite("server-dwg-local-extract", "server tests/test_dwg_local_extract.py", "pytest",
-              SERVER, _py_pytest("tests/test_dwg_local_extract.py"), 22,
+              SERVER, _py_pytest("tests/test_dwg_local_extract.py"), 25,
               allowed_skip_reasons=(
                   r"dwg2dxf binary not installed on this host",
                   r"the real dwg2dxf plus util-linux prlimit/setpriv are not "
                   r"installed on this host",
+                  r"needs the real app image: dwg2dxf, prlimit/setpriv, AND the "
+                  r"compiled seccomp filter deploy/Dockerfile.app bakes in",
               )),
         # The cross-process fence probe uses POSIX fcntl and therefore skips on
         # Windows operator boxes. Linux CI executes it. Keep the Windows run
