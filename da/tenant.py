@@ -25,7 +25,7 @@ nothing to provision and relies on key discipline; a hostile tenant cannot reach
 another tenant's keys because tenant ids are validated to a safe single path
 segment (no '/', no '..').
 
-Tenant id shape: reuse cadwalk-studio's `Deployment.deployment_id` (UuidV7) — a
+Tenant id shape: reuse the orchestration platform's `Deployment.deployment_id` (UuidV7) — a
 lowercase-hex+hyphen uuid is already a safe slug. Short demo slugs (`demo-a`,
 `t1`) are also accepted. Validation rejects anything that is not a single safe
 `[a-z0-9-]` path segment, so a tenant id can never traverse or escape its prefix.

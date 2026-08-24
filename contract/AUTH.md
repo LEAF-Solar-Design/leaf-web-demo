@@ -59,8 +59,8 @@ leaf_website already stores — see `leaf_website/lib/auth0.ts SubscriptionMetad
 - `tenant_id` = `leaf.organization_id`, else the Auth0 `sub` (a single-user
   tenant until they create/join an org).
 - `org_id` = `leaf.organization_id` (null for a solo user).
-- `tier` = `PLAN_TIER[leaf.plan]` mapped onto the cadwalk-studio `DeploymentTier`
-  enum (default `hosted_starter`). **Surface-only** — this lane does NOT enforce
+- `tier` = `PLAN_TIER[leaf.plan]` mapped onto the orchestration platform's
+  `DeploymentTier` enum (default `hosted_starter`). **Surface-only** — this lane does NOT enforce
   entitlement; downstream (credential broker / metering) consumes the tier.
 
 > **Update (Wave 5, §17):** the `tier` claim now **DRIVES entitlement enforcement**
@@ -117,8 +117,8 @@ Workspace { tenant_id, org_id, tier, workspace_dir }
 - An unknown-but-**verified** tenant is **auto-provisioned** a default workspace
   (`LEAF_WORKSPACE_BASE/<tenant_id>`) rather than rejected — a verified identity
   always maps to a workspace in the demo.
-- **Production impl** backs onto the cadwalk-studio Postgres tenancy tables
-  (`Deployment`/`DeploymentTier`, `src/lib/tenancy/types.ts`) and may choose a
+- **Production impl** backs onto the orchestration platform's Postgres tenancy
+  tables (`Deployment`/`DeploymentTier`) and may choose a
   stricter policy (e.g. deny until a `Deployment` row exists). Swap the store
   without touching the verifier or routers.
 

@@ -1,7 +1,7 @@
 """Database access: lazy shared connection pool + cursor helpers.
 
-Mirrors the cadwalk-studio tenancy idiom (shared-pool lazy connect, injectable
-client). Reads DATABASE_URL from the environment, falling back to
+Mirrors the orchestration platform's tenancy idiom (shared-pool lazy connect,
+injectable client). Reads DATABASE_URL from the environment, falling back to
 platform/.env.local (gitignored). Prepared statements are disabled
 (prepare_threshold=None) so the store works over a pgbouncer/Neon pooled endpoint
 as well as a direct one.

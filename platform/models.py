@@ -5,7 +5,7 @@ one-to-one, plus row->model mappers. Kept dependency-free (no pydantic here) so
 the store/offboard layers stay importable without the web stack. The API layer
 (api.py) defines its own request/response pydantic models.
 
-Tier / status vocabularies mirror the cadwalk-studio tenancy prior art
+Tier / status vocabularies mirror the orchestration platform's tenancy prior art
 (DeploymentTier = self_hosted | hosted_starter | hosted_pro).
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-# --- controlled vocabularies (mirror cadwalk-studio/src/lib/tenancy/types.ts) ---
+# --- controlled vocabularies (mirror the orchestration platform's tenancy types) ---
 TIERS = ("self_hosted", "hosted_starter", "hosted_pro")
 ORG_STATUSES = ("active", "offboarding", "deleted")
 PROJECT_STATUSES = ("active", "archived", "deleted")

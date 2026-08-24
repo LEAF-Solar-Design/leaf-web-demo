@@ -1,7 +1,7 @@
 """Tier-branching entitlement enforcement for the platform jobs lane.
 
-The orgs table has carried the cadwalk-studio-mirrored ``tier`` column since
-migration 0001 — stored and validated but never branched on. This module is the
+The orgs table has carried the ``tier`` column (mirrored from the orchestration
+platform's tenancy schema) since migration 0001 — stored and validated but never branched on. This module is the
 branch: POST /api/projects/{id}/jobs resolves the caller org's tier through the
 server lane's fail-closed policy (server/entitlements.py + entitlements.json,
 overridable via ``LEAF_ENTITLEMENTS_FILE``) so both lanes enforce the ONE
