@@ -274,11 +274,20 @@ def _upload_drawing(
         return entitlements.entitlement_denied_response("upload", tier)
 
     # Size cap. Two layers: (1) the declared Content-Length is rejected up
-    # front; (2) the handler never buffers more than cap+1 bytes. NOTE
-    # (review round 1, MAJOR): FastAPI parses the multipart body (spooling to
-    # temp disk) BEFORE this handler runs, so a length-less/chunked oversized
-    # body still costs transient disk — the deployment's ingress proxy body
-    # limit is the real outer wall (documented in CONTRACT-ADDENDUM §19).
+    # front; (2) the handler never buffers more than cap+1 bytes. STALE NOTE
+    # CORRECTED (2026-08-24, Phase 0.5 item 5): a round-1 review flagged that
+    # FastAPI parses the multipart body (spooling to temp disk) BEFORE this
+    # handler runs, so a length-less/chunked oversized body would cost
+    # transient disk regardless of these two checks. That gap is closed, not
+    # by an ingress proxy (this deployment has none in front of the app
+    # container — ALB routes straight to it, confirmed against
+    # leaf_platform.tf), but by guest_uploads.UploadBodyLimitMiddleware: an
+    # ASGI middleware registered ahead of routing that counts bytes off
+    # `receive()` and aborts the instant the cumulative body exceeds cap + 1
+    # MiB slack, for both declared and chunked bodies (see its docstring, and
+    # tests/test_guest_uploads.py::test_chunked_oversized_body_hits_the_asgi_wall).
+    # That is the real outer wall; CONTRACT-ADDENDUM §19 has been corrected to
+    # match.
     cap = guest_uploads.max_upload_bytes()
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > cap + 65536:
