@@ -34,6 +34,7 @@ import deps
 import conversations as conversation_crud
 import ios_ship_provider as ios_ship_provider_client
 import ios_ship_callback_listener
+import ios_surface_bridge
 import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
@@ -43,6 +44,7 @@ from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
     agent,
     author,
+    cad_upload,
     capabilities,
     checkpoints,
     conversations as conversations_router,
@@ -224,20 +226,32 @@ app.include_router(ops_metrics.router)  # APS observability read-API: fleet metr
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
+# Dedicated CAD admissibility endpoint (POST /api/cad/upload), fail-closed behind
+# LEAF_CAD_UPLOAD_ENABLED: mounted-but-disabled answers 503, so a 404 here now
+# means UNMOUNTED, never "flag off". Distinct from the live DrawingUploadControl
+# path above (POST /api/drawings/upload -> uploads.router + drawings.router),
+# which owns extraction and tenancy; this one only proves a file is admissible
+# and durably receipted.
+app.include_router(cad_upload.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
 app.include_router(templates_router.router)  # Wave C solar template beta, fail-closed behind LEAF_SOLAR_TEMPLATE_BETA_ENABLED
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
-# SOURCE SEAM (ios_surface): the consume route reports "unavailable" until a
-# published-contract reader is injected via ios_surface.set_contract_source(fn),
-# where fn({tenant_id, project_id, revision}) -> the ship-lane's sanitized
-# leaf.ios-ship-surface.v1 dict. That reader belongs to the EXTERNAL Apple ship
-# pipeline (the operator's TestFlight leg); it is deliberately NOT wired here so
-# the surface degrades truthfully ("surface_source_unavailable") until real,
-# credential-free contract data exists to read. No Apple credential ever reaches
-# this consumer -- the reader hands it only the three published categories.
+# SOURCE SEAM (ios_surface): fn({tenant_id, project_id, revision}) -> a sanitized
+# leaf.ios-ship-surface.v1 dict. Wired to the INTERIM in-repo projection of the
+# live ship-lane store (ios_surface_bridge), which reads readiness, the newest
+# execution for the revision, and its TestFlight receipt. The bridge derives
+# readiness.launchable from a TERMINAL BUILD EXISTING, never from ios_ship's
+# launch eligibility -- the two spellings of "launchable" mean opposite things
+# and copying it through would render "iOS app Ready" before any build had run.
+# An external Apple pipeline can supersede this by re-calling
+# set_contract_source(fn) with its own reader; nothing else has to change. No
+# Apple credential ever reaches this consumer -- the bridge returns only the
+# three published categories, and validate_contract fails the whole contract
+# closed on any secret-shaped key or value.
+ios_surface.set_contract_source(ios_surface_bridge.contract_source)
 
 # §19 retention promise-keeper: the purge daemon deletes expired guest drawings
 # at their STAMPED expiry. It starts by default even when

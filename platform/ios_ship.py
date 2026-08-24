@@ -549,6 +549,29 @@ def get_execution(org_id: Any, project_id: Any, execution_id: Any) -> Optional[D
         return _row_dict(_get_execution_row(cur, org, project, execution))
 
 
+def latest_execution_for_revision(org_id: Any, tenant_id: str, project_id: Any,
+                                  revision: str) -> Optional[Dict[str, Any]]:
+    """Newest execution for ONE tenant's project revision, read-only.
+
+    Tenant-scoped by construction: org, tenant, project and revision are all in
+    the WHERE clause, so this can never surface another tenant's build state.
+    Returns only the terminal-state columns a read-only consumer needs; the
+    launch identity fields (bundle id, versions, source sha) are deliberately
+    NOT selected, so nothing from this row can widen a downstream projection.
+    """
+    org, project = _as_uuid(org_id, "org_id"), _as_uuid(project_id, "project_id")
+    if not tenant_id or not revision:
+        raise IosShipError("invalid_scope", "tenant_id and revision are required")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT execution_id, status, failed_stage, receipt_id, dispatch_result, "
+            "updated_at FROM ios_ship_executions WHERE org_id=%(org)s "
+            "AND tenant_id=%(tenant)s AND project_id=%(project)s AND revision=%(revision)s "
+            "ORDER BY created_at DESC, execution_id DESC LIMIT 1",
+            {"org": org, "tenant": tenant_id, "project": project, "revision": revision})
+        return _row_dict(cur.fetchone())
+
+
 def _provider_execution_row(cur: Any, org: uuid.UUID, tenant_id: str,
                             project: uuid.UUID, execution: uuid.UUID,
                             provider_run_id: str, *, for_update: bool = False) -> Any:
