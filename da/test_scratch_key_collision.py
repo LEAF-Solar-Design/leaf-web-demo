@@ -23,7 +23,9 @@ the fix.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 
 import pytest
@@ -35,6 +37,37 @@ import client  # noqa: E402
 DWG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "data", "rooftop_demo.dwg")
 FROZEN_TS = 1787529600
+
+
+@pytest.fixture(autouse=True)
+def hermetic_aps(monkeypatch):
+    """These tests derive KEY SHAPES: no credentials, no network, ever.
+
+    Two separate leaks made this module non-hermetic, and BOTH were invisible
+    on a developer box that happens to hold real APS credentials:
+
+    1. `client.extract(..., dry_run=True)` calls `_load_creds()` BEFORE it
+       honours dry_run (`activity_qualified` -> `nickname` -> `auth_token` is
+       the first statement), so with no `~/.aps/credentials.json` every
+       extract-based test here dies `FileNotFoundError: APS creds missing`.
+       That is exactly what CI hits while the same tests pass locally: a green
+       local run hiding 8 red CI ones.
+    2. With credentials present it goes FURTHER and makes LIVE calls to
+       https://developer.api.autodesk.com — `auth_token()` mints a real OAuth
+       token and `nickname()` GETs /da/us-east/v3/forgeapps/me. `dry_run`
+       means "no dollars", NOT "no network", so these unit tests were reaching
+       the public internet on every run.
+
+    `_load_creds()` reads APS_CREDENTIALS_JSON BEFORE the file, and
+    `auth_token()`/`nickname()` are the only mint/lookup points, so stubbing
+    the three makes the module hermetic without touching da/client.py — its
+    importers treat that module as frozen. No token is minted and nothing
+    leaves the process.
+    """
+    monkeypatch.setenv("APS_CREDENTIALS_JSON", json.dumps(
+        {"client_id": "test-client-id", "client_secret": "test-client-secret"}))
+    monkeypatch.setattr(client, "auth_token", lambda: "test-token-never-sent")
+    monkeypatch.setattr(client, "nickname", lambda: "test-nickname")
 
 
 @pytest.fixture
@@ -199,3 +232,78 @@ def test_version_aware_extract_is_stable_across_runs(frozen_clock):
     assert a["input_object"] == b["input_object"]
     # ...while their scratch OUTPUT keys still differ, since those are per-run.
     assert a["output_object"] != b["output_object"]
+
+
+# --------------------------------------------------------------------------- #
+# The DRIVERS (da/arx_probe.py, da/write_spike.py)
+#
+# client.py was fixed, but both LIVE drivers kept hand-building
+# `in/{ts}_{base}` / `out/{ts}_{base}` themselves, bypassing the helpers and
+# keeping the ONE-SECOND collision alive on the exact code paths that submit
+# PAID WorkItems. Their `_extract_with_status()` and their write/ARX path are
+# network-bound end to end, so the enforceable guard is a SOURCE guard: no
+# hand-built scratch key may reappear, and the helpers must be the ones used.
+#
+# A source guard is only worth its bytes if the pattern it greps is proven to
+# match the thing it bans, so the regex is negative-controlled first.
+# --------------------------------------------------------------------------- #
+DRIVERS = ("arx_probe.py", "write_spike.py")
+
+# An f-string literal that opens a scratch key with `in/{` or `out/{` — i.e.
+# a key whose entropy is interpolated inline instead of coming from client.py.
+_HAND_BUILT_KEY = re.compile(r'f?"(?:in|out)/\{')
+
+# The exact shape both drivers used to carry, kept verbatim as the negative
+# control for the regex above.
+_KNOWN_BAD_SOURCE = '    input_key = f"in/{ts}_{dwg_name}"\n'
+
+
+def _driver_source(name: str) -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_hand_built_key_pattern_matches_the_known_bad_shape():
+    """Negative control: a ban whose pattern was never shown to fire is
+    decoration. This is the literal line both drivers shipped."""
+    assert _HAND_BUILT_KEY.search(_KNOWN_BAD_SOURCE)
+    assert _HAND_BUILT_KEY.search('        out_key = f"out/{ts}_output.dwg"\n')
+    # ...and it must not fire on the fixed form.
+    assert not _HAND_BUILT_KEY.search(
+        "    input_key = client.ephemeral_input_key(dwg_name, nonce=nonce)\n")
+
+
+@pytest.mark.parametrize("name", DRIVERS)
+def test_driver_builds_no_scratch_key_by_hand(name):
+    src = _driver_source(name)
+    hits = _HAND_BUILT_KEY.findall(src)
+    assert not hits, (
+        f"da/{name} hand-builds {len(hits)} scratch key(s) instead of calling "
+        "client.ephemeral_input_key/ephemeral_output_key. A key built from "
+        "int(time.time()) plus a basename collides at one-second resolution, "
+        "and the loser of that collision downloads the winner's bytes from a "
+        "PAID WorkItem."
+    )
+
+
+@pytest.mark.parametrize("name", DRIVERS)
+def test_driver_uses_the_nonce_helpers(name):
+    """Absence of the bad shape is not presence of the fix: a driver that
+    simply stopped submitting would also pass the ban above."""
+    src = _driver_source(name)
+    for helper in ("client.run_nonce()", "client.ephemeral_input_key(",
+                   "client.ephemeral_output_key("):
+        assert helper in src, f"da/{name} never calls {helper}"
+
+
+@pytest.mark.parametrize("name", DRIVERS)
+def test_driver_nonce_is_not_time_derived(name):
+    """One nonce per run, from client.run_nonce() (uuid4-derived). A driver
+    that re-derived its own entropy from the clock would reproduce the defect
+    while still passing the two checks above."""
+    src = _driver_source(name)
+    assert not re.search(r"nonce\s*=\s*.*time\.", src), (
+        f"da/{name} derives a nonce from the clock; a clock cannot fix a "
+        "clock-resolution collision."
+    )

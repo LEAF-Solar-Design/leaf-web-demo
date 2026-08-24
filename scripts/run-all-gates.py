@@ -872,10 +872,26 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 10),
+        # The APS scratch-key collision guard. It shipped with the client.py fix
+        # but was NEVER registered here, so it gated nothing: the same defect
+        # stayed live in both da/ drivers for as long as the suite "existed".
+        # Fully offline — an autouse fixture stubs the credential source and the
+        # two APS mint/lookup points, so it needs neither credentials nor
+        # network (it used to need both, and only passed on a box holding real
+        # APS credentials).
+        Suite("da-scratch-key-collision", "da test_scratch_key_collision.py", "pytest", DA,
+              _py_pytest("test_scratch_key_collision.py"), 23),
         # Unit tests for da/redact.py, the credential stripper behind the fence
         # above. Fully offline (pure string handling, no APS/network).
         Suite("da-redact", "da test_redact.py", "pytest", DA,
               _py_pytest("test_redact.py"), 13),
+        # The ban that keeps a presigned credential out of every COMMITTED
+        # *.json under data/. da/redact.py + the drivers' write-time redaction
+        # are the fix; this is the gate, and it asserts on the SigV4 query
+        # parameters rather than on url shape, because a live credentialed url
+        # and a redacted one share a path. Offline (file reads only).
+        Suite("da-receipt-no-presigned-urls", "da test_receipt_no_presigned_urls.py",
+              "pytest", DA, _py_pytest("test_receipt_no_presigned_urls.py"), 26),
         # Both are fully offline (no APS, no network) but were never registered,
         # so 11 tests sat outside the gate entirely.
         Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
