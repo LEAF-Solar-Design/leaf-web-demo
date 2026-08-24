@@ -1465,9 +1465,14 @@ else 403s naming the boundary); guest quota is counted only AFTER validation;
 the purge daemon starts regardless of the enable flag (stamped promises
 outlive the feature switch) and a failed deletion logs `status: "failed"`,
 never a false kill; the upload route pre-rejects oversized declared
-Content-Length. NOTE: FastAPI spools multipart to temp disk before the
-handler runs — the deployment's ingress proxy body limit is the outer wall
-against length-less oversized bodies (set it to ~LEAF_UPLOAD_MAX_BYTES).
+Content-Length. NOTE (round-2 concern, closed in round 3 below): FastAPI
+spools multipart to temp disk before the handler runs, so a length-less
+(chunked) oversized body would cost transient disk regardless of the
+declared-Content-Length check. Round 3's ASGI middleware is the real outer
+wall against that — not an ingress proxy; this deployment has none in front
+of the app container (ALB routes straight to it, confirmed against
+leaf_platform.tf both environments), and ALB itself has no body-size-limit
+config to set.
 
 **Review round 3** (round-2 findings, all addressed): the compose stack
 shares a `leaf-uploads` volume between app and broker with matching
