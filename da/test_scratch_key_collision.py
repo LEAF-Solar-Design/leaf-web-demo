@@ -23,6 +23,7 @@ the fix.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -36,6 +37,33 @@ import client  # noqa: E402
 DWG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "data", "rooftop_demo.dwg")
 FROZEN_TS = 1787529600
+
+
+@pytest.fixture(autouse=True)
+def hermetic_aps(monkeypatch):
+    """These tests derive KEY SHAPES: no credentials, no network, ever.
+
+    Two separate leaks made this module non-hermetic, and BOTH were invisible
+    on a developer box that happens to hold real APS credentials:
+
+    1. `client.extract(..., dry_run=True)` calls `_load_creds()` BEFORE it
+       honours dry_run, so with no `~/.aps/credentials.json` every extract-
+       based test here dies `FileNotFoundError: APS creds missing`. That is
+       precisely what CI hit while the same tests passed locally - a green
+       local run hid 8 CI failures.
+    2. With credentials present it goes FURTHER and mints a real OAuth token
+       against https://developer.api.autodesk.com - a live external call from
+       a unit test. With dummy credentials that surfaces as a 403.
+
+    `_load_creds()` reads APS_CREDENTIALS_JSON before the file, and
+    `auth_token()` is the single mint point, so stubbing both makes the module
+    hermetic without touching client.py (which its importers treat as frozen).
+    No token is minted and nothing leaves the process.
+    """
+    monkeypatch.setenv("APS_CREDENTIALS_JSON", json.dumps(
+        {"client_id": "test-client-id", "client_secret": "test-client-secret"}))
+    monkeypatch.setattr(client, "auth_token", lambda: "test-token-never-sent")
+    monkeypatch.setattr(client, "nickname", lambda: "test-nickname")
 
 
 @pytest.fixture
