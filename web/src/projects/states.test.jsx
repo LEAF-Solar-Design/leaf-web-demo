@@ -3,23 +3,30 @@
  *   Every projects-surface component renders all three of loading/empty/error
  *   without crash; enumerated by test over the component registry.
  *
- * A registry entry per projects-surface component (ProjectList, Membership,
- * ExportDialog). Each entry drives that component into its own loading,
- * empty, and error state using the exact same setup its own acceptance test
- * (projectList.test.jsx, membership.test.jsx, export.test.jsx) uses — this
- * file adds no new component behavior, it only sweeps the three states and
+ * A registry entry per projects-surface component (ProjectLifecyclePanel,
+ * Membership, ExportDialog, ...). Each entry drives that component into its own
+ * loading, empty, and error state using the exact same setup its own acceptance
+ * test (lifecyclePanel.test.jsx, membership.test.jsx, export.test.jsx) uses —
+ * this file adds no new component behavior, it only sweeps the three states and
  * asserts none of them throws.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
-  listProjects: vi.fn(),
-  createProject: vi.fn(),
+  createBlankProject: vi.fn(),
+  cloneProject: vi.fn(),
+  deleteProject: vi.fn(),
+  exportProject: vi.fn(),
+  getProjectLifecycle: vi.fn(),
+  getStoredActorBindingId: vi.fn(() => null),
+  inviteMember: vi.fn(),
+  resetProject: vi.fn(),
+  revokeMember: vi.fn(),
 }))
 
-import { listProjects } from './api.js'
-import ProjectList from './ProjectList.jsx'
+import { getProjectLifecycle } from './api.js'
+import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
 import Membership from './Membership.jsx'
 import ExportDialog from './ExportDialog.jsx'
 import CloneDialog from './CloneDialog.jsx'
@@ -29,25 +36,29 @@ import ReceiptPanel from './ReceiptPanel.jsx'
 afterEach(cleanup)
 
 const noop = () => {}
+const PROJECT_ID = '11111111-2222-4333-8444-555555555555'
 
 const COMPONENT_REGISTRY = [
   {
-    name: 'ProjectList',
+    name: 'ProjectLifecyclePanel',
     async loading() {
-      listProjects.mockReturnValue(new Promise(() => {})) // in-flight forever — the loading state itself
-      const utils = render(<ProjectList enabled />)
-      await waitFor(() => expect(screen.getByRole('status', { name: /loading projects/i })).toBeTruthy())
+      getProjectLifecycle.mockReturnValue(new Promise(() => {})) // in-flight forever — the loading state itself
+      const utils = render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
+      await waitFor(() => expect(screen.getByRole('status', { name: /loading project lifecycle/i })).toBeTruthy())
       return utils
     },
     async empty() {
-      listProjects.mockResolvedValue([])
-      const utils = render(<ProjectList enabled />)
-      await waitFor(() => expect(screen.getByText(/don.t have any projects yet/i)).toBeTruthy())
+      getProjectLifecycle.mockResolvedValue({
+        project: { project_id: PROJECT_ID, name: 'Rooftop Array' },
+        members: [], files: [], receipts: [],
+      })
+      const utils = render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
+      await waitFor(() => expect(screen.getByText(/no receipts yet/i)).toBeTruthy())
       return utils
     },
     async error() {
-      listProjects.mockRejectedValue(new Error('GET /api/projects -> 500'))
-      const utils = render(<ProjectList enabled />)
+      getProjectLifecycle.mockRejectedValue(new Error('That project is no longer available to you.'))
+      const utils = render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
       await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
       return utils
     },

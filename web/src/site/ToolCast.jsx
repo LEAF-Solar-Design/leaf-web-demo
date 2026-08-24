@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   getCapabilities,
   createOrg,
-  createProject,
   getDrawingIntake,
   getJob,
   getSession,
@@ -39,6 +38,9 @@ import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
+import ProjectLifecyclePanel from '../projects/ProjectLifecyclePanel.jsx'
+import { createBlankProject } from '../projects/api.js'
+import { ENV_LIFECYCLE_UI } from '../projects/flag.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
@@ -99,7 +101,12 @@ const MODE_DRAWING_ID = PROOF_MODE
       ? 'rooftop_demo'
       : null
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
-const workspaceServices = { createOrg, listProjects, createProject, openProject }
+// Project creation goes through the idempotent lifecycle factory
+// (POST /api/projects/blank), NOT /api/projects: only the blank-project route
+// mints the owner membership binding and the lifecycle receipt that every
+// /api/projects/{id}/... route below requires. ProjectSwitcher's create form is
+// the one affordance that reaches it.
+const workspaceServices = { createOrg, listProjects, createProject: createBlankProject, openProject }
 const UNIFIED_TOUR_STEPS = [
   {
     id: 'welcome',
@@ -940,6 +947,17 @@ export default function ToolCast({
     if (project) setLeftView('workspace')
   }, [sessionReady, workspace])
 
+  // A deleted project cannot be rehydrated: drop the open workspace and leave
+  // the Project tab rather than let the rail render a project the server no
+  // longer has. The delete receipt outlives the panel here, because the panel
+  // it would have been rendered in is unmounting with the project.
+  const forgetDeletedProject = useCallback((projectId, receiptId) => {
+    bindConverseProject(null)
+    workspace.closeProject()
+    setLeftView('operator')
+    showToast({ text: receiptId ? `Project deleted. Receipt ${receiptId}` : 'Project deleted.' })
+  }, [bindConverseProject, showToast, workspace])
+
   const authorTool = useCallback((description, targetToolName = null) => {
     if (!sessionReady) return undefined
     return authorStage.stage(description, targetToolName)
@@ -1461,6 +1479,22 @@ export default function ToolCast({
             ) : (
               <div className="tc-panel-note">Choose a project from the header to load its drawing versions, jobs, and built tools.</div>
             )
+          )}
+          {/* Project lifecycle (cards B-U2..B-U6). ENV_LIFECYCLE_UI is the FIRST
+              operand on purpose: it is a build-time literal, so with the flag off
+              Rollup folds this whole expression away and the panel never reaches
+              the bundle (web/src/projects/bundleFence.test.js is the oracle).
+              !PUBLIC_DEMO is stated even though !transportMock already implies it
+              — the public /try?demo=1 page must stay fenced off even if the
+              transportMock definition ever changes. canOperate is the same gate
+              the Project tab button itself uses for operator affordances. */}
+          {ENV_LIFECYCLE_UI && leftView === 'workspace'
+            && !PUBLIC_DEMO && !transportMock && canOperate && workspace.openProjectId && (
+            <ProjectLifecyclePanel
+              projectId={workspace.openProjectId}
+              projectName={currentProjectName}
+              onProjectDeleted={forgetDeletedProject}
+            />
           )}
           {leftView === 'author' && (
             <AuthorPanel
