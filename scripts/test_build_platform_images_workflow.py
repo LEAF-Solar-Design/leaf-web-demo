@@ -3332,7 +3332,24 @@ def check_docs_noop_filter(text: str) -> None:
         # and the surface-result release check that previously used the build
         # head. The single `gh workflow run` site and its input set are
         # unchanged.
-        "1cc3faaf4a12ea68be43add0bc091ef591176c57f6d12c81592cebe341390303"
+        # Hash updated 2026-08-24 for ATOMIC TWO-LEG DISPATCH. The serial
+        # dispatch/watch loop became: plan every service, take ONE tip read,
+        # dispatch every leg, resolve every run, then watch every leg. The
+        # bodies moved into plan_service / require_tip_current /
+        # dispatch_service / resolve_service_run / watch_service and per-service
+        # state moved into associative arrays; the statements inside them are
+        # otherwise carried over unchanged. The run-name reader was widened from
+        # `^prod-<sha>` to also read the v3 `<sha>-<attempt>-<service>` and the
+        # sha-/src-<40> deploy-only forms, because v3 naming had silently
+        # disabled it in production. The clean stand-down was TIGHTENED from
+        # DEPLOYED_ANY to DISPATCHED_ANY.
+        # REVIEWED FOR DISPATCH CAPABILITY: no new dispatch site (still exactly
+        # one `gh workflow run`, asserted above), no new secret reference,
+        # endpoint class, credential, or gh call of any kind. The dispatch input
+        # set is byte-identical. The added reads are the same `gh run list` and
+        # `gh api compare` the ordering read already made. The never-backwards
+        # tip gate is unchanged in substance and still ungated.
+        "d15214ad2adb4ef73ffe13943bb9ff11a06b0907a938ef317cfc56e8070b75dd"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -3967,6 +3984,138 @@ def check_speculative_dispatcher_battery(dispatcher_path: Path) -> None:
     print("speculative dispatcher decoy battery: PASS")
 
 
+def _unquoted_shell_refs(script: str) -> set:
+    """Every $NAME / ${NAME} the SHELL would expand.
+
+    Both quote states are tracked, because they mask each other and getting
+    that wrong is not a small error: a single apostrophe inside a double-quoted
+    string ("this relay\'s budget") would otherwise flip the single-quote state
+    and desynchronise the rest of the file, surfacing every embedded jq
+    program\'s --arg variables as if they were shell references.
+
+      * inside single quotes bash expands NOTHING and offers no escape, which
+        is exactly where the embedded jq programs live, so their $name tokens
+        are jq variables bound by --arg and must not be collected;
+      * inside double quotes $NAME DOES expand, and a \' there is literal;
+      * a backslash escape suppresses expansion outside single quotes.
+    """
+    names = set()
+    in_single = False
+    in_double = False
+    index = 0
+    length = len(script)
+    while index < length:
+        char = script[index]
+        if char == "'" and not in_double:
+            in_single = not in_single
+            index += 1
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            index += 1
+            continue
+        if char == chr(92) and not in_single:
+            index += 2
+            continue
+        if char == "$" and not in_single:
+            match = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", script[index:])
+            if match:
+                names.add(match.group(1))
+                index += match.end()
+                continue
+        index += 1
+    return names
+
+
+def _shell_assigned_names(script: str) -> set:
+    """Every name the script could bind: assignment, local, or loop variable.
+
+    Deliberately permissive -- the pin hunts for names bound NOWHERE, so a
+    false ASSIGNMENT only weakens the check, while a false REFERENCE would
+    make it fire on correct code.
+    """
+    assigned = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)(?:\[[^]]*\])?=", script))
+    for decl in re.findall(r"^\s*(?:local|declare|export)\s+(.+)$", script, re.M):
+        for token in decl.split():
+            assigned.add(token.split("=", 1)[0].lstrip("$-"))
+    assigned |= set(
+        re.findall(r"^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b", script, re.M)
+    )
+    return assigned
+
+
+def _strip_heredocs(script: str) -> str:
+    """Remove quoted-heredoc bodies so quote tracking cannot desync on them.
+
+    `python3 - <<'PY' ... PY` bodies are full of apostrophes that belong to
+    another language entirely; counting them as shell quotes would scramble
+    every span boundary after the first one.
+    """
+    out = []
+    lines = script.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.search(r"<<-?'([A-Za-z_][A-Za-z0-9_]*)'", line)
+        out.append(line)
+        index += 1
+        if match:
+            delim = match.group(1)
+            while index < len(lines) and lines[index].strip() != delim:
+                index += 1
+            if index < len(lines):
+                out.append(lines[index])
+                index += 1
+    return "".join(out)
+
+
+def _jq_program_vars(script: str) -> set:
+    """Every $name appearing inside a single-quoted span, i.e. a jq program.
+
+    The mirror image of _unquoted_shell_refs: what the SHELL will not expand is
+    exactly what jq sees, and jq resolves those names from its own --arg
+    bindings. A shell-side rename that reaches inside one of these spans does
+    not fail loudly -- jq exits non-zero with "is not defined", which the
+    surrounding `|| { echo ...; exit 1; }` reports as a validation failure of
+    the ARTIFACT rather than of the filter.
+    """
+    body = _strip_heredocs(script)
+    names = set()
+    in_single = False
+    in_double = False
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "'" and not in_double:
+            in_single = not in_single
+            index += 1
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            index += 1
+            continue
+        if char == chr(92) and not in_single:
+            index += 2
+            continue
+        if char == "$" and in_single:
+            match = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", body[index:])
+            if match:
+                names.add(match.group(1))
+                index += match.end()
+                continue
+        index += 1
+    return names
+
+
+def _jq_bound_names(script: str) -> set:
+    """Names bound into jq programs by --arg / --argjson / --slurpfile / --rawfile."""
+    return set(
+        re.findall(
+            r"--(?:arg|argjson|slurpfile|rawfile)\s+([A-Za-z_][A-Za-z0-9_]*)", script
+        )
+    )
+
+
 def check_staging_relay_convergence(text: str) -> None:
     """The relay may never end green with a dispatched service unaccounted for.
 
@@ -4078,37 +4227,74 @@ def check_staging_relay_convergence(text: str) -> None:
     assert "displayTitle == $want" in code, (
         "run resolution must compare the run name, not just the run id")
 
-    # The tip is re-read INSIDE the per-service loop, before each dispatch.
-    # Deploying serially widens the window in which main can move, and
-    # dispatching an older tag behind a newer relay would roll staging
-    # BACKWARDS — the exact thing latest-main-only staging exists to stop.
+    # ATOMIC DISPATCH: ONE tip read covers BOTH legs, and no leg is watched
+    # until every leg is dispatched.
+    #
+    # This assertion used to require the tip read INSIDE the per-service loop,
+    # which was correct for the serial design and is what the design was
+    # changed away from on 2026-08-24. Serially, the second service sat behind
+    # the first service's ENTIRE deploy (~8 min web, ~14 min app, plus lock
+    # queue), and any merge inside that window cost it its dispatch: five
+    # consecutive relays between 16:05Z and 16:38Z landed a web deploy with no
+    # app deploy between any of them, and staging ran split across two source
+    # commits for hours. The tip read is now taken ONCE, immediately before the
+    # dispatch phase, so both legs provably carry the same tag from the same
+    # observation and the exposure window is the seconds between two
+    # `gh workflow run` calls rather than a whole deploy.
+    #
+    # The safety property is unchanged and still asserted: nothing is
+    # dispatched without a fresh, ungated tip read preceding it.
     assert "branches/main" in code, (
         "each dispatch must be preceded by a fresh tip-of-main read")
-    service_loop_at = code.index("for SERVICE in $SERVICES")
-    per_service_tip_at = code.find("branches/main", service_loop_at)
-    assert service_loop_at < per_service_tip_at < dispatch_at, (
-        "the tip re-check must sit inside the loop and before each dispatch")
+    assert code.count("require_tip_current") == 3, (
+        "exactly one definition and two call sites: once before the dispatch "
+        "phase, and once again before an eviction re-dispatch, which happens "
+        "minutes later and so needs its own read")
+    # Positions are compared between CALL SITES. dispatch_at above is the
+    # `gh workflow run` inside dispatch_service's definition, and a definition
+    # says nothing about execution order.
+    # rindex, not index: the eviction-retry path inside watch_service also
+    # calls dispatch_service, and it is defined earlier in the file than the
+    # phase driver at the bottom. The LAST occurrence of each is the phase loop.
+    gate_call_at = code.index('require_tip_current "$SERVICES"')
+    dispatch_loop_at = code.rindex('dispatch_service "$SERVICE"')
+    watch_loop_at = code.rindex('watch_service "$SERVICE"')
+    assert gate_call_at < dispatch_loop_at < watch_loop_at, (
+        "every leg must be dispatched before any leg is watched; interleaving "
+        "them is the abandoned-leg defect")
+    assert code.count("branches/main") == 3, (
+        "exactly three tip reads: require_tip_current's own read, its re-read "
+        "guarding a stale converger classification, and the freeze check "
+        "before the v3 convergence receipt. A FOURTH, per-leg read would mean "
+        "the two legs no longer share one observation")
 
-    # The tip read is the FIRST statement of every dispatch attempt and is
-    # NEVER gated. sol-critic RED round 2 on PR #497 broke the tempting
-    # alternative: gating it once a service had landed (to avoid leaving a
-    # split) lets relay A hold a queued app deploy across newer relay B's
-    # whole web-then-app sequence, each eviction retried, so A's OLDER app
-    # lands on top of B's and both relays finish green. Deploying web before
-    # app orders services within one relay, not two relays against each other.
+    # The tip read is the FIRST statement of the gate and is NEVER gated.
+    # sol-critic RED round 2 on PR #497 broke the tempting alternative: gating
+    # it once a service had landed (to avoid leaving a split) lets relay A hold
+    # a queued app deploy across newer relay B's whole sequence, each eviction
+    # retried, so A's OLDER app lands on top of B's and both relays finish
+    # green. Ordering legs within one relay never orders two relays against
+    # each other; the infra workflow's in-lock monotonic-forward guard does.
     # A visible split is survivable; a silent backwards deploy is not.
-    loop_body = code[code.index("while :; do"):].splitlines()[1:]
-    first_stmt = next(ln.strip() for ln in loop_body if ln.strip())
-    assert first_stmt.startswith("MAIN_SHA="), (
-        "every dispatch attempt must re-read the tip FIRST and ungated; "
-        f"found {first_stmt!r}")
+    gate_body = code[code.index("require_tip_current() {"):].splitlines()[1:]
+    first_stmt = next(ln.strip() for ln in gate_body if ln.strip())
+    assert first_stmt.startswith("local "), first_stmt
+    first_action = next(
+        ln.strip() for ln in gate_body if ln.strip() and not ln.strip().startswith("local ")
+    )
+    assert first_action.startswith("MAIN_SHA="), (
+        "the tip gate must re-read the tip FIRST and ungated; "
+        f"found {first_action!r}")
 
-    # And standing down after something went live must NAME the split rather
+    # And standing down after something went out must NAME the split rather
     # than report a plain success.
     assert "STAGING IS SPLIT" in code, (
         "standing down mid-release must announce the split it leaves behind")
-    assert re.search(r'if \[ "\$DEPLOYED_ANY" != "true" \]', code), (
-        "the split handling must be conditioned on a service already being live")
+    assert re.search(r'if \[ "\$DISPATCHED_ANY" != "true" \]', code), (
+        "the clean stand-down must be conditioned on nothing having been "
+        "DISPATCHED, not merely nothing having been deployed: a dispatched "
+        "deploy can still land after this relay exits, so a relay that has "
+        "dispatched can no longer prove nothing of its release went out")
 
     # A KNOWINGLY UNCONVERGED SPLIT MUST NOT CONCLUDE SUCCESS.
     #
@@ -4158,9 +4344,13 @@ def check_staging_relay_convergence(text: str) -> None:
     # superseder now reconciles, so there is a competing deploy; the only safe
     # move is to wait for the superseder's receipt. So the whole moved-tip
     # handling carries NO dispatch -- the single `gh workflow run` sits after it.
+    # The block ends where the tip gate does. Under the serial design this was
+    # delimited by the loop's `BEFORE=$(latest_any_run_id)` watermark; the
+    # moved-tip handling now lives in require_tip_current, so the boundary is
+    # the start of the next function.
     classify_at = code.index('CONVERGER=$(superseder_deploys')
     after_classify = code[classify_at:]
-    moved_tip_block = after_classify[:after_classify.index("BEFORE=$(latest_any_run_id)")]
+    moved_tip_block = after_classify[:after_classify.index("dispatch_service() {")]
     assert "gh workflow run" not in moved_tip_block, (
         "a relay superseded mid-release must NOT dispatch its own remaining "
         "service on a moved tip: a docs-only superseder now reconciles, so "
@@ -4453,8 +4643,12 @@ def check_staging_relay_convergence(text: str) -> None:
         r'^(\s*)if \[ "\$CONCLUSION" = "success" \]; then\n(.*?)\n\1fi\b',
         code, re.S | re.M)
     assert success_arm, "the watch needs an explicit success arm"
-    assert re.search(r"^\s*break\b", success_arm.group(2), re.M), (
-        "the loop may only advance past a service whose deploy concluded success")
+    # `break` under the serial loop, `return 0` now that the watch is a
+    # function called once per already-dispatched leg. Either way the ONLY way
+    # to stop watching a service is that its deploy concluded success; every
+    # other path below exits non-zero.
+    assert re.search(r"^\s*(break|return 0)\b", success_arm.group(2), re.M), (
+        "the watch may only stop on a service whose deploy concluded success")
     assert "landed (run $RUN_ID)" in success_arm.group(2), (
         "the success arm must say which run landed the deploy")
     assert re.search(r"^\s*DEPLOYED_ANY=true\b", success_arm.group(2), re.M), (
@@ -4497,8 +4691,10 @@ def check_staging_relay_convergence(text: str) -> None:
         "the retry must require BOTH a cancelled conclusion and zero started jobs")
     assert code.count("continue") == 1, (
         "exactly one retry path may re-enter the dispatch loop")
-    assert re.search(r'\[ "\$ATTEMPT" -lt "\$EVICTION_RETRIES" \]', code), (
-        "eviction retries must be bounded")
+    assert re.search(
+        r'\[ "\$\{ATTEMPT_OF\[\$SERVICE\]\}" -lt "\$EVICTION_RETRIES" \]', code), (
+        "eviction retries must be bounded, per service: the attempt counter is "
+        "per-leg now that both legs are in flight at once")
 
     # The job must outlive the step's own deadline, so a stuck deploy is
     # reported as a NAMED half-deployed service instead of a bare job timeout.
@@ -4508,6 +4704,56 @@ def check_staging_relay_convergence(text: str) -> None:
     assert job["timeout-minutes"] > int(deadline.group(1)), (
         f"timeout-minutes {job['timeout-minutes']} must exceed the step's own "
         f"{deadline.group(1)}-minute deadline")
+
+    # NO REFERENCE TO A VARIABLE NOTHING ASSIGNS. The step runs under
+    # `set -euo pipefail`, so a reference to an unset name does not print an
+    # empty string -- it ABORTS the step. That turns a deliberate, informative
+    # failure path into a bare "unbound variable" with no diagnosis, on the
+    # exact path an operator most needs to read.
+    #
+    # This is not hypothetical. Moving the dispatch and watch bodies into
+    # functions renamed their working variables, and two error-message
+    # interpolations were missed: `$conclusion` on the "deploy concluded X"
+    # path and `$want` on the "no run named X appeared" path. Both are inside
+    # error strings, so no rehearsal that takes the success path can reach
+    # them, and `bash -n` cannot see them either. Only this check does.
+    #
+    # Single-quoted spans are skipped, because jq programs are embedded as
+    # single-quoted heredoc-free strings and their `$name` tokens are JQ
+    # variables bound by `--arg`, not shell variables. Bash gives single quotes
+    # no escape, so tracking the quote state across the whole script is exact.
+    referenced = _unquoted_shell_refs(code)
+    assigned = _shell_assigned_names(code)
+    # Names the runner or the step env supplies rather than the script itself.
+    supplied = set(_relay_deploy_step(job).get("env", {})) | set(job.get("env", {})) | {
+        "GITHUB_REPOSITORY", "GITHUB_OUTPUT", "GITHUB_RUN_ID", "GITHUB_ENV",
+        "RUNNER_TEMP", "HOME", "PATH", "BASH_REMATCH", "LC_ALL",
+    }
+    unbound = sorted(n for n in referenced if n not in assigned and n not in supplied)
+    assert unbound == [], (
+        "the deploy step references shell variables nothing assigns, which "
+        f"aborts under `set -u` instead of reporting: {unbound}")
+
+    # ...AND NO jq PROGRAM MAY REFERENCE A VARIABLE NOTHING BINDS. This is the
+    # mirror of the pin above and it exists because that one cannot see here:
+    # it deliberately skips single-quoted spans, which is exactly where the jq
+    # filters live.
+    #
+    # The failure this catches is quieter than the shell one. A shell-side
+    # rename that reaches into a jq program does not abort the step -- jq exits
+    # non-zero with "$NAME is not defined", and the surrounding
+    # `|| { echo "...invalid or mismatched surface result"; exit 1; }` reports
+    # it as a bad ARTIFACT rather than a bad filter. Every successful v3 deploy
+    # would fail its surface-result validation while the error blamed the
+    # producer. That is precisely what a bulk rename did to
+    # `.convergence_id == $convergence` on this branch, and sol-critic caught
+    # it after the shell pin had passed clean.
+    jq_vars = _jq_program_vars(code)
+    jq_bound = _jq_bound_names(code) | {"__loc__", "ENV"}
+    unbound_jq = sorted(jq_vars - jq_bound)
+    assert unbound_jq == [], (
+        "a jq program in the deploy step references variables no --arg binds, "
+        f"so jq fails and the error blames the artifact: {unbound_jq}")
 
     print("staging relay convergence invariants: PASS")
 
@@ -4562,9 +4808,9 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "a second dispatch nobody watches",
             mutate(original,
-                   '              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG',
-                   '              gh workflow run "$DEPLOY_WORKFLOW" --repo "$INFRA_REPO"\n'
-                   '              echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG'),
+                   '            echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG',
+                   '            gh workflow run "$DEPLOY_WORKFLOW" --repo "$INFRA_REPO"\n'
+                   '            echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG'),
         ),
         (
             "job timeout cut below the step's own watch deadline",
@@ -4600,9 +4846,9 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "tip re-check gated, letting a stale tag land on a newer deploy",
             mutate(original,
-                   '              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\',
-                   '              if [ "$DEPLOYED_ANY" = "false" ]; then\n'
-                   '              MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\'),
+                   '            MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\',
+                   '            if [ "$DISPATCHED_ANY" = "false" ]; then\n'
+                   '            MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \\'),
         ),
         (
             "mid-release stand-down reported as an ordinary success",
@@ -4611,20 +4857,20 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         (
             "landed deploy no longer records that the release is partly live",
-            mutate(original, "                DEPLOYED_ANY=true\n", ""),
+            mutate(original, "DEPLOYED_ANY=true", "DEPLOYED_ANY=false"),
         ),
         (
             "loop advances without the deploy having landed",
             mutate(original,
-                   '                fi\n                break\n              fi\n',
+                   '                fi\n                return 0\n              fi\n',
                    '                fi\n              fi\n'),
         ),
         # --- the 2026-08-07 reporting hole and its escape hatch ---
         (
             "an `unknown` superseder no longer fails red, so a split is green",
             mutate(original,
-                   '                if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then\n',
-                   "                if false; then\n"),
+                   '            if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then\n',
+                   "            if false; then\n"),
         ),
         (
             "classifier budget exhaustion defaults to 'converges' instead of red",
@@ -4733,9 +4979,9 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         (
             "acting on the pre-poll tip snapshot (sol@medium's interleaving)",
             mutate(original,
-                   '                TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
+                   '            TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
 ',
-                   '                TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
+                   '            TIP_NOW=$MAIN_SHA # $(GH_TOKEN="$HOME_TOKEN" gh api \
 '),
         ),
         (
@@ -4760,10 +5006,10 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             mutate(original,
                    "it may itself have been superseded and stood down. "
                    "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
-                   'with a successful main build."\n                exit 1\n',
+                   'with a successful main build."\n            exit 1\n',
                    "it may itself have been superseded and stood down. "
                    "Staging is NOT converged on $BUILD_HEAD_SHA; converge it "
-                   'with a successful main build."\n                exit 0\n'),
+                   'with a successful main build."\n            exit 0\n'),
         ),
         (
             "`wait_for_receipt` REDEFINED later to return 0, so the wait is "
@@ -4802,8 +5048,8 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             "convergence recorded INSIDE the service loop, so a release that "
             "lands web and then fails on app still publishes a receipt",
             mutate(original,
-                   '                DEPLOYED_ANY=true\n',
-                   '                DEPLOYED_ANY=true\n'
+                   '                  DEPLOYED_ANY=true\n',
+                   '                  DEPLOYED_ANY=true\n'
                    '                echo "converged=true" >> "$GITHUB_OUTPUT"\n'),
         ),
         (
@@ -4836,7 +5082,7 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
             continue
         raise AssertionError(f"relay convergence battery: {name} was NOT caught")
 
-    landed_echo = '                echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."\n'
+    landed_echo = '                  echo "$SERVICE deploy of $IMAGE_TAG landed (run $RUN_ID)."\n'
     positives = [
         ("unmodified workflow", original),
         (
@@ -5034,6 +5280,20 @@ APP_OLD = "Deploy leaf-platform staging app (prod-1111111)"
 APP_NEW = "Deploy leaf-platform staging app (prod-2222222)"
 TAG = "prod-9999999"
 
+# THE NAMES PRODUCTION ACTUALLY USES. The fixtures above are the LEGACY
+# `prod-<sha>` run names. The v3 digest-aware path names its runs
+# `<sha>-<attempt>-<service>` (see CONVERGENCE_ID at the dispatch site), and
+# every leaf-platform staging deploy run on 2026-08-24 carried that name. The
+# ordering read matched `^prod-` only, so it silently stopped deciding the
+# moment v3 went live while these legacy fixtures kept it green -- a test that
+# modelled a grammar production had left behind. Both grammars are exercised.
+SHA_OLD = "1" * 40
+SHA_NEW = "2" * 40
+WEB_NEW_V3 = f"Deploy leaf-platform staging web ({SHA_NEW}-1-web)"
+APP_OLD_V3 = f"Deploy leaf-platform staging app ({SHA_OLD}-1-app)"
+WEB_OLD_V3 = f"Deploy leaf-platform staging web ({SHA_OLD}-1-web)"
+APP_NEW_V3 = f"Deploy leaf-platform staging app ({SHA_NEW}-2-app)"
+
 
 def test_staging_relay_orders_the_starved_service_first() -> None:
     """The abandoned service takes the first slot, and ONLY the order moves.
@@ -5065,6 +5325,38 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
         web_title=WEB_NEW, app_title=APP_NEW)
     assert deployed == [("web", TAG), ("app", TAG)], deployed
 
+    # THE SAME THREE CASES IN THE GRAMMAR PRODUCTION ACTUALLY USES. A reader
+    # that understands only `prod-<sha>` returns nothing for these, the guard
+    # never fires, and the order silently reverts to the fixed `web app` this
+    # read exists to remove. That is not hypothetical: it was the live state of
+    # staging all of 2026-08-24, with these very assertions green above it.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW_V3, app_title=APP_OLD_V3, relation="behind")
+    assert rc == 0
+    assert deployed == [("app", TAG), ("web", TAG)], (
+        "a v3-named deploy history must still let app take the first slot; "
+        f"got {deployed}")
+    assert "trails web" in out, (
+        "the ordering read must ANNOUNCE that it decided, so a silent revert "
+        "to the fixed order is visible in the relay log")
+
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_OLD_V3, app_title=APP_NEW_V3, relation="ahead")
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
+
+    rc, _, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW_V3, app_title=APP_NEW_V3)
+    assert deployed == [("web", TAG), ("app", TAG)], deployed
+
+    # Mixed grammars, which is what an operator dispatch between two relay
+    # deploys actually produces: one service on a v3 convergence id, the other
+    # on the legacy alias. Both must still be readable.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW_V3,
+        app_title=f"Deploy leaf-platform staging app (sha-{SHA_OLD})",
+        relation="behind")
+    assert deployed == [("app", TAG), ("web", TAG)], deployed
+
     # THE READ IS BEST EFFORT AND MAY ONLY REORDER. Every degraded input still
     # deploys BOTH services onto the manifest's tag; none may drop a service,
     # change the tag, or fail the release.
@@ -5087,32 +5379,40 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
             f"{name} must fall back to both services in the fixed order, "
             f"got {deployed}")
 
-    # THE COST OF REORDERING, PINNED RATHER THAN DENIED. Only the FIRST
-    # service is dispatched unconditionally; the second sits behind another
-    # tip re-check. So order decides WHO GETS SKIPPED when main moves, and a
-    # wrong read can therefore skip web where the fixed order would have
-    # skipped app. sol-critic RED round 2 on PR #506 was exactly this: an
-    # earlier comment claimed both services are always dispatched, and that
-    # was false. The trade is deliberate — the fixed order charged this cost
-    # to app every single time — but it must stay a KNOWN and ANNOUNCED
-    # outcome, so it is asserted here instead of asserted away.
+    # ORDERING NO LONGER DECIDES WHO GETS SKIPPED, because nothing is skipped
+    # for want of a dispatch.
+    #
+    # This case used to assert the opposite, and asserting it was right at the
+    # time: under the serial design only the FIRST service was dispatched
+    # unconditionally, the second sat behind another tip re-check, and a single
+    # tip movement therefore cost the second service its dispatch outright.
+    # sol-critic RED round 2 on PR #506 forced that cost to be named rather
+    # than denied.
+    #
+    # On 2026-08-24 that cost stopped being acceptable: the read that was meant
+    # to spread it across both services had been dead since v3 naming went live
+    # (see the v3 grammar cases below), so it fell on app every single time.
+    # Five consecutive relays between 16:05Z and 16:38Z landed a web deploy and
+    # dispatched no app deploy at all, and staging ran split across two source
+    # commits for hours. The dispatch phase now takes ONE tip read and issues
+    # BOTH dispatches under it, so a tip that moves after that read no longer
+    # strands the second leg.
     rc, out, deployed = _rehearse_relay_dispatch(
         web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
         tip_ok_reads=1)
     assert rc == 0
-    assert deployed == [("app", TAG)], deployed
-    # Web is the service skipped THIS relay, but the superseder that moved the
-    # tip is a converger and the fake serves its convergence receipt, so the
-    # relay stands down GREEN on that PROOF (the 2026-08-07 receipt) rather than
-    # on the old bare `STAGING IS SPLIT` warning. Web ends up on the
-    # superseder's newer image, so "web stays on its previous image" is no
-    # longer even true here. The receipt-ABSENT path that does strand web is
-    # pinned red statically and in the decoy battery; its 95-minute wait cannot
-    # be rehearsed in-process, exactly as the classifier's own timeout is only
-    # covered statically for the same reason.
-    assert "CONVERGED" in out, (
-        "when reordering skips web and the superseder publishes its "
-        "convergence receipt, the relay stands down green on that proof")
+    assert deployed == [("app", TAG), ("web", TAG)], (
+        "one tip read covers both legs, so a tip that moves after it must not "
+        f"strand the second service; got {deployed}")
+
+    # THE RESIDUAL WINDOW, PINNED RATHER THAN DENIED. The cost is reduced, not
+    # removed: a tip that has ALREADY moved when the single read is taken still
+    # stops the whole release, and a relay cancelled between its two
+    # `gh workflow run` calls still leaves one leg undispatched. The first of
+    # those is rehearsable and asserted immediately below; the second is a
+    # cancellation of the relay process itself, which this in-process rehearsal
+    # cannot stage, exactly as the classifier's 95-minute timeout is covered
+    # statically for the same reason.
 
     # And the stand-down still wins over ordering: main moved, nothing goes out.
     rc, out, deployed = _rehearse_relay_dispatch(
@@ -5897,6 +6197,50 @@ def test_build_platform_images_workflow_invariants() -> None:
     # Pytest entry point: the gate runner counts collected tests, and a bare
     # main() collects as zero.
     main()
+
+
+def test_unbound_shell_ref_pin_is_red_on_mutation() -> None:
+    """The unbound-variable pin must actually catch a renamed interpolation."""
+    good = 'X=1\necho "$X"\n'
+    assert _unquoted_shell_refs(good) == {"X"}
+    # A jq program's $name is bound by --arg, not by the shell, so it must NOT
+    # be collected; otherwise the pin fires on every jq call in the step.
+    jq_only = "jq -r --arg want \"$X\" '[.[] | select(.title == $want)]'\n"
+    assert _unquoted_shell_refs(jq_only) == {"X"}
+    # An apostrophe inside a DOUBLE-quoted string is literal to bash. Reading it
+    # as a quote flips the scanner's state and every jq --arg name after it
+    # leaks in as a false positive, which is how the first cut of this pin
+    # failed.
+    apostrophe = 'echo "this relay\'s budget"\njq -e \'select(.x == $n)\' f\n'
+    assert _unquoted_shell_refs(apostrophe) == set()
+    # The exact defect this pin exists for: an error message left holding the
+    # pre-rename spelling.
+    renamed = 'CONCLUSION=x\necho "concluded $conclusion"\n'
+    refs = _unquoted_shell_refs(renamed)
+    assert "conclusion" in refs and "CONCLUSION" not in refs
+    assert "conclusion" not in _shell_assigned_names(renamed)
+    assert "CONCLUSION" in _shell_assigned_names(renamed)
+    # An assignment in a condition (`if VAR=$(...)`) still binds the name.
+    assert "VERDICT" in _shell_assigned_names('if VERDICT=$(f); then :; fi\n')
+
+
+def test_jq_var_pin_is_red_on_mutation() -> None:
+    """The jq pin must catch a shell-side rename that reached into a filter."""
+    good = "jq -e --arg convergence \"$CONVERGENCE_ID\" '.id == $convergence' f\n"
+    assert _jq_program_vars(good) == {"convergence"}
+    assert _jq_bound_names(good) == {"convergence"}
+    # The exact defect: the filter renamed to the SHELL variable's spelling.
+    broken = "jq -e --arg convergence \"$CONVERGENCE_ID\" '.id == $CONVERGENCE_ID' f\n"
+    assert _jq_program_vars(broken) - _jq_bound_names(broken) == {"CONVERGENCE_ID"}
+    # A quoted heredoc body is another language; its apostrophes must not be
+    # read as shell quotes or every span boundary after it is wrong.
+    heredoc = (
+        "python3 - <<'PY'\n"
+        "x = \"it's fine\"\n"
+        "PY\n"
+        "jq -e --arg a \"$A\" '.k == $a' f\n"
+    )
+    assert _jq_program_vars(heredoc) == {"a"}
 
 
 def test_staging_relay_cannot_leave_a_service_undeployed() -> None:
