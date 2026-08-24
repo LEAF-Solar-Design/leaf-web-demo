@@ -104,7 +104,9 @@ class ConvertError(Exception):
 # DoS. They do not bound a controlled memory-corruption exploit. These do:
 # hard rlimits so a hostile DWG cannot groom an unbounded heap, plus
 # no_new_privs so a corrupted child can never gain privilege it did not start
-# with. Defense in depth that survives the NEXT parser CVE, not just today's.
+# with, plus a seccomp-bpf syscall DENYLIST (below) that removes a corrupted
+# child's route to a shell or a callback outright. Defense in depth that
+# survives the NEXT parser CVE, not just today's.
 #
 # NOT preexec_fn. The obvious spelling — resource.setrlimit in a
 # subprocess preexec_fn — is documented-unsafe here: this process is a threaded
@@ -124,6 +126,13 @@ class ConvertError(Exception):
 # is why this needs no new dependency.
 
 _CAGE_TOOLS = ("prlimit", "setpriv")
+
+# Default location deploy/Dockerfile.app bakes the compiled syscall denylist
+# into (deploy/gen_seccomp_filter.c, run at build time against libseccomp-dev
+# and then purged — the file itself has no runtime library dependency). A
+# fixed path, not derived from this module's location, so the build step does
+# not need /app/server to exist yet when it generates the filter.
+_DEFAULT_SECCOMP_FILTER_PATH = "/usr/local/etc/leaf/seccomp-dwg2dxf.bpf"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -174,6 +183,20 @@ def cage_available() -> bool:
     return all(shutil.which(tool) for tool in _CAGE_TOOLS)
 
 
+def seccomp_filter_path() -> Optional[str]:
+    """Path to the compiled dwg2dxf syscall denylist, or None when this
+    deployment has none. ``LEAF_DWG_CONVERT_SECCOMP_FILE`` (an explicit path —
+    must exist) wins; otherwise the path deploy/Dockerfile.app bakes the
+    filter into is used if present. Resolved at call time, same reasoning as
+    dwg2dxf_bin(): tests and per-deployment images decide it, not import
+    order."""
+    explicit = os.environ.get("LEAF_DWG_CONVERT_SECCOMP_FILE", "").strip()
+    if explicit:
+        return explicit if Path(explicit).is_file() else None
+    return (_DEFAULT_SECCOMP_FILTER_PATH
+            if Path(_DEFAULT_SECCOMP_FILTER_PATH).is_file() else None)
+
+
 def _cage_prefix() -> list[str]:
     """The argv prefix that cages the parser, or [] when this host has no cage.
 
@@ -204,7 +227,17 @@ def _cage_prefix() -> list[str]:
     # setuid/setcap binary it manages to exec. --inh-caps=-all: it inherits no
     # capability either. Both are unprivileged operations, so this works
     # unchanged once the image drops root.
-    return limits + ["--", "setpriv", "--no-new-privs", "--inh-caps=-all", "--"]
+    setpriv_argv = ["setpriv", "--no-new-privs", "--inh-caps=-all"]
+    # --seccomp-filter is additive and OPTIONAL here even when the rest of the
+    # cage is present: a dev host with prlimit/setpriv but no compiled filter
+    # still gets the base cage. Production cannot silently lose JUST this
+    # layer, though — see the cage_required() check in converted_dxf(), which
+    # refuses to run bare when the filter is missing and the deployment
+    # declared itself caged.
+    seccomp = seccomp_filter_path()
+    if seccomp is not None:
+        setpriv_argv.append(f"--seccomp-filter={seccomp}")
+    return limits + ["--"] + setpriv_argv + ["--"]
 
 
 @contextlib.contextmanager
@@ -221,11 +254,15 @@ def converted_dxf(source: Path) -> Iterator[Path]:
             "local DWG conversion is not available on this deployment",
             False)
     cage = _cage_prefix()
-    if not cage and cage_required():
+    if cage_required() and (not cage or seccomp_filter_path() is None):
         # FAIL CLOSED. The deployment declared that hostile bytes are only ever
-        # parsed inside the cage; without it there is no safe way to serve this
-        # request, so refuse rather than parse bare. Not retryable: a retry hits
-        # the same image with the same missing tools.
+        # parsed inside the FULL cage — prlimit/setpriv AND its seccomp filter,
+        # gated behind the same flag on purpose (RECEIPT-04): an image that
+        # kept prlimit/setpriv but lost the compiled filter would otherwise
+        # pass every other check and silently parse hostile bytes one defense
+        # layer thinner, with no health check able to see it. Refuse rather
+        # than parse degraded. Not retryable: a retry hits the same image with
+        # the same missing tools.
         raise ConvertError(
             "INTERNAL",
             "local DWG conversion is unavailable: its sandbox is not present "

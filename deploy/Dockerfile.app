@@ -11,6 +11,8 @@ FROM python:3.12-slim AS app
 
 WORKDIR /app
 
+COPY deploy/gen_seccomp_filter.c /tmp/gen_seccomp_filter.c
+
 # --- git: REQUIRED, not optional. ---------------------------------------------
 # server/customization_service.py shells out to git against the tenant bare repo
 # (`rev-parse --verify refs/heads/main`, `show`, and `worktree add` for
@@ -60,6 +62,14 @@ WORKDIR /app
 #   * --disable-shared --disable-bindings: one static binary, no bindings.
 #   * The toolchain is purged in the SAME layer; `dwg2dxf --version` at the
 #     end is the build-time proof the binary landed and runs.
+# --- dwg2dxf syscall denylist (seccomp-bpf) -----------------------------------
+# deploy/gen_seccomp_filter.c, compiled and RUN here against libseccomp-dev,
+# emits the raw BPF program server/dwg_convert.py points setpriv's
+# --seccomp-filter at. Build-time only: the compiler and libseccomp-dev are
+# purged in this same layer, and the emitted .bpf file has no runtime
+# dependency on libseccomp (setpriv reads it as raw bytes itself). See the
+# generator's own header comment for what is denied and why execve is not.
+#
 # NOTE: the `apt-get install ... git` prefix below is pinned verbatim by
 # server/tests/test_postgres_container_wiring.py (_PINNED_GIT_INSTALL).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
@@ -68,7 +78,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
  && apt-get update \
  && apt-get install -y --no-install-recommends git curl ca-certificates \
-      xz-utils gcc make libc6-dev \
+      xz-utils gcc make libc6-dev libseccomp-dev \
  && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \
       -o /tmp/libredwg.tar.xz \
  && echo "23330d9f887ebb93ff9512751c0f77a905a16b11ba659787074469c8f1581402  /tmp/libredwg.tar.xz" \
@@ -82,7 +92,12 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
  && cd / \
  && rm -rf /tmp/libredwg-0.14.8584 /tmp/libredwg.tar.xz \
       /tmp/libredwg-configure.log /tmp/libredwg-make.log \
- && apt-get purge -y curl xz-utils gcc make libc6-dev \
+ && mkdir -p /usr/local/etc/leaf \
+ && gcc -O2 -o /tmp/gen_seccomp_filter /tmp/gen_seccomp_filter.c -lseccomp \
+ && /tmp/gen_seccomp_filter /usr/local/etc/leaf/seccomp-dwg2dxf.bpf \
+ && test -s /usr/local/etc/leaf/seccomp-dwg2dxf.bpf \
+ && rm -f /tmp/gen_seccomp_filter /tmp/gen_seccomp_filter.c \
+ && apt-get purge -y curl xz-utils gcc make libc6-dev libseccomp-dev \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
  && dwg2dxf --version
