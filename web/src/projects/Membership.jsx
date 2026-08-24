@@ -28,9 +28,16 @@ export default function Membership({
   viewerId,
   authority, // server truth: { role, can_invite, can_manage } — never computed here
   members,   // server truth: [{ member_id, name, email, role }]
-  onInvite,      // async (email, role) => void
+  onInvite,      // async (identifier, role) => void
   onChangeRole,  // async (memberId, role) => void
   onRevoke,      // async (memberId) => void
+  // What the invite field collects. Defaults to an email address, which is what
+  // an invite reads like; the live platform route takes a binding id instead
+  // (platform/api.py InviteProjectMemberBody has NO binding-by-email lookup),
+  // so the real caller overrides both. The identifier is passed to onInvite
+  // verbatim either way — this component never parses or validates it.
+  inviteLabel = 'Invite by email',
+  inviteInputType = 'email',
 }) {
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState('read-only')
@@ -108,9 +115,9 @@ export default function Membership({
       {canInvite && (
         <form className="membership-invite" onSubmit={submitInvite}>
           <label>
-            Invite by email
+            {inviteLabel}
             <input
-              type="email"
+              type={inviteInputType}
               value={inviteEmail}
               onChange={(event) => setInviteEmail(event.target.value)}
               disabled={inviting}

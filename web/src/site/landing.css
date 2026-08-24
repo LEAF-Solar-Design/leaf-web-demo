@@ -184,31 +184,82 @@
 .tc-back:hover { color: #4ade80; }
 .tc-focus-hidden { display: none !important; }
 
-/* Project lifecycle stays inside the /try workspace. ProjectList preserves
-   the existing fail-closed lifecycle feature flag and authenticated API. */
-.projects-stage-panel {
-  position: absolute; top: 108px; right: 18px; z-index: 55;
-  width: min(320px, calc(100vw - 36px)); max-height: calc(100vh - 126px);
-  overflow: auto; box-sizing: border-box; padding: 14px;
-  border: 1px solid #3f3f46; border-radius: 10px;
-  background: rgba(10, 10, 12, .97); color: #e4e4e7;
+/* Project lifecycle lives inside the /try workspace's Project tab rail
+   (web/src/projects/ProjectLifecyclePanel.jsx), not as a floating stage panel.
+   It inherits the rail's own styling; only the affordance row and the roster
+   spacing need anything of their own. */
+.project-lifecycle { display: grid; gap: 12px; margin-top: 12px; }
+.project-lifecycle-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.project-lifecycle-error { color: #a1a1aa; font-size: 11px; display: grid; gap: 8px; }
+/* A failed refresh is a banner over a still-usable surface, not a replacement
+   for it; a failed cold load keeps the flatter -error treatment above. */
+.project-lifecycle-stale {
+  color: #fbbf24; font-size: 11px; display: grid; gap: 6px;
+  padding: 6px 8px; border-left: 2px solid rgba(251, 191, 36, .5);
+  background: rgba(251, 191, 36, .06);
 }
-.projects-stage-panel .projects-head { margin-bottom: 10px; }
-.projects-stage-panel .projects-title { font-size: 13px; font-weight: 600; }
-.projects-stage-panel .projects-create { display: grid; gap: 8px; }
-.projects-stage-panel .projects-create label { display: grid; gap: 5px; color: #a1a1aa; font-size: 11px; }
-.projects-stage-panel .projects-create input {
-  min-width: 0; border: 1px solid #52525b; border-radius: 6px;
-  padding: 7px 9px; color: #f4f4f5; background: #18181b;
+.project-lifecycle-refreshing { color: #a1a1aa; font-size: 10px; letter-spacing: .04em; }
+
+/* Wave B lifecycle components (B-U2..B-U6). They shipped unmounted, so none of
+   these class names had ever been styled; the dialogs in particular render
+   aria-modal and MUST NOT sit in inline flow behind an interactive panel. */
+.membership-panel-wrap, .membership, .danger-zone, .receipt-panel {
+  display: grid; gap: 8px; font-size: 11px; color: #d4d4d8;
 }
-.projects-stage-panel .projects-roster { margin: 10px 0 0; padding: 0; list-style: none; }
-.projects-stage-panel .projects-open {
-  width: 100%; border: 0; padding: 7px 0; text-align: left;
-  color: #d4d4d8; background: transparent; cursor: pointer;
+.membership-head, .receipt-panel-head, .danger-action-head,
+.clone-dialog-head, .export-dialog-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
 }
-.projects-stage-panel .projects-opened,
-.projects-stage-panel .projects-empty,
-.projects-stage-panel .projects-error { color: #a1a1aa; font-size: 11px; }
+.membership-title, .receipt-panel-title, .danger-action-title,
+.clone-dialog-title, .export-dialog-title {
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; color: #e4e4e7;
+}
+.membership-role { color: #a1a1aa; font-size: 10px; }
+.membership-roster { display: grid; gap: 6px; }
+.membership-row, .receipt-row {
+  display: grid; gap: 4px; padding: 6px 8px;
+  background: rgba(255, 255, 255, .03); border-radius: 4px;
+}
+.membership-member { font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; }
+.membership-invite { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.membership-invite input, .membership-invite select {
+  background: rgba(0, 0, 0, .3); border: 1px solid rgba(255, 255, 255, .12);
+  color: #e4e4e7; border-radius: 4px; padding: 4px 6px; font-size: 11px; min-width: 0;
+}
+.membership-error, .danger-action-error, .clone-dialog-error, .export-dialog-error {
+  color: #f87171; font-size: 10px;
+}
+.receipt-timeline { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
+.receipt-row-head { display: flex; justify-content: space-between; gap: 8px; }
+.receipt-kind { font-weight: 600; color: #e4e4e7; }
+.receipt-time, .receipt-panel-empty { color: #a1a1aa; font-size: 10px; }
+.receipt-fields { display: grid; gap: 2px; }
+.receipt-field { display: flex; gap: 6px; font-size: 10px; color: #a1a1aa; }
+.receipt-field-key { color: #71717a; }
+.clone-dialog-receipt-id, .export-dialog-receipt-id, .danger-action-receipt-id {
+  font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; color: #a1a1aa;
+}
+.danger-zone { border-top: 1px solid rgba(248, 113, 113, .25); padding-top: 8px; }
+.danger-action-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.danger-action-typed input {
+  background: rgba(0, 0, 0, .3); border: 1px solid rgba(248, 113, 113, .35);
+  color: #e4e4e7; border-radius: 4px; padding: 4px 6px; font-size: 11px;
+}
+/* The one hard requirement in this block: a dialog must overlay, not stack. */
+.clone-dialog-backdrop, .export-dialog-backdrop {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+  background: rgba(0, 0, 0, .55);
+}
+.clone-dialog, .export-dialog {
+  width: min(420px, calc(100vw - 32px)); display: grid; gap: 10px;
+  padding: 14px; border-radius: 8px; font-size: 12px; color: #e4e4e7;
+  background: #18181b; border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+.clone-dialog-progress, .export-dialog-progress, .export-dialog-progress-label {
+  color: #a1a1aa; font-size: 11px;
+}
+.clone-dialog-success, .clone-dialog-done, .export-dialog-complete { color: #4ade80; font-size: 11px; }
 
 /* ---------------- landing: statement block (z 20) ---------------- */
 

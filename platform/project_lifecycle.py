@@ -320,6 +320,39 @@ def _file_dict(row: Dict[str, Any], *, include_content: bool) -> Dict[str, Any]:
     return item
 
 
+def _active_project_name_taken(cur: Any, org_id: uuid.UUID, name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM projects WHERE org_id = %(org_id)s AND status = 'active' "
+        "AND deleted_at IS NULL AND lower(btrim(name)) = lower(btrim(%(name)s)) LIMIT 1",
+        {"org_id": org_id, "name": name},
+    )
+    return cur.fetchone() is not None
+
+
+def _assert_project_name_free(cur: Any, org_id: uuid.UUID, name: str) -> None:
+    # Migration 0041 enforces one active name per org with a raising trigger, so
+    # an unchecked INSERT surfaces as a 500. Fail as a 409 the client can explain.
+    if _active_project_name_taken(cur, org_id, name):
+        raise LifecycleConflict(
+            "a project with that name already exists in this workspace"
+        )
+
+
+def _resolve_free_project_name(cur: Any, org_id: uuid.UUID, requested: str) -> str:
+    # Clone names are derived, not typed: a caller cannot pick a different one
+    # (CloneDialog takes no name field), so a taken name must resolve rather
+    # than fail. The receipt carries the granted name and the dialog shows it.
+    if not _active_project_name_taken(cur, org_id, requested):
+        return requested
+    for suffix in range(2, 51):
+        candidate = _validate_project_name(f"{requested} {suffix}")
+        if not _active_project_name_taken(cur, org_id, candidate):
+            return candidate
+    raise LifecycleConflict(
+        "too many projects share that name; rename the source project first"
+    )
+
+
 def _member_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "membership_id": str(row["membership_id"]),
@@ -350,6 +383,7 @@ def create_blank_project(
             )
             if replay is not None:
                 return replay
+            _assert_project_name_free(cur, org_id, name)
             project_id = new_uuid()
             cur.execute(
                 "INSERT INTO projects (project_id, org_id, name) "
@@ -397,7 +431,7 @@ def project_snapshot(
     def operation(conn: Any) -> Dict[str, Any]:
         with conn.cursor() as cur:
             project = _project_row(cur, org_id, project_id, lock=False)
-            _require_project_role(
+            viewer_role = _require_project_role(
                 cur, org_id, project_id, actor_binding_id, write=False, lock=False,
             )
             cur.execute(
@@ -422,6 +456,21 @@ def project_snapshot(
                 {"org_id": org_id, "project_id": project_id},
             )
             receipts = [_receipt_dict(row) for row in cur.fetchall()]
+            # The caller's own identity, server-derived. A browser cannot know
+            # its actor binding id (nothing echoes it), so without this the
+            # client can only guess which roster row is "you" - and guessing is
+            # exactly what the role matrix must never do.
+            viewer_binding = str(actor_binding_id)
+            viewer_row = next(
+                (m for m in members if m["binding_id"] == viewer_binding), None,
+            )
+            viewer = {
+                "binding_id": viewer_binding,
+                "membership_id": viewer_row["membership_id"] if viewer_row else None,
+                "role": viewer_role,
+                "can_invite": viewer_role in WRITE_ROLES,
+                "can_manage": viewer_role in WRITE_ROLES,
+            }
             return {
                 "project": {
                     "project_id": str(project["project_id"]),
@@ -429,6 +478,7 @@ def project_snapshot(
                     "status": project["status"],
                     "profile": "blank_browser",
                 },
+                "viewer": viewer,
                 "members": members,
                 "files": files,
                 "receipts": receipts,
@@ -695,11 +745,15 @@ def clone_project(
             )
             if replay is not None:
                 return replay
+            # Distinct binding, never a rebind of `name`: assigning the closed-over
+            # name inside this closure makes it local and the read above it raises
+            # UnboundLocalError.
+            granted_name = _resolve_free_project_name(cur, org_id, name)
             target_project_id = new_uuid()
             cur.execute(
                 "INSERT INTO projects (project_id, org_id, name) "
                 "VALUES (%(project_id)s, %(org_id)s, %(name)s)",
-                {"project_id": target_project_id, "org_id": org_id, "name": name},
+                {"project_id": target_project_id, "org_id": org_id, "name": granted_name},
             )
             cur.execute(
                 "INSERT INTO project_authority_modes "
@@ -746,7 +800,9 @@ def clone_project(
             result = {
                 "project": {
                     "project_id": str(target_project_id),
-                    "name": name,
+                    # The GRANTED name, which may carry a collision suffix. The
+                    # dialog renders receipt.name, so the user sees what landed.
+                    "name": granted_name,
                     "status": "active",
                     "profile": "blank_browser",
                 },

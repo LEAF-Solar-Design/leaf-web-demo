@@ -39,6 +39,8 @@ import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
+import ProjectLifecyclePanel from '../projects/ProjectLifecyclePanel.jsx'
+import { ENV_LIFECYCLE_UI } from '../projects/flag.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
@@ -99,6 +101,15 @@ const MODE_DRAWING_ID = PROOF_MODE
       ? 'rooftop_demo'
       : null
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
+// Creation stays on POST /api/projects. The lifecycle factory
+// (POST /api/projects/blank) is the better route on paper - it mints the owner
+// membership binding - but it goes through _get_lifecycle_actor, which REQUIRES
+// X-Actor-Binding-Id whenever LEAF_AUTH_LIVE is off (the default, platform/
+// deps.py auth_live). Nothing in the browser can produce that id, so routing
+// creation there breaks project creation in every auth-off deployment, flag on
+// or off. Projects created here carry no project membership row, so the
+// lifecycle panel below reports the server's own 403 for them; that is a
+// truthful read of a real tenancy gap, not a client-side failure to try.
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
 const UNIFIED_TOUR_STEPS = [
   {
@@ -940,6 +951,17 @@ export default function ToolCast({
     if (project) setLeftView('workspace')
   }, [sessionReady, workspace])
 
+  // A deleted project cannot be rehydrated: drop the open workspace and leave
+  // the Project tab rather than let the rail render a project the server no
+  // longer has. The delete receipt outlives the panel here, because the panel
+  // it would have been rendered in is unmounting with the project.
+  const forgetDeletedProject = useCallback((projectId, receiptId) => {
+    bindConverseProject(null)
+    workspace.closeProject()
+    setLeftView('operator')
+    showToast({ text: receiptId ? `Project deleted. Receipt ${receiptId}` : 'Project deleted.' })
+  }, [bindConverseProject, showToast, workspace])
+
   const authorTool = useCallback((description, targetToolName = null) => {
     if (!sessionReady) return undefined
     return authorStage.stage(description, targetToolName)
@@ -1461,6 +1483,22 @@ export default function ToolCast({
             ) : (
               <div className="tc-panel-note">Choose a project from the header to load its drawing versions, jobs, and built tools.</div>
             )
+          )}
+          {/* Project lifecycle (cards B-U2..B-U6). ENV_LIFECYCLE_UI is the FIRST
+              operand on purpose: it is a build-time literal, so with the flag off
+              Rollup folds this whole expression away and the panel never reaches
+              the bundle (web/src/projects/bundleFence.test.js is the oracle).
+              !PUBLIC_DEMO is stated even though !transportMock already implies it
+              — the public /try?demo=1 page must stay fenced off even if the
+              transportMock definition ever changes. canOperate is the same gate
+              the Project tab button itself uses for operator affordances. */}
+          {ENV_LIFECYCLE_UI && leftView === 'workspace'
+            && !PUBLIC_DEMO && !transportMock && canOperate && workspace.openProjectId && (
+            <ProjectLifecyclePanel
+              projectId={workspace.openProjectId}
+              projectName={currentProjectName}
+              onProjectDeleted={forgetDeletedProject}
+            />
           )}
           {leftView === 'author' && (
             <AuthorPanel
