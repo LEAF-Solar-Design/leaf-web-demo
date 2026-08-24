@@ -286,9 +286,18 @@ def provision_activity() -> str:
 # --------------------------------------------------------------------------- #
 def _extract_with_status(dwg_local_path: str):
     dwg_name = os.path.basename(dwg_local_path)
-    ts = int(time.time())
-    input_key = f"in/{ts}_{dwg_name}"
-    output_key = f"out/{ts}_{dwg_name}.families.txt"
+    # Scratch keys come from client.py, never hand-built here. A hand-built
+    # `in/<int(time.time())>_<base>` has ONE-SECOND resolution: two runs on the
+    # same basename in the same second produce the SAME OSS key, OSS PUTs are
+    # last-write-wins, and the loser downloads the winner's bytes — a PAID
+    # WorkItem returning coherent-but-unrelated geometry instead of failing.
+    # ONE uuid4-derived nonce per run, shared by this run's input and output
+    # keys; never time-derived, because a clock cannot fix a clock-resolution
+    # collision.
+    nonce = client.run_nonce()
+    input_key = client.ephemeral_input_key(dwg_name, nonce=nonce)
+    output_key = client.ephemeral_output_key(dwg_name, nonce=nonce,
+                                             suffix=".families.txt")
     activity_id = client.activity_qualified(client.EXTRACT_ACTIVITY)
     client.upload_object(dwg_local_path, input_key)
     in_url = client.signed_download_url(input_key)
@@ -394,9 +403,12 @@ def run(dwg: str) -> int:
               f"layers={len(L_in)} probe_in_input={PROBE_LAYER in L_in}")
 
         # ---- upload input + reserve output url ---------------------------
-        ts = int(time.time())
-        in_key = f"in/{ts}_{os.path.basename(dwg)}"
-        out_key = f"out/{ts}_output.dwg"
+        # Same per-run nonce discipline as _extract_with_status above: one
+        # uuid4-derived nonce shared by this WorkItem's input and output keys,
+        # so neither can collide with a concurrent run of the same basename.
+        nonce = client.run_nonce()
+        in_key = client.ephemeral_input_key(os.path.basename(dwg), nonce=nonce)
+        out_key = client.ephemeral_output_key("output", nonce=nonce, suffix=".dwg")
         client.upload_object(dwg, in_key)
         in_url = client.signed_download_url(in_key)
         up_key, out_url = client.signed_upload_url(out_key)
