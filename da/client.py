@@ -37,6 +37,7 @@ import json
 import os
 import re
 import time
+import uuid
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -247,20 +248,51 @@ def _ephemeral_prefix(tenant_id: str | None) -> str:
     return _tenant.tenant_key_prefix(tenant_id)
 
 
+def run_nonce() -> str:
+    """Per-run entropy for a throwaway scratch key.
+
+    THE WHOLE POINT: a scratch key built from `int(time.time())` plus a file
+    basename has ONE-SECOND resolution. Two runs that start in the same second
+    on the same basename produce the SAME key, OSS PUTs are last-write-wins,
+    and the loser silently downloads the winner's bytes — a paid WorkItem that
+    returns coherent-but-unrelated geometry instead of failing. That is the
+    2026-07-25 "unrelated rooftop geometry" acceptance failure.
+
+    A clock cannot fix a clock-resolution collision, so this is uuid4-derived,
+    never time-derived. `APS_MAX_CONCURRENCY` does not help either: it gates
+    WorkItem admission only, while upload/download run outside it.
+    """
+    return uuid.uuid4().hex[:12]
+
+
 def ephemeral_input_key(dwg_name: str, tenant_id: str | None = None,
-                        ts: int | None = None) -> str:
+                        ts: int | None = None, nonce: str | None = None) -> str:
     """Per-run throwaway INPUT key. None -> `in/<ts>_<dwg>` (unchanged);
-    tenant -> `t/<tenant>/in/<ts>_<dwg>`."""
+    tenant -> `t/<tenant>/in/<ts>_<dwg>`.
+
+    `nonce` is ADDITIVE and defaults to None, which reproduces the legacy key
+    BYTE-FOR-BYTE (da/test_multitenant.py pins that). Callers that actually
+    submit a WorkItem pass one, which makes the key collision-proof; the frozen
+    no-nonce shape stays available for anything that depends on it.
+    """
     ts = int(time.time()) if ts is None else int(ts)
-    return f"{_ephemeral_prefix(tenant_id)}in/{ts}_{dwg_name}"
+    stamp = f"{ts}_{nonce}" if nonce else f"{ts}"
+    return f"{_ephemeral_prefix(tenant_id)}in/{stamp}_{dwg_name}"
 
 
 def ephemeral_output_key(name: str, tenant_id: str | None = None,
-                         ts: int | None = None, suffix: str = ".result.json") -> str:
+                         ts: int | None = None, suffix: str = ".result.json",
+                         nonce: str | None = None) -> str:
     """Per-run throwaway OUTPUT key. None -> `out/<ts>_<name><suffix>` (unchanged);
-    tenant -> `t/<tenant>/out/<ts>_<name><suffix>`."""
+    tenant -> `t/<tenant>/out/<ts>_<name><suffix>`.
+
+    `nonce` is ADDITIVE exactly as in `ephemeral_input_key`. An output key
+    collision is as damaging as an input one: two runs writing the same Result
+    object means one caller finalizes and downloads the other's output.
+    """
     ts = int(time.time()) if ts is None else int(ts)
-    return f"{_ephemeral_prefix(tenant_id)}out/{ts}_{name}{suffix}"
+    stamp = f"{ts}_{nonce}" if nonce else f"{ts}"
+    return f"{_ephemeral_prefix(tenant_id)}out/{stamp}_{name}{suffix}"
 
 
 # lazy loader for the sibling submit QUEUE (da/queue.py). Loaded by PATH under a
@@ -807,8 +839,14 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
     activity_id = activity_qualified(extract_activity_for(dwg_local_path))
     version_aware = tenant_id is not None and drawing_id is not None
     dwg_name = os.path.basename(dwg_local_path)
-    # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied
-    output_key = f"{_ephemeral_prefix(tenant_id)}out/{int(time.time())}_{dwg_name}.families.txt"
+    # ONE nonce for the whole run, so the input and output keys of a single
+    # extraction share an identity and stay greppable together in OSS.
+    nonce = run_nonce()
+    # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied.
+    # The nonce is what makes it per-RUN rather than per-second: without it two
+    # extractions of the same basename in the same second write the same object.
+    output_key = ephemeral_output_key(dwg_name, tenant_id, nonce=nonce,
+                                      suffix=".families.txt")
 
     if version_aware:
         v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
@@ -840,8 +878,12 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
         families = download_object(output_key).decode("utf-8", "replace")
         return parse_text(families, dwg_local_path)
 
-    # ------- legacy single-tenant demo path (FROZEN behavior) -------
-    input_key = f"{_ephemeral_prefix(tenant_id)}in/{int(time.time())}_{dwg_name}"
+    # ------- legacy single-tenant demo path -------
+    # Shape is still `[t/<tenant>/]in/<ts>_..._<dwg>`; the nonce makes it unique
+    # per run. This branch is the one every bare `da.extract(<path>)` caller
+    # lands on (server/broker.py x2, server/write_loop.py), and it is the branch
+    # that used to be able to hand back ANOTHER drawing's bytes.
+    input_key = ephemeral_input_key(dwg_name, tenant_id, nonce=nonce)
 
     if dry_run:
         arguments = {"HostDwg": _input_arg(input_key, live=False),
@@ -895,14 +937,19 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
     activity_id = activity_qualified(f"{TOOL_ACTIVITY_PREFIX}{engine_op}")
     dwg_name = os.path.basename(dwg_local_path)
     ts = int(time.time())
+    # ONE nonce per run, shared by this run's input and output keys.
+    nonce = run_nonce()
     # per-run scratch OUTPUT key; tenant-scoped when a tenant is supplied
-    output_key = ephemeral_output_key(engine_op, tenant_id, ts)
+    output_key = ephemeral_output_key(engine_op, tenant_id, ts, nonce=nonce)
     version_aware = tenant_id is not None and drawing_id is not None
 
     if version_aware:
         v, input_key = _resolve_store_key(tenant_id, drawing_id, version, backend, dry_run)
     else:
-        input_key = ephemeral_input_key(dwg_name, tenant_id, ts)
+        # Same collision exposure as extract()'s legacy branch: `engine_op` and
+        # the basename are both stable across runs, so the second is the only
+        # thing separating two callers without the nonce.
+        input_key = ephemeral_input_key(dwg_name, tenant_id, ts, nonce=nonce)
 
     if dry_run:
         arguments = {
