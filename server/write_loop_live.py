@@ -39,6 +39,7 @@ for p in (str(SERVER_DIR), str(DA_DIR)):
         sys.path.insert(0, p)
 
 import client            # da/client.py (credential-holding)  # noqa: E402
+import redact            # da/redact.py (credential stripper)  # noqa: E402
 import store             # da/store.py                         # noqa: E402
 import write_loop        # server/write_loop.py                # noqa: E402
 
@@ -98,7 +99,7 @@ def _extract_v1_with_status(dwg_local_path: str):
     status = client.submit_workitem(activity_id, args, dry_run=False, poll=True)
     if status.get("status") != "success":
         raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
-                           f"report={status.get('reportUrl')}")
+                           f"report={redact.redact_url(status.get('reportUrl'))}")
     client.finalize_upload(output_key, up_key)
     families = client.download_object(output_key).decode("utf-8", "replace")
     return client.parse_text(families, dwg_local_path), status
@@ -188,7 +189,9 @@ def main() -> int:
         print(f"WRITE-LOOP: PASS (cumulative ${_cumulative()}, {len(_LEDGER)} WorkItems)")
         return 0
     except Exception as e:  # noqa: BLE001
-        receipt["error"] = f"{type(e).__name__}: {e}"
+        # Exception text can carry a presigned report url (see the extract
+        # raise above); redact before it lands in a committed receipt.
+        receipt["error"] = redact.redact_text(f"{type(e).__name__}: {e}")
         receipt["cumulative_spend"] = _cumulative()
         receipt["workitems"] = _LEDGER
         try:

@@ -26,6 +26,10 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling da/ imports
+import redact  # noqa: E402  -- credential stripper
+
 CALLBACK_SIG_HEADER = "X-Leaf-Signature"  # "sha256=<hexdigest>"
 
 
@@ -66,7 +70,11 @@ def parse_callback(body: bytes) -> Dict[str, Any]:
     return {
         "workitem_id": data.get("id") or data.get("workitemId"),
         "status": data.get("status"),
-        "report_url": data.get("reportUrl"),
+        # Redacted: an inbound DA reportUrl is a presigned S3 url carrying a
+        # live one-hour AWS credential, and nothing downstream fetches it.
+        # `raw` below is the UNREDACTED body -- in-memory transport only;
+        # never persist or log it.
+        **redact.report_url_fields(data, prefix="report_url"),
         "stats": data.get("stats"),
         "raw": data,
     }
