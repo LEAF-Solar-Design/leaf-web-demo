@@ -24,6 +24,7 @@ the fix.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pytest
@@ -199,3 +200,39 @@ def test_version_aware_extract_is_stable_across_runs(frozen_clock):
     assert a["input_object"] == b["input_object"]
     # ...while their scratch OUTPUT keys still differ, since those are per-run.
     assert a["output_object"] != b["output_object"]
+
+
+# --------------------------------------------------------------------------- #
+# The da/ DRIVERS must go through the helpers, not rebuild the buggy key shape
+#
+# PR #782 fixed the collision inside client.py, but da/arx_probe.py and
+# da/write_spike.py never called those helpers: each still built
+# `in/{int(time.time())}_{basename}` by hand, so the paid write and ARX legs
+# kept the exact 1-second-granularity race the rest of the repo had left
+# behind. Fixing a shared helper does nothing for a caller that bypasses it,
+# so this guard is stated over the DRIVER SOURCE, not over client.py.
+# --------------------------------------------------------------------------- #
+_HAND_BUILT_KEY = re.compile(r"""["']?(?:in|out)/\{""")
+
+DRIVERS = ("arx_probe.py", "write_spike.py")
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+def test_driver_does_not_hand_build_a_scratch_key(driver):
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), driver),
+               encoding="utf-8").read()
+    assert not _HAND_BUILT_KEY.search(src), (
+        f"da/{driver} builds an OSS scratch key by hand. That shape has "
+        "1-second resolution and no other entropy, so two runs in the same "
+        "second collide and OSS last-write-wins hands one caller the other's "
+        "bytes. Use client.ephemeral_input_key/ephemeral_output_key with "
+        "client.run_nonce()."
+    )
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+def test_driver_uses_the_uuid_derived_nonce_helpers(driver):
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), driver),
+               encoding="utf-8").read()
+    for symbol in ("run_nonce()", "ephemeral_input_key(", "ephemeral_output_key("):
+        assert symbol in src, f"da/{driver} does not call client.{symbol}"

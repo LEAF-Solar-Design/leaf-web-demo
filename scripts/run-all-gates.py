@@ -865,6 +865,24 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_extract_dxf_activity.py"), 5),
         Suite("da-mutation-apply", "da test_mutation_apply.py", "pytest", DA,
               _py_pytest("test_mutation_apply.py"), 24),
+        # PR #782's own regression suite, never registered, so the collision
+        # guard it added ran in NO gate. Fully offline (dry_run bodies, frozen
+        # clock, no APS/network/credentials). 16 -> 20 here: the 4 new tests
+        # guard the da/ DRIVERS, which kept building `in/<ts>_<base>` by hand
+        # and so were never covered by the client.py fix.
+        Suite("da-scratch-key-collision",
+              "da test_scratch_key_collision.py", "pytest", DA,
+              _py_pytest("test_scratch_key_collision.py"), 20),
+        # The presigned-credential ban on every committed receipt under data/.
+        # This repo is PUBLIC (2026-08-24) and secret scanning opened six
+        # aws_temporary_access_key_id alerts on receipts whose reportUrl still
+        # carried its X-Amz-* query. Fully offline. The floor is 3 negative
+        # controls + 1 data-dir guard + 3 known-receipt guards + 2 per *.json
+        # under data/ (9 files = 18) = 25; adding a data/*.json raises the
+        # executed count, it never lowers it.
+        Suite("da-receipt-no-presigned-urls",
+              "da test_receipt_no_presigned_urls.py", "pytest", DA,
+              _py_pytest("test_receipt_no_presigned_urls.py"), 25),
         # Windows operator hosts run the non-billable AutoCAD engine canary.
         # Linux CI must still collect the suite and may skip only when the named
         # local AutoCAD runtime or tracked demo DWG is unavailable.

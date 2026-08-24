@@ -70,7 +70,10 @@ def _import_client(retries: int = 4, wait_s: float = 10.0):
                         "activity_qualified", "upload_object", "signed_download_url",
                         "signed_upload_url", "finalize_upload", "download_object",
                         "submit_workitem", "extract", "parse_text", "_engine_seconds",
-                        "create_bucket", "_auth_headers"):
+                        "create_bucket", "_auth_headers",
+                        # collision-proof scratch keys (PR #782) — this driver
+                        # bypassed them and built `in/<ts>_<base>` by hand.
+                        "run_nonce", "ephemeral_input_key", "ephemeral_output_key"):
                 getattr(client, sym)
             return client
         except (ImportError, AttributeError, SyntaxError) as e:  # pragma: no cover
@@ -84,6 +87,10 @@ def _import_client(retries: int = 4, wait_s: float = 10.0):
 
 client = _import_client()
 import write_lisp  # noqa: E402  (our sibling, safe)
+# Presigned-url redaction, shared with da/blank_spike.py. data/write_spike_receipt.json
+# is COMMITTED to a public repo, so every reportUrl must lose its query BEFORE it
+# is written, never in a later cleanup pass.
+from redact import redact_report_url  # noqa: E402  (pure sibling: no network, no creds)
 
 import requests  # noqa: E402
 
@@ -118,7 +125,9 @@ def _record(label: str, status: dict) -> dict:
         "label": label,
         "id": status.get("id"),
         "status": status.get("status"),
-        "reportUrl": status.get("reportUrl"),
+        # REDACTED AT WRITE TIME: this block goes straight into the committed
+        # receipt, so the presigned query never gets a chance to reach git.
+        "reportUrl": redact_report_url(status.get("reportUrl")),
         "engine_seconds": eng,
         "usd_est": _usd_est(eng),
     }
@@ -205,9 +214,19 @@ def provision() -> str:
 # --------------------------------------------------------------------------- #
 def _extract_with_status(dwg_local_path: str):
     dwg_name = os.path.basename(dwg_local_path)
-    ts = int(time.time())
-    input_key = f"in/{ts}_{dwg_name}"
-    output_key = f"out/{ts}_{dwg_name}.families.txt"
+    # COLLISION-PROOF scratch keys (PR #782). The old shape was
+    # `in/<int(time.time())>_<base>`, built by hand and bypassing client's
+    # helpers: ONE-SECOND resolution, so two runs of the same basename in the
+    # same second wrote the same OSS object, and OSS PUTs are last-write-wins.
+    # The loser then downloaded the winner's bytes — a paid WorkItem returning
+    # coherent-but-unrelated geometry. `run_nonce()` is uuid4-derived, NEVER
+    # time-derived, because a clock cannot fix a clock-resolution collision.
+    # One nonce for the whole extraction keeps its input and output keys
+    # greppable together in OSS.
+    nonce = client.run_nonce()
+    input_key = client.ephemeral_input_key(dwg_name, nonce=nonce)
+    output_key = client.ephemeral_output_key(dwg_name, nonce=nonce,
+                                             suffix=".families.txt")
     activity_id = client.activity_qualified(client.EXTRACT_ACTIVITY)
     client.upload_object(dwg_local_path, input_key)
     in_url = client.signed_download_url(input_key)
@@ -216,8 +235,10 @@ def _extract_with_status(dwg_local_path: str):
                  "Result": {"url": out_url, "verb": "put"}}
     status = client.submit_workitem(activity_id, arguments, dry_run=False, poll=True)
     if status.get("status") != "success":
+        # redacted: run() copies str(e) into receipt["error"], so an unredacted
+        # reportUrl here is the same committed-credential leak by another route.
         raise RuntimeError(f"extract WorkItem {status.get('id')} status={status.get('status')} "
-                           f"report={status.get('reportUrl')}")
+                           f"report={redact_report_url(status.get('reportUrl'))}")
     client.finalize_upload(output_key, up_key)
     families = client.download_object(output_key).decode("utf-8", "replace")
     return client.parse_text(families, dwg_local_path), status
@@ -316,9 +337,11 @@ def run(dwg: str) -> int:
               f"layers={len(L_in)} probe_in_input={PROBE_LAYER in L_in}")
 
         # ---- upload input + reserve output url ---------------------------
-        ts = int(time.time())
-        in_key = f"in/{ts}_{os.path.basename(dwg)}"
-        out_key = f"out/{ts}_output.dwg"
+        # Same collision-proof keys as _extract_with_status: one uuid4-derived
+        # per-run nonce, never a bare `int(time.time())` stamp.
+        nonce = client.run_nonce()
+        in_key = client.ephemeral_input_key(os.path.basename(dwg), nonce=nonce)
+        out_key = client.ephemeral_output_key("output", nonce=nonce, suffix=".dwg")
         client.upload_object(dwg, in_key)
         in_url = client.signed_download_url(in_key)
         up_key, out_url = client.signed_upload_url(out_key)
@@ -331,7 +354,7 @@ def run(dwg: str) -> int:
         receipt["write_workitem"] = _record("write", st_w)
         if st_w.get("status") != "success":
             raise RuntimeError(f"write WorkItem {st_w.get('id')} status={st_w.get('status')} "
-                               f"report={st_w.get('reportUrl')}")
+                               f"report={redact_report_url(st_w.get('reportUrl'))}")
         client.finalize_upload(out_key, up_key)
         out_bytes = client.download_object(out_key)
         if not out_bytes:

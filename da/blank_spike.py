@@ -68,6 +68,10 @@ _REPO = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 
 import blank_lisp  # noqa: E402  (pure sibling: no network, no creds)
+# The presigned-url redactor this module introduced (PR #778) now lives in
+# da/redact.py so da/arx_probe.py and da/write_spike.py reuse the SAME one.
+# Re-exported here: `blank_spike.redact_report_url` is unchanged for callers.
+from redact import redact_report_url  # noqa: E402,F401  (pure sibling)
 
 BLANK_ACTIVITY = os.environ.get("APS_BLANK_ACTIVITY", "LeafBlankCreate")
 RECEIPT_PATH = os.path.join(_REPO, "data", "blank_spike_receipt.json")
@@ -132,22 +136,6 @@ def _cap_guard(next_label: str) -> None:
     if _cumulative_usd() >= CAP_USD:
         raise RuntimeError("LANE CAP: cumulative $" + str(_cumulative_usd())
                            + " >= $" + str(CAP_USD) + "; refusing " + repr(next_label))
-
-
-def redact_report_url(url):
-    """Drop the query string from a WorkItem reportUrl before it is recorded.
-
-    APS hands back a PRESIGNED S3 url whose query carries a temporary AWS
-    credential (X-Amz-Security-Token, X-Amz-Signature, ...). This receipt is
-    committed to the repo, so the query must never land in git. The path is
-    kept because it still identifies the report object exactly (owner + work
-    item id), and the credential expires within the hour anyway, so nothing of
-    diagnostic value is lost.
-    """
-    if not url or not isinstance(url, str):
-        return url
-    base, sep, _query = url.partition("?")
-    return base + ("?<redacted-presigned>" if sep else "")
 
 
 def _record(client, label: str, status: dict) -> dict:
@@ -417,9 +405,12 @@ def run(tenant_id: str, dry_run: bool, receipt_path: str) -> dict:
                                         tenant_id=tenant_id)
         receipt["create_workitem"] = _record(client, "create", status)
         if status.get("status") != "success":
+            # redact here too: main() copies str(exc) into the FAIL receipt's
+            # `failure` field, so a raw reportUrl in this message is the same
+            # committed-credential leak by another route.
             raise RuntimeError("create WorkItem " + str(status.get("id"))
                                + " status=" + str(status.get("status"))
-                               + " report=" + str(status.get("reportUrl")))
+                               + " report=" + str(redact_report_url(status.get("reportUrl"))))
 
         client.finalize_upload(output_key, up_key)
         data = client.download_object(output_key)
