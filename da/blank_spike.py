@@ -214,12 +214,58 @@ class metered_submit:
 # --------------------------------------------------------------------------- #
 # Activity provisioning
 # --------------------------------------------------------------------------- #
+def _aliased_matching_version(client, requests, spec: dict, headers: dict) -> int:
+    """Return a version whose LIVE body matches `spec`, publishing one if not.
+
+    A bare 409 on POST /activities means the Activity NAME already exists - it
+    does NOT mean the VERSION the alias points at still runs this spec. Read
+    the aliased version back and compare with blank_lisp.activity_body_matches
+    (the same comparison server/da/blank_dwg.py's _aliased_matching_version
+    uses, imported rather than reimplemented, so the CLI spike and the broker
+    producer never disagree on what counts as drift for this one recipe).
+    """
+    alias = requests.get(
+        client.DA + "/activities/" + BLANK_ACTIVITY + "/aliases/" + client.ALIAS,
+        headers=headers, timeout=client._HTTP_TIMEOUT)
+    if alias.status_code == 200:
+        current = alias.json().get("version")
+        if isinstance(current, int) and current > 0:
+            live = requests.get(
+                client.DA + "/activities/" + BLANK_ACTIVITY + "/versions/" + str(current),
+                headers=headers, timeout=client._HTTP_TIMEOUT)
+            live.raise_for_status()
+            if blank_lisp.activity_body_matches(live.json(), spec):
+                return current
+    elif alias.status_code != 404:
+        alias.raise_for_status()
+
+    # No matching live version: publish one. The version body is the activity
+    # definition WITHOUT its id (id is the path segment, not a version field).
+    body = {k: v for k, v in spec.items() if k != "id"}
+    published = requests.post(
+        client.DA + "/activities/" + BLANK_ACTIVITY + "/versions",
+        headers=headers, data=json.dumps(body), timeout=client._HTTP_TIMEOUT)
+    published.raise_for_status()
+    version = published.json().get("version")
+    if not isinstance(version, int) or version < 1:
+        raise RuntimeError("activity version publish returned an unusable version "
+                           + repr(version))
+    return version
+
+
 def ensure_blank_activity(client, dry_run: bool = False) -> dict:
     """Idempotently provision the blank-CREATE Activity + its alias.
 
-    409 on POST /activities means it already exists, which is success, not an
-    error: the Activity body is fixed (the per-run .scr arrives as an argument),
-    so one version serves every run.
+    409 on POST /activities means the Activity NAME already exists, not that
+    the aliased VERSION is still correct. A caller who treated 409 as "done"
+    would keep running whatever body was uploaded first, forever - if that
+    body's commandLine or parameters ever changed (the per-run .scr argument
+    delivery means this is the only drift surface left; see da/blank_lisp.py's
+    activity_body_matches docstring for why `settings` changes can't be
+    detected), this Activity would silently keep executing the OLD recipe.
+    So on 409, read the aliased version's LIVE body back and compare it; only
+    a match makes the 409 a no-op, otherwise publish a new version and repoint
+    the alias, mirroring server/da/blank_dwg.py's _ensure_activity.
     """
     spec = blank_lisp.blank_activity_spec(BLANK_ACTIVITY, client.ENGINE)
     if dry_run:
@@ -229,18 +275,29 @@ def ensure_blank_activity(client, dry_run: bool = False) -> dict:
     headers = dict(client._auth_headers())
     headers["Content-Type"] = "application/json"
     r = requests.post(client.DA + "/activities", headers=headers,
-                      data=json.dumps(spec), timeout=60)
+                      data=json.dumps(spec), timeout=client._HTTP_TIMEOUT)
     if r.status_code == 409:
         created = False
+        version = _aliased_matching_version(client, requests, spec, headers)
     else:
         r.raise_for_status()
         created = True
+        version = 1
     a = requests.post(client.DA + "/activities/" + BLANK_ACTIVITY + "/aliases",
-                      headers=headers, data=json.dumps({"id": client.ALIAS, "version": 1}),
-                      timeout=60)
-    if a.status_code not in (200, 201, 409):
+                      headers=headers,
+                      data=json.dumps({"id": client.ALIAS, "version": version}),
+                      timeout=client._HTTP_TIMEOUT)
+    if a.status_code == 409:
+        # The alias exists and may still point at a stale version. PATCH is the
+        # only way to move it - skipping this is how drift survives a repair.
+        moved = requests.patch(
+            client.DA + "/activities/" + BLANK_ACTIVITY + "/aliases/" + client.ALIAS,
+            headers=headers, data=json.dumps({"version": version}),
+            timeout=client._HTTP_TIMEOUT)
+        moved.raise_for_status()
+    elif a.status_code not in (200, 201):
         a.raise_for_status()
-    return {"activity": BLANK_ACTIVITY, "created": created,
+    return {"activity": BLANK_ACTIVITY, "created": created, "version": version,
             "alias": client.ALIAS, "alias_ok": True}
 
 
