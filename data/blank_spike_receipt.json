@@ -1,0 +1,99 @@
+{
+  "activity": {
+    "alias": "prod",
+    "name": "LeafBlankCreate",
+    "provision": {
+      "activity": "LeafBlankCreate",
+      "alias": "prod",
+      "alias_ok": true,
+      "created": false
+    },
+    "qualified": "iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp.LeafBlankCreate+prod",
+    "result_object": "t/leaf-spike-t302/blank/a9e2377c2da0/output.dwg",
+    "script_object": "t/leaf-spike-t302/blank/a9e2377c2da0/run.scr"
+  },
+  "cost": {
+    "attribution": {
+      "activity": "iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp.LeafBlankCreate+prod",
+      "drawing_id": "01a03460-e021-7fa8-84c3-a6e46f187f0f",
+      "run_id": "a9e2377c2da0",
+      "tenant_id": "leaf-spike-t302",
+      "version": 1
+    },
+    "billable_workitems": 2,
+    "cap": {
+      "max_usd": 0.25,
+      "max_workitems": 4
+    },
+    "per_workitem": [
+      {
+        "dwg_version_tag": "AC1032",
+        "engine_seconds": 2.96,
+        "id": "3649a0c7bea34c33bd1f0042b21a31bd",
+        "label": "create",
+        "output_bytes": 32466,
+        "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/3649a0c7bea34c33bd1f0042b21a31bd/report?<redacted-presigned>",
+        "sha256": "076b2fcdd4fd47b6cda5bdf9a5681612fe6df6c1cbe727892fd1f0dd10e22588",
+        "status": "success",
+        "usd_est": 0.0082
+      },
+      {
+        "engine_seconds": 2.52,
+        "id": "cb10d80fad8f4df5b65702a0e27fe443",
+        "label": "read",
+        "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/cb10d80fad8f4df5b65702a0e27fe443/report?<redacted-presigned>",
+        "status": "success",
+        "usd_est": 0.007
+      }
+    ],
+    "usd_per_hr": 10.0,
+    "usd_total": 0.0152
+  },
+  "create_workitem": {
+    "dwg_version_tag": "AC1032",
+    "engine_seconds": 2.96,
+    "id": "3649a0c7bea34c33bd1f0042b21a31bd",
+    "label": "create",
+    "output_bytes": 32466,
+    "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/3649a0c7bea34c33bd1f0042b21a31bd/report?<redacted-presigned>",
+    "sha256": "076b2fcdd4fd47b6cda5bdf9a5681612fe6df6c1cbe727892fd1f0dd10e22588",
+    "status": "success",
+    "usd_est": 0.0082
+  },
+  "drawing": {
+    "bytes": 32466,
+    "drawing_id": "01a03460-e021-7fa8-84c3-a6e46f187f0f",
+    "sha256": "076b2fcdd4fd47b6cda5bdf9a5681612fe6df6c1cbe727892fd1f0dd10e22588",
+    "tenant_id": "leaf-spike-t302",
+    "version": 1,
+    "version_key": "tenants/leaf-spike-t302/drawings/01a03460-e021-7fa8-84c3-a6e46f187f0f/v/00000001.dwg"
+  },
+  "dry_run": false,
+  "engine": "Autodesk.AutoCAD+26_0",
+  "failure": null,
+  "generated_at": "2026-08-24T15:26:15.708762+00:00",
+  "marker_layer": "LEAF_BLANK_F11C9D2D1E14",
+  "pass": true,
+  "plan_version_ack": "MASTER-PLAN v9 (2026-08-24)",
+  "provenance": {
+    "asserted": true,
+    "geometry": null,
+    "layers_seen": [
+      "0",
+      "LEAF_BLANK_F11C9D2D1E14"
+    ],
+    "marker_layer": "LEAF_BLANK_F11C9D2D1E14"
+  },
+  "read_workitem": {
+    "engine_seconds": 2.52,
+    "id": "cb10d80fad8f4df5b65702a0e27fe443",
+    "label": "read",
+    "reportUrl": "https://dasprod-store.s3.us-east-1.amazonaws.com/workItem/iBZFSm0zj8SGcjm40Xpm7IQHNQMSmNi6rBmAJSp9k7WtCOGp/cb10d80fad8f4df5b65702a0e27fe443/report?<redacted-presigned>",
+    "status": "success",
+    "usd_est": 0.007
+  },
+  "run_id": "a9e2377c2da0",
+  "scope_item": "T3-02",
+  "sha256": "fac9084f90367438e6a345876f5b4af11b58bcea5692c63664692db6dbd4daa1",
+  "spike": "drawing.blank_create"
+}
