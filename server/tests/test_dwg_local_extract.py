@@ -203,6 +203,174 @@ def test_real_dwg2dxf_converts_the_repo_fixture(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# the cage: hard bounds on the native parser child
+# --------------------------------------------------------------------------- #
+# These bytes are attacker-controlled and unauthenticated by design, so the
+# rlimit/no-new-privs cage around dwg2dxf is a SECURITY control, not a tuning
+# knob. What is pinned here is the argv the child is actually launched with —
+# the limits' live enforcement is a kernel property proven against the real
+# binary in the container, not something a unit test can observe.
+_CAGE_TOOLS_PRESENT = all(shutil.which(t) for t in ("prlimit", "setpriv"))
+
+
+def _fake_cage_tools(monkeypatch, present: bool) -> None:
+    """Decide cage-tool availability regardless of the host, so BOTH branches
+    are covered on every platform (Linux CI has util-linux; dev macOS/Windows
+    do not, and neither may silently skip its half of this contract)."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        dwg_convert.shutil, "which",
+        lambda name: (f"/usr/bin/{name}" if present else None)
+        if name in ("prlimit", "setpriv") else real_which(name))
+
+
+def _captured_argv(monkeypatch, tmp_path, **env):
+    """The exact argv converted_dxf() hands subprocess.run, without running it."""
+    seen = {}
+
+    def _fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        raise AssertionError("stop before exec")
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("LEAF_DWG2DXF_BIN", str(_stub_converter(tmp_path)))
+    monkeypatch.setattr(dwg_convert.subprocess, "run", _fake_run)
+    src = tmp_path / "u.dwg"
+    src.write_bytes(MALFORMED_DWG)
+    with pytest.raises(AssertionError, match="stop before exec"):
+        with dwg_convert.converted_dxf(src):
+            pass
+    return seen["argv"]
+
+
+def test_cage_wraps_the_parser_in_prlimit_and_setpriv(monkeypatch, tmp_path):
+    """The child must be launched THROUGH the cage, and the cage must be spelled
+    as an exec chain: prlimit and setpriv each exec their argument, so the whole
+    thing stays ONE process that the wall-clock timeout can still kill."""
+    _fake_cage_tools(monkeypatch, True)
+    argv = _captured_argv(monkeypatch, tmp_path)
+
+    assert argv[0] == "prlimit", f"the parser ran uncaged: {argv}"
+    setpriv = argv.index("setpriv")
+    assert argv[setpriv - 1] == "--", "prlimit needs its -- before the command"
+    assert "--no-new-privs" in argv, (
+        "a corrupted child must not be able to gain privilege via a setuid exec")
+    assert "--inh-caps=-all" in argv
+    # The real binary and its real argv contract survive the wrapping.
+    assert argv[-4:-2] == ["-y", "-o"]
+    assert argv[-1].endswith("u.dwg")
+
+
+def test_cage_limits_track_their_knobs(monkeypatch, tmp_path):
+    _fake_cage_tools(monkeypatch, True)
+    argv = _captured_argv(
+        monkeypatch, tmp_path,
+        LEAF_DWG_CONVERT_MEM_BYTES="123456789",
+        LEAF_DWG_CONVERT_NOFILE="7",
+        LEAF_DWG_CONVERT_NPROC="3",
+        LEAF_DWG_CONVERT_TIMEOUT_S="30",
+        LEAF_DWG_CONVERT_MAX_OUTPUT_BYTES="1000")
+
+    assert "--as=123456789" in argv
+    assert "--nofile=7" in argv
+    assert "--nproc=3" in argv
+    assert "--core=0" in argv
+    # CPU bound sits just above the wall-clock budget so the wall timeout, which
+    # produces the honest TIMEOUT rejection, is what normally fires.
+    assert "--cpu=31" in argv
+    # FSIZE keeps HEADROOM over the output cap so the post-run check — and its
+    # precise "output cap" message — stays reachable instead of being pre-empted
+    # by a SIGXFSZ kill that reports nothing useful.
+    assert "--fsize=5096" in argv
+
+
+def test_cage_mem_limit_zero_disables_only_the_address_space_cap(
+        monkeypatch, tmp_path):
+    _fake_cage_tools(monkeypatch, True)
+    argv = _captured_argv(monkeypatch, tmp_path,
+                          LEAF_DWG_CONVERT_MEM_BYTES="0")
+    assert not [a for a in argv if a.startswith("--as=")]
+    assert "--core=0" in argv and "--nofile=64" in argv
+
+
+def test_malformed_cage_knob_falls_back_to_the_safe_default(
+        monkeypatch, tmp_path):
+    """An operator typo must not take the upload lane down, and must not
+    silently widen a bound either — every default here is the safe value."""
+    _fake_cage_tools(monkeypatch, True)
+    argv = _captured_argv(monkeypatch, tmp_path,
+                          LEAF_DWG_CONVERT_MEM_BYTES="not-a-number",
+                          LEAF_DWG_CONVERT_NOFILE="-5")
+    assert f"--as={2 * 1024 * 1024 * 1024}" in argv
+    assert "--nofile=64" in argv
+
+
+def test_without_the_tools_the_parser_still_runs_bare(monkeypatch, tmp_path):
+    """Dev hosts with no util-linux keep working — but only because they have
+    NOT declared themselves caged (see the fail-closed test below)."""
+    _fake_cage_tools(monkeypatch, False)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    argv = _captured_argv(monkeypatch, tmp_path)
+    assert "prlimit" not in argv and "setpriv" not in argv
+    assert argv[1:3] == ["-y", "-o"]
+
+
+def test_a_deployment_that_requires_the_cage_fails_closed_without_it(
+        monkeypatch, tmp_path):
+    """THE load-bearing one. deploy/Dockerfile.app sets
+    LEAF_DWG_CONVERT_REQUIRE_CAGE=1, so an image that lost util-linux must
+    REFUSE to parse hostile bytes rather than quietly parse them bare — a
+    downgrade that no health check would ever show."""
+    _fake_cage_tools(monkeypatch, False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    monkeypatch.setenv("LEAF_DWG2DXF_BIN", str(_stub_converter(tmp_path)))
+
+    def _never(*args, **kwargs):
+        raise AssertionError("the parser must NOT run without its cage")
+
+    monkeypatch.setattr(dwg_convert.subprocess, "run", _never)
+    src = tmp_path / "u.dwg"
+    src.write_bytes(MALFORMED_DWG)
+    with pytest.raises(dwg_convert.ConvertError) as err:
+        with dwg_convert.converted_dxf(src):
+            pass
+    assert err.value.error_code == "INTERNAL"
+    assert err.value.retryable is False, (
+        "retrying hits the same image with the same missing tools")
+
+
+@pytest.mark.skipif(_REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT,
+                    reason="the real dwg2dxf plus util-linux prlimit/setpriv are not installed on this host")
+def test_real_caged_conversion_still_converts_the_repo_fixture(monkeypatch):
+    """The cage must not cost the honest path anything. Runs the REAL parser
+    under the REAL limits against the repo's real DWG."""
+    monkeypatch.delenv("LEAF_DWG2DXF_BIN", raising=False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    with dwg_convert.converted_dxf(ROOFTOP_DWG) as dxf_path:
+        intake = dxf_intake.parse_dxf_file(dxf_path,
+                                           source_name="rooftop_demo.dwg")
+    assert intake["layers"] and intake["polylines"]
+
+
+@pytest.mark.skipif(_REAL_DWG2DXF is None or not _CAGE_TOOLS_PRESENT,
+                    reason="the real dwg2dxf plus util-linux prlimit/setpriv are not installed on this host")
+def test_real_caged_conversion_refuses_hostile_bytes_cleanly(
+        monkeypatch, tmp_path):
+    """Hostile bytes that clear the 3-byte magic gate must produce a structured
+    rejection — never a hang, and never a crash that takes the worker with it."""
+    monkeypatch.delenv("LEAF_DWG2DXF_BIN", raising=False)
+    monkeypatch.setenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", "1")
+    src = tmp_path / "hostile.dwg"
+    src.write_bytes(b"AC1032" + os.urandom(64 * 1024))
+    with pytest.raises(dwg_convert.ConvertError) as err:
+        with dwg_convert.converted_dxf(src):
+            raise AssertionError("hostile bytes must never yield a DXF")
+    assert err.value.error_code == "BAD_PARAMS"
+
+
+# --------------------------------------------------------------------------- #
 # engine resolution
 # --------------------------------------------------------------------------- #
 def test_engine_default_auto_tracks_converter_availability(monkeypatch, tmp_path):

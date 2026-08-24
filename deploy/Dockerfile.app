@@ -29,14 +29,34 @@ WORKDIR /app
 #   * Built from source because Debian trixie ships NO libredwg package
 #     (verified against this exact base image 2026-08-10: `apt-cache policy/
 #     search libredwg*` empty beside a known-positive control).
-#   * Provenance: the canonical GNU release tarball, version + sha256 pinned
-#     below; GPG signatures live beside it at the same URL.
+#   * Provenance, and why this is NOT the GNU FTP tarball any more. Upstream has
+#     cut no stable release since 0.13.3; ftp.gnu.org/gnu/libredwg/ still ends
+#     there (checked 2026-08-24). Everything after it ships as dated 0.14.NNNN
+#     snapshots on the project's GitHub releases, which is the ONLY channel that
+#     carries the post-0.13.3 memory-safety work. 0.13.3 is therefore not "the
+#     stable choice", it is the last unmaintained point on a dead line.
+#     The pinned sha256 below is the digest upstream publishes for this exact
+#     tarball in the release's own `dist.sha256` asset, independently recomputed
+#     from the download before pinning; `sha256sum -c` re-verifies it at build
+#     time, so a mutated or substituted asset fails the BUILD.
+#   * SECURITY (why the version moved): 0.13.3 carries CVE-2026-9605, a
+#     heap-buffer-overflow whose fix (commit 8f03865f, "decode: fix
+#     decompression overflow") lands in src/decode.c — the code path dwg2dxf
+#     actually executes. 0.13.3 has only the partial `+32+info->size` bound
+#     there; this pin has the full `+size > max_decomp_size` / `> dec.size`
+#     guards. Keep this pin CURRENT: server/dwg_convert.py's cage bounds the
+#     next parser bug, it does not excuse shipping a known one.
+#     (CVE-2026-15182 is dwg_bmp/src/dwg.c — reached only by the `dwgbmp`
+#     program, which this image does not install. Not reachable here.)
 #   * LICENSE (GPL-3.0+): consumed strictly across a process boundary —
 #     subprocess only, never linked or bound into the Python process (the
 #     load-bearing note lives in server/dwg_convert.py). The binary ships only
 #     inside this server image and is never distributed to end users.
 #   * --disable-werror: GCC 14 (trixie) promotes -Walloc-size findings in
-#     0.13.3's encode.c to errors; upstream ships this switch for exactly that.
+#     encode.c to errors; upstream ships this switch for exactly that. Still
+#     required at 0.14.8584 (a build without it was not attempted; the flag is
+#     carried forward, and the pinned build below is daemon-verified green with
+#     it — `dwg2dxf 0.14.8584`, 2026-08-24).
 #   * --disable-shared --disable-bindings: one static binary, no bindings.
 #   * The toolchain is purged in the SAME layer; `dwg2dxf --version` at the
 #     end is the build-time proof the binary landed and runs.
@@ -49,18 +69,18 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
  && apt-get update \
  && apt-get install -y --no-install-recommends git curl ca-certificates \
       xz-utils gcc make libc6-dev \
- && curl -fsSL https://ftp.gnu.org/gnu/libredwg/libredwg-0.13.3.tar.xz \
+ && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \
       -o /tmp/libredwg.tar.xz \
- && echo "83f1f6e78a744777a481ff4520e4cef3f8ac4b2c1c25671077ca12fe81e8816e  /tmp/libredwg.tar.xz" \
+ && echo "23330d9f887ebb93ff9512751c0f77a905a16b11ba659787074469c8f1581402  /tmp/libredwg.tar.xz" \
       | sha256sum -c - \
  && tar -xJf /tmp/libredwg.tar.xz -C /tmp \
- && cd /tmp/libredwg-0.13.3 \
+ && cd /tmp/libredwg-0.14.8584 \
  && ./configure --disable-shared --disable-bindings --disable-werror \
       > /tmp/libredwg-configure.log 2>&1 \
  && make -j"$(nproc)" > /tmp/libredwg-make.log 2>&1 \
  && install -s -m755 programs/dwg2dxf /usr/local/bin/dwg2dxf \
  && cd / \
- && rm -rf /tmp/libredwg-0.13.3 /tmp/libredwg.tar.xz \
+ && rm -rf /tmp/libredwg-0.14.8584 /tmp/libredwg.tar.xz \
       /tmp/libredwg-configure.log /tmp/libredwg-make.log \
  && apt-get purge -y curl xz-utils gcc make libc6-dev \
  && apt-get autoremove -y \
@@ -162,6 +182,7 @@ ENV APS_LIVE=0 \
     LEAF_DRAWING_STORE=legacy \
     LEAF_UPLOAD_STORE=legacy \
     LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
+    LEAF_DWG_CONVERT_REQUIRE_CAGE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
