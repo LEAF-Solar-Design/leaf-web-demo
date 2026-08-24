@@ -41,6 +41,8 @@ import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
 import WorkspaceBootstrapGate from '../components/WorkspaceBootstrapGate.jsx'
 import ProjectLifecyclePanel from '../projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from '../projects/flag.js'
+import CadEditSurface from '../cadedit/CadEditSurface.jsx'
+import { ENV_CAD_EDIT } from '../cadedit/flag.js'
 import IosSurface from '../ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from '../ios/flag.js'
 import useIosSurface from '../ios/useIosSurface.js'
@@ -1521,6 +1523,19 @@ export default function ToolCast({
               projectName={currentProjectName}
               onProjectDeleted={forgetDeletedProject}
             />
+          )}
+          {/* Browser CAD editing surface, behind cad_edit. Same shape as the
+              lifecycle fence above and for the same reason: ENV_CAD_EDIT is
+              the FIRST operand, so a flag-off build folds the whole
+              expression away and neither the surface nor the DXF engine it
+              pulls in reaches the bundle (web/src/cadedit/bundleFence.test.js
+              is the oracle). !PUBLIC_DEMO and !transportMock keep it off the
+              public /try demo and off any mock-transport session; canOperate
+              and an open project are the same operator gates the lifecycle
+              panel uses. */}
+          {ENV_CAD_EDIT && leftView === 'workspace'
+            && !PUBLIC_DEMO && !transportMock && canOperate && workspace.openProjectId && (
+            <CadEditSurface />
           )}
           {/* Consume-only iOS readiness (cards D-1..D-4). Rendered on the
               workspace context (NOT flag-first, unlike the lifecycle fence
