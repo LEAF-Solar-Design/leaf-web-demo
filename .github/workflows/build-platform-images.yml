@@ -1485,6 +1485,14 @@ jobs:
           # env blocks) AND set config-rail LEAF_IOS_SURFACE_ENABLED=1 to take
           # the consume-only iOS surface live. Rollback = set back to "0".
           VITE_IOS_SURFACE: "0"
+          # cad_edit flip: OFF ("0"). The CAD editing surface stays dormant;
+          # this block exists so the flag is SETTABLE at build time rather than
+          # unsettable. Build-time Vite flag read as the string '1', so this env
+          # block is its build-time rail; flip to "1" here (both web-build env
+          # blocks) AND in deploy/Dockerfile.web to take it live. NOTE: one
+          # shared web image serves BOTH staging and production, so enabling it
+          # is an all-environments decision. Rollback = set back to "0".
+          VITE_CAD_EDIT: "0"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -2003,6 +2011,14 @@ jobs:
           # env blocks) AND set config-rail LEAF_IOS_SURFACE_ENABLED=1 to take
           # the consume-only iOS surface live. Rollback = set back to "0".
           VITE_IOS_SURFACE: "0"
+          # cad_edit flip: OFF ("0"). The CAD editing surface stays dormant;
+          # this block exists so the flag is SETTABLE at build time rather than
+          # unsettable. Build-time Vite flag read as the string '1', so this env
+          # block is its build-time rail; flip to "1" here (both web-build env
+          # blocks) AND in deploy/Dockerfile.web to take it live. NOTE: one
+          # shared web image serves BOTH staging and production, so enabling it
+          # is an all-environments decision. Rollback = set back to "0".
+          VITE_CAD_EDIT: "0"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail

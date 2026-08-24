@@ -83,9 +83,8 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
   const ensureBoundary = useCallback(() => {
     if (boundaryRef.current) return boundaryRef.current
     // The resolved flag is passed EXPLICITLY rather than left to
-    // EngineBoundary's env fallback: that fallback reads VITE_CAD_EDIT as
-    // 'true', while this surface's build fence reads it as '1'. Passing the
-    // already-resolved boolean makes the two spellings irrelevant here.
+    // EngineBoundary's env fallback. Both now read VITE_CAD_EDIT as the
+    // string '1', so this is belt-and-braces rather than a spelling dodge.
     const boundary = new EngineBoundary({ flags: { cad_edit: true }, createWorker })
     boundary.onMessage((message) => {
       if (message.type === 'ready') return

@@ -52,8 +52,11 @@ export function isCadEditEnabled(flags) {
     return !!flags.cad_edit
   }
   if (typeof import.meta !== 'undefined' && import.meta.env) {
+    // Repo convention: every VITE_* feature flag is the STRING '1' — see
+    // web/src/cadedit/flag.js, web/src/projects/flag.js, web/src/ios/flag.js,
+    // and the "1"/"0" values baked by deploy/Dockerfile.web. Do not drift.
     const value = import.meta.env.VITE_CAD_EDIT
-    return value === 'true' || value === true
+    return value === '1' || value === true
   }
   return false
 }
