@@ -166,10 +166,14 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         try:
             import requests
             import broker_client
+            # A real agent build routinely exceeds two minutes, so the proxy wait is
+            # env-tunable; the historical 120 s stays the default.
+            author_timeout = float(os.environ.get("LEAF_AUTHOR_TIMEOUT_S", "120"))
             resp = requests.post(f"{harness_url}/author",
                                  json={"description": req.description,
                                        "tenant_id": str(tenant)},
-                                 headers=broker_client.harness_headers(), timeout=120)
+                                 headers=broker_client.harness_headers(),
+                                 timeout=author_timeout)
         except Exception as exc:
             print(f"[author] harness unreachable, templated fallback: {exc}")
         if resp is not None:
