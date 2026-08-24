@@ -41,11 +41,42 @@ _LISP = r"""(setvar "CMDECHO" 0)
 # a timeout, and DA uploads Result only after a clean exit, so the extraction
 # output is thrown away even though the LISP already wrote it.
 #
-# QUIT_SAVED marks the document unmodified first, so QUIT has nothing to ask
-# about. It is also strictly safer for DWG (it cannot write back to the user's
-# uploaded bytes), but the LIVE LeafExtract+prod Activity still carries
-# QUIT_DEFAULT and is deliberately NOT re-provisioned here — see
-# client.extract_dxf_activity_spec.
+# CORRECTION (2026-08-24, real accoreconsole 2026 W.164.0.0, $0, reproduced
+# independently twice — once against a dirtied real DWG, once running the
+# ACTUAL extract_dxf_activity_spec script against a real DXF-opened drawing):
+# QUIT_SAVED does NOT mark the document unmodified. `vlax-get-acad-object`
+# returns nil in this headless/DA sandbox, so `vla-put-Saved` throws
+# `; error: bad argument type: VLA-OBJECT nil` every time — the mark-saved
+# call is a silent no-op, not a working safety mechanism. The paragraph above
+# describing it as "marks the document unmodified first" was wrong about the
+# mechanism.
+#
+# What IS true, and reproduces: QUIT_SAVED is the LAST line of the script, so
+# when its command errors, accoreconsole has nothing left to execute and exits
+# at script EOF regardless — clean exit, no hang, and the LISP's already-written
+# Result output survives. The safety property is "the script ends here no
+# matter what," not "the document is actually unmodified." Same reproduction
+# also found `(setvar "DBMOD" 0)` does NOT work as a headless-safe substitute —
+# AutoCAD rejects it outright (`; error: AutoCAD variable setting rejected:
+# "DBMOD" 0`) — so that is not a viable replacement either.
+#
+# OPEN QUESTION, not resolved here: this same session's reproduction could NOT
+# reproduce the ".dxf QUIT _Y HANGS forever" row above against a trivial
+# synthetic DXF (single LINE, R12 header, `vendor/acadrust-worker/fixtures/
+# one_line.dxf`), with or without an explicit DBMOD-dirtying command first —
+# plain `(command "_.QUIT" "_Y")` also exited cleanly (~15-17s, "; error:
+# Function cancelled", no hang). That does not overturn the original
+# 2026-07-24 measurement above, which may have used more complex/realistic
+# DXF content that AutoCAD tracks as modified differently — it is flagged here
+# as unresolved so a future session tests QUIT_DEFAULT against a real guest
+# DXF before drawing any conclusion about removing QUIT_SAVED.
+#
+# QUIT_SAVED is left in place pending that follow-up: it is harmless (errors
+# into a clean EOF exit, same as QUIT_DEFAULT would), and swapping the LIVE
+# LeafExtract+prod / LeafExtractDxf Activity's baked-in script requires a new
+# Activity version + alias repoint (see client.extract_dxf_activity_spec /
+# blank_lisp.activity_body_matches), which is not warranted to eliminate a
+# no-op line with no measured behavioral difference.
 QUIT_DEFAULT = '(command "_.QUIT" "_Y")'
 QUIT_SAVED = ('(vl-load-com)'
               '(vla-put-Saved (vla-get-ActiveDocument (vlax-get-acad-object)) :vlax-true)'
