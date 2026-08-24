@@ -292,13 +292,75 @@ def create_project(
         return project
 
 
+def _grant_creator_project_membership(
+    cur: Any, org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID,
+) -> None:
+    """Give a project's creator the membership its lifecycle authority requires.
+
+    Project authority is membership-only by design (project_lifecycle
+    ._require_project_role: tenant identity "never grants authority over every
+    project in that tenant"), so a project row written WITHOUT this row can never
+    be deleted, exported, cloned, or membership-managed by anyone at all --
+    its creator included. Mirrors create_blank_project: the project role is the
+    creator's own tenant role, and the creator is its own inviter.
+
+    Fails closed: no active tenant binding -> PermissionError, and no membership.
+    Never resurrects a revoked membership -- an existing row of ANY status
+    (including one this org deliberately revoked) is left exactly as it is, so
+    the get-or-create replay path can backfill a genuine orphan without handing
+    a removed member their access back.
+    """
+    cur.execute(
+        "SELECT role FROM identity_bindings "
+        "WHERE platform_tenant_id = %(org_id)s AND binding_id = %(binding_id)s "
+        "AND status = 'active' FOR SHARE",
+        {"org_id": org_id, "binding_id": binding_id},
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise PermissionError("creator has no active identity binding in this organization")
+    cur.execute(
+        "SELECT membership_id FROM project_member_bindings "
+        "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        "AND binding_id = %(binding_id)s FOR UPDATE",
+        {"org_id": org_id, "project_id": project_id, "binding_id": binding_id},
+    )
+    if cur.fetchone() is not None:
+        return
+    cur.execute(
+        "INSERT INTO project_member_bindings "
+        "(membership_id, org_id, project_id, binding_id, role, invited_by_binding_id) "
+        "VALUES (%(membership_id)s, %(org_id)s, %(project_id)s, %(binding_id)s, "
+        "%(role)s, %(binding_id)s) "
+        # A concurrent creator of the same name may have raced an active row past
+        # the FOR UPDATE probe above; keep theirs rather than raise a 500.
+        "ON CONFLICT (org_id, project_id, binding_id) WHERE status = 'active' "
+        "DO NOTHING",
+        {
+            "membership_id": new_uuid(),
+            "org_id": org_id,
+            "project_id": project_id,
+            "binding_id": binding_id,
+            "role": str(row["role"]),
+        },
+    )
+
+
 def get_or_create_project(
     org_id: uuid.UUID,
     name: str,
     *,
     authority_mode: Optional[str] = None,
+    creator_binding_id: Optional[uuid.UUID] = None,
 ) -> tuple[Project, bool]:
-    """Create one active normalized project name per org, or replay its UUID."""
+    """Create one active normalized project name per org, or replay its UUID.
+
+    ``creator_binding_id`` is the actor accountable for the project. When given,
+    that actor's project membership is written in the SAME transaction as the
+    project insert, because project lifecycle authority is membership-only and a
+    project without it is permanently unmanageable. It is None only where no
+    identity was proven (the auth-off dev seam), which keeps that path unchanged.
+    """
     if authority_mode is not None and authority_mode not in AUTHORITY_MODES:
         raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
     project_id = new_uuid()
@@ -348,6 +410,12 @@ def get_or_create_project(
                 )
                 if cur.fetchone()["authority_mode"] != authority_mode:
                     raise ValueError("existing project authority mode does not match bootstrap policy")
+            if creator_binding_id is not None:
+                # Same transaction as the project insert: the project row and the
+                # membership that makes it manageable commit together or not at all.
+                _grant_creator_project_membership(
+                    cur, org_id, project.project_id, creator_binding_id,
+                )
             return project, created
 
 

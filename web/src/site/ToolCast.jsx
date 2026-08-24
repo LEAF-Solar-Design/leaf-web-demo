@@ -105,14 +105,16 @@ const MODE_DRAWING_ID = PROOF_MODE
       : null
 const catalogServices = { getTools, getCapabilities, routePrompt: nlPrompt }
 // Creation stays on POST /api/projects. The lifecycle factory
-// (POST /api/projects/blank) is the better route on paper - it mints the owner
-// membership binding - but it goes through _get_lifecycle_actor, which REQUIRES
+// (POST /api/projects/blank) goes through _get_lifecycle_actor, which REQUIRES
 // X-Actor-Binding-Id whenever LEAF_AUTH_LIVE is off (the default, platform/
 // deps.py auth_live). Nothing in the browser can produce that id, so routing
 // creation there breaks project creation in every auth-off deployment, flag on
-// or off. Projects created here carry no project membership row, so the
-// lifecycle panel below reports the server's own 403 for them; that is a
-// truthful read of a real tenancy gap, not a client-side failure to try.
+// or off. POST /api/projects now mints the creator's project membership from
+// the VERIFIED subject (platform/store.py _grant_creator_project_membership),
+// so a project created here under live auth is fully manageable by the person
+// who created it. With auth off no identity is proven, no membership is
+// invented, and the lifecycle panel below still reports the server's own 403 -
+// a truthful read of the demo seam, not a client-side failure to try.
 const workspaceServices = { createOrg, listProjects, createProject, openProject }
 const UNIFIED_TOUR_STEPS = [
   {

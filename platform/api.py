@@ -268,15 +268,30 @@ def _lifecycle_response(operation):
 
 
 @router.post("/projects")
-def create_project(body: CreateProjectBody, org_id: uuid.UUID = Depends(get_write_org_id)):
+def create_project(
+    body: CreateProjectBody,
+    actor: platform_deps.WriteActor = Depends(platform_deps.get_write_actor),
+):
     # This route is the canonical platform project factory. Authority remains a
     # server policy and cannot be selected by request headers or body fields.
+    #
+    # The creator's project membership is written WITH the project row. Project
+    # lifecycle authority is membership-only (project_lifecycle
+    # ._require_project_role), so a project created here without it could never
+    # be deleted, exported, or shared by ANYONE, its creator included -- observed
+    # live on staging 2026-08-24 as POST /api/projects 200 followed by DELETE
+    # /api/projects/{id} 403 for the same verified subject. The auth-off dev seam
+    # proves no identity, so it stays as it was unless the caller opts in by
+    # sending X-Actor-Binding-Id.
     try:
         project, created = store.get_or_create_project(
-            org_id,
+            actor.org_id,
             body.name,
             authority_mode="postgres_canonical",
+            creator_binding_id=actor.binding_id,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"project": project.to_dict(), "created": created}

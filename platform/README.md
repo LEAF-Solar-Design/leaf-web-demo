@@ -171,6 +171,23 @@ response adds `created`. The migration fails closed if historical active
 duplicates exist before it installs the uniqueness constraint. See
 `docs/workspace-project-bootstrap.md` for the app and provider binding process.
 
+This route is the canonical project factory, and it writes the creator's
+`project_member_bindings` row in the SAME transaction as the project insert.
+That is not a convenience: project lifecycle authority is membership-only
+(`project_lifecycle._require_project_role` — tenant identity never grants
+authority over every project in the tenant), so a project row created without
+that membership can never be deleted, exported, cloned, or membership-managed by
+anyone at all, its creator included. The creator's project role mirrors
+`create_blank_project`: it is the creator's own tenant role, and the creator is
+its own inviter. A get-or-create replay backfills a membership that is missing
+entirely, and never resurrects one the org deliberately revoked.
+
+The actor comes from the verified Auth0 subject under `LEAF_AUTH_LIVE=1`. With
+auth off no identity is proven, so no membership is invented and the demo seam is
+unchanged; a dev harness that wants the same manageable project may opt in by
+sending `X-Actor-Binding-Id` (with auth off the org is already client-supplied,
+so that header grants no authority the caller did not already hold).
+
 ## Open integration note — orgs-table ownership
 
 The chosen dev DB (`leaf-portal-db`) already contains a Prisma-style `Organization`

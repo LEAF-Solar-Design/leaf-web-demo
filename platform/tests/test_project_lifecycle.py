@@ -2,14 +2,84 @@
 from __future__ import annotations
 
 import json
+import pathlib
+import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 from psycopg.errors import ObjectNotInPrerequisiteState
 
 from leaf_platform import project_lifecycle, store
 from leaf_platform.db import cursor
+
+
+# --------------------------------------------------------------------------- #
+# Hermetic live-auth harness: a throwaway RS256 keypair and a local JWKS file,
+# so the LIVE identity path (the one the browser ProjectSwitcher actually takes)
+# is exercised here with no Auth0 and no network. Same pattern as
+# platform/tests/test_wave_hardening_1b.py and server/tests/test_wave5.py.
+# --------------------------------------------------------------------------- #
+_ISS = "https://leaf-lifecycle.example/"
+_AUD = "https://api.leaf-lifecycle.example"
+_NS = "https://leafdesign.ai/"
+_KID = "leaf-lifecycle-key-1"
+
+_LIVE_PRIV = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_LIVE_PRIV_PEM = _LIVE_PRIV.private_bytes(
+    serialization.Encoding.PEM,
+    serialization.PrivateFormat.PKCS8,
+    serialization.NoEncryption(),
+)
+_LIVE_JWK = json.loads(RSAAlgorithm.to_jwk(_LIVE_PRIV.public_key()))
+_LIVE_JWK.update({"kid": _KID, "alg": "RS256", "use": "sig"})
+_LIVE_JWKS_FILE = pathlib.Path(
+    tempfile.mkdtemp(prefix="leaf-lifecycle-auth-")
+) / "jwks.json"
+_LIVE_JWKS_FILE.write_text(json.dumps({"keys": [_LIVE_JWK]}), encoding="utf-8")
+
+
+@pytest.fixture
+def live_auth(monkeypatch):
+    """Turn Auth0 verification ON, pointed at the local RS256 JWKS (no network)."""
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_AUTH0_ISSUER", _ISS)
+    monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", _AUD)
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", _NS)
+    monkeypatch.setenv("LEAF_AUTH0_JWKS_FILE", str(_LIVE_JWKS_FILE))
+    yield
+
+
+def _bearer(org_id, subject: str, key: str | None = None) -> dict:
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": _ISS, "aud": _AUD, "iat": now, "exp": now + 3600,
+            "sub": subject, _NS + "tenant_id": "tenant-lifecycle",
+            _NS + "org_id": str(org_id),
+        },
+        _LIVE_PRIV_PEM, algorithm="RS256", headers={"kid": _KID},
+    )
+    headers = {"Authorization": "Bearer " + token}
+    if key is not None:
+        headers["Idempotency-Key"] = key
+    return headers
+
+
+def _membership_rows(org_id, project_id):
+    with cursor() as cur:
+        cur.execute(
+            "SELECT binding_id, role, status FROM project_member_bindings "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "ORDER BY created_at, membership_id",
+            {"org_id": org_id, "project_id": project_id},
+        )
+        return cur.fetchall()
 
 
 def _binding(org_id, subject: str, role: str):
@@ -419,3 +489,183 @@ def test_blank_creation_refuses_a_taken_name_as_a_conflict_not_a_crash(
     )
     assert second.status_code == 409, second.text
     assert "already exists" in second.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/projects -- the canonical project factory the browser ProjectSwitcher
+# calls. It used to write the project row with NO project_member_bindings row.
+# Lifecycle authority is membership-only, so every project born through this
+# route was permanently unmanageable: staging 2026-08-24 showed POST 200 followed
+# by DELETE 403 for the SAME verified Auth0 subject, leaving an orphan row only
+# the operator-gated offboarding hard delete could remove.
+# --------------------------------------------------------------------------- #
+def test_live_auth_project_factory_creator_can_delete_what_it_created(
+    client, make_org, live_auth,
+):
+    """THE regression: live-auth create via /api/projects, then DELETE by the
+    same verified subject, must succeed rather than 403."""
+    org = make_org("Factory live auth")
+    subject = f"auth0|factory-live-{uuid.uuid4()}"
+    owner = _binding(org.org_id, subject, "owner")
+
+    created = client.post(
+        "/api/projects",
+        json={"name": f"Switcher project {uuid.uuid4()}"},
+        headers=_bearer(org.org_id, subject),
+    )
+    assert created.status_code == 200, created.text
+    project_id = created.json()["project"]["project_id"]
+
+    # The creator holds an owner membership on its own project ...
+    rows = _membership_rows(org.org_id, project_id)
+    assert [(str(r["binding_id"]), r["role"], r["status"]) for r in rows] == [
+        (str(owner.binding_id), "owner", "active"),
+    ]
+
+    # ... so every membership-gated lifecycle route now answers it.
+    snapshot = client.get(
+        f"/api/projects/{project_id}/lifecycle",
+        headers=_bearer(org.org_id, subject),
+    )
+    assert snapshot.status_code == 200, snapshot.text
+    assert snapshot.json()["viewer"]["role"] == "owner"
+
+    deleted = client.delete(
+        f"/api/projects/{project_id}",
+        headers=_bearer(org.org_id, subject, f"delete-{uuid.uuid4()}"),
+    )
+    assert deleted.status_code == 200, deleted.text
+
+
+def test_live_auth_project_factory_membership_is_scoped_to_its_creator(
+    client, make_org, live_auth,
+):
+    """The creator's row is the ONLY one written: a tenant owner who did not
+    create the project still has no project authority over it."""
+    org = make_org("Factory live scope")
+    creator_subject = f"auth0|factory-creator-{uuid.uuid4()}"
+    bystander_subject = f"auth0|factory-bystander-{uuid.uuid4()}"
+    _binding(org.org_id, creator_subject, "owner")
+    _binding(org.org_id, bystander_subject, "owner")
+
+    created = client.post(
+        "/api/projects",
+        json={"name": f"Creator only {uuid.uuid4()}"},
+        headers=_bearer(org.org_id, creator_subject),
+    )
+    assert created.status_code == 200, created.text
+    project_id = created.json()["project"]["project_id"]
+
+    assert client.get(
+        f"/api/projects/{project_id}/lifecycle",
+        headers=_bearer(org.org_id, bystander_subject),
+    ).status_code == 403
+    assert client.delete(
+        f"/api/projects/{project_id}",
+        headers=_bearer(org.org_id, bystander_subject, f"delete-{uuid.uuid4()}"),
+    ).status_code == 403
+
+
+def test_project_factory_without_an_actor_header_keeps_the_dev_seam(
+    client, make_org,
+):
+    """Auth off proves no identity, so the documented header-only demo seam is
+    unchanged: the project is created and no membership is invented for it."""
+    org = make_org("Factory dev seam")
+    created = client.post(
+        "/api/projects",
+        json={"name": f"Headerless {uuid.uuid4()}"},
+        headers={"X-Org-Id": str(org.org_id)},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["created"] is True
+    assert _membership_rows(org.org_id, created.json()["project"]["project_id"]) == []
+
+
+def test_project_factory_dev_seam_binds_an_opted_in_actor(client, make_org):
+    """With auth off the org is already client-supplied, so an explicit
+    X-Actor-Binding-Id grants nothing new -- it only records who created the row
+    so a dev harness gets the same manageable project a live caller gets."""
+    org = make_org("Factory dev actor")
+    editor = _binding(org.org_id, f"factory-dev-editor-{uuid.uuid4()}", "editor")
+
+    created = client.post(
+        "/api/projects",
+        json={"name": f"Dev actor {uuid.uuid4()}"},
+        headers=_headers(org.org_id, editor.binding_id),
+    )
+    assert created.status_code == 200, created.text
+    project_id = created.json()["project"]["project_id"]
+
+    # Mirrors create_blank_project: the project role IS the creator's tenant
+    # role, so a tenant editor gets editor, not a silent promotion to owner.
+    rows = _membership_rows(org.org_id, project_id)
+    assert [(str(r["binding_id"]), r["role"], r["status"]) for r in rows] == [
+        (str(editor.binding_id), "editor", "active"),
+    ]
+    assert client.delete(
+        f"/api/projects/{project_id}",
+        headers=_headers(org.org_id, editor.binding_id, f"delete-{uuid.uuid4()}"),
+    ).status_code == 200
+
+
+def test_project_factory_replay_backfills_an_orphan_but_never_a_revoked_member(
+    client, make_org,
+):
+    """get-or-create replays. A replay must repair a project that has NO row for
+    the caller (the orphans this defect already shipped), and must never hand a
+    deliberately revoked member their access back."""
+    org = make_org("Factory replay")
+    owner = _binding(org.org_id, f"factory-replay-owner-{uuid.uuid4()}", "owner")
+    editor = _binding(org.org_id, f"factory-replay-editor-{uuid.uuid4()}", "editor")
+    name = f"Replay project {uuid.uuid4()}"
+
+    # An orphan exactly as the defect shipped it: created with no membership.
+    orphaned = client.post(
+        "/api/projects", json={"name": name},
+        headers={"X-Org-Id": str(org.org_id)},
+    )
+    assert orphaned.status_code == 200, orphaned.text
+    project_id = orphaned.json()["project"]["project_id"]
+    assert _membership_rows(org.org_id, project_id) == []
+
+    # Replay by an identified caller backfills the missing membership.
+    replay = client.post(
+        "/api/projects", json={"name": name},
+        headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["project"]["project_id"] == project_id
+    assert [r["role"] for r in _membership_rows(org.org_id, project_id)] == ["owner"]
+
+    invited = client.post(
+        f"/api/projects/{project_id}/members",
+        json={"binding_id": str(editor.binding_id), "role": "editor"},
+        headers=_headers(org.org_id, owner.binding_id, f"invite-{uuid.uuid4()}"),
+    )
+    assert invited.status_code == 201, invited.text
+    membership_id = invited.json()["member"]["membership_id"]
+
+    revoked = client.delete(
+        f"/api/projects/{project_id}/members/{membership_id}",
+        headers=_headers(org.org_id, owner.binding_id, f"revoke-{uuid.uuid4()}"),
+    )
+    assert revoked.status_code == 200, revoked.text
+
+    # THE escalation this must not permit: the revoked editor re-POSTs the same
+    # project name and rides the replay path back into the project.
+    reentry = client.post(
+        "/api/projects", json={"name": name},
+        headers=_headers(org.org_id, editor.binding_id),
+    )
+    assert reentry.status_code == 200, reentry.text
+    editor_rows = [
+        r for r in _membership_rows(org.org_id, project_id)
+        if str(r["binding_id"]) == str(editor.binding_id)
+    ]
+    assert [r["status"] for r in editor_rows] == ["revoked"], editor_rows
+    assert client.delete(
+        f"/api/projects/{project_id}",
+        headers=_headers(org.org_id, editor.binding_id, f"delete-{uuid.uuid4()}"),
+    ).status_code == 403

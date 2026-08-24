@@ -154,9 +154,10 @@ function mutation(method, body) {
 // POST /api/projects/blank {name} -> {project:{project_id,name,status,profile},
 // receipt, replayed}. The idempotent blank-browser-entry factory
 // (platform/project_lifecycle.py create_blank_project) and the ONE project
-// creation route this surface uses — /api/projects (get_or_create_project)
-// mints no lifecycle receipt and no owner membership binding, so a project made
-// through it is invisible to every route below.
+// creation route this surface uses. The generic /api/projects
+// (get_or_create_project) mints no lifecycle receipt; it DOES now write the
+// creator's membership binding under live auth, so a project made through it is
+// no longer invisible to the routes below, but it is still receipt-less.
 export async function createBlankProject(name, orgId) {
   const trimmed = String(name ?? '').trim()
   if (!trimmed) throw new Error('A project needs a name before it can be created.')
