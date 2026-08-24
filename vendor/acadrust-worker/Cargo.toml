@@ -8,7 +8,7 @@ license = "MPL-2.0"
 # for the browser. It never ships acadrust source itself; it links it as a
 # dependency, which keeps this repo's own SPDX license clean (MPL-2.0 is
 # file-scoped copyleft, not viral to the linking crate) while still keeping
-# the whole worker isolated in engine/acadrust-worker/ per the day-1 spike's
+# the whole worker isolated in vendor/acadrust-worker/ per the day-1 spike's
 # isolation goal.
 
 [lib]
@@ -16,13 +16,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-# Pinned to the same shape day 1 verified compiles clean for
-# wasm32-unknown-unknown (see ../../.claude/drumline/leaf-plan/postmortems/spike-kimi-day1.md,
-# kept out of this repo — this comment is the carried summary). No rev is
-# pinned yet: day 1 did not record the exact commit SHA it tested against.
-# OPEN QUESTION (carried, see docs/ACADRUST-SPIKE-DAY2.md OQ-1): pin an exact
-# rev once a toolchain in THIS workdir can resolve and lock it.
-acadrust = { git = "https://github.com/hakanaktt/acadrust.git" }
+# OQ-1 RESOLVED (day 3): pinned to the exact commit SHA cloned and inspected
+# in this workdir (C:\tmp\spike-day3-c6477dd5-crate), HEAD of the crate's
+# `main` branch at clone time. `rev =` (a git dependency), not a vendored
+# path dependency: the crate is a plain, unmodified upstream dependency with
+# no local patches, so `git` + `rev` is the minimal pin that still resolves
+# through normal `cargo update` semantics later. A vendored path dependency
+# would be the right call only if this crate needed local patches, which it
+# does not.
+acadrust = { git = "https://github.com/hakanaktt/acadrust.git", rev = "18500466e7e4392ef830fdc59cede75fa3794f2b" }
 # Day 1's exact fix for acadrust's transitive getrandom wall on
 # wasm32-unknown-unknown (ahash pulls in getrandom 0.3 at runtime-rng init;
 # the default backend refuses to compile for wasm32 without an explicit
@@ -33,6 +35,9 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # shape bindings.mjs's plain-array stand-in exposes.
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
+# Direct dep so `serde::Serialize` is importable (serde_json/serde-wasm-bindgen
+# only re-export it transitively, not by name, under edition 2021 resolution).
+serde = "1"
 
 [profile.release]
 opt-level = "z"   # size, not speed: this ships to a browser Worker over the wire

@@ -12,14 +12,34 @@
 // A real deployment would wire this into engineWorker.js's own worker-side
 // branch (today an echo loop with no engine); that wiring is future work —
 // this card's file boundary excludes editing engineWorker.js.
+//
+// Day 3: env switch (CAD_ENGINE_REAL_WASM=1) loads the REAL compiled
+// wasm-bindgen output (pkg-node/acadrust_worker.js, produced by
+//   RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+//     wasm-pack build --release --target nodejs vendor/acadrust-worker --out-dir pkg-node
+// — see docs/ACADRUST-SPIKE-DAY3.md) instead of the JS-native stand-in
+// (bindings.mjs). Both expose the identical 1:1 surface (parseDxf/writeDxf/
+// bytesEqual, `parsed.entities` as an array-like getter) by construction —
+// see src/lib.rs's module doc — so this is a lazy module swap, not a
+// rewrite of the message loop below. Lazy (dynamic import inside getEngine,
+// not a static top-level import) so a workdir that never built pkg-node/
+// still runs the default stand-in path without error.
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { parseDxf, writeDxf, bytesEqual } from './bindings.mjs'
-
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+const USE_REAL_WASM = process.env.CAD_ENGINE_REAL_WASM === '1'
+
+let enginePromise = null
+function getEngine() {
+  if (enginePromise) return enginePromise
+  enginePromise = USE_REAL_WASM
+    ? import('./pkg-node/acadrust_worker.js')
+    : import('./bindings.mjs')
+  return enginePromise
+}
 
 // Fixture lookup by documentId. A real browser build would fetch or inline
 // these instead of node:fs; node:fs is this Node-run spike's stand-in for
@@ -30,7 +50,7 @@ const FIXTURES = {
   'one_line.dxf': path.join(HERE, 'fixtures', 'one_line.dxf'),
 }
 
-export function handleMessage(raw) {
+export async function handleMessage(raw) {
   if (!raw || typeof raw !== 'object') {
     return { type: 'error', message: 'bad_message' }
   }
@@ -44,6 +64,7 @@ export function handleMessage(raw) {
     if (!fixturePath) {
       return { type: 'error', message: `unknown_document:${raw.documentId}` }
     }
+    const { parseDxf, writeDxf, bytesEqual } = await getEngine()
     const original = new Uint8Array(readFileSync(fixturePath))
     const parsed = parseDxf(original)
     const written = writeDxf(parsed)

@@ -1200,7 +1200,14 @@ def build_suites() -> List[Suite]:
         # measured count, not a cross-environment minimum. Measured on this
         # tree 2026-08-17: 24 files, 180 tests, `npm run test:unit` in web/.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 180),
+              [_npm(), "run", "test:unit"], 180,
+              allowed_vitest_skips=(
+                  # Day-3 CAD engine real-build round trip: needs a compiled
+                  # wasm artifact, which needs a Rust toolchain, so it exists
+                  # only on a machine that ran the build and never on a runner.
+                  # Opt in with CAD_ENGINE_REAL_WASM=1. One test.
+                  ("src/cad/engineWasmHarness.realwasm.test.js", 1),
+              )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
@@ -1468,7 +1475,13 @@ def parse_vitest(text: str) -> dict:
     got = passed + failed + skipped
     skipped_files: list[tuple[str, int]] = []
     for output_line in t.splitlines():
-        match = re.search(r"(\S+\.test\.ts).*?(\d+) skipped", output_line)
+        # Every vitest test-file extension this repo actually uses, not just
+        # .test.ts: web/ is almost entirely .test.js / .test.jsx, so the
+        # ts-only pattern made a skip in ANY web test unnameable, and an
+        # unnameable skip trips the "reported N but named 0" rule below on a
+        # correctly-declared skip. The rule is right; the pattern was partial.
+        match = re.search(r"(\S+\.test\.(?:ts|tsx|js|jsx|mjs|cjs)).*?(\d+) skipped",
+                          output_line)
         if match:
             skipped_files.append((match.group(1).replace("\\", "/"), int(match.group(2))))
     return {"passed": passed, "failed": failed, "skipped": skipped, "got": got,
