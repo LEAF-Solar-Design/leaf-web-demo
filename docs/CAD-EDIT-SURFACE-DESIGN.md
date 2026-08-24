@@ -187,11 +187,13 @@ whole surface. `!PUBLIC_DEMO` and `!transportMock` keep it off the public
 `/try` demo and off any mock-transport session; `canOperate` and an open
 project are the same operator gates the lifecycle panel uses.
 
-**A known trap, closed at the call site.** `engineWorker.js`'s
-`isCadEditEnabled` env fallback reads `VITE_CAD_EDIT` as the string `'true'`,
-while this surface's build fence reads it as `'1'`. The surface passes the
-already-resolved boolean explicitly (`flags: { cad_edit: true }`) so the two
-spellings can never disagree on this path. Unifying them is a follow-up.
+**A known trap, now closed at the source.** `engineWorker.js`'s
+`isCadEditEnabled` env fallback used to read `VITE_CAD_EDIT` as the string
+`'true'` while this surface's build fence read it as `'1'` — a latent
+split-brain that stayed invisible only because the surface passes the
+already-resolved boolean explicitly (`flags: { cad_edit: true }`). Both
+readers now compare against `'1'`, the repo-wide convention for every `VITE_*`
+feature flag, so setting `VITE_CAD_EDIT=1` enables both consistently.
 
 **The license fence.** `scripts/check_license_fence.py` allows references to
 the vendored crate only under its own `vendor/` prefix and, from `web/`, only
@@ -255,6 +257,6 @@ Stated plainly so nobody quotes a capability this does not have.
    the save-back route (which is where the envelope's "editing routes refuse"
    negative control becomes a real server-side assertion instead of a
    documented absence).
-4. Retire `web/src/cad/EditSurface.jsx`; unify the `VITE_CAD_EDIT`
-   `'1'`-vs-`'true'` spelling.
+4. Retire `web/src/cad/EditSurface.jsx`. (The `VITE_CAD_EDIT`
+   `'1'`-vs-`'true'` spelling split is done — every reader is on `'1'`.)
 5. Drop the orphan worker chunk from flag-off builds.
