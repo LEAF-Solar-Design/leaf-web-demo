@@ -375,3 +375,137 @@ def test_scr_reference_matches_the_builder(tmp_path):
             assert blank_lisp.build_blank_scr("LEAF_BLANK_XXXXXXXXXXXX") in fh.read(), \
                 "engine/blank_create.scr is stale: regenerate with " \
                 "`python da/blank_spike.py --write-scr-reference`"
+
+
+# --------------------------------------------------------------------------- #
+# witness entity (the broker's read oracle counts entities, not layer names)
+# --------------------------------------------------------------------------- #
+def test_default_recipe_carries_no_witness_entity():
+    """The spike's own recipe is unchanged: client.extract reads the layer TABLE."""
+    scr = blank_lisp.build_blank_scr("LEAF_BLANK_ABCDEF123456")
+    assert "_.POINT" not in scr
+
+
+def test_witness_draws_one_point_on_the_marker_layer_before_saveas():
+    """Measured 2026-08-24 on real accoreconsole 2026: count_by_layer.lsp reports
+    counts={} for a bare marker layer and counts={marker: 1} with this point."""
+    marker = "LEAF_BLANK_ABCDEF123456"
+    scr = blank_lisp.build_blank_scr(marker, witness=True)
+    assert f'(command "_.POINT" "{blank_lisp.WITNESS_POINT}")' in scr
+    # MAKE sets the marker layer current, so the point must land after it and
+    # before the drawing is written.
+    assert scr.index('"_Make"') < scr.index('"_.POINT"') < scr.index("SAVEAS")
+    assert scr.count('"_.POINT"') == 1
+
+
+def test_witness_is_the_only_difference_from_the_proven_recipe():
+    marker = "LEAF_BLANK_ABCDEF123456"
+    plain = blank_lisp.build_blank_scr(marker).splitlines()
+    witness = blank_lisp.build_blank_scr(marker, witness=True).splitlines()
+    assert [line for line in witness if line not in plain] == [
+        f'(command "_.POINT" "{blank_lisp.WITNESS_POINT}")',
+        '(progn (princ "LEAF-BLANK-WITNESS") (princ))',
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# activity drift comparison (shared by the spike and the broker producer)
+# --------------------------------------------------------------------------- #
+def test_activity_body_matches_ignores_cosmetic_drift():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    same = dict(spec, description="reworded", id="ignored-by-the-version-endpoint")
+    assert blank_lisp.activity_body_matches(same, spec) is True
+
+
+def test_activity_body_matches_catches_every_execution_relevant_change():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    assert blank_lisp.activity_body_matches(dict(spec), spec) is True
+    for field, drifted in (
+        ("engine", "Autodesk.AutoCAD+24_3"),
+        ("commandLine", [r'$(engine.path)\accoreconsole.exe /s "$(settings[script].path)"']),
+        ("parameters", {"Result": {"verb": "put", "required": True,
+                                   "localName": "output.dwg"}}),
+    ):
+        assert blank_lisp.activity_body_matches(dict(spec, **{field: drifted}), spec) is False
+        # A field the live body simply lacks is drift too, not a pass.
+        assert blank_lisp.activity_body_matches(
+            {k: v for k, v in spec.items() if k != field}, spec) is False
+
+
+def test_activity_body_matches_fails_closed_on_a_non_dict():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    for junk in (None, "", [], 0):
+        assert blank_lisp.activity_body_matches(junk, spec) is False
+        assert blank_lisp.activity_body_matches(spec, junk) is False
+
+
+def test_the_activex_body_that_shipped_is_detected_as_drift():
+    """The concrete case this guard exists for: the pre-consolidation broker body
+    baked its script into `settings` and had no Script parameter."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankDwgFeasibility",
+                                          "Autodesk.AutoCAD+26_0",
+                                          out_localname="blank.dwg")
+    shipped = {
+        "engine": "Autodesk.AutoCAD+26_0",
+        "commandLine": [r'$(engine.path)\accoreconsole.exe /s "$(settings[script].path)"'],
+        "parameters": {"Result": {"verb": "put", "required": True,
+                                  "localName": "blank.dwg"}},
+    }
+    assert blank_lisp.activity_body_matches(shipped, spec) is False
+
+
+def test_apis_injected_parameter_defaults_are_not_drift():
+    """The version-churn trap: APS echoing back defaults must NOT read as drift.
+
+    If it did, the caller would publish a new activity VERSION and repoint the
+    alias on EVERY run. APS versions cannot be deleted, so that is unbounded
+    permanent growth on a shared account, not a cosmetic bug.
+    """
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    rendered = {
+        "id": "LeafBlankCreate",
+        "version": 3,
+        "description": "whatever APS stored",
+        "engine": spec["engine"],
+        "commandLine": spec["commandLine"],
+        "parameters": {
+            name: {**param, "zip": False, "ondemand": False, "description": ""}
+            for name, param in spec["parameters"].items()
+        },
+    }
+    assert blank_lisp.activity_body_matches(rendered, spec) is True
+
+
+def test_a_changed_parameter_field_is_still_drift_despite_the_tolerance():
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    for name, key, bad in (
+        ("Script", "localName", "other.scr"),
+        ("Script", "verb", "put"),
+        ("Result", "localName", "elsewhere.dwg"),
+        ("Result", "required", False),
+    ):
+        drifted = {**spec, "parameters": {
+            pname: ({**param, key: bad} if pname == name else dict(param))
+            for pname, param in spec["parameters"].items()}}
+        assert blank_lisp.activity_body_matches(drifted, spec) is False, (name, key)
+
+
+def test_added_or_removed_parameters_are_drift():
+    """The name SET is exact, so a stale HostDwg or a missing Script is caught."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    stale = {**spec, "parameters": {**spec["parameters"],
+             "HostDwg": {"verb": "get", "required": True, "localName": "host.dwg"}}}
+    assert blank_lisp.activity_body_matches(stale, spec) is False
+    missing = {**spec, "parameters": {
+        k: v for k, v in spec["parameters"].items() if k != "Script"}}
+    assert blank_lisp.activity_body_matches(missing, spec) is False
+
+
+def test_a_settings_only_change_is_invisible_and_that_is_why_script_is_an_argument():
+    """Documents the LIMITATION found by a real-APS readback: the live version
+    body carries no `settings`, so a baked-in script cannot be drift-checked."""
+    spec = blank_lisp.blank_activity_spec("LeafBlankCreate", "Autodesk.AutoCAD+26_0")
+    assert "settings" not in spec, "the recipe must never be baked into settings"
+    # Even if a caller DID bake one in, the comparison cannot see it.
+    assert blank_lisp.activity_body_matches(
+        {**spec, "settings": {"script": {"value": "(totally different)"}}}, spec) is True

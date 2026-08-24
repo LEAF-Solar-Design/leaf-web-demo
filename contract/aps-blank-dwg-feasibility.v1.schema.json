@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://leafdesign.ai/contracts/aps-blank-dwg-feasibility.v1.schema.json",
   "title": "Leaf APS blank DWG feasibility receipt",
+  "$comment": "The additionalProperties:false below are a CREDENTIAL GUARD, not tidiness. This repo is public. APS hands back presigned reportUrls whose query carries a temporary AWS credential, and a closed receipt is what stops one ever reaching an artifact. Loosening any of them removes that guard: see test_the_closed_contract_is_a_credential_guard.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,6 +10,7 @@
     "status",
     "source_sha",
     "activity",
+    "marker_layer",
     "workitem_id",
     "output",
     "drawing",
@@ -23,6 +25,7 @@
     "status": {"enum": ["supported", "unsupported"]},
     "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "activity": {"const": "LeafBlankDwgFeasibility"},
+    "marker_layer": {"type": "string", "pattern": "^LEAF_BLANK_[0-9A-F]{12}$"},
     "workitem_id": {"type": ["string", "null"], "minLength": 1},
     "output": {
       "oneOf": [
@@ -33,7 +36,7 @@
           "required": ["sha256", "bytes", "version"],
           "properties": {
             "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "bytes": {"type": "integer", "minimum": 6},
+            "bytes": {"type": "integer", "minimum": 4096},
             "version": {"const": 1}
           }
         }
@@ -96,6 +99,7 @@
         "no_input_activity_rejected",
         "invalid_dwg_output",
         "read_tool_failed",
+        "provenance_mismatch",
         null
       ]
     },
