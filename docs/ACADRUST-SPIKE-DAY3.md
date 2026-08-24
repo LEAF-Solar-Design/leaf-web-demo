@@ -1,5 +1,7 @@
 # acadrust WASM spike — day 3 (card C1B-D3)
 
+> **Editor's note, 2026-08-24:** the crate directory moved from `engine/acadrust-worker/` to `vendor/acadrust-worker/` (the license fence's allowed prefix; OQ-4). Paths below are historical and read as written at the time.
+
 DRUMLINE W9 spike lineage, day 3 of 14 (go/no-go day 10). Continues day 2's
 receipt (`docs/ACADRUST-SPIKE-DAY2.md`): "message-schema integration GREEN;
 real wasm execution still OPEN," carrying four open questions (OQ-1..OQ-4).

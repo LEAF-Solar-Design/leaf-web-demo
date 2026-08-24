@@ -16,7 +16,7 @@
 // Day 3: env switch (CAD_ENGINE_REAL_WASM=1) loads the REAL compiled
 // wasm-bindgen output (pkg-node/acadrust_worker.js, produced by
 //   RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-//     wasm-pack build --release --target nodejs engine/acadrust-worker --out-dir pkg-node
+//     wasm-pack build --release --target nodejs vendor/acadrust-worker --out-dir pkg-node
 // — see docs/ACADRUST-SPIKE-DAY3.md) instead of the JS-native stand-in
 // (bindings.mjs). Both expose the identical 1:1 surface (parseDxf/writeDxf/
 // bytesEqual, `parsed.entities` as an array-like getter) by construction —

@@ -1,5 +1,7 @@
 # acadrust WASM spike — day 2 (card C1B-D2)
 
+> **Editor's note, 2026-08-24:** the crate directory moved from `engine/acadrust-worker/` to `vendor/acadrust-worker/` (the license fence's allowed prefix; OQ-4). Paths below are historical and read as written at the time.
+
 DRUMLINE W9 spike lineage, day 2 of 14 (go/no-go day 10). Continues the
 day-1 receipt (`leaf-plan` ledger, `kind: spike-day1`, 2026-08-19T13:38Z):
 "all 3 day-1 goals GREEN" — acadrust (MPL-2.0,

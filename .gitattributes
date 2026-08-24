@@ -4,4 +4,4 @@ server/start-app.sh text eol=lf
 # ENG-CORPUS DXF fixtures: byte/sha fidelity is the harness premise --
 # never let checkout translation touch them (the cat_oracle pattern above).
 engine/corpus/*.dxf -text -diff
-engine/acadrust-worker/fixtures/*.dxf -text -diff
+vendor/acadrust-worker/fixtures/*.dxf -text -diff

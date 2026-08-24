@@ -8,7 +8,7 @@ license = "MPL-2.0"
 # for the browser. It never ships acadrust source itself; it links it as a
 # dependency, which keeps this repo's own SPDX license clean (MPL-2.0 is
 # file-scoped copyleft, not viral to the linking crate) while still keeping
-# the whole worker isolated in engine/acadrust-worker/ per the day-1 spike's
+# the whole worker isolated in vendor/acadrust-worker/ per the day-1 spike's
 # isolation goal.
 
 [lib]
