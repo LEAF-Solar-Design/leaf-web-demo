@@ -509,3 +509,182 @@ def test_a_settings_only_change_is_invisible_and_that_is_why_script_is_an_argume
     # Even if a caller DID bake one in, the comparison cannot see it.
     assert blank_lisp.activity_body_matches(
         {**spec, "settings": {"script": {"value": "(totally different)"}}}, spec) is True
+
+
+# --------------------------------------------------------------------------- #
+# ensure_blank_activity - a 409 must not be trusted as "already correct"
+# --------------------------------------------------------------------------- #
+class _FakeResponse:
+    def __init__(self, status_code, body=None):
+        self.status_code = status_code
+        self._body = body if body is not None else {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError("HTTP " + str(self.status_code))
+
+
+class _FakeRequests:
+    """Records every call; each verb is scripted with a response queue so a
+    test can assert both the outcome and exactly which endpoints were hit -
+    the whole point being to prove a matching 409 does NOT publish a version
+    and a drifted 409 DOES.
+    """
+
+    def __init__(self, get=(), post=(), patch=()):
+        self.calls = []
+        self._get = list(get)
+        self._post = list(post)
+        self._patch = list(patch)
+
+    def get(self, url, **kw):
+        self.calls.append(("GET", url))
+        return self._get.pop(0)
+
+    def post(self, url, **kw):
+        self.calls.append(("POST", url, kw.get("data")))
+        return self._post.pop(0)
+
+    def patch(self, url, **kw):
+        self.calls.append(("PATCH", url, kw.get("data")))
+        return self._patch.pop(0)
+
+
+def _fake_da_client():
+    ns = types.SimpleNamespace()
+    ns.DA = "https://developer.api.autodesk.com/da/us-east/v3"
+    ns.ALIAS = "prod"
+    ns.ENGINE = "Autodesk.AutoCAD+26_0"
+    ns._HTTP_TIMEOUT = 60
+    ns._auth_headers = lambda: {"Authorization": "Bearer fake"}
+    return ns
+
+
+def _install_fake_requests(monkeypatch, fake):
+    monkeypatch.setitem(sys.modules, "requests", fake)
+
+
+def test_aliased_matching_version_reuses_the_live_version_when_it_matches(monkeypatch):
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    fake = _FakeRequests(
+        get=[_FakeResponse(200, {"id": client.ALIAS, "version": 1}),
+             _FakeResponse(200, spec)],
+    )
+    headers = {"Authorization": "Bearer fake"}
+    version = blank_spike._aliased_matching_version(client, fake, spec, headers)
+    assert version == 1
+    assert not fake._post, "a matching live version must never publish a new one"
+
+
+def test_aliased_matching_version_publishes_a_new_version_on_drift(monkeypatch):
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    drifted_live = {**spec, "commandLine": [
+        r'$(engine.path)\accoreconsole.exe /s "$(settings[script].path)"']}
+    fake = _FakeRequests(
+        get=[_FakeResponse(200, {"id": client.ALIAS, "version": 1}),
+             _FakeResponse(200, drifted_live)],
+        post=[_FakeResponse(200, {"version": 2})],
+    )
+    headers = {"Authorization": "Bearer fake"}
+    version = blank_spike._aliased_matching_version(client, fake, spec, headers)
+    assert version == 2, "drift must publish and return the NEW version, not reuse the stale one"
+    post_calls = [c for c in fake.calls if c[0] == "POST"]
+    assert len(post_calls) == 1
+    assert post_calls[0][1].endswith("/activities/" + blank_spike.BLANK_ACTIVITY + "/versions")
+    published_body = json.loads(post_calls[0][2])
+    assert "id" not in published_body, "the version body must not carry the id path segment"
+    assert published_body["commandLine"] == spec["commandLine"]
+
+
+def test_aliased_matching_version_treats_a_missing_alias_as_no_match(monkeypatch):
+    """A 404 on the alias (never provisioned) must fall through to publish,
+    exactly like drift - it must never raise or be mistaken for a match."""
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    fake = _FakeRequests(
+        get=[_FakeResponse(404, {})],
+        post=[_FakeResponse(200, {"version": 1})],
+    )
+    headers = {"Authorization": "Bearer fake"}
+    version = blank_spike._aliased_matching_version(client, fake, spec, headers)
+    assert version == 1
+    assert len([c for c in fake.calls if c[0] == "GET"]) == 1, \
+        "a 404 alias has no version to read back - must not attempt a second GET"
+
+
+def test_aliased_matching_version_rejects_an_unusable_published_version(monkeypatch):
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    fake = _FakeRequests(
+        get=[_FakeResponse(404, {})],
+        post=[_FakeResponse(200, {"version": None})],
+    )
+    headers = {"Authorization": "Bearer fake"}
+    with pytest.raises(RuntimeError, match="unusable version"):
+        blank_spike._aliased_matching_version(client, fake, spec, headers)
+
+
+def test_ensure_blank_activity_409_with_matching_live_version_reuses_it(monkeypatch):
+    """The 409-and-correct path: no version publish, no alias PATCH needed."""
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    fake = _FakeRequests(
+        get=[_FakeResponse(200, {"id": client.ALIAS, "version": 1}),
+             _FakeResponse(200, spec)],
+        post=[_FakeResponse(409, {}),   # POST /activities -> already exists
+              _FakeResponse(200, {})],  # POST .../aliases -> alias set at v1
+    )
+    _install_fake_requests(monkeypatch, fake)
+    result = blank_spike.ensure_blank_activity(client, dry_run=False)
+    assert result["created"] is False
+    assert result["version"] == 1
+    assert not fake._patch, "no drift means no alias repoint"
+    version_posts = [c for c in fake.calls
+                     if c[0] == "POST" and c[1].endswith("/versions")]
+    assert version_posts == [], "a matching version must never be republished"
+
+
+def test_ensure_blank_activity_409_with_drift_publishes_and_repoints_the_alias(monkeypatch):
+    """THE defect this fix closes: a 409 whose live body no longer matches the
+    spec must publish a new version and move the alias onto it, not report
+    success on the strength of the 409 alone."""
+    client = _fake_da_client()
+    spec = blank_lisp.blank_activity_spec(blank_spike.BLANK_ACTIVITY, client.ENGINE)
+    stale_live = {**spec, "parameters": {
+        k: v for k, v in spec["parameters"].items() if k != "Script"}}
+    fake = _FakeRequests(
+        get=[_FakeResponse(200, {"id": client.ALIAS, "version": 1}),
+             _FakeResponse(200, stale_live)],
+        post=[_FakeResponse(409, {}),           # POST /activities -> already exists
+              _FakeResponse(200, {"version": 2}),  # POST .../versions -> new version
+              _FakeResponse(409, {})],           # POST .../aliases -> alias already exists
+        patch=[_FakeResponse(200, {})],          # PATCH .../aliases/<alias> -> repointed
+    )
+    _install_fake_requests(monkeypatch, fake)
+    result = blank_spike.ensure_blank_activity(client, dry_run=False)
+    assert result["created"] is False
+    assert result["version"] == 2
+    patch_calls = [c for c in fake.calls if c[0] == "PATCH"]
+    assert len(patch_calls) == 1
+    assert patch_calls[0][1].endswith("/aliases/" + client.ALIAS)
+    assert json.loads(patch_calls[0][2]) == {"version": 2}
+
+
+def test_ensure_blank_activity_first_ever_create_still_uses_version_one(monkeypatch):
+    """Regression: when the Activity does not exist yet (no 409 at all), the
+    version stays a plain 1 - untouched by the new drift-repair path."""
+    client = _fake_da_client()
+    fake = _FakeRequests(
+        post=[_FakeResponse(201, {}),   # POST /activities -> created
+              _FakeResponse(200, {})],  # POST .../aliases -> alias set at v1
+    )
+    _install_fake_requests(monkeypatch, fake)
+    result = blank_spike.ensure_blank_activity(client, dry_run=False)
+    assert result["created"] is True
+    assert result["version"] == 1
+    assert not fake._get, "a first-ever create has nothing to read back"
