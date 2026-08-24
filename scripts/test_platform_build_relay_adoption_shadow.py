@@ -33,13 +33,16 @@ def _manifest(disposition: str = "reused") -> dict:
     services = {}
     for index, name in enumerate(SERVICES, start=1):
         digest = "sha256:" + format(index, "064x")
+        # The v3 contract binds the lookup tag to the surface fingerprint, so
+        # derive one from the other rather than stamping them independently.
+        surface_fingerprint = format(index + 20, "064x")
         service = {
             "repository": REPOSITORIES[name],
             "image_digest": digest,
-            "immutable_lookup_tag": "surface-v1-" + format(index + 10, "064x"),
+            "immutable_lookup_tag": f"surface-v1-{surface_fingerprint}",
             "producer_source_revision": SOURCE,
             "producer_source_tree": TREE,
-            "surface_fingerprint": format(index + 20, "064x"),
+            "surface_fingerprint": surface_fingerprint,
             "recipe_fingerprint": format(index + 30, "064x"),
             "producer_workflow_path": ".github/workflows/build-platform-images.yml",
             "producer_workflow_blob": "4" * 40,
