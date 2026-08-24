@@ -852,11 +852,24 @@ def build_suites() -> List[Suite]:
         Suite("server-session-annex-store",
               "server tests/test_session_annex_store.py", "pytest",
               SERVER, _py_pytest("tests/test_session_annex_store.py"), 28),
+        # The regression fence for GitHub secret-scanning alerts #2-#7 (presigned
+        # APS reportUrl credentials committed in data/*_receipt.json). Fully
+        # offline: it greps the tracked tree, no DB or network. Added alongside
+        # the fix rather than after it, so it never becomes a suite that "sat
+        # outside the gate entirely" -- see the da-client-credentials note below
+        # for what that failure mode looks like when a suite skips registration.
+        Suite("server-no-presigned-credentials-tracked",
+              "server tests/test_no_presigned_credentials_tracked.py", "pytest",
+              SERVER, _py_pytest("tests/test_no_presigned_credentials_tracked.py"), 9),
         # --- da/ (cwd=da) --- #
         Suite("da-store", "da test_store.py", "pytest", DA,
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 10),
+        # Unit tests for da/redact.py, the credential stripper behind the fence
+        # above. Fully offline (pure string handling, no APS/network).
+        Suite("da-redact", "da test_redact.py", "pytest", DA,
+              _py_pytest("test_redact.py"), 13),
         # Both are fully offline (no APS, no network) but were never registered,
         # so 11 tests sat outside the gate entirely.
         Suite("da-client-credentials", "da test_client_credentials.py", "pytest", DA,
