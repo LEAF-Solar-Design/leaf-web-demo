@@ -1295,16 +1295,20 @@ export default function ToolCast({
     })
     return () => { live = false }
   }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
-  // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one live read of
-  // GET /api/ios-surface/status for the open project/revision, distinct from the
-  // ios_ship LAUNCH lane above (this one only ever reads). Inert unless the
-  // build flag is on AND an operator workspace with an open project is showing;
-  // the backend refuses (404) while LEAF_IOS_SURFACE_ENABLED is off regardless.
+  // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
+  // read of GET /api/ios-surface/status per (project, revision), distinct from the
+  // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
+  // render gate below EXACTLY (incl. activeSurface === 'cad') so the hook is inert
+  // whenever the panel is not mounted -- otherwise a project switch on the iOS
+  // product surface, where this panel does not render, would fetch for nothing.
+  // Not a live poll: a build's stage advancing (BUILT -> RECEIPT) is picked up on
+  // the next project/revision change or remount, not on a timer. The backend
+  // refuses (404) while LEAF_IOS_SURFACE_ENABLED is off regardless.
   const iosSurface = useIosSurface(
     workspace.openProjectId,
     workspace.canonicalVersionId,
     {
-      enabled: ENV_IOS_SURFACE && leftView === 'workspace'
+      enabled: ENV_IOS_SURFACE && activeSurface === 'cad' && leftView === 'workspace'
         && !PUBLIC_DEMO && !transportMock && canOperate,
     },
   )
