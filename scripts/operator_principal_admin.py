@@ -5,7 +5,7 @@ never through the app. Every mutation bumps ``role_revision``, so in-flight
 approvals and execution authorities bound to the prior revision deny at
 redemption.
 
-Transition guards (contract/OPERATOR.md §1.1 — fails closed on anything else):
+Transition guards (contract §1.3 — fails closed on anything else):
   grant    -> creates an active row; touching an existing suspended/revoked row
               requires --reactivate, and profiles/environment are rewritten only
               when passed explicitly (a bare re-grant never resets scope).
@@ -108,7 +108,7 @@ def cmd_grant(args: argparse.Namespace) -> int:
                 return _refuse(
                     args.subject, row["status"],
                     f"grant over a {row['status']} principal requires"
-                    " --reactivate (contract/OPERATOR.md §1.1)")
+                    " --reactivate (contract/OPERATOR.md §1.3)")
             # Scope fields change only when passed explicitly: a bare re-grant
             # bumps the revision and re-attributes, never resets scope.
             cur.execute(
@@ -127,7 +127,7 @@ def cmd_grant(args: argparse.Namespace) -> int:
     return 0
 
 
-# Legal transitions per contract/OPERATOR.md §1.1; anything else fails closed.
+# Legal transitions per contract §1.3; anything else fails closed.
 _TRANSITIONS = {
     "suspend": {"from": ("active",), "to": "suspended", "idempotent_on": ()},
     "resume": {"from": ("suspended",), "to": "active", "idempotent_on": ()},
@@ -155,7 +155,7 @@ def _set_status(subject: str, command: str) -> int:
             return _refuse(
                 subject, current,
                 f"{command} applies only to {'/'.join(rule['from'])} principals"
-                " (contract/OPERATOR.md §1.1)")
+                " (contract/OPERATOR.md §1.3)")
         cur.execute(
             "UPDATE operator_principals SET status = %s,"
             " role_revision = role_revision + 1, updated_at = now()"
@@ -187,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=("staging", "production"))
     grant.add_argument("--granted-by", required=True,
                        help="accountable human authorizing this grant"
-                            " (schema NOT NULL; contract/OPERATOR.md §1.1)")
+                            " (schema NOT NULL; contract/OPERATOR.md §1.4)")
     grant.add_argument("--reactivate", action="store_true",
                        help="explicitly allow re-activating a suspended or"
                             " revoked principal")
