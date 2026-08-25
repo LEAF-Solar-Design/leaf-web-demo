@@ -60,3 +60,11 @@ data/workspaces/
 server/agent_tenants.json*
 artifacts/
 artifacts/
+# Local runtime state written by the running app and harness (never source)
+data/agent_rate_state.json
+data/agent_session_grants.json
+harness/sessions-data/
+
+# Vercel CLI project link and Cygwin/MSYS crash dumps
+web/.vercel/
+*.stackdump

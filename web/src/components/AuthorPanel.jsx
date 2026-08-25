@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { authorTool } from '../api'
 
 // "Author a tool" — a text description -> POST /api/author -> a generated
 // tool card + code preview, added to the tool list so it's immediately
@@ -305,6 +306,26 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       const res = await onAuthor(d, targetToolName)
       setAuthored(res)
     } catch (e) {
+      // Auth-off demo mode: the R5 stage lane fail-closes with
+      // `customization_auth_required` (it hard-requires live auth). The
+      // customization contract (§7 Legacy authoring) sanctions the legacy direct
+      // /api/author path for exactly this mode, so fall back to it instead of
+      // dead-ending the demo behind a "service unavailable" gate. The response
+      // is tagged `legacy_demo` so the card states the mode honestly below —
+      // never the staged-lifecycle claim, which would be false for this shape.
+      if (e && e.body && e.body.reason_code === 'customization_auth_required') {
+        try {
+          const res = await authorTool(false, d)
+          setAuthored({ ...res, legacy_demo: true })
+          return
+        } catch (e2) {
+          if (e2 && e2.entitlementRequired) setBuildGate(true)
+          else if (e2 && e2.grantRequired) setGrantGate(true)
+          else if (isServiceDown(e2)) setSvcGate(true)
+          else setErr(String(e2.message || e2))
+          return
+        }
+      }
       // Expected "not-an-alarm" rejections surface as calm gates, never red:
       //   entitlementRequired — the plan doesn't include authoring (build).
       //   grantRequired       — no Claude account linked to fund the agent.
@@ -439,7 +460,13 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             </div>
           )}
           <p className="authored-desc">{authored.preview || authored.tool.description}</p>
-          {!authored.published && (
+          {authored.legacy_demo && (
+            <div className="customization-state" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span>Authored in local demo mode — registered in this demo workspace only. Not production evidence.</span>
+            </div>
+          )}
+          {!authored.legacy_demo && !authored.published && (
             <div className="customization-state" role="status">
               <span className="dot square" aria-hidden="true" />
               <span>{authored.demo
