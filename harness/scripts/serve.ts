@@ -234,8 +234,10 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
       ? new FakeAgentRunner()
       : new AuthorStandardServicesRunner(
           new AgentSdkRunner({
-            maxTurns: 40,
-            maxTotalTokens: 500_000,
+            // Spend caps stay at the proven 40-turn / 500k defaults; the envs let an
+            // operator widen one bounded run without a rebuild.
+            maxTurns: Number(process.env.LEAF_AGENT_MAX_TURNS || 40),
+            maxTotalTokens: Number(process.env.LEAF_AGENT_MAX_TOTAL_TOKENS || 500_000),
             ...(standardServicesResolver ? { standardServicesResolver } : {}),
           }),
           Boolean(standardServicesResolver),
