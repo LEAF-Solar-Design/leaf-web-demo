@@ -108,6 +108,14 @@ def platform_db():
     return db
 
 
+def unit_economics_store():
+    """Return the fleet unit-economics store through the canonical package alias."""
+    _ensure_platform_package()
+    import leaf_platform.unit_economics as store  # noqa: PLC0415
+
+    return store
+
+
 def overlay_store():
     """The T1 overlay store, through THE ONE package alias.
 

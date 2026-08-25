@@ -702,6 +702,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_submit_latency_metric.py"), 23),
         Suite("server-ops-metrics", "server tests/test_ops_metrics.py", "pytest",
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 22),
+        Suite("server-unit-economics-ops",
+              "server tests/test_unit_economics_ops.py", "pytest", SERVER,
+              _py_pytest("tests/test_unit_economics_ops.py"), 4),
         # P2 telemetry (waves A + B). Floors are the measured local executed
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review
@@ -1134,6 +1137,9 @@ def build_suites() -> List[Suite]:
         # prove-the-checker-can-fail case.
         Suite("vendor-pin-verify", "scripts test_vendor_pin.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
+        Suite("unit-economics-owner-report",
+              "scripts test_render_unit_economics_issue.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_render_unit_economics_issue.py"), 3),
         # Prewarm staging relay (tf design W2). 20 = 13 EXECUTED cases (the
         # eligibility matrix run against the real step body with a fake gh,
         # plus the migration-surface refusal and its fail-closed preview case

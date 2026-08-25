@@ -14,16 +14,17 @@ from __future__ import annotations
 import hmac
 import os
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Literal, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import billing, deps as platform_deps, entitlements, project_lifecycle, store
-from .db import cursor
+from . import (billing, deps as platform_deps, entitlements, project_lifecycle,
+               store, unit_economics)
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
-from .models import JOB_KINDS, TIERS, Org
+from .models import JOB_KINDS, TIERS
 from .mutation_fence import drawing_mutation_commit_guard
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
@@ -803,11 +804,11 @@ class BillingTierSyncBody(BaseModel):
     plan: Optional[str] = None
     subscription_active: Optional[bool] = None
     subscription_status: Optional[str] = None
-    # audit echoes only — recorded in the response for the caller's log line;
-    # deliberately NOT persisted (no Stripe identifiers in the platform DB
-    # until the spec's deferred audit-table decision is taken).
-    stripe_subscription_id: Optional[str] = None
-    stripe_event_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = Field(default=None, max_length=255)
+    stripe_event_id: Optional[str] = Field(default=None, max_length=255)
+    stripe_event_type: Optional[str] = Field(default=None, max_length=100)
+    current_period_start: Optional[datetime] = None
+    current_period_end: Optional[datetime] = None
 
 
 class BillingOrgResolveBody(BaseModel):
@@ -880,33 +881,41 @@ def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
     """
     _require_billing_sync_caller(x_billing_sync_secret)
 
-    org = store.get_org(org_id)
-    if org is None:
-        raise HTTPException(status_code=404, detail="org not found")
-    if org.status != "active":
-        raise HTTPException(status_code=409,
-                            detail=f"organization is not active (status={org.status}); "
-                                   "tier not updated")
-
     bt = billing.server_billing_tiers()
     tier = bt.derive_tier(body.plan, body.subscription_active, body.subscription_status)
     if tier not in bt.CLAIM_TIERS:  # unreachable by construction; belt over the write
         raise HTTPException(status_code=503, detail="derived tier outside frozen vocabulary")
 
-    updated = store.set_org_tier(org_id, tier)
-    if updated is None:
-        # active-guarded UPDATE matched nothing: the org flipped state between
-        # the read above and the write — refuse rather than guess (TOCTOU).
-        raise HTTPException(status_code=409,
-                            detail="organization state changed during sync; tier not updated")
-    if updated.tier != org.tier:
+    try:
+        result = unit_economics.record_billing_tier_event(
+            org_id,
+            tier,
+            plan=body.plan,
+            subscription_active=body.subscription_active,
+            subscription_status=body.subscription_status,
+            stripe_subscription_id=body.stripe_subscription_id,
+            stripe_event_id=body.stripe_event_id,
+            stripe_event_type=body.stripe_event_type,
+            current_period_start=body.current_period_start,
+            current_period_end=body.current_period_end,
+        )
+    except unit_economics.BillingOrgMissing as exc:
+        raise HTTPException(status_code=404, detail="org not found") from exc
+    except unit_economics.BillingOrgInactive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"organization is not active (status={exc}); tier not updated",
+        ) from exc
+    except unit_economics.LedgerConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if result["applied"]:
         _emit_org_event("billing.tier_changed", str(org_id), {
-            "from_tier": org.tier, "to_tier": updated.tier})
+            "from_tier": result["previous_tier"], "to_tier": result["tier"]})
     return {
-        "org_id": str(org_id),
-        "previous_tier": org.tier,
-        "tier": updated.tier,
-        "applied": updated.tier != org.tier,
+        **result,
         "stripe_subscription_id": body.stripe_subscription_id,
         "stripe_event_id": body.stripe_event_id,
     }

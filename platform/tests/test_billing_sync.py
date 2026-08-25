@@ -74,8 +74,20 @@ def test_upgrade_applies_plan_tier(client, make_org, live_sync):
     assert body["previous_tier"] == "hosted_starter"
     assert body["tier"] == "hosted_pro"
     assert body["applied"] is True
+    assert body["event_recorded"] is True
     assert body["stripe_event_id"] == "evt_test_1"
     assert store.get_org(org.org_id).tier == "hosted_pro"
+    with cursor() as cur:
+        cur.execute(
+            "SELECT stripe_event_ref_sha256, subscription_ref_sha256, "
+            "stripe_event_type, current_period_start, current_period_end "
+            "FROM billing_subscription_events WHERE org_id = %(org_id)s",
+            {"org_id": org.org_id},
+        )
+        event = cur.fetchone()
+    assert event["stripe_event_ref_sha256"] != "evt_test_1"
+    assert len(event["stripe_event_ref_sha256"]) == 64
+    assert event["subscription_ref_sha256"] is None
 
 
 def test_lapse_forces_restricted(client, make_org, live_sync):
@@ -109,6 +121,63 @@ def test_idempotent_repost_applied_false(client, make_org, live_sync):
     assert first.json()["applied"] is True
     assert again.json()["applied"] is False
     assert again.json()["tier"] == "hosted_pro"
+
+
+def test_stripe_event_replay_is_measured_once_and_cannot_regress_tier(
+    client, make_org, live_sync,
+):
+    org = make_org(tier="hosted_starter")
+    first = _sync(client, org.org_id, {
+        "plan": "pro",
+        "subscription_active": True,
+        "subscription_status": "active",
+        "stripe_event_id": "evt_replay_guard",
+        "stripe_event_type": "customer.subscription.updated",
+        "current_period_start": "2026-08-01T00:00:00Z",
+        "current_period_end": "2026-09-01T00:00:00Z",
+    })
+    assert first.status_code == 200
+    lapsed = _sync(client, org.org_id, {
+        "plan": "pro",
+        "subscription_active": False,
+        "subscription_status": "canceled",
+        "stripe_event_id": "evt_later_cancel",
+        "stripe_event_type": "customer.subscription.deleted",
+    })
+    assert lapsed.status_code == 200
+    replay = _sync(client, org.org_id, {
+        "plan": "pro",
+        "subscription_active": True,
+        "subscription_status": "active",
+        "stripe_event_id": "evt_replay_guard",
+        "stripe_event_type": "customer.subscription.updated",
+        "current_period_start": "2026-08-01T00:00:00Z",
+        "current_period_end": "2026-09-01T00:00:00Z",
+    })
+    assert replay.status_code == 200
+    assert replay.json()["event_recorded"] is False
+    assert replay.json()["tier"] == "restricted"
+    assert store.get_org(org.org_id).tier == "restricted"
+    with cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS count FROM billing_subscription_events "
+            "WHERE org_id = %(org_id)s",
+            {"org_id": org.org_id},
+        )
+        assert cur.fetchone()["count"] == 2
+
+
+def test_stripe_event_id_facts_drift_is_409(client, make_org, live_sync):
+    org = make_org()
+    first = _sync(client, org.org_id, {
+        "plan": "pro", "stripe_event_id": "evt_drift_guard",
+    })
+    assert first.status_code == 200
+    drift = _sync(client, org.org_id, {
+        "plan": "starter", "stripe_event_id": "evt_drift_guard",
+    })
+    assert drift.status_code == 409
+    assert "different facts" in drift.json()["detail"]
 
 
 # --------------------------------------------------------------------------- #

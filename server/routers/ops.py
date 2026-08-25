@@ -32,14 +32,16 @@ from __future__ import annotations
 import hmac
 import json
 import os
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Literal, Optional, Set
 from uuid import uuid4
 
 import requests
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, StrictBool, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 import agent_audit
 import agent_ledger
@@ -66,6 +68,30 @@ class DeploymentSnapshotRequest(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+class UnitEconomicsObservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    idempotency_key: str = Field(..., min_length=1, max_length=256)
+    period_start: datetime
+    period_end: datetime
+    kind: Literal["shared_fixed", "usage_variable", "revenue"]
+    category: str = Field(..., min_length=1, max_length=100)
+    amount_usd: Decimal = Field(..., ge=0)
+    quantity: Optional[Decimal] = Field(default=None, ge=0)
+    unit: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    source: str = Field(..., min_length=1, max_length=100)
+    source_ref: Optional[str] = Field(default=None, max_length=500)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("idempotency_key", "category", "source")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +297,60 @@ def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
         rows.append({"tenant_id": tid, "runs": runs, "usd_est": usd_est,
                      "disabled": tid in disabled})
     return with_envelope_fields({"tenants": rows})
+
+
+@router.get("/api/ops/unit-economics")
+def ops_unit_economics(
+    period_start: Optional[datetime] = None,
+    period_end: Optional[datetime] = None,
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    """Return one fleet-only report. No tenant or external identifiers leave it."""
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    end = period_end or datetime.now(timezone.utc)
+    start = period_start or end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    try:
+        import platform_link
+
+        report = platform_link.unit_economics_store().fleet_report(start, end)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return report
+
+
+@router.post("/api/ops/unit-economics/observations")
+def ops_unit_economics_observation(
+    body: UnitEconomicsObservationRequest,
+    x_ops_secret: Optional[str] = Header(default=None),
+) -> Any:
+    """Append an observed fleet cost or revenue line with idempotent replay."""
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    import platform_link
+
+    unit_store = platform_link.unit_economics_store()
+    try:
+        result = unit_store.append_observation(
+            idempotency_key=body.idempotency_key,
+            period_start=body.period_start,
+            period_end=body.period_end,
+            kind=body.kind,
+            category=body.category,
+            amount_usd=body.amount_usd,
+            quantity=body.quantity,
+            unit=body.unit,
+            source=body.source,
+            source_ref=body.source_ref,
+            metadata=body.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except unit_store.LedgerConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return with_envelope_fields(result)
 
 
 @router.post("/api/ops/tenants/{tid}/disable")

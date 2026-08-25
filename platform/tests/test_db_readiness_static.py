@@ -91,12 +91,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0050_live_project_guard.sql",
+        manifest_names[-1], "0051_unit_economics.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0050",
+        inventory["scope"]["migration_ids"][-1], "0051",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
@@ -346,14 +346,14 @@ def test_manifest_tail_pin_drift_names_the_pin_line_and_remediation():
     """
     with pytest.raises(AssertionError) as exc_info:
         _assert_closed_world_pin(
-            "0050_next_migration.sql", "0049_solar_template.sql",
+            "0051_next_migration.sql", "0050_unit_economics.sql",
             "Update this pin to the new last migration filename once main "
             "adds one.",
         )
     message = str(exc_info.value)
     assert re.search(rf"{re.escape(_THIS_FILE)}:\d+", message), message
-    assert "0050_next_migration.sql" in message
-    assert "0049_solar_template.sql" in message
+    assert "0051_next_migration.sql" in message
+    assert "0050_unit_economics.sql" in message
     assert (
         "Update this pin to the new last migration filename once main "
         "adds one." in message
@@ -365,14 +365,14 @@ def test_migration_id_tail_pin_drift_names_the_pin_line_and_remediation():
     naming this file, the drifted line, and the exact remediation."""
     with pytest.raises(AssertionError) as exc_info:
         _assert_closed_world_pin(
-            "0050", "0049",
+            "0051", "0050",
             "Update this pin (and authority-inventory.json's "
             "scope.migration_ids) to the new last migration id.",
         )
     message = str(exc_info.value)
     assert re.search(rf"{re.escape(_THIS_FILE)}:\d+", message), message
+    assert "'0051'" in message
     assert "'0050'" in message
-    assert "'0049'" in message
     assert (
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id." in message
