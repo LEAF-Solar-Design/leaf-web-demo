@@ -1591,19 +1591,33 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # is stated here because this is where its history is.
     #
     # deploy/Dockerfile.app takes the BASE allowlist with no additions. USER and
-    # VOLUME are deliberately absent, though neither deletes a file: the guard
-    # runs as root at build time, so a later `USER 10001` can leave a 0600
-    # script unreadable to the process that actually runs it, and a later
-    # `VOLUME /app/scripts` masks the directory at runtime. Both ship an image
-    # whose guard passed and whose documented command still fails. This image
-    # declares neither, so it needs no exception. The three images that DO drop
-    # privilege declare their runtime USER ABOVE the guard, so the guard runs as
-    # that uid and `_assert_guard_runs_as_the_runtime_identity` enforces the
-    # pairing; `test -r`/`test -x` then observe what the runtime uid can actually
-    # reach at BUILD time rather than merely bounding it (no command text is
-    # read, so the evasions that beat two earlier mode scanners do not apply).
-    # What a later CMD/HEALTHCHECK can do at RUNTIME remains a review class,
-    # recorded in test_every_image_asserts_its_shipped_scripts_at_build_time.
+    # VOLUME are deliberately absent FROM THE ALLOWLIST, though neither deletes a
+    # file, because both are dangerous BELOW the guard: a `USER 10003` declared
+    # after it can leave a 0600 script unreadable to the process that actually
+    # runs it, and a `VOLUME /app/scripts` masks the directory at runtime. Both
+    # ship an image whose guard passed and whose documented command still fails.
+    #
+    # This image now DROPS PRIVILEGE (deterministic finding D2: it was the last
+    # of the four still running as root, which is what turned a memory
+    # corruption in the unauthenticated DWG parse path into root-in-container).
+    # It therefore joins the other three in declaring its runtime USER ABOVE the
+    # guard, which is why USER still needs no allowlist exception here — there is
+    # nothing below the guard to admit. The guard consequently runs AS uid 10003,
+    # so its `test -r` clauses observe the real uid, gid and directory traversal
+    # at BUILD time rather than merely bounding them, and
+    # `_assert_guard_runs_as_the_runtime_identity` enforces that pairing. No
+    # command text is read, so the six evasions that beat the mode-evaluating
+    # predecessor and the two (`install --mode=`, `c''hmod`) that beat its
+    # byte-pinning successor are closed by construction.
+    #
+    # NOT covered here, and it is the reason this image is also smoke-run as the
+    # dropped uid rather than trusted to this test: the guard proves the
+    # RECONCILERS are readable, and start-app.sh is not among the guarded targets
+    # (it is not a scripts/ COPY), so a mode that leaves the ENTRYPOINT
+    # unexecutable would pass every assertion in this file and fail at container
+    # start. What a later CMD/HEALTHCHECK can do at RUNTIME likewise remains a
+    # review class, recorded in
+    # test_every_image_asserts_its_shipped_scripts_at_build_time.
     #
     # WHAT THIS CANNOT DECIDE, stated so the allowlist is not read as more than
     # it is: the members that carry a payload -- CMD, ENTRYPOINT, HEALTHCHECK --
@@ -1612,12 +1626,37 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     # guard passes this test, passes the build, and deletes the script seconds
     # into container life while the container reports healthy. No rule about
     # POSITION can bind runtime behaviour, so that is a review class, not a gate.
-    _assert_one_survival_guard(
+    instructions = _instructions(dockerfile)
+
+    # The uid is read from PARSED INSTRUCTIONS, never as a substring of the file.
+    # The sibling registry test records why (found by mutation): once moving USER
+    # above a guard means writing a comment about the move, a comment containing
+    # the literal satisfies a substring pin on its own while the real instruction
+    # says anything it likes.
+    runtime = _user_in_effect(instructions)
+    assert runtime != "root", (
+        "deploy/Dockerfile.app no longer drops privilege. It was the last image "
+        "still running as root (deterministic finding D2), and the guard's `-r` "
+        "clauses were added because it stopped. Re-derive them before relaxing "
+        "this — a root guard proves nothing about what the runtime uid can read."
+    )
+    assert runtime == "10003:10003", (
+        f"deploy/Dockerfile.app runs as {runtime!r}, not the pinned "
+        "'10003:10003'. The uid is distinct from broker (10001), harness "
+        "(10002) and canonical-worker (65532) on purpose; changing it is a "
+        "deliberate act, not a side effect of editing this file."
+    )
+
+    guard_index = _assert_one_survival_guard(
         "deploy/Dockerfile.app",
-        _instructions(dockerfile),
+        instructions,
         copies.values(),
         _CANNOT_REMOVE,
+        readable=True,
+        executable=_cmd_executable(instructions, copies.values()),
     )
+    _assert_guard_runs_as_the_runtime_identity(
+        "deploy/Dockerfile.app", instructions, guard_index)
 
 
 # image -> (the operator-reachable script that motivated its guard,
