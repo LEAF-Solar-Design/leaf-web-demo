@@ -83,6 +83,19 @@ DEFAULT_CLUSTER = "leaf-automation-staging"
 # Bounded so a burst of callers cannot turn a page refresh into an ECS API
 # rate-limit event. Short enough that a deploy is reflected within one cycle.
 _CACHE_TTL_SECONDS = 15.0
+# The sidecar file (C1-C4 of the sidecar design review): the operator egress
+# guard rightly denies this process the ECS control plane, so a sibling
+# container in the same task performs the read and publishes it here. The
+# reader fails closed on absence, staleness, malformed content, or an
+# explicit unavailable state; it never falls back to the stored receipt.
+_SIDECAR_FILE_DEFAULT = "/run/leaf-identity/current.json"
+_SIDECAR_SCHEMA = "leaf.live-identity-collector.v1"
+# 2 * the collector's 20s poll + 5s slack (C4). One constant, derived.
+_SIDECAR_MAX_AGE_SECONDS = 45.0
+# Bounded read (C9): seven families' descriptions fit well inside this.
+_SIDECAR_MAX_BYTES = 1024 * 1024
+# Reject future-dated documents beyond small clock skew (C10).
+_SIDECAR_MAX_FUTURE_SKEW_SECONDS = 5.0
 # Hard bounds on the AWS call. No unbounded I/O on a request path.
 _CONNECT_TIMEOUT_SECONDS = 2.0
 _READ_TIMEOUT_SECONDS = 4.0
@@ -97,7 +110,6 @@ class LiveIdentityUnavailable(RuntimeError):
 
 _lock = threading.Lock()
 _cached: Optional[tuple[float, dict[str, str]]] = None
-_client = None
 
 
 def _cluster(env: Mapping[str, str]) -> str:
@@ -110,30 +122,6 @@ def _region(env: Mapping[str, str]) -> str:
         or env.get("AWS_DEFAULT_REGION", "").strip()
         or "us-east-1"
     )
-
-
-def _make_client(env: Mapping[str, str]):  # pragma: no cover - needs the real SDK
-    try:
-        import boto3
-        from botocore.config import Config
-    except Exception as exc:  # noqa: BLE001
-        raise LiveIdentityUnavailable("boto3 is not installed") from exc
-    return boto3.client(
-        "ecs",
-        region_name=_region(env),
-        config=Config(
-            connect_timeout=_CONNECT_TIMEOUT_SECONDS,
-            read_timeout=_READ_TIMEOUT_SECONDS,
-            retries={"max_attempts": _MAX_ATTEMPTS, "mode": "standard"},
-        ),
-    )
-
-
-def _get_client(env: Mapping[str, str]):
-    global _client
-    if _client is None:
-        _client = _make_client(env)
-    return _client
 
 
 def _routed_family(descriptions: dict[str, dict[str, Any]], service: str) -> str:
@@ -192,72 +180,100 @@ def _service_container_digest(task: dict[str, Any], service: str) -> str:
     return digest
 
 
-def _read_live_digests(env: Mapping[str, str]) -> dict[str, str]:
-    """Map each service to the image digest its RUNNING tasks resolved.
+def _sidecar_path(env: Mapping[str, str]) -> str:
+    return env.get("LEAF_IDENTITY_SIDECAR_FILE", "").strip() or _SIDECAR_FILE_DEFAULT
 
-    Deliberately avoids ecs:DescribeTaskDefinition. AWS does not support
-    resource-level permissions for that action, so granting it would mean
-    account-wide read of every task definition in the account, including other
-    services' plaintext environment variables. ListTasks plus DescribeTasks
-    reads strictly less (no environment variables at all) and answers the
-    better question.
+
+def _read_sidecar_document(env: Mapping[str, str]) -> tuple[dict[str, Any], float]:
+    """Read, bound, validate, and age-check the collector's document.
+
+    Fails closed on every anomaly. The unavailable state carries the
+    collector's own reason so the 503 detail names the real cause (C1).
     """
-    client = _get_client(env)
-    cluster = _cluster(env)
-    families = sorted({f for names in _COLOR_FAMILIES.values() for f in names})
-    try:
-        response = client.describe_services(cluster=cluster, services=families)
-    except LiveIdentityUnavailable:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise LiveIdentityUnavailable(f"could not describe services: {exc}") from exc
+    import datetime
 
+    path = _sidecar_path(env)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_SIDECAR_MAX_BYTES + 1)
+    except FileNotFoundError as exc:
+        raise LiveIdentityUnavailable(
+            "identity collector file is absent; the sidecar has not published"
+        ) from exc
+    except OSError as exc:
+        raise LiveIdentityUnavailable(
+            f"identity collector file unreadable: {type(exc).__name__}"
+        ) from exc
+    if len(raw) > _SIDECAR_MAX_BYTES:
+        raise LiveIdentityUnavailable("identity collector file exceeds its size bound")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise LiveIdentityUnavailable("identity collector file is not valid JSON") from exc
+    if not isinstance(document, dict) or document.get("schema") != _SIDECAR_SCHEMA:
+        raise LiveIdentityUnavailable("identity collector document schema differs")
+    observed_raw = document.get("observed_at")
+    if not isinstance(observed_raw, str):
+        raise LiveIdentityUnavailable("identity collector document carries no observation time")
+    try:
+        observed = datetime.datetime.fromisoformat(observed_raw)
+    except ValueError as exc:
+        raise LiveIdentityUnavailable("identity collector observation time is invalid") from exc
+    if observed.tzinfo is None:
+        raise LiveIdentityUnavailable("identity collector observation time is not timezone-aware")
+    age = (datetime.datetime.now(datetime.timezone.utc) - observed).total_seconds()
+    if age < -_SIDECAR_MAX_FUTURE_SKEW_SECONDS:
+        raise LiveIdentityUnavailable("identity collector document is future-dated")
+    if age > _SIDECAR_MAX_AGE_SECONDS:
+        raise LiveIdentityUnavailable(
+            f"identity collector document is stale ({age:.0f}s old, bound {_SIDECAR_MAX_AGE_SECONDS:.0f}s)"
+        )
+    if document.get("state") != "ok":
+        reason = str(document.get("reason", ""))[:300]
+        raise LiveIdentityUnavailable(
+            f"identity collector reports unavailable: {reason or 'no reason recorded'}"
+        )
+    return document, age
+
+
+def _read_live_digests(env: Mapping[str, str]) -> dict[str, str]:
+    digests, _ = _read_live_digests_with_meta(env)
+    return digests
+
+
+def _read_live_digests_with_meta(
+    env: Mapping[str, str],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Map each service to the digest its RUNNING tasks resolved, per the
+    sidecar's bounded, age-checked observation. All interpretation (routed
+    color, mid-roll refusal, digest extraction) stays in this process; the
+    sidecar only collects."""
+    document, age = _read_sidecar_document(env)
+    services_payload = document.get("describe_services")
+    if not isinstance(services_payload, dict):
+        raise LiveIdentityUnavailable("identity collector document lacks service descriptions")
     described = {
         item["serviceName"]: item
-        for item in response.get("services", [])
+        for item in services_payload.get("services", [])
         if isinstance(item, dict) and isinstance(item.get("serviceName"), str)
     }
+    tasks_by_family = document.get("tasks")
+    if not isinstance(tasks_by_family, dict):
+        raise LiveIdentityUnavailable("identity collector document lacks task descriptions")
 
     digests: dict[str, str] = {}
-    # Bounded: two calls per service, five services. No per-item network call
-    # inside a loop over unbounded input.
     for service in SERVICES:
         family = _routed_family(described, service)
-        try:
-            listed = client.list_tasks(
-                cluster=cluster, serviceName=family, desiredStatus="RUNNING"
-            )
-        except LiveIdentityUnavailable:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise LiveIdentityUnavailable(
-                f"could not list {family} tasks: {exc}"
-            ) from exc
-        arns = listed.get("taskArns")
-        if not isinstance(arns, list) or not arns:
+        family_payload = tasks_by_family.get(family)
+        if not isinstance(family_payload, dict):
             raise LiveIdentityUnavailable(f"{family} has no running tasks")
-        # DescribeTasks accepts at most 100 identifiers; a service running more
-        # than that is far outside this platform's shape, and silently reading
-        # the first 100 would answer a smaller question than it appears to.
-        if len(arns) > _MAX_TASKS_PER_SERVICE:
-            raise LiveIdentityUnavailable(
-                f"{family} runs {len(arns)} tasks, more than this endpoint reads"
-            )
-        try:
-            described_tasks = client.describe_tasks(cluster=cluster, tasks=arns)
-        except LiveIdentityUnavailable:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise LiveIdentityUnavailable(
-                f"could not describe {family} tasks: {exc}"
-            ) from exc
-        tasks = described_tasks.get("tasks")
+        tasks = family_payload.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             raise LiveIdentityUnavailable(f"{family} returned no task detail")
-        # A mid-roll service can run two digests at once. There is no single
-        # true answer then, so refuse rather than pick whichever task sorted
-        # first: an arbitrary choice here is precisely the kind of quiet
-        # wrong answer this endpoint exists to stop.
+        if len(tasks) > _MAX_TASKS_PER_SERVICE:
+            raise LiveIdentityUnavailable(
+                f"{family} runs {len(tasks)} tasks, more than this endpoint reads"
+            )
         observed = {_service_container_digest(task, service) for task in tasks}
         if len(observed) != 1:
             raise LiveIdentityUnavailable(
@@ -265,7 +281,8 @@ def _read_live_digests(env: Mapping[str, str]) -> dict[str, str]:
                 "the fleet is mid-roll and has no single running identity"
             )
         digests[service] = observed.pop()
-    return digests
+    meta = {"observed_at": document["observed_at"], "age_seconds": round(age, 1)}
+    return digests, meta
 
 
 def live_digests(
@@ -278,12 +295,19 @@ def live_digests(
     """
     global _cached
     current = os.environ if env is None else env
+    if reader is None:
+        # The sidecar file path is uncached (C3): a local bounded read has no
+        # rate limit to protect, and stacking the 15s cache on the sidecar's
+        # own poll interval would widen the true staleness bound to 75s.
+        digests = _read_live_digests(current)
+        if set(digests) != set(SERVICES):
+            raise LiveIdentityUnavailable("live digest set is incomplete")
+        return digests
     now = time.monotonic()
     with _lock:
         if _cached is not None and now - _cached[0] < _CACHE_TTL_SECONDS:
             return dict(_cached[1])
-        read = reader or _read_live_digests
-        digests = read(current)
+        digests = reader(current)
         if set(digests) != set(SERVICES):
             raise LiveIdentityUnavailable("live digest set is incomplete")
         _cached = (now, dict(digests))
@@ -292,10 +316,9 @@ def live_digests(
 
 def reset_cache() -> None:
     """Drop the cached read. For tests and for an explicit operator refresh."""
-    global _cached, _client
+    global _cached
     with _lock:
         _cached = None
-        _client = None
 
 
 def _receipt(env: Mapping[str, str]) -> Optional[dict[str, Any]]:
@@ -355,7 +378,13 @@ def live_deployment_identity(
     """
     current = os.environ if env is None else env
     environment = _expected_environment(current)
-    digests = live_digests(current, reader=reader)
+    meta: Optional[dict[str, Any]] = None
+    if reader is None:
+        digests, meta = _read_live_digests_with_meta(current)
+        if set(digests) != set(SERVICES):
+            raise LiveIdentityUnavailable("live digest set is incomplete")
+    else:
+        digests = live_digests(current, reader=reader)
     document = _receipt(current)
 
     receipt_services: Mapping[str, Any] = {}
@@ -406,9 +435,18 @@ def live_deployment_identity(
         "schema": SCHEMA,
         "environment": environment,
         "status": status,
-        "derived_from": "live-ecs",
+        # "live-ecs-sidecar" is the honest name for the real mechanism (C2);
+        # injected readers keep the historical label so their consumers can
+        # tell recorded fixtures from the deployed read path.
+        "derived_from": "live-ecs" if meta is None else "live-ecs-sidecar",
         "services": services,
     }
+    if meta is not None:
+        # Rollback-shaped convergence gates need the observation time: a
+        # stale-but-matching revision must be distinguishable from a fresh
+        # one (design review R2).
+        result["observed_at"] = meta["observed_at"]
+        result["age_seconds"] = meta["age_seconds"]
     # Only a fully verified fleet gets a single top-level source revision. A
     # partial or contradicted receipt must not present one, because a caller
     # reading only this field is the exact failure this module exists to stop.

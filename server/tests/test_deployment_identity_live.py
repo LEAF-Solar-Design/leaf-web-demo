@@ -314,45 +314,85 @@ def _staging_fixture(app_active="leaf-platform-app", web_active="leaf-platform-w
     return _FakeClient(services, tasks_by_service, task_detail)
 
 
-def test_the_routed_color_is_the_one_that_is_read(monkeypatch):
-    monkeypatch.setattr(live, "_get_client", lambda _env: _staging_fixture())
+_SIDECAR_FAMILIES = (
+    "leaf-platform-app",
+    "leaf-platform-app-alt",
+    "leaf-platform-web",
+    "leaf-platform-web-alt",
+    "leaf-platform-broker",
+    "leaf-platform-harness",
+    "leaf-platform-canonical-worker",
+)
 
-    digests = live.live_digests({})
+
+def _sidecar_env(tmp_path, client, observed_at=None, state="ok", reason=None):
+    """Materialize a fake client's world into the sidecar document.
+
+    The reader consumes the collector's file now; the fixtures still describe
+    the fleet through the same three ECS response shapes, so the behavioral
+    tests keep exercising identical routing/digest logic. The bridge calls
+    only the three reviewed read actions, so the DescribeTaskDefinition
+    regression guard keeps its teeth.
+    """
+    import datetime as _dt
+    import json as _json
+
+    document = {
+        "schema": "leaf.live-identity-collector.v1",
+        "observed_at": observed_at
+        or _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "state": state,
+        "describe_services": client.describe_services("c", list(_SIDECAR_FAMILIES)),
+        "tasks": {},
+    }
+    if reason is not None:
+        document["reason"] = reason
+    for family in _SIDECAR_FAMILIES:
+        arns = client.list_tasks("c", serviceName=family, desiredStatus="RUNNING")[
+            "taskArns"
+        ]
+        if arns:
+            document["tasks"][family] = client.describe_tasks("c", tasks=arns)
+    path = tmp_path / "current.json"
+    path.write_text(_json.dumps(document), encoding="utf-8")
+    return {"LEAF_IDENTITY_SIDECAR_FILE": str(path)}
+
+
+def test_the_routed_color_is_the_one_that_is_read(tmp_path):
+    env = _sidecar_env(tmp_path, _staging_fixture())
+
+    digests = live.live_digests(env)
 
     assert digests["app"] == LIVE["app"]
     assert digests["web"] == LIVE["web"]
 
 
-def test_the_idle_color_is_read_when_it_is_the_routed_one(monkeypatch):
-    monkeypatch.setattr(
-        live,
-        "_get_client",
-        lambda _env: _staging_fixture(app_active="leaf-platform-app-alt"),
+def test_the_idle_color_is_read_when_it_is_the_routed_one(tmp_path):
+    env = _sidecar_env(
+        tmp_path, _staging_fixture(app_active="leaf-platform-app-alt")
     )
 
-    assert live.live_digests({})["app"] == digest("9")
+    assert live.live_digests(env)["app"] == digest("9")
 
 
-def test_two_active_colors_fail_closed_rather_than_pick_one(monkeypatch):
+def test_two_active_colors_fail_closed_rather_than_pick_one(tmp_path):
     client = _staging_fixture()
     client._services["leaf-platform-app-alt"] = _service("leaf-platform-app-alt")
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="ambiguous"):
-        live.live_digests({})
+        live.live_digests(_sidecar_env(tmp_path, client))
 
 
-def test_no_active_color_fails_closed(monkeypatch):
+def test_no_active_color_fails_closed(tmp_path):
     client = _staging_fixture()
     for family in ("leaf-platform-app", "leaf-platform-app-alt"):
         client._services[family] = _service(family, desired=0, running=0)
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="no active app"):
-        live.live_digests({})
+        live.live_digests(_sidecar_env(tmp_path, client))
 
 
-def test_a_mid_roll_service_running_two_digests_fails_closed(monkeypatch):
+def test_a_mid_roll_service_running_two_digests_fails_closed(tmp_path):
     """The case an arbitrary pick would answer wrongly.
 
     While a service rolls, two tasks run different images. There is no single
@@ -367,13 +407,12 @@ def test_a_mid_roll_service_running_two_digests_fails_closed(monkeypatch):
     client._task_detail["task/leaf-platform-web/2"] = _task(
         "leaf-platform-web", digest("5")
     )
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="mid-roll"):
-        live.live_digests({})
+        live.live_digests(_sidecar_env(tmp_path, client))
 
 
-def test_several_tasks_on_one_digest_are_fine(monkeypatch):
+def test_several_tasks_on_one_digest_are_fine(tmp_path):
     """Horizontal scale is not a mid-roll: same digest, one true answer."""
     client = _staging_fixture()
     client._tasks_by_service["leaf-platform-web"] = [
@@ -383,33 +422,30 @@ def test_several_tasks_on_one_digest_are_fine(monkeypatch):
     client._task_detail["task/leaf-platform-web/2"] = _task(
         "leaf-platform-web", LIVE["web"]
     )
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
-    assert live.live_digests({})["web"] == LIVE["web"]
+    assert live.live_digests(_sidecar_env(tmp_path, client))["web"] == LIVE["web"]
 
 
-def test_a_service_with_no_running_tasks_fails_closed(monkeypatch):
+def test_a_service_with_no_running_tasks_fails_closed(tmp_path):
     client = _staging_fixture()
     client._tasks_by_service["leaf-platform-web"] = []
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="no running tasks"):
-        live.live_digests({})
+        live.live_digests(_sidecar_env(tmp_path, client))
 
 
-def test_a_container_without_a_digest_is_refused(monkeypatch):
+def test_a_container_without_a_digest_is_refused(tmp_path):
     """imageDigest is absent for a non-ECR registry; there is no honest answer."""
     client = _staging_fixture()
     client._task_detail["task/leaf-platform-web/1"] = {
         "containers": [{"name": "leaf-platform-web"}]
     }
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
     with pytest.raises(LiveIdentityUnavailable, match="no usable image digest"):
-        live.live_digests({})
+        live.live_digests(_sidecar_env(tmp_path, client))
 
 
-def test_sidecar_containers_do_not_shadow_the_service_image(monkeypatch):
+def test_sidecar_containers_do_not_shadow_the_service_image(tmp_path):
     """The live app task carries two init containers alongside the app."""
     client = _staging_fixture()
     client._task_detail["task/leaf-platform-app/1"] = {
@@ -419,12 +455,11 @@ def test_sidecar_containers_do_not_shadow_the_service_image(monkeypatch):
             {"name": "leaf-platform-app", "imageDigest": LIVE["app"]},
         ]
     }
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
-    assert live.live_digests({})["app"] == LIVE["app"]
+    assert live.live_digests(_sidecar_env(tmp_path, client))["app"] == LIVE["app"]
 
 
-def test_the_reader_never_calls_describe_task_definition(monkeypatch):
+def test_the_reader_never_calls_describe_task_definition(tmp_path):
     """Regression guard on the IAM shape.
 
     DescribeTaskDefinition cannot be resource-scoped by AWS, so granting it
@@ -440,6 +475,54 @@ def test_the_reader_never_calls_describe_task_definition(monkeypatch):
         )
 
     client.describe_task_definition = forbidden
-    monkeypatch.setattr(live, "_get_client", lambda _env: client)
 
-    assert set(live.live_digests({})) == set(SERVICES)
+    assert set(live.live_digests(_sidecar_env(tmp_path, client))) == set(SERVICES)
+
+
+def test_a_stale_sidecar_document_fails_closed(tmp_path):
+    import datetime as _dt
+
+    old = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=120)
+    ).isoformat()
+    env = _sidecar_env(tmp_path, _staging_fixture(), observed_at=old)
+
+    with pytest.raises(LiveIdentityUnavailable, match="stale"):
+        live.live_digests(env)
+
+
+def test_a_future_dated_sidecar_document_fails_closed(tmp_path):
+    import datetime as _dt
+
+    ahead = (
+        _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=60)
+    ).isoformat()
+    env = _sidecar_env(tmp_path, _staging_fixture(), observed_at=ahead)
+
+    with pytest.raises(LiveIdentityUnavailable, match="future-dated"):
+        live.live_digests(env)
+
+
+def test_an_unavailable_sidecar_state_surfaces_its_reason(tmp_path):
+    env = _sidecar_env(
+        tmp_path, _staging_fixture(), state="unavailable", reason="ThrottlingException: rate"
+    )
+
+    with pytest.raises(LiveIdentityUnavailable, match="ThrottlingException"):
+        live.live_digests(env)
+
+
+def test_an_absent_sidecar_file_fails_closed(tmp_path):
+    with pytest.raises(LiveIdentityUnavailable, match="absent"):
+        live.live_digests({"LEAF_IDENTITY_SIDECAR_FILE": str(tmp_path / "missing.json")})
+
+
+def test_the_response_names_the_sidecar_and_its_observation(tmp_path):
+    env = _sidecar_env(tmp_path, _staging_fixture())
+
+    result = live_deployment_identity(env)
+
+    assert result["derived_from"] == "live-ecs-sidecar"
+    assert isinstance(result["observed_at"], str)
+    assert isinstance(result["age_seconds"], float)
+    assert result["age_seconds"] < live._SIDECAR_MAX_AGE_SECONDS
