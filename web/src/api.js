@@ -1196,9 +1196,18 @@ export async function stageAuthorTool(mock, description, targetToolName = null, 
     }, opts)
   }
   const path = '/api/author/stage'
+  // Authority headers are OPTIONAL and stage-POST-only: the caller supplies the
+  // ids of an ACTIVE turn it owns so the server's fail-closed authority check
+  // (stage_authority_invalid) has a subject to match. Absent -> unchanged wire.
+  const authorityHeaders = (opts.authority && opts.authority.sessionId && opts.authority.turnId)
+    ? {
+      'X-Authority-Session-Id': opts.authority.sessionId,
+      'X-Authority-Turn-Id': opts.authority.turnId,
+    }
+    : {}
   const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(), ...authorityHeaders },
     body: JSON.stringify({
       description,
       mode: 'build',

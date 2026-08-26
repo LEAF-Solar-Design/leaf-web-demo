@@ -144,6 +144,10 @@ const devControls = (() => {
 // The run's dwg (intake source name) — unchanged from the original demo.
 const DEFAULT_DRAWING_ID = 'rooftop_demo'
 
+// A self-minted author-authority turn is reusable for this long — a wide
+// margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
+const AUTHOR_AUTHORITY_TTL_MS = 120_000
+
 // Calm degraded copy for the agent tier (two-tier dispatch, wire §11). The
 // deterministic path is never blocked by any of these — the banner just says
 // so honestly. Keyed off classifyAgentError, never message text.
@@ -1008,7 +1012,43 @@ export default function App() {
   })
   drawingErrorRef.current = setRunErr
 
-  const authorStage = useAuthorStageController({ mock })
+  // Turn-authority provider for the author panel's stage POST (server fail-
+  // closes without it: X-Authority-Session-Id/-Turn-Id naming an ACTIVE turn
+  // whose subject matches the caller). Reuses a self-minted turn within TTL
+  // (a wide margin under the server's TURN_MAX_S default of 300s) rather than
+  // reusing an arbitrary composer turn: useConverseSessionController exposes
+  // no live "still active" signal for turns already in flight (its `turns`
+  // entries are a one-time snapshot from turn start, never updated to
+  // terminal), so trusting one here could hand the server a turn id that has
+  // already ended. Minting is the safe default; the server 409s harmlessly if
+  // this races and loses.
+  const agentSessionIdRef = useRef(agentSessionId)
+  useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
+  const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
+  const authorAuthorityProvider = useCallback(async (description) => {
+    // No entitlement pre-check here: entitlements load async, and a stage
+    // click can beat them (proven by the e2e). A mint against a tenant that
+    // truly cannot converse just fails and falls through to null, which the
+    // server answers with its own fail-closed refusal.
+    const cached = authorAuthorityRef.current
+    if (cached && cached.sessionId === agentSessionIdRef.current
+        && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
+      return { sessionId: cached.sessionId, turnId: cached.turnId }
+    }
+    try {
+      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' })
+      // The response's own session id, never the state-fed ref alone: the
+      // first mint resolves before React has re-rendered the fresh sessionId.
+      const sessionId = response?.session_id || agentSessionIdRef.current
+      if (!sessionId || !response?.turn_id) return null
+      authorAuthorityRef.current = { sessionId, turnId: response.turn_id, mintedAt: Date.now() }
+      return { sessionId, turnId: response.turn_id }
+    } catch {
+      return null
+    }
+  }, [startAgentTurn])
+
+  const authorStage = useAuthorStageController({ mock, authorityProvider: authorAuthorityProvider })
   authorPendingRef.current = !!authorStage.pointer
 
   useEffect(() => {
