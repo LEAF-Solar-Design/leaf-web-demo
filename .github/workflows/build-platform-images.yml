@@ -2747,6 +2747,197 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # ---------------------------------------------------------------------
+  # D3, phase 1 of 2: HARVEST the real CVE surface of what actually deploys.
+  #
+  # This workflow builds the five images that reach production and has never
+  # had a CVE gate. The proven gate next door in
+  # build-instant-execution-image.yml (`Scan image before push`) cannot be
+  # copied here: its shape is build --load / scan / `docker push`, and the app
+  # leg publishes through `outputs: type=image,push=true,compression=zstd`
+  # precisely so that provenance, the supply set and speculative adoption all
+  # mint from ONE build. A load-then-re-push would fork the identity chain the
+  # `Build and push` comment forbids forking.
+  #
+  # It is also the wrong PLACE. A gate keyed on the build job's own
+  # `steps.build-image.outputs.digest` is bypassed three ways, all live today:
+  #   1. an adopted merge skips the whole build matrix
+  #      (`needs.adopt.outputs.adopted != 'true'`), and `adopt` writes the
+  #      supply set itself;
+  #   2. the resume arm skips `build-image` when the exact full-build tags
+  #      already exist, so a rerun would scan nothing and read as a pass;
+  #   3. the surface-reuse arm does the same.
+  # So this job scans the five digests recorded in the STAGING SUPPLY SET --
+  # the single artifact both the staging relay and the manual production
+  # handoff consume, written by exactly two jobs (`verify` for the full-build
+  # path, `adopt` for the adopted path). Whatever deploys is what gets
+  # scanned, no matter which path built it or whether this run built it at all.
+  #
+  # PHASE 1 IS DELIBERATELY TOOTHLESS: `exit-code: "0"` on every scan and
+  # `continue-on-error: true` on the job, so it cannot change the run's
+  # conclusion and therefore cannot gate the staging relay or the promote.
+  # That is not timidity, it is the only honest sequence. The exact
+  # final-image finding set cannot be enumerated off-CI (it needs ECR plus the
+  # canonical-solver deploy key), and a blocking gate seeded from a
+  # base-image guess would redden main on its first run: measured 2026-08-26,
+  # the bases alone carry 39 fixed HIGH/CRITICAL (python:3.12-slim),
+  # 9 (node:22-slim, incl. CRITICAL CVE-2026-59873) and 2 (nginx:alpine),
+  # and no Dockerfile under deploy/ runs `apt-get upgrade` or `apk upgrade`.
+  #
+  # PHASE 2, once one harvest artifact exists: drop `continue-on-error`, flip
+  # `exit-code` to "1", and add `trivyignores` pointing at an allowlist built
+  # from THAT artifact, every entry carrying a machine-checked expiry. A
+  # failing job then fails the run, which is what actually gates deployment:
+  # dispatch-staging-deploys.yml fires only on a successful run, and the
+  # manual promote consumes the same run's supply set.
+  #
+  # The one privilege delta for review: this job assumes AWS_ECR_PUSH_ROLE
+  # (the seventh assumption in the workflow) because that is the credential
+  # that can read leaf-platform-* in ECR. It uses it for `amazon-ecr-login`
+  # and image pulls only -- it builds nothing, tags nothing and pushes
+  # nothing. A pull-only role in leaf-automation-aws-terraform would be
+  # strictly better and is the follow-up.
+  cve-harvest:
+    needs: [prepare, verify, adopt]
+    if: >-
+      ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
+          needs.prepare.outputs.build == 'true' &&
+          (needs.verify.result == 'success' ||
+           (needs.adopt.result == 'success' &&
+            needs.adopt.outputs.adopted == 'true')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Phase 1 only. Removing this is half of the phase-2 flip.
+    continue-on-error: true
+    environment: ecr-release
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
+      SUPPLY_SET: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+
+    steps:
+      - name: Download the staging supply set this run published
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SUPPLY_SET }}
+          path: supply-set
+
+      - name: Resolve the five immutable digests to scan
+        id: digests
+        run: |
+          set -euo pipefail
+          manifest=supply-set/staging-supply-set.json
+          jq -e '.schema == "leaf.staging-supply-set.v3"' "$manifest" >/dev/null || {
+            echo "::error::Supply set is not a leaf.staging-supply-set.v3 manifest"
+            exit 1
+          }
+          for image in app broker canonical-worker harness web; do
+            digest="$(jq -er --arg image "$image" '.services[$image].image_digest' "$manifest")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::$image digest is not a sha256 digest: $digest"
+              exit 1
+            }
+            echo "${image//-/_}=$ECR_REGISTRY/leaf-platform-$image@$digest" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GHA-HarvestPlatformCVEs-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Scan app
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.digests.outputs.app }}
+          scanners: vuln
+          format: json
+          output: harvest/app.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Scan broker
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.digests.outputs.broker }}
+          scanners: vuln
+          format: json
+          output: harvest/broker.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Scan canonical-worker
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.digests.outputs.canonical_worker }}
+          scanners: vuln
+          format: json
+          output: harvest/canonical-worker.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Scan harness
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.digests.outputs.harness }}
+          scanners: vuln
+          format: json
+          output: harvest/harness.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Scan web
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.digests.outputs.web }}
+          scanners: vuln
+          format: json
+          output: harvest/web.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Summarise the harvest
+        run: |
+          set -euo pipefail
+          {
+            echo "## CVE harvest (report-only, D3 phase 1)"
+            echo ""
+            echo "Fixed HIGH/CRITICAL findings in the five digests this run published."
+            echo "This job gates nothing yet; see the phase-2 note in the workflow."
+            echo ""
+            echo "| service | fixed HIGH/CRITICAL |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for image in app broker canonical-worker harness web; do
+            f="harvest/$image.json"
+            if [[ -s "$f" ]]; then
+              n="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$f")"
+            else
+              n="not scanned"
+            fi
+            echo "| $image | $n |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload the harvest
+        uses: actions/upload-artifact@v4
+        with:
+          name: cve-harvest-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+          path: harvest
+          if-no-files-found: warn
+          retention-days: 30
+
   handoff:
     needs: [prepare]
     if: >-
@@ -2874,3 +3065,4 @@ jobs:
           path: ${{ runner.temp }}/production-handoff-candidate.json
           if-no-files-found: error
           retention-days: 30
+

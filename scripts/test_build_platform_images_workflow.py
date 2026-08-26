@@ -798,14 +798,15 @@ def main() -> None:
         assert not raw_key or "\\" not in raw_key.group(1), (
             "escape sequences in a mapping key are banned: %r" % line)
 
-    # SIX jobs hold the ECR push credential (see the note above the
+    # SEVEN jobs hold the ECR push credential (see the note above the
     # deferred assignment for the roster and for why this is parsed, not
-    # text-matched).
+    # text-matched). The seventh is cve-harvest (D3, 2026-08-26): it reads
+    # leaf-platform-* digests out of ECR to scan them and pushes nothing.
     oidc_grants = [
         l for l in structural
         if _key_of(l) == "id-token" and _value_of(l) == "write"
     ]
-    assert len(oidc_grants) == 6, oidc_grants
+    assert len(oidc_grants) == 7, oidc_grants
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
@@ -1690,8 +1691,10 @@ def main() -> None:
         release_role,  # speculate: pushes real spec-* images by design
         release_role,  # speculate-manifest: reads live digests
         release_role,  # adopt: aliases the release tag onto digests
-    ], ("exactly six role assumptions in the workflow, in job order "
-        "warm, build, verify, speculate, speculate-manifest, adopt")
+        release_role,  # cve-harvest: pulls the published digests to scan
+    ], ("exactly seven role assumptions in the workflow, in job order "
+        "warm, build, verify, speculate, speculate-manifest, adopt, "
+        "cve-harvest")
     # Substring bans stay as belt-and-braces: comment-inclusive is fine for
     # a NEGATIVE. (Sound: AWS_ECR_BUILDCACHE_PUSH_ROLE does not contain the
     # substring AWS_ECR_PUSH_ROLE.)
@@ -2002,7 +2005,12 @@ def main() -> None:
     manifest_block = text.split("\n  speculate-manifest:\n", 1)[1].split(
         "\n  adopt:\n", 1
     )[0]
-    adopt_block = text.split("\n  adopt:\n", 1)[1].split("\n  handoff:\n", 1)[0]
+    # Bounded at cve-harvest, which sits between adopt and handoff since
+    # D3 (2026-08-26). The roster is pinned deliberately: a new job must
+    # declare itself here rather than silently widening a slice.
+    adopt_block = text.split("\n  adopt:\n", 1)[1].split(
+        "\n  cve-harvest:\n", 1
+    )[0]
 
     # Speculative dispatches must never queue inside the release concurrency
     # group (they are dispatched on the main ref). Cancellation is
@@ -2459,7 +2467,10 @@ def main() -> None:
     # stop matching the release role's trust once the leaf_iam.tf transition
     # removes the ref-based subject. Parsed, not text-matched, so a
     # commented copy or a {name: ...} mapping variant cannot satisfy it.
-    release_env_jobs = {"build", "verify", "speculate", "speculate-manifest", "adopt"}
+    # cve-harvest joined the set with D3 (2026-08-26): it reaches the
+    # release role only to PULL the published digests it scans.
+    release_env_jobs = {"build", "verify", "speculate", "speculate-manifest",
+                        "adopt", "cve-harvest"}
     for job_name in release_env_jobs:
         assert wf_jobs[job_name].get("environment") == "ecr-release", job_name
     for job_name, job in wf_jobs.items():
@@ -2539,6 +2550,70 @@ def main() -> None:
     adopt_web = _sole_named(
         adopt_steps, "Verify the provider-bound web source restamp"
     )
+
+    # ---- D3 CVE harvest (2026-08-26) ---------------------------------
+    # This job is the repo's only CVE gate on what actually deploys, and it
+    # is deliberately toothless in phase 1. Pin the whole contract so a
+    # later edit cannot leave a HALF-FLIPPED gate that looks armed and
+    # blocks nothing.
+    harvest = wf_jobs["cve-harvest"]
+    harvest_steps = harvest["steps"]
+
+    # It must scan what DEPLOYS, not what this run happened to build. A gate
+    # keyed on the build job's own digest is bypassed three ways, all live:
+    # an adopted merge skips the whole matrix, the resume arm skips
+    # build-image when the exact tags exist, and the surface-reuse arm does
+    # the same. Reading the supply-set artifact is what makes this
+    # bypass-proof, so the download and the digest resolve are both pinned.
+    assert harvest["needs"] == ["prepare", "verify", "adopt"]
+    download = next(
+        s for s in harvest_steps
+        if str(s.get("uses", "")).startswith("actions/download-artifact@")
+    )
+    assert download["with"]["name"] == "${{ env.SUPPLY_SET }}"
+    assert harvest["env"]["SUPPLY_SET"] == (
+        "staging-supply-set-${{ needs.prepare.outputs.source_sha }}"
+        "-attempt-${{ github.run_attempt }}"
+    )
+    resolve = next(s for s in harvest_steps if s.get("id") == "digests")
+    assert "leaf.staging-supply-set.v3" in resolve["run"]
+
+    # All five services, every one scanned, on the same pinned action the
+    # instant-execution gate already uses. A sixth service added to the
+    # release matrix without a scan step must fail here.
+    scan_steps = [
+        s for s in harvest_steps
+        if str(s.get("uses", "")).startswith("aquasecurity/trivy-action@")
+    ]
+    assert [s["name"] for s in scan_steps] == [
+        "Scan app",
+        "Scan broker",
+        "Scan canonical-worker",
+        "Scan harness",
+        "Scan web",
+    ], [s.get("name") for s in scan_steps]
+    assert {s["uses"] for s in scan_steps} == {
+        "aquasecurity/trivy-action@v0.36.0"
+    }
+    for step in scan_steps:
+        assert step["with"]["severity"] == "HIGH,CRITICAL", step["name"]
+        assert step["with"]["ignore-unfixed"] is True, step["name"]
+
+    # THE INVARIANT: the job blocks if and only if its scans block.
+    # exit-code 0 everywhere plus continue-on-error is a coherent
+    # report-only phase 1; exit-code 1 everywhere with no continue-on-error
+    # is a coherent blocking phase 2. Every other combination is a gate that
+    # lies, so flipping one without the other fails this test by
+    # construction.
+    exit_codes = {str(s["with"]["exit-code"]) for s in scan_steps}
+    assert exit_codes in ({"0"}, {"1"}), exit_codes
+    report_only = exit_codes == {"0"}
+    assert harvest.get("continue-on-error", False) is report_only, (
+        "cve-harvest: exit-code and continue-on-error disagree, so the gate "
+        "either blocks nothing while looking armed, or reddens main on "
+        "findings it was only meant to record"
+    )
+
     assert "leaf.web-source-restamp.v1" in adopt_web["run"]
     assert "spec-candidate/restamped-web/dist" in adopt_web["run"]
     assert "steps.decide.outputs.built_from" in adopt_web["run"]
