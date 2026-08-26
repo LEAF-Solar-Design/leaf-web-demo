@@ -109,15 +109,23 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
       return response
     }
 
+    // The response carries the session id the turn actually ran under, so a
+    // caller that needs (session, turn) authority in the same continuation
+    // never has to race the sessionId state update through a re-render.
+    const withSession = (response) => (
+      response && typeof response === 'object' && !response.session_id
+        ? { ...response, session_id: sessionRef.current }
+        : response
+    )
     const current = sessionRef.current || (await attach())
     try {
-      return await send(current)
+      return withSession(await send(current))
     } catch (error) {
       if (!retryNotFound || classifyAgentError(error) !== 'not_found') throw error
       resetCached()
       sessionRef.current = null
       setSessionId(null)
-      return send(await attach())
+      return withSession(await send(await attach()))
     }
   }, [attach, resetCached, retryNotFound])
 

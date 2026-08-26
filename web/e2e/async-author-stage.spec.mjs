@@ -562,3 +562,51 @@ for (const invalid of [
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
   })
 }
+
+// Live defect (staging run 32910678723): the server's stage POST fail-closes
+// (409 stage_authority_invalid) without X-Authority-Session-Id/-Turn-Id naming
+// an ACTIVE turn owned by the caller. The panel's own turn-authority provider
+// mints one from the converse session (POST /api/sessions then .../messages,
+// both served by the shared cat-proof fixture) and the stage POST must carry
+// the exact ids that mint returned.
+test('the direct stage POST carries turn authority minted from a live session', async ({ page }) => {
+  const proofState = makeCatProofState()
+  const stageHeaders = []
+  await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
+    let body = {}
+    if (request.postData()) {
+      try { body = request.postDataJSON() } catch { body = {} }
+    }
+    if (url.pathname === '/api/author/stage' && request.method() === 'POST') {
+      stageHeaders.push(request.headers())
+    }
+    const result = catProofResponse({
+      method: request.method(),
+      path: url.pathname,
+      body,
+      query: Object.fromEntries(url.searchParams),
+    }, proofState)
+    await route.fulfill({
+      status: result.status,
+      contentType: result.body == null ? undefined : 'application/json',
+      body: result.body == null ? '' : JSON.stringify(result.body),
+      headers,
+    })
+  })
+
+  await page.goto('/try?proof=1')
+  await page.getByRole('tab', { name: 'Author' }).click()
+  await page.getByLabel('What should the tool do?').fill('count panels within 24in of the roof edge')
+  await page.getByRole('button', { name: 'Generate tool' }).click()
+  await expect(page.locator('.authored')).toContainText(AUTHORED_TOOL.name, { timeout: 15_000 })
+
+  expect(stageHeaders).toHaveLength(1)
+  // The fixture's POST /api/sessions -> {session_id: 'cat-session'} then
+  // POST .../messages -> {turn_id: 'turn-1'} is exactly what the provider mints.
+  expect(stageHeaders[0]['x-authority-session-id']).toBe('cat-session')
+  expect(stageHeaders[0]['x-authority-turn-id']).toBe('turn-1')
+})

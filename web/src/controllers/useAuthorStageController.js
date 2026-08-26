@@ -32,6 +32,12 @@ export default function useAuthorStageController({
   enabled = true,
   storage,
   stageAuthorTool = defaultStageAuthorTool,
+  // Optional turn-authority provider: async () => ({ sessionId, turnId } | null).
+  // Called once per initial stage submission (never on a poll/reconnect, which
+  // sends no new POST). A null/thrown result proceeds WITHOUT authority headers
+  // -- the server still fail-closes on its own; this never invents a client-side
+  // refusal.
+  authorityProvider,
 } = {}) {
   const storageRef = useRef(storage)
   const accountScope = authorAccountScope(config.tenant, storage)
@@ -72,6 +78,16 @@ export default function useAuthorStageController({
         setResult(initial.staged_result)
         return initial.staged_result
       }
+      // Only the initial POST carries authority; a poll/reconnect (poll_url
+      // already set) never re-submits, so skip minting/reusing a turn for it.
+      let authority = null
+      if (authorityProvider && !initial.poll_url) {
+        try {
+          authority = (await authorityProvider(initial.description)) || null
+        } catch {
+          authority = null
+        }
+      }
       const staged = await stageAuthorTool(
         mock,
         initial.description,
@@ -81,6 +97,7 @@ export default function useAuthorStageController({
           pollUrl: initial.poll_url || null,
           changeSetId: initial.change_set_id || null,
           retryAfterMs: initial.retry_after_ms || null,
+          authority,
           signal: abortController.signal,
           onAccepted: (accepted) => {
             if (sequenceRef.current !== sequence) return
@@ -123,7 +140,7 @@ export default function useAuthorStageController({
       setError(cause instanceof Error ? cause : new Error(String(cause)))
       return null
     }
-  }, [mock, persist, stageAuthorTool])
+  }, [authorityProvider, mock, persist, stageAuthorTool])
 
   const stage = useCallback((description, targetToolName = null) => {
     if (!enabled) return Promise.resolve(null)

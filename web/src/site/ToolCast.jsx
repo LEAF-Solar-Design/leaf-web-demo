@@ -610,9 +610,36 @@ export default function ToolCast({
   })
   resetJobRef.current = resetJob
 
+  // Turn-authority provider for the author panel's stage POST: the server
+  // fail-closes (409 stage_authority_invalid) without X-Authority-Session-Id/
+  // -Turn-Id naming an ACTIVE turn owned by this subject, so mint one from the
+  // converse session right before staging and reuse it briefly. The response's
+  // own session_id is authoritative; the state-fed sessionId can lag a render.
+  // A failed mint returns null and the server still answers with its own
+  // refusal — never a client-side one.
+  // Wide margin under the server's TURN_MAX_S default of 300s.
+  const AUTHOR_AUTHORITY_TTL_MS = 120_000
+  const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
+  const authorAuthorityProvider = useCallback(async (description) => {
+    const cached = authorAuthorityRef.current
+    if (cached && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
+      return { sessionId: cached.sessionId, turnId: cached.turnId }
+    }
+    try {
+      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' })
+      const mintedSession = response?.session_id
+      if (!mintedSession || !response?.turn_id) return null
+      authorAuthorityRef.current = { sessionId: mintedSession, turnId: response.turn_id, mintedAt: Date.now() }
+      return { sessionId: mintedSession, turnId: response.turn_id }
+    } catch {
+      return null
+    }
+  }, [])
+
   const authorStage = useAuthorStageController({
     mock: PUBLIC_DEMO,
     enabled: sessionReady,
+    authorityProvider: authorAuthorityProvider,
   })
   authorPendingRef.current = !!authorStage.pointer
 
