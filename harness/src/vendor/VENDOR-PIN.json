@@ -24,7 +24,7 @@
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "ba55ed5b026a219ecf8f316af102638d7397a7d66363d1adafa53dd794c74d17",
-    "ports/impl/agentSdkRunner.ts": "ca46904686333321f28f516a784e911d3207669b31f5fa3cd5ef37ef1ca660c1",
+    "ports/impl/agentSdkRunner.ts": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6",
     "ports/impl/agentSdkTurnRunner.ts": "2f8bcaec9c5f99d4e7ad7357ef1a100560a618f6f32b08dd4bc5dd22a5c386b0",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
     "ports/impl/converseSdkRunner.ts": "482b0c8981a2e2b82958e977c265cb4d43af75f99720739fcc88dbfc16759d44",
