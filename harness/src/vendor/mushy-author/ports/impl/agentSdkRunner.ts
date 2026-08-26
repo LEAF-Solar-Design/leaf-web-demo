@@ -637,7 +637,17 @@ export class AgentSdkRunner implements AgentRunner {
           )),
           profile: "author",
         });
-      } catch {
+      } catch (error) {
+        // The thrown message is a protocol constant (exact-matched by
+        // runnerDiagnosticCode and isStableRunnerError) and must not carry
+        // the cause; the cause goes to the harness log instead, stripped
+        // to a safe charset and bounded so an arbitrary provider message
+        // can never carry a credential-shaped value into the log line.
+        const cause = error instanceof Error ? error.message : String(error);
+        console.error(
+          "[runner] standard services resolver setup failed:",
+          cause.replace(/[^A-Za-z0-9 _:.\/-]/g, " ").slice(0, 200),
+        );
         throw new Error("standard_services_resolver_setup_failed");
       }
     }
