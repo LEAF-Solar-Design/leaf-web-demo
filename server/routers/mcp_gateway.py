@@ -368,6 +368,7 @@ def _mint_attachment(
     request: AttachmentExchangeRequest,
     direction: str,
 ) -> dict[str, Any]:
+    subject_id = mcp_authority.harness_safe_subject(subject_id)
     plan, effects = mcp_authority.tier_authority(tier)
     channel_secret = secrets.token_urlsafe(48)
     channel_hash = hashlib.sha256(channel_secret.encode("utf-8")).hexdigest()
@@ -504,6 +505,7 @@ def _mint_human_approval_token(
     *, tenant_id: str, subject_id: str, identity: dict[str, str],
     approval_id: str, argument_digest: str,
 ) -> tuple[str, int]:
+    subject_id = mcp_authority.harness_safe_subject(subject_id)
     return mcp_authority.signer().issue(
         {
             "sub": subject_id,
@@ -683,7 +685,7 @@ def execute_human_approval(
                 "approval_id": request.approval_id,
                 "argument_digest": request.argument_digest,
                 "tenant_id": tenant_id,
-                "subject_id": tenant.subject,
+                "subject_id": mcp_authority.harness_safe_subject(tenant.subject),
             })
             invocation["tool"] = _ledger_tool(reviewed.get("tool"))
             identity_value = reviewed.get("identity")
@@ -706,7 +708,8 @@ def execute_human_approval(
             invocation["session_id"] = identity["session_id"]
             if (
                 identity_value.get("tenant_id") != tenant_id
-                or identity_value.get("subject_id") != tenant.subject
+                or identity_value.get("subject_id")
+                != mcp_authority.harness_safe_subject(tenant.subject)
             ):
                 raise mcp_authority.McpAuthorityError("MCP approval is unavailable")
             session = session_store.get_session(identity["session_id"])

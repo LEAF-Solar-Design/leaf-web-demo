@@ -19,6 +19,10 @@ from routers import mcp_gateway
 
 TENANT = "tenant-a"
 SUBJECT = "auth0|alice"
+# What every mint/review boundary now emits for SUBJECT: the vendored
+# tenant-services ID contract [A-Za-z0-9][A-Za-z0-9._:-]{0,255} rejects
+# the pipe, so mcp_authority.harness_safe_subject maps it to ":".
+SAFE_SUBJECT = "auth0:alice"
 OTHER_SUBJECT = "auth0|mallory"
 TURN = "turn-a"
 MODEL_SESSION = "model-session-a"
@@ -165,7 +169,7 @@ def test_kms_signer_resolves_alias_and_publishes_matching_jwk(monkeypatch):
     signer = mcp_authority.KmsRs256Signer(kms, "alias/attachment", clock=lambda: 50)
 
     token, expires_at = signer.issue(
-        {"subject_id": SUBJECT, "iss": "https://attacker.example/", "jti": "fixed"},
+        {"subject_id": SAFE_SUBJECT, "iss": "https://attacker.example/", "jti": "fixed"},
         audience="audience-a",
         ttl_seconds=120,
     )
@@ -454,14 +458,14 @@ def test_internal_exchange_binds_app_owned_authority_and_random_channel(authorit
     claims = decode(body["bearer_token"], kms.public, "urn:leaf:tenant-mcp-broker")
     assert body["identity"] == {
         "tenant_id": TENANT,
-        "subject_id": SUBJECT,
+        "subject_id": SAFE_SUBJECT,
         "session_id": MODEL_SESSION,
         "authority_turn_id": TURN,
         "subscription_mount_id": MOUNT,
         "runner_profile_id": "spine",
     }
     assert claims["tenant_id"] == TENANT
-    assert claims["subject_id"] == SUBJECT
+    assert claims["subject_id"] == SAFE_SUBJECT
     assert claims["session_id"] == MODEL_SESSION
     assert claims["authority_turn_id"] == TURN
     assert claims["subscription_mount_id"] == MOUNT
@@ -607,9 +611,9 @@ def test_human_token_is_bound_to_exact_approval_and_digest(authority):
     claims = decode(
         response.json()["bearer_token"], kms.public, "urn:leaf:tenant-mcp-approval"
     )
-    assert claims["sub"] == SUBJECT
+    assert claims["sub"] == SAFE_SUBJECT
     assert claims["tenant_id"] == TENANT
-    assert claims["subject_id"] == SUBJECT
+    assert claims["subject_id"] == SAFE_SUBJECT
     assert claims["session_id"] == MODEL_SESSION
     assert claims["authority_turn_id"] == TURN
     assert claims["subscription_mount_id"] == MOUNT
@@ -639,7 +643,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
                 "status": "pending",
                 "identity": {
                     "tenant_id": TENANT,
-                    "subject_id": SUBJECT,
+                    "subject_id": SAFE_SUBJECT,
                     "session_id": authority_session_id,
                     "authority_turn_id": TURN,
                     "subscription_mount_id": MOUNT,
@@ -677,7 +681,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
             "approval_id": "approval_12345678",
             "argument_digest": "a" * 64,
             "tenant_id": TENANT,
-            "subject_id": SUBJECT,
+            "subject_id": SAFE_SUBJECT,
         },
     )
     execute_payload = calls[1][1]
@@ -693,7 +697,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
     )
     for claims in (human_claims, attachment_claims):
         assert claims["tenant_id"] == TENANT
-        assert claims["subject_id"] == SUBJECT
+        assert claims["subject_id"] == SAFE_SUBJECT
         assert claims["session_id"] == authority_session_id
         assert claims["authority_turn_id"] == TURN
         assert claims["subscription_mount_id"] == MOUNT
@@ -702,7 +706,7 @@ def test_authenticated_human_executes_only_reviewed_binding_and_gets_safe_receip
     assert human_claims["argument_digest"] == "a" * 64
     assert execute_payload["identity"] == {
         "tenant_id": TENANT,
-        "subject_id": SUBJECT,
+        "subject_id": SAFE_SUBJECT,
         "session_id": authority_session_id,
         "authority_turn_id": TURN,
         "subscription_mount_id": MOUNT,
@@ -753,7 +757,7 @@ def test_human_approval_enforces_provider_artifact_contract_end_to_end(
                 "status": "pending",
                 "identity": {
                     "tenant_id": TENANT,
-                    "subject_id": SUBJECT,
+                    "subject_id": SAFE_SUBJECT,
                     "session_id": authority_session_id,
                     "authority_turn_id": TURN,
                     "subscription_mount_id": MOUNT,
@@ -795,7 +799,7 @@ def test_vanished_session_fails_before_human_approval_execution(
             "status": "pending",
             "identity": {
                 "tenant_id": TENANT,
-                "subject_id": SUBJECT,
+                "subject_id": SAFE_SUBJECT,
                 "session_id": authority_session_id,
                 "authority_turn_id": TURN,
                 "subscription_mount_id": MOUNT,
@@ -833,7 +837,7 @@ def test_completed_human_approval_retry_returns_journaled_receipt_without_mint_o
             "status": "completed",
             "identity": {
                 "tenant_id": TENANT,
-                "subject_id": SUBJECT,
+                "subject_id": SAFE_SUBJECT,
                 "session_id": authority_session_id,
                 "authority_turn_id": TURN,
                 "subscription_mount_id": MOUNT,
@@ -891,7 +895,7 @@ def test_uncertain_human_approval_is_observable_and_never_reexecutes(
             "status": state,
             "identity": {
                 "tenant_id": TENANT,
-                "subject_id": SUBJECT,
+                "subject_id": SAFE_SUBJECT,
                 "session_id": authority_session_id,
                 "authority_turn_id": TURN,
                 "subscription_mount_id": MOUNT,
@@ -981,7 +985,7 @@ def test_human_execution_rechecks_mount_before_mint_or_execute(authority, monkey
             "status": "pending",
             "identity": {
                 "tenant_id": TENANT,
-                "subject_id": SUBJECT,
+                "subject_id": SAFE_SUBJECT,
                 "session_id": authority_session_id,
                 "authority_turn_id": TURN,
                 "subscription_mount_id": MOUNT,
@@ -1128,3 +1132,26 @@ def test_token_body_limit_runs_before_fastapi_parsing(authority):
     assert authenticated.status_code == 413
     assert missing_human.status_code == 401
     assert kms.sign_calls == []
+
+
+def test_minted_subject_id_satisfies_the_vendored_id_contract(authority):
+    """auth0 subjects carry a pipe; the vendored tenant-services ID contract
+    is [A-Za-z0-9][A-Za-z0-9._:-]{0,255} (harness parseAttachment). The raw
+    subject leaking into the minted identity killed every authority-carrying
+    stage on staging (standard_services_resolver_setup_failed:
+    standard_services_exchange_invalid:subject_id, observed 2026-08-26)."""
+    import re as _re
+
+    client, authority_session_id, kms = authority
+    response = client.post(
+        "/internal/mcp/gateway/attachment",
+        json=attachment_body(authority_session_id),
+        headers={"X-Tenant-Id": TENANT, "X-Dispatch-Secret": "dispatch-secret"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    claims = decode(body["bearer_token"], kms.public, "urn:leaf:tenant-mcp-broker")
+    contract = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+    assert contract.fullmatch(body["identity"]["subject_id"])
+    assert contract.fullmatch(claims["subject_id"])
+    assert "|" not in body["identity"]["subject_id"]
