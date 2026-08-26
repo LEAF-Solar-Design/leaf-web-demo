@@ -501,3 +501,22 @@ def test_project_publisher_rejects_cross_tenant_scope_before_storage(monkeypatch
         assert str(exc) == "project is unavailable for this tenant"
     else:
         raise AssertionError("cross-tenant project unexpectedly published")
+
+
+def test_publish_partial_matches_the_producer_positional_contract():
+    """da/blank_dwg.py calls publish(payload, digest) POSITIONALLY on the
+    functools.partial broker builds with three identity kwargs. The all-
+    keyword-only signature this pins against shipped to staging and killed
+    every rung-2 acceptance with a TypeError inside the one-off broker task
+    (named live 2026-08-26); the bind below reproduces that call shape
+    hermetically."""
+    import functools
+    import inspect
+
+    publish = functools.partial(
+        broker._publish_blank_dwg,
+        tenant_id="00000000-0000-0000-0000-000000000000",
+        project_id="00000000-0000-0000-0000-000000000001",
+        drawing_name="APS blank drawing acceptance",
+    )
+    inspect.signature(publish).bind(b"AC1032", "0" * 64)
