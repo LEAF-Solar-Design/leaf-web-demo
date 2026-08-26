@@ -1347,7 +1347,7 @@ def _is_blank_dwg_request(req: BrokerRunRequest, tool: Dict[str, Any]) -> bool:
 
 
 def _publish_blank_dwg(
-    *, tenant_id: str, project_id: str, drawing_name: str, payload: bytes, digest: str
+    payload: bytes, digest: str, *, tenant_id: str, project_id: str, drawing_name: str
 ) -> Dict[str, Any]:
     """Publish the validated bytes as one tenant and project-owned version 1."""
     import store as drawing_store  # da/store.py, made importable by write_loop
