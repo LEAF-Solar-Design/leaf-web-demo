@@ -6,11 +6,11 @@
   ],
   "subject": "google-oauth2|117253027602795724088",
   "authorized_party": "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O",
-  "expires_at": 1786042227,
-  "tenant_id": "1b60bef6-b488-4e18-ac45-4e4afecc30ff",
+  "expires_at": 1784885683,
+  "tenant_id": "cmko86m8c000210p4gurmb17y",
   "org_id": "cmko86m8c000210p4gurmb17y",
-  "tier": "admin",
+  "tier": "hosted_pro",
   "client_id": "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O",
-  "redirect_uri": "http://localhost:8080",
-  "token_file": "C:\\Users\\ehaug\\AppData\\Local\\leaf-grants\\auth0-access-token.txt"
+  "redirect_uri": "http://127.0.0.1:8081",
+  "token_file": "C:\\tmp\\leaf-grants\\auth0-access-token-8081.txt"
 }
