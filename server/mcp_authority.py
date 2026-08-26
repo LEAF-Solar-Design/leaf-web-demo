@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets
 import time
 import urllib.parse
@@ -112,6 +113,30 @@ def tier_authority(tier: str) -> tuple[str, tuple[str, ...]]:
         return _TIER_AUTHORITY[tier]
     except (KeyError, TypeError) as exc:
         raise McpAuthorityError("the active tenant tier has no MCP policy") from exc
+
+
+_SUBJECT_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
+
+
+def harness_safe_subject(subject: str) -> str:
+    """Deterministic harness-safe encoding of a platform subject.
+
+    Auth0 subjects carry a pipe (auth0|abc123); the vendored tenant-services
+    ID contract is [A-Za-z0-9][A-Za-z0-9._:-]{0,255}, so the raw subject
+    fails validation at the harness and the whole authority-carrying stage
+    path dies (standard_services_exchange_invalid:subject_id, observed live
+    2026-08-26). Every out-of-range byte maps to ':', keeping the common
+    auth0 case readable (auth0:abc123) and the mapping deterministic; a
+    leading non-alphanumeric gains an 's:' prefix so the first-char class
+    holds; length is clamped to the contract's 256.
+
+    Applied at the mint/review boundaries ONLY. App-internal authority
+    checks (active-turn subject, project access) keep the raw subject.
+    """
+    safe = _SUBJECT_UNSAFE.sub(":", subject or "")
+    if not safe or not re.match(r"[A-Za-z0-9]", safe[0]):
+        safe = "s:" + safe
+    return safe[:256]
 
 
 def verify_subscription_mount(tenant_id: str, mount_id: str) -> None:

@@ -34,6 +34,10 @@ from routers import mcp_gateway
 
 TENANT = "tenant-a"
 SUBJECT = "auth0|alice"
+# The harness-returned identity carries the boundary-safe encoding
+# (mcp_authority.harness_safe_subject): the vendored ID contract
+# rejects the pipe.
+SAFE_SUBJECT = "auth0:alice"
 TURN = "turn-a"
 MODEL_SESSION = "model-session-a"
 MOUNT = "subscription-a"
@@ -121,7 +125,7 @@ def attachment_body(authority_session_id: str) -> dict[str, str]:
 def _identity(authority_session_id: str) -> dict[str, str]:
     return {
         "tenant_id": TENANT,
-        "subject_id": SUBJECT,
+        "subject_id": SAFE_SUBJECT,
         "session_id": authority_session_id,
         "authority_turn_id": TURN,
         "subscription_mount_id": MOUNT,
