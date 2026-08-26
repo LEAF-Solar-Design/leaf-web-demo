@@ -110,6 +110,18 @@ def _bounded_float(
 
 
 def _source_revision(env: Mapping[str, str]) -> Optional[str]:
+    """The BAKED build revision, not the release's.
+
+    LEAF_BUILD_REVISION is stamped at image build. When a release ADOPTS a
+    tree-identical preview image (staging-supply-set build_disposition
+    "reused"), this keeps reporting the preview commit, and the acceptance's
+    readiness equality against the release sha fails even though the
+    deployment identity receipt verifies (observed live 2026-08-26, staging
+    runs 32923174402/32923435140 at release eb25106 baked bca33e91). A
+    release that must pass the authored acceptance needs the app image BUILT
+    at the release sha; reconciling this field with the attested receipt
+    instead is a design decision deliberately not made here.
+    """
     for name in _REVISION_KEYS:
         value = env.get(name, "").strip()
         if value and _REVISION_RE.fullmatch(value):
