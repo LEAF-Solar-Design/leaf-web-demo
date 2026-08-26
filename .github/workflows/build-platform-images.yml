@@ -2829,6 +2829,11 @@ jobs:
         id: digests
         run: |
           set -euo pipefail
+          # trivy-action will not create its own output directory: without
+          # this the very first scan dies on
+          # "open harvest/app.json: no such file or directory" AFTER doing all
+          # the real work (run 32977669822, the job's first live run).
+          mkdir -p harvest
           manifest=supply-set/staging-supply-set.json
           jq -e '.schema == "leaf.staging-supply-set.v3"' "$manifest" >/dev/null || {
             echo "::error::Supply set is not a leaf.staging-supply-set.v3 manifest"
