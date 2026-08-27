@@ -1380,6 +1380,45 @@ describe("ConverseLoop — remaining spine tools", () => {
     ]);
   });
 
+  it("customize_platform read ops ride the read rung: no chip, immediate dispatch", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "CUSTOMIZE_READ:web/src/theme.css");
+    await sendText(loop, s, "CUSTOMIZE_TREE:web/src");
+    await sendText(loop, s, "CUSTOMIZE_LIST:5");
+
+    expect(appRun.customizeCalls).toEqual([
+      { op: "read_source", tenantId: "demo-tenant", path: "web/src/theme.css" },
+      { op: "list_source", tenantId: "demo-tenant", dir: "web/src" },
+      { op: "list", tenantId: "demo-tenant", limit: 5 },
+    ]);
+    // Never a chip: a read proposes nothing, so nothing needed approval.
+    const events = await store.eventsAfter(s.session_id, 0);
+    expect(ofType(events, "confirmation_required")).toHaveLength(0);
+    // And each consult rode the READ action, not the always-confirm one.
+    for (const what of ["customize_read_source", "customize_list_source", "customize_list"]) {
+      expect(gate.checks).toContainEqual(
+        expect.objectContaining({
+          action: "read_platform_state",
+          args: { what },
+          decision: "allow",
+        }),
+      );
+    }
+    expect(gate.checks.filter((c) => c.action === "customize_platform")).toHaveLength(0);
+  });
+
+  it("customize_platform list clamps its limit and tree defaults to the root", async () => {
+    const { loop, appRun } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "CUSTOMIZE_LIST:99999");
+    await sendText(loop, s, "CUSTOMIZE_TREE:.");
+    expect(appRun.customizeCalls).toEqual([
+      { op: "list", tenantId: "demo-tenant", limit: 50 },
+      { op: "list_source", tenantId: "demo-tenant", dir: "" },
+    ]);
+  });
+
   it("request_publication sends only the durable change-set id", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

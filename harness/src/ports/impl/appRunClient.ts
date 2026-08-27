@@ -202,6 +202,30 @@ export class HttpAppRunClient implements AppRunClient {
     );
   }
 
+  async customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "GET",
+      `/api/platform/customize?limit=${encodeURIComponent(String(limit))}`,
+    );
+  }
+
+  async customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "GET",
+      `/api/platform/source?path=${encodeURIComponent(path)}`,
+    );
+  }
+
+  async customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "GET",
+      `/api/platform/source/tree${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`,
+    );
+  }
+
   /**
    * POST /api/run → 202 {job_id, status}. With `wait`, then POLL GET /api/jobs/{id}
    * up to waitTimeoutS (default 15s) so a fast read returns its result inline. The

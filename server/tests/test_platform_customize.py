@@ -1552,3 +1552,157 @@ def test_admin_tier_is_sole_platform_customize_grant():
                  "hosted_starter", "hosted_pro"]:
         assert entitlements.entitlements_for(tier)["platform_customize"] is False, tier
     assert entitlements.entitlements_for("admin")["platform_customize"] is True
+
+
+# --------------------------------------------------------------------------- #
+# 5. read side: source browse + change listing (the lane's eyes)
+# --------------------------------------------------------------------------- #
+def test_read_source_returns_committed_bytes(lane_env):
+    repo = lane_env["repo"]
+    view = lane.read_source(path="README.md")
+    assert view["content"] == "hello\n"
+    assert view["size"] == 6
+    assert view["binary"] is False
+    assert view["commit"] == _git(repo, "rev-parse", "refs/heads/main")
+    assert view["ref"] == "refs/heads/main"
+
+
+def test_read_source_reads_the_base_ref_not_the_worktree(lane_env):
+    """Object-store read: an uncommitted working-tree edit is invisible, so
+    what the agent reads is exactly the base a propose() would build on."""
+    (lane_env["repo"] / "README.md").write_text("dirty\n", encoding="utf-8")
+    assert lane.read_source(path="README.md")["content"] == "hello\n"
+
+
+def test_read_source_missing_path_is_404(lane_env):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.read_source(path="docs/absent.md")
+    assert exc.value.code == "source_not_found"
+    assert exc.value.status_code == 404
+
+
+def test_read_source_directory_refused(lane_env):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.read_source(path="docs")
+    assert exc.value.code == "source_is_directory"
+
+
+@pytest.mark.parametrize("bad", [
+    "../secrets", ".git/config", "/etc/passwd", "docs/../.git/config", "",
+])
+def test_read_source_path_discipline_matches_the_edit_lane(lane_env, bad):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.read_source(path=bad)
+    assert exc.value.code == "edit_path_invalid"
+
+
+def test_read_source_query_length_bounded(lane_env):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.read_source(path="a/" * 300 + "x")
+    assert exc.value.code == "edit_path_invalid"
+
+
+def test_read_source_size_cap(lane_env, monkeypatch):
+    monkeypatch.setattr(lane, "MAX_SOURCE_BYTES", 3)
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.read_source(path="README.md")
+    assert exc.value.code == "source_too_large"
+    assert exc.value.status_code == 413
+
+
+def test_read_source_binary_reported_never_returned(lane_env):
+    repo = lane_env["repo"]
+    (repo / "logo.bin").write_bytes(b"\x00\x01\x02PNG")
+    _git(repo, "add", "logo.bin")
+    _git(repo, "commit", "-m", "binary asset")
+    view = lane.read_source(path="logo.bin")
+    assert view["binary"] is True
+    assert "content" not in view
+    assert view["size"] == 6
+
+
+def test_list_source_root_and_subdir(lane_env):
+    root = lane.list_source()
+    names = {e["name"]: e for e in root["entries"]}
+    assert names["README.md"]["type"] == "file"
+    assert names["README.md"]["size"] == 6
+    assert names["server"]["type"] == "dir"
+    assert root["truncated"] is False
+    sub = lane.list_source(dir="server")
+    assert [e["name"] for e in sub["entries"]] == ["auth.py"]
+
+
+def test_list_source_missing_dir_is_404(lane_env):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.list_source(dir="absent")
+    assert exc.value.code == "source_not_found"
+
+
+def test_list_source_file_refused(lane_env):
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        lane.list_source(dir="README.md")
+    assert exc.value.code == "source_not_a_directory"
+
+
+def test_list_source_truncates_honestly(lane_env, monkeypatch):
+    monkeypatch.setattr(lane, "MAX_TREE_ENTRIES", 1)
+    view = lane.list_source()
+    assert len(view["entries"]) == 1
+    assert view["truncated"] is True
+
+
+def test_list_view_is_tenant_scoped_and_carries_landing_essentials(lane_env):
+    mine_a = _propose(title="first change")
+    mine_b = _propose(title="second change",
+                      edits=[{"path": "README.md", "content": "edited\n"}])
+    foreign = lane.propose(
+        tenant_id=OTHER_TENANT, subject="auth0|other", title="foreign",
+        edits=[{"path": "docs/note.md", "content": "other\n"}])
+    view = lane.list_view(tenant_id=TENANT)
+    ids = {row["change_id"] for row in view["changes"]}
+    assert ids == {mine_a["change_id"], mine_b["change_id"]}
+    assert foreign["change_id"] not in ids
+    assert view["count"] == 2
+    assert view["truncated"] is False
+    for row in view["changes"]:
+        # enough to recover the change without re-proposing: the id, the
+        # state, and the exact commit a land ack must name.
+        assert row["change_id"]
+        assert row["state"] in {"approved", "awaiting_cosign"}
+        assert len(row["commit_sha"]) == 40
+        assert row["created_at"]
+        assert row["path_count"] == 1
+
+
+def test_list_view_skips_corrupt_and_foreign_files(lane_env):
+    good = _propose()
+    state = lane.state_dir()
+    (state / "not-a-change.json").write_text("{}", encoding="utf-8")
+    (state / "12345678-1234-1234-1234-1234567890ff.json").write_text(
+        "{corrupt", encoding="utf-8")
+    view = lane.list_view(tenant_id=TENANT)
+    assert [row["change_id"] for row in view["changes"]] == [good["change_id"]]
+
+
+def test_list_view_limit_clamped_and_truncation_flagged(lane_env):
+    for n in range(3):
+        _propose(title=f"change {n}")
+    page = lane.list_view(tenant_id=TENANT, limit=2)
+    assert len(page["changes"]) == 2
+    assert page["count"] == 3
+    assert page["truncated"] is True
+    floor = lane.list_view(tenant_id=TENANT, limit=0)
+    assert len(floor["changes"]) == 1
+    ceiling = lane.list_view(tenant_id=TENANT, limit=10_000)
+    assert len(ceiling["changes"]) == 3
+
+
+def test_read_routes_on_the_harness_backedge():
+    """The R7 read side is reachable from the spine; nothing writable widened.
+    Exact paths only — no prefix admits anything deeper."""
+    assert deps._dispatch_backedge_route("GET", "/api/platform/customize") is True
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source") is True
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source/tree") is True
+    assert deps._dispatch_backedge_route("POST", "/api/platform/source") is False
+    assert deps._dispatch_backedge_route("POST", "/api/platform/source/tree") is False
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source/tree/deeper") is False

@@ -70,6 +70,37 @@ Change records are one JSON file per change under
 `LEAF_PLATFORM_CUSTOMIZE_STATE_DIR` (O_EXCL create, atomic replace — the
 approvals-dir idiom; no database).
 
+## The read side: the lane's eyes (2026-08-27)
+
+An agent that can propose edits but cannot see the repository proposes BLIND —
+the live failure mode was an orphan stylesheet invented for a theme change
+because the agent could not find the real theme files, plus a duplicate
+proposal after a session break lost the change_id. Three GET-only routes fix
+both, all behind the SAME `_gate` admission chain (admin tier + R7 rollout),
+none of them able to write anything:
+
+* `GET /api/platform/customize` — tenant-scoped, newest-first change listing
+  (bounded page, at most 50 rows) so a conversation recovers a lost change_id
+  instead of re-proposing. Rows carry the landing essentials (id, state, exact
+  commit_sha); the listing reconciles from durable markers but deliberately
+  never observes GitHub — review freshness stays a per-id status concern, so a
+  listing can never fan out N network round trips.
+* `GET /api/platform/source?path=` — ONE file at the base-ref tip, read from
+  the git OBJECT STORE only (`cat-file`), never the working tree: no
+  filesystem walk, so no symlink or traversal surface, and what the agent
+  reads is exactly the base a propose() builds on. Same path discipline as an
+  edit, size-checked before the bytes leave git (256 KiB cap), binary content
+  reported by size and never returned.
+* `GET /api/platform/source/tree?dir=` — ONE directory level (bounded at 500
+  entries with an honest `truncated` flag).
+
+On the spine these ride the `customize_platform` tool as ops `list`,
+`read_source`, `list_source` (plus the existing `status`), which the harness
+consults as `read_platform_state` (policy `auto`) — the same read-rung mapping
+`status` has always used. The always-confirm posture on propose and land is
+untouched: reads widen what the agent can SEE, never what it can DO, and the
+spine prompt now instructs it to look before proposing.
+
 ## The landing path is the EXISTING pipeline
 
 The lane produces a branch. Everything after is the standing machinery,

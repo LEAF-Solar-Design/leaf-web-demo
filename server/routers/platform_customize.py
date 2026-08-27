@@ -43,6 +43,10 @@ _ERROR_MESSAGES = {
     "merge_head_moved": "The pull request no longer points at the approved commit. Nothing was merged.",
     "merge_pr_not_open": "The pull request is no longer open.",
     "merge_base_retargeted": "The pull request no longer targets the branch the proposal named. Nothing was merged.",
+    "source_not_found": "That path does not exist in the platform source at the review base.",
+    "source_too_large": "That file is too large to read through this lane.",
+    "source_is_directory": "That path is a directory. List it instead of reading it.",
+    "source_not_a_directory": "That path is a file. Read it instead of listing it.",
 }
 
 
@@ -183,6 +187,61 @@ def propose_and_land(req: ProposeRequest,
             title=req.title,
             edits=[e.dict() for e in req.edits],
         )
+    except lane.PlatformCustomizeError as exc:
+        return _error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
+
+
+@router.get("/api/platform/customize")
+def list_changes(limit: int = 20,
+                 tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Tenant-scoped, newest-first change listing (bounded page).
+
+    Exists so a conversation that lost its change_id (session break, client
+    reload) recovers the change instead of proposing a duplicate. Read-only;
+    the same R7 admission chain as every other route here.
+    """
+    admitted = _gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    tenant_id, _tier = admitted
+    try:
+        return lane.list_view(tenant_id=tenant_id, limit=limit)
+    except lane.PlatformCustomizeError as exc:
+        return _error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
+
+
+@router.get("/api/platform/source")
+def read_source(path: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Read ONE platform source file at the review base (R7 read side).
+
+    The lane's eyes: an admin agent proposing an edit can first read the file
+    it is editing, so proposals land in real code instead of blind orphan
+    files. Object-store read only — never the working tree — size-capped, and
+    binary content is reported by size, never returned.
+    """
+    admitted = _gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    try:
+        return lane.read_source(path=path)
+    except lane.PlatformCustomizeError as exc:
+        return _error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _error(lane.PlatformCustomizeError("platform_customize_failed", 503), cause=exc)
+
+
+@router.get("/api/platform/source/tree")
+def source_tree(dir: str = "", tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """List ONE directory level of the platform source at the review base."""
+    admitted = _gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    try:
+        return lane.list_source(dir=dir)
     except lane.PlatformCustomizeError as exc:
         return _error(exc)
     except Exception as exc:  # noqa: BLE001

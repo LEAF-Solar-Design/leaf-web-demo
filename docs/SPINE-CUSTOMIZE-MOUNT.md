@@ -104,3 +104,17 @@ being the only door.
 - Operator wants: assistant-driven UI edits ("background → lightmode", CAD
   background as full-page background). The second also needs an actual design
   change; find/port the design lane separately.
+
+## Postscript: the read side (2026-08-27)
+
+The mounted tool gained read-only ops after the first live use showed the
+propose-blind failure (an orphan stylesheet invented because the agent could
+not browse the repo, and a duplicate proposal after a lost change_id):
+`{op:"list"}` (tenant-scoped change listing), `{op:"read_source", path}` and
+`{op:"list_source", dir?}` (source browse at the review base). All three
+consult the gate as `read_platform_state` — the same read-rung mapping
+`status` uses — and dispatch to three GET-only §0 routes
+(`GET /api/platform/customize`, `GET /api/platform/source`,
+`GET /api/platform/source/tree`) that re-run the full R7 admission chain
+server-side. always-confirm on propose/land is unchanged. See
+docs/ADMIN-SELF-EDIT-LANE.md "The read side".
