@@ -17,6 +17,9 @@
  *   CONFIRM_REQ:<kind>          -> request_confirmation {kind, payload:{}}
  *   CUSTOMIZE:<title> [PARAMS:{edits:[...]}]      -> customize_platform {op:"propose", ...}
  *   CUSTOMIZE_LAND:<change_id> [PARAMS:{commit_sha}] -> customize_platform {op:"land", ...}
+ *   CUSTOMIZE_LIST:<limit>      -> customize_platform {op:"list", limit}
+ *   CUSTOMIZE_READ:<path>       -> customize_platform {op:"read_source", path}
+ *   CUSTOMIZE_TREE:<dir|.>      -> customize_platform {op:"list_source", dir} ("." = root)
  *   FORBIDDEN_TOOL              -> attempts a non-spine tool via canUseTool
  *   FAIL:<stop_reason>          -> terminal failure (quota/rate-limit drills)
  *   SLOW                        -> hold the turn open on `slowGate` (turn-lock tests)
@@ -91,7 +94,7 @@ export class FakeConverseRunner implements SpineConverseRunner {
       }
     } else {
       const directive =
-        /(RUN|SEARCH|STATE|JOB|AUTHOR|AUTHOR_ONCE|PUBLISH|CONFIRM_REQ|CUSTOMIZE|CUSTOMIZE_LAND):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
+        /(RUN|SEARCH|STATE|JOB|AUTHOR|AUTHOR_ONCE|PUBLISH|CONFIRM_REQ|CUSTOMIZE_LAND|CUSTOMIZE_LIST|CUSTOMIZE_READ|CUSTOMIZE_TREE|CUSTOMIZE):(\S+)(?:\s+DWG:(\S+))?(?:\s+PARAMS:(\{.*\}))?/.exec(tail);
       if (tail.includes("FORBIDDEN_TOOL")) {
         const verdict = await input.canUseTool("mcp__other__shell", {});
         yield say(
@@ -121,6 +124,15 @@ export class FakeConverseRunner implements SpineConverseRunner {
           CUSTOMIZE_LAND: [
             "customize_platform",
             { op: "land", change_id: value, ...params },
+          ],
+          CUSTOMIZE_LIST: [
+            "customize_platform",
+            { op: "list", limit: Number(value) || undefined },
+          ],
+          CUSTOMIZE_READ: ["customize_platform", { op: "read_source", path: value }],
+          CUSTOMIZE_TREE: [
+            "customize_platform",
+            { op: "list_source", ...(value === "." ? {} : { dir: value }) },
           ],
         };
         const [toolName, args] = argsByKind[kind!]!;

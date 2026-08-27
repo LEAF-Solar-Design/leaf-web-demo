@@ -695,6 +695,16 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
         return False
     if path in ("/api/capabilities", "/api/tools"):
         return True
+    if path in (
+        # R7 read side: the spine's read-only customize ops (change list,
+        # source file read, source tree listing). Each route re-runs the full
+        # R7 admission chain (admin tier + rollout allowlist) on dispatch, so
+        # this entry widens reachability, never authority.
+        "/api/platform/customize",
+        "/api/platform/source",
+        "/api/platform/source/tree",
+    ):
+        return True
     if path.startswith("/api/drawings/"):
         return True
     if path.startswith("/api/jobs/"):

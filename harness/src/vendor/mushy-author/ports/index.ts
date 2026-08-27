@@ -833,6 +833,16 @@ export interface AppRunClient {
     commitSha: string,
     authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>>;
+  /** GET /api/platform/customize — tenant-scoped, newest-first change listing.
+   * Read-only: exists so a conversation that lost its change_id recovers it
+   * instead of proposing a duplicate change. */
+  customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>>;
+  /** GET /api/platform/source?path= — ONE platform source file at the review
+   * base (R7 read side). Size-capped server-side; binary reported, not returned. */
+  customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>>;
+  /** GET /api/platform/source/tree?dir= — ONE directory level at the review
+   * base. Empty dir lists the repo root. */
+  customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>>;
 }
 
 // --------------------------------------------------------------------------- //

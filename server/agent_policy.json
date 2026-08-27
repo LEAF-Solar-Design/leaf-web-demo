@@ -43,7 +43,7 @@
       ]
     },
     "read_platform_state": {
-      "description": "Read platform state: catalog, usage, jobs, versions, own audit (R1).",
+      "description": "Read platform state: catalog, usage, jobs, versions, own audit (R1). Also the consult surface for the R7 READ side (change list, source file, source tree) - read-only GETs whose routes re-run the full admin admission chain server-side, so this auto policy widens reachability, never authority.",
       "rung": 1,
       "required_capability": "converse",
       "policy": "auto",
@@ -54,7 +54,10 @@
           "GET /api/usage",
           "GET /api/jobs",
           "GET /api/drawings/*",
-          "GET /api/agent/audit"
+          "GET /api/agent/audit",
+          "GET /api/platform/customize",
+          "GET /api/platform/source",
+          "GET /api/platform/source/tree"
         ]
       },
       "args_schema": {

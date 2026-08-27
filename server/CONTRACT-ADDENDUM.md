@@ -1206,9 +1206,15 @@ That back edge is a new authenticated surface:
   `POST /internal/agent/gate`, and — the R7 spine mount (2026-08-03, this
   revision) — `POST /api/platform/customize`,
   `GET /api/platform/customize/{change_id}`, and
-  `POST /api/platform/customize/{change_id}/land`. The R7 routes keep every
+  `POST /api/platform/customize/{change_id}/land`. The R7 read side
+  (2026-08-27 revision) adds three GET-only exact paths:
+  `GET /api/platform/customize` (tenant-scoped change listing, bounded page),
+  `GET /api/platform/source` (one source file at the review base, size-capped,
+  object-store read only), and `GET /api/platform/source/tree` (one directory
+  level, bounded). The R7 routes keep every
   server-side admission unchanged (admin-tier `platform_customize`
-  entitlement, R7 rollout listing, branch-only writes, exact-commit land ack);
+  entitlement, R7 rollout listing, branch-only writes, exact-commit land ack;
+  the read routes run the same admission chain and can write nothing);
   the `/internal/platform-customize/*` co-sign routes remain OFF this
   allowlist — the harness never holds co-sign authority. Every other route
   ignores the header entirely.

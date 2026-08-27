@@ -173,7 +173,7 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
   customize_platform:
-    "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land', ...}. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
+    "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land'|'list'|'read_source'|'list_source', ...}. Read-only ops need no approval: list_source {dir?} lists one source directory at the review base, read_source {path} reads one file, list {limit?} recovers this workspace's past changes (change_id, state, commit_sha), status needs {change_id}. Read the files you intend to change BEFORE proposing. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
 };
 
 export interface ConverseSdkRunnerOptions {
@@ -282,7 +282,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       },
       request_confirmation: { kind: z.string(), payload: z.record(z.unknown()).optional() },
       customize_platform: {
-        op: z.enum(["propose", "status", "land"]),
+        op: z.enum(["propose", "status", "land", "list", "read_source", "list_source"]),
         title: z.string().optional(),
         edits: z
           .array(
@@ -296,6 +296,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         change_id: z.string().optional(),
         commit_sha: z.string().optional(),
         confirmation_id: z.string().optional(),
+        path: z.string().optional(),
+        dir: z.string().optional(),
+        limit: z.number().optional(),
       },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>

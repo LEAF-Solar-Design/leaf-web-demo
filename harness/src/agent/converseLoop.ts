@@ -797,12 +797,13 @@ export class ConverseLoop {
           // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
         case "customize_platform": {
-          const op =
-            args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
-          if (op === "status") {
-            // A status read has no side effect; the read rung records it
-            // without proposing a chip.
-            return { action: "read_platform_state", args: { what: "customize_status" } };
+          const op = customizeOp(args.op);
+          if (op === "status" || op === "list" || op === "read_source" || op === "list_source") {
+            // Read-only ops have no side effect; the read rung records them
+            // without proposing a chip. The server still runs the full R7
+            // admission chain (admin tier + rollout) on every dispatch, so
+            // this softens nothing an approval was protecting.
+            return { action: "read_platform_state", args: { what: `customize_${op}` } };
           }
           const confirmation =
             typeof args.confirmation_id === "string"
@@ -1264,7 +1265,7 @@ export class ConverseLoop {
       }
 
       case "customize_platform": {
-        const op = args.op === "land" ? "land" : args.op === "status" ? "status" : "propose";
+        const op = customizeOp(args.op);
         const authority = {
           sessionId: ctx.authoritySessionId,
           turnId: ctx.authorityTurnId,
@@ -1273,6 +1274,19 @@ export class ConverseLoop {
           const changeId = String(args.change_id ?? "").trim();
           if (!changeId) return err("customize_platform status requires args.change_id");
           return ok(JSON.stringify(await appRun.customizeStatus(tenantId, changeId)));
+        }
+        if (op === "list") {
+          const limit = clampInt(args.limit, 1, 50, 20);
+          return ok(JSON.stringify(await appRun.customizeList(tenantId, limit)));
+        }
+        if (op === "read_source") {
+          const path = String(args.path ?? "").trim();
+          if (!path) return err("customize_platform read_source requires args.path");
+          return ok(JSON.stringify(await appRun.customizeReadSource(tenantId, path)));
+        }
+        if (op === "list_source") {
+          const dir = String(args.dir ?? "").trim();
+          return ok(JSON.stringify(await appRun.customizeListSource(tenantId, dir)));
         }
         if (op === "land") {
           const changeId = String(args.change_id ?? "").trim();
@@ -1345,6 +1359,24 @@ function err(content: string): SpineToolResult {
 /** Strip an MCP server prefix (mcp__spine__catalog_search -> catalog_search). */
 function baseToolName(name: string): string {
   return name.replace(/^mcp__.+?__/, "");
+}
+
+type CustomizeOp = "propose" | "status" | "land" | "list" | "read_source" | "list_source";
+
+/** ONE op parser for consult and dispatch — the two MUST agree, or a read op
+ * could consult as a read yet dispatch as a propose. Unknown falls to propose,
+ * the always-confirm arm (fail toward the approval, never around it). */
+function customizeOp(raw: unknown): CustomizeOp {
+  switch (raw) {
+    case "status":
+    case "land":
+    case "list":
+    case "read_source":
+    case "list_source":
+      return raw;
+    default:
+      return "propose";
+  }
 }
 
 function isSpineTool(name: string): name is SpineToolName {

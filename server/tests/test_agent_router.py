@@ -152,6 +152,12 @@ def test_backedge_route_matcher_covers_exactly_the_contract_routes():
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize") is True
     assert deps._dispatch_backedge_route("GET", "/api/platform/customize/chg-1") is True
     assert deps._dispatch_backedge_route("POST", "/api/platform/customize/chg-1/land") is True
+    # R7 read side: change listing + source browse (exact paths, GET only).
+    assert deps._dispatch_backedge_route("GET", "/api/platform/customize") is True
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source") is True
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source/tree") is True
+    assert deps._dispatch_backedge_route("POST", "/api/platform/source") is False
+    assert deps._dispatch_backedge_route("GET", "/api/platform/source/tree/deeper") is False
     # T1 overlay: the harness's propose_overlay tool reaches this over the
     # back-edge. Its absence 401'd every live chat turn while these tests
     # stayed green, because they call the route directly with a tenant header.

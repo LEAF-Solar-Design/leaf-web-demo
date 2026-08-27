@@ -188,12 +188,15 @@ export class FakeAppRunClient implements AppRunClient {
 
   /** R7 self-edit calls, recorded verbatim for assertions. */
   customizeCalls: Array<{
-    op: "propose" | "status" | "land";
+    op: "propose" | "status" | "land" | "list" | "read_source" | "list_source";
     tenantId: string;
     title?: string;
     edits?: Array<{ path: string; content?: string; delete?: boolean }>;
     changeId?: string;
     commitSha?: string;
+    limit?: number;
+    path?: string;
+    dir?: string;
   }> = [];
 
   async customizePropose(
@@ -227,5 +230,31 @@ export class FakeAppRunClient implements AppRunClient {
     this.methodLog.push("customizeLand");
     this.customizeCalls.push({ op: "land", tenantId, changeId, commitSha });
     return { change_id: changeId, state: "Landed", branch: `admin-customize/${changeId}` };
+  }
+
+  async customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizeList");
+    this.customizeCalls.push({ op: "list", tenantId, limit });
+    return {
+      changes: [{ change_id: "chg-fake-1", title: "fake change", state: "Approved" }],
+      count: 1,
+      truncated: false,
+    };
+  }
+
+  async customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizeReadSource");
+    this.customizeCalls.push({ op: "read_source", tenantId, path });
+    return { path, size: 12, binary: false, content: "fake-source\n" };
+  }
+
+  async customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>> {
+    this.methodLog.push("customizeListSource");
+    this.customizeCalls.push({ op: "list_source", tenantId, dir });
+    return {
+      dir,
+      entries: [{ name: "README.md", type: "file", size: 6 }],
+      truncated: false,
+    };
   }
 }

@@ -66,6 +66,13 @@ MAX_EDITS = 200
 MAX_EDIT_BYTES = 1_000_000  # per file
 MAX_TITLE = 200
 
+# Read-side bounds (source browse + change listing). Reads are cheap but still
+# bounded: a listing never walks more than one tree level, a file read is
+# size-checked BEFORE its bytes leave git, and the change list caps its page.
+MAX_SOURCE_BYTES = 262_144  # per file read
+MAX_TREE_ENTRIES = 500      # per directory listing
+MAX_LIST = 50               # per change-list page
+
 # States a change record moves through. Terminal-ish: landed / denied.
 AWAITING_COSIGN = "awaiting_cosign"
 APPROVED = "approved"
@@ -1517,4 +1524,199 @@ def public_view(record: Mapping[str, Any]) -> dict[str, Any]:
                        "approval naming the exact commit, after the review "
                        "gate passed those bytes; this lane never deploys"),
         },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# read-only source access (the lane's eyes). Everything below reads the git
+# OBJECT STORE at the base-ref tip — never the working tree — so there is no
+# filesystem walk and therefore no symlink or traversal surface, and what the
+# agent reads is exactly the base a propose() would build on.
+# --------------------------------------------------------------------------- #
+def _git_out(git_dir: Path, *args: str, timeout: int = 30) -> bytes:
+    """`_git` with raw stdout bytes (file content can be binary or non-UTF-8)."""
+    cmd = ["git", *_git_trust(git_dir), "--git-dir", str(git_dir), *args]
+    try:
+        result = subprocess.run(
+            cmd, check=True, env=dict(os.environ),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        stderr_raw = getattr(exc, "stderr", b"") or b""
+        stderr = stderr_raw.decode("utf-8", errors="replace").strip()
+        raise PlatformCustomizeError(
+            "platform_repo_unavailable", 503,
+            _redact(f"git_failed: {' '.join(cmd[-3:])} in {git_dir} "
+                    f"({type(exc).__name__})"
+                    + (f": {stderr}" if stderr else "")),
+        ) from exc
+    return result.stdout
+
+
+def _base_tip(git_dir: Path) -> str:
+    """The base-ref tip commit — proves the repo is reachable, so a later
+    per-object failure can honestly be attributed to the PATH, not the repo."""
+    return _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
+
+
+def _validated_query_path(raw: Any) -> str:
+    """The edit-path discipline plus a length bound: the write lane's pydantic
+    model caps path length at 500, but a GET query param arrives unbounded and
+    would otherwise flow into git argv at any size."""
+    if isinstance(raw, str) and len(raw) > 500:
+        raise PlatformCustomizeError("edit_path_invalid", 422, "too_long")
+    return _validated_repo_path(raw)
+
+
+def _object_type(git_dir: Path, spec: str) -> str:
+    try:
+        return _git(git_dir, "cat-file", "-t", spec)
+    except PlatformCustomizeError as exc:
+        # _base_tip already succeeded, so the repo works: the object is absent.
+        raise PlatformCustomizeError("source_not_found", 404, exc.detail) from exc
+
+
+def read_source(*, path: str) -> dict[str, Any]:
+    """Read ONE file from the platform repo at the base-ref tip.
+
+    Same path discipline as an edit (`_validated_repo_path`: no traversal, no
+    `.git`, allowlisted charset), size-checked before the bytes are read, and
+    binary content is reported by size only, never returned.
+    """
+    rel = _validated_query_path(path)
+    git_dir = repo_dir()
+    tip = _base_tip(git_dir)
+    spec = f"{tip}:{rel}"
+    obj_type = _object_type(git_dir, spec)
+    if obj_type == "tree":
+        raise PlatformCustomizeError("source_is_directory", 422, rel)
+    if obj_type != "blob":
+        raise PlatformCustomizeError("source_not_found", 404, f"{rel}: {obj_type}")
+    size = int(_git(git_dir, "cat-file", "-s", spec))
+    if size > MAX_SOURCE_BYTES:
+        raise PlatformCustomizeError("source_too_large", 413, f"{rel}: {size} bytes")
+    blob = _git_out(git_dir, "cat-file", "blob", spec)
+    view: dict[str, Any] = {
+        "contract": "leaf.platform-customize.v1",
+        "ref": base_ref(),
+        "commit": tip,
+        "path": rel,
+        "size": size,
+    }
+    if b"\x00" in blob:
+        view["binary"] = True
+        return view
+    view["binary"] = False
+    view["content"] = blob.decode("utf-8", errors="replace")
+    return view
+
+
+def list_source(*, dir: str = "") -> dict[str, Any]:
+    """List ONE directory level of the platform repo at the base-ref tip.
+
+    Empty ``dir`` lists the repo root. Bounded at MAX_TREE_ENTRIES with an
+    honest ``truncated`` flag — a silent cap would read as "that was all".
+    """
+    git_dir = repo_dir()
+    tip = _base_tip(git_dir)
+    rel = _validated_query_path(dir) if dir else ""
+    spec = f"{tip}:{rel}" if rel else tip
+    if rel and _object_type(git_dir, spec) == "blob":
+        raise PlatformCustomizeError("source_not_a_directory", 422, rel)
+    raw = _git_out(git_dir, "ls-tree", "-z", "--long", spec)
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    for chunk in raw.split(b"\x00"):
+        if not chunk:
+            continue
+        if len(entries) >= MAX_TREE_ENTRIES:
+            truncated = True
+            break
+        meta, _, name = chunk.partition(b"\t")
+        fields = meta.split()
+        if len(fields) < 4 or not name:
+            continue
+        mode, obj_type, _oid, obj_size = fields[0], fields[1], fields[2], fields[3]
+        kind = ("dir" if obj_type == b"tree"
+                else "symlink" if mode == b"120000"
+                else "submodule" if obj_type == b"commit"
+                else "file")
+        entry: dict[str, Any] = {
+            "name": name.decode("utf-8", errors="replace"),
+            "type": kind,
+        }
+        if kind == "file":
+            try:
+                entry["size"] = int(obj_size)
+            except ValueError:
+                pass
+        entries.append(entry)
+    return {
+        "contract": "leaf.platform-customize.v1",
+        "ref": base_ref(),
+        "commit": tip,
+        "dir": rel,
+        "entries": entries,
+        "truncated": truncated,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# tenant-scoped change listing (change_id recovery after a session break)
+# --------------------------------------------------------------------------- #
+def _summary_view(record: Mapping[str, Any]) -> dict[str, Any]:
+    """One bounded listing row: enough to recover a change (its id, state, and
+    the exact commit a land ack must name) without the full record's weight."""
+    view = public_view(record)
+    return {
+        "change_id": view["change_id"],
+        "title": view["title"],
+        "state": view["state"],
+        "branch": view["branch"],
+        "commit_sha": view["commit_sha"],
+        "created_at": record.get("created_at"),
+        "path_count": len(view["paths"]),
+        "fundamental": bool(view["fundamental_paths"]),
+        "pr": view["pr"],
+        "review": view["review"],
+    }
+
+
+def list_view(*, tenant_id: str, limit: int = 20) -> dict[str, Any]:
+    """Newest-first listing of THIS tenant's change records.
+
+    Foreign, corrupt, or unreadable records are skipped, never fatal — one
+    poisoned file must not take the listing down for every good record. The
+    returned page is reconciled from durable markers (same self-heal the
+    per-id status read does) but deliberately never observes GitHub: review
+    freshness stays a per-id concern, so a listing can never fan out N
+    network round trips.
+    """
+    bounded = max(1, min(int(limit), MAX_LIST))
+    rows: list[dict[str, Any]] = []
+    for record_path in state_dir().glob("*.json"):
+        if not _CHANGE_ID_RE.fullmatch(record_path.stem):
+            continue
+        try:
+            raw = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _LOG.debug("customize_list_skip_unreadable: %s", record_path.name)
+            continue
+        if not isinstance(raw, dict) or raw.get("tenant_id") != str(tenant_id):
+            continue
+        rows.append(raw)
+    rows.sort(key=lambda r: (str(r.get("created_at") or ""),
+                             str(r.get("change_id") or "")), reverse=True)
+    page: list[dict[str, Any]] = []
+    for raw in rows[:bounded]:
+        change_id = str(raw.get("change_id") or "")
+        try:
+            page.append(_summary_view(_reconcile(change_id, raw)))
+        except Exception:  # noqa: BLE001 — reconcile trouble degrades to the stored row
+            page.append(_summary_view(raw))
+    return {
+        "contract": "leaf.platform-customize.v1",
+        "changes": page,
+        "count": len(rows),
+        "truncated": len(rows) > bounded,
     }
