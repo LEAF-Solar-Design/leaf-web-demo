@@ -216,7 +216,7 @@ def current_annotation(*, tenant_id: str, org_id: str, project_id: str,
             " AND d.project_id = b.project_id AND d.org_id = b.org_id "
             " AND d.status = 'active' "
             "JOIN projects p ON p.project_id = b.project_id AND p.org_id = b.org_id "
-            " AND p.status = 'active' "
+            " AND p.status = 'active' AND p.deleted_at IS NULL "
             "JOIN orgs o ON o.org_id = b.org_id AND o.status = 'active' "
             "WHERE t.repository_id = %(repository)s "
             "ORDER BY CASE WHEN b.state = 'pending' THEN 0 ELSE 1 END, "
@@ -255,7 +255,7 @@ def register_target(*, tenant_id: str, org_id: str, project_id: str,
             "JOIN orgs o ON o.org_id = d.org_id "
             "WHERE d.drawing_id = %(drawing)s AND d.project_id = %(project)s "
             "AND d.org_id = %(org)s AND d.status = 'active' "
-            "AND p.status = 'active' AND o.status = 'active' FOR UPDATE",
+            "AND p.status = 'active' AND p.deleted_at IS NULL AND o.status = 'active' FOR UPDATE",
             scope,
         )
         if cur.fetchone() is None:
@@ -374,7 +374,7 @@ def create_batch(*, batch_id: str, tenant_id: str, org_id: str,
             "JOIN orgs o ON o.org_id=d.org_id "
             "WHERE d.drawing_id=%(drawing)s AND d.project_id=%(project)s "
             "AND d.org_id=%(org)s AND d.status='active' "
-            "AND p.status='active' AND o.status='active' FOR SHARE",
+            "AND p.status='active' AND p.deleted_at IS NULL AND o.status='active' FOR SHARE",
             scope,
         )
         if cur.fetchone() is None:
@@ -405,7 +405,7 @@ def create_batch(*, batch_id: str, tenant_id: str, org_id: str,
             " JOIN orgs o ON o.org_id=d.org_id "
             " WHERE d.drawing_id=%(drawing)s AND d.project_id=%(project)s "
             " AND d.org_id=%(org)s AND d.status='active' "
-            " AND p.status='active' AND o.status='active') FOR UPDATE",
+            " AND p.status='active' AND p.deleted_at IS NULL AND o.status='active') FOR UPDATE",
             scope,
         )
         current_target = _row(cur.fetchone())
@@ -668,7 +668,7 @@ def accept(*, batch_id: str, tenant_id: str, actor_binding_id: str,
             " JOIN orgs o ON o.org_id=d.org_id "
             " WHERE d.drawing_id=%(drawing)s AND d.project_id=%(project)s "
             " AND d.org_id=%(org)s AND d.status='active' "
-            " AND p.status='active' AND o.status='active') FOR UPDATE",
+            " AND p.status='active' AND p.deleted_at IS NULL AND o.status='active') FOR UPDATE",
             {"tenant": tenant, "org": current["org_id"],
              "project": current["project_id"], "drawing": current["drawing_id"]},
         )
@@ -750,7 +750,7 @@ def reject(*, batch_id: str, tenant_id: str, actor_binding_id: str,
             " JOIN orgs o ON o.org_id=d.org_id "
             " WHERE d.drawing_id=%(drawing)s AND d.project_id=%(project)s "
             " AND d.org_id=%(org)s AND d.status='active' "
-            " AND p.status='active' AND o.status='active') FOR UPDATE",
+            " AND p.status='active' AND p.deleted_at IS NULL AND o.status='active') FOR UPDATE",
             {"tenant": tenant, "org": current["org_id"],
              "project": current["project_id"], "drawing": current["drawing_id"]},
         )

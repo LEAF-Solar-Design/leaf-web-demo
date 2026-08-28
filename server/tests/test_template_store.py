@@ -127,15 +127,19 @@ def test_registry_fallback_untouched_when_flag_off(monkeypatch) -> None:
     assert calls["count"] == 0
 
 
-# --- static: every pin surface advanced to 0049 in this same change --------- #
+# --- static: every pin surface advanced to the head in this same change ----- #
+# The 0049 card wrote these four mirrors so a migration could never land with
+# half its pins moved. They did their job: the 0050 live-project-guard card
+# tripped all four. Renamed off the number so the NEXT card edits values, not
+# identifiers.
 
-def test_authority_inventory_advanced_to_0049() -> None:
+def test_authority_inventory_advanced_to_the_head() -> None:
     inventory = json.loads(
         (PROJECT_ROOT / "platform" / "authority-inventory.json")
         .read_text(encoding="utf-8"))
     ids = inventory["scope"]["migration_ids"]
-    assert ids[-1] == "0049"
-    assert ids == [f"{n:04d}" for n in range(1, 50)]
+    assert ids[-1] == "0050"
+    assert ids == [f"{n:04d}" for n in range(1, 51)]
     files = sorted(
         p.name.split("_", 1)[0]
         for p in (PROJECT_ROOT / "platform" / "migrations").glob("*.sql"))
@@ -145,21 +149,24 @@ def test_authority_inventory_advanced_to_0049() -> None:
 def test_conversation_model_pin_advanced() -> None:
     src = (SERVER_DIR / "tests" / "test_conversation_model.py").read_text(
         encoding="utf-8")
-    assert 'migration_ids[-1] == "0049"' in src
-    assert "range(1, 50)" in src
+    assert 'migration_ids[-1] == "0050"' in src
+    assert "range(1, 51)" in src
 
 
 def test_readiness_pins_advanced() -> None:
     src = (PROJECT_ROOT / "platform" / "tests" / "test_db_readiness_static.py"
            ).read_text(encoding="utf-8")
-    assert "0049" in src
+    # The FILENAME, not the bare number. That file also holds synthetic "0049"
+    # and "0050" literals inside two negative pin-drift tests, so a bare-number
+    # assertion passed whether or not the real pin had moved -- vacuous.
+    assert "0050_live_project_guard.sql" in src
 
 
 def test_postgres_contract_expected_migrations_advanced() -> None:
     src = (SERVER_DIR / "tests" /
            "test_postgres_authority_inventory_contract.py").read_text(
         encoding="utf-8")
-    assert "range(1, 50)" in src
+    assert "range(1, 51)" in src
 
 
 def test_db_registers_template_versions_columns() -> None:

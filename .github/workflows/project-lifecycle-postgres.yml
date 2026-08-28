@@ -20,6 +20,14 @@ on:
       - 'platform/requirements.txt'
       - 'platform/tests/conftest.py'
       - 'platform/tests/test_project_lifecycle.py'
+      # The soft-delete / project-authority guard rides this lane for the same
+      # reason: it is DB-backed, so the hermetic test-gate can only ever SKIP
+      # it. These three modules are the other holders of the live-project
+      # predicate the guard pins.
+      - 'platform/tests/test_soft_delete_authority_guard.py'
+      - 'platform/annotation_store.py'
+      - 'platform/canonical_jobs.py'
+      - 'platform/signing.py'
   workflow_dispatch: {}
 
 jobs:
@@ -71,5 +79,27 @@ jobs:
           if printf '%s\n' "$out" | grep -qi 'skipped'; then
             printf '%s\n' "$out"
             echo 'FAIL: lifecycle tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
+
+      - name: Run the soft-delete / project-authority guard contract
+        # Same lane, same reasoning as the step above. This suite pins the
+        # 2026-08-28 incident: project_authority_modes rows outlive their
+        # project's soft delete, an unguarded join therefore selects dead
+        # projects, and create_drawing_version reported it as a bare
+        # "project not found". It needs a live database, so the hermetic
+        # test-gate can only ever SKIP it -- which reads identically to a pass.
+        # This step is where it actually executes.
+        run: |
+          set -o pipefail
+          if ! out=$(python -m pytest --import-mode=importlib -q -rs \
+              platform/tests/test_soft_delete_authority_guard.py 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if printf '%s\n' "$out" | grep -qi 'skipped'; then
+            printf '%s\n' "$out"
+            echo 'FAIL: soft-delete guard tests skipped - DATABASE_URL is not reaching pytest.'
             exit 1
           fi

@@ -1075,6 +1075,12 @@ def build_suites() -> List[Suite]:
         # PASS with an "(executed-count drift: expected >= 172, got 175)"
         # note rather than moving the floor unilaterally. Re-measure and move
         # both together in one PR that can touch test_gate_runner.py.
+        # 2026-08-28, soft-delete guard card: RE-MEASURED and both floors
+        # moved together (this card does touch test_gate_runner.py). 183
+        # collected across the 11 *_static.py files, 181 executed on a
+        # no-DB host, 2 DATABASE_URL-gated skips (both in
+        # test_db_primitives_static.py). That closes the standing 172-vs-175
+        # drift as well as adding this card's 6 tests.
         Suite("platform-static", "platform/tests *_static (no DB)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests/test_ledger_static.py")
               + [f"{repo_name}/platform/tests/test_hashing_static.py",
@@ -1085,7 +1091,14 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
                  f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
-                 f"{repo_name}/platform/tests/test_annotation_store_static.py"], 172,
+                 f"{repo_name}/platform/tests/test_annotation_store_static.py",
+                 # The soft-delete guard (migration 0050). Registered in the
+                 # SAME change that adds the file, because
+                 # test_every_platform_static_file_is_registered_in_platform_static
+                 # pins this list against glob("*_static.py") -- an unregistered
+                 # *_static.py runs nowhere, which is the exact vacuous-green
+                 # this list exists to stop.
+                 f"{repo_name}/platform/tests/test_soft_delete_guard_static.py"], 181,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

@@ -77,8 +77,8 @@ def test_migration_advances_authority_inventory_by_exactly_one() -> None:
         .read_text(encoding="utf-8")
     )
     migration_ids = inventory["scope"]["migration_ids"]
-    assert migration_ids[-1] == "0049"
-    assert migration_ids == [f"{n:04d}" for n in range(1, 50)]
+    assert migration_ids[-1] == "0050"
+    assert migration_ids == [f"{n:04d}" for n in range(1, 51)]
 
     migration_files = sorted(
         p.name.split("_", 1)[0]

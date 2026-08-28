@@ -146,6 +146,13 @@ _REQUIRED_COLUMNS = {
     },
     "tenant_authority_modes": {"org_id", "authority_mode"},
     "project_authority_modes": {"org_id", "project_id", "authority_mode"},
+    # Migration 0050's live-project guard. These are VIEWS, not tables, but
+    # information_schema.columns covers both and they are load-bearing: the
+    # authority resolve and every drawing write now read them instead of the
+    # base tables, so a database missing them must fail readiness LOUDLY rather
+    # than fail each request with a 500.
+    "live_projects": {"project_id", "org_id", "status", "deleted_at"},
+    "live_project_authority_modes": {"org_id", "project_id", "authority_mode"},
     "canonical_worker_heartbeats": {
         "worker_id", "tool_name", "source_revision", "source_sha256", "observed_at",
     },
@@ -1808,8 +1815,21 @@ def reconciliation_snapshot() -> Dict[str, Any]:
                 "GROUP BY authority_mode ORDER BY authority_mode")
             project_modes = {
                 row["authority_mode"]: int(row["count"]) for row in cur.fetchall()}
+            # `project` stays the RAW table census the backfill comparison
+            # expects. `project_live` counts the same rows through migration
+            # 0050's guard, so `project - project_live` is the orphan
+            # population: authority rows whose project was soft-deleted. That
+            # number was 20+ on staging and invisible until someone joined the
+            # tables by hand; here it is a monitored quantity.
+            cur.execute(
+                "SELECT authority_mode, COUNT(*) AS count "
+                "FROM live_project_authority_modes "
+                "GROUP BY authority_mode ORDER BY authority_mode")
+            live_project_modes = {
+                row["authority_mode"]: int(row["count"]) for row in cur.fetchall()}
     return {
         "schema": status,
         "record_counts": counts,
-        "authority_modes": {"tenant": tenant_modes, "project": project_modes},
+        "authority_modes": {"tenant": tenant_modes, "project": project_modes,
+                            "project_live": live_project_modes},
     }
