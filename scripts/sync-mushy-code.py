@@ -20,6 +20,29 @@ usage:
   python scripts/sync-mushy-code.py --verify                       # CI check
 
 Exit 0 on success / verified; 1 on drift or damage (with a per-file report).
+
+PIN CONVENTION -- read this before re-vendoring:
+
+  The vendored tree is NOT "whatever `upstream_commit` points at". It is
+  upstream_commit PLUS the downstream patches listed in DOWNSTREAM_PATCHES
+  below, applied directly to the vendored files here (never to the upstream
+  repo) with only their per-file sha256 in the pin manifest hand-updated to
+  match. `upstream_commit` itself is NOT bumped for these patches, because
+  the patch never landed upstream.
+
+  The per-file hash in VENDOR-PIN.json is therefore the real integrity
+  check, not `upstream_commit`. `--verify` trusts it correctly. But
+  `--from <checkout of upstream_commit>` does not know a patch exists: it
+  rmtree's the vendored dir and recopies straight from upstream, which
+  SILENTLY REVERTS every entry in DOWNSTREAM_PATCHES and then re-pins the
+  reverted (unpatched) content as if it were correct. do_sync() below
+  detects this by diffing the pre-sync pinned hash of each listed file
+  against the post-sync one and refuses to write a manifest that reverts a
+  known patch -- see check_for_reverted_patches().
+
+  To retire an entry (i.e. the patch really did land upstream and
+  `--from` now reproduces it byte-for-byte), delete it from
+  DOWNSTREAM_PATCHES in the same commit that re-vendors it.
 """
 from __future__ import annotations
 
@@ -44,6 +67,19 @@ SINGLE_FILES = [
     ("packages/author-ts/scripts/git-worker.cjs", REPO / "harness" / "scripts" / "git-worker.cjs"),
 ]
 
+# Files patched directly in the vendored tree, downstream of upstream_commit.
+# Keyed by the "files" key used in the pin manifest (surface-relative path).
+# Re-vendoring from upstream_commit alone reverts these; see PIN CONVENTION
+# above. Each entry names the PR that introduced the patch and what it does.
+DOWNSTREAM_PATCHES = {
+    "ports/impl/converseSdkRunner.ts":
+        "PR #761: classify a clean SDK EOF that already streamed visible "
+        "text as end_turn instead of an internal error.",
+    "ports/impl/tenantChangeRepo.ts":
+        "p8-unit4: real vendored Git adapter for staged_tree resolution "
+        "and the closed, digest-only Unit 3 coordination client.",
+}
+
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
@@ -58,6 +94,20 @@ def tree_manifest(root: Path) -> dict[str, str]:
         for p in sorted(root.rglob("*"))
         if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
     }
+
+
+def check_for_reverted_patches(
+    vendored: Path, old_files: dict[str, str], new_files: dict[str, str]
+) -> list[str]:
+    """Diff pre- and post-sync pinned hashes for every DOWNSTREAM_PATCHES
+    entry under this surface. A changed hash means --from just overwrote a
+    hand-applied patch with plain upstream content."""
+    hits = []
+    for rel, why in DOWNSTREAM_PATCHES.items():
+        old_hash, new_hash = old_files.get(rel), new_files.get(rel)
+        if old_hash is not None and new_hash is not None and old_hash != new_hash:
+            hits.append(f"  {(vendored / rel).relative_to(REPO)}: {why}")
+    return hits
 
 
 def do_sync(upstream: Path) -> int:
@@ -78,6 +128,10 @@ def do_sync(upstream: Path) -> int:
         if not src.is_dir():
             print(f"upstream surface missing: {src}")
             return 1
+        old_files = (
+            json.loads(pin.read_text(encoding="utf-8")).get("files", {})
+            if pin.exists() else {}
+        )
         if vendored.exists():
             shutil.rmtree(vendored)
         # pyc-free discipline (spec non-negotiable #3): never vendor bytecode.
@@ -90,6 +144,17 @@ def do_sync(upstream: Path) -> int:
             "surface": upstream_rel,
             "files": tree_manifest(vendored),
         }
+        reverted = check_for_reverted_patches(vendored, old_files, manifest["files"])
+        if reverted:
+            print("REFUSING to write the pin: this sync would silently revert "
+                  "known downstream patches (see DOWNSTREAM_PATCHES / PIN "
+                  "CONVENTION at the top of this file):")
+            for line in reverted:
+                print(line)
+            print("Re-apply the patch on top of the freshly vendored file, "
+                  "then re-run --from; or, if it truly landed upstream, "
+                  "remove its DOWNSTREAM_PATCHES entry in the same commit.")
+            return 1
         extras = {}
         if pin == SURFACES[0][2]:
             for single_rel, single_dst in SINGLE_FILES:
