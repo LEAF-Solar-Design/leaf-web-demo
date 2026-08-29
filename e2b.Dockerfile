@@ -11,3 +11,9 @@ WORKDIR /home/user
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# This is a bare e2b sandbox template — no server runs by default, so the only
+# honest liveness signal is that the interpreter itself still execs. Anything
+# launched inside the sandbox owns its own health story.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD python -c "import sys; sys.exit(0)" || exit 1
