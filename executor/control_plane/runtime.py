@@ -4,11 +4,16 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import logging
 import re
 import ssl
 from typing import Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class RuntimeClient(Protocol):
@@ -53,8 +58,13 @@ class HttpRuntimeClient:
             return self._post_with_server_name(parsed, body, context)
         request = Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json",
                           "X-Instant-Runtime-Control-Secret": self.control_secret}, method="POST")
-        with urlopen(request, timeout=self.request_timeout_seconds, context=context) as response:  # nosec B310: endpoint is registered control-plane data
-            return json.loads(response.read())
+        try:
+            with urlopen(request, timeout=self.request_timeout_seconds, context=context) as response:  # nosec B310: endpoint is registered control-plane data
+                return json.loads(response.read())
+        except HTTPError as exc:
+            response_body = exc.read().decode("utf-8", "replace")
+            _LOG.error("executor control call to %s failed: status=%s body=%s", url, exc.code, response_body)
+            raise
 
     def _post_with_server_name(self, parsed, body: dict, context: ssl.SSLContext | None) -> dict:
         if context is None or not parsed.hostname:
@@ -78,6 +88,10 @@ class HttpRuntimeClient:
             response = connection.getresponse()
             payload = response.read()
             if not 200 <= response.status < 300:
+                _LOG.error(
+                    "executor control call to %s failed: status=%s body=%s",
+                    parsed.geturl(), response.status, payload.decode("utf-8", "replace"),
+                )
                 raise OSError(f"executor control returned HTTP {response.status}")
             return json.loads(payload)
         finally:

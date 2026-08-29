@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
+import logging
 import threading
 import uuid
 import weakref
@@ -15,6 +16,8 @@ from .models import Lease, Session
 from .reaper import ControlPlaneReaper, ReconciliationUnavailable
 from .store import ControlStore, NoCapacity, StaleFence, StoreUnavailable
 
+
+_LOG = logging.getLogger(__name__)
 
 CONTRACT = "leaf.instant-execution/v1"
 
@@ -170,6 +173,10 @@ class ControlPlane:
             ready = self.runtime.assign(slot.endpoint, {"assignment": assignment, "code_load": code_load, "catalog": catalog,
                 "artifact": signed_artifact, "drawing_context": request["drawing_context"]["data"]})
             if ready.get("state") != "ready":
+                _LOG.error(
+                    "executor assign response was not ready: session_id=%s executor_endpoint=%s slot_id=%s response=%s",
+                    session.session_id, slot.endpoint, slot.slot_id, ready,
+                )
                 raise ControlPlaneError("RUNTIME_NOT_READY", "executor did not confirm code readiness")
             self.store.activate(session.session_id, lease)
             try:
@@ -185,6 +192,11 @@ class ControlPlane:
                 self.runtime.release(slot.endpoint, {"assignment_id": str(uuid.uuid4()), "reason": "runtime_not_ready"})
             raise
         except Exception as exc:
+            _LOG.error(
+                "assignment failed with an unwrapped exception: session_id=%s executor_endpoint=%s "
+                "slot_id=%s exception_type=%s exception_message=%s",
+                request.get("session_id"), slot.endpoint, slot.slot_id, type(exc).__name__, str(exc),
+            )
             if session_created:
                 self.release(request["session_id"], "assignment_failed")
             else:

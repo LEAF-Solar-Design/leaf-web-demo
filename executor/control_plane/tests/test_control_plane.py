@@ -5,14 +5,18 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import ssl
 import threading
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 import uuid
 
 from executor.contracts.validate_contracts import validate
 from executor.control_plane.api import application
 from executor.control_plane.coordination import CoordinationUnavailable
 from executor.control_plane.jws import LeaseSigner, verify_jws
+from executor.control_plane.runtime import HttpRuntimeClient
 from executor.control_plane.service import ControlPlane, ControlPlaneError
 from executor.control_plane.store import InMemoryStore, StaleFence
 
@@ -248,6 +252,91 @@ class ControlPlaneTests(unittest.TestCase):
             self.plane.assign(self.request())
         self.assertEqual([event[0] for event in self.runtime.events], ["assign", "release"])
         self.assertEqual(self.store.candidate().state, "READY")
+
+    def test_runtime_not_ready_response_is_logged(self):
+        self.runtime.ready = False
+        with self.assertLogs("executor.control_plane.service", level="ERROR") as logs:
+            with self.assertRaisesRegex(ControlPlaneError, "did not confirm"):
+                self.plane.assign(self.request())
+        logged = "\n".join(logs.output)
+        self.assertIn("not_ready", logged)
+        self.assertIn("executor.internal:8443", logged)
+
+    def test_unexpected_runtime_exception_is_logged_and_wrapped(self):
+        class ExplodingRuntime(Runtime):
+            def assign(self, endpoint, command):
+                raise ConnectionResetError("executor dropped the connection mid handshake")
+
+        plane = ControlPlane(self.store, ExplodingRuntime(), LeaseSigner(b"a" * 32, "test-key"), self.coord, self.clock)
+        with self.assertLogs("executor.control_plane.service", level="ERROR") as logs:
+            with self.assertRaisesRegex(ControlPlaneError, "executor assignment failed") as raised:
+                plane.assign(self.request())
+        self.assertEqual("ASSIGNMENT_FAILED", raised.exception.code)
+        self.assertIsInstance(raised.exception.__cause__, ConnectionResetError)
+        logged = "\n".join(logs.output)
+        self.assertIn("ConnectionResetError", logged)
+        self.assertIn("executor dropped the connection mid handshake", logged)
+        self.assertEqual(self.store.candidate().state, "READY")
+
+    def test_runtime_client_logs_status_and_body_on_http_error(self):
+        client = HttpRuntimeClient("runtime-control")
+        error_body = b'{"error": "not found"}'
+        http_error = HTTPError(
+            "http://127.0.0.1:8088/v1/control/assign", 404, "Not Found", {}, io.BytesIO(error_body),
+        )
+        with patch("executor.control_plane.runtime.urlopen", side_effect=http_error):
+            with self.assertLogs("executor.control_plane.runtime", level="ERROR") as logs:
+                with self.assertRaises(HTTPError):
+                    client.assign("http://127.0.0.1:8088", {"assignment": {}})
+        logged = "\n".join(logs.output)
+        self.assertIn("404", logged)
+        self.assertIn("not found", logged)
+
+    def test_server_name_client_logs_status_and_body_and_never_the_secret(self):
+        # This is the PRODUCTION path. _post delegates to _post_with_server_name
+        # whenever the scheme is https and a TLS server name is set, and the
+        # deployed control plane calls executor.instant.internal over mTLS. The
+        # plain _post branch covered above is the locally exercised one, so
+        # without this the logging on the path that actually runs during the
+        # rung 6 incident would be untested.
+        secret = "runtime-control-secret-value"
+        client = HttpRuntimeClient(secret, tls_server_name="executor.instant.internal")
+
+        class _Response:
+            status = 503
+
+            @staticmethod
+            def read():
+                return b'{"error": "executor assignment failed"}'
+
+        class _Connection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return _Response()
+
+            def close(self):
+                pass
+
+        with patch.object(HttpRuntimeClient, "_ssl_context",
+                          return_value=ssl.create_default_context()):
+            with patch("executor.control_plane.runtime._ServerNameHTTPSConnection",
+                       _Connection):
+                with self.assertLogs("executor.control_plane.runtime", level="ERROR") as logs:
+                    with self.assertRaises(OSError):
+                        client.assign("https://executor.instant.internal:8443",
+                                      {"assignment": {}})
+        logged = "\n".join(logs.output)
+        self.assertIn("503", logged)
+        self.assertIn("executor assignment failed", logged)
+        # The control secret rides this exact call as the
+        # X-Instant-Runtime-Control-Secret request header. The logging added
+        # here prints the response, and must never print the secret with it.
+        self.assertNotIn(secret, logged)
 
     def test_response_has_no_service_credentials(self):
         assignment = self.plane.assign(self.request())
