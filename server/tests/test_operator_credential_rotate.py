@@ -22,6 +22,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import operator_credential_rotate_runbook as rb  # noqa: E402
 import operator_secret_broker as broker  # noqa: E402
+from route_flatten import leaf_paths
 
 PG_URL = os.environ.get("LEAF_OPERATOR_TEST_DATABASE_URL")
 needs_pg = pytest.mark.skipif(
@@ -313,7 +314,7 @@ def test_credential_router_registers_expected_paths():
 
     app = FastAPI()
     app.include_router(router_mod.router)
-    paths = {r.path for r in app.routes}
+    paths = set(leaf_paths(app))
     assert "/api/operator/runbooks/credential/{handle}/state" in paths
     assert "/api/operator/runbooks/credential/propose" in paths
     assert "/api/operator/runbooks/credential/execute" in paths

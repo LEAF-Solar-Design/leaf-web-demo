@@ -361,10 +361,14 @@ def test_no_registered_route_under_operator_namespace():
     prove none lives under /api/operator. Covers /stream, /transcript, and
     any surface a later change might mount without amending this gate."""
     from app import app
+    from route_flatten import leaf_paths
 
-    operator_routes = [
-        getattr(r, "path", "") for r in app.routes
-        if getattr(r, "path", "").startswith("/api/operator")]
+    all_paths = leaf_paths(app)
+    # Non-vacuity: a broken walk that enumerates nothing must not read as
+    # "nothing is mounted under /api/operator" (the fastapi 0.110
+    # _IncludedRouter reshape did exactly that to the old direct r.path walk).
+    assert len(all_paths) > 50, "route walk broke; fix the walk, not this gate"
+    operator_routes = [p for p in all_paths if p.startswith("/api/operator")]
     assert operator_routes == [], (
         f"routes registered under /api/operator on a pre-operator app "
         f"revision: {operator_routes}; Lane A must amend this gate in the "

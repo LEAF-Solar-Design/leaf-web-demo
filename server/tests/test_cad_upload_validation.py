@@ -25,6 +25,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from routers import cad_upload as cad_upload_router  # noqa: E402
+from route_flatten import iter_leaf_routes  # noqa: E402
 
 VALID_DWG = b"AC1032" + os.urandom(200)
 VALID_DXF = (
@@ -248,9 +249,9 @@ def mounted_client(monkeypatch, tmp_path):
 
 
 def test_mounted_route_exists_on_the_real_app():
-    assert any(getattr(route, "path", None) == "/api/cad/upload"
-               and "POST" in getattr(route, "methods", set())
-               for route in app_module.app.routes)
+    assert any(path == "/api/cad/upload"
+               and "POST" in (getattr(route, "methods", None) or set())
+               for path, route in iter_leaf_routes(app_module.app.routes))
 
 
 def test_mounted_flag_off_is_503_not_404(mounted_client, monkeypatch):

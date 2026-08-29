@@ -155,6 +155,13 @@ _EXPECTED_ENDPOINTS = frozenset({
     # executes no command in the app process and reaches no production route
     # (server/routers/operator_worker.py, proven in test_operator_worker_boundary.py).
     ("POST", "/api/operator/worker/dispatch"),
+    # Exact worker cancellation (PR #746, merged 2026-08-20): operator-authed,
+    # server-side owner/tenant/state authorization before any cancel. #746
+    # mounted the route without amending this pin; the gate never caught it
+    # because the fastapi 0.110 _IncludedRouter reshape had silently blinded
+    # the route walk (fixed in this same change, with a non-vacuity floor so
+    # a blind walk can never read as a pass again).
+    ("POST", "/api/operator/worker/cancel"),
 })
 
 
@@ -181,7 +188,11 @@ def _operator_surface(enabled: bool) -> list:
         # create_task chain that spawns descendants while draining also settles.
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
-        "loop.run_until_complete(app.app.router.startup())\n"
+        "async def _start_lifespan():\n"
+        "    lifespan = app.app.router.lifespan_context(app.app)\n"
+        "    await lifespan.__aenter__()\n"
+        "    return lifespan\n"
+        "lifespan = loop.run_until_complete(_start_lifespan())\n"
         # The cap bounds the drain so a pathological chain cannot hang the test;
         # a chain deeper than the cap is effectively an unbounded dynamic
         # mutation (it would also stall a real server's startup), the
@@ -205,8 +216,22 @@ def _operator_surface(enabled: bool) -> list:
         # whole sub-app whose child routes are NOT in app.routes flatly, so a
         # production route mounted there would escape a non-recursive walk. Walk
         # child routes with the mount path as prefix.
+        #
+        # RECURSE into fastapi>=0.110 _IncludedRouter nodes too: include_router
+        # no longer flattens -- it appends one opaque node per call (no .path,
+        # no .methods, no .dependant) whose children hang off
+        # original_router.routes and whose prefix is include_context.prefix.
+        # Skipping them silently enumerates NOTHING, which makes the flag-off
+        # "surface is empty" assertion vacuously true forever; the walked-leaf
+        # count printed below is the non-vacuity proof the assertion pins.
+        "walked = [0]\n"
         "def _walk(routes, prefix):\n"
         "    for r in routes:\n"
+        "        orig = getattr(r, 'original_router', None)\n"
+        "        if orig is not None:\n"  # fastapi>=0.110 _IncludedRouter
+        "            ctx = getattr(r, 'include_context', None)\n"
+        "            _walk(orig.routes, prefix + (getattr(ctx, 'prefix', '') or ''))\n"
+        "            continue\n"
         "        rpath = prefix + getattr(r, 'path', '')\n"
         "        try:\n"
         "            subs = getattr(r, 'routes', None)\n"
@@ -215,6 +240,7 @@ def _operator_surface(enabled: bool) -> list:
         "        if subs:\n"          # a Mount / sub-application
         "            _walk(subs, rpath)\n"
         "            continue\n"
+        "        walked[0] += 1\n"
         "        if not (rpath.startswith('/api/operator/') or _uses_ro(r)):\n"
         "            continue\n"
         "        methods = getattr(r, 'methods', None) or set()\n"
@@ -224,6 +250,7 @@ def _operator_surface(enabled: bool) -> list:
         "            eps.append(['MOUNT', rpath])\n"
         "_walk(app.app.routes, '')\n"
         "print('EPS_JSON=' + json.dumps(eps))\n"
+        "print('WALKED_TOTAL=' + str(walked[0]))\n"
     )
     env = dict(os.environ)
     env["LEAF_OPERATOR_ENABLED"] = "1" if enabled else "0"
@@ -235,6 +262,20 @@ def _operator_surface(enabled: bool) -> list:
                          capture_output=True, text=True, env=env, check=True)
     line = next(ln for ln in out.stdout.splitlines()
                 if ln.startswith("EPS_JSON="))
+    walked_line = next(ln for ln in out.stdout.splitlines()
+                       if ln.startswith("WALKED_TOTAL="))
+    # NON-VACUITY GATE, load-bearing: if a routing-library change makes the
+    # walk skip containers it does not recognize (exactly what fastapi 0.110's
+    # _IncludedRouter did), "found no operator surface" and "enumerated
+    # nothing" become indistinguishable and the flag-off proof below certifies
+    # a surface it never audited. The real app registers far more than 50 leaf
+    # routes on every stack this repo has shipped, so a count below that floor
+    # is an enumeration break, never a real app shape.
+    walked_total = int(walked_line[len("WALKED_TOTAL="):])
+    assert walked_total > 50, (
+        f"route walk enumerated only {walked_total} leaf routes; the walk is "
+        "broken (unrecognized router container?), so surface assertions built "
+        "on it would be vacuous. Fix the walk, do not touch the pinned set.")
     return [tuple(e) for e in json.loads(line[len("EPS_JSON="):])]
 
 

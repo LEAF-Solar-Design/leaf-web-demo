@@ -18,6 +18,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import operator_secret_broker as broker  # noqa: E402
+from route_flatten import leaf_paths
 
 
 @pytest.fixture(autouse=True)
@@ -312,7 +313,7 @@ def test_secret_router_registers_metadata_routes_only():
 
     app = FastAPI()
     app.include_router(router_mod.router)
-    paths = {r.path for r in app.routes}
+    paths = set(leaf_paths(app))
     assert "/api/operator/secrets" in paths
     assert "/api/operator/secrets/{handle}" in paths
     # There is deliberately NO route that injects/returns a credential value.
