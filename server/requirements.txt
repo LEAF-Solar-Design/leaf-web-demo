@@ -1,7 +1,15 @@
-# Security baseline: FastAPI 0.141.1, Starlette 1.6.0, and httpx 0.28.1.
-# The pre-drift stack pinned Starlette 0.35.1 because its TestClient used
-# httpx's removed app= shortcut. The current TestClient supports httpx 0.28+
-# and the operator route-surface test uses Starlette's lifespan API.
+# Security baseline: FastAPI 0.141.1, Starlette 1.6.0, and httpx 0.28.1
+# (starlette 0.35.1 shipped 7 known CVEs into the app and broker images).
+# The old pin guarded against three post-drift breaks, all now migrated:
+# 1. Router.startup() removed -> the operator route-surface probe enters
+#    startup via the lifespan API instead.
+# 2. include_router no longer flattens: app.routes carries _IncludedRouter
+#    nodes with NO .path/.methods/.dependant, so any direct r.path walk
+#    crashes or silently enumerates nothing. Tests walk via
+#    tests/route_flatten.py, and the O2/O3 surface gates now pin a
+#    non-vacuity floor so a future reshape cannot pass silently.
+# 3. httpx>=0.28 removed the TestClient app= shortcut -> no TestClient(app=..)
+#    call remains.
 fastapi==0.141.1
 starlette==1.6.0
 uvicorn

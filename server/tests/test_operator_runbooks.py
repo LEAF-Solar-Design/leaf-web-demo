@@ -23,6 +23,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import operator_runbooks as rb  # noqa: E402
+from route_flatten import leaf_paths
 
 PG_URL = os.environ.get("LEAF_OPERATOR_TEST_DATABASE_URL")
 needs_pg = pytest.mark.skipif(
@@ -301,7 +302,7 @@ def test_runbook_router_registers_expected_paths():
 
     app = FastAPI()
     app.include_router(router_mod.router)
-    paths = {r.path for r in app.routes}
+    paths = set(leaf_paths(app))
     assert "/api/operator/runbooks/tenant-agent/{tenant_id}/state" in paths
     assert "/api/operator/runbooks/tenant-agent/{verb}/propose" in paths
     assert "/api/operator/runbooks/tenant-agent/{verb}/execute" in paths
@@ -311,8 +312,9 @@ def test_default_app_registers_no_operator_route():
     if os.environ.get("LEAF_OPERATOR_ENABLED", "").strip() == "1":
         pytest.skip("operator plane explicitly enabled")
     from app import app
-    assert [r.path for r in app.routes
-            if getattr(r, "path", "").startswith("/api/operator")] == []
+    all_paths = leaf_paths(app)
+    assert len(all_paths) > 50, "route walk broke; a vacuous empty walk must not pass this gate"
+    assert [p for p in all_paths if p.startswith("/api/operator")] == []
 
 
 # --------------------------------------------------------------------------- #

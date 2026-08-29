@@ -21,6 +21,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import operator_overlay_runbook as rb  # noqa: E402
 import operator_runbook_tx as tx  # noqa: E402
+from route_flatten import leaf_paths
 
 PG_URL = os.environ.get("LEAF_OPERATOR_TEST_DATABASE_URL")
 needs_pg = pytest.mark.skipif(
@@ -248,7 +249,7 @@ def test_overlay_router_registers_expected_paths():
 
     app = FastAPI()
     app.include_router(router_mod.router)
-    paths = {r.path for r in app.routes}
+    paths = set(leaf_paths(app))
     assert "/api/operator/runbooks/tenant-overlay/{tenant_id}/state" in paths
     assert "/api/operator/runbooks/tenant-overlay/propose" in paths
     assert "/api/operator/runbooks/tenant-overlay/execute" in paths

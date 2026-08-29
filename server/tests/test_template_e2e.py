@@ -47,6 +47,7 @@ import deps  # noqa: E402
 import templates  # noqa: E402
 from customization_authority import TenantBinding  # noqa: E402
 from routers import templates as templates_router  # noqa: E402
+from route_flatten import leaf_paths  # noqa: E402
 
 TEMPLATE_ID = "rooftop-standard-string"
 TENANT = "tenant-e2e"
@@ -54,8 +55,8 @@ PROJECT = "project-e2e"
 
 
 def test_application_mounts_every_solar_template_route():
-    mounted = {route.path for route in application.app.routes}
-    expected = {route.path for route in templates_router.router.routes}
+    mounted = set(leaf_paths(application.app))
+    expected = set(leaf_paths(templates_router.router))
     assert expected
     assert expected <= mounted
 
