@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import ssl
 import threading
 import unittest
 from unittest.mock import patch
@@ -290,6 +291,52 @@ class ControlPlaneTests(unittest.TestCase):
         logged = "\n".join(logs.output)
         self.assertIn("404", logged)
         self.assertIn("not found", logged)
+
+    def test_server_name_client_logs_status_and_body_and_never_the_secret(self):
+        # This is the PRODUCTION path. _post delegates to _post_with_server_name
+        # whenever the scheme is https and a TLS server name is set, and the
+        # deployed control plane calls executor.instant.internal over mTLS. The
+        # plain _post branch covered above is the locally exercised one, so
+        # without this the logging on the path that actually runs during the
+        # rung 6 incident would be untested.
+        secret = "runtime-control-secret-value"
+        client = HttpRuntimeClient(secret, tls_server_name="executor.instant.internal")
+
+        class _Response:
+            status = 503
+
+            @staticmethod
+            def read():
+                return b'{"error": "executor assignment failed"}'
+
+        class _Connection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return _Response()
+
+            def close(self):
+                pass
+
+        with patch.object(HttpRuntimeClient, "_ssl_context",
+                          return_value=ssl.create_default_context()):
+            with patch("executor.control_plane.runtime._ServerNameHTTPSConnection",
+                       _Connection):
+                with self.assertLogs("executor.control_plane.runtime", level="ERROR") as logs:
+                    with self.assertRaises(OSError):
+                        client.assign("https://executor.instant.internal:8443",
+                                      {"assignment": {}})
+        logged = "\n".join(logs.output)
+        self.assertIn("503", logged)
+        self.assertIn("executor assignment failed", logged)
+        # The control secret rides this exact call as the
+        # X-Instant-Runtime-Control-Secret request header. The logging added
+        # here prints the response, and must never print the secret with it.
+        self.assertNotIn(secret, logged)
 
     def test_response_has_no_service_credentials(self):
         assignment = self.plane.assign(self.request())
