@@ -259,12 +259,17 @@ def countersign(org_id: uuid.UUID, project_id: uuid.UUID, bundle_id: uuid.UUID,
             # Serialize countersign attempts at the project boundary. Credential-row
             # locking alone cannot prevent two different credentials from racing on
             # the same idempotency key and leaving an orphan history operation.
+            # live_projects, not projects: this lock doubles as the existence
+            # gate (it raises below), and a soft-deleted project must not be
+            # countersignable. `projects` alone accepted both soft-delete
+            # shapes -- deleted_at set with status still 'active', and
+            # status 'deleted'.
             cur.execute(
-                "SELECT 1 FROM projects WHERE org_id = %(org)s AND project_id = %(project)s "
+                "SELECT 1 FROM live_projects WHERE org_id = %(org)s AND project_id = %(project)s "
                 "FOR UPDATE",
                 {"org": org_id, "project": project_id})
             if cur.fetchone() is None:
-                raise ValueError("project not found")
+                raise ValueError("project not found or not live")
             cur.execute(
                 "SELECT signature_id, bundle_id, credential_id, history_operation_id, root_sha256, signed_payload, "
                 "signature_algorithm, signature_bytes FROM review_signatures "

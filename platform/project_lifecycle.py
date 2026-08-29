@@ -142,10 +142,16 @@ def _project_row(
     cur: Any, org_id: uuid.UUID, project_id: uuid.UUID, *, lock: bool = True,
 ) -> Dict[str, Any]:
     lock_clause = "FOR UPDATE" if lock else ""
+    # THE gate for every lifecycle operation (clone, export, reset, delete, file
+    # writes), so its liveness predicate has to cover BOTH soft-delete writers.
+    # `status <> 'deleted'` alone matched a project that store.soft_delete_project
+    # had hidden (it sets deleted_at and leaves status 'active'), which made an
+    # invisible project fully mutable through this path. live_projects is that
+    # predicate, named once.
     cur.execute(
         "SELECT project_id, org_id, name, status, created_at, updated_at "
-        "FROM projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
-        "AND status <> 'deleted' " + lock_clause,
+        "FROM live_projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        + lock_clause,
         {"org_id": org_id, "project_id": project_id},
     )
     row = cur.fetchone()
@@ -759,7 +765,7 @@ def clone_project(
                 "INSERT INTO project_authority_modes "
                 "(org_id, project_id, authority_mode, selected_by) "
                 "SELECT %(org_id)s, %(target_project_id)s, "
-                "COALESCE((SELECT authority_mode FROM project_authority_modes "
+                "COALESCE((SELECT authority_mode FROM live_project_authority_modes "
                 "WHERE org_id = %(org_id)s AND project_id = %(source_project_id)s), "
                 "'postgres_canonical'), 'server'",
                 {

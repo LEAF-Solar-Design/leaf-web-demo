@@ -185,6 +185,23 @@ through `0019`. As above, that was true and is corrected for shape: a negative
 scoped to a range invites the reader to assume the complement is covered, and
 here nothing outside those nine tables is. Read the tuple.
 
+`authority_modes` reports the project counts twice. `project` is the raw
+`project_authority_modes` census the backfill comparison reads. `project_live`
+is the same count through migration `0050`'s `live_project_authority_modes`
+view, which joins the live-project guard. **`project - project_live` is the
+orphan population**: authority rows whose project has been soft-deleted. Those
+rows are expected (a soft delete is reversible, so the authority it selected is
+retained on purpose) and harmless as long as nothing joins the base table
+without the guard. They stopped being harmless on 2026-08-28, when a
+fixture-mint query joined `projects` to `project_authority_modes` with no
+`deleted_at` predicate, selected a project soft-deleted two days earlier, and
+stalled a release lane about 40 minutes behind a bare `project not found`. A
+growing gap is not itself a fault; a NON-ZERO gap plus a hand-written join over
+the base tables is. Query `live_projects` / `live_project_authority_modes`, not
+`projects` / `project_authority_modes`, whenever you mean a live project --
+including from one-off ops and fixture scripts, which
+`platform/tests/test_soft_delete_guard_static.py` cannot reach.
+
 For a local schema rehearsal:
 
 ```shell

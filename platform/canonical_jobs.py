@@ -148,7 +148,7 @@ def submit_solve_job(org_id: uuid.UUID, project_id: uuid.UUID, request_tenant_id
                 "AND (%(input_version_id)s::uuid IS NULL OR EXISTS (SELECT 1 FROM drawing_versions dv "
                 "WHERE dv.org_id = p.org_id AND dv.project_id = p.project_id "
                 "AND dv.version_id = %(input_version_id)s AND dv.deleted_at IS NULL)) "
-                "AND COALESCE((SELECT authority_mode FROM project_authority_modes "
+                "AND COALESCE((SELECT authority_mode FROM live_project_authority_modes "
                 "WHERE org_id = p.org_id AND project_id = p.project_id), "
                 "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = p.org_id), "
                 "'legacy_sqlite') = 'postgres_canonical' "
@@ -242,7 +242,14 @@ def claim_next(worker_id: str, *, lease_seconds: float = 30,
                 "AND (%(tool)s::text IS NULL OR j.tool_name = %(tool)s::text) "
                 "AND j.attempt < j.max_attempts "
                 "AND (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at < %(now)s)) "
-                "AND COALESCE((SELECT authority_mode FROM project_authority_modes "
+                # A job whose project was soft-deleted after enqueue must not be
+                # dispatched: running it writes fresh canonical rows into a
+                # project no reader can see. Enqueue already refuses a dead
+                # project (submit_job binds p.deleted_at IS NULL); this closes
+                # the window where the delete lands BETWEEN enqueue and claim.
+                "AND EXISTS (SELECT 1 FROM live_projects lp "
+                "WHERE lp.org_id = j.org_id AND lp.project_id = j.project_id) "
+                "AND COALESCE((SELECT authority_mode FROM live_project_authority_modes "
                 "WHERE org_id = j.org_id AND project_id = j.project_id), "
                 "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = j.org_id), "
                 "'legacy_sqlite') = 'postgres_canonical' "

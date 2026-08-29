@@ -60,12 +60,18 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert "tests/test_session_annex_store.py" in annex.argv
 
     static = suites["platform-static"]
-    # 174 collected across the 10 *_static.py files minus the 2 DATABASE_URL-
-    # gated skips = 172 executed on a no-DB host (measured 2026-08-14). Mirrors
-    # the floor in run-all-gates.py; BOTH must move together when a *_static.py
-    # file gains a test (#432's 96->102 history), and only alongside a
-    # re-measured run-all-gates.py floor.
-    assert static.expected == 172
+    # 183 collected across the 11 *_static.py files minus the 2 DATABASE_URL-
+    # gated skips = 181 executed on a no-DB host (re-measured 2026-08-28 with
+    # the soft-delete guard card, which both registers
+    # test_soft_delete_guard_static.py and closes the standing 172-vs-175 drift
+    # the previous note left open). Mirrors the floor in run-all-gates.py; BOTH
+    # must move together when a *_static.py file gains a test (#432's 96->102
+    # history), and only alongside a re-measured run-all-gates.py floor.
+    assert static.expected == 181
+    assert any(
+        str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
+        for arg in static.argv
+    )
     assert any(
         str(arg).endswith("platform/tests/test_db_schema_proof_static.py")
         for arg in static.argv

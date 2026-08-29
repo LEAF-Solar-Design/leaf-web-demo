@@ -85,6 +85,83 @@ class ProjectRepositoryAuthorityConflict(ValueError):
     """A project mapping conflicts with the immutable server-owned authority."""
 
 
+class ProjectUnavailable(ValueError):
+    """A named project cannot be written, with ``reason`` saying exactly why.
+
+    Subclasses ValueError so every existing ``except ValueError`` keeps working;
+    ``reason`` is the machine-readable discriminator ("soft_deleted",
+    "not_found", "state_changed") for callers that want to branch instead of
+    reading prose.
+    """
+
+    def __init__(self, message: str, *, reason: str, project_id: object,
+                 deleted_at: Optional[datetime] = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.project_id = str(project_id)
+        self.deleted_at = deleted_at
+
+
+class ProjectSoftDeleted(ProjectUnavailable):
+    """The project exists in this org but has been soft-deleted.
+
+    Recovery, deliberately NOT in the message text (an error body that a tenant
+    may see should not carry a runnable statement or schema detail):
+    ``UPDATE projects SET deleted_at = NULL, status = 'active'
+    WHERE org_id = ... AND project_id = ...``.
+    """
+
+
+class ProjectNotFound(ProjectUnavailable):
+    """No project with that id is visible to this org."""
+
+
+def _project_absence(cur: Any, org_id: uuid.UUID,
+                     project_id: uuid.UUID) -> ProjectUnavailable:
+    """Explain WHY a live-project match returned nothing. Failure path only.
+
+    A guarded INSERT ... SELECT FROM live_projects that matches nothing conflates
+    three different situations, and the generic "project not found" it used to
+    raise sent a release lane 40 minutes down the wrong diagnosis on 2026-08-28
+    (a soft-deleted project read as a permission fault, then as an app bug).
+    This runs ONE extra query, only after the write has already failed, so the
+    hot path pays nothing for it.
+
+    Deliberately scoped to the caller's own org: probing whether some OTHER
+    tenant owns the id would turn this message into a cross-tenant existence
+    oracle, which is exactly what this module's "404, never 403" rule exists to
+    prevent. "no such project" and "owned by another org" therefore stay ONE
+    case on purpose -- distinguishing them in the message is a privacy defect,
+    not a diagnostic improvement.
+    """
+    cur.execute(
+        "SELECT status, deleted_at FROM projects "
+        "WHERE org_id = %(org_id)s AND project_id = %(project_id)s",
+        {"org_id": org_id, "project_id": project_id},
+    )
+    row = cur.fetchone()
+    if row is None:
+        return ProjectNotFound(
+            f"project {project_id} not found in org {org_id}",
+            reason="not_found", project_id=project_id,
+        )
+    deleted_at, status = row["deleted_at"], row["status"]
+    if deleted_at is None and status != "deleted":
+        # The guarded read and this one disagree, so liveness flipped under a
+        # concurrent writer. Say that instead of inventing a cause.
+        return ProjectUnavailable(
+            f"project {project_id} liveness changed concurrently "
+            f"(status={status!r}); retry the operation",
+            reason="state_changed", project_id=project_id,
+        )
+    stamp = deleted_at.isoformat() if deleted_at is not None else None
+    return ProjectSoftDeleted(
+        f"project {project_id} is soft-deleted (deleted_at={stamp}, "
+        f"status={status!r}) and cannot be written",
+        reason="soft_deleted", project_id=project_id, deleted_at=deleted_at,
+    )
+
+
 def _canonical_authority_uuid(value: object, field: str) -> uuid.UUID:
     if not isinstance(value, (str, uuid.UUID)):
         raise ValueError(f"{field} must be a canonical UUID")
@@ -110,7 +187,9 @@ def register_project_repository_authority(
         raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT project_id FROM projects WHERE org_id = %(organization)s "
+            # status='active' alone missed a project soft-deleted by
+            # store.soft_delete_project, which leaves status untouched.
+            "SELECT project_id FROM live_projects WHERE org_id = %(organization)s "
             "AND project_id = %(project)s AND status = 'active' FOR UPDATE",
             {"organization": organization, "project": project},
         )
@@ -402,7 +481,7 @@ def get_or_create_project(
             elif authority_mode is not None:
                 cur.execute(
                     "SELECT COALESCE("
-                    "(SELECT authority_mode FROM project_authority_modes "
+                    "(SELECT authority_mode FROM live_project_authority_modes "
                     " WHERE org_id = %(org_id)s AND project_id = %(project_id)s), "
                     "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = %(org_id)s), "
                     "'legacy_sqlite') AS authority_mode",
@@ -437,26 +516,49 @@ def set_tenant_authority_mode(org_id: uuid.UUID, authority_mode: str) -> None:
 
 
 def set_project_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID, authority_mode: str) -> None:
+    """Select a project's authority. Fails closed on a project that is not live.
+
+    Selecting FROM live_projects rather than VALUES(...) is what makes the write
+    impossible for a soft-deleted project: the previous unconditional upsert
+    would happily create or resurrect an authority row for a project nobody can
+    read, which is precisely the orphan shape found on staging 2026-08-28.
+    """
     if authority_mode not in AUTHORITY_MODES:
         raise ValueError(f"authority_mode must be one of {AUTHORITY_MODES}")
     with cursor() as cur:
         cur.execute(
             "INSERT INTO project_authority_modes (org_id, project_id, authority_mode, selected_by) "
-            "VALUES (%(org_id)s, %(project_id)s, %(authority_mode)s, 'server') "
+            "SELECT p.org_id, p.project_id, %(authority_mode)s, 'server' FROM live_projects p "
+            "WHERE p.org_id = %(org_id)s AND p.project_id = %(project_id)s "
             "ON CONFLICT (org_id, project_id) DO UPDATE SET authority_mode = EXCLUDED.authority_mode, "
             "selected_by = 'server', selected_at = NOW()",
             {"org_id": org_id, "project_id": project_id, "authority_mode": authority_mode},
         )
+        if cur.rowcount != 1:
+            raise _project_absence(cur, org_id, project_id)
 
 
 def get_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID) -> str:
-    """Resolve exactly one authority; absent cutover deliberately means legacy."""
+    """Resolve exactly one authority; absent cutover deliberately means legacy.
+
+    Both arms are live-project scoped. The project arm reads
+    live_project_authority_modes, so an orphan authority row left behind by a
+    soft delete is invisible. The TENANT arm needs its own guard because
+    tenant_authority_modes has no project dimension: without the EXISTS it would
+    happily answer 'postgres_canonical' for a project that no longer exists, and
+    the canonical write paths gated by _require_postgres_authority would let a
+    write through into a deleted project. A non-live project resolves to
+    'legacy_sqlite', which is this module's documented fail-closed answer.
+    """
     with cursor() as cur:
         cur.execute(
             "SELECT COALESCE("
-            "(SELECT authority_mode FROM project_authority_modes "
+            "(SELECT authority_mode FROM live_project_authority_modes "
             " WHERE org_id = %(org_id)s AND project_id = %(project_id)s), "
-            "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = %(org_id)s), "
+            "(SELECT tam.authority_mode FROM tenant_authority_modes tam "
+            " WHERE tam.org_id = %(org_id)s AND EXISTS "
+            " (SELECT 1 FROM live_projects lp WHERE lp.org_id = %(org_id)s "
+            "  AND lp.project_id = %(project_id)s)), "
             "'legacy_sqlite') AS authority_mode",
             {"org_id": org_id, "project_id": project_id},
         )
@@ -877,9 +979,8 @@ def create_drawing_artifact(org_id: uuid.UUID, project_id: uuid.UUID,
     with cursor() as cur:
         cur.execute(
             "INSERT INTO drawing_artifacts (drawing_id, project_id, org_id, name) "
-            "SELECT %(drawing_id)s, p.project_id, p.org_id, %(name)s FROM projects p "
+            "SELECT %(drawing_id)s, p.project_id, p.org_id, %(name)s FROM live_projects p "
             "WHERE p.project_id = %(project_id)s AND p.org_id = %(org_id)s "
-            "AND p.deleted_at IS NULL "
             "ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name "
             "RETURNING drawing_id, project_id, org_id, name, status, created_at",
             {"drawing_id": new_uuid(), "project_id": project_id, "org_id": org_id,
@@ -887,7 +988,7 @@ def create_drawing_artifact(org_id: uuid.UUID, project_id: uuid.UUID,
         )
         row = cur.fetchone()
         if row is None:
-            raise ValueError("project not found")
+            raise _project_absence(cur, org_id, project_id)
         return DrawingArtifact.from_row(row)
 
 
@@ -899,6 +1000,21 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
     """Append the next monotonic version to a project's chain (single-writer)."""
     with connection() as conn:
         with conn.cursor() as cur:
+            # Liveness is asserted ONCE, up front, for every branch below.
+            # Guarding only the create-the-artifact branch (as this did before)
+            # left the far more common path unguarded: a project soft-deleted
+            # AFTER its drawing artifact existed accepted new versions silently.
+            # FOR SHARE holds the project row against a concurrent soft-delete
+            # for the rest of this transaction, so the check cannot go stale
+            # between here and the INSERT.
+            cur.execute(
+                "SELECT 1 FROM live_projects "
+                "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+                "FOR SHARE",
+                {"org_id": org_id, "project_id": project_id},
+            )
+            if cur.fetchone() is None:
+                raise _project_absence(cur, org_id, project_id)
             if drawing_id is None:
                 cur.execute(
                     "SELECT drawing_id FROM drawing_artifacts "
@@ -913,12 +1029,12 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                         "INSERT INTO drawing_artifacts "
                         "(drawing_id, project_id, org_id, name) "
                         "SELECT %(drawing_id)s, project_id, org_id, 'Primary drawing' "
-                        "FROM projects WHERE project_id = %(project_id)s "
-                        "AND org_id = %(org_id)s AND deleted_at IS NULL RETURNING drawing_id",
+                        "FROM live_projects WHERE project_id = %(project_id)s "
+                        "AND org_id = %(org_id)s RETURNING drawing_id",
                         {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
                     )
                     if cur.fetchone() is None:
-                        raise ValueError("project not found")
+                        raise _project_absence(cur, org_id, project_id)
                 else:
                     drawing_id = artifact["drawing_id"]
             else:
@@ -1020,7 +1136,7 @@ def import_ready_account_upload(
                 "SELECT p.project_id FROM projects p "
                 "WHERE p.org_id = %(org_id)s AND p.project_id = %(project_id)s "
                 "AND p.status = 'active' AND p.deleted_at IS NULL "
-                "AND COALESCE((SELECT authority_mode FROM project_authority_modes "
+                "AND COALESCE((SELECT authority_mode FROM live_project_authority_modes "
                 "WHERE org_id = p.org_id AND project_id = p.project_id), "
                 "(SELECT authority_mode FROM tenant_authority_modes WHERE org_id = p.org_id), "
                 "'legacy_sqlite') = 'postgres_canonical' FOR UPDATE",
