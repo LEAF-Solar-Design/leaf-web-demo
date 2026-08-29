@@ -57,6 +57,14 @@ ENV LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
 
 USER 65532:65532
 
+# Probes the one pre-auth GET the control plane serves (api.py routes
+# /.well-known/jwks.json before the secret check), so it exercises the full
+# WSGI stack without a credential. Keyed to the default CMD below; the
+# reconciler / warm-executor roles that run this same image with an explicit
+# command should override it at the task definition (or HEALTHCHECK NONE).
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/.well-known/jwks.json', timeout=4)" || exit 1
+
 # Mount /tmp as tmpfs when launching with --read-only. The default is the
 # control-plane WSGI process. The same image also runs the reconciler or warm
 # executor through the explicit commands documented in deploy/README.md.
