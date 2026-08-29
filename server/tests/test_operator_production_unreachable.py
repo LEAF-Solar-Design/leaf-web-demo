@@ -181,7 +181,11 @@ def _operator_surface(enabled: bool) -> list:
         # create_task chain that spawns descendants while draining also settles.
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
-        "loop.run_until_complete(app.app.router.startup())\n"
+        "async def _start_lifespan():\n"
+        "    lifespan = app.app.router.lifespan_context(app.app)\n"
+        "    await lifespan.__aenter__()\n"
+        "    return lifespan\n"
+        "lifespan = loop.run_until_complete(_start_lifespan())\n"
         # The cap bounds the drain so a pathological chain cannot hang the test;
         # a chain deeper than the cap is effectively an unbounded dynamic
         # mutation (it would also stall a real server's startup), the
