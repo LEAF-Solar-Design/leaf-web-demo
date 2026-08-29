@@ -2784,12 +2784,13 @@ jobs:
   # 9 (node:22-slim, incl. CRITICAL CVE-2026-59873) and 2 (nginx:alpine),
   # and no Dockerfile under deploy/ runs `apt-get upgrade` or `apk upgrade`.
   #
-  # PHASE 2, once one harvest artifact exists: drop `continue-on-error`, flip
-  # `exit-code` to "1", and add `trivyignores` pointing at an allowlist built
-  # from THAT artifact, every entry carrying a machine-checked expiry. A
-  # failing job then fails the run, which is what actually gates deployment:
-  # dispatch-staging-deploys.yml fires only on a successful run, and the
-  # manual promote consumes the same run's supply set.
+  # PHASE 2 is live: this job blocks on fixed HIGH/CRITICAL findings. Its
+  # expiring Trivy ignore list was seeded from the pre-D1 harvest artifact;
+  # Starlette/FastAPI findings were excluded and must not be re-added.
+  # The coordinator must re-seed it from a post-D1 harvest before merge.
+  # A failing job fails the run, which gates deployment because
+  # dispatch-staging-deploys.yml fires only on a successful run and manual
+  # promotion consumes the same run's supply set.
   #
   # The one privilege delta for review: this job assumes AWS_ECR_PUSH_ROLE
   # (the seventh assumption in the workflow) because that is the credential
@@ -2807,8 +2808,6 @@ jobs:
             needs.adopt.outputs.adopted == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Phase 1 only. Removing this is half of the phase-2 flip.
-    continue-on-error: true
     environment: ecr-release
     permissions:
       id-token: write
@@ -2858,6 +2857,9 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Validate expiring CVE allowlist
+        run: python .github/scripts/validate_cve_allowlist.py .github/cve-allowlist/platform-images.trivyignore
+
       - name: Scan app
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -2865,7 +2867,8 @@ jobs:
           scanners: vuln
           format: json
           output: harvest/app.json
-          exit-code: "0"
+          exit-code: "1"
+          trivyignores: .github/cve-allowlist/platform-images.trivyignore
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
@@ -2876,7 +2879,8 @@ jobs:
           scanners: vuln
           format: json
           output: harvest/broker.json
-          exit-code: "0"
+          exit-code: "1"
+          trivyignores: .github/cve-allowlist/platform-images.trivyignore
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
@@ -2887,7 +2891,8 @@ jobs:
           scanners: vuln
           format: json
           output: harvest/canonical-worker.json
-          exit-code: "0"
+          exit-code: "1"
+          trivyignores: .github/cve-allowlist/platform-images.trivyignore
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
@@ -2898,7 +2903,8 @@ jobs:
           scanners: vuln
           format: json
           output: harvest/harness.json
-          exit-code: "0"
+          exit-code: "1"
+          trivyignores: .github/cve-allowlist/platform-images.trivyignore
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
@@ -2909,7 +2915,8 @@ jobs:
           scanners: vuln
           format: json
           output: harvest/web.json
-          exit-code: "0"
+          exit-code: "1"
+          trivyignores: .github/cve-allowlist/platform-images.trivyignore
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
@@ -2917,10 +2924,10 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## CVE harvest (report-only, D3 phase 1)"
+            echo "## CVE harvest (blocking, D3 phase 2)"
             echo ""
             echo "Fixed HIGH/CRITICAL findings in the five digests this run published."
-            echo "This job gates nothing yet; see the phase-2 note in the workflow."
+            echo "Fixed findings fail this job unless they are in the expiring allowlist."
             echo ""
             echo "| service | fixed HIGH/CRITICAL |"
             echo "| --- | --- |"
@@ -3070,4 +3077,3 @@ jobs:
           path: ${{ runner.temp }}/production-handoff-candidate.json
           if-no-files-found: error
           retention-days: 30
-
