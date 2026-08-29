@@ -7,12 +7,15 @@ import io
 import json
 import threading
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 import uuid
 
 from executor.contracts.validate_contracts import validate
 from executor.control_plane.api import application
 from executor.control_plane.coordination import CoordinationUnavailable
 from executor.control_plane.jws import LeaseSigner, verify_jws
+from executor.control_plane.runtime import HttpRuntimeClient
 from executor.control_plane.service import ControlPlane, ControlPlaneError
 from executor.control_plane.store import InMemoryStore, StaleFence
 
@@ -248,6 +251,45 @@ class ControlPlaneTests(unittest.TestCase):
             self.plane.assign(self.request())
         self.assertEqual([event[0] for event in self.runtime.events], ["assign", "release"])
         self.assertEqual(self.store.candidate().state, "READY")
+
+    def test_runtime_not_ready_response_is_logged(self):
+        self.runtime.ready = False
+        with self.assertLogs("executor.control_plane.service", level="ERROR") as logs:
+            with self.assertRaisesRegex(ControlPlaneError, "did not confirm"):
+                self.plane.assign(self.request())
+        logged = "\n".join(logs.output)
+        self.assertIn("not_ready", logged)
+        self.assertIn("executor.internal:8443", logged)
+
+    def test_unexpected_runtime_exception_is_logged_and_wrapped(self):
+        class ExplodingRuntime(Runtime):
+            def assign(self, endpoint, command):
+                raise ConnectionResetError("executor dropped the connection mid handshake")
+
+        plane = ControlPlane(self.store, ExplodingRuntime(), LeaseSigner(b"a" * 32, "test-key"), self.coord, self.clock)
+        with self.assertLogs("executor.control_plane.service", level="ERROR") as logs:
+            with self.assertRaisesRegex(ControlPlaneError, "executor assignment failed") as raised:
+                plane.assign(self.request())
+        self.assertEqual("ASSIGNMENT_FAILED", raised.exception.code)
+        self.assertIsInstance(raised.exception.__cause__, ConnectionResetError)
+        logged = "\n".join(logs.output)
+        self.assertIn("ConnectionResetError", logged)
+        self.assertIn("executor dropped the connection mid handshake", logged)
+        self.assertEqual(self.store.candidate().state, "READY")
+
+    def test_runtime_client_logs_status_and_body_on_http_error(self):
+        client = HttpRuntimeClient("runtime-control")
+        error_body = b'{"error": "not found"}'
+        http_error = HTTPError(
+            "http://127.0.0.1:8088/v1/control/assign", 404, "Not Found", {}, io.BytesIO(error_body),
+        )
+        with patch("executor.control_plane.runtime.urlopen", side_effect=http_error):
+            with self.assertLogs("executor.control_plane.runtime", level="ERROR") as logs:
+                with self.assertRaises(HTTPError):
+                    client.assign("http://127.0.0.1:8088", {"assignment": {}})
+        logged = "\n".join(logs.output)
+        self.assertIn("404", logged)
+        self.assertIn("not found", logged)
 
     def test_response_has_no_service_credentials(self):
         assignment = self.plane.assign(self.request())
