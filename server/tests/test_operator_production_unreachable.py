@@ -52,8 +52,13 @@ is what matters:
       not_mounted in the matrix, and production_promotion_mounted is false, so no
       operator action or route performs promotion; and the canonical production
       deploy workflow is MANUAL (workflow_dispatch, on main) gated on an exact
-      confirmation plus an INDEPENDENT approval comment (the separate owner),
-      while no operator module names or triggers it.
+      confirmation plus an exact approval comment from a repository collaborator
+      (the owner separate from THIS PLANE), while no operator module names or
+      triggers it. Since PR #680 that approval has two NAMED and RECORDED modes,
+      `independent` (approver != dispatcher, needs write) and
+      `administrator-self-authorization` (approver == dispatcher AND == the rerun
+      actor, needs live ADMIN); it is deliberately NOT a two-person rule, and the
+      admin requirement plus the anti-laundering check are what this gate pins.
 
 The honest residuals, bounded not waived (no static test can close these; they
 are the same trust boundary that any codebase has for its own trusted code):
@@ -716,23 +721,45 @@ _PROD_DEPLOY_WF = REPO_ROOT / ".github" / "workflows" / "deploy-platform-web-pro
 
 def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane():
     # The other half of O5: production promotion goes through the CANONICAL
-    # deploy transaction, which requires a SEPARATE owner and is OUTSIDE every
-    # operator surface. The canonical workflow is MANUAL (not operator-triggered),
-    # pinned to main, and gated on an exact confirmation plus an INDEPENDENT
-    # approval comment in an open issue (the separate owner).
+    # deploy transaction, which is OUTSIDE every operator surface. The canonical
+    # workflow is MANUAL (not operator-triggered), pinned to main, and gated on
+    # an exact confirmation plus an exact approval comment in an open issue.
+    #
+    # SEPARATE OWNER, as the contract means it (section 7, obligation 3): the
+    # owner is separate from THIS PLANE. It is a repository collaborator acting
+    # through GitHub, which the operator control plane cannot be and cannot
+    # reach. It is NOT a two-person rule: PR #680 (4f8a5f71, 2026-08-18)
+    # deliberately retired the bare `[ "$APPROVER" != "$ACTOR" ]` pair, which
+    # made a single-approver release undeployable, and replaced it with two
+    # NAMED and RECORDED modes, porting the mode the infra repo already proves
+    # in accept-leaf-platform-staging-authored-cad.yml:
+    #
+    #   independent                       approver != dispatcher, needs write
+    #   administrator-self-authorization  approver == dispatcher, needs live ADMIN
+    #
+    # These pins mirror scripts/test_production_web_release.py, which #680
+    # re-pinned in the same PR (this file was missed because no CI workflow and
+    # no run-all-gates.py Suite executes it).
     wf = _PROD_DEPLOY_WF.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in wf                       # manual, not operator-triggered
     assert '[ "$GITHUB_REF" = "refs/heads/main" ]' in wf    # canonical source
     assert "Validate protected production request and operator" in wf
-    assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # separate independent approval
-    assert "Independent production approval required" in wf
-    # SEPARATE OWNER, enforced not just present: the approver must differ from
-    # BOTH the actor and the triggering actor (no self-approval), and the request
-    # must FAIL if not. These are bare `set -e` test commands; a mutation that
-    # defeats them with `|| true` / `|| :` is caught here, and a missing exit is
-    # caught by requiring the fail-closed `exit 1`.
-    assert '[ "$APPROVER" != "$ACTOR" ]' in wf
-    assert '[ "$APPROVER" != "$TRIGGERING_ACTOR" ]' in wf
+    assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # exact approval payload
+    assert ("Production approval required (independent approver, or a "
+            "repository administrator self-authorizing)") in wf
+    # The administrator requirement and the anti-laundering check, enforced not
+    # just present, at BOTH enforcement points (admission and promotion).
+    # Dropping any one of these would silently let a non-admin, or a rerun by a
+    # different actor, self-authorize a production deploy.
+    assert "administrator-self-authorization" in wf
+    assert "Self-authorization requires live repository admin permission." in wf
+    assert ("Self-authorization requires the dispatcher and rerun actor to be "
+            "the same administrator.") in wf
+    assert ("Self-authorization requires live repository admin permission at "
+            "promotion.") in wf
+    assert "Approval mode changed between admission" in wf
+    # A mutation that defeats a check with `|| true` / `|| :` is caught here,
+    # and a missing exit is caught by requiring the fail-closed `exit 1`.
     assert "|| true" not in wf and "|| :" not in wf   # no tautology defeat
     assert "exit 1" in wf                             # fail-closed on a bad request
     # OUTSIDE every operator surface: no operator server module or router names
@@ -746,40 +773,111 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
         assert "approve-vercel-production" not in s, src_path.name
 
 
-def test_o5_self_approval_is_behaviorally_rejected():
-    # BEHAVIORAL: EXECUTE the canonical workflow's own separation checks (not a
-    # hand-copy) and prove self-approval FAILS. The two checks are extracted
-    # verbatim from the workflow and run under `set -e`, exactly as the workflow
-    # runs them, so a self-approval (approver == the actor OR the triggering
-    # actor) exits non-zero and an independent approver passes.
+_APPROVAL_MODE_IF = ('if [ "${APPROVER,,}" = "${ACTOR,,}" ] '
+                     '|| [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ]; then')
+
+
+def _extract_approval_mode_blocks(wf: str) -> list:
+    """Every `if ... fi` approval-mode branch, lifted VERBATIM from the workflow.
+
+    Indentation-delimited: the branch ends at the first `fi` sitting at the same
+    column as its `if`. Nothing is rewritten, so a tautology defeat or a dropped
+    admin check inside the branch is carried into the executed script.
+    """
+    lines = wf.splitlines()
+    blocks = []
+    for i, line in enumerate(lines):
+        if line.strip() != _APPROVAL_MODE_IF:
+            continue
+        indent = len(line) - len(line.lstrip())
+        for j in range(i + 1, len(lines)):
+            candidate = lines[j]
+            if (candidate.strip() == "fi"
+                    and len(candidate) - len(candidate.lstrip()) == indent):
+                blocks.append("\n".join(lines[i:j + 1]))
+                break
+        else:
+            raise AssertionError(f"unterminated approval-mode branch at line {i + 1}")
+    return blocks
+
+
+def test_o5_self_approval_is_behaviorally_admin_only():
+    # BEHAVIORAL: EXECUTE the canonical workflow's OWN approval-mode branch (not
+    # a hand-copy) and prove what the post-#680 contract actually enforces:
+    #
+    #   - self-approval WITHOUT live repository admin is REJECTED;
+    #   - a rerun by a different actor cannot launder a self-approval;
+    #   - self-approval BY an administrator is accepted, and is RECORDED as
+    #     administrator-self-authorization (never as independent);
+    #   - an independent approver with write is accepted as independent;
+    #   - an independent approver below write is REJECTED.
+    #
+    # The branch is lifted verbatim from the workflow and run under
+    # `set -euo pipefail`, exactly as the workflow runs it, so a `|| true`
+    # tautology defeat or a dropped admin check is executed too and makes a bad
+    # request wrongly pass -> this test then FAILS, catching the mutation.
     import shutil
+    import textwrap
     bash = shutil.which("bash")
     if not bash:
         pytest.skip("bash unavailable")
     wf = _PROD_DEPLOY_WF.read_text(encoding="utf-8")
-    # Extract the WHOLE line the workflow runs (not just the bracket), so a
-    # trailing `|| true` / `|| :` tautology defeat is executed too and makes
-    # self-approval wrongly pass -> this test then FAILS, catching the mutation.
-    check_re = re.compile(r'\[ "\$APPROVER" != "\$(?:ACTOR|TRIGGERING_ACTOR)" \]')
-    lines = [ln.strip() for ln in wf.splitlines() if check_re.search(ln)]
-    assert any('!= "$ACTOR" ]' in ln for ln in lines)
-    assert any('!= "$TRIGGERING_ACTOR" ]' in ln for ln in lines)
-    # Run each UNIQUE line once, under set -e, exactly as the workflow does.
-    guard = "set -e\n" + "\n".join(dict.fromkeys(lines)) + "\n"
+    blocks = _extract_approval_mode_blocks(wf)
+    # BOTH enforcement points carry the branch: admission (APPROVER_PERMISSION)
+    # and promotion (PERMISSION, re-derived against freshly fetched permission).
+    assert len(blocks) == 2, f"expected admission + promotion branches, got {len(blocks)}"
+    admission, promotion = blocks
+    assert "APPROVAL_MODE=" in admission and "APPROVER_PERMISSION" in admission
+    assert "FINAL_APPROVAL_MODE=" in promotion
 
-    def run(approver, actor, triggering):
-        return subprocess.run(
-            [bash, "-c", guard],
+    def run(block, mode_var, perm_var, approver, actor, triggering, permission):
+        script = ("set -euo pipefail\n" + textwrap.dedent(block)
+                  + f'\necho "MODE=${mode_var}"\n')
+        proc = subprocess.run(
+            [bash, "-c", script],
             env={"APPROVER": approver, "ACTOR": actor,
-                 "TRIGGERING_ACTOR": triggering,
+                 "TRIGGERING_ACTOR": triggering, perm_var: permission,
                  "PATH": os.environ.get("PATH", "")},
-            capture_output=True).returncode
+            capture_output=True, text=True)
+        mode = ""
+        for line in proc.stdout.splitlines():
+            if line.startswith("MODE="):
+                mode = line[len("MODE="):]
+        return proc.returncode, mode
 
-    # Self-approval: the approver is the initiator (actor) or the re-run trigger.
-    assert run("alice", "alice", "bob") != 0, "approver == actor must be rejected"
-    assert run("alice", "bob", "alice") != 0, "approver == triggering_actor rejected"
-    # A genuinely independent approver passes both checks.
-    assert run("carol", "alice", "bob") == 0, "an independent approver must pass"
+    for block, mode_var, perm_var in ((admission, "APPROVAL_MODE", "APPROVER_PERMISSION"),
+                                      (promotion, "FINAL_APPROVAL_MODE", "PERMISSION")):
+        # Self-approval on write/maintain is REFUSED: admin is the price of
+        # approving your own dispatch.
+        for weak in ("write", "maintain"):
+            rc, _ = run(block, mode_var, perm_var, "alice", "alice", "alice", weak)
+            assert rc != 0, f"self-approval on {weak} must be rejected"
+        # Laundering: the approver is the dispatcher but the RERUN actor is
+        # someone else (or the reverse), so the two identities disagree.
+        for actor, triggering in (("alice", "bob"), ("bob", "alice")):
+            rc, _ = run(block, mode_var, perm_var, "alice", actor, triggering, "admin")
+            assert rc != 0, "a rerun by a different actor must not launder self-approval"
+        # Self-approval BY an administrator is the sanctioned second mode, and
+        # it is RECORDED as such - never laundered into "independent".
+        rc, mode = run(block, mode_var, perm_var, "alice", "alice", "alice", "admin")
+        assert rc == 0, "an administrator self-authorizing must pass"
+        assert mode == "administrator-self-authorization", mode
+        # Case-insensitivity is part of the contract: a login differing only in
+        # case is the SAME person and must not read as independent.
+        rc, mode = run(block, mode_var, perm_var, "Alice", "alice", "ALICE", "admin")
+        assert rc == 0 and mode == "administrator-self-authorization", (rc, mode)
+        rc, _ = run(block, mode_var, perm_var, "Alice", "alice", "ALICE", "write")
+        assert rc != 0, "case-differing self-approval on write must be rejected"
+        # An independent approver passes and is recorded as independent.
+        rc, mode = run(block, mode_var, perm_var, "carol", "alice", "bob", "write")
+        assert rc == 0, "an independent approver with write must pass"
+        assert mode == "independent", mode
+
+    # Only the ADMISSION branch screens the independent approver's permission
+    # (promotion pre-filters it with a jq `select`, then re-derives the mode).
+    rc, _ = run(admission, "APPROVAL_MODE", "APPROVER_PERMISSION",
+                "carol", "alice", "bob", "read")
+    assert rc != 0, "an independent approver below write must be rejected"
 
 
 # --- O3 (mutation check): no operator handler names a production deploy target

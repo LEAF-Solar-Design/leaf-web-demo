@@ -283,8 +283,19 @@ def test_roles_file_gained_no_operator_role():
 # content-exact: any semantic drift (e.g. a production route appearing in a
 # dispatch list) changes this digest. A legitimate tenant-catalog change
 # re-pins this constant in the same PR, per the promotion ritual.
+# Re-pinned for PR #810 (079dd932, 2026-08-27), which added the R7 READ side:
+# three GET-only routes (GET /api/platform/customize, /api/platform/source,
+# /api/platform/source/tree) joined read_platform_state's dispatch list, and its
+# description gained the consult-surface note. The action CATALOG is unchanged
+# (same eleven names, same policies, same rung 1 / auto / converse), and the
+# routes are reads behind the same admin admission chain, so the widening is of
+# reachability, never authority. The previous pin,
+# 7c35884f5cfd1b654b5e8b418deec2e59e5a86f751fa23c238b9dac628a88f1d, dated to
+# #523 (90e94998, 2026-08-07); #810 should have re-pinned it in the same PR per
+# the promotion ritual and did not, because no CI workflow and no
+# run-all-gates.py Suite executes this file.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "7c35884f5cfd1b654b5e8b418deec2e59e5a86f751fa23c238b9dac628a88f1d")
+    "cdcef02aa205461b65da38b280abb7cabd62f003b83a2ccbe30e3c7710011c92")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
