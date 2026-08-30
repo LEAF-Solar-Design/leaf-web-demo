@@ -1938,25 +1938,23 @@ def describe_selection(patterns: List[str]) -> str:
 # gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
-    # Operator control-plane suites. MODELED, not CI-measured -- unlike the
-    # rest of this table, which was refreshed from real shard-result JSONs on
-    # 2026-08-17. These are per-file test time from the all-16 junit XML plus
-    # ~2.5s process startup, taken on a loaded Windows host on 2026-08-29.
-    # A full --only server-operator- run the same day reported 11-51s per
-    # suite, but that host was heavily loaded and those numbers are not a CI
-    # signal either; the RANKING held (production-unreachable heaviest), which
-    # is what the packer actually needs. REFRESH THESE from the first CI shard
-    # JSONs that carry them, the same way the 2026-08-17 entries were derived.
-    # A wrong estimate costs makespan, never correctness: it cannot fail a
-    # gate, it can only make one shard quietly become the critical path.
-    # production-unreachable dominates because its O5 behavioral test spawns
-    # bash 14 times to execute the deploy workflow's own approval-mode branch;
-    # process creation is the cost, so Linux CI should run it well under this.
-    "server-operator-production-unreachable": 34.8,
-    "server-operator-integration-drills": 6.9,
-    "server-operator-overlay-runbook": 6.0,
-    "server-operator-identity-bindings": 5.7,
-    "server-operator-worker-cancel": 4.4,
+    # Operator control-plane suites, MEASURED on the CI runner from the shard
+    # logs of run 33283298381 (the registration PR's own first green run), the
+    # same provenance as the 2026-08-17 entries below.
+    #
+    # Only production-unreachable earns an entry: at 3.4s it is the sole
+    # operator suite above _DEFAULT_EST_S. It leads because its O5 behavioral
+    # test spawns bash 14 times to execute the deploy workflow's own
+    # approval-mode branch. The other fifteen all measured 0.4-2.0s on CI, so
+    # the default already covers them.
+    #
+    # The first cut of this table modeled these from a LOADED WINDOWS host and
+    # over-weighted five suites by 3-10x (production-unreachable at 34.8 vs the
+    # real 3.4): Windows process creation dominated the model and does not
+    # exist on the Linux runner. Recorded because the direction is the trap --
+    # over-weighting cannot fail a gate, so nothing would have complained while
+    # the packer reserved a shard's worth of phantom load.
+    "server-operator-production-unreachable": 3.4,
     "web-version-restore-proof": 61.1,
     "server-checkout-crossproc": 60.3,
     "server-backbone": 45.8,
