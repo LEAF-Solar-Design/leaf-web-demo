@@ -29,6 +29,17 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import IosSurface from './ios/IosSurface.jsx'
+import { ENV_IOS_SURFACE } from './ios/flag.js'
+import CadEditSurface from './cadedit/CadEditSurface.jsx'
+import { ENV_CAD_EDIT } from './cadedit/flag.js'
+import {
+  productSurfaceStates,
+  productSurfaceFromSearch,
+  searchForProductSurface,
+} from './site/productSurfaces.js'
+import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
@@ -2206,6 +2217,44 @@ export default function App() {
   // (round-2 review F1: that state was an unrecoverable blank).
   const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
 
+  // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
+  // module default, so the drawing workspace renders exactly as before unless
+  // the user picks another tab (or arrives with ?surface=). The tabs, frame,
+  // IosSurface, and EditSurface existed fully built and tested but were never
+  // mounted (2026-08-30 finding); this is the mount, not new surface behavior.
+  const [activeSurface, setActiveSurface] = useState(() => {
+    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+  })
+  const onSelectSurface = useCallback((id) => {
+    setActiveSurface(id)
+    try {
+      const next = searchForProductSurface(window.location.search, id)
+      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+    } catch { /* URL sync is a convenience; state alone still switches the tab */ }
+  }, [])
+  // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
+  // with the surface flag baked on and a concrete project + revision; every
+  // other case stays null, which IosSurface renders truthfully as
+  // "Not yet configured" and the tab label shows as "Setup required".
+  const [iosContract, setIosContract] = useState(null)
+  useEffect(() => {
+    if (!ENV_IOS_SURFACE || mock || !openProjectId || !canonicalVersionId) {
+      setIosContract(null)
+      return undefined
+    }
+    let live = true
+    fetchIosSurfaceStatus({ projectId: openProjectId, revision: canonicalVersionId })
+      .then((contract) => { if (live) setIosContract(contract) })
+      .catch(() => { if (live) setIosContract(null) })
+    return () => { live = false }
+  }, [mock, openProjectId, canonicalVersionId])
+  const surfaceStates = useMemo(() => productSurfaceStates({
+    sessionActive: mock || !signedOut,
+    hasDrawing: !!shown,
+    apsLive: health ? !!health.aps_live : undefined,
+    iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
+  }), [mock, signedOut, shown, health, iosContract])
+
   const advisories = [
     quotaShown && 'spend cap',
     runQuotaShown && 'daily limit',
@@ -2460,7 +2509,24 @@ export default function App() {
           />
         )}
 
-        <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
+        <ProductSurfaceTabs
+          activeSurface={activeSurface}
+          states={surfaceStates}
+          onSelect={onSelectSurface}
+        />
+        {activeSurface !== 'cad' && (
+          <ProductSurfaceFrame
+            activeSurface={activeSurface}
+            states={surfaceStates}
+            projectSlot={activeSurface === 'ios'
+              ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
+              : <span className="dim">{openProjectId ? currentProjectName || projectName : 'No project open'}</span>}
+            onOpenCad={() => onSelectSurface('cad')}
+          />
+        )}
+        {/* The CAD workspace hides (not unmounts) on other tabs so live
+            drawing, lock, and job state survive tab switches untouched. */}
+        <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' ? undefined : 'none' }} ref={workspaceCardRef}>
           {unreadableHead && unreadableHead.pending && (
             // The routine post-restore load: calm progress, not a failure —
             // no alert role, no retry (the load is already in flight).
@@ -2599,6 +2665,12 @@ export default function App() {
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
           )}
+          {/* cad_edit surface: ENV_CAD_EDIT is deliberately the FIRST operand
+              so a flag-off build folds the whole cadedit module away (the
+              module's own documented call-site contract). The engine fence
+              stands: the only /cad/ contact stays engineWorker, inside
+              cadedit/, never from here. */}
+          {ENV_CAD_EDIT && <CadEditSurface />}
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
