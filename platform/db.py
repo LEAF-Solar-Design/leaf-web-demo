@@ -144,6 +144,18 @@ _REQUIRED_COLUMNS = {
         "attempt", "max_attempts", "lease_owner", "lease_expires_at",
         "execution_context",
     },
+    "billing_subscription_events": {
+        "event_key", "org_id", "stripe_event_type", "stripe_event_ref_sha256",
+        "subscription_ref_sha256", "plan", "subscription_active",
+        "subscription_status", "current_period_start", "current_period_end",
+        "previous_tier", "derived_tier", "tier_changed", "payload_sha256",
+        "observed_at", "recorded_at",
+    },
+    "unit_economics_observations": {
+        "observation_key", "period_start", "period_end", "kind", "category",
+        "amount_usd", "quantity", "unit", "source", "source_ref_sha256",
+        "payload_sha256", "metadata", "recorded_at",
+    },
     "tenant_authority_modes": {"org_id", "authority_mode"},
     "project_authority_modes": {"org_id", "project_id", "authority_mode"},
     # Migration 0050's live-project guard. These are VIEWS, not tables, but
@@ -600,6 +612,12 @@ _REQUIRED_INDEXES = {
     "project_lifecycle_receipts_create_idempotency": _catalog_contract(
         "project_lifecycle_receipts", "CREATE UNIQUE INDEX",
         "(org_id, action, idempotency_key)", "WHERE", "action = 'project_created'"),
+    "idx_billing_subscription_events_period": _catalog_contract(
+        "billing_subscription_events", "(observed_at, event_key)"),
+    "idx_billing_subscription_events_org_period": _catalog_contract(
+        "billing_subscription_events", "(org_id, observed_at)"),
+    "idx_unit_economics_observations_period": _catalog_contract(
+        "unit_economics_observations", "(period_start, period_end, kind, category)"),
 }
 
 _REQUIRED_TRIGGERS = {
@@ -609,6 +627,12 @@ _REQUIRED_TRIGGERS = {
     "project_lifecycle_receipts_immutable": _catalog_contract(
         "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+    "billing_subscription_events_immutable": _catalog_contract(
+        "billing_subscription_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_unit_economics_ledger_mutation()"),
+    "unit_economics_observations_immutable": _catalog_contract(
+        "unit_economics_observations", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_unit_economics_ledger_mutation()"),
 }
 
 

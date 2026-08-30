@@ -2,9 +2,10 @@
 
 Companion to `contract/AUTH.md` (identity; §11 owns the FROZEN tier vocabulary
 this document feeds) and `contract/CONTRACT.md` (frozen core, unchanged).
-Status: **design + dark skeleton**. The mapping and the sync endpoint are
-implemented and gate-tested; nothing here bills anyone until the operator
-activation ritual in §5 is performed. Lane: census item 5, 2026-07-23.
+Status: **dark billing rail + active measurement design**. The mapping, sync
+endpoint, append-only measurement ledgers, and fleet report are implemented and
+gate-tested; nothing here bills anyone until the operator activation ritual in
+§5 is performed. Lane: census item 5, 2026-07-23.
 
 Two invariants frame everything (`contract/AUTH.md` §0, §11):
 
@@ -70,11 +71,12 @@ Flag-gated skeleton, **dark by default**. Server half: `platform/billing.py` +
 |---|---|
 | Activation | `LEAF_BILLING_SYNC_LIVE=1` AND `LEAF_BILLING_SYNC_SECRET` set; otherwise **503** and no write. Fail-closed configuration: a deployed-but-unconfigured endpoint can never be driven. |
 | Hop auth | `X-Billing-Sync-Secret` header, constant-time compare (F16); missing/wrong → **403**. Same trusted-internal-caller model as the broker hop. |
-| Body | Subscription FACTS only: `{plan?, subscription_active?, subscription_status?, stripe_subscription_id?, stripe_event_id?}` — the same fields the Action reads from `app_metadata.leaf`, so both legs derive from identical inputs. The body **never carries a literal tier** (single derivation path: the table decides) and never a credential. |
+| Body | Subscription FACTS only: `{plan?, subscription_active?, subscription_status?, stripe_subscription_id?, stripe_event_id?, stripe_event_type?, current_period_start?, current_period_end?}`. The body **never carries a literal tier** (single derivation path: the table decides) and never a credential. |
 | Derivation | `billing_tiers.derive_tier(plan, subscription_active, subscription_status)`; result validated against the frozen claim-mintable subset before any write. |
 | Org safety | Unknown org → **404**. Non-active org → **409**, untouched (billing must never resurrect an offboarding/deleted org into a billable tier). The write itself is an active-guarded `UPDATE … WHERE status='active'` (TOCTOU-safe); a state flip between read and write → **409**, no write. |
-| Idempotency | The write sets an absolute tier; replaying an event is a no-op (`applied:false` in the response). No event-id dedup table yet (§6). |
-| Response | `{org_id, previous_tier, tier, applied, stripe_subscription_id, stripe_event_id}` — the Stripe ids are **audit echoes for the caller's log line only**, deliberately not persisted (§6). |
+| Idempotency | The tier write and measurement append share one serializable transaction. A hashed Stripe event ID deduplicates delivery. Replaying an older event cannot overwrite a tier set by a newer event. Reusing an event ID with different facts returns **409**. |
+| Measurement | `billing_subscription_events` records lifecycle facts, tier movement, periods, and digested Stripe references. Raw Stripe IDs are not stored. |
+| Response | `{org_id, previous_tier, tier, applied, event_recorded, event_key, stripe_subscription_id, stripe_event_id}`. The raw Stripe IDs remain response echoes only. |
 
 ### 3.1 Org discovery: `POST /api/billing/org-resolve`
 
@@ -131,13 +133,17 @@ Nothing below is chippable; each step is an operator action:
    `LEAF_BILLING_SYNC_SECRET=<secret>` on the platform service, and give
    leaf_website the same secret.
 
-## 6. Deferred decisions (recorded, not built)
+## 6. Measurement and remaining decisions
 
-* **Stripe id audit table** — the endpoint echoes `stripe_subscription_id` /
-  `stripe_event_id` but persists neither; a billing-audit table (and event-id
-  idempotency dedup) is a follow-up schema decision.
-* **Metering** — usage-based billing (`/api/usage` `agent` aggregates) is out
-  of scope for the tier rail entirely.
+* **Built: billing lifecycle ledger** — migration `0051_unit_economics.sql`
+  stores digested Stripe references, subscription periods, and tier decisions
+  in an append-only table with event-id deduplication.
+* **Built: pricing-input report** — `GET /api/ops/unit-economics` joins billing
+  lifecycle signals, agent estimates, APS estimates, hosted-job cost, and
+  externally observed fleet costs. The scheduled owner loop and operating
+  instructions live in `docs/UNIT_ECONOMICS.md`.
+* **Still separate: billing calculation** — the report measures inputs. It does
+  not turn usage into an invoice or change a product price.
 * **Org discovery for the webhook** — BUILT (2026-07-30), see §3.1: this repo
   serves `POST /api/billing/org-resolve`; the companion consumer half
   (leaf_website PR #172) persists the result as `Organization.platformOrgId`,

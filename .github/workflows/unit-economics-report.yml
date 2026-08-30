@@ -1,0 +1,99 @@
+name: Unit economics report
+
+on:
+  schedule:
+    - cron: "17 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch fleet report
+        env:
+          REPORT_URL: ${{ vars.LEAF_UNIT_ECONOMICS_REPORT_URL }}
+          OPS_SECRET: ${{ secrets.LEAF_UNIT_ECONOMICS_OPS_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p unit-economics
+          if [[ -z "$REPORT_URL" || -z "$OPS_SECRET" ]]; then
+            jq -n '{
+              schema: "leaf.unit-economics-workflow-state.v1",
+              status: "unconfigured",
+              message: "Set LEAF_UNIT_ECONOMICS_REPORT_URL and LEAF_UNIT_ECONOMICS_OPS_SECRET."
+            }' > unit-economics/report.json
+            exit 0
+          fi
+
+          period_end=$(date -u +%Y-%m-01T00:00:00Z)
+          period_start=$(date -u -d "$period_end -1 month" +%Y-%m-%dT%H:%M:%SZ)
+          http_status=$(curl --silent --show-error \
+            --output unit-economics/api-response.json \
+            --write-out '%{http_code}' \
+            --header "X-Ops-Secret: $OPS_SECRET" \
+            --get \
+            --data-urlencode "period_start=$period_start" \
+            --data-urlencode "period_end=$period_end" \
+            "$REPORT_URL" || true)
+          if [[ "$http_status" != "200" ]]; then
+            jq -n --arg status "$http_status" '{
+              schema: "leaf.unit-economics-workflow-state.v1",
+              status: "unavailable",
+              message: ("The fleet report endpoint returned HTTP " + ($status | if . == "000" then "transport failure" else . end) + ".")
+            }' > unit-economics/report.json
+            rm -f unit-economics/api-response.json
+            exit 0
+          fi
+          if jq -e '
+            .schema == "leaf.unit-economics-report.v1"
+            and .scope == "fleet"
+            and (.coverage_gaps | type == "array")
+          ' unit-economics/api-response.json > /dev/null; then
+            mv unit-economics/api-response.json unit-economics/report.json
+          else
+            jq -n '{
+              schema: "leaf.unit-economics-workflow-state.v1",
+              status: "unavailable",
+              message: "The fleet report endpoint returned an invalid or unsafe report shape."
+            }' > unit-economics/report.json
+            rm -f unit-economics/api-response.json
+          fi
+
+      - name: Render owner report
+        env:
+          UNIT_ECONOMICS_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/render_unit_economics_issue.py --input unit-economics/report.json --output unit-economics/issue.md
+
+      - name: Preserve report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-economics-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: unit-economics/
+          retention-days: 90
+
+      - name: Update standing owner issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: Leaf unit economics measurement
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_number=$(gh issue list --state open --limit 100 \
+            --json number,title \
+            --jq '.[] | select(.title == "Leaf unit economics measurement") | .number' \
+            | head -n 1)
+          if [[ -n "$issue_number" ]]; then
+            gh issue edit "$issue_number" --body-file unit-economics/issue.md
+          else
+            gh issue create --title "$ISSUE_TITLE" --body-file unit-economics/issue.md
+          fi
