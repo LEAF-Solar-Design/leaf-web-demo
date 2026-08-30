@@ -1744,3 +1744,55 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   .app > aside.rail { order: 3; }
   .app > footer.foot-bar { order: 4; }
 }
+
+/* Product-surface navigation and the shared profile frame. */
+.tc-product-nav { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.tc-product-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tc-product-tabs [role="tab"] {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card-grad); color: var(--foreground); cursor: pointer; font: inherit;
+}
+.tc-product-tabs [role="tab"][aria-selected="true"] { border-color: var(--primary); }
+.tc-product-tabs [role="tab"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.tc-product-tabs [role="tab"] small { color: var(--muted); font-size: 11px; }
+.tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--status-success); }
+.tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: var(--status-danger); }
+.tc-product-shared { color: var(--muted-2); font-size: 12px; }
+.tc-product-frame {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad);
+  padding: 16px 18px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px;
+}
+.tc-product-frame-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.tc-product-frame h1 { margin: 0; font-size: 20px; }
+.tc-product-frame p { margin: 0; color: var(--muted); }
+.tc-product-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.tc-product-columns h2 { font-size: 12px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 4px; }
+.tc-product-columns ul { margin: 0; padding-left: 18px; color: var(--muted); }
+.tc-product-note { font-size: 12px; color: var(--muted-2); }
+.tc-product-cad-link {
+  align-self: flex-start; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--primary);
+  background: transparent; color: var(--primary); cursor: pointer; font: inherit;
+}
+.tc-product-cad-link:hover { color: var(--primary-hover); border-color: var(--primary-hover); }
+
+/* cad_edit is an inert ribbon shell until its own flag is enabled. */
+.cad-edit-surface {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+  padding: 6px 10px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 6px;
+}
+.cad-edit-surface [role="tablist"] { display: flex; gap: 4px; }
+.cad-edit-surface [role="tab"] {
+  padding: 3px 10px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px;
+}
+.cad-edit-surface [role="tab"][aria-selected="true"] { color: var(--foreground); border-color: var(--border); background: var(--card-grad); }
+.cad-edit-surface [role="toolbar"] { display: flex; gap: 14px; flex-wrap: wrap; }
+.cad-edit-surface [role="group"] { display: flex; gap: 4px; align-items: center; }
+.cad-edit-surface__group-label { color: var(--muted-2); font-size: 11px; margin-right: 2px; text-transform: uppercase; letter-spacing: 0.05em; }
+.cad-edit-surface [role="group"] button {
+  padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: var(--foreground); cursor: pointer; font: inherit; font-size: 12px;
+}
+.cad-edit-surface [role="group"] button:hover { border-color: var(--primary); }
+.cad-edit-surface [role="status"] { margin: 0; font-size: 12px; color: var(--status-warning); min-height: 14px; }

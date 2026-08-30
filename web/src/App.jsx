@@ -29,6 +29,16 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import IosSurface from './ios/IosSurface.jsx'
+import { ENV_IOS_SURFACE } from './ios/flag.js'
+import EditSurface from './cad/EditSurface.jsx'
+import {
+  productSurfaceStates,
+  productSurfaceFromSearch,
+  searchForProductSurface,
+} from './site/productSurfaces.js'
+import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
@@ -492,6 +502,31 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  // These four profiles share one workspace. CAD remains the default so the
+  // existing drawing view is unchanged unless the URL or user selects another
+  // profile.
+  const [activeSurface, setActiveSurface] = useState(() => {
+    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+  })
+  const onSelectSurface = useCallback((id) => {
+    setActiveSurface(id)
+    try {
+      const next = searchForProductSurface(window.location.search, id)
+      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+    } catch { /* URL sync is optional; local state still switches the profile. */ }
+  }, [])
+  const [iosContract, setIosContract] = useState(null)
+  useEffect(() => {
+    if (!ENV_IOS_SURFACE || mock || !openProjectId || !canonicalVersionId) {
+      setIosContract(null)
+      return undefined
+    }
+    let live = true
+    fetchIosSurfaceStatus({ projectId: openProjectId, revision: canonicalVersionId })
+      .then((contract) => { if (live) setIosContract(contract) })
+      .catch(() => { if (live) setIosContract(null) })
+    return () => { live = false }
+  }, [mock, openProjectId, canonicalVersionId])
   const annotationEnabled = Boolean(
     !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
   )
@@ -2206,6 +2241,13 @@ export default function App() {
   // (round-2 review F1: that state was an unrecoverable blank).
   const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
 
+  const surfaceStates = useMemo(() => productSurfaceStates({
+    sessionActive: mock || !signedOut,
+    hasDrawing: !!shown,
+    apsLive: health ? !!health.aps_live : undefined,
+    iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
+  }), [mock, signedOut, shown, health, iosContract])
+
   const advisories = [
     quotaShown && 'spend cap',
     runQuotaShown && 'daily limit',
@@ -2460,7 +2502,24 @@ export default function App() {
           />
         )}
 
-        <div className="workspace-card enter" style={{ '--rank': 1 }} ref={workspaceCardRef}>
+        <ProductSurfaceTabs
+          activeSurface={activeSurface}
+          states={surfaceStates}
+          onSelect={onSelectSurface}
+        />
+        {activeSurface !== 'cad' && (
+          <ProductSurfaceFrame
+            activeSurface={activeSurface}
+            states={surfaceStates}
+            projectSlot={activeSurface === 'ios'
+              ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
+              : <span className="dim">{openProjectId ? currentProjectName || projectName : 'No project open'}</span>}
+            onOpenCad={() => onSelectSurface('cad')}
+          />
+        )}
+        {/* Keep the live CAD workspace mounted so tab switches preserve locks,
+            drawing state, jobs, and the current view. */}
+        <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' ? undefined : 'none' }} ref={workspaceCardRef}>
           {unreadableHead && unreadableHead.pending && (
             // The routine post-restore load: calm progress, not a failure —
             // no alert role, no retry (the load is already in flight).
@@ -2599,6 +2658,7 @@ export default function App() {
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
           )}
+          <EditSurface />
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
