@@ -21,3 +21,11 @@ whose baked `LEAF_SOURCE_SHA` is an on-main commit — the identity shape the st
 authored-CAD acceptance requires before the production handoff. (Adopted/reused images
 bake preview revisions, which the acceptance's on-main ancestry check correctly refuses;
 see docs/SPECULATIVE-PR-BUILDS.md "Identity and the supply set".)
+
+## Anchor moved forward (2026-08-30)
+
+The promote candidate advanced past the original anchor: #818 ("re-pin three stale
+operator gate pins to the live contract") merged behind it and its relay moved the
+staging app service forward, making the original anchor a guarded non-forward move.
+This commit is the second docs-only anchor, cut from the head that contains #818, for
+the same force_rebuild_all identity purpose described above.
