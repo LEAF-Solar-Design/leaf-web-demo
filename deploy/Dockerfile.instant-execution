@@ -7,6 +7,15 @@ FROM python:3.12-slim
 # Security posture: apply Debian security updates at build time so the image
 # never ships base-layer CVEs the distro has already fixed (the Trivy gate
 # blocks HIGH/CRITICAL with a released fix, e.g. util-linux CVE-2026-53615).
+#
+# The two ADDs below exist to keep that promise under the workflow's registry
+# buildcache: BuildKit re-fetches URL sources every build and keys the layer
+# chain on their content, so the apt layer is invalidated exactly when Debian
+# publishes new security or point updates, and stays cached otherwise. Without
+# them the cached layer froze `apt-get upgrade` at cache-creation time and the
+# Trivy gate failed main on openssl CVE-2026-14456 fixed after that build.
+ADD https://deb.debian.org/debian-security/dists/trixie-security/InRelease /opt/leaf-build/debian-security.inrelease
+ADD https://deb.debian.org/debian/dists/trixie-updates/InRelease /opt/leaf-build/debian-updates.inrelease
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
