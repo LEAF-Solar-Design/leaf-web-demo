@@ -1745,55 +1745,61 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   .app > footer.foot-bar { order: 4; }
 }
 
-/* --- Product-surface navigation + frame (mounted 2026-08-30; the components
-       predate the mount — see components/ProductSurfaceTabs.jsx) ----------- */
-.tc-product-nav { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
-.tc-product-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
-.tc-product-tabs [role="tab"] {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--card-grad); color: var(--foreground); cursor: pointer; font: inherit;
+/* --- Product-surface navigation + frame, mounted 2026-08-30 into the legacy
+       /app shell. ToolCast's landing.css owns these same class names on /try
+       as absolute stage chrome (nav z-34 top bar, frame inset overlay), and
+       both stylesheets are global in the bundle. Every rule here is scoped
+       under .app and explicitly resets the landing.css properties that would
+       otherwise leak in; unscoped tc-product rules broke /try by growing its
+       nav over the workspace tab strip (PR #824 round 2). ----------------- */
+.app .tc-product-nav {
+  position: static; inset: auto; z-index: auto; min-height: 0;
+  background: transparent; border-bottom: 0;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  margin: 10px 0 4px; padding: 0;
 }
-.tc-product-tabs [role="tab"][aria-selected="true"] { border-color: var(--primary); }
-.tc-product-tabs [role="tab"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.tc-product-tabs [role="tab"] small { color: var(--muted); font-size: 11px; }
-.tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--status-success); }
-.tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: var(--status-danger); }
-.tc-product-shared { color: var(--muted-2); font-size: 12px; }
-.tc-product-frame {
+.app .tc-product-tabs { display: flex; min-width: 0; gap: 6px; flex-wrap: wrap; }
+.app .tc-product-tabs [role="tab"] {
+  min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card-grad); color: var(--foreground); cursor: pointer;
+  font: inherit; text-align: left;
+}
+.app .tc-product-tabs [role="tab"]:hover { color: var(--foreground); background: var(--card-grad); }
+.app .tc-product-tabs [role="tab"][aria-selected="true"] { border-color: var(--primary); color: var(--foreground); background: var(--card-grad); }
+.app .tc-product-tabs [role="tab"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.app .tc-product-tabs [role="tab"] > span { font: inherit; }
+.app .tc-product-tabs [role="tab"] small { color: var(--muted); font-size: 11px; }
+.app .tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--status-success); }
+.app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: var(--status-danger); }
+.app .tc-product-shared { display: block; margin-left: 0; white-space: normal; color: var(--muted-2); font-size: 12px; }
+.app .tc-product-frame {
+  position: static; inset: auto; z-index: auto; overflow: visible;
   border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad);
   padding: 16px 18px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px;
 }
-.tc-product-frame-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
-.tc-product-frame h1 { margin: 0; font-size: 20px; }
-.tc-product-frame p { margin: 0; color: var(--muted); }
-.tc-product-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-.tc-product-columns h2 { font-size: 12px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 4px; }
-.tc-product-columns ul { margin: 0; padding-left: 18px; color: var(--muted); }
-.tc-product-note { font-size: 12px; color: var(--muted-2); }
-.tc-product-cad-link {
-  align-self: flex-start; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--primary);
-  background: transparent; color: var(--primary); cursor: pointer; font: inherit;
+.app .tc-product-frame-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: normal;
 }
-.tc-product-cad-link:hover { color: var(--primary-hover); border-color: var(--primary-hover); }
-
-/* --- cad_edit ribbon skeleton (card C1-6; mounts only with the flag baked) - */
-.cad-edit-surface {
-  border: 1px solid var(--border); border-radius: 8px; background: var(--card);
-  padding: 6px 10px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 6px;
+.app .tc-product-frame-head strong { color: inherit; font-weight: 600; }
+.app .tc-product-frame h1 {
+  max-width: none; margin: 0; color: var(--foreground);
+  font-family: inherit; font-size: 20px; font-weight: 600; line-height: 1.3; letter-spacing: normal;
 }
-.cad-edit-surface [role="tablist"] { display: flex; gap: 4px; }
-.cad-edit-surface [role="tab"] {
-  padding: 3px 10px; border: 1px solid transparent; border-radius: 6px;
-  background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px;
+.app .tc-product-frame p { max-width: none; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.app .tc-product-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 0; }
+.app .tc-product-columns > div { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.app .tc-product-columns h2 {
+  margin: 0 0 4px; color: var(--muted-2); font-family: inherit;
+  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
 }
-.cad-edit-surface [role="tab"][aria-selected="true"] { color: var(--foreground); border-color: var(--border); background: var(--card-grad); }
-.cad-edit-surface [role="toolbar"] { display: flex; gap: 14px; flex-wrap: wrap; }
-.cad-edit-surface [role="group"] { display: flex; gap: 4px; align-items: center; }
-.cad-edit-surface__group-label { color: var(--muted-2); font-size: 11px; margin-right: 2px; text-transform: uppercase; letter-spacing: 0.05em; }
-.cad-edit-surface [role="group"] button {
-  padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px;
-  background: transparent; color: var(--foreground); cursor: pointer; font: inherit; font-size: 12px;
+.app .tc-product-columns ul { display: block; margin: 0; padding: 0 0 0 18px; list-style: disc; color: var(--muted); }
+.app .tc-product-columns li { padding: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
+.app .tc-product-note { padding-left: 0; border-left: 0; font-size: 12px; color: var(--muted-2); }
+.app .tc-product-cad-link {
+  align-self: flex-start; margin-top: 0; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--primary); background: transparent; color: var(--primary);
+  cursor: pointer; font: inherit;
 }
-.cad-edit-surface [role="group"] button:hover { border-color: var(--primary); }
-.cad-edit-surface [role="status"] { margin: 0; font-size: 12px; color: var(--status-warning); min-height: 14px; }
+.app .tc-product-cad-link:hover { background: transparent; color: var(--primary-hover); border-color: var(--primary-hover); }
