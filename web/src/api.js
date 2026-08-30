@@ -19,18 +19,29 @@ import { groupToolsByFamily } from './mock/mockCapabilities.js'
 import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalog.js'
 import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
+import { track, trackErrorShown } from './telemetry.js'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8130'
+// A deployed static bundle talks to the app through the same public origin.
+// Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
+// `import.meta.env?.` rather than `import.meta.env.`: vite always defines the
+// object, plain node never does, and the existing `?? ''` only defended against
+// a missing VALUE. Without the optional chain this module throws on import
+// outside vite, which put every pure function downstream of it out of reach of
+// a `node --test` unit test.
+const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
+const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env?.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
-const MOCK_DEFAULT = import.meta.env.VITE_MOCK !== '0'
+const MOCK_DEFAULT = import.meta.env?.VITE_MOCK !== '0'
 // Tenant stub (X-Tenant-Id header) until real auth lands — matches the
 // server default so the broker ledger / job list stay consistent.
-const TENANT = import.meta.env.VITE_TENANT_ID || 'demo-tenant'
+const TENANT = import.meta.env?.VITE_TENANT_ID || 'demo-tenant'
 // Auth seam (auth0-identity-signup): the platform JWT lives in localStorage
 // under `leaf.jwt`. When present we attach `Authorization: Bearer <token>` to
 // EVERY /api call so LEAF_AUTH_LIVE=1 works from the UI; when absent, headers are
 // byte-identical to the open-demo path (zero behavior change off-auth).
 const AUTH_KEY = 'leaf.jwt'
+const GUEST_SESSION_KEY = 'leaf.guest_session'
+const unauthorizedListeners = new Set()
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
 
@@ -43,30 +54,63 @@ export function authHeaders() {
   } catch { return {} }
 }
 
-// noteUnauthorized: a 401 wipes the stored platform token ONLY when the failing
-// request actually carried the CURRENTLY-stored token (compared at response
-// time). The guard exists for the post-login race pinned by
-// api.noteUnauthorized.test.js: guest-phase requests fired before the token
-// existed resolve 401 after handleRedirectCallback stores the fresh token, and
-// an unconditional wipe would log every user straight back out. Restored
-// 2026-08-30 — the helper had been dropped from this module while its callers
-// (annotationClient.js, ios/iosSurfaceStatus.js) sat outside the live import
-// graph, so no build noticed until those surfaces were mounted.
-const unauthorizedSubscribers = new Set()
-export function subscribeUnauthorized(fn) {
-  unauthorizedSubscribers.add(fn)
-  return () => unauthorizedSubscribers.delete(fn)
+// Guest authority is intentionally narrower than account authority. Reuse it
+// only for the uploaded-drawing endpoints that the server guest allowlist
+// exposes. It must never flow into run, solve, author, converse, or job calls.
+function storedGuestSession() {
+  try { return localStorage.getItem(GUEST_SESSION_KEY) }
+  catch { return null }
 }
-export function noteUnauthorized(res, source, sentAuthorization) {
-  if (res?.status !== 401) return res
+
+function guestDrawingHeaders(drawingId) {
+  if (!String(drawingId || '').startsWith('u-')) return {}
+  const guestSession = storedGuestSession()
+  return guestSession ? { 'X-Guest-Session': guestSession } : {}
+}
+
+function rememberUploadAuthority(receipt) {
   try {
-    const stored = localStorage.getItem(AUTH_KEY)
-    if (!stored) return res
-    if (sentAuthorization !== `Bearer ${stored}`) return res
-    localStorage.removeItem(AUTH_KEY)
-    unauthorizedSubscribers.forEach((fn) => { try { fn(source) } catch { /* one bad listener must not mute the rest */ } })
-  } catch { /* storage unavailable: nothing stored, nothing to wipe */ }
-  return res
+    if (receipt?.tenant_kind === 'guest' && receipt.guest_session) {
+      localStorage.setItem(GUEST_SESSION_KEY, receipt.guest_session)
+    } else if (receipt?.tenant_kind === 'account') {
+      localStorage.removeItem(GUEST_SESSION_KEY)
+    }
+  } catch { /* storage unavailable */ }
+}
+
+export function subscribeUnauthorized(listener) {
+  unauthorizedListeners.add(listener)
+  return () => unauthorizedListeners.delete(listener)
+}
+
+// A 401 proves the token is bad ONLY when the failing request actually carried
+// the currently-stored token. `sentAuth` is the Authorization header value the
+// request was sent with (undefined/absent = no bearer was sent). Guest-phase
+// requests and stragglers sent with an older token must never wipe a token
+// stored since: post-login, the pre-auth bootstrap 401s resolve in the window
+// between handleRedirectCallback storing leaf.jwt and the reload committing,
+// and the previous unconditional wipe here cleared the fresh token every time,
+// stranding every signed-in user back in the guest workspace (found by the
+// 2026-08-08 production synthetic walk).
+export function noteUnauthorized(response, source = 'api', sentAuth = undefined) {
+  if (response?.status !== 401) return response
+  const sentToken = typeof sentAuth === 'string' && sentAuth.startsWith('Bearer ')
+    ? sentAuth.slice('Bearer '.length)
+    : null
+  let stored = null
+  try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  if (!sentToken || !stored || sentToken !== stored) return response
+  try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  for (const listener of unauthorizedListeners) {
+    try { listener(source) } catch { /* observers cannot change transport behavior */ }
+  }
+  return response
+}
+
+async function apiFetch(input, init, source = 'api') {
+  // Every api.js call site passes plain-object headers, so the sent bearer is
+  // readable directly; a Headers instance would read as undefined -> no wipe.
+  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization)
 }
 
 // A tiny artificial delay so mock runs show loading states like the real thing.
@@ -77,13 +121,32 @@ async function http(path, opts, timeoutMs = null) {
   const request = timeoutMs == null
     ? fetch(`${API_BASE}${path}`, { ...opts, headers })
     : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
-  const res = await request
+  const res = noteUnauthorized(await request, path, headers.Authorization)
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
+    try {
+      e.body = await res.clone().json()
+    } catch { /* non-JSON errors keep the stable status-only contract */ }
+    // P2 auto-capture: the transport seam every user-visible API error
+    // crosses. endpoint_class = the route shape, never ids or params.
+    trackErrorShown({
+      http_status: res.status,
+      error_code: e.body?.error?.error_code,
+      endpoint_class: path.split('?')[0].split('/').slice(0, 3).join('/'),
+    })
     throw e
   }
   return res.json()
+}
+
+const WORKSPACE_BOOTSTRAP_DETAILS = new Set([
+  'verified subject has no active platform identity binding',
+  'verified subject has no active platform tenant authority',
+])
+
+export function isWorkspaceBootstrapRequired(error) {
+  return error?.status === 403 && WORKSPACE_BOOTSTRAP_DETAILS.has(error?.body?.detail)
 }
 
 // --- Session / intake ---------------------------------------------------
@@ -92,12 +155,25 @@ async function http(path, opts, timeoutMs = null) {
 // null in mock or when auth is off. The UI uses it for the honest tier chip
 // (falls back to "demo" when absent).
 export async function getSession(mock, dwg = 'rooftop_demo') {
+  // P2: never the raw dwg value (it can be a caller-supplied name/path via
+  // ?drawing=; the privacy contract bans drawing names and paths).
+  const catalogSource = dwg === 'rooftop_demo' ? 'default' : 'custom'
   if (mock) {
     const res = await fetchWithBudget(fetch, '/sample.intake.json')
     if (!res.ok) throw new Error('failed to load sample.intake.json')
-    return { intake: await res.json(), tenant: null, tier: null, org: null }
+    const intake = await res.json()
+    // P2 funnel top, mock branch included, emitted only AFTER the session
+    // actually resolved (a failed intake must not inflate session counts).
+    track('session.started', { mock: true, catalog_source: catalogSource })
+    return { intake, tenant: null, tier: null, org: null }
   }
-  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, 5000)
+  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, STARTUP_FETCH_TIMEOUT_MS)
+  // P2 funnel top: how many people open the product, and as who.
+  track('session.started', {
+    mock: false,
+    tier: data.tier || undefined,
+    catalog_source: catalogSource,
+  })
   // tier/org_id are echoed by deps.tenant_echo only when auth is live; null off-auth.
   return {
     intake: data.intake,
@@ -117,17 +193,35 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
 export async function nlPrompt(mock, text, tools = []) {
   if (mock) return { ...matchPrompt(text, tools), stub: true }
   try {
-    const res = await fetch(`${API_BASE}/api/nl-prompt`, {
+    const res = await apiFetch(`${API_BASE}/api/nl-prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
       body: JSON.stringify({ text }),
-    })
-    if (!res.ok) throw new Error(`POST /api/nl-prompt -> ${res.status}`)
+    }, '/api/nl-prompt')
+    if (!res.ok) {
+      const error = new Error(`POST /api/nl-prompt -> ${res.status}`)
+      error.status = res.status
+      throw error
+    }
     const body = await res.json()
-    return { alternatives: [], ...body, stub: false }
+    const route = { alternatives: [], ...body, stub: false }
+    // P2: router quality and lane mix (folds the raw dispatch-tier signal).
+    track('prompt.routed', {
+      lane: route.lane, tool: route.tool, stub: false,
+      confidence_bucket: route.confidence >= 0.8 ? 'high'
+        : route.confidence >= 0.5 ? 'mid' : 'low',
+      alternatives_n: route.alternatives.length,
+    })
+    return route
   } catch (e) {
+    if (e?.status === 401) throw e
     // Endpoint not live yet (sibling lands it concurrently) — route locally.
-    return { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
+    const route = { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
+    track('prompt.routed', {
+      lane: route.lane, tool: route.tool, stub: true,
+      alternatives_n: (route.alternatives || []).length,
+    })
+    return route
   }
 }
 
@@ -150,7 +244,7 @@ export async function getTools(mock) {
     await nap(150)
     return listMockCatalogTools()
   }
-  const data = await http('/api/tools', undefined, 5000)
+  const data = await http('/api/tools', undefined, STARTUP_FETCH_TIMEOUT_MS)
   return data.tools
 }
 
@@ -186,7 +280,7 @@ export async function getCapabilities(mock) {
     return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
   }
   try {
-    const data = await http('/api/capabilities', undefined, 5000)
+    const data = await http('/api/capabilities', undefined, STARTUP_FETCH_TIMEOUT_MS)
     return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
   } catch (error) {
     if (error?.status !== 404) throw error
@@ -278,8 +372,8 @@ export async function openProject(projectId, orgId) {
 //
 // AUTH (1C-followup): the backend now gates ops on a real internal credential,
 // `X-Ops-Secret`, NOT the legacy `X-Internal-Role: qa` dev seam. When the
-// operator has provisioned a secret — localStorage `leaf.ops_secret` or the
-// build-time `VITE_OPS_SECRET` — we attach it; absent, we still send the legacy
+// operator has provisioned the browser-local `leaf.ops_secret` value, we
+// attach it. We still send the legacy
 // role header so an ungated LOCAL dev backend keeps working (the demo path is
 // byte-unchanged off-secret). The secret is read at call time and never logged.
 const OPS_SECRET_KEY = 'leaf.ops_secret'
@@ -290,7 +384,7 @@ function opsSecret() {
     const ls = localStorage.getItem(OPS_SECRET_KEY)
     if (ls) return ls
   } catch { /* localStorage unavailable */ }
-  return import.meta.env.VITE_OPS_SECRET || null
+  return null
 }
 
 // Ops request headers: the legacy role seam + the real secret (when present) +
@@ -301,7 +395,7 @@ function opsHeaders() {
 }
 
 export async function getOpsTenants() {
-  const res = await fetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() })
+  const res = await apiFetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() }, '/api/ops/tenants')
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`GET /api/ops/tenants -> ${res.status}`)
   const body = await res.json()
@@ -310,13 +404,86 @@ export async function getOpsTenants() {
 
 export async function setTenantDisabled(tenantId, disabled) {
   const action = disabled ? 'disable' : 'enable'
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/ops/tenants/${encodeURIComponent(tenantId)}/${action}`,
     { method: 'POST', headers: opsHeaders() },
+    `/api/ops/tenants/${tenantId}/${action}`,
   )
   if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
   if (!res.ok) throw new Error(`POST /api/ops/tenants/${tenantId}/${action} -> ${res.status}`)
   return res.json()
+}
+
+// --- Current-account administration ------------------------------------
+// These calls rely only on the signed-in user's bearer token. Internal ops
+// and customization approval secrets must never enter the browser request.
+export async function getAccountControls() {
+  const res = await apiFetch(
+    `${API_BASE}/api/admin/account-controls`,
+    { headers: authHeaders() },
+    '/api/admin/account-controls',
+  )
+  if (!res.ok) {
+    const e = new Error(`GET /api/admin/account-controls -> ${res.status}`)
+    e.status = res.status
+    throw e
+  }
+  return res.json()
+}
+
+export async function updateAccountControls(toolPublicationApprovalRequired, expectedRevision) {
+  const res = await apiFetch(
+    `${API_BASE}/api/admin/account-controls`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        tool_publication_approval_required: Boolean(toolPublicationApprovalRequired),
+        expected_revision: expectedRevision,
+      }),
+    },
+    '/api/admin/account-controls',
+  )
+  if (!res.ok) {
+    const e = new Error(`PUT /api/admin/account-controls -> ${res.status}`)
+    e.status = res.status
+    throw e
+  }
+  return res.json()
+}
+
+// --- Platform self-edit (R7 admin lane) ----------------------------------
+// Admin-tier only, enforced server-side (verified admin claim + subject
+// allowlist + internal-tenant rollout flag); these calls carry only the
+// signed-in user's bearer like every other /api call. The co-sign
+// approve/deny routes authenticate with an independent secret and therefore
+// deliberately have NO client here.
+export async function proposePlatformChange(title, edits) {
+  return http('/api/platform/customize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, edits }),
+  })
+}
+
+export async function getPlatformChange(changeId) {
+  return http(`/api/platform/customize/${encodeURIComponent(changeId)}`)
+}
+
+export async function mergePlatformChange(changeId, commitSha) {
+  return http(`/api/platform/customize/${encodeURIComponent(changeId)}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commit_sha: commitSha }),
+  })
+}
+
+export async function landPlatformChange(changeId, commitSha) {
+  return http(`/api/platform/customize/${encodeURIComponent(changeId)}/land`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commit_sha: commitSha }),
+  })
 }
 
 // --- Per-tenant spend / quota meter (thin ledger-backed read) -----------
@@ -378,8 +545,11 @@ export async function getClaudeGrant() {
 // from the user's choice. It is OPTIONAL in the contract (the server auto-detects
 // from the token shape when omitted); we send it so the linked kind is honest
 // even if detection is ambiguous. The token itself is never stored/echoed/logged.
-export async function linkClaudeGrant(token, kind) {
-  const body = kind ? { token, kind } : { token }
+export async function linkClaudeGrant(token, kind, label, plan) {
+  const body = { token }
+  if (kind) body.kind = kind
+  if (label) body.label = label
+  if (plan) body.plan = plan
   return http('/api/tenant/claude-grant', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
@@ -387,8 +557,17 @@ export async function linkClaudeGrant(token, kind) {
   })
 }
 
-export async function unlinkClaudeGrant() {
+export async function activateClaudeGrant(accountId) {
   return http('/api/tenant/claude-grant', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ account_id: accountId }),
+  })
+}
+
+export async function unlinkClaudeGrant(accountId) {
+  const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''
+  return http(`/api/tenant/claude-grant${query}`, {
     method: 'DELETE',
     headers: { 'X-Tenant-Id': TENANT },
   })
@@ -542,6 +721,18 @@ export function closeJobBeacon(jobId) {
   }
 }
 
+// P2 wave C-2: the run-lane wall classifier. One call per recognized wall,
+// placed exactly where runToolAsync already classifies the response for the
+// UI, so the event can never disagree with the card the user saw. wall_kind
+// is a CLOSED vocabulary; nothing client-influenceable passes through raw.
+function trackRunWall(wallKind, toolName, tier) {
+  track('run.wall_hit', {
+    wall_kind: wallKind,
+    tool: toolName,
+    ...(tier ? { tier } : {}),
+  })
+}
+
 // --- Run (LIVE async) ---------------------------------------------------
 // POST /api/run -> 202 {job_id} -> subscribe -> resolve with the §3 envelope.
 // `opts.onSubmit(job_id)` fires the instant the job_id is known (for durable
@@ -552,11 +743,11 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   // canonical platform Job row (spine_ref-linked) so the workspace jobs[] grows.
   // Absent -> byte-identical to the plain tenant-only run (no linkage).
   const submission = createRunSubmissionRequest(toolName, params, dwg, opts)
-  const res = await fetch(`${API_BASE}/api/run`, {
+  const res = await apiFetch(`${API_BASE}/api/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...submission.headers, ...authHeaders() },
     body: JSON.stringify(submission.body),
-  })
+  }, '/api/run')
   const body = await res.json().catch(() => null)
 
   if (res.status !== 202 || !body || !body.job_id) {
@@ -565,6 +756,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     // renders it CALM (amber), like a spend cap, not a red failure. Checked FIRST
     // so the tag survives even when the body also carries `ok`.
     if (res.status === 403 && body && body.entitlement_required) {
+      trackRunWall('entitlement', toolName, body.tier)
       return {
         ok: false, tool: toolName, version: null, result: null, overlay: null,
         timing_ms: 0, cost: null, degraded_mode: false,
@@ -580,6 +772,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     // renders the calm "daily run limit reached" card (amber), never the spend
     // card and never a red failure. Nothing ran; the job was rejected pre-APS.
     if (res.status === 429) {
+      trackRunWall('daily_quota', toolName, body && body.tier)
       const qErr = (body && body.error) ||
         { error_code: 'quota_exceeded', message: 'Daily run limit reached.', retryable: true }
       return {
@@ -594,7 +787,15 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     }
     // Submission itself failed. If the server already returned a §3 envelope
     // (e.g. UNKNOWN_TOOL 404), pass it straight through; else synthesize one.
-    if (body && 'ok' in body) return body
+    // The 402 spend cap arrives on this path as a quota_exceeded envelope
+    // WITHOUT quota_kind (the 429 daily-runs branch above tags its own), which
+    // is exactly the predicate the UI's spend card uses.
+    if (body && 'ok' in body) {
+      if (body.error?.error_code === 'quota_exceeded') {
+        trackRunWall('spend_cap', toolName, body.tier)
+      }
+      return body
+    }
     if (body && body.error) {
       return { ok: false, tool: toolName, version: null, result: null, overlay: null,
         timing_ms: 0, cost: null, error: body.error, degraded_mode: false }
@@ -632,18 +833,60 @@ export async function getDrawingIntake(mock, drawingId, version = 'head') {
   if (mock) { await nap(120); return mockVersions.view(version) }
   return http(
     `/api/drawings/${encodeURIComponent(drawingId)}/intake?version=${encodeURIComponent(version)}`,
-    { headers: { 'X-Tenant-Id': TENANT } },
+    { headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) } },
   )
+}
+
+// --- Drawing upload and extraction (CONTRACT-ADDENDUM section 19) -------
+export async function getGuestUploadPolicy() {
+  return http('/api/site/guest-upload-policy', undefined, STARTUP_FETCH_TIMEOUT_MS)
+}
+
+export async function uploadDrawing(file, guestSession = null, engine = null) {
+  const form = new FormData()
+  form.append('file', file)
+  // DWG extraction engine ('local' | 'aps') — the /try toggle's choice. The
+  // server validates it and applies it to .dwg only.
+  if (engine) form.append('engine', engine)
+  const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+  const uploadGuestSession = guestSession || storedGuestSession()
+  if (uploadGuestSession) headers['X-Guest-Session'] = uploadGuestSession
+  const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
+  }
+  rememberUploadAuthority(body)
+  return body
+}
+
+export async function getDrawingUploadStatus(drawingId, guestSession = null, tenantId = null) {
+  const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
+  if (guestSession) headers['X-Guest-Session'] = guestSession
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/upload-status`, { headers }, 5000)
+}
+
+export async function getUploadedDrawingIntake(drawingId, guestSession = null, tenantId = null) {
+  const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
+  if (guestSession) headers['X-Guest-Session'] = guestSession
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/intake?version=head`, { headers }, 8000)
 }
 
 // Version-history chain (sibling contract): GET /api/drawings/{id}/versions ->
 // {drawing_id, head, latest, versions:[{v, parent, created, bytes, sha256, tool,
 // workitem_id, note}]}. LIVE only. Throws if the sibling endpoint isn't live yet
 // so the caller can render a calm "history unavailable" note.
-export async function getDrawingVersions(mock, drawingId) {
-  if (mock) { await nap(120); return mockVersions.list() }
-  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions`, {
-    headers: { 'X-Tenant-Id': TENANT },
+// `includeDeltas`: opt-in per-row `delta` chips (?include_deltas=1). The
+// server computes them by loading EVERY version payload, so only the history
+// drawer asks; checkout-state reads keep the cheap default shape.
+export async function getDrawingVersions(mock, drawingId, { includeDeltas = false } = {}) {
+  if (mock) { await nap(120); return mockVersions.list({ includeDeltas }) }
+  const query = includeDeltas ? '?include_deltas=1' : ''
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions${query}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) },
   })
 }
 
@@ -651,21 +894,35 @@ export async function getDrawingVersions(mock, drawingId) {
 // Wave-2 landed the checkout as a DISPLAY-ONLY chip (read from /versions). These
 // two calls make it MUTABLE: acquire the single-writer lock, or release it.
 //
+// The holder is a public display label, not authorization. The server returns
+// an opaque capability once on a successful take. Callers keep it in memory
+// only and present it for every protected checkout or version mutation.
+export const CHECKOUT_CAPABILITY_HEADER = 'X-Checkout-Capability'
+
+export function checkoutHeaders(capability) {
+  return capability ? { [CHECKOUT_CAPABILITY_HEADER]: capability } : {}
+}
+
 // POST /api/drawings/{id}/checkout {holder?, ttl_s?}
-//   200 {acquired:true, holder, checkout:{holder,acquired,expires}}
+//   200 {acquired:true, holder, checkout_capability, checkout:{holder,acquired,expires}}
 //   409 {acquired:false, locked_by, ...}   (someone else holds it — EXPECTED)
 // The 409 is a normal coordination outcome, not an error: we fold it into the
 // resolved value (`acquired:false`) instead of throwing, so the caller just
 // refetches /versions to show the real lock. LIVE only.
-export async function takeCheckout(drawingId, holder, ttlS) {
+export async function takeCheckout(drawingId, holder, ttlS, capability) {
   const payload = {}
   if (holder) payload.holder = holder
   if (ttlS) payload.ttl_s = ttlS
-  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
+  const res = await apiFetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Tenant-Id': TENANT,
+      ...checkoutHeaders(capability),
+      ...authHeaders(),
+    },
     body: JSON.stringify(payload),
-  })
+  }, `/api/drawings/${drawingId}/checkout`)
   const data = await res.json().catch(() => null)
   if (res.status === 409) {
     return {
@@ -678,35 +935,54 @@ export async function takeCheckout(drawingId, holder, ttlS) {
   return { acquired: true, ...(data || {}) }
 }
 
-// DELETE /api/drawings/{id}/checkout?holder=
+// DELETE /api/drawings/{id}/checkout   (X-Checkout-Capability)
 //   200 {released, checkout:null}
-//   403 (not the holder) — tagged .status=403 so the caller can say "you don't
-//   hold this lock" calmly. LIVE only.
-export async function releaseCheckout(drawingId, holder) {
-  const q = holder ? `?holder=${encodeURIComponent(holder)}` : ''
-  const res = await fetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout${q}`, {
+//   403 (cannot prove ownership) — tagged .status=403 so the caller can keep
+//   the current lock state and explain the refusal calmly. LIVE only.
+export async function releaseCheckout(drawingId, capability) {
+  const res = await apiFetch(`${API_BASE}/api/drawings/${encodeURIComponent(drawingId)}/checkout`, {
     method: 'DELETE',
-    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
-  })
+    headers: {
+      'X-Tenant-Id': TENANT,
+      ...checkoutHeaders(capability),
+      ...authHeaders(),
+    },
+  }, `/api/drawings/${drawingId}/checkout`)
   if (res.status === 403) { const e = new Error('not the lock holder'); e.status = 403; throw e }
   const data = await res.json().catch(() => null)
   if (!res.ok) throw new Error(`DELETE /api/drawings/${drawingId}/checkout -> ${res.status}`)
   return data || { released: true, checkout: null }
 }
 
-export async function undoDrawing(mock, drawingId) {
-  if (mock) { await nap(180); return mockVersions.undo() }
-  return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
+// POST /api/drawings/{id}/versions/{v}/restore -> restore-as-new-head: appends
+// a NEW version whose content equals `version`'s, with parent = the CURRENT
+// head (history is never rewritten). Same single-writer gate as undo/redo/
+// publish — pass the held checkout capability when one is active (omitted ->
+// the ordinary no-lock demo path, unauthenticated by that gate). Enveloped
+// body verbatim: {drawing_id, restored_from, new_version:{drawing_id,version,
+// parent}, head, latest}. MOCK: mockVersions.restore(version) (same
+// append-only in-memory chain, zero network).
+export async function restoreDrawingVersion(mock, drawingId, version, capability) {
+  if (mock) { await nap(180); return mockVersions.restore(version) }
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions/${encodeURIComponent(version)}/restore`, {
     method: 'POST',
-    headers: { 'X-Tenant-Id': TENANT },
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
   })
 }
 
-export async function redoDrawing(mock, drawingId) {
+export async function undoDrawing(mock, drawingId, capability) {
+  if (mock) { await nap(180); return mockVersions.undo() }
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/undo`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
+  })
+}
+
+export async function redoDrawing(mock, drawingId, capability) {
   if (mock) { await nap(180); return mockVersions.redo() }
   return http(`/api/drawings/${encodeURIComponent(drawingId)}/redo`, {
     method: 'POST',
-    headers: { 'X-Tenant-Id': TENANT },
+    headers: { 'X-Tenant-Id': TENANT, ...checkoutHeaders(capability) },
   })
 }
 
@@ -723,11 +999,11 @@ export async function authorTool(mock, description) {
     await nap(700)
     return authorMock(description)
   }
-  const res = await fetch(`${API_BASE}/api/author`, {
+  const res = await apiFetch(`${API_BASE}/api/author`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
     body: JSON.stringify({ description }),
-  })
+  }, '/api/author')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     // The message can reach the DOM (AuthorPanel renders it), so it is
@@ -746,9 +1022,27 @@ export async function authorTool(mock, description) {
     // a calm "upgrade to build" gate, not a red failure.
     err.entitlementRequired = res.status === 403 && !!(body && body.entitlement_required)
     if (err.entitlementRequired) { err.required = body.required || 'build'; err.tier = body.tier || null }
+    tagAuthorQuota(err, res.status, body)
     throw err
   }
   return body
+}
+
+// Daily authoring-quota rejection (HTTP 429 {quota_kind:"daily_author", tier,
+// limit, used}). A plan boundary that lifts at 00:00 UTC, not a failure, so the
+// AuthorPanel renders it as a calm gate like the build-entitlement one. Applied
+// by BOTH author error paths: the legacy POST /api/author client and the R5
+// POST /api/author/stage client the app actually calls, which is the one a user
+// reaches by pressing Generate. Distinct from the run lane's 402 spend cap and
+// its daily RUN quota, neither of which reaches these routes.
+function tagAuthorQuota(err, status, body) {
+  err.quotaExceeded = status === 429 && !!(body && body.quota_kind === 'daily_author')
+  if (err.quotaExceeded) {
+    err.tier = body.tier || null
+    err.limit = Number.isFinite(Number(body.limit)) ? Number(body.limit) : null
+    err.used = Number.isFinite(Number(body.used)) ? Number(body.used) : null
+  }
+  return err
 }
 
 function customizationError(method, path, status, body) {
@@ -759,7 +1053,7 @@ function customizationError(method, path, status, body) {
   err.body = body
   err.grantRequired = isGrantRequired(body)
   err.entitlementRequired = status === 403 && !!(body && body.entitlement_required)
-  return err
+  return tagAuthorQuota(err, status, body)
 }
 
 function requestId() {
@@ -767,9 +1061,113 @@ function requestId() {
   return `leaf-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+const AUTHOR_PENDING = new Set(['accepted', 'submitted', 'queued', 'pending', 'running', 'authoring'])
+const AUTHOR_COMPLETE = new Set(['staged', 'complete', 'completed', 'succeeded'])
+const AUTHOR_FAILED = new Set(['failed', 'error'])
+
+function authorPollUrl(pollUrl, changeSetId) {
+  if (!pollUrl) return null
+  try {
+    const origin = globalThis.location?.origin || 'http://localhost'
+    const base = new URL(API_BASE || '/', origin)
+    const resolved = new URL(pollUrl, base)
+    if (resolved.origin !== base.origin) throw new TypeError('cross-origin author poll URL')
+    const expectedPath = `/api/author/stages/${encodeURIComponent(changeSetId || '')}`
+    if (resolved.pathname !== expectedPath || resolved.search || resolved.hash) {
+      throw new TypeError('non-canonical author poll URL')
+    }
+    return resolved.toString()
+  } catch {
+    const error = new Error('The authoring request returned an invalid status address.')
+    error.authorTerminal = true
+    throw error
+  }
+}
+
+function authorPollSleep(delay, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delay)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function authorRetryDelay(value) {
+  const delay = Number(value)
+  return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
+}
+
+function authorStageResult(body) {
+  if (body?.result?.receipt) return body.result
+  if (body?.receipt && body?.result && typeof body.result === 'object') {
+    return { ...body.result, receipt: body.receipt }
+  }
+  if (body?.staged?.receipt) return body.staged
+  if (body?.receipt) return body
+  return null
+}
+
+async function pollAuthorStage(accepted, opts = {}) {
+  const acceptedId = opts.changeSetId || accepted?.change_set_id
+  const pollUrl = authorPollUrl(opts.pollUrl || accepted?.poll_url, acceptedId)
+  if (!pollUrl) throw new Error('The authoring request did not include a poll URL.')
+  let delay = authorRetryDelay(opts.retryAfterMs || accepted?.retry_after_ms)
+  const started = Date.now()
+  while (Date.now() - started < 20 * 60 * 1000) {
+    if (opts.signal?.aborted) throw opts.signal.reason || new DOMException('Aborted', 'AbortError')
+    await authorPollSleep(delay, opts.signal)
+    const res = await apiFetch(pollUrl, {
+      headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
+      signal: opts.signal,
+    }, pollUrl)
+    const body = await res.json().catch(() => null)
+    if (!res.ok) throw customizationError('GET', pollUrl, res.status, body)
+    const status = String(body?.status || '').toLowerCase()
+    if (body?.change_set_id !== acceptedId) {
+      const error = new Error('The authoring status did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
+    opts.onStatus?.({
+      status: status || 'running',
+      progress: body?.progress || body?.message || status || 'authoring',
+      change_set_id: body?.change_set_id || accepted?.change_set_id || null,
+    })
+    const staged = authorStageResult(body)
+    if (staged && staged?.receipt?.change_set_id !== acceptedId) {
+      const error = new Error('The staged receipt did not match the accepted change set.')
+      error.authorTerminal = true
+      throw error
+    }
+    if (staged && (AUTHOR_COMPLETE.has(status) || !status)) return staged
+    if (AUTHOR_FAILED.has(status)) {
+      const error = customizationError('GET', pollUrl, 500, body)
+      error.authorTerminal = true
+      throw error
+    }
+    if (!AUTHOR_PENDING.has(status) && !AUTHOR_COMPLETE.has(status)) {
+      const error = new Error('The authoring status response was not recognized. The staged tool was not published.')
+      throw error
+    }
+    if (AUTHOR_COMPLETE.has(status)) {
+      const error = new Error('Authoring completed without a staged tool receipt.')
+      error.authorTerminal = true
+      throw error
+    }
+    delay = authorRetryDelay(body?.retry_after_ms || delay)
+  }
+  throw new Error('Authoring is still running. Resume this request to keep checking it.')
+}
+
 // R5: stage only. The server resolves base and policy fields, while this client
 // carries the public contract request and never treats staging as publication.
-export async function stageAuthorTool(mock, description) {
+export async function stageAuthorTool(mock, description, targetToolName = null, opts = {}) {
   if (mock) {
     await nap(700)
     const authored = authorMock(description)
@@ -778,68 +1176,113 @@ export async function stageAuthorTool(mock, description) {
       error.unsupported = true
       throw error
     }
+    const tool = targetToolName
+      ? { ...authored.tool, name: targetToolName }
+      : authored.tool
     return {
       ...authored,
+      tool,
       demo: true,
       receipt: { change_set_id: `demo-${requestId()}`, state: 'staged' },
       diff_summary: 'Demo preview only. No live tenant catalog changed.',
       validation: { status: 'demo' },
     }
   }
+  if (opts.pollUrl) {
+    return pollAuthorStage({
+      poll_url: opts.pollUrl,
+      change_set_id: opts.changeSetId,
+      retry_after_ms: opts.retryAfterMs,
+    }, opts)
+  }
   const path = '/api/author/stage'
-  const res = await fetch(`${API_BASE}${path}`, {
+  // Authority headers are OPTIONAL and stage-POST-only: the caller supplies the
+  // ids of an ACTIVE turn it owns so the server's fail-closed authority check
+  // (stage_authority_invalid) has a subject to match. Absent -> unchanged wire.
+  const authorityHeaders = (opts.authority && opts.authority.sessionId && opts.authority.turnId)
+    ? {
+      'X-Authority-Session-Id': opts.authority.sessionId,
+      'X-Authority-Turn-Id': opts.authority.turnId,
+    }
+    : {}
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify({ description, mode: 'build', idempotency_key: requestId() }),
-  })
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(), ...authorityHeaders },
+    body: JSON.stringify({
+      description,
+      mode: 'build',
+      idempotency_key: opts.idempotencyKey || requestId(),
+      ...(targetToolName ? { target_tool_name: targetToolName } : {}),
+    }),
+    signal: opts.signal,
+  }, path)
   const body = await res.json().catch(() => null)
-  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  if (!res.ok) {
+    const error = customizationError('POST', path, res.status, body)
+    error.authorTerminal = res.status >= 400 && res.status < 500 && ![401, 408].includes(res.status)
+    throw error
+  }
+  if (res.status === 202) {
+    if (!body?.poll_url || !body?.change_set_id) {
+      const error = new Error('The accepted authoring request did not include its durable status address.')
+      throw error
+    }
+    opts.onAccepted?.(body)
+    opts.onStatus?.({
+      status: body.status || 'accepted',
+      progress: 'queued',
+      change_set_id: body.change_set_id,
+    })
+    return pollAuthorStage(body, opts)
+  }
   return body
 }
 
-// Keep confirmation issuance isolated: a server lane may change this additive
-// endpoint without changing the frozen R6 register request below.
-async function issuePublishConfirmation(receipt) {
-  const path = '/api/author/confirmations'
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify(receipt),
-  })
-  const body = await res.json().catch(() => null)
-  if (!res.ok) throw customizationError('POST', path, res.status, body)
-  if (!body || typeof body.confirmation_id !== 'string' || !body.confirmation_id) {
-    throw new Error('The publish confirmation was unavailable. The staged tool was not published.')
-  }
-  return body.confirmation_id
-}
-
-// R6: obtain one server confirmation, then post exactly the receipt-bound fields.
+// Request publication or resume an existing request. The server owns approval
+// policy, durable continuation, and the exact receipt used for publication.
 export async function publishStagedAuthor(mock, staged) {
   if (!staged || !staged.receipt) throw new Error('A staged tool is required before publishing.')
   if (mock) {
     await nap(250)
     registerMockCatalogTool(staged.tool)
-    return { ...staged, published: true, demo: true, demo_session_only: true }
+    return { ...staged, published: true, publication_status: 'published', demo: true, demo_session_only: true }
   }
   const receipt = staged.receipt
-  const confirmation_id = await issuePublishConfirmation(receipt)
-  const path = '/api/author/register'
-  const publish = {
-    change_set_id: receipt.change_set_id,
-    staged_commit: receipt.staged_commit,
-    catalog_digest: receipt.catalog_digest,
-    platform_release: receipt.platform_release,
-    workspace_contract_digest: receipt.workspace_contract_digest,
-    confirmation_id,
-    idempotency_key: requestId(),
-  }
-  const res = await fetch(`${API_BASE}${path}`, {
+  const path = '/api/author/publication-requests'
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-    body: JSON.stringify(publish),
-  })
+    body: JSON.stringify({ change_set_id: receipt.change_set_id }),
+  }, path)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw customizationError('POST', path, res.status, body)
-  return { ...staged, ...body, published: true }
+  const publicationStatus = body?.status
+  if (!['published', 'awaiting_approval', 'denied'].includes(publicationStatus)) {
+    throw new Error('The publication request returned an unknown status. The staged tool was not published.')
+  }
+  return {
+    ...staged,
+    ...body,
+    published: publicationStatus === 'published',
+    publication_status: publicationStatus,
+  }
+}
+
+// --- Demand capture ------------------------------------------------------
+// Public waitlist endpoint. This intentionally bypasses mock mode because it
+// records a real request even when the operator surface is otherwise mocked.
+export async function submitDemandCapture({ email, interest, org = null }) {
+  const path = '/api/demand'
+  const res = await apiFetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, interest, org }),
+  }, path)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || 'We could not save your request. Please try again.')
+    error.status = res.status
+    throw error
+  }
+  return body
 }
