@@ -155,6 +155,105 @@ def test_executor_suite_is_registered_with_its_measured_floor():
     assert "executor" in g._MEASURED_EST_S
 
 
+# Floors measured 2026-08-29 in ONE run of all 16 files (237 passed, 34
+# skipped, 0 failed); per-file executed counts taken from that run's junit XML.
+# The 34 skips are all one reason, LEAF_OPERATOR_TEST_DATABASE_URL unset, which
+# no workflow in this repo sets -- so CI executes these same counts.
+_OPERATOR_FLOORS = {
+    "server-operator-authority": 7,
+    "server-operator-credential-rotate": 19,
+    "server-operator-egress-boundary": 27,
+    "server-operator-external-write": 22,
+    "server-operator-identity-bindings": 12,
+    "server-operator-integration-drills": 4,
+    "server-operator-overlay-runbook": 11,
+    "server-operator-principals": 3,
+    "server-operator-principals-static": 4,
+    "server-operator-production-unreachable": 25,
+    "server-operator-runbooks": 15,
+    "server-operator-secret-broker": 31,
+    "server-operator-stage-release": 22,
+    "server-operator-vocab-freeze": 13,
+    "server-operator-worker-boundary": 12,
+    "server-operator-worker-cancel": 10,
+}
+
+# Files whose own source carries NO conditional-skip construct. Their suites
+# must keep an EMPTY skip allowlist, so a future environment-gated skip FAILS
+# the suite instead of quietly eroding its floor.
+_OPERATOR_NO_SKIP_FILES = frozenset({
+    "server-operator-egress-boundary",
+    "server-operator-identity-bindings",
+    "server-operator-integration-drills",
+    "server-operator-principals-static",
+    "server-operator-production-unreachable",
+    "server-operator-secret-broker",
+    "server-operator-vocab-freeze",
+    "server-operator-worker-boundary",
+    "server-operator-worker-cancel",
+})
+
+
+def test_operator_suites_are_registered_with_their_measured_floors():
+    """The operator control plane ran in NO CI until this registration.
+
+    Sixteen files and 271 tests -- production unreachability, the egress
+    boundary, authority and principals, the worker boundary -- were in no
+    workflow and no Suite, and three pins rotted through that hole before
+    anyone noticed: #746 mounted POST /api/operator/worker/cancel without
+    amending the route pin, #810 changed agent_policy.json without re-pinning
+    its content SHA, and #680 retired the production deploy's two-person rule
+    without updating the two O5 workflow-string pins. #815 hit the same hole
+    from the other side, finding the fastapi 0.110 _IncludedRouter reshape had
+    blinded the route walk to 6 of 204 leaves under a green gate.
+
+    This mirrors the floors in run-all-gates.py exactly as the executor and
+    platform-static pins do: BOTH must move together, and only alongside a
+    re-measured run. A floor only catches a regression from where it was last
+    measured, so drifting above it is a silent loss of exactly that much
+    coverage."""
+    g = _load_runner()
+    suites = {s.id: s for s in g.build_suites()}
+
+    missing = sorted(set(_OPERATOR_FLOORS) - set(suites))
+    assert not missing, f"operator suites vanished from the catalog: {missing}"
+
+    assert {sid: suites[sid].expected for sid in _OPERATOR_FLOORS} == _OPERATOR_FLOORS
+
+    # EVERY test_operator_*.py file is registered. A new one must join the
+    # catalog in the same PR, or it lands invisible to CI exactly as these
+    # sixteen did.
+    on_disk = {p.name for p in (REPO / "server" / "tests").glob("test_operator_*.py")}
+    registered = {
+        arg.rsplit("/", 1)[-1]
+        for sid in _OPERATOR_FLOORS
+        for arg in suites[sid].argv
+        if isinstance(arg, str) and arg.startswith("tests/test_operator_")
+    }
+    assert on_disk == registered, (
+        "every server/tests/test_operator_*.py must be registered here; "
+        f"unregistered: {sorted(on_disk - registered)}")
+
+    for sid in _OPERATOR_FLOORS:
+        suite = suites[sid]
+        assert suite.cwd == REPO / "server", sid
+        if sid in _OPERATOR_NO_SKIP_FILES:
+            assert suite.allowed_skip_reasons == (), (
+                f"{sid}'s file carries no conditional skip; an allowlist here "
+                "would let a future skip erode the floor silently")
+        else:
+            # The ONLY sanctioned skip is the operator Postgres opt-in, which
+            # no workflow sets. Any other allowance is a widened exception and
+            # must be argued for on its own.
+            assert suite.allowed_skip_reasons == (
+                r"LEAF_OPERATOR_TEST_DATABASE_URL not set",), sid
+
+    # The behavioral O5 test spawns bash 14 times; at the 2.0s default the
+    # packer would badly understate it and quietly make it a shard's critical
+    # path (the failure mode the 2026-08-17 cost refresh was written for).
+    assert "server-operator-production-unreachable" in g._MEASURED_EST_S
+
+
 def test_test_gate_workflow_shards_and_fans_in():
     """Pins the CI shape the completeness proof depends on: shard jobs run the
     runner with shard flags AND write result JSON; a fan-in job that KEEPS the
