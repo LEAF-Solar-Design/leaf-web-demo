@@ -32,7 +32,8 @@ import DemoBanner from './components/DemoBanner.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
-import EditSurface from './cad/EditSurface.jsx'
+import CadEditSurface from './cadedit/CadEditSurface.jsx'
+import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
   productSurfaceFromSearch,
@@ -2664,10 +2665,12 @@ export default function App() {
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
           )}
-          {/* cad_edit ribbon (card C1-6): self-gating on VITE_CAD_EDIT — with
-              the flag off it renders nothing at all, so this mount is inert on
-              builds that don't bake the editing surface in. */}
-          <EditSurface />
+          {/* cad_edit surface: ENV_CAD_EDIT is deliberately the FIRST operand
+              so a flag-off build folds the whole cadedit module away (the
+              module's own documented call-site contract). The engine fence
+              stands: the only /cad/ contact stays engineWorker, inside
+              cadedit/, never from here. */}
+          {ENV_CAD_EDIT && <CadEditSurface />}
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
