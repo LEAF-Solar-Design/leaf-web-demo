@@ -19,11 +19,12 @@ assert.match(dockerfile, /^ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaV
 assert.match(dockerfile, /^ARG VITE_AUTH0_AUDIENCE=https:\/\/api\.leafdesign\.ai$/m)
 assert.match(dockerfile, /^ARG VITE_LIFECYCLE_UI=1$/m,
   'the deployable web image must bake the reviewed lifecycle UI selector on')
-// cad_edit is settable at build time but DORMANT by default. One shared web
-// image serves both staging and production, so a non-zero default here would
-// enable the CAD editing surface in every environment at once.
-assert.match(dockerfile, /^ARG VITE_CAD_EDIT=0$/m,
-  'the deployable web image must keep the CAD editing surface off by default')
+// cad_edit flipped ON 2026-08-30 by operator direction (leaf-web-demo #823).
+// One shared web image serves both staging and production, so this pin is the
+// documented all-environments enable; rollback = 0 here AND in the Dockerfile
+// AND both build-workflow env blocks together.
+assert.match(dockerfile, /^ARG VITE_CAD_EDIT=1$/m,
+  'the deployable web image must bake the operator-enabled CAD editing surface on')
 assert.match(dockerfile, /VITE_AUTH0_DOMAIN=\$\{VITE_AUTH0_DOMAIN\}/)
 assert.match(dockerfile, /VITE_AUTH0_CLIENT_ID=\$\{VITE_AUTH0_CLIENT_ID\}/)
 assert.match(dockerfile, /VITE_AUTH0_AUDIENCE=\$\{VITE_AUTH0_AUDIENCE\}/)
