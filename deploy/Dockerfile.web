@@ -17,17 +17,19 @@ ARG VITE_AUTH0_DOMAIN=leafautomation.us.auth0.com
 ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
 ARG VITE_AUTH0_AUDIENCE=https://api.leafdesign.ai
 ARG VITE_LIFECYCLE_UI=1
-# ios_surface flip: OFF (0) by default -- the consume-only iOS readiness surface
-# stays dormant until the operator's Apple/TestFlight leg lands and the flip is
-# authorized. Set to 1 (here AND in build-platform-images.yml's web-build env
-# blocks) plus config-rail LEAF_IOS_SURFACE_ENABLED=1 to take it live.
+# ios_surface flip: ON (1), operator-directed 2026-08-30 (#823) -- the
+# consume-only iOS readiness surface renders; its live status still needs the
+# paired config-rail LEAF_IOS_SURFACE_ENABLED=1 on the app. Rollback = 0 here
+# AND in build-platform-images.yml's two web-build env blocks together.
 # leaf-plan envelope: ios_surface. Commit-stable, so it stays above npm ci.
 ARG VITE_IOS_SURFACE=1
-# cad_edit flip: OFF (0) by default -- the CAD editing surface stays dormant.
-# Plumbed here only so the flag is SETTABLE at build time; nothing enables it.
-# Read as the string '1' everywhere (web/src/cadedit/flag.js and the
-# isCadEditEnabled env fallback in web/src/cad/engineWorker.js). Set to 1 (here
-# AND in build-platform-images.yml's two web-build env blocks) to take it live.
+# cad_edit flip: ON (1), operator-directed 2026-08-30 (#823). One shared web
+# image serves both staging and production, so this is the documented
+# all-environments enable. Read as the string '1' everywhere
+# (web/src/cadedit/flag.js and the isCadEditEnabled env fallback in
+# web/src/cad/engineWorker.js). Rollback = 0 here AND in
+# build-platform-images.yml's two web-build env blocks AND the
+# check_web_container_config.mjs pin, together.
 # Commit-stable, so it stays above npm ci.
 ARG VITE_CAD_EDIT=1
 ENV VITE_API_BASE=${VITE_API_BASE} \
