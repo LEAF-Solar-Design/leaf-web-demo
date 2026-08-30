@@ -998,6 +998,84 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_customization_async_stage.py"), 51),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
+        # --- operator control plane (cwd=server): each file its OWN process --- #
+        #
+        # REGISTERED 2026-08-29. Until this block, server/tests/test_operator_*.py
+        # ran in NO CI workflow and NO Suite here -- 16 files, 271 tests, the
+        # entire operator control-plane contract (production unreachability,
+        # the egress boundary, authority and principals, the worker boundary),
+        # invisible to PR CI. Three separate pins rotted through that hole
+        # before anyone noticed: PR #746 mounted POST /api/operator/worker/cancel
+        # without amending the route pin, #810 changed agent_policy.json without
+        # re-pinning its content SHA, and #680 retired the production deploy's
+        # two-person rule without updating the two O5 workflow-string pins.
+        # #815 found the same hole from the other side: the fastapi 0.110
+        # _IncludedRouter reshape had silently blinded the route walk to 6 of
+        # 204 leaves, and CI was green throughout.
+        #
+        # FLOORS ARE MEASURED, not collected: one run of all 16 files on
+        # 2026-08-29 (237 passed, 34 skipped, 0 failed), per-file executed
+        # counts taken from its junit XML. Every one of the 34 skips carries
+        # the SAME reason -- LEAF_OPERATOR_TEST_DATABASE_URL unset -- and no
+        # workflow in this repo sets that variable, so CI executes exactly
+        # these counts too. Suites with no skip machinery in their file get an
+        # EMPTY skip allowlist, so any future environment-gated skip FAILS the
+        # suite rather than quietly eroding its count.
+        Suite("server-operator-authority",
+              "server tests/test_operator_authority.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_authority.py"), 7,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-credential-rotate",
+              "server tests/test_operator_credential_rotate.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_credential_rotate.py"), 19,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-egress-boundary",
+              "server tests/test_operator_egress_boundary.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_egress_boundary.py"), 27),
+        Suite("server-operator-external-write",
+              "server tests/test_operator_external_write.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_external_write.py"), 22,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-identity-bindings",
+              "server tests/test_operator_identity_bindings.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_identity_bindings.py"), 12),
+        Suite("server-operator-integration-drills",
+              "server tests/test_operator_integration_drills.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_integration_drills.py"), 4),
+        Suite("server-operator-overlay-runbook",
+              "server tests/test_operator_overlay_runbook.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_overlay_runbook.py"), 11,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-principals",
+              "server tests/test_operator_principals.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_principals.py"), 3,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-principals-static",
+              "server tests/test_operator_principals_static.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_principals_static.py"), 4),
+        Suite("server-operator-production-unreachable",
+              "server tests/test_operator_production_unreachable.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_production_unreachable.py"), 25),
+        Suite("server-operator-runbooks",
+              "server tests/test_operator_runbooks.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_runbooks.py"), 15,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-secret-broker",
+              "server tests/test_operator_secret_broker.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_secret_broker.py"), 31),
+        Suite("server-operator-stage-release",
+              "server tests/test_operator_stage_release.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_stage_release.py"), 22,
+              allowed_skip_reasons=(r"LEAF_OPERATOR_TEST_DATABASE_URL not set",)),
+        Suite("server-operator-vocab-freeze",
+              "server tests/test_operator_vocab_freeze.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_vocab_freeze.py"), 13),
+        Suite("server-operator-worker-boundary",
+              "server tests/test_operator_worker_boundary.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_worker_boundary.py"), 12),
+        Suite("server-operator-worker-cancel",
+              "server tests/test_operator_worker_cancel.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_worker_cancel.py"), 10),
         # --- platform (cwd=repo parent; DB-gated) --- #
         # Floor 236 is a MEASURED, GREEN, pristine-database baseline: 236
         # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
@@ -1854,6 +1932,25 @@ def describe_selection(patterns: List[str]) -> str:
 # gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
+    # Operator control-plane suites. MODELED, not CI-measured -- unlike the
+    # rest of this table, which was refreshed from real shard-result JSONs on
+    # 2026-08-17. These are per-file test time from the all-16 junit XML plus
+    # ~2.5s process startup, taken on a loaded Windows host on 2026-08-29.
+    # A full --only server-operator- run the same day reported 11-51s per
+    # suite, but that host was heavily loaded and those numbers are not a CI
+    # signal either; the RANKING held (production-unreachable heaviest), which
+    # is what the packer actually needs. REFRESH THESE from the first CI shard
+    # JSONs that carry them, the same way the 2026-08-17 entries were derived.
+    # A wrong estimate costs makespan, never correctness: it cannot fail a
+    # gate, it can only make one shard quietly become the critical path.
+    # production-unreachable dominates because its O5 behavioral test spawns
+    # bash 14 times to execute the deploy workflow's own approval-mode branch;
+    # process creation is the cost, so Linux CI should run it well under this.
+    "server-operator-production-unreachable": 34.8,
+    "server-operator-integration-drills": 6.9,
+    "server-operator-overlay-runbook": 6.0,
+    "server-operator-identity-bindings": 5.7,
+    "server-operator-worker-cancel": 4.4,
     "web-version-restore-proof": 61.1,
     "server-checkout-crossproc": 60.3,
     "server-backbone": 45.8,
